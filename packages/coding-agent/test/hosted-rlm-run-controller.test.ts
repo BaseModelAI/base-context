@@ -181,9 +181,12 @@ describe("createHostedRlmRunController", () => {
 		expect(Object.keys(result.value)).toEqual(["identity", "start", "requestAbort", "finish", "observe"]);
 	});
 
-	test.each([undefined, null, true, 4, "raw", [], () => undefined])("rejects invalid outer value %#", (raw) => {
-		expect(expectCreate(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
+	test.each([[undefined], [null], [true], [4], ["raw"], [[]], [() => undefined]])(
+		"rejects invalid outer value %#",
+		(raw) => {
+			expect(expectCreate(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
+		},
+	);
 
 	test.each(["port", "expectedIdentity"])("rejects missing %s", (key) => {
 		const box = makePort();

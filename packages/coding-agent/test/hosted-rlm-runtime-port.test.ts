@@ -118,9 +118,12 @@ describe("createHostedRlmRuntimePort", () => {
 		expect(Object.keys(harness.port)).toEqual(["identity", "startInitialTask", "abort", "observe", "subscribe"]);
 	});
 
-	test.each([undefined, null, true, 4, "raw", [], () => undefined])("rejects invalid outer value %#", (raw) => {
-		expect(createHostedRlmRuntimePort(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
-	});
+	test.each([[undefined], [null], [true], [4], ["raw"], [[]], [() => undefined]])(
+		"rejects invalid outer value %#",
+		(raw) => {
+			expect(createHostedRlmRuntimePort(raw)).toEqual({ ok: false, code: "INVALID_INPUT" });
+		},
+	);
 
 	test.each(["identity", "startInitialTask", "abort", "observe", "subscribe"])("rejects missing %s", (key) => {
 		const raw = makeHarness().raw;
