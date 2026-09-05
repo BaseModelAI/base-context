@@ -753,6 +753,32 @@ class ReplTest(unittest.TestCase):
         inspected = self.repl.execute("bash-inspect", "handle.poll().output")
         self.assertIn("detached", one(inspected, "result")["text"])
 
+    def test_wrapper_awaits_in_creating_cell_suppress_bash_completion(self):
+        expressions = {
+            "gather": "(await asyncio.gather(bash('printf gather')))[0].output",
+            "wait-for": "(await asyncio.wait_for(bash('printf wait-for'), 1)).output",
+            "shield": "(await asyncio.shield(bash('printf shield'))).output",
+            "nested": "(await asyncio.shield(asyncio.gather(bash('printf nested'))))[0].output",
+        }
+        for label, expression in expressions.items():
+            with self.subTest(label=label):
+                completed = self.repl.execute(
+                    f"bash-wrapper-{label}",
+                    f"from rlm import bash\nimport asyncio\n{expression}",
+                )
+                self.assertIn(label, one(completed, "result")["text"])
+                probe = self.repl.execute(f"bash-wrapper-{label}-probe", "await asyncio.sleep(0.05)")
+                request = one(probe, "host_request")
+                if request is not None:
+                    self.repl.send(
+                        {
+                            "type": "host_reply",
+                            "id": request["id"],
+                            "data": {"status": "ok", "result": {}},
+                        }
+                    )
+                self.assertIsNone(request)
+
     def test_background_task_await_does_not_suppress_bash_completion(self):
         code = "\n".join(
             [
@@ -762,6 +788,7 @@ class ReplTest(unittest.TestCase):
                 "async def consume():",
                 "    globals()['task_result'] = await task_handle",
                 "waiter = asyncio.create_task(consume())",
+                "await asyncio.sleep(0.02)",
                 "task_handle.pid",
             ]
         )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import functools
 import json
 import os
 import secrets
@@ -67,6 +68,92 @@ def _consume_notice_task(task: asyncio.Task[None]) -> None:
     """Retrieve detached notifier failures so they never become loop warnings."""
     if not task.cancelled():
         task.exception()
+
+
+def _referenced_futures(
+    value: Any, *, depth: int = 0, seen: set[int] | None = None
+) -> set[asyncio.Future[Any]]:
+    """Find futures captured by asyncio's small internal completion callbacks."""
+    if isinstance(value, asyncio.Future):
+        return {value}
+    if depth >= 4:
+        return set()
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        return set()
+    seen.add(identity)
+
+    nested: list[Any] = []
+    if isinstance(value, functools.partial):
+        nested.extend((value.func, value.args, value.keywords))
+    elif isinstance(value, dict):
+        nested.extend(value.keys())
+        nested.extend(value.values())
+    elif isinstance(value, (tuple, list, set, frozenset)):
+        nested.extend(value)
+    else:
+        closure = getattr(value, "__closure__", None)
+        if closure:
+            for cell in closure:
+                try:
+                    nested.append(cell.cell_contents)
+                except ValueError:
+                    pass
+        bound_self = getattr(value, "__self__", None)
+        if bound_self is not None:
+            nested.append(bound_self)
+
+    futures: set[asyncio.Future[Any]] = set()
+    for item in nested:
+        futures.update(_referenced_futures(item, depth=depth + 1, seen=seen))
+    return futures
+
+
+def _future_contains(root: asyncio.Future[Any], target: asyncio.Future[Any], seen: set[int]) -> bool:
+    """Follow aggregate children, such as asyncio.gather's private future list."""
+    if root is target:
+        return True
+    if id(root) in seen:
+        return False
+    seen.add(id(root))
+    children = getattr(root, "_children", None) or ()
+    return any(
+        isinstance(child, asyncio.Future) and _future_contains(child, target, seen) for child in children
+    )
+
+
+def _completion_reaches(start: asyncio.Future[Any], target: asyncio.Future[Any]) -> bool:
+    """Follow callback-captured futures from an inner await to its wrapper future."""
+    pending = [start]
+    seen: set[int] = set()
+    while pending:
+        future = pending.pop()
+        if future is target:
+            return True
+        if id(future) in seen:
+            continue
+        seen.add(id(future))
+        callbacks = getattr(future, "_callbacks", None) or ()
+        for entry in callbacks:
+            callback = entry[0] if isinstance(entry, tuple) else entry
+            pending.extend(_referenced_futures(callback))
+    return False
+
+
+def _creating_cell_waits_for(
+    owner: asyncio.Task[Any] | None, awaiter: asyncio.Task[Any] | None
+) -> bool:
+    """Return whether the cell owner directly or transitively waits for awaiter."""
+    if owner is None or awaiter is None:
+        return False
+    if owner is awaiter:
+        return True
+    waiter = getattr(owner, "_fut_waiter", None)
+    if not isinstance(waiter, asyncio.Future):
+        return False
+    return _future_contains(waiter, awaiter, set()) or _completion_reaches(awaiter, waiter)
 
 
 @dataclass(frozen=True)
@@ -706,7 +793,7 @@ class BashHandle:
             current_task = asyncio.current_task()
         except RuntimeError:
             current_task = None
-        if current_task is not None and current_task is self._creating_cell_task:
+        if _creating_cell_waits_for(self._creating_cell_task, current_task):
             self._awaited_by_creating_cell = True
         if self._released:
             return self._wait().__await__()
