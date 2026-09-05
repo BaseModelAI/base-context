@@ -49,13 +49,17 @@ _serve_task: asyncio.Task[Any] | None = None
 # detached task spawned by a cell keeps writing under that cell's id after
 # the cell finishes. Threads start with a fresh context and emit id null.
 _current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_cell", default=None)
+_current_cell_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "_current_cell_generation", default=None
+)
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
-# Bash handles use this per-cell barrier to distinguish a detached command from
-# one that the creating cell eventually awaits. Entries live only until the
-# request finishes; late detached tasks receive an already-set event.
-_cell_finished_events: dict[str, asyncio.Event] = {}
+# Request ids may be reused. Bash completion barriers therefore use the
+# runtime's monotonic cell generation rather than the caller-supplied id.
+_active_cell_generations: set[int] = set()
+_cell_owner_tasks: dict[int, asyncio.Task[Any]] = {}
+_cell_finished_events: dict[int, asyncio.Event] = {}
 # Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
 # host reply can arrive after that, so waiting (and future) host_request calls fail.
 _host_closed = False
@@ -102,26 +106,25 @@ def is_active() -> bool:
     return _protocol_fd >= 0
 
 
-def current_cell_finished_event() -> asyncio.Event | None:
-    """Return a barrier that opens when the calling cell has fully finished.
+def current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
+    """Return the calling cell's completion barrier and owning execution task.
 
-    Detached asyncio tasks inherit the creating cell id. If such a task starts
-    after that cell finished, return an already-open barrier instead of retaining
-    completed request ids indefinitely.
+    Detached asyncio tasks inherit the internal cell generation. If such a task
+    runs after that cell finished, return an already-open barrier and no owner.
     """
-    cell_id = _current_cell.get()
-    if cell_id is None or _loop is None:
+    cell_generation = _current_cell_generation.get()
+    if cell_generation is None or _loop is None:
         return None
     with _interrupt_lock:
-        if cell_id not in _inflight:
+        if cell_generation not in _active_cell_generations:
             event = asyncio.Event()
             event.set()
-            return event
-        event = _cell_finished_events.get(cell_id)
+            return event, None
+        event = _cell_finished_events.get(cell_generation)
         if event is None:
             event = asyncio.Event()
-            _cell_finished_events[cell_id] = event
-        return event
+            _cell_finished_events[cell_generation] = event
+        return event, _cell_owner_tasks.get(cell_generation)
 
 
 async def host_request(data: dict[str, Any]) -> dict[str, Any]:
@@ -432,9 +435,6 @@ def _consume_handoff_interrupt() -> bool:
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
     global _finishing_rid, _handoff_interrupted, _sigint_target
-    cell_finished = _cell_finished_events.pop(rid, None)
-    if cell_finished is not None:
-        cell_finished.set()
     if _finishing_rid == rid:
         # An unconsumed handoff interrupt dies with its request (state requests
         # have no cancellable post-run work); it must never hit the next request.
@@ -453,6 +453,15 @@ def _finish_locked(rid: str) -> None:
 def _finish_request(rid: str) -> None:
     with _interrupt_lock:
         _finish_locked(rid)
+
+
+def _finish_cell_generation(cell_generation: int) -> None:
+    with _interrupt_lock:
+        _active_cell_generations.discard(cell_generation)
+        _cell_owner_tasks.pop(cell_generation, None)
+        cell_finished = _cell_finished_events.pop(cell_generation, None)
+        if cell_finished is not None:
+            cell_finished.set()
 
 
 _RUNTIME_FILE = __file__
@@ -565,14 +574,20 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
     global _cell_counter
     cell_id = req["id"]
     _cell_counter += 1
-    filename = f"<cell-{_cell_counter}>"
+    cell_generation = _cell_counter
+    filename = f"<cell-{cell_generation}>"
+    with _interrupt_lock:
+        _active_cell_generations.add(cell_generation)
     # The cell task (created below) copies this context, so writes made from
-    # the cell and from asyncio tasks it spawns carry this cell's id.
-    token = _current_cell.set(cell_id)
+    # the cell and from asyncio tasks it spawns carry this cell's identity.
+    cell_token = _current_cell.set(cell_id)
+    generation_token = _current_cell_generation.set(cell_generation)
     try:
         codes, has_trailing = _compile_cell(req["code"], filename)
         assert _loop is not None
         task = _loop.create_task(_run_codes(codes, ns))
+        with _interrupt_lock:
+            _cell_owner_tasks[cell_generation] = task
         status, value, error = await _run_guarded(task, cell_id)
         result_text: str | None = None
         try:
@@ -597,7 +612,9 @@ async def _handle_execute(req: dict[str, Any], ns: dict[str, Any]) -> None:
             _send(error)
         _send({"event": "done", "id": cell_id, "status": status})
     finally:
-        _current_cell.reset(token)
+        _finish_cell_generation(cell_generation)
+        _current_cell_generation.reset(generation_token)
+        _current_cell.reset(cell_token)
 
 
 def _drain_output() -> None:

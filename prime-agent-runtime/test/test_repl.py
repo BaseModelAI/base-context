@@ -753,6 +753,74 @@ class ReplTest(unittest.TestCase):
         inspected = self.repl.execute("bash-inspect", "handle.poll().output")
         self.assertIn("detached", one(inspected, "result")["text"])
 
+    def test_background_task_await_does_not_suppress_bash_completion(self):
+        code = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "task_handle = bash('sleep 0.05; printf background-waiter')",
+                "async def consume():",
+                "    globals()['task_result'] = await task_handle",
+                "waiter = asyncio.create_task(consume())",
+                "task_handle.pid",
+            ]
+        )
+        started = self.repl.execute("bash-task-waiter", code)
+        pid = int(one(started, "result")["text"])
+        request = one(started, "host_request")
+        while request is None:
+            event = self.repl.read_event()
+            if event.get("event") == "host_request":
+                request = event
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["pid"], pid)
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "ok", "result": {}},
+            }
+        )
+
+    def test_reused_request_id_does_not_capture_old_cell_bash_completion(self):
+        setup = "\n".join(
+            [
+                "from rlm import bash",
+                "import asyncio",
+                "reuse_gate = asyncio.Event()",
+                "async def launch_after_cell():",
+                "    await reuse_gate.wait()",
+                "    globals()['reused_handle'] = bash('printf reused-id')",
+                "asyncio.create_task(launch_after_cell())",
+            ]
+        )
+        self.repl.execute("reused-cell-id", setup)
+
+        self.repl.send(
+            {
+                "type": "execute",
+                "id": "reused-cell-id",
+                "code": "reuse_gate.set()\nawait asyncio.sleep(0.2)",
+            }
+        )
+        request = None
+        while True:
+            event = self.repl.read_event()
+            if event.get("event") == "host_request":
+                request = event
+                break
+            self.assertFalse(event.get("event") == "done" and event.get("id") == "reused-cell-id")
+        self.assertEqual(request["data"]["type"], "bash.completed")
+        self.assertEqual(request["data"]["command"], "printf reused-id")
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "ok", "result": {}},
+            }
+        )
+        self.assertEqual(one(self.repl.until_done("reused-cell-id"), "done")["status"], "ok")
+
     def test_protocol_framing_under_noise(self):
         setup = "\n".join(
             [

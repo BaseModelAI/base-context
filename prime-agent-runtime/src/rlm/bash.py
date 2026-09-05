@@ -51,13 +51,13 @@ _hook_installed = False
 _hook_lock = threading.Lock()
 
 
-def _current_cell_finished_event() -> asyncio.Event | None:
-    """Get the creating REPL cell's completion barrier without coupling standalone use to repl."""
+def _current_cell_completion_context() -> tuple[asyncio.Event, asyncio.Task[Any] | None] | None:
+    """Get the creating REPL cell's lifecycle without coupling standalone use to repl."""
     try:
         from . import repl
 
         if repl.is_active():
-            return repl.current_cell_finished_event()
+            return repl.current_cell_completion_context()
     except (ImportError, RuntimeError):
         pass
     return None
@@ -136,8 +136,10 @@ class BashHandle:
 
     def __init__(self, command: str) -> None:
         self.command = command
-        self._creating_cell_finished = _current_cell_finished_event()
-        self._await_started = False
+        completion_context = _current_cell_completion_context()
+        self._creating_cell_finished = completion_context[0] if completion_context else None
+        self._creating_cell_task = completion_context[1] if completion_context else None
+        self._awaited_by_creating_cell = False
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
         self._eof = threading.Event()
@@ -553,7 +555,7 @@ class BashHandle:
         # The cell may do other work before awaiting this handle. Do not classify
         # it as detached until that whole cell has crossed its completion barrier.
         await cell_finished.wait()
-        if self._await_started:
+        if self._awaited_by_creating_cell:
             return
         try:
             from . import repl
@@ -700,7 +702,12 @@ class BashHandle:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait.
-        self._await_started = True
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if current_task is not None and current_task is self._creating_cell_task:
+            self._awaited_by_creating_cell = True
         if self._released:
             return self._wait().__await__()
         self._released = True
