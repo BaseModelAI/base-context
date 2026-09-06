@@ -95,24 +95,29 @@ class ExtractArchiveFailure:
 class RuntimeRootCapability:
     """Nominal root authority.  It never reveals the fd or path."""
 
-    __slots__ = ("__close", "__verify")
+    __slots__ = ("__close", "__verify", "__freeze")
 
     def __init__(
         self,
         token: object,
         verify: Callable[[], bool],
         close: Callable[[], bool],
+        freeze: Callable[[], bool],
     ) -> None:
-        if token is not _ROOT_CAPABILITY_TOKEN or not callable(verify) or not callable(close):
+        if token is not _ROOT_CAPABILITY_TOKEN or not callable(verify) or not callable(close) or not callable(freeze):
             raise ValueError("invalid runtime root capability")
         self.__verify = verify
         self.__close = close
+        self.__freeze = freeze
 
     def verify(self) -> bool:
         return self.__verify()
 
     def close(self) -> bool:
         return self.__close()
+
+    def freeze_for_launch(self) -> bool:
+        return self.__freeze()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -710,7 +715,7 @@ class _ExtractionSink(_TarSink):
         if not self.finalized:
             self._abort(ExtractErrorCode.INTERNAL_ERROR)
         records = tuple(self.directories.values())
-        state = {"closed": False}
+        state = {"closed": False, "frozen": False}
 
         def verify() -> bool:
             if state["closed"]:
@@ -746,8 +751,156 @@ class _ExtractionSink(_TarSink):
                         ok = False
             state["closed"] = ok
             return ok
+        # --- freeze_for_launch closure ---
+        frozen_dir_infos = tuple(
+            (r.identity, r, (self.directories[r.parent_path] if r.parent_path is not None else None))
+            for r in sorted(
+                (d for d in self.directories.values() if d.path != "."),
+                key=lambda d: d.path.count("/"),
+                reverse=True,
+            )
+        )
+        frozen_root = self.directories["."]
+        frozen_file_infos = tuple(
+            (self.directories[f.parent_path], f.name, f.expected_mode, f.expected_size, f.expected_sha256, f.identity)
+            for f in self.files
+        )
+        _pfd = self.parent_fd
+        _pid = self.parent_identity
+        _sink = self
 
-        return RuntimeRootCapability(_ROOT_CAPABILITY_TOKEN, verify, close)
+        def freeze() -> bool:
+            if state["frozen"] or state["closed"]:
+                return False
+            state["frozen"] = True  # one-shot: claimed at entry
+            try:
+                # Files: re-open, verify identity/mode, re-hash, re-fstat, chmod, fsync, revalidate
+                for parent_rec, fname, fmode, fsize, fsha256, fid in frozen_file_infos:
+                    tfd = os.open(fname, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_rec.fd)
+                    try:
+                        st = os.fstat(tfd)
+                        cur = _stat_identity(st)
+                        if (cur is None or not _same_identity(cur, fid)
+                            or not stat.S_ISREG(st.st_mode) or st.st_uid != _current_uid()
+                            or st.st_nlink != 1 or st.st_size != fsize
+                            or not _mode_exact(st.st_mode, fmode)):
+                            raise RuntimeError
+                        # Re-hash through fd with bounded fixed-size reads
+                        hasher = hashlib.sha256()
+                        off = 0
+                        while off < fsize:
+                            chunk = os.pread(tfd, min(65536, fsize - off), off)
+                            if not chunk:
+                                raise RuntimeError
+                            hasher.update(chunk)
+                            off += len(chunk)
+                        if hasher.hexdigest() != fsha256:
+                            raise RuntimeError
+                        # Re-fstat before chmod: require regular/same uid/nlink=1/exact mode/exact size
+                        st2 = os.fstat(tfd)
+                        cur2 = _stat_identity(st2)
+                        if (cur2 is None or not _same_identity(cur2, fid)
+                            or not stat.S_ISREG(st2.st_mode)
+                            or st2.st_uid != _current_uid()
+                            or st2.st_nlink != 1
+                            or not _mode_exact(st2.st_mode, fmode)
+                            or st2.st_size != fsize):
+                            raise RuntimeError
+                        fzm = 0o555 if (fmode & 0o111) else 0o444
+                        os.fchmod(tfd, fzm)
+                        os.fsync(tfd)
+                        # Post-chmod fstat: require regular/same uid/nlink=1/size
+                        st3 = os.fstat(tfd)
+                        if (not _same_identity(_stat_identity(st3), fid)
+                            or not stat.S_ISREG(st3.st_mode)
+                            or st3.st_uid != _current_uid()
+                            or st3.st_nlink != 1
+                            or st3.st_size != fsize
+                            or not _mode_exact(st3.st_mode, fzm)):
+                            raise RuntimeError
+                        named = os.stat(fname, dir_fd=parent_rec.fd, follow_symlinks=False)
+                        nid = _stat_identity(named)
+                        if (nid is None or not _same_identity(nid, fid)
+                            or not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                            or named.st_size != fsize or not _mode_exact(named.st_mode, fzm)):
+                            raise RuntimeError
+                    finally:
+                        os.close(tfd)
+                # Directories deepest-first: verify identity/nlink, capture parent nlink, chmod 0555, fsync, verify
+                for _id, rec, parent_rec in frozen_dir_infos:
+                    st = os.fstat(rec.fd)
+                    cur = _stat_identity(st)
+                    if (cur is None or not _same_identity(cur, _id)
+                        or not stat.S_ISDIR(st.st_mode) or st.st_uid != _current_uid()
+                        or st.st_nlink != rec.nlink):
+                        raise RuntimeError
+                    pfd = _pfd if parent_rec is None else parent_rec.fd
+                    nlink_before = os.fstat(pfd).st_nlink
+                    os.fchmod(rec.fd, 0o555)
+                    os.fsync(rec.fd)
+                    nlink_after = os.fstat(pfd).st_nlink
+                    if nlink_after != nlink_before:
+                        raise RuntimeError
+                    st2 = os.fstat(rec.fd)
+                    cur2 = _stat_identity(st2)
+                    if (cur2 is None or not _same_identity(cur2, _id)
+                        or not _mode_exact(st2.st_mode, 0o555) or st2.st_nlink != rec.nlink):
+                        raise RuntimeError
+                    named = os.stat(rec.name, dir_fd=pfd, follow_symlinks=False)
+                    nid = _stat_identity(named)
+                    if (nid is None or not _same_identity(nid, _id)
+                        or not stat.S_ISDIR(named.st_mode) or not _mode_exact(named.st_mode, 0o555)
+                        or named.st_nlink != rec.nlink):
+                        raise RuntimeError
+                    rec.mode = 0o555
+                # Root
+                parent_nlink_before = os.fstat(_pfd).st_nlink
+                os.fchmod(frozen_root.fd, 0o555)
+                os.fsync(frozen_root.fd)
+                parent_nlink_after = os.fstat(_pfd).st_nlink
+                if parent_nlink_after != parent_nlink_before:
+                    raise RuntimeError
+                st = os.fstat(frozen_root.fd)
+                if (not _same_identity(_stat_identity(st), frozen_root.identity)
+                    or not _mode_exact(st.st_mode, 0o555) or st.st_nlink != frozen_root.nlink):
+                    raise RuntimeError
+                named = os.stat(frozen_root.name, dir_fd=_pfd, follow_symlinks=False)
+                if (not _same_identity(_stat_identity(named), frozen_root.identity)
+                    or not _mode_exact(named.st_mode, 0o555) or named.st_nlink != frozen_root.nlink):
+                    raise RuntimeError
+                frozen_root.mode = 0o555
+                # Private extraction parent
+                parent_nlink_before = os.fstat(_pfd).st_nlink
+                os.fchmod(_pfd, 0o555)
+                os.fsync(_pfd)
+                parent_nlink_after = os.fstat(_pfd).st_nlink
+                if parent_nlink_after != parent_nlink_before:
+                    raise RuntimeError
+                st = os.fstat(_pfd)
+                if (not _same_identity(_stat_identity(st), _pid)
+                    or not _mode_exact(st.st_mode, 0o555)):
+                    raise RuntimeError
+                return True
+            except Exception:
+                # Best-effort restore every open directory record fd to 0700
+                for rec in _sink.directories.values():
+                    if rec.fd >= 0:
+                        try:
+                            os.fchmod(rec.fd, 0o700)
+                            rec.mode = 0o700
+                        except Exception:
+                            pass
+                try:
+                    os.fchmod(_pfd, 0o700)
+                except Exception:
+                    pass
+                try:
+                    _sink.cleanup()
+                except Exception:
+                    pass
+                return False
+
+        return RuntimeRootCapability(_ROOT_CAPABILITY_TOKEN, verify, close, freeze)
 
 
 def _cleanup_safely(sink: _ExtractionSink) -> bool:

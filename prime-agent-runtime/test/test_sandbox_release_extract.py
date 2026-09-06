@@ -567,5 +567,70 @@ class ExtractionCase(unittest.TestCase):
             os.close(archive_fd)
 
 
+    def test_freeze_success_and_one_shot(self) -> None:
+        result = self.extract()
+        self.assertIs(type(result), ExtractArchiveSuccess)
+        cap = result.root
+        self.assertTrue(cap.verify())
+        self.assertTrue(cap.freeze_for_launch())
+        self.assertTrue(cap.verify())
+        root = os.path.join(self.temp, _CANDIDATE)
+        self.assertEqual(stat.S_IMODE(os.lstat(root).st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(root, "prime-agent")).st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(root, "package.json")).st_mode), 0o444)
+        self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(root, "install.sh")).st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(os.lstat(os.path.join(root, "skills")).st_mode), 0o555)
+        self.assertEqual(stat.S_IMODE(os.lstat(self.temp).st_mode), 0o555)
+        self.assertFalse(cap.freeze_for_launch())
+        self.assertTrue(cap.close())
+
+    def test_freeze_hardlink_failure_restores_parent_and_cleans(self) -> None:
+        result = self.extract()
+        self.assertIs(type(result), ExtractArchiveSuccess)
+        cap = result.root
+        root = os.path.join(self.temp, _CANDIDATE)
+        os.link(os.path.join(root, "install.sh"), os.path.join(root, "extra-link"))
+        self.assertFalse(cap.freeze_for_launch())
+        self.assertEqual(stat.S_IMODE(os.lstat(self.temp).st_mode), 0o700)
+
+    def test_freeze_same_size_content_mutation_fails_and_second_freeze_also_fails(self) -> None:
+        result = self.extract()
+        self.assertIs(type(result), ExtractArchiveSuccess)
+        cap = result.root
+        root = os.path.join(self.temp, _CANDIDATE)
+        pkg = os.path.join(root, "package.json")
+        fd = os.open(pkg, os.O_WRONLY)
+        try:
+            os.pwrite(fd, b"x\n\n", 0)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self.assertFalse(cap.freeze_for_launch())
+        self.assertFalse(cap.freeze_for_launch())
+        self.assertEqual(stat.S_IMODE(os.lstat(self.temp).st_mode), 0o700)
+
+    def test_freeze_directory_fchmod_failure_cleans(self) -> None:
+        result = self.extract()
+        self.assertIs(type(result), ExtractArchiveSuccess)
+        cap = result.root
+        real_fsync = os.fsync
+        dir_fsync_calls = 0
+        def fail_on_first_directory_fsync(fd):
+            nonlocal dir_fsync_calls
+            try:
+                st = os.fstat(fd)
+            except OSError:
+                return real_fsync(fd)
+            if stat.S_ISDIR(st.st_mode):
+                dir_fsync_calls += 1
+                if dir_fsync_calls == 1:
+                    raise OSError("injected directory fsync failure")
+            return real_fsync(fd)
+        with patch("rlm.sandbox_release_extract.os.fsync", side_effect=fail_on_first_directory_fsync):
+            self.assertFalse(cap.freeze_for_launch())
+        self.assertEqual(stat.S_IMODE(os.lstat(self.temp).st_mode), 0o700)
+        root = os.path.join(self.temp, _CANDIDATE)
+        self.assertFalse(os.path.lexists(root))
+
 if __name__ == "__main__":
     unittest.main()
