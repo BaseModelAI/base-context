@@ -8934,6 +8934,24 @@ export const MODELS = {
 			contextWindow: 272000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
+		"gpt-6-astra": {
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			thinkingLevelMap: {"minimal":null,"xhigh":"xhigh","max":"max","off":null},
+			input: ["text", "image"],
+			cost: {
+				input: 10,
+				output: 50,
+				cacheRead: 1,
+				cacheWrite: 12.5,
+			},
+			contextWindow: 272000,
+			maxTokens: 128000,
+		} satisfies Model<"openai-codex-responses">,
 	},
 	"opencode": {
 		"big-pickle": {

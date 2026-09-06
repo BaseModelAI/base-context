@@ -1,0 +1,1 @@
+- Added GPT-6 Astra to the ChatGPT OAuth model catalog with reasoning levels from low through max ([#2062](https://github.com/PrimeIntellect-ai/prime-agent/discussions/2062)).

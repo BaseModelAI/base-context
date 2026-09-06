@@ -1,0 +1,1 @@
+- Fixed GPT-6 Astra discovery for ChatGPT OAuth subagents on accounts with access ([#2062](https://github.com/PrimeIntellect-ai/prime-agent/discussions/2062)).
