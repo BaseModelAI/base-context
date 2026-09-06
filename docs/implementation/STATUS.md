@@ -89,7 +89,10 @@ control checkouts, command logs, future run artifacts. Credentials must not ente
 
 The installed same-home coexistence fixture passed: foreign handshake rejection sent
 zero command bytes; Base doctor cleanup and shutdown left upstream responsive.
-W1 remains open until installed update/uninstall fixtures finish.
+W1 remains open until installed update/uninstall fixtures finish. A session-owner
+inspection also found an explicit writable-path bypass. SessionManager now checks
+legacy destinations at open/create and final writes, while explicit read/copy is
+retained. Its focused tests pass 56/56; fresh artifact coverage remains pending.
 The locally installed H tarballs are unmodified, but their newly resolved external
 npm dependencies are not the certified frozen W0 benchmark graph. Npm lifecycle
 permission was explicit for the Base Context postinstall; managed-kernel bootstrap

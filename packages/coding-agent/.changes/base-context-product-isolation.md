@@ -5,3 +5,4 @@
 - Disabled unvalidated OAuth login, refresh, and credential-use routes while preserving supported API-key and bearer-token routes.
 - Added product, source-build, schema, path, and provider-contract diagnostics to `doctor`.
 - Changed installer, updater, release artifacts, and prepublish builds to use the owned product and bundled source runtime.
+- Reject legacy writable session paths at the session owner, including symlink changes, while preserving explicit read and copy inputs.

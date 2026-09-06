@@ -26,6 +26,7 @@ import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
@@ -1168,6 +1169,7 @@ export class SessionManager {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
+		if (persist) assertProductStatePath(sessionDir);
 		if (persist && sessionDir && !existsSync(sessionDir)) {
 			mkdirSync(sessionDir, { recursive: true });
 		}
@@ -1185,7 +1187,7 @@ export class SessionManager {
 	 * lets the async daemon path skip the synchronous re-read.
 	 */
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
-		this.sessionFile = resolve(sessionFile);
+		this.sessionFile = this.persist ? assertProductStatePath(sessionFile) : resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
 
@@ -1272,7 +1274,7 @@ export class SessionManager {
 		this.flushed = false;
 
 		if (this.persist) {
-			this.sessionFile = sessionFile;
+			this.sessionFile = sessionFile ? assertProductStatePath(sessionFile) : undefined;
 		}
 		return this.sessionFile;
 	}
@@ -1301,7 +1303,7 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		const targetPath = realpathIfPresent(this.sessionFile);
+		const targetPath = realpathIfPresent(assertProductStatePath(this.sessionFile));
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
 		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
@@ -1364,6 +1366,7 @@ export class SessionManager {
 			return this.sessionFile;
 		}
 		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
+		assertProductStatePath(dir);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
@@ -1392,7 +1395,7 @@ export class SessionManager {
 	}
 
 	getSessionArtifactDir(): string | undefined {
-		return this.persist ? getSessionArtifactPath(this.sessionDir, this.sessionId) : undefined;
+		return this.persist ? assertProductStatePath(getSessionArtifactPath(this.sessionDir, this.sessionId)) : undefined;
 	}
 
 	/**
@@ -1411,6 +1414,7 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
+		assertProductStatePath(this.sessionFile);
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		const shouldPersistWithoutAssistant = entry.type === "session_state" || entry.type === "session_info";
@@ -2074,6 +2078,7 @@ export class SessionManager {
 		migrateToCurrentVersion(sourceEntries);
 
 		const dir = sessionDir ?? getDefaultSessionDir(targetCwd);
+		assertProductStatePath(dir);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
