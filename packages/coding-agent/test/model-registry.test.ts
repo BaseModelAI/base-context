@@ -1456,10 +1456,8 @@ describe("ModelRegistry", () => {
 				expect(registry.markProviderAuthSourceStale(token!)).toBe(true);
 
 				await expect(registry.getApiKeyForProvider(providerId)).resolves.toBeUndefined();
-				expect(authStorage.getAuthStatus(providerId)).toEqual({
-					configured: true,
-					source: "stored",
-				});
+				// The saved OAuth credential remains unavailable, not a fallback after key rejection.
+				expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: false });
 			});
 
 			test("changed literal models.json apiKey no longer matches stale provider marker", async () => {

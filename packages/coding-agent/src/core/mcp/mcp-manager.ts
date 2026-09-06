@@ -9,6 +9,7 @@ import {
 } from "@ponythewhite/base-context-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@ponythewhite/base-context-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
+import { getProviderAuthContract } from "../provider-contracts.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
 
@@ -154,8 +155,10 @@ export class McpManager {
 		if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
 			return true;
 		}
-		const cred = this.authStorage.get(this.providerId(integration.server));
+		const providerId = this.providerId(integration.server);
+		const cred = this.authStorage.get(providerId);
 		if (cred === undefined) return false;
+		if (cred.type === "oauth" && getProviderAuthContract(providerId).oauth !== "validated") return false;
 		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
 		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
 		if (!integration.userDeclared) return true;
@@ -185,8 +188,14 @@ export class McpManager {
 				// getApiKey refreshes + rewrites auth.json under lock; Python re-reads.
 				// Surface failure (throw) instead of a false success so the kernel can
 				// report a refresh error rather than a misleading "not enabled".
-				const key = await this.authStorage.getApiKey(this.providerId(server));
-				if (!key) throw new Error(`Could not refresh credentials for ${server}`);
+				const providerId = this.providerId(server);
+				const key = await this.authStorage.getApiKey(providerId);
+				if (!key) {
+					const contract = getProviderAuthContract(providerId);
+					throw new Error(
+						contract.oauth === "validated" ? `Could not refresh credentials for ${server}` : contract.guidance,
+					);
+				}
 				return {};
 			},
 			// Resolved config so the kernel skill connects to the same URL the host
@@ -211,6 +220,8 @@ export class McpManager {
 			handlers["mcp.begin_login"] = async (payload) => {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.begin_login requires a server");
+				const contract = getProviderAuthContract(this.providerId(server));
+				if (contract.oauth !== "validated") throw new Error(contract.guidance);
 				await beginLogin(server);
 				return {};
 			};

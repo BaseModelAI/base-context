@@ -9,6 +9,7 @@ import {
 } from "@ponythewhite/base-context-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
+import { getProviderAuthContract } from "../../../core/provider-contracts.js";
 import { theme } from "../theme/theme.js";
 import {
 	getMenuListLayout,
@@ -119,7 +120,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			title: options.title ?? (mode === "login" ? "Providers" : "Saved Credentials"),
 			subtitle:
 				options.subtitle ??
-				(mode === "login" ? "Connect with a subscription or API key." : "Choose a credential to remove."),
+				(mode === "login" ? "API keys; unvalidated OAuth unavailable." : "Choose a credential to remove."),
 		});
 		this.addChild(panel);
 		if (options.header) {
@@ -255,7 +256,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		}
 
 		if (credential) {
-			return true;
+			return status.configured;
 		}
 		if (provider.authType !== "api_key") {
 			return false;
@@ -324,6 +325,14 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		if (this.isProviderStale(provider)) {
 			return theme.fg("warning", status.label ?? "expired");
 		}
+		if (
+			credential?.type === "oauth" &&
+			getProviderAuthContract(provider.id).oauth !== "validated" &&
+			(provider.authType === "oauth" || (!status.configured && !status.source))
+		) {
+			return theme.fg("warning", "saved OAuth unavailable");
+		}
+		if (!status.configured && !status.source) return theme.fg("muted", "unconfigured");
 
 		if (status.source && status.source !== "stored") {
 			return provider.authType === "api_key"

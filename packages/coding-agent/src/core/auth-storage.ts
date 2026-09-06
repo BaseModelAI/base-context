@@ -31,6 +31,7 @@ import {
 	savePrimeCliApiKey,
 	savePrimeCliTeamSelection,
 } from "./prime-inference-auth.js";
+import { getProviderAuthContract, isProviderApiKeyAllowed } from "./provider-contracts.js";
 import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
 
 export type PrimeTeamCredential = {
@@ -362,11 +363,20 @@ export class AuthStorage {
 
 	private getStoredCredentialValueMaterial(providerId: string, credential: AuthCredential): string | undefined {
 		if (credential.type === "api_key") {
-			if (credential.key.startsWith("!")) {
-				const resolvedKey = resolveConfigValueUncached(credential.key);
+			const isCommand = credential.key.startsWith("!");
+			const resolvedKey = isCommand
+				? resolveConfigValueUncached(credential.key)
+				: resolveConfigValue(credential.key);
+			if (resolvedKey !== undefined && !isProviderApiKeyAllowed(providerId, resolvedKey)) {
+				return undefined;
+			}
+			if (isCommand) {
 				return resolvedKey === undefined ? undefined : `api_key:command:${credential.key}\0${resolvedKey}`;
 			}
-			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;
+			return `api_key:${credential.key}\0${resolvedKey ?? ""}`;
+		}
+		if (getProviderAuthContract(providerId).oauth !== "validated") {
+			return undefined;
 		}
 		const provider = getOAuthProvider(providerId);
 		const apiKey = provider?.getApiKey(credential) ?? credential.access;
@@ -375,7 +385,7 @@ export class AuthStorage {
 
 	private getRuntimeAuthCandidate(provider: string): AuthSourceCandidate | undefined {
 		const apiKey = this.runtimeOverrides.get(provider);
-		if (!apiKey) {
+		if (!apiKey || !isProviderApiKeyAllowed(provider, apiKey)) {
 			return undefined;
 		}
 		return {
@@ -410,10 +420,17 @@ export class AuthStorage {
 		options?: { resolveCommandValue?: boolean; resolvedCommandValue?: string },
 	): AuthSourceCandidate | undefined {
 		const credential = this.data[provider];
-		if (!credential) {
+		if (!credential || (credential.type === "oauth" && getProviderAuthContract(provider).oauth !== "validated")) {
 			return undefined;
 		}
 		const isCommandApiKey = credential.type === "api_key" && credential.key.startsWith("!");
+		if (credential.type === "api_key") {
+			const apiKey =
+				options?.resolvedCommandValue ?? (isCommandApiKey ? credential.key : resolveConfigValue(credential.key));
+			if (apiKey !== undefined && !isProviderApiKeyAllowed(provider, apiKey)) {
+				return undefined;
+			}
+		}
 		const identityMaterial = isCommandApiKey ? `api_key:command:${credential.key}` : `${provider}:${credential.type}`;
 		const commandValueMaterial =
 			isCommandApiKey && options?.resolvedCommandValue !== undefined
@@ -434,10 +451,16 @@ export class AuthStorage {
 		});
 	}
 
+	private getEnvironmentApiKey(provider: string): string | undefined {
+		// The generic resolver prefers ANTHROPIC_OAUTH_TOKEN, an unavailable subscription route.
+		const apiKey = provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : getEnvApiKey(provider);
+		return apiKey && isProviderApiKeyAllowed(provider, apiKey) ? apiKey : undefined;
+	}
+
 	private getEnvironmentAuthCandidate(provider: string): AuthSourceCandidate | undefined {
-		const envKeys = findEnvKeys(provider);
+		const envKeys = findEnvKeys(provider)?.filter((key) => key !== "ANTHROPIC_OAUTH_TOKEN");
 		const envKey = envKeys?.[0];
-		const apiKey = getEnvApiKey(provider);
+		const apiKey = this.getEnvironmentApiKey(provider);
 		if (!apiKey) {
 			return undefined;
 		}
@@ -482,7 +505,7 @@ export class AuthStorage {
 
 	private getFallbackAuthCandidate(provider: string): AuthSourceCandidate | undefined {
 		const apiKey = this.fallbackResolver?.(provider);
-		if (!apiKey) {
+		if (!apiKey || !isProviderApiKeyAllowed(provider, apiKey)) {
 			return undefined;
 		}
 		return this.createAuthSourceCandidate({
@@ -765,6 +788,10 @@ export class AuthStorage {
 	 * Login to an OAuth provider.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+		const contract = getProviderAuthContract(providerId);
+		if (contract.oauth !== "validated") {
+			throw new Error(contract.guidance);
+		}
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
@@ -797,6 +824,9 @@ export class AuthStorage {
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
+		if (getProviderAuthContract(providerId).oauth !== "validated") {
+			return null;
+		}
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
@@ -808,7 +838,7 @@ export class AuthStorage {
 			this.loadError = null;
 
 			const cred = currentData[providerId];
-			if (cred?.type !== "oauth") {
+			if (cred?.type !== "oauth" || getProviderAuthContract(providerId).oauth !== "validated") {
 				return { result: null };
 			}
 
@@ -863,7 +893,7 @@ export class AuthStorage {
 		}
 
 		const envCandidate = this.getEnvironmentAuthCandidate(providerId);
-		const envKey = getEnvApiKey(providerId);
+		const envKey = this.getEnvironmentApiKey(providerId);
 		if (
 			providerId === PRIME_INFERENCE_PROVIDER_ID &&
 			envKey &&
@@ -897,21 +927,23 @@ export class AuthStorage {
 					cred.key.startsWith("!") && hasStaleRecord
 						? resolveConfigValueUncached(cred.key)
 						: resolveConfigValue(cred.key);
-				const sourceToken =
-					apiKey === undefined
-						? undefined
-						: this.getAuthSourceTokenForCandidate(
-								providerId,
-								cred.key.startsWith("!")
-									? (this.getStoredAuthCandidate(providerId, { resolvedCommandValue: apiKey }) ??
-											storedCandidate)
-									: storedCandidate,
-							);
-				return { apiKey, sourceToken };
+				if (apiKey === undefined || isProviderApiKeyAllowed(providerId, apiKey)) {
+					const sourceToken =
+						apiKey === undefined
+							? undefined
+							: this.getAuthSourceTokenForCandidate(
+									providerId,
+									cred.key.startsWith("!")
+										? (this.getStoredAuthCandidate(providerId, { resolvedCommandValue: apiKey }) ??
+												storedCandidate)
+										: storedCandidate,
+								);
+					return { apiKey, sourceToken };
+				}
 			}
 		}
 
-		if (cred?.type === "oauth") {
+		if (cred?.type === "oauth" && getProviderAuthContract(providerId).oauth === "validated") {
 			const storedCandidate = this.getStoredAuthCandidate(providerId);
 			if (storedCandidate && !this.isAuthSourceStale(providerId, storedCandidate)) {
 				const provider = getOAuthProvider(providerId);
@@ -939,7 +971,11 @@ export class AuthStorage {
 						this.reload();
 						const updatedCred = this.data[providerId];
 
-						if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
+						if (
+							updatedCred?.type === "oauth" &&
+							getProviderAuthContract(providerId).oauth === "validated" &&
+							Date.now() < updatedCred.expires
+						) {
 							const updatedCandidate = this.getStoredAuthCandidate(providerId);
 							return {
 								apiKey: provider.getApiKey(updatedCred),
@@ -975,10 +1011,13 @@ export class AuthStorage {
 		if (options?.includeFallback !== false) {
 			const fallbackCandidate = this.getFallbackAuthCandidate(providerId);
 			if (fallbackCandidate && !this.isAuthSourceStale(providerId, fallbackCandidate)) {
-				return {
-					apiKey: this.fallbackResolver?.(providerId) ?? undefined,
-					sourceToken: this.getAuthSourceTokenForCandidate(providerId, fallbackCandidate),
-				};
+				const apiKey = this.fallbackResolver?.(providerId) ?? undefined;
+				if (apiKey === undefined || isProviderApiKeyAllowed(providerId, apiKey)) {
+					return {
+						apiKey,
+						sourceToken: this.getAuthSourceTokenForCandidate(providerId, fallbackCandidate),
+					};
+				}
 			}
 		}
 
@@ -991,10 +1030,10 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Get all registered OAuth providers
+	 * Get registered OAuth providers validated for this distribution.
 	 */
 	getOAuthProviders() {
-		return getOAuthProviders();
+		return getOAuthProviders().filter((provider) => getProviderAuthContract(provider.id).oauth === "validated");
 	}
 
 	setPrimeInferenceTeamSelection(team: PrimeTeam | null): void {

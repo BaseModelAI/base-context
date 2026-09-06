@@ -134,6 +134,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import { assertProductStatePath } from "../../runtime-paths.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -1142,7 +1143,11 @@ export class InteractiveMode {
 			this.resetSideQuestion();
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(
+			new ProcessTerminal(),
+			this.settingsManager.getShowHardwareCursor(),
+			assertProductStatePath(path.join(getAgentDir(), "tui")),
+		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.ui.onCopy = (text) => {
 			void this.copyFullscreenSelection(text);
@@ -8699,7 +8704,7 @@ export class InteractiveMode {
 		}
 
 		const authStorage = this.modelRegistry.authStorage;
-		const isAuthed = (name: string) => authStorage.get(`mcp:${name}`) !== undefined;
+		const isAuthed = (name: string) => authStorage.hasAuth(`mcp:${name}`);
 		if (sub === "login") {
 			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
@@ -8728,13 +8733,12 @@ export class InteractiveMode {
 			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
 			if (result.changed && result.serverChange) {
 				const { name, transport, verb, usesOAuth } = result.serverChange;
-				const hasMcpProviderRefresh = this.uiServices.refreshMcpProviders !== undefined;
 				this.uiServices.refreshMcpProviders?.();
 				const successMessage =
 					verb === "removed"
 						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
 						: usesOAuth
-							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Prime Agent, then run"} /mcp login ${name} to connect.`
+							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). OAuth is unavailable until the Base Context provider contract is validated. Use explicit bearer-token or API-key configuration instead.`
 							: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
 				await this.reloadAfterMcpChange(usesOAuth ? successMessage : result.message, successMessage);
 			} else if (result.action === "list") {

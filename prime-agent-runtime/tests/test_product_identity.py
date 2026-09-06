@@ -1,15 +1,16 @@
 """Native Python state isolation; no host, network, or provider calls."""
 
+import asyncio
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from rlm.bash import _with_prefix
 from rlm.harness import HarnessState, get_harness_state
-from rlm.mcp_base import _read_auth
+from rlm.mcp_base import McpIntegration, NotEnabled, _read_auth
 from rlm.product import product_home, product_state_path, project_state_dir
 from rlm.repl import _resolve_owner_pid, _snapshot_state
 from websearch.websearch import _resolve_api_key
@@ -58,6 +59,47 @@ class ProductIdentityTest(unittest.TestCase):
                     self.assertEqual(_resolve_api_key(), "provider-key")
                     self.assertEqual(_resolve_owner_pid(), 123)
                 self.assertEqual((legacy / "auth.json").read_text(), legacy_auth)
+
+    def test_mcp_explicit_credentials_remain_available(self):
+        class Integration(McpIntegration):
+            server = "custom"
+            bearer_token_env = "MCP_TOKEN"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"BASE_CONTEXT_HOME": tmp}, clear=True):
+                integration = Integration()
+                for key in ("explicit-api-key", "MCP_API_KEY"):
+                    with self.subTest(key=key), patch.dict(os.environ, {"MCP_API_KEY": "explicit-api-key"}):
+                        product_state_path("auth.json").write_text(
+                            json.dumps({"mcp:custom": {"type": "api_key", "key": key}})
+                        )
+                        self.assertEqual(asyncio.run(integration._resolve_token()), "explicit-api-key")
+                product_state_path("auth.json").write_text(
+                    json.dumps({"mcp:custom": {"type": "oauth", "access": "unavailable", "expires": 10**15}})
+                )
+                with patch.dict(os.environ, {"MCP_TOKEN": " explicit-bearer "}):
+                    self.assertEqual(asyncio.run(integration._resolve_token()), "explicit-bearer")
+
+    def test_mcp_stored_oauth_is_unavailable_without_refresh(self):
+        class Integration(McpIntegration):
+            server = "custom"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"BASE_CONTEXT_HOME": tmp}, clear=True), patch(
+                "rlm.host_request", new_callable=AsyncMock
+            ) as host_request:
+                integration = Integration()
+                for expires in (0, 10**15):
+                    with self.subTest(expires=expires):
+                        product_state_path("auth.json").write_text(json.dumps({"mcp:custom": {
+                            "type": "oauth", "access": "unavailable", "refresh": "unavailable", "expires": expires,
+                        }}))
+                        self.assertIsNone(integration._token())
+                        with self.assertRaisesRegex(NotEnabled, "provider contract is validated") as raised:
+                            asyncio.run(integration._resolve_token())
+                        self.assertIn("bearer-token or API-key", str(raised.exception))
+                        self.assertNotIn("/mcp login", str(raised.exception))
+                host_request.assert_not_called()
 
     def test_rejects_invalid_or_shared_state(self):
         with tempfile.TemporaryDirectory() as tmp:

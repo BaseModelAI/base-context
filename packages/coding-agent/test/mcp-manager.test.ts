@@ -30,20 +30,34 @@ describe("McpManager", () => {
 		expect(overrides).toContain("-notion/SKILL.md");
 	});
 
-	it("enables an integration once credentials are stored", () => {
-		authStorage.set("mcp:linear", {
-			type: "oauth",
-			access: "tok",
-			refresh: "r",
-			expires: Date.now() + 3600_000,
+	it("does not enable stored OAuth for built-in or dynamically registered integrations", () => {
+		for (const server of ["linear", "acme"]) {
+			authStorage.set(`mcp:${server}`, {
+				type: "oauth",
+				access: "tok",
+				refresh: "r",
+				expires: Date.now() + 3600_000,
+				endpoint: "https://mcp.acme.test/mcp",
+			});
+		}
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({ acme: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true } }),
 		});
-		const manager = new McpManager({ authStorage });
-		const overrides = manager.getDisabledBuiltinSkillOverrides();
-		expect(overrides).not.toContain("-linear/SKILL.md");
-		expect(overrides).toContain("-notion/SKILL.md");
+		expect(getOAuthProvider("mcp:acme")).toBeDefined();
+		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+		for (const server of ["linear", "acme"]) {
+			expect(manager.listStatus().find((status) => status.server === server)?.enabled).toBe(false);
+		}
+		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
+	});
 
-		const status = manager.listStatus().find((s) => s.server === "linear");
-		expect(status?.enabled).toBe(true);
+	it("enables an integration with an explicit API key", async () => {
+		authStorage.set("mcp:linear", { type: "api_key", key: "explicit-token" });
+		const manager = new McpManager({ authStorage });
+		expect(manager.getDisabledBuiltinSkillOverrides()).not.toContain("-linear/SKILL.md");
+		expect(manager.listStatus().find((status) => status.server === "linear")?.enabled).toBe(true);
+		expect(await manager.hostHandlers()["mcp.refresh"]({ server: "linear" })).toEqual({});
 	});
 
 	it("registers an OAuth provider per built-in integration", () => {
@@ -77,11 +91,14 @@ describe("McpManager", () => {
 		const handlers = manager.hostHandlers();
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
 
-		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow("Could not refresh");
+		authStorage.set("mcp:linear", { type: "oauth", access: "old", refresh: "r", expires: 0 });
+		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow(
+			"unavailable in Base Context until its provider contract is validated",
+		);
 		await expect(handlers["mcp.refresh"]({})).rejects.toThrow("requires a server");
 	});
 
-	it("exposes mcp.begin_login only when beginLogin is provided", async () => {
+	it("rejects unvalidated OAuth before invoking an interactive login callback", async () => {
 		let called = "";
 		const manager = new McpManager({
 			authStorage,
@@ -91,8 +108,10 @@ describe("McpManager", () => {
 		});
 		const handlers = manager.hostHandlers();
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.begin_login", "mcp.config", "mcp.refresh"]);
-		await handlers["mcp.begin_login"]({ server: "linear" });
-		expect(called).toBe("linear");
+		await expect(handlers["mcp.begin_login"]({ server: "linear" })).rejects.toThrow(
+			"unavailable in Base Context until its provider contract is validated",
+		);
+		expect(called).toBe("");
 	});
 
 	it("mcp.config keeps catalog names reserved from generic overrides", async () => {
@@ -154,7 +173,12 @@ describe("McpManager", () => {
 			const manager = new McpManager({
 				authStorage,
 				getUserServers: () => ({
-					custom: { type: "http", url: "https://example.test/mcp", bearerTokenEnvVar: "MY_MCP_TOKEN" },
+					custom: {
+						type: "http",
+						url: "https://example.test/mcp",
+						oauth: true,
+						bearerTokenEnvVar: "MY_MCP_TOKEN",
+					},
 				}),
 			});
 			const status = manager.listStatus().find((s) => s.server === "custom");

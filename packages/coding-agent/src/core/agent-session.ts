@@ -35,6 +35,7 @@ import {
 	supportsFastMode,
 } from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
+import { PRODUCT } from "../product-identity.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
 import {
@@ -9560,7 +9561,7 @@ export class AgentSession {
 	}
 
 	private _createEphemeralRlmSessionDir(): string {
-		this._rlmSessionDir = mkdtempSync(join(tmpdir(), "prime-agent-rlm-"));
+		this._rlmSessionDir = mkdtempSync(join(tmpdir(), `${PRODUCT.command}-rlm-`));
 		return this._rlmSessionDir;
 	}
 

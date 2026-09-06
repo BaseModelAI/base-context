@@ -139,7 +139,7 @@ describe("OAuthSelectorComponent", () => {
 		expect(output.indexOf("OpenAI")).toBeLessThan(output.indexOf("GitHub Copilot"));
 	});
 
-	it("shows stored OAuth auth distinctly in the API key selector", () => {
+	it("shows saved unvalidated OAuth as unavailable in the API key selector", () => {
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
 				type: "oauth",
@@ -159,7 +159,7 @@ describe("OAuthSelectorComponent", () => {
 		const output = stripAnsi(selector.render(120).join("\n"));
 
 		expect(output).toContain("Anthropic");
-		expect(output).toContain("subscription configured");
+		expect(output).toContain("saved OAuth unavailable");
 	});
 
 	it("shows environment API key auth as configured", () => {
@@ -183,17 +183,15 @@ describe("OAuthSelectorComponent", () => {
 	it("shows stale auth as expired instead of configured", () => {
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
-				type: "oauth",
-				access: "stale-access-token",
-				refresh: "refresh-token",
-				expires: Date.now() + 60_000,
+				type: "api_key",
+				key: "stale-api-key",
 			},
 		});
 		authStorage.markAuthStale("anthropic");
 		const selector = new OAuthSelectorComponent(
 			"login",
 			authStorage,
-			[{ id: "anthropic", name: "Anthropic", authType: "oauth" }],
+			[{ id: "anthropic", name: "Anthropic", authType: "api_key" }],
 			() => {},
 			() => {},
 		);
@@ -209,10 +207,8 @@ describe("OAuthSelectorComponent", () => {
 		process.env.OPENAI_API_KEY = "test-openai-key";
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
-				type: "oauth",
-				access: "stale-access-token",
-				refresh: "refresh-token",
-				expires: Date.now() + 60_000,
+				type: "api_key",
+				key: "stale-api-key",
 			},
 		});
 		authStorage.markAuthStale("anthropic");
@@ -220,7 +216,7 @@ describe("OAuthSelectorComponent", () => {
 			"login",
 			authStorage,
 			[
-				{ id: "anthropic", name: "Anthropic", authType: "oauth" },
+				{ id: "anthropic", name: "Anthropic", authType: "api_key" },
 				{ id: "openai", name: "OpenAI", authType: "api_key" },
 			],
 			() => {},
@@ -290,7 +286,7 @@ describe("OAuthSelectorComponent", () => {
 		expect(output).not.toContain("expired");
 	});
 
-	it("shows stale stored auth as expired when models.json auth is active for the provider", () => {
+	it("keeps a saved OAuth row unavailable when models.json API-key auth is active", () => {
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
 				type: "oauth",
@@ -312,7 +308,8 @@ describe("OAuthSelectorComponent", () => {
 		const output = stripAnsi(selector.render(120).join("\n"));
 
 		expect(output).toContain("Anthropic");
-		expect(output).toContain("expired");
+		expect(output).toContain("saved OAuth unavailable");
+		expect(output).not.toContain("expired");
 		expect(output).not.toContain("configured");
 	});
 

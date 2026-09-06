@@ -14,6 +14,7 @@ import {
 } from "../core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
+import { PRODUCT } from "../product-identity.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
@@ -202,7 +203,10 @@ export async function runOwnedSessionWorkerFrontend(
 	profile: OwnedSessionWorkerProfile,
 ): Promise<number> {
 	const interactive = profile === "interactive-ephemeral";
-	const recoveryDescriptorPath = join(tmpdir(), `prime-agent-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`);
+	const recoveryDescriptorPath = join(
+		tmpdir(),
+		`${PRODUCT.command}-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`,
+	);
 	const orphanProcessJournalPath = `${recoveryDescriptorPath}.orphans.jsonl`;
 	let currentChild: ChildProcess | undefined;
 	let terminating = false;

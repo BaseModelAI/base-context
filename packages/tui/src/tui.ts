@@ -370,12 +370,26 @@ export class TUI extends Container {
 		focusOrder: number;
 	}[] = [];
 
-	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
+	/** diagnosticsDir defaults to a private temporary directory, created only when a log is written. */
+	constructor(
+		terminal: Terminal,
+		showHardwareCursor?: boolean,
+		private diagnosticsDir?: string,
+	) {
 		super();
 		this.terminal = terminal;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
+	}
+
+	private getDiagnosticsDir(): string {
+		if (this.diagnosticsDir === undefined) {
+			this.diagnosticsDir = fs.mkdtempSync(path.join(os.tmpdir(), "tui-"));
+		} else {
+			fs.mkdirSync(this.diagnosticsDir, { recursive: true, mode: 0o700 });
+		}
+		return this.diagnosticsDir;
 	}
 
 	get fullRedraws(): number {
@@ -1670,9 +1684,9 @@ export class TUI extends Container {
 		const debugRedraw = process.env.BASE_CONTEXT_DEBUG_REDRAW === "1";
 		const logRedraw = (reason: string): void => {
 			if (!debugRedraw) return;
-			const logPath = path.join(os.homedir(), ".prime", "agent", "pi-debug.log");
+			const logPath = path.join(this.getDiagnosticsDir(), "tui-debug.log");
 			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
-			fs.appendFileSync(logPath, msg);
+			fs.appendFileSync(logPath, msg, { mode: 0o600 });
 		};
 
 		// First render - just output everything without clearing (assumes clean screen)
@@ -1852,7 +1866,7 @@ export class TUI extends Container {
 			const isImage = isImageLine(line);
 			if (!isImage && visibleWidth(line) > width) {
 				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(os.homedir(), ".prime", "agent", "pi-crash.log");
+				const crashLogPath = path.join(this.getDiagnosticsDir(), "tui-crash.log");
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
@@ -1862,8 +1876,7 @@ export class TUI extends Container {
 					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
 					"",
 				].join("\n");
-				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-				fs.writeFileSync(crashLogPath, crashData);
+				fs.writeFileSync(crashLogPath, crashData, { mode: 0o600 });
 
 				// Clean up terminal state before throwing
 				this.stop();
@@ -1903,8 +1916,7 @@ export class TUI extends Container {
 		buffer += "\x1b[?2026l"; // End synchronized output
 
 		if (process.env.BASE_CONTEXT_TUI_DEBUG === "1") {
-			const debugDir = "/tmp/tui";
-			fs.mkdirSync(debugDir, { recursive: true });
+			const debugDir = this.getDiagnosticsDir();
 			const debugPath = path.join(debugDir, `render-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
 			const debugData = [
 				`firstChanged: ${firstChanged}`,
@@ -1928,7 +1940,7 @@ export class TUI extends Container {
 				"=== buffer ===",
 				JSON.stringify(buffer),
 			].join("\n");
-			fs.writeFileSync(debugPath, debugData);
+			fs.writeFileSync(debugPath, debugData, { mode: 0o600 });
 		}
 
 		// Write entire buffer at once

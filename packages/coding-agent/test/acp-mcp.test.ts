@@ -38,6 +38,7 @@ describe("ACP MCP servers", () => {
 				protocolVersion: acp.PROTOCOL_VERSION,
 				clientCapabilities: {},
 			});
+			expect(initialized.agentInfo).toMatchObject({ name: "base-context", title: "Base Context" });
 			expect(initialized.agentCapabilities?.mcpCapabilities?.http).toBe(true);
 
 			const created = await handle.agent.request("session/new", {

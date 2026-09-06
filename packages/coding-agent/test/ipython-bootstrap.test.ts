@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { getKernelVenvDir } from "../src/core/kernel/bootstrap.js";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 import { buildRlmBootstrapCode } from "../src/core/tools/ipython.js";
 
@@ -17,6 +18,9 @@ describe("RLM bootstrap", () => {
 		expect(code).toContain("async def list_subagents(self)");
 		expect(code).toContain("async def delete_subagent(self, target)");
 		expect(code).toContain("self._raise_missing()");
+		expect(code).toContain("base-context-runtime is not installed in this kernel.");
+		expect(code).toContain("Rebuild the Base Context kernel environment");
+		expect(code).not.toContain("~/.prime");
 	});
 
 	it("disables colored output for subprocesses launched by the kernel", () => {
@@ -56,7 +60,7 @@ function resolveKernelPython(): string | null {
 	const candidates = [
 		process.env.BASE_CONTEXT_KERNEL_PYTHON,
 		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
-		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
+		join(getKernelVenvDir(), "bin", "python"),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
 		if (!existsSync(python)) continue;

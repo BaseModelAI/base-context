@@ -21,7 +21,7 @@ import {
 	type SimpleStreamOptions,
 } from "@ponythewhite/base-context-ai";
 import { registerBuiltinMcpOAuthProviders } from "@ponythewhite/base-context-ai/mcp";
-import { registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
+import { getOAuthProvider, registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
@@ -35,6 +35,7 @@ import {
 	getPrivatePrimeInferenceModels,
 	isPrivatePrimeInferenceModel,
 } from "./prime-inference-models.js";
+import { getProviderAuthContract, isProviderApiKeyAllowed } from "./provider-contracts.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
 	resolveConfigValueOrThrow,
@@ -1019,7 +1020,10 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
+		return (
+			isProviderApiKeyAllowed(model.provider, "", model.api) &&
+			(this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider))
+		);
 	}
 
 	private fingerprintProviderRequestAuthSource(source: ProviderRequestAuthSource["source"], material: string): string {
@@ -1071,7 +1075,7 @@ export class ModelRegistry {
 		options?: { resolvedApiKey?: string },
 	): ProviderRequestAuthSource | undefined {
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
-		if (!providerApiKey) {
+		if (!providerApiKey || !isProviderApiKeyAllowed(provider, options?.resolvedApiKey ?? "")) {
 			return undefined;
 		}
 
@@ -1089,6 +1093,7 @@ export class ModelRegistry {
 		}
 
 		const envValue = process.env[providerApiKey];
+		if (!isProviderApiKeyAllowed(provider, envValue ?? providerApiKey)) return undefined;
 		if (envValue) {
 			return this.createProviderRequestAuthSource({
 				source: "environment",
@@ -1291,6 +1296,12 @@ export class ModelRegistry {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
+			const contract = getProviderAuthContract(
+				model.api === "openai-codex-responses" ? "openai-codex" : model.provider,
+			);
+			if (!isProviderApiKeyAllowed(model.provider, "", model.api)) {
+				return { ok: false, error: contract.guidance };
+			}
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(model.provider, {
 				includeFallback: false,
@@ -1302,6 +1313,9 @@ export class ModelRegistry {
 					providerConfig.apiKey,
 					`API key for provider "${model.provider}"`,
 				);
+				if (!isProviderApiKeyAllowed(model.provider, resolvedApiKey, model.api)) {
+					return { ok: false, error: contract.guidance };
+				}
 				const providerRequestAuthSource = this.getProviderRequestAuthSource(model.provider, { resolvedApiKey });
 				if (
 					providerRequestAuthSource &&
@@ -1333,6 +1347,12 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
+			if (
+				!isProviderApiKeyAllowed(model.provider, apiKey ?? "", model.api) ||
+				Object.values(headers ?? {}).some((value) => !isProviderApiKeyAllowed(model.provider, value, model.api))
+			) {
+				return { ok: false, error: contract.guidance };
+			}
 			return {
 				ok: true,
 				apiKey,
@@ -1377,7 +1397,8 @@ export class ModelRegistry {
 	 */
 	getProviderDisplayName(provider: string): string {
 		const registeredProvider = this.registeredProviders.get(provider);
-		const oauthProvider = this.authStorage.getOAuthProviders().find((p) => p.id === provider);
+		// Adapter metadata is a valid display name, not permission to authenticate.
+		const oauthProvider = getOAuthProvider(provider);
 
 		return (
 			registeredProvider?.name ??
@@ -1405,7 +1426,7 @@ export class ModelRegistry {
 		}
 
 		const resolvedApiKey = resolveConfigValueUncached(providerApiKey);
-		if (resolvedApiKey === undefined) {
+		if (resolvedApiKey === undefined || !isProviderApiKeyAllowed(provider, resolvedApiKey)) {
 			this.setLastProviderAuthSourceToken(provider, undefined);
 			return undefined;
 		}
@@ -1425,7 +1446,7 @@ export class ModelRegistry {
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
 		const cred = this.authStorage.get(model.provider);
-		return cred?.type === "oauth";
+		return cred?.type === "oauth" && getProviderAuthContract(model.provider).oauth === "validated";
 	}
 
 	/**
@@ -1545,7 +1566,7 @@ export class ModelRegistry {
 					compat: modelDef.compat,
 				} as Model<Api>);
 			}
-			if (config.oauth?.modifyModels) {
+			if (config.oauth?.modifyModels && getProviderAuthContract(providerName).oauth === "validated") {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
 					this.models = config.oauth.modifyModels(this.models, cred);

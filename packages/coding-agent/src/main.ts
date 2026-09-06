@@ -112,6 +112,7 @@ import { ExtensionSelectorComponent } from "./modes/interactive/components/exten
 import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
+import { assertProductStatePath } from "./runtime-paths.js";
 import { isLocalPath } from "./utils/paths.js";
 
 /**
@@ -362,12 +363,12 @@ async function promptConfirm(message: string): Promise<boolean> {
 const STARTUP_SESSION_LOSS_COPY: DaemonSessionLossCopy = {
 	busyDetail(count) {
 		const { noun, pronoun } = pluralizeSessions(count);
-		return `A background service from a different Prime Agent version is running with ${count} busy ${noun}. Stopping it will terminate ${pronoun}.`;
+		return `A background service from a different Base Context version is running with ${count} busy ${noun}. Stopping it will terminate ${pronoun}.`;
 	},
 	unlistableDetail:
-		"A background service from a different Prime Agent version is running and its sessions could not be listed. Stopping it may terminate active sessions.",
+		"A background service from a different Base Context version is running and its sessions could not be listed. Stopping it may terminate active sessions.",
 	question: "Stop it and continue?",
-	nonTtyHint: 'Run "prime-agent shutdown" to stop it, then retry.',
+	nonTtyHint: 'Run "base-context shutdown" to stop it, then retry.',
 };
 
 // The promise to keep after awaiting readiness. Wrapped in an object so it
@@ -389,7 +390,7 @@ async function takeOverStaleDaemonOrExit(socketPath: string): Promise<DaemonRead
 	}
 	if (!(await shutdownDaemonAndWait(socketPath))) {
 		console.error(
-			chalk.red(`Could not stop the background service on ${socketPath}. Run "prime-agent shutdown" and retry.`),
+			chalk.red(`Could not stop the background service on ${socketPath}. Run "base-context shutdown" and retry.`),
 		);
 		process.exit(1);
 	}
@@ -914,7 +915,11 @@ async function promptForMissingSessionCwd(
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+		const ui = new TUI(
+			new ProcessTerminal(),
+			settingsManager.getShowHardwareCursor(),
+			assertProductStatePath(join(getAgentDir(), "tui")),
+		);
 		ui.setClearOnShrink(settingsManager.getClearOnShrink());
 
 		let settled = false;

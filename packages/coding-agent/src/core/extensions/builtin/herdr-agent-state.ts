@@ -18,6 +18,7 @@
 
 import { createConnection } from "node:net";
 import { basename } from "node:path";
+import { PRODUCT } from "../../../product-identity.js";
 import type { ExtensionAPI, ExtensionFactory } from "../types.js";
 
 type AgentState = "working" | "blocked" | "idle";
@@ -133,7 +134,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 	}
 
 	const source = "herdr:pi";
-	const agentLabel = "prime-agent";
+	const agentLabel = PRODUCT.command;
 	const idleDebounceMs = parseDurationEnv("HERDR_PI_IDLE_DEBOUNCE_MS", 250);
 	const retryGraceMs = parseDurationEnv("HERDR_PI_RETRY_GRACE_MS", 2500);
 

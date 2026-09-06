@@ -1074,7 +1074,7 @@ describe("InteractiveMode submit handling", () => {
 
 describe("InteractiveMode MCP command", () => {
 	type McpCommandHarness = {
-		modelRegistry: { authStorage: { get(providerId: string): unknown } };
+		modelRegistry: { authStorage: { get(providerId: string): unknown; hasAuth(providerId: string): boolean } };
 		settingsManager: SettingsManager;
 		uiServices: { refreshMcpProviders?(): void };
 		showConfigurationMenu(tab: "mcp-connections"): Promise<void>;
@@ -1101,7 +1101,7 @@ describe("InteractiveMode MCP command", () => {
 
 	test("preserves the explicit /mcp list status output", async () => {
 		const fakeThis = {
-			modelRegistry: { authStorage: { get: vi.fn(() => undefined) } },
+			modelRegistry: { authStorage: { get: vi.fn(() => undefined), hasAuth: vi.fn(() => false) } },
 			settingsManager: SettingsManager.inMemory({}),
 			showConfigurationMenu: vi.fn(async () => {}),
 			showStatus: vi.fn(),
@@ -1119,7 +1119,9 @@ describe("InteractiveMode MCP command", () => {
 		const ui = { requestRender: vi.fn() };
 		const showStatus = (InteractiveMode.prototype as unknown as { showStatus(message: string): void }).showStatus;
 		return {
-			modelRegistry: { authStorage: { get: vi.fn(() => undefined), removeVerified: vi.fn() } },
+			modelRegistry: {
+				authStorage: { get: vi.fn(() => undefined), hasAuth: vi.fn(() => false), removeVerified: vi.fn() },
+			},
 			settingsManager: manager,
 			uiServices: { refreshMcpProviders: vi.fn() },
 			chatContainer,
@@ -1194,11 +1196,11 @@ describe("InteractiveMode MCP command", () => {
 
 		expect(events[0]).toBe("refresh");
 		expect(fakeThis.handleReloadCommand).not.toHaveBeenCalled();
-		expect(events.join("\n")).toContain("Run /mcp login remote to connect.");
+		expect(events.join("\n")).toContain("Use explicit bearer-token or API-key configuration instead.");
 		expect(events.join("\n")).toContain("Run /reload after the current turn to activate it.");
 	});
 
-	test("guides OAuth server additions to explicit login after refresh", async () => {
+	test("explains unavailable OAuth server authentication after refresh", async () => {
 		const manager = SettingsManager.inMemory({});
 		const fakeThis = createRenderedMcpHarness(manager);
 		const events: string[] = [];
@@ -1211,7 +1213,9 @@ describe("InteractiveMode MCP command", () => {
 		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
 
 		expect(events).toEqual(["refresh", "reload"]);
-		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain("Run /mcp login remote to connect.");
+		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
+			"Use explicit bearer-token or API-key configuration instead.",
+		);
 	});
 
 	test("keeps OAuth guidance accurate for legacy UI service hosts", async () => {
@@ -1223,7 +1227,7 @@ describe("InteractiveMode MCP command", () => {
 		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
-			"Restart Prime Agent, then run /mcp login remote to connect.",
+			"OAuth is unavailable until the Base Context provider contract is validated.",
 		);
 	});
 

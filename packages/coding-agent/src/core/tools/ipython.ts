@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AgentTool } from "@ponythewhite/base-context-agent";
 import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
+import { PRODUCT } from "../../product-identity.js";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
 import { resolveKernelBashShell } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
@@ -41,9 +42,9 @@ except Exception as _prime_agent_rlm_error:
     class _PrimeAgentMissingRlm:
         def _raise_missing(self):
             raise RuntimeError(
-                "prime-agent-runtime is not installed in this kernel. "
-                "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
-                "BASE_CONTEXT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
+                "${PRODUCT.runtimeDistribution} is not installed in this kernel. "
+                "Rebuild the ${PRODUCT.name} kernel environment, or set "
+                "BASE_CONTEXT_KERNEL_PYTHON to a kernel environment with ${PRODUCT.runtimeDistribution} installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
 
@@ -272,7 +273,7 @@ export interface IpythonToolDetails {
 }
 
 export interface IpythonToolOptions {
-	/** Python override. Must have prime-agent-runtime installed. */
+	/** Python override. Must have base-context-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
 	/** Command prefix prepended to every bash() command. */

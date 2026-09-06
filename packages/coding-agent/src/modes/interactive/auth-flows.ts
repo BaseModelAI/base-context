@@ -17,6 +17,7 @@ import {
 	PRIME_INFERENCE_PROVIDER_NAME,
 	type PrimeTeam,
 } from "../../core/prime-inference-auth.js";
+import { getProviderAuthContract } from "../../core/provider-contracts.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
 import { showFullPaneOverlay } from "./components/centered-overlay.js";
@@ -56,7 +57,7 @@ export async function getAnthropicSubscriptionAuthWarning(
 	modelRegistry: ModelRegistry,
 	model: { provider: string } | undefined,
 ): Promise<string | undefined> {
-	if (!model || model.provider !== "anthropic") {
+	if (!model || model.provider !== "anthropic" || getProviderAuthContract(model.provider).oauth !== "validated") {
 		return undefined;
 	}
 
@@ -123,6 +124,11 @@ export class ProviderAuthFlows {
 	 */
 	runMcpLogin(server: string, label?: string): Promise<AuthenticationResult> {
 		const providerId = `mcp:${server}`;
+		const contract = getProviderAuthContract(providerId);
+		if (contract.oauth !== "validated") {
+			this.host.showError(contract.guidance);
+			return Promise.resolve({ status: "failed" });
+		}
 		const provider = this.host.modelRegistry.authStorage.getOAuthProviders().find((p) => p.id === providerId);
 		if (!provider) {
 			this.host.showError(`Unknown MCP integration: ${server}`);
@@ -137,7 +143,7 @@ export class ProviderAuthFlows {
 		if (providerOptions.length === 0) {
 			this.host.showStatus(
 				authType === "oauth"
-					? "No subscription providers available."
+					? "Subscription OAuth is unavailable in Base Context until provider client contracts are validated. Use /login API Keys instead."
 					: authType === "api_key"
 						? "No API key providers available."
 						: "No providers available.",
@@ -592,6 +598,11 @@ export class ProviderAuthFlows {
 		providerName: string,
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
+		const contract = getProviderAuthContract(providerId);
+		if (contract.oauth !== "validated") {
+			this.host.showError(contract.guidance);
+			return { status: "failed" };
+		}
 		const providerInfo = this.host.modelRegistry.authStorage
 			.getOAuthProviders()
 			.find((provider) => provider.id === providerId);

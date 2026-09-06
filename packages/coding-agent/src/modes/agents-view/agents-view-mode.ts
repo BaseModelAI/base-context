@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import {
 	type AutocompleteProvider,
 	CombinedAutocompleteProvider,
@@ -24,6 +24,7 @@ import {
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
+import { assertProductStatePath } from "../../runtime-paths.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
@@ -739,7 +740,11 @@ export class AgentsViewMode implements Component, Focusable {
 		setRegisteredThemes(options.uiServices.getThemes());
 		initTheme(options.uiServices.settingsManager.getTheme(), true);
 
-		this.ui = new TUI(new ProcessTerminal(), options.uiServices.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(
+			new ProcessTerminal(),
+			options.uiServices.settingsManager.getShowHardwareCursor(),
+			assertProductStatePath(join(getAgentDir(), "tui")),
+		);
 		this.ui.setClearOnShrink(options.uiServices.settingsManager.getClearOnShrink());
 		this.ui.terminal.setTitle(`${APP_TITLE} - Agents`);
 		this.editor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
@@ -2402,7 +2407,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		this.daemonShutdownReceived = true;
 		this.reconnectTimedOut = false;
-		this.setStatusMessage(`Prime Agent daemon shut down. Restart Prime Agent to reconnect. ${error.message}`, {
+		this.setStatusMessage(`Base Context daemon shut down. Restart Base Context to reconnect. ${error.message}`, {
 			tone: "error",
 			sticky: true,
 		});
