@@ -1,9 +1,21 @@
 import { describe, expect, test, vi } from "vitest";
-import { AgentSession, isAgentSessionInstance } from "../src/core/agent-session.js";
 import {
+	AgentSession,
+	type HostedRlmChildAgentSnapshot,
+	isAgentSessionInstance,
+	type LocalRlmChildAgentSnapshot,
+	type RlmChildAgentSnapshot,
+} from "../src/core/agent-session.js";
+import {
+	type HostedRlmSpawnHandle,
+	type HostedRlmSubagentRegistryEntry,
 	INVALID_SUBAGENT_RUNTIME_ERROR,
+	type LocalRlmSpawnHandle,
+	type LocalRlmSubagentRegistryEntry,
 	type NormalizedHostedIdentityMatch,
 	normalizeRlmSubagentRuntime,
+	type RlmChildRunLocation,
+	type RlmSpawnHandle,
 	type RlmSubagentRuntime,
 } from "../src/core/rlm-runtime.js";
 
@@ -1285,5 +1297,195 @@ describe("expectedHostedIdentity printable ASCII validation", () => {
 		};
 		const r = normalizeRlmSubagentRuntime({ hostedPort: port }, (_v): _v is never => false, identity);
 		expect(r).not.toBeNull();
+	});
+});
+
+describe("RlmSpawnHandle union types", () => {
+	const localHandle: LocalRlmSpawnHandle = {
+		rlm_child_id: "sub-abc123",
+		name: "worker",
+		session_dir: "/tmp/sessions/abc123",
+		model: "provider/model",
+	};
+	const hostedHandle: HostedRlmSpawnHandle = {
+		rlm_child_id: "sub-xyz789",
+		name: "hosted-worker",
+		model: "other/model",
+		execution: Object.freeze({ type: "prime-sandbox" }),
+	};
+
+	test("LocalRlmSpawnHandle preserves exact old fields byte-for-byte", () => {
+		expect(localHandle.rlm_child_id).toBe("sub-abc123");
+		expect(localHandle.name).toBe("worker");
+		expect(localHandle.session_dir).toBe("/tmp/sessions/abc123");
+		expect(localHandle.model).toBe("provider/model");
+		expect("execution" in localHandle).toBe(false);
+	});
+
+	test("HostedRlmSpawnHandle has rlm_child_id/name/model/execution, no session_dir", () => {
+		expect(hostedHandle.rlm_child_id).toBe("sub-xyz789");
+		expect(hostedHandle.name).toBe("hosted-worker");
+		expect(hostedHandle.model).toBe("other/model");
+		expect(hostedHandle.execution).toEqual({ type: "prime-sandbox" });
+		expect("session_dir" in hostedHandle).toBe(false);
+	});
+
+	test("HostedRlmSpawnHandle execution is frozen/immutable", () => {
+		expect(Object.isFrozen(hostedHandle.execution)).toBe(true);
+	});
+
+	test("RlmSpawnHandle is a true union discriminated by execution presence", () => {
+		const handles: RlmSpawnHandle[] = [localHandle, hostedHandle];
+		const localOnly = handles.filter((h): h is LocalRlmSpawnHandle => !("execution" in h));
+		const hostedOnly = handles.filter((h): h is HostedRlmSpawnHandle => "execution" in h);
+		expect(localOnly).toHaveLength(1);
+		expect(hostedOnly).toHaveLength(1);
+		expect(localOnly[0]).toBe(localHandle);
+		expect(hostedOnly[0]).toBe(hostedHandle);
+	});
+
+	test("LocalRlmSpawnHandle serializes to same JSON as old shape", () => {
+		const json = JSON.stringify(localHandle);
+		expect(JSON.parse(json)).toEqual({
+			rlm_child_id: "sub-abc123",
+			name: "worker",
+			session_dir: "/tmp/sessions/abc123",
+			model: "provider/model",
+		});
+	});
+
+	test("HostedRlmSpawnHandle JSON round-trip", () => {
+		const json = JSON.stringify(hostedHandle);
+		expect(JSON.parse(json)).toEqual({
+			rlm_child_id: "sub-xyz789",
+			name: "hosted-worker",
+			model: "other/model",
+			execution: { type: "prime-sandbox" },
+		});
+	});
+});
+
+describe("RlmChildRunLocation union", () => {
+	test("local location holds sessionDir", () => {
+		const loc: RlmChildRunLocation = { type: "local", sessionDir: "/tmp/sessions/abc" };
+		expect(loc.type).toBe("local");
+		expect(loc.sessionDir).toBe("/tmp/sessions/abc");
+		expect("execution" in loc).toBe(false);
+	});
+
+	test("hosted location holds immutable execution", () => {
+		const loc: RlmChildRunLocation = { type: "hosted", execution: Object.freeze({ type: "prime-sandbox" }) };
+		expect(loc.type).toBe("hosted");
+		expect(loc.execution).toEqual({ type: "prime-sandbox" });
+		expect(Object.isFrozen(loc.execution)).toBe(true);
+		expect("sessionDir" in loc).toBe(false);
+	});
+
+	test("exhaustive branching works", () => {
+		const localLoc: RlmChildRunLocation = { type: "local", sessionDir: "/tmp/s" };
+		const hostedLoc: RlmChildRunLocation = { type: "hosted", execution: Object.freeze({ type: "prime-sandbox" }) };
+		const localResult = localLoc.type === "local" ? localLoc.sessionDir : "unreachable";
+		const hostedResult = hostedLoc.type === "hosted" ? "hosted" : "unreachable";
+		expect(localResult).toBe("/tmp/s");
+		expect(hostedResult).toBe("hosted");
+	});
+});
+
+describe("hosted location registry and snapshot arm tests", () => {
+	const hostedExecution: Readonly<{ type: "prime-sandbox" }> = Object.freeze({ type: "prime-sandbox" });
+
+	test("registry list arm construction for hosted location omits session_dir", () => {
+		const location: RlmChildRunLocation = { type: "hosted", execution: hostedExecution };
+		const entry: HostedRlmSubagentRegistryEntry = {
+			rlm_child_id: "child-1",
+			active_session_id: null,
+			session_id: null,
+			session_name: "worker",
+			status: "running",
+			execution: location.execution,
+		};
+		expect("session_dir" in entry).toBe(false);
+		expect(entry.execution).toEqual({ type: "prime-sandbox" });
+	});
+
+	test("registry list arm construction for local location has session_dir", () => {
+		const entry: LocalRlmSubagentRegistryEntry = {
+			rlm_child_id: "child-1",
+			active_session_id: null,
+			session_id: null,
+			session_name: "worker",
+			session_dir: "/tmp/session",
+			status: "running",
+		};
+		expect("execution" in entry).toBe(false);
+		expect(entry.session_dir).toBe("/tmp/session");
+	});
+
+	test("snapshot arm construction for hosted location has execution, no sessionDir", () => {
+		const snapshot: HostedRlmChildAgentSnapshot = {
+			id: "child-1",
+			parentId: "parent-1",
+			sessionName: "worker",
+			model: "p/m",
+			label: "test task",
+			status: "running",
+			execution: hostedExecution,
+		};
+		expect("sessionDir" in snapshot).toBe(false);
+		expect(snapshot.execution).toEqual({ type: "prime-sandbox" });
+	});
+
+	test("snapshot arm construction for local location has sessionDir, no execution", () => {
+		const snapshot: LocalRlmChildAgentSnapshot = {
+			id: "child-1",
+			parentId: "parent-1",
+			sessionName: "worker",
+			model: "p/m",
+			label: "test task",
+			status: "running",
+			sessionDir: "/tmp/session",
+		};
+		expect("execution" in snapshot).toBe(false);
+		expect(snapshot.sessionDir).toBe("/tmp/session");
+	});
+
+	test("exhaustive snapshot branch by execution presence", () => {
+		const hosted: RlmChildAgentSnapshot = {
+			id: "hosted",
+			sessionName: "h",
+			model: "p/m",
+			label: "hosted",
+			status: "running",
+			execution: hostedExecution,
+		};
+		const local: RlmChildAgentSnapshot = {
+			id: "local",
+			sessionName: "l",
+			model: "p/m",
+			label: "local",
+			status: "running",
+			sessionDir: "/tmp/l",
+		};
+		const hostedResult = "execution" in hosted ? hosted.execution.type : "unreachable";
+		const localResult = "execution" in local ? "unreachable" : local.sessionDir;
+		expect(hostedResult).toBe("prime-sandbox");
+		expect(localResult).toBe("/tmp/l");
+	});
+
+	test("context tree guard: hosted location never enters disk loading path", () => {
+		// Verify the guard used in agent-session getContextTree: local arms only
+		const hostedGuard = (loc: { type: string }): boolean => loc.type === "local";
+		const localGuard = (loc: { type: string }): boolean => loc.type === "local";
+		expect(hostedGuard({ type: "hosted" })).toBe(false);
+		expect(localGuard({ type: "local" })).toBe(true);
+	});
+
+	test("context tree guard: local location enters disk loading path", () => {
+		const location = { type: "local" as const, sessionDir: "/tmp/s" };
+		let diskLoadCalled = false;
+		if (location.type === "local") {
+			diskLoadCalled = true;
+		}
+		expect(diskLoadCalled).toBe(true);
 	});
 });

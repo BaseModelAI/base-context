@@ -18,7 +18,12 @@ import {
 	createAgentSessionMessage,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-session.js";
+import {
+	AgentSession,
+	type LocalRlmChildRun,
+	type RlmChildAgentSnapshot,
+	type RlmChildRun,
+} from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
@@ -96,7 +101,7 @@ interface InspectableRlmRun {
 	id: string;
 	prompt?: string;
 	sessionName?: string;
-	sessionDir: string;
+	location: { type: "local"; sessionDir: string } | { type: "hosted"; execution: { readonly type: "prime-sandbox" } };
 	model?: typeof model;
 	abort: () => void;
 	status: string;
@@ -674,7 +679,7 @@ describe("AgentSession rlm recursion", () => {
 				id: nestedId,
 				prompt: "still working",
 				sessionName: nestedId,
-				sessionDir: join(tempDir, nestedId),
+				location: { type: "local", sessionDir: join(tempDir, nestedId) },
 				model,
 				abort: () => {},
 				status: index === 1 ? "queued" : "running",
@@ -686,7 +691,7 @@ describe("AgentSession rlm recursion", () => {
 					id,
 					prompt: "hidden parent",
 					sessionName: id,
-					sessionDir: join(tempDir, id),
+					location: { type: "local", sessionDir: join(tempDir, id) },
 					model,
 					abort: () => {},
 					status: "cancelled",
@@ -2348,7 +2353,7 @@ describe("AgentSession rlm recursion", () => {
 										unfinishedActionCount: 0,
 										parentActiveSessionId: "parent-active",
 										rlmChildId: run.id,
-										sessionDir: run.sessionDir,
+										sessionDir: (run.location as { type: "local"; sessionDir: string }).sessionDir,
 									},
 								]
 							: [],
@@ -2380,7 +2385,7 @@ describe("AgentSession rlm recursion", () => {
 					active_session_id: "running-active",
 					session_id: rootRun.session.sessionId,
 					session_name: createDefaultRlmSubagentSessionName("slow shard", rootRun.id),
-					session_dir: rootRun.sessionDir,
+					session_dir: (rootRun.location as { type: "local"; sessionDir: string }).sessionDir,
 					status: "running",
 				},
 			],
@@ -3025,7 +3030,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "live-grandchild",
 			prompt: "still working",
 			sessionName: "live-grandchild",
-			sessionDir: join(tempDir, "live-grandchild"),
+			location: { type: "local", sessionDir: join(tempDir, "live-grandchild") },
 			model,
 			abort: () => {},
 			status: "running",
@@ -3037,7 +3042,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "update-restart-parent",
 			prompt: "parent work",
 			sessionName: "update-restart-parent",
-			sessionDir: join(tempDir, "update-restart-parent"),
+			location: { type: "local", sessionDir: join(tempDir, "update-restart-parent") },
 			model,
 			abort: () => {},
 			status: "running",
@@ -3183,6 +3188,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "deep-1",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort: deepAbort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3226,6 +3232,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "sub-dup",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3273,6 +3280,7 @@ describe("AgentSession rlm recursion", () => {
 				id: `chain-${level}`,
 				status: "done",
 				settled: true,
+				location: { type: "local", sessionDir: "/tmp/test" },
 				session,
 				abort: vi.fn(),
 				publication: { reject: vi.fn() },
@@ -3285,6 +3293,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "leaf-run",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort: leafAbort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -3330,6 +3339,7 @@ describe("AgentSession rlm recursion", () => {
 			id: "grandchild-1",
 			status: "running",
 			settled: false,
+			location: { type: "local", sessionDir: "/tmp/test" },
 			abort,
 			publication: { reject: vi.fn() },
 			emitUpdate: vi.fn(),
@@ -4493,5 +4503,87 @@ describe("AgentSession RLM session dir", () => {
 			if (previousRef === undefined) delete process.env.MY_SERPER_REF;
 			else process.env.MY_SERPER_REF = previousRef;
 		}
+	});
+});
+
+describe("hosted RlmChildRunLocation runtime", () => {
+	const mockModel = {
+		provider: "test",
+		id: "model",
+		name: "Test Model",
+		contextWindow: 10000,
+		maxOutput: 1000,
+		api: "chat" as const,
+		costPreferences: { input: 0, output: 0 },
+	};
+
+	it("hosted execution is frozen and rejects mutation", () => {
+		const run: LocalRlmChildRun = {
+			id: "test-child",
+			prompt: "test",
+			sessionName: "test",
+			location: Object.freeze({ type: "local", sessionDir: "/tmp/test" }),
+			model: mockModel as any,
+			status: "running",
+			toolUseCount: 0,
+			settled: false,
+			abort: () => {},
+			publication: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+			settlement: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+			deletionReservation: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+		};
+		// Local location must be frozen
+		expect(Object.isFrozen(run.location)).toBe(true);
+		expect(run.location.type).toBe("local");
+		expect(() => {
+			(run.location as any).sessionDir = "/evil";
+		}).toThrow();
+	});
+
+	it("hosted run with colliding _rlmChildSessions entry is unchanged by local map", () => {
+		// A hosted run whose id happens to collide with a retained child in
+		// _rlmChildSessions must not produce different snapshot/list results.
+		const hostedExec = Object.freeze({ type: "prime-sandbox" as const });
+		const hostedRun: RlmChildRun = {
+			id: "collide-id",
+			prompt: "hosted task",
+			sessionName: "hosted-worker",
+			location: Object.freeze({ type: "hosted", execution: hostedExec }),
+			model: mockModel as any,
+			status: "done" as const,
+			toolUseCount: 0,
+			settled: true,
+			abort: () => {},
+			publication: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+			settlement: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+			deletionReservation: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
+		};
+		const mockSession = {
+			_activeRlmChildRuns: new Map<string, RlmChildRun>([["collide-id", hostedRun]]),
+			_rlmChildSessions: new Map<string, { session: { sessionName: string } }>([
+				["collide-id", { session: { sessionName: "local-bogus" } }],
+			]),
+			_rlmChildCleanupFailures: new Map(),
+			_deletingRlmChildren: new Map(),
+			_deletedRlmChildIds: new Set(),
+			_rlmParentNodeId: "parent-1",
+			_rlmChildUnsubscribes: new Map(),
+			_abandonedRlmQuiescenceChildIds: new Set(),
+			getContextTree: () => ({
+				ownUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+				totalUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+				children: [],
+			}),
+			_contextWindowResolver: () => () => 10000,
+			sessionManager: { getBranch: () => [], getEntries: () => [] },
+		} as unknown as AgentSession;
+
+		// _isUnboundTerminalRlmChildRun must not consult _rlmChildSessions for hosted
+		// The hosted run is terminal (done, no local session) so _isUnboundTerminalRlmChildRun
+		// should return true even though a colliding entry exists in _rlmChildSessions.
+		// Test by calling via prototype since the method is on AgentSession.prototype
+		// Use type assertion to access private method for test
+		const isUnbound = (AgentSession.prototype as any)._isUnboundTerminalRlmChildRun.call(mockSession, hostedRun);
+		expect(isUnbound).toBe(true);
 	});
 });

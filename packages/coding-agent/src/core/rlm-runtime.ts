@@ -14,16 +14,26 @@ export interface RlmRunRequest {
 	cellSourceCode?: string;
 }
 
-export interface RlmSpawnHandle {
+export interface LocalRlmSpawnHandle {
 	rlm_child_id: string;
 	name: string;
 	session_dir: string;
 	model: string;
 }
 
+export interface HostedRlmSpawnHandle {
+	rlm_child_id: string;
+	name: string;
+	model: string;
+	/** Immutable execution context. Presence discriminates local vs hosted. */
+	readonly execution: { readonly type: "prime-sandbox" };
+}
+
+export type RlmSpawnHandle = LocalRlmSpawnHandle | HostedRlmSpawnHandle;
+
 export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
 
-export interface RlmSubagentRegistryEntry {
+export interface LocalRlmSubagentRegistryEntry {
 	rlm_child_id: string;
 	active_session_id: string | null;
 	session_id: string | null;
@@ -31,6 +41,23 @@ export interface RlmSubagentRegistryEntry {
 	session_dir: string;
 	status: RlmSubagentRegistryStatus;
 }
+
+export interface HostedRlmSubagentRegistryEntry {
+	rlm_child_id: string;
+	active_session_id: string | null;
+	session_id: string | null;
+	session_name: string;
+	status: RlmSubagentRegistryStatus;
+	/** Immutable execution context. Presence discriminates local vs hosted. */
+	readonly execution: { readonly type: "prime-sandbox" };
+}
+
+export type RlmSubagentRegistryEntry = LocalRlmSubagentRegistryEntry | HostedRlmSubagentRegistryEntry;
+
+/** Location arm: local child holds a session_dir; hosted holds immutable execution. */
+export type RlmChildRunLocation =
+	| Readonly<{ type: "local"; readonly sessionDir: string }>
+	| Readonly<{ type: "hosted"; readonly execution: Readonly<{ readonly type: "prime-sandbox" }> }>;
 
 export interface RlmListSubagentsResult {
 	subagents: RlmSubagentRegistryEntry[];

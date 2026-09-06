@@ -220,7 +220,10 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	type HostedRlmSubagentRegistryEntry,
 	INVALID_SUBAGENT_RUNTIME_ERROR,
+	type LocalRlmSpawnHandle,
+	type LocalRlmSubagentRegistryEntry,
 	normalizeRequestedRlmSandbox,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
@@ -230,7 +233,6 @@ import {
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
-	type RlmSpawnHandle,
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
@@ -299,7 +301,7 @@ export interface RlmChildAgentActivity {
 	toolName?: string;
 }
 
-export interface RlmChildAgentSnapshot {
+export interface LocalRlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
 	activeSessionId?: string;
@@ -317,6 +319,28 @@ export interface RlmChildAgentSnapshot {
 	repliedSinceTask?: boolean;
 	error?: string;
 }
+
+export interface HostedRlmChildAgentSnapshot {
+	id: string;
+	parentId?: string;
+	activeSessionId?: string;
+	sessionName?: string;
+	model?: string;
+	label: string;
+	status: RlmChildAgentStatus;
+	durationMs?: number;
+	answerPreview?: string;
+	toolUseCount?: number;
+	tokenCount?: number;
+	recap?: string;
+	/** Immutable execution context. */
+	readonly execution: { readonly type: "prime-sandbox" };
+	activity?: RlmChildAgentActivity;
+	repliedSinceTask?: boolean;
+	error?: string;
+}
+
+export type RlmChildAgentSnapshot = LocalRlmChildAgentSnapshot | HostedRlmChildAgentSnapshot;
 
 export type CompactionReason = "manual" | "threshold" | "overflow" | "requested";
 
@@ -892,11 +916,11 @@ type AutonomousRuntimeSnapshot = Pick<
 	"continuationsUsed" | "gateAttempts" | "lastGateFailure" | "lastGateFailureSnapshot"
 >;
 
-interface RlmChildRun {
+/** Shared mutable fields for local and hosted RLM child runs. Not exported. */
+interface RlmChildRunBase {
 	id: string;
 	prompt: string;
 	sessionName: string;
-	sessionDir: string;
 	model: Model<Api>;
 	status: RlmChildAgentStatus;
 	durationMs?: number;
@@ -908,8 +932,6 @@ interface RlmChildRun {
 	publication: AgentMessageDeferred;
 	/** Resolves after terminal result publication and detached-run cleanup finish. */
 	settlement: AgentMessageDeferred;
-	/** Child session, once its runtime exists. Used to cancel nested child runs. */
-	session?: AgentSession;
 	settled: boolean;
 	/** Do not inject a late terminal notice after the parent session is aborted. */
 	suppressTerminalNotice?: boolean;
@@ -933,9 +955,25 @@ interface RlmChildRun {
 	unsubscribe?: () => void;
 }
 
+/** Local RLM child run with a filesystem session directory. */
+export interface LocalRlmChildRun extends RlmChildRunBase {
+	readonly location: Readonly<{ type: "local"; readonly sessionDir: string }>;
+	/** Child session, once its runtime exists. Only local runs carry a session. */
+	session?: AgentSession;
+}
+
+/** Hosted RLM child run with immutable execution context and no local session. */
+export interface HostedRlmChildRun extends RlmChildRunBase {
+	readonly location: Readonly<{ type: "hosted"; readonly execution: Readonly<{ readonly type: "prime-sandbox" }> }>;
+	/** Hosted runs never have a local AgentSession. */
+	session?: never;
+}
+
+export type RlmChildRun = LocalRlmChildRun | HostedRlmChildRun;
+
 interface RetainedRlmChild {
 	session: AgentSession;
-	run?: RlmChildRun;
+	run?: LocalRlmChildRun;
 }
 
 interface RlmSubagentModelSelection {
@@ -4091,7 +4129,7 @@ export class AgentSession {
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
 		for (const run of [...this._activeRlmChildRuns.values()]) {
-			const childSession = run.session;
+			const childSession = run.location.type === "local" ? run.session : undefined;
 			if (!childSession) continue;
 			if (run.detachedDeletion) {
 				run.suppressTerminalNotice = true;
@@ -9764,7 +9802,7 @@ export class AgentSession {
 		);
 		if (!run) return undefined;
 		await run.publication.promise;
-		return run.session?.sessionId;
+		return run.location.type === "local" ? run.session?.sessionId : undefined;
 	}
 
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
@@ -9793,14 +9831,25 @@ export class AgentSession {
 				continue;
 			}
 			const daemonChild = daemonChildren.get(run.id);
-			subagents.push({
-				rlm_child_id: run.id,
-				active_session_id: daemonChild?.activeSessionId ?? null,
-				session_id: daemonChild?.sessionId ?? run.session?.sessionId ?? null,
-				session_name: daemonChild?.sessionName ?? run.session?.sessionName ?? run.sessionName,
-				session_dir: run.sessionDir,
-				status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
-			});
+			if (run.location.type === "local") {
+				subagents.push({
+					rlm_child_id: run.id,
+					active_session_id: daemonChild?.activeSessionId ?? null,
+					session_id: daemonChild?.sessionId ?? run.session?.sessionId ?? null,
+					session_name: daemonChild?.sessionName ?? run.session?.sessionName ?? run.sessionName,
+					session_dir: run.location.sessionDir,
+					status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
+				});
+			} else {
+				subagents.push({
+					rlm_child_id: run.id,
+					active_session_id: daemonChild?.activeSessionId ?? null,
+					session_id: daemonChild?.sessionId ?? null,
+					session_name: daemonChild?.sessionName ?? run.sessionName,
+					status: run.status === "done" ? "completed" : run.status === "error" ? "error" : "running",
+					execution: run.location.execution,
+				});
+			}
 			recorded.add(run.id);
 		}
 		for (const [childId, { session: childSession }] of this._rlmChildSessions) {
@@ -10033,7 +10082,7 @@ export class AgentSession {
 		run.deletionCleanup = undefined;
 		run.deletionCleanupObserver = undefined;
 		run.deletionCleanupFailed = true;
-		run.session = session;
+		if (run.location.type === "local") run.session = session;
 		this._rlmChildCleanupFailures.set(run.id, subagent);
 		// Make retry admission available before waking the parent model with the
 		// retry-required notice.
@@ -10101,24 +10150,42 @@ export class AgentSession {
 		if (run) {
 			run.abort = noopRlmChildAbort;
 			run.unsubscribe = undefined;
-			run.session = undefined;
+			if (run.location.type === "local") run.session = undefined;
 		}
 	}
 
 	private _emitRlmSubagentRemoval(subagent: RlmSubagentRegistryEntry): void {
-		this._emit({
-			type: "rlm_child_update",
-			child: {
-				id: subagent.rlm_child_id,
-				parentId: this._rlmParentNodeId,
-				activeSessionId: subagent.active_session_id ?? undefined,
-				sessionName: subagent.session_name,
-				label: subagent.session_name,
-				status: "cancelled",
-				sessionDir: subagent.session_dir,
-				error: "Deleted by parent orchestrator",
-			},
-		});
+		if ("execution" in subagent) {
+			const hosted: HostedRlmSubagentRegistryEntry = subagent;
+			this._emit({
+				type: "rlm_child_update",
+				child: {
+					id: hosted.rlm_child_id,
+					parentId: this._rlmParentNodeId,
+					activeSessionId: hosted.active_session_id ?? undefined,
+					sessionName: hosted.session_name,
+					label: hosted.session_name,
+					status: "cancelled",
+					execution: hosted.execution,
+					error: "Deleted by parent orchestrator",
+				},
+			});
+		} else {
+			const local: LocalRlmSubagentRegistryEntry = subagent;
+			this._emit({
+				type: "rlm_child_update",
+				child: {
+					id: local.rlm_child_id,
+					parentId: this._rlmParentNodeId,
+					activeSessionId: local.active_session_id ?? undefined,
+					sessionName: local.session_name,
+					label: local.session_name,
+					status: "cancelled",
+					sessionDir: local.session_dir,
+					error: "Deleted by parent orchestrator",
+				},
+			});
+		}
 	}
 
 	private async _deleteResolvedRlmSubagent(subagent: RlmSubagentRegistryEntry): Promise<RlmDeleteSubagentResult> {
@@ -10141,7 +10208,7 @@ export class AgentSession {
 			} else {
 				this._emitRlmSubagentRemoval(subagent);
 			}
-			const liveSession = run.session;
+			const liveSession = run.location.type === "local" ? run.session : undefined;
 			if (run.status === "error" && !liveSession && run.settled) {
 				this._deletedRlmChildIds.add(childId);
 				this._removeRlmSubagentTracking(childId, run);
@@ -10205,7 +10272,20 @@ export class AgentSession {
 			return false;
 		}
 		if (this._disposed || this._disposing) return false;
-		this._rlmChildSessions.set(childId, { session: brandedSession, run: this._activeRlmChildRuns.get(childId) });
+		const activeRun = this._activeRlmChildRuns.get(childId);
+		let localRun: LocalRlmChildRun | undefined;
+		if (activeRun === undefined) {
+			localRun = undefined;
+		} else if (activeRun.location.type === "local") {
+			localRun = activeRun as unknown as LocalRlmChildRun;
+		} else {
+			// Hosted active run — cannot register (proved by location check above).
+			return false;
+		}
+		this._rlmChildSessions.set(childId, {
+			session: brandedSession,
+			run: localRun,
+		});
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
 		}
@@ -10233,8 +10313,26 @@ export class AgentSession {
 
 	private _rlmChildSnapshotForRun(
 		run: RlmChildRun,
-		child = run.session ?? this._rlmChildSessions.get(run.id)?.session,
+		child: AgentSession | undefined = run.location.type === "local"
+			? (run.session ?? this._rlmChildSessions.get(run.id)?.session)
+			: undefined,
 	): RlmChildAgentSnapshot {
+		if (run.location.type === "hosted") {
+			return {
+				id: run.id,
+				parentId: this._rlmParentNodeId,
+				sessionName: run.sessionName,
+				model: `${run.model.provider}/${run.model.id}`,
+				label: rlmChildLabel(run.prompt),
+				status: run.status,
+				durationMs: run.durationMs,
+				answerPreview: run.answerPreview,
+				toolUseCount: run.toolUseCount > 0 ? run.toolUseCount : undefined,
+				execution: run.location.execution,
+				activity: run.activity,
+				error: run.error,
+			};
+		}
 		const model = child?.model ?? run.model;
 		return {
 			id: run.id,
@@ -10248,7 +10346,7 @@ export class AgentSession {
 			toolUseCount: run.toolUseCount > 0 ? run.toolUseCount : undefined,
 			tokenCount: child?._contextTokensForCurrentMessages(),
 			recap: child?.getCurrentRecap(),
-			sessionDir: run.sessionDir,
+			sessionDir: run.location.sessionDir,
 			activity: run.activity,
 			repliedSinceTask: child?._repliedToParentSinceTask,
 			error: run.error,
@@ -10290,7 +10388,8 @@ export class AgentSession {
 	}
 
 	private _isUnboundTerminalRlmChildRun(run: RlmChildRun): boolean {
-		if (run.session !== undefined || this._rlmChildSessions.has(run.id)) return false;
+		if (run.location.type === "local" && (run.session !== undefined || this._rlmChildSessions.has(run.id)))
+			return false;
 		return run.status === "done" || run.status === "error" || run.status === "cancelled";
 	}
 
@@ -10305,7 +10404,7 @@ export class AgentSession {
 				this._deletingRlmChildren.has(run.id) ||
 				this._deletedRlmChildIds.has(run.id) ||
 				this._isUnboundTerminalRlmChildRun(run);
-			const child = run.session;
+			const child = run.location.type === "local" ? run.session : undefined;
 			if (!hidden) {
 				snapshots.push(this._rlmChildSnapshotForRun(run));
 				recorded.add(run.id);
@@ -10350,7 +10449,7 @@ export class AgentSession {
 			if (!this._abandonedRlmQuiescenceChildIds.has(childId)) sessions.add(session);
 		}
 		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.session && !run.abandonedForQuiescence) sessions.add(run.session);
+			if (run.location.type === "local" && run.session && !run.abandonedForQuiescence) sessions.add(run.session);
 		}
 		return [...sessions];
 	}
@@ -10415,10 +10514,14 @@ export class AgentSession {
 	// Inline (non-daemon) mode only; daemon clients attach to the child session directly.
 	getRlmChildSession(childId: string): AgentSession | undefined {
 		for (const session of this._rlmSubtreeSessions()) {
-			const direct =
-				session._activeRlmChildRuns.get(childId)?.session ?? session._rlmChildSessions.get(childId)?.session;
-			if (direct) {
-				return direct;
+			const active = session._activeRlmChildRuns.get(childId);
+			if (active?.location.type === "local" && active.session) {
+				return active.session;
+			}
+			if (!active) {
+				// No active run — try retained children (always local).
+				const retained = session._rlmChildSessions.get(childId)?.session;
+				if (retained) return retained;
 			}
 		}
 		return undefined;
@@ -10441,14 +10544,15 @@ export class AgentSession {
 				}
 				// The abort cascade never reaches running work retained under a settled descendant.
 				const cancelled = session._cancelRlmChildRun(run, reason);
-				const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
+				const descendantsCancelled =
+					(run.location.type === "local" ? run.session?.cancelRunningRlmDescendants(reason) : undefined) ?? false;
 				if (cancelled || descendantsCancelled) {
 					return true;
 				}
 			}
-			// A fruitless match keeps walking: child ids are only mkdir-unique among
-			// siblings, so a colliding live run elsewhere must stay reachable.
-			if (session._rlmChildSessions.get(childId)?.session.cancelRunningRlmDescendants(reason)) {
+			// Only consult the retained-session map when no active run (hosted or local)
+			// exists for this childId in this session.
+			if (!run && session._rlmChildSessions.get(childId)?.session.cancelRunningRlmDescendants(reason)) {
 				return true;
 			}
 		}
@@ -10463,7 +10567,7 @@ export class AgentSession {
 			const session = stack.pop()!;
 			yield session;
 			for (const run of session._activeRlmChildRuns.values()) {
-				if (run.session && !visited.has(run.session)) {
+				if (run.location.type === "local" && run.session && !visited.has(run.session)) {
 					visited.add(run.session);
 					stack.push(run.session);
 				}
@@ -10495,7 +10599,9 @@ export class AgentSession {
 		}
 		const localConflict =
 			[...this._activeRlmChildRuns.values()].some(
-				(run) => run.session?.sessionName === name || (!run.session && run.sessionName === name),
+				(run) =>
+					(run.location.type === "local" ? run.session?.sessionName : undefined) === name ||
+					((run.location.type === "local" ? run.session : undefined) === undefined && run.sessionName === name),
 			) ||
 			[...this._rlmChildSessions.values()].some(({ session }) => session.sessionName === name) ||
 			[...this._rlmChildCleanupFailures.values()].some((entry) => entry.session_name === name);
@@ -10573,7 +10679,7 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
-	): Promise<RlmSpawnHandle> {
+	): Promise<LocalRlmSpawnHandle> {
 		// Snapshot before any await: the spawning request is the turn whose tool call is
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
@@ -10627,11 +10733,11 @@ export class AgentSession {
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
-		const run: RlmChildRun = {
+		const run: LocalRlmChildRun = {
 			id: childNodeId,
 			prompt,
 			sessionName,
-			sessionDir: childSessionDir,
+			location: Object.freeze({ type: "local" as const, sessionDir: childSessionDir }),
 			model: modelSelection.model,
 			status: "queued",
 			toolUseCount: 0,
@@ -10962,7 +11068,7 @@ export class AgentSession {
 							if (run.unsubscribe) this._rlmChildUnsubscribes.set(run.id, run.unsubscribe);
 							run.abort = noopRlmChildAbort;
 							run.unsubscribe = undefined;
-							run.session = undefined;
+							if (run.location.type === "local") run.session = undefined;
 						} else if (run.status !== "error") {
 							this._removeRlmSubagentTracking(run.id, run);
 						} else {
@@ -10991,7 +11097,7 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
-	): Promise<RlmSpawnHandle> {
+	): Promise<LocalRlmSpawnHandle> {
 		return this._startRlmChildRun(prompt, kwargs, spawnCode);
 	}
 
@@ -12016,17 +12122,22 @@ export class AgentSession {
 		for (const run of this._activeRlmChildRuns.values()) {
 			liveIds.add(run.id);
 			const node =
-				run.session?.getContextTree() ?? loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow);
-			children.push({
-				...(node ?? {
-					ownUsage: emptyUsage(),
-					totalUsage: emptyUsage(),
-					children: [],
-				}),
-				id: run.id,
-				label: rlmChildLabel(run.prompt),
-				status: run.status,
-			});
+				run.location.type === "local"
+					? (run.session?.getContextTree() ??
+						loadContextTreeChildFromDisk(run.location.sessionDir, resolveContextWindow))
+					: undefined;
+			if (node) {
+				children.push({
+					...(node ?? {
+						ownUsage: emptyUsage(),
+						totalUsage: emptyUsage(),
+						children: [],
+					}),
+					id: run.id,
+					label: rlmChildLabel(run.prompt),
+					status: run.status,
+				});
+			}
 		}
 		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
 
