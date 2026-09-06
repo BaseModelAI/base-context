@@ -1,20 +1,21 @@
-"""Persistent harness-state helpers for Prime Agent's RLM kernel.
+"""Persistent harness-state helpers for Base Context's RLM kernel.
 
 The state model is intentionally small: it records prompt notes, memory,
 skills, subagent specs, and refinement events in the session-local harness
 store by default; pass ``global_=True`` for the cross-session global store.
-Execution still belongs to Prime Agent's TypeScript host and the existing
+Execution still belongs to Base Context's TypeScript host and the existing
 ``rlm.run`` recursion bridge.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+
+from .product import assert_product_state_path, product_env, product_state_path
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
@@ -33,15 +34,6 @@ def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
     return (normalized or fallback)[:80]
-
-
-def _agent_dir() -> Path:
-    raw = (
-        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    return Path(raw).expanduser().resolve()
 
 
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
@@ -68,27 +60,26 @@ def _strip_scope_prefix(id: str | None, global_: bool) -> tuple[str | None, bool
     return id, global_
 
 
-def _env_dir(name: str) -> str | None:
-    # Set-but-empty env values must behave as unset; a bare "" would skip the
-    # session-dir fallback and land local writes in the global agent-dir default.
-    value = (os.environ.get(name) or "").strip()
+def _env_dir(suffix: str) -> str | None:
+    # Empty optional session paths remain unset; BASE_CONTEXT_HOME is stricter.
+    value = (product_env(suffix) or "").strip()
     return value or None
 
 
 def _state_file(state_dir: str | Path | None = None, *, global_: bool = False) -> Path:
     root: str | Path | None = state_dir
     if root is None:
-        root = _env_dir("RLM_GLOBAL_HARNESS_STATE_DIR") if global_ else _env_dir("RLM_HARNESS_STATE_DIR")
-    if root is None and not global_ and (session_dir := _env_dir("RLM_SESSION_DIR")):
+        root = _env_dir("GLOBAL_HARNESS_STATE_DIR") if global_ else _env_dir("HARNESS_STATE_DIR")
+    if root is None and not global_ and (session_dir := _env_dir("KERNEL_SESSION_DIR")):
         root = Path(session_dir) / _DEFAULT_HARNESS_DIR_NAME
     if root is None and not global_:
         raise RuntimeError(
-            "Local harness state requires RLM_HARNESS_STATE_DIR or RLM_SESSION_DIR. "
+            "Local harness state requires BASE_CONTEXT_HARNESS_STATE_DIR or BASE_CONTEXT_KERNEL_SESSION_DIR. "
             "Use get_harness_state(global_=True) for global state."
         )
     if root:
-        return Path(root).expanduser().resolve() / _DEFAULT_FILE_NAME
-    return _agent_dir() / _DEFAULT_HARNESS_DIR_NAME / _DEFAULT_FILE_NAME
+        return assert_product_state_path(Path(root).expanduser() / _DEFAULT_FILE_NAME)
+    return product_state_path(_DEFAULT_HARNESS_DIR_NAME, _DEFAULT_FILE_NAME)
 
 
 @dataclass
@@ -156,7 +147,7 @@ class HarnessState:
             self.file_path: Path | None = None
         else:
             self.file_path = (
-                Path(file_path).expanduser().resolve()
+                assert_product_state_path(file_path)
                 if file_path
                 else _state_file(global_=(scope == "global"))
             )
@@ -197,6 +188,8 @@ class HarnessState:
             self.load()
 
     def load(self) -> "HarnessState":
+        if self.file_path is not None:
+            assert_product_state_path(self.file_path)
         if self.file_path is None or not self.file_path.exists():
             self._loaded_mtime = None
             return self
@@ -286,6 +279,7 @@ class HarnessState:
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
+        assert_product_state_path(self.file_path)
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "schema": 1,
@@ -795,7 +789,7 @@ def get_harness_state(
     if state is None:
         state = HarnessState(file_path, scope=scope)
         # Recorded at construction only: an instance created from env defaults must
-        # keep targeting RLM_GLOBAL_HARNESS_STATE_DIR even when a later explicit
+        # keep targeting BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR even when a later explicit
         # state_dir call aliases the same local file. An explicit dir that merely
         # aliases the env resolution must not sandbox later global_=True writes
         # either, so pin only when the explicit dir actually diverges.

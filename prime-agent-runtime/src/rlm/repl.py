@@ -30,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .bash import _kill_live_handles
+from .product import assert_product_state_path, product_env
 
 PROTOCOL_VERSION = 3
 
@@ -615,6 +616,8 @@ def _snapshot_state(
 ) -> dict[str, Any]:
     import datetime
 
+    path = str(assert_product_state_path(path))
+    manifest_path = str(assert_product_state_path(manifest_path))
     try:
         import dill
     except Exception as err:  # noqa: BLE001 - dill is provisioned by the host, not a hard dep
@@ -1037,7 +1040,7 @@ def _read_requests(stdin_fd: int, queue: asyncio.Queue[dict[str, Any]]) -> None:
 
 
 def _resolve_owner_pid() -> int:
-    raw = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID", "")
+    raw = product_env("KERNEL_OWNER_PID") or ""
     try:
         owner = int(raw)
     except ValueError:

@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 from . import _winjob
+from .product import assert_product_state_path, product_env
 
 _IS_POSIX = os.name == "posix"
 
@@ -672,27 +673,27 @@ def bash(command: str) -> BashHandle:
 
 def _shell() -> str:
     # Read per call so env changes made in the REPL apply to later commands.
-    override = os.environ.get("PRIME_AGENT_BASH_SHELL")
+    override = product_env("BASH_SHELL")
     if override:
         if not os.path.isabs(override):
-            raise ValueError("PRIME_AGENT_BASH_SHELL must be an absolute path")
+            raise ValueError("BASE_CONTEXT_BASH_SHELL must be an absolute path")
         return override
     if not _IS_POSIX:
         # Never consult PATH on Windows: a repo-controlled PATH could supply
-        # the shell. The host injects PRIME_AGENT_BASH_SHELL when one exists.
+        # the shell. The host injects BASE_CONTEXT_BASH_SHELL when one exists.
         raise RuntimeError(
-            "bash() needs PRIME_AGENT_BASH_SHELL set to the absolute path of a "
+            "bash() needs BASE_CONTEXT_BASH_SHELL set to the absolute path of a "
             "POSIX shell on Windows (e.g. install Git Bash in its default "
             "location so the host injects it)"
         )
     # PATH fallback only serves bare/standalone POSIX runtime use: the host
-    # always injects PRIME_AGENT_BASH_SHELL (an absolute path) when a shell exists.
+    # always injects BASE_CONTEXT_BASH_SHELL (an absolute path) when a shell exists.
     shell = shutil.which("bash")
     return shell or "/bin/sh"
 
 
 def _with_prefix(command: str) -> str:
-    prefix = os.environ.get("PRIME_AGENT_BASH_COMMAND_PREFIX")
+    prefix = product_env("BASH_COMMAND_PREFIX")
     return f"{prefix}\n{command}" if prefix else command
 
 
@@ -816,13 +817,14 @@ def _record_journal(pid: int, active: bool) -> bool:
     # Returns False only when the journal is configured but enrollment failed;
     # active-record callers must then fail closed. Active records always carry
     # a processStartId so host reaping stays identity-verified.
-    path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
-    owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
+    path = product_env("INTERNAL_ORPHAN_PROCESS_JOURNAL")
+    owner = product_env("KERNEL_OWNER_PID")
     if not path or not owner:
         return True
     try:
+        path = assert_product_state_path(path)
         owner_pid = int(owner)
-    except ValueError:
+    except (OSError, ValueError):
         return False
     start_id = _process_start_id(pid) if active else None
     if active and start_id is None:

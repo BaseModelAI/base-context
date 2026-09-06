@@ -4,27 +4,18 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import httpx
 
+from rlm.product import product_env, product_state_path
 
-def _env_int(name: str, default: int) -> int:
-    """Read an int from the environment, falling back to default on bad values."""
+
+def _env_int(suffix: str, default: int) -> int:
+    """Read a product-owned int, falling back to default on bad values."""
     try:
-        return int(os.environ[name])
-    except (KeyError, ValueError):
+        return int(product_env(suffix) or "")
+    except ValueError:
         return default
-
-
-def _agent_dir() -> Path:
-    """Resolve the Prime Agent config dir the same way the runtime does."""
-    raw = (
-        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    return Path(raw).expanduser()
 
 
 def _resolve_api_key() -> str:
@@ -34,8 +25,9 @@ def _resolve_api_key() -> str:
     if env_key:
         return env_key
 
+    auth_path = product_state_path("auth.json")
     try:
-        auth = json.loads((_agent_dir() / "auth.json").read_text())
+        auth = json.loads(auth_path.read_text())
         cred = auth.get("serper") if isinstance(auth, dict) else None
         if isinstance(cred, dict) and cred.get("type") == "api_key":
             return _resolve_config_value(str(cred.get("key") or ""))
@@ -151,14 +143,14 @@ async def run(
             "Web search is not set up yet: no Serper API key is configured.\n"
             "Tell the user how to enable it:\n"
             "  1. Get a free API key at https://serper.dev (sign up, copy the key).\n"
-            "  2. In Prime Agent, run /login, switch to MCP Connections, choose \"Serper (web search)\", and paste the key.\n"
+            "  2. In Base Context, run /login, switch to MCP Connections, choose \"Serper (web search)\", and paste the key.\n"
             "Do not ask the user to set environment variables. Once the key is saved, web search works automatically."
         )
 
     if timeout is None:
-        timeout = _env_int("PRIME_AGENT_WEBSEARCH_TIMEOUT", 45)
+        timeout = _env_int("WEBSEARCH_TIMEOUT", 45)
     if num_results is None:
-        num_results = _env_int("PRIME_AGENT_WEBSEARCH_NUM_RESULTS", 5)
+        num_results = _env_int("WEBSEARCH_NUM_RESULTS", 5)
 
     try:
         result = await _fetch_serper(query, api_key, timeout=timeout, num_results=num_results)
