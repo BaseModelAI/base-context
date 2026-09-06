@@ -1398,8 +1398,8 @@ describe("hosted location registry and snapshot arm tests", () => {
 		const location: RlmChildRunLocation = { type: "hosted", execution: hostedExecution };
 		const entry: HostedRlmSubagentRegistryEntry = {
 			rlm_child_id: "child-1",
-			active_session_id: null,
-			session_id: null,
+			active_session_id: "active-child-1",
+			session_id: "session-child-1",
 			session_name: "worker",
 			status: "running",
 			execution: location.execution,
@@ -1424,6 +1424,7 @@ describe("hosted location registry and snapshot arm tests", () => {
 	test("snapshot arm construction for hosted location has execution, no sessionDir", () => {
 		const snapshot: HostedRlmChildAgentSnapshot = {
 			id: "child-1",
+			activeSessionId: "active-child-1",
 			parentId: "parent-1",
 			sessionName: "worker",
 			model: "p/m",
@@ -1452,6 +1453,7 @@ describe("hosted location registry and snapshot arm tests", () => {
 	test("exhaustive snapshot branch by execution presence", () => {
 		const hosted: RlmChildAgentSnapshot = {
 			id: "hosted",
+			activeSessionId: "active-hosted",
 			sessionName: "h",
 			model: "p/m",
 			label: "hosted",

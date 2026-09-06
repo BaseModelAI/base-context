@@ -223,9 +223,9 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         execution = payload["execution"]
         if not isinstance(child_id, str) or not child_id:
             raise RuntimeError(f"{operation} entry is missing rlm_child_id")
-        if active_session_id is not None and not isinstance(active_session_id, str):
+        if not isinstance(active_session_id, str) or not active_session_id:
             raise RuntimeError(f"{operation} entry has invalid active_session_id")
-        if session_id is not None and not isinstance(session_id, str):
+        if not isinstance(session_id, str) or not session_id:
             raise RuntimeError(f"{operation} entry has invalid session_id")
         if not isinstance(session_name, str) or not session_name:
             raise RuntimeError(f"{operation} entry is missing session_name")

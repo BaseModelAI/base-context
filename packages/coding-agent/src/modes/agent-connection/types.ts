@@ -573,8 +573,8 @@ export interface AgentConnectionLocalRlmChildAgentSnapshot {
 export interface AgentConnectionHostedRlmChildAgentSnapshot {
 	id: string;
 	parentId?: string;
-	/** Child daemon active-session id, for direct attachment. */
-	activeSessionId?: string;
+	/** Child daemon active-session id, assigned before hosted runtime creation. */
+	activeSessionId: string;
 	/** Stable daemon-visible child name for addressing and display. */
 	sessionName?: string;
 	/** Exact provider/model selector used by the child. */

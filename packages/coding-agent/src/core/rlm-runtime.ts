@@ -44,8 +44,8 @@ export interface LocalRlmSubagentRegistryEntry {
 
 export interface HostedRlmSubagentRegistryEntry {
 	rlm_child_id: string;
-	active_session_id: string | null;
-	session_id: string | null;
+	active_session_id: string;
+	session_id: string;
 	session_name: string;
 	status: RlmSubagentRegistryStatus;
 	/** Immutable execution context. Presence discriminates local vs hosted. */

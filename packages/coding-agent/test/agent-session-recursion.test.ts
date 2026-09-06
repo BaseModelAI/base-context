@@ -18,12 +18,7 @@ import {
 	createAgentSessionMessage,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import {
-	AgentSession,
-	type LocalRlmChildRun,
-	type RlmChildAgentSnapshot,
-	type RlmChildRun,
-} from "../src/core/agent-session.js";
+import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
@@ -101,6 +96,8 @@ interface InspectableRlmRun {
 	id: string;
 	prompt?: string;
 	sessionName?: string;
+	activeSessionId?: string;
+	sessionId?: string;
 	location: { type: "local"; sessionDir: string } | { type: "hosted"; execution: { readonly type: "prime-sandbox" } };
 	model?: typeof model;
 	abort: () => void;
@@ -4276,6 +4273,87 @@ print(_result.name)
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
+	it("blocks every local-session fallback for an active hosted id collision", async () => {
+		const root = createSession();
+		const internals = root as unknown as InspectableRlmSession;
+		const hostedRun: InspectableRlmRun = {
+			id: "hosted-collision",
+			prompt: "hosted task",
+			sessionName: "hosted-worker",
+			activeSessionId: "active-hosted-collision",
+			sessionId: "session-hosted-collision",
+			location: Object.freeze({
+				type: "hosted",
+				execution: Object.freeze({ type: "prime-sandbox" }),
+			}),
+			model,
+			status: "done",
+			settled: true,
+			abort: () => {},
+		};
+		internals._activeRlmChildRuns.set(hostedRun.id, hostedRun);
+		internals._rlmChildSessions.set(hostedRun.id, { session: root });
+
+		try {
+			expect(root.getRlmChildSession(hostedRun.id)).toBeUndefined();
+			expect(await root.registerRlmChildSession(hostedRun.id, root)).toBe(false);
+			expect(root.cancelRlmChildRun(hostedRun.id)).toBe(false);
+		} finally {
+			internals._activeRlmChildRuns.clear();
+			internals._rlmChildSessions.clear();
+		}
+	});
+
+	it("omits hosted context nodes while preserving an unresolved local placeholder", () => {
+		const root = createSession();
+		const internals = root as unknown as InspectableRlmSession;
+		const hostedRun: InspectableRlmRun = {
+			id: "hosted-running",
+			prompt: "hosted task",
+			sessionName: "hosted-worker",
+			activeSessionId: "active-hosted-running",
+			sessionId: "session-hosted-running",
+			location: Object.freeze({
+				type: "hosted",
+				execution: Object.freeze({ type: "prime-sandbox" }),
+			}),
+			model,
+			status: "running",
+			settled: false,
+			abort: () => {},
+		};
+		const localRun: InspectableRlmRun = {
+			id: "local-unpublished",
+			prompt: "local task",
+			sessionName: "local-worker",
+			location: Object.freeze({ type: "local", sessionDir: join(tempDir, "missing-local-child") }),
+			model,
+			status: "running",
+			settled: false,
+			abort: () => {},
+		};
+		mkdirSync(localRun.location.type === "local" ? localRun.location.sessionDir : tempDir, { recursive: true });
+		internals._activeRlmChildRuns.set(hostedRun.id, hostedRun);
+		internals._activeRlmChildRuns.set(localRun.id, localRun);
+		internals._rlmChildSessions.set(hostedRun.id, { session: root });
+
+		try {
+			const hostedSnapshot = root.getRlmChildSnapshots().find((entry) => entry.id === hostedRun.id);
+			expect(hostedSnapshot).toMatchObject({
+				id: hostedRun.id,
+				execution: { type: "prime-sandbox" },
+			});
+			expect(hostedSnapshot).not.toHaveProperty("sessionDir");
+			expect(hostedSnapshot).not.toHaveProperty("recap");
+
+			const contextChildren = root.getContextTree().children;
+			expect(contextChildren.some((entry) => entry.id === hostedRun.id)).toBe(false);
+			expect(contextChildren.some((entry) => entry.id === localRun.id)).toBe(true);
+		} finally {
+			internals._activeRlmChildRuns.clear();
+			internals._rlmChildSessions.clear();
+		}
+	});
 });
 
 interface InspectableRlmDirSession {
@@ -4503,87 +4581,5 @@ describe("AgentSession RLM session dir", () => {
 			if (previousRef === undefined) delete process.env.MY_SERPER_REF;
 			else process.env.MY_SERPER_REF = previousRef;
 		}
-	});
-});
-
-describe("hosted RlmChildRunLocation runtime", () => {
-	const mockModel = {
-		provider: "test",
-		id: "model",
-		name: "Test Model",
-		contextWindow: 10000,
-		maxOutput: 1000,
-		api: "chat" as const,
-		costPreferences: { input: 0, output: 0 },
-	};
-
-	it("hosted execution is frozen and rejects mutation", () => {
-		const run: LocalRlmChildRun = {
-			id: "test-child",
-			prompt: "test",
-			sessionName: "test",
-			location: Object.freeze({ type: "local", sessionDir: "/tmp/test" }),
-			model: mockModel as any,
-			status: "running",
-			toolUseCount: 0,
-			settled: false,
-			abort: () => {},
-			publication: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-			settlement: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-			deletionReservation: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-		};
-		// Local location must be frozen
-		expect(Object.isFrozen(run.location)).toBe(true);
-		expect(run.location.type).toBe("local");
-		expect(() => {
-			(run.location as any).sessionDir = "/evil";
-		}).toThrow();
-	});
-
-	it("hosted run with colliding _rlmChildSessions entry is unchanged by local map", () => {
-		// A hosted run whose id happens to collide with a retained child in
-		// _rlmChildSessions must not produce different snapshot/list results.
-		const hostedExec = Object.freeze({ type: "prime-sandbox" as const });
-		const hostedRun: RlmChildRun = {
-			id: "collide-id",
-			prompt: "hosted task",
-			sessionName: "hosted-worker",
-			location: Object.freeze({ type: "hosted", execution: hostedExec }),
-			model: mockModel as any,
-			status: "done" as const,
-			toolUseCount: 0,
-			settled: true,
-			abort: () => {},
-			publication: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-			settlement: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-			deletionReservation: { resolve: () => {}, reject: () => {}, promise: Promise.resolve() },
-		};
-		const mockSession = {
-			_activeRlmChildRuns: new Map<string, RlmChildRun>([["collide-id", hostedRun]]),
-			_rlmChildSessions: new Map<string, { session: { sessionName: string } }>([
-				["collide-id", { session: { sessionName: "local-bogus" } }],
-			]),
-			_rlmChildCleanupFailures: new Map(),
-			_deletingRlmChildren: new Map(),
-			_deletedRlmChildIds: new Set(),
-			_rlmParentNodeId: "parent-1",
-			_rlmChildUnsubscribes: new Map(),
-			_abandonedRlmQuiescenceChildIds: new Set(),
-			getContextTree: () => ({
-				ownUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-				totalUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-				children: [],
-			}),
-			_contextWindowResolver: () => () => 10000,
-			sessionManager: { getBranch: () => [], getEntries: () => [] },
-		} as unknown as AgentSession;
-
-		// _isUnboundTerminalRlmChildRun must not consult _rlmChildSessions for hosted
-		// The hosted run is terminal (done, no local session) so _isUnboundTerminalRlmChildRun
-		// should return true even though a colliding entry exists in _rlmChildSessions.
-		// Test by calling via prototype since the method is on AgentSession.prototype
-		// Use type assertion to access private method for test
-		const isUnbound = (AgentSession.prototype as any)._isUnboundTerminalRlmChildRun.call(mockSession, hostedRun);
-		expect(isUnbound).toBe(true);
 	});
 });

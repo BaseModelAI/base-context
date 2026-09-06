@@ -225,11 +225,23 @@ class RlmSpawnHandleHostedTest(unittest.TestCase):
         self.assertIsNotNone(subagents[0].execution)
         self.assertTrue(subagents[0].is_hosted)
 
-    def test_hosted_subagent_immutable_execution(self) -> None:
+    def test_rejects_hosted_subagent_without_home_assigned_session_ids(self) -> None:
         payload = {
             "rlm_child_id": "sub-hosted-1",
             "active_session_id": None,
             "session_id": None,
+            "session_name": "hosted-worker",
+            "status": "running",
+            "execution": {"type": "prime-sandbox"},
+        }
+        with self.assertRaises(RuntimeError):
+            rlm_module._subagent_from_payload(payload)
+
+    def test_hosted_subagent_immutable_execution(self) -> None:
+        payload = {
+            "rlm_child_id": "sub-hosted-1",
+            "active_session_id": "active-hosted-1",
+            "session_id": "session-hosted-1",
             "session_name": "hosted-worker",
             "status": "running",
             "execution": {"type": "prime-sandbox"},
@@ -335,8 +347,8 @@ class RlmSpawnHandleHostedTest(unittest.TestCase):
     def test_hosted_subagent_is_hosted_true(self) -> None:
         payload = {
             "rlm_child_id": "sub-xyz",
-            "active_session_id": None,
-            "session_id": None,
+            "active_session_id": "active-hosted-1",
+            "session_id": "session-hosted-1",
             "session_name": "hosted-worker",
             "status": "running",
             "execution": {"type": "prime-sandbox"},
