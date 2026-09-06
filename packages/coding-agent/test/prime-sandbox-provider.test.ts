@@ -328,6 +328,21 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 		expect(calls).toBe(1);
 	});
 
+	test("rejects noncanonical and non-exact readiness output", async () => {
+		const canonical = readinessLine();
+		const invalidBase64 = canonical.replace(`${"A".repeat(43)}=`, `${"A".repeat(42)}B=`);
+		for (const stdout of [`${invalidBase64}\n`, `${canonical}\n\n`, `${canonical}\ntrailing`]) {
+			let calls = 0;
+			const port = provider(async () => {
+				calls += 1;
+				return calls === 1 ? authResponse() : jsonResponse({ stdout, stderr: "", exit_code: 0 });
+			});
+			expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "INVALID_RESPONSE" });
+			expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "LAUNCH_ALREADY_ATTEMPTED" });
+			expect(calls).toBe(2);
+		}
+	});
+
 	test("a completed failing bootstrap is never executed twice", async () => {
 		let calls = 0;
 		const port = provider(async () => {

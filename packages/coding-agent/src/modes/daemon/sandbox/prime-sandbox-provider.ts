@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { types } from "node:util";
 import { parseBoundedJson } from "./prime-sandbox-json.js";
+import { decodeSandboxReadinessBundle } from "./prime-sandbox-readiness-bundle.js";
 import {
 	isPreparedFileUpload,
 	type PreparedFileUpload,
@@ -368,26 +369,19 @@ function parseCommandReadiness(bytes: Uint8Array): SandboxProviderReadinessResul
 		return failure("INVALID_RESPONSE");
 	}
 	if (exitCode !== 0) return failure("COMMAND_FAILED");
-	if (stderr !== "" || !stdout.endsWith("\n") || stdout.length < 10 || stdout.length > MAX_READINESS_LINE_BYTES + 1) {
+	if (stderr !== "" || stdout.length < 1 || stdout.length > MAX_READINESS_LINE_BYTES) {
 		return failure("INVALID_RESPONSE");
 	}
-	const line = stdout.slice(0, -1);
-	for (let index = 0; index < line.length; index += 1) {
-		const unit = line.charCodeAt(index);
-		if (unit < 0x20 || unit > 0x7e) return failure("INVALID_RESPONSE");
-	}
-	const parts = line.split(" ");
-	if (parts.length !== 9 || parts[0] !== "BUNDLE" || parts[1] !== "v3") return failure("INVALID_RESPONSE");
-	for (let index = 2; index < 8; index += 1) {
-		if (!/^[A-Za-z0-9+/]{43}=$/.test(parts[index] ?? "")) return failure("INVALID_RESPONSE");
-	}
-	if (!/^[A-Za-z0-9+/]{86}==$/.test(parts[8] ?? "")) return failure("INVALID_RESPONSE");
-	const encoded = new TextEncoder().encode(line);
-	if (encoded.byteLength > MAX_READINESS_LINE_BYTES) {
+	const encoded = new TextEncoder().encode(stdout);
+	const decoded = decodeSandboxReadinessBundle(encoded);
+	if (!decoded.ok) {
 		encoded.fill(0);
 		return failure("INVALID_RESPONSE");
 	}
-	return Object.freeze({ ok: true, value: new SandboxRuntimeReadinessCapability(encoded) });
+	const line = new Uint8Array(new ArrayBuffer(encoded.byteLength - 1));
+	line.set(encoded.subarray(0, -1));
+	encoded.fill(0);
+	return Object.freeze({ ok: true, value: new SandboxRuntimeReadinessCapability(line) });
 }
 
 function parseExposureRow(value: unknown, expectedSandboxId: string): ExposureRow | undefined {
