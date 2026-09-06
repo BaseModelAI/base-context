@@ -856,6 +856,19 @@ describe("Container proof in waitUntilReady", () => {
 		expect(insp.ok).toBe(false);
 		if (!insp.ok) expect(insp.code).toBe("UNCERTAIN");
 	});
+	it("runner descendant escape result => UNCERTAIN", async () => {
+		const m = new Map([
+			[VK, VR],
+			[LK, { ok: false, code: "DESCENDANTS_FOUND" }],
+		]);
+		const r = await createSandboxLifecycle(mkR(m), vc());
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		const insp = await r.value.lifecycle.inspect();
+		expect(insp.ok).toBe(false);
+		if (!insp.ok) expect(insp.code).toBe("UNCERTAIN");
+	});
+
 	it("runner unknown failure code => UNCERTAIN", async () => {
 		const m = new Map([
 			[VK, VR],

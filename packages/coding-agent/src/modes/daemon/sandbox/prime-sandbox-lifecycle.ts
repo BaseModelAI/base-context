@@ -24,6 +24,7 @@ export type RunnerFailureCode =
 	| "TIMED_OUT"
 	| "OUTPUT_OVERFLOW"
 	| "STREAM_FAILED"
+	| "DESCENDANTS_FOUND"
 	| "PROCESS_UNCERTAIN";
 export type RunnerResult = RunnerSuccess | RunnerFailure;
 
@@ -289,6 +290,7 @@ function validRunnerFailureCode(v: unknown): v is RunnerFailureCode {
 		v === "TIMED_OUT" ||
 		v === "OUTPUT_OVERFLOW" ||
 		v === "STREAM_FAILED" ||
+		v === "DESCENDANTS_FOUND" ||
 		v === "PROCESS_UNCERTAIN"
 	);
 }
