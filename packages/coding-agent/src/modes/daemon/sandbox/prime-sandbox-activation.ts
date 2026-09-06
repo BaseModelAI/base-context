@@ -35,6 +35,11 @@ export class SandboxRuntimeActivation {
 	}
 }
 
+Object.freeze(SandboxHomeActivation.prototype);
+Object.freeze(SandboxHomeActivation);
+Object.freeze(SandboxRuntimeActivation.prototype);
+Object.freeze(SandboxRuntimeActivation);
+
 const homeActivations = new WeakMap<object, HomeActivationState>();
 const runtimeActivations = new WeakMap<object, RuntimeActivationState>();
 

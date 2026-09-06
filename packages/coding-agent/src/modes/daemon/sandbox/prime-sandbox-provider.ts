@@ -1,7 +1,8 @@
 import { isIP } from "node:net";
 import { types } from "node:util";
 import { parseBoundedJson } from "./prime-sandbox-json.js";
-import { decodeSandboxReadinessBundle } from "./prime-sandbox-readiness-bundle.js";
+import { closeSandboxReadinessBundle, decodeSandboxReadinessBundle } from "./prime-sandbox-readiness-bundle.js";
+import { connectSandboxRuntimeTcp, type SandboxTcpIo, type SandboxTcpResult } from "./prime-sandbox-tcp.js";
 import {
 	isPreparedFileUpload,
 	type PreparedFileUpload,
@@ -93,6 +94,12 @@ export function copySandboxRuntimeReadiness(value: unknown): Uint8Array<ArrayBuf
 }
 
 export type SandboxFetchPort = (url: string, init: RequestInit) => Promise<Response>;
+export type SandboxRuntimeConnectPort = (
+	host: unknown,
+	port: unknown,
+	signal?: AbortSignal,
+) => Promise<SandboxTcpResult<SandboxTcpIo>>;
+export type SandboxProviderConnectionResult = SandboxTcpResult<SandboxTcpIo>;
 
 export interface PrimeSandboxProviderPort {
 	uploadRelease(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
@@ -101,6 +108,7 @@ export interface PrimeSandboxProviderPort {
 	uploadTrust(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
 	bootstrapAndLaunch(signal?: AbortSignal): Promise<SandboxProviderReadinessResult>;
 	exposeRuntime(signal?: AbortSignal): Promise<SandboxProviderResult>;
+	connectRuntime(signal?: AbortSignal): Promise<SandboxProviderConnectionResult>;
 	unexposeAndProveAbsent(signal?: AbortSignal): Promise<SandboxProviderResult>;
 	close(): Promise<SandboxProviderResult>;
 }
@@ -378,6 +386,7 @@ function parseCommandReadiness(bytes: Uint8Array): SandboxProviderReadinessResul
 		encoded.fill(0);
 		return failure("INVALID_RESPONSE");
 	}
+	closeSandboxReadinessBundle(decoded.readiness);
 	const line = new Uint8Array(new ArrayBuffer(encoded.byteLength - 1));
 	line.set(encoded.subarray(0, -1));
 	encoded.fill(0);
@@ -547,14 +556,42 @@ export function createPrimeSandboxProviderPort(
 	apiKey: string,
 	expectedSandboxId: string,
 	dispatch: SandboxFetchPort = fetch,
+	connectRuntime: SandboxRuntimeConnectPort = connectSandboxRuntimeTcp,
 ): SandboxProviderFactoryResult {
-	if (!printableToken(apiKey, 8192) || !sandboxId(expectedSandboxId) || typeof dispatch !== "function") {
+	if (
+		!printableToken(apiKey, 8192) ||
+		!sandboxId(expectedSandboxId) ||
+		typeof dispatch !== "function" ||
+		typeof connectRuntime !== "function"
+	) {
 		return failure("INPUT_INVALID");
 	}
 	const records = new Set<ActiveRequest>();
 	const bodyCleanups = new Set<VerifiedUploadBody>();
+	const runtimeConnections = new Set<SandboxTcpIo>();
+	let runtimeConnecting = false;
 	let closed = false;
 	let exposure: ExposureState | undefined;
+
+	async function closeRuntimeConnections(): Promise<boolean> {
+		const pending: Promise<boolean>[] = [];
+		for (const io of runtimeConnections) {
+			try {
+				io.close();
+				const operation = io
+					.waitClosed()
+					.then(() => true)
+					.catch(() => false);
+				pending.push(settleWithin(operation, CLEANUP_TIMEOUT_MS));
+			} catch {
+				return false;
+			}
+		}
+		const settled = await Promise.all(pending);
+		for (const result of settled) if (!result) return false;
+		runtimeConnections.clear();
+		return true;
+	}
 	let exposureAbsenceProven = false;
 	let launchClaimed = false;
 
@@ -1123,8 +1160,44 @@ export function createPrimeSandboxProviderPort(
 			return success();
 		},
 
+		async connectRuntime(signal?: AbortSignal): Promise<SandboxProviderConnectionResult> {
+			const currentExposure = exposure;
+			if (closed || currentExposure === undefined || runtimeConnecting || runtimeConnections.size !== 0) {
+				return Object.freeze({ ok: false, code: "CONNECT_FAILED" });
+			}
+			runtimeConnecting = true;
+			let connected: SandboxProviderConnectionResult;
+			try {
+				connected = await connectRuntime(currentExposure.host, currentExposure.port, signal);
+			} catch {
+				return Object.freeze({ ok: false, code: "CONNECT_FAILED" });
+			} finally {
+				runtimeConnecting = false;
+			}
+			if (!connected.ok) return connected;
+			if (closed || exposure !== currentExposure || runtimeConnections.size !== 0) {
+				connected.value.close();
+				await settleWithin(
+					connected.value
+						.waitClosed()
+						.then(() => true)
+						.catch(() => false),
+					CLEANUP_TIMEOUT_MS,
+				);
+				return Object.freeze({ ok: false, code: "CONNECT_FAILED" });
+			}
+			runtimeConnections.add(connected.value);
+			connected.value
+				.waitClosed()
+				.then(() => runtimeConnections.delete(connected.value))
+				.catch(() => undefined);
+			return connected;
+		},
+
 		async unexposeAndProveAbsent(signal?: AbortSignal): Promise<SandboxProviderResult> {
 			if (closed) return failure("CLOSED");
+			if (runtimeConnecting) return failure("CLEANUP_UNCERTAIN");
+			if (runtimeConnections.size !== 0 && !(await closeRuntimeConnections())) return failure("CLEANUP_UNCERTAIN");
 			let currentId = exposure?.exposureId;
 			if (currentId === undefined) {
 				const before = await listExposures(signal);
@@ -1169,6 +1242,8 @@ export function createPrimeSandboxProviderPort(
 		},
 
 		async close(): Promise<SandboxProviderResult> {
+			if (runtimeConnecting) return failure("CLEANUP_UNCERTAIN");
+			if (runtimeConnections.size !== 0 && !(await closeRuntimeConnections())) return failure("CLEANUP_UNCERTAIN");
 			const mayFinalize = exposure === undefined && exposureAbsenceProven;
 			const pending: Promise<boolean>[] = [];
 			for (const body of bodyCleanups) {

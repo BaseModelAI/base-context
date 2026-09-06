@@ -4,6 +4,7 @@ import type { SandboxHandshakeIo } from "./prime-sandbox-handshake.js";
 
 const ISSUE = Object.freeze({});
 const CONNECT_TIMEOUT_MS = 5_000;
+const MAX_IO_TIMEOUT_MS = 600_000;
 const CLOSE_TIMEOUT_MS = 1_000;
 const MAX_BUFFERED_BYTES = 262_512;
 const MAX_BUFFERED_CHUNKS = 4_096;
@@ -53,6 +54,9 @@ export class SandboxTcpListener {
 		Object.freeze(this);
 	}
 }
+
+Object.freeze(SandboxTcpListener.prototype);
+Object.freeze(SandboxTcpListener);
 
 const listenerStates = new WeakMap<object, ListenerState>();
 
@@ -272,7 +276,7 @@ function createSocketIo(socket: Socket, onClosed: () => void): SandboxTcpIo {
 				length > MAX_BUFFERED_BYTES ||
 				!Number.isSafeInteger(timeoutMs) ||
 				timeoutMs < 1 ||
-				timeoutMs > CONNECT_TIMEOUT_MS
+				timeoutMs > MAX_IO_TIMEOUT_MS
 			) {
 				closeState(state);
 				return undefined;
@@ -297,7 +301,7 @@ function createSocketIo(socket: Socket, onClosed: () => void): SandboxTcpIo {
 				copy === undefined ||
 				!Number.isSafeInteger(timeoutMs) ||
 				timeoutMs < 1 ||
-				timeoutMs > CONNECT_TIMEOUT_MS
+				timeoutMs > MAX_IO_TIMEOUT_MS
 			) {
 				copy?.fill(0);
 				closeState(state);

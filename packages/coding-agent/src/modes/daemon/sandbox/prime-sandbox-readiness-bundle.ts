@@ -322,3 +322,18 @@ export function copyReadinessProtocolNonce(value: unknown): Uint8Array<ArrayBuff
 export function copyReadinessSignature(value: unknown): Uint8Array<ArrayBuffer> | undefined {
 	return copyField(value, "signature");
 }
+
+export function closeSandboxReadinessBundle(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const data = readinessBundles.get(value);
+	if (data === undefined) return false;
+	readinessBundles.delete(value);
+	data.launcherPublicKey.fill(0);
+	data.homePublicKey.fill(0);
+	data.archiveSha256.fill(0);
+	data.manifestSha256.fill(0);
+	data.launcherSha256.fill(0);
+	data.protocolNonce.fill(0);
+	data.signature.fill(0);
+	return true;
+}

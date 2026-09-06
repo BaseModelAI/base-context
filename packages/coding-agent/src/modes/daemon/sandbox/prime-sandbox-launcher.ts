@@ -1,5 +1,6 @@
 import { closeSync, writeSync } from "node:fs";
 import {
+	closeSandboxLaunchConfig,
 	copyLaunchConfigArchiveSha256,
 	copyLaunchConfigHomePublicKey,
 	copyLaunchConfigLauncherSha256,
@@ -7,6 +8,7 @@ import {
 } from "./prime-sandbox-launch-config.js";
 import { readProtectedSandboxLaunchConfig } from "./prime-sandbox-launch-config-file.js";
 import {
+	closeSandboxReadinessBundle,
 	copyReadinessArchiveSha256,
 	copyReadinessHomePublicKey,
 	copyReadinessLauncherPublicKey,
@@ -118,7 +120,11 @@ async function readRendezvous(descriptor: number): Promise<Uint8Array<ArrayBuffe
 async function readinessMatchesConfig(bytes: Uint8Array): Promise<boolean> {
 	const config = readProtectedSandboxLaunchConfig();
 	const readiness = decodeSandboxReadinessBundle(bytes);
-	if (!config.ok || !readiness.ok) return false;
+	if (!config.ok || !readiness.ok) {
+		if (config.ok) closeSandboxLaunchConfig(config.value);
+		if (readiness.ok) closeSandboxReadinessBundle(readiness.readiness);
+		return false;
+	}
 	const configHome = copyLaunchConfigHomePublicKey(config.value);
 	const configArchive = copyLaunchConfigArchiveSha256(config.value);
 	const configManifest = copyLaunchConfigManifestSha256(config.value);
@@ -178,6 +184,8 @@ async function readinessMatchesConfig(bytes: Uint8Array): Promise<boolean> {
 			protocolNonce,
 			signature,
 		);
+		closeSandboxLaunchConfig(config.value);
+		closeSandboxReadinessBundle(readiness.readiness);
 	}
 }
 

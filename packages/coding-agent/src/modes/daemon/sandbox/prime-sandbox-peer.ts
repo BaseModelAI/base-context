@@ -7,6 +7,7 @@ import {
 } from "./prime-sandbox-activation.js";
 import { performSandboxRuntimeHandshake } from "./prime-sandbox-handshake.js";
 import {
+	closeSandboxLaunchConfig,
 	copyLaunchConfigArchiveSha256,
 	copyLaunchConfigHomePublicKey,
 	copyLaunchConfigLauncherSha256,
@@ -118,6 +119,7 @@ async function main(): Promise<number> {
 		!protocolNonceResult.ok
 	) {
 		zero(homePublicKey, archiveSha256, manifestSha256, launcherSha256);
+		closeSandboxLaunchConfig(config);
 		return EXIT_FAILURE;
 	}
 	const identity: SandboxEd25519KeyPair = identityResult.value;
@@ -126,6 +128,7 @@ async function main(): Promise<number> {
 	if (launcherPublicKey === undefined) {
 		zero(homePublicKey, archiveSha256, manifestSha256, launcherSha256, protocolNonce);
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		return EXIT_FAILURE;
 	}
 	const fields = {
@@ -140,6 +143,7 @@ async function main(): Promise<number> {
 	if (!signature.ok) {
 		zero(launcherPublicKey, homePublicKey, archiveSha256, manifestSha256, launcherSha256, protocolNonce);
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		return EXIT_FAILURE;
 	}
 	const bundle = buildSandboxReadinessBundle({ ...fields, signature: signature.value });
@@ -147,6 +151,7 @@ async function main(): Promise<number> {
 	if (!bundle.ok) {
 		zero(protocolNonce);
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		return EXIT_FAILURE;
 	}
 	let listener: SandboxTcpListener | undefined;
@@ -163,6 +168,7 @@ async function main(): Promise<number> {
 		if (sessionActivation !== undefined) closeSandboxRuntimeActivation(sessionActivation);
 		if (listener !== undefined) await closeSandboxTcpListener(listener);
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		zero(protocolNonce, bundle.bytes);
 		process.exit(exitCode);
 	};
@@ -222,6 +228,7 @@ async function main(): Promise<number> {
 	});
 	if (!listened.ok) {
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		zero(protocolNonce, bundle.bytes);
 		return EXIT_FAILURE;
 	}
@@ -237,6 +244,7 @@ async function main(): Promise<number> {
 		shuttingDown = true;
 		await closeSandboxTcpListener(listener);
 		closeSandboxEd25519KeyPair(identity);
+		closeSandboxLaunchConfig(config);
 		zero(protocolNonce, bundle.bytes);
 		return EXIT_FAILURE;
 	}

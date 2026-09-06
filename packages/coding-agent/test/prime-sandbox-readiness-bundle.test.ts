@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildSandboxReadinessBundle,
+	closeSandboxReadinessBundle,
 	copyReadinessArchiveSha256,
 	copyReadinessHomePublicKey,
 	copyReadinessLauncherPublicKey,
@@ -211,4 +212,13 @@ describe("sandbox readiness bundle", () => {
 		if (signature instanceof Uint8Array) signature.fill(0);
 		expect(new TextDecoder().decode(result.bytes)).toBe(PYTHON_FIXTURE);
 	});
+});
+
+test("closes decoded readiness capabilities", () => {
+	const decoded = decodeSandboxReadinessBundle(new TextEncoder().encode(PYTHON_FIXTURE));
+	expect(decoded.ok).toBe(true);
+	if (!decoded.ok) return;
+	expect(closeSandboxReadinessBundle(decoded.readiness)).toBe(true);
+	expect(copyReadinessLauncherPublicKey(decoded.readiness)).toBeUndefined();
+	expect(closeSandboxReadinessBundle(decoded.readiness)).toBe(false);
 });

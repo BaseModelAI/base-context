@@ -270,3 +270,15 @@ export function copyLaunchConfigManifestSha256(value: unknown): Uint8Array<Array
 export function copyLaunchConfigLauncherSha256(value: unknown): Uint8Array<ArrayBuffer> | undefined {
 	return copyConfigField(value, "launcherSha256");
 }
+
+export function closeSandboxLaunchConfig(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const data = launchConfigs.get(value);
+	if (data === undefined) return false;
+	launchConfigs.delete(value);
+	data.homePublicKey.fill(0);
+	data.archiveSha256.fill(0);
+	data.manifestSha256.fill(0);
+	data.launcherSha256.fill(0);
+	return true;
+}

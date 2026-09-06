@@ -8,7 +8,9 @@ import {
 	createPrimeSandboxProviderPort,
 	type PrimeSandboxProviderPort,
 	type SandboxFetchPort,
+	type SandboxRuntimeConnectPort,
 } from "../src/modes/daemon/sandbox/prime-sandbox-provider.js";
+import type { SandboxTcpIo } from "../src/modes/daemon/sandbox/prime-sandbox-tcp.js";
 import { prepareFileUpload, type SandboxArtifactKind } from "../src/modes/daemon/sandbox/prime-sandbox-upload-body.js";
 
 const API_KEY = "pi_test_control_key";
@@ -89,8 +91,8 @@ function readinessLine(): string {
 	return `BUNDLE v3 ${key} ${key} ${key} ${key} ${key} ${key} ${signature}`;
 }
 
-function provider(dispatch: SandboxFetchPort): PrimeSandboxProviderPort {
-	const result = createPrimeSandboxProviderPort(API_KEY, SANDBOX_ID, dispatch);
+function provider(dispatch: SandboxFetchPort, connect?: SandboxRuntimeConnectPort): PrimeSandboxProviderPort {
+	const result = createPrimeSandboxProviderPort(API_KEY, SANDBOX_ID, dispatch, connect);
 	if (!result.ok) throw new Error(result.code);
 	return result.value;
 }
@@ -352,6 +354,106 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "COMMAND_FAILED" });
 		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "LAUNCH_ALREADY_ATTEMPTED" });
 		expect(calls).toBe(2);
+	});
+
+	test("rejects an overlapping private runtime connection attempt", async () => {
+		let stage = 0;
+		const dispatch: SandboxFetchPort = async () => {
+			stage += 1;
+			if (stage === 1) return jsonResponse({ exposures: [] });
+			if (stage === 2) return jsonResponse(exposureRow());
+			if (stage === 3) return jsonResponse({});
+			return jsonResponse({ exposures: [] });
+		};
+		let resolveConnect: ((value: Readonly<{ ok: true; value: SandboxTcpIo }>) => void) | undefined;
+		const io: SandboxTcpIo = Object.freeze({
+			async readExact() {
+				return undefined;
+			},
+			async writeExact() {
+				return false;
+			},
+			close() {},
+			async waitClosed() {},
+		});
+		const connect: SandboxRuntimeConnectPort = async () =>
+			await new Promise<Readonly<{ ok: true; value: SandboxTcpIo }>>((resolve) => {
+				resolveConnect = resolve;
+			});
+		const port = provider(dispatch, connect);
+		expect(await port.exposeRuntime()).toEqual({ ok: true });
+		const first = port.connectRuntime();
+		expect(await port.connectRuntime()).toEqual({ ok: false, code: "CONNECT_FAILED" });
+		resolveConnect?.(Object.freeze({ ok: true, value: io }));
+		expect(await first).toEqual({ ok: true, value: io });
+		expect(await port.unexposeAndProveAbsent()).toEqual({ ok: true });
+		expect(await port.close()).toEqual({ ok: true });
+		expect(stage).toBe(4);
+	});
+
+	test("connects through the private exposure without returning endpoint metadata", async () => {
+		let stage = 0;
+		const dispatch: SandboxFetchPort = async (url, init) => {
+			stage += 1;
+			if (stage === 1) {
+				expect(init.method).toBe("GET");
+				return jsonResponse({ exposures: [] });
+			}
+			if (stage === 2) {
+				expect(init.method).toBe("POST");
+				return jsonResponse(exposureRow());
+			}
+			if (stage === 3) {
+				expect(init.method).toBe("DELETE");
+				return jsonResponse({});
+			}
+			expect(stage).toBe(4);
+			expect(url).toBe(`${"https://api.primeintellect.ai"}/api/v1/sandbox/${SANDBOX_ID}/expose`);
+			return jsonResponse({ exposures: [] });
+		};
+		let connectedHost = "";
+		let connectedPort = 0;
+		let closed = false;
+		let resolveClosed: (() => void) | undefined;
+		const closedPromise = new Promise<void>((resolve) => {
+			resolveClosed = resolve;
+		});
+		const io: SandboxTcpIo = Object.freeze({
+			async readExact() {
+				return undefined;
+			},
+			async writeExact() {
+				return false;
+			},
+			close() {
+				if (closed) return;
+				closed = true;
+				resolveClosed?.();
+			},
+			async waitClosed() {
+				await closedPromise;
+			},
+		});
+		const connect: SandboxRuntimeConnectPort = async (host, port) => {
+			if (typeof host !== "string" || typeof port !== "number") return { ok: false, code: "INPUT_INVALID" };
+			connectedHost = host;
+			connectedPort = port;
+			return { ok: true, value: io };
+		};
+		const port = provider(dispatch, connect);
+		expect(await port.connectRuntime()).toEqual({ ok: false, code: "CONNECT_FAILED" });
+		expect(await port.exposeRuntime()).toEqual({ ok: true });
+		const connected = await port.connectRuntime();
+		expect(connected).toEqual({ ok: true, value: io });
+		expect(connectedHost).toBe("runtime.example.com");
+		expect(connectedPort).toBe(23456);
+		expect(Object.hasOwn(connected, "host")).toBe(false);
+		expect(Object.hasOwn(connected, "port")).toBe(false);
+		expect(await port.connectRuntime()).toEqual({ ok: false, code: "CONNECT_FAILED" });
+		expect(await port.unexposeAndProveAbsent()).toEqual({ ok: true });
+		expect(closed).toBe(true);
+		expect(await port.close()).toEqual({ ok: true });
+		expect(stage).toBe(4);
 	});
 
 	test("exposes fixed TCP 9443 then unexposes and proves zero matches", async () => {

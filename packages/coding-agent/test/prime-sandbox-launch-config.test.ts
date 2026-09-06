@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	buildSandboxLaunchConfig,
+	closeSandboxLaunchConfig,
 	copyLaunchConfigArchiveSha256,
 	copyLaunchConfigHomePublicKey,
 	copyLaunchConfigLauncherSha256,
@@ -191,4 +192,13 @@ describe("sandbox launch config", () => {
 		first.bytes.fill(0);
 		expect(new TextDecoder().decode(second.bytes)).toBe(PYTHON_FIXTURE);
 	});
+});
+
+test("closes decoded launch config capabilities", () => {
+	const decoded = decodeSandboxLaunchConfig(new TextEncoder().encode(PYTHON_FIXTURE));
+	expect(decoded.ok).toBe(true);
+	if (!decoded.ok) return;
+	expect(closeSandboxLaunchConfig(decoded.config)).toBe(true);
+	expect(copyLaunchConfigHomePublicKey(decoded.config)).toBeUndefined();
+	expect(closeSandboxLaunchConfig(decoded.config)).toBe(false);
 });
