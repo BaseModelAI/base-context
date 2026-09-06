@@ -757,21 +757,34 @@ class ReplTest(unittest.TestCase):
         self.assertIn("detached", one(inspected, "result")["text"])
 
     def test_wrapper_awaits_in_creating_cell_suppress_bash_completion(self):
+        def task_group(label: str, await_expression: str) -> str:
+            return "\n".join(
+                [
+                    f"handle = bash('printf {label}')",
+                    "async def consume():",
+                    f"    return {await_expression}",
+                    "async with asyncio.TaskGroup() as group:",
+                    "    task = group.create_task(consume())",
+                    "task.result().output",
+                ]
+            )
+
         snippets = {
             "gather": "(await asyncio.gather(bash('printf gather')))[0].output",
             "wait-for": "(await asyncio.wait_for(bash('printf wait-for'), 1)).output",
             "shield": "(await asyncio.shield(bash('printf shield'))).output",
             "nested": "(await asyncio.shield(asyncio.gather(bash('printf nested'))))[0].output",
-            "task-group": "\n".join(
+            "wait": "\n".join(
                 [
-                    "handle = bash('printf task-group')",
-                    "async def consume():",
-                    "    return await handle",
-                    "async with asyncio.TaskGroup() as group:",
-                    "    task = group.create_task(consume())",
+                    "handle = bash('printf wait')",
+                    "task = asyncio.ensure_future(handle)",
+                    "await asyncio.wait({task})",
                     "task.result().output",
                 ]
             ),
+            "task-group": task_group("task-group", "await handle"),
+            "task-group-gather": task_group("task-group-gather", "(await asyncio.gather(handle))[0]"),
+            "task-group-shield": task_group("task-group-shield", "await asyncio.shield(handle)"),
         }
         for label, snippet in snippets.items():
             with self.subTest(label=label):

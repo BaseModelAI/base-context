@@ -48,6 +48,7 @@ _COMPLETION_NOTICE_COMMAND_CAP = 1000
 _ASYNCIO_WRAPPER_CALLBACKS = {
     ("asyncio.tasks", "gather.<locals>._done_callback"),
     ("asyncio.tasks", "shield.<locals>._inner_done_callback"),
+    ("asyncio.tasks", "_wait.<locals>._on_completion"),
     ("asyncio.tasks", "_release_waiter"),
 }
 
@@ -126,6 +127,10 @@ def _completion_reaches(
             identity = (getattr(base, "__module__", None), getattr(base, "__qualname__", None))
             if identity in _ASYNCIO_WRAPPER_CALLBACKS:
                 collect(callback)
+            elif identity == (None, "Task.task_wakeup"):
+                task = getattr(callback, "__self__", None)
+                if isinstance(task, asyncio.Task):
+                    pending.append(task)
             elif identity == ("asyncio.taskgroups", "TaskGroup._on_task_done"):
                 parent = getattr(getattr(callback, "__self__", None), "_parent_task", None)
                 if isinstance(parent, asyncio.Future):
