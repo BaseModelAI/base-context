@@ -1,8 +1,6 @@
 # Providers
 
-Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. It treats Prime Intellect's hosted catalog as the authoritative public model list and refreshes model additions, removals, names, capabilities, and pricing once per day. A validated disk cache and the catalog bundled with each release keep model selection available when the endpoint is offline. The hosted catalog cannot change provider request URLs, APIs, headers, or compatibility settings unless that transport already exists in the bundled catalog.
-
-Set `PI_OFFLINE=1` to skip catalog network refreshes. Set `PRIME_AGENT_MODEL_CATALOG_URL` to use another HTTPS catalog endpoint; `PRIME_AGENT_DOWNLOAD_BASE_URL` also changes the default catalog origin alongside the release origin.
+Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Models for external providers are bundled with each release. Prime Inference models refresh from its `/models` endpoint, with the bundled list and a validated disk cache as fallbacks. Set `PI_OFFLINE=1` to skip network refreshes.
 
 ## Table of Contents
 

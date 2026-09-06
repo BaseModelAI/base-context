@@ -7,7 +7,6 @@ import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { APP_NAME, getBinDir } from "../config.js";
-import { isTruthyEnvFlag } from "./env.js";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
@@ -33,6 +32,12 @@ export interface ToolUnavailableResult {
 }
 
 export type ToolEnsureResult = ToolAvailableResult | ToolUnavailableResult;
+
+function isOfflineModeEnabled(): boolean {
+	const value = process.env.PI_OFFLINE;
+	if (!value) return false;
+	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
+}
 
 interface ToolConfig {
 	name: string;
@@ -325,7 +330,7 @@ export async function ensureToolWithStatus(tool: ManagedTool, silent: boolean = 
 	const platformName = platform();
 	const architecture = arch();
 
-	if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
+	if (isOfflineModeEnabled()) {
 		if (!silent) {
 			console.log(chalk.yellow(`${config.name} not found. Offline mode enabled, skipping download.`));
 		}
