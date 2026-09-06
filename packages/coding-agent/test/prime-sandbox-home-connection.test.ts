@@ -11,8 +11,14 @@ import {
 import {
 	closeSandboxHomeRuntimeConnection,
 	connectAndActivateSandboxRuntime,
+	proxyNextSandboxInference,
 	SandboxHomeRuntimeConnection,
 } from "../src/modes/daemon/sandbox/prime-sandbox-home-connection.js";
+import {
+	decodeSandboxInferenceReply,
+	decodeSandboxRequestDeliveryAck,
+	encodeSandboxInferenceRequest,
+} from "../src/modes/daemon/sandbox/prime-sandbox-inference.js";
 import {
 	buildSandboxLaunchConfig,
 	decodeSandboxLaunchConfig,
@@ -33,6 +39,8 @@ import {
 import {
 	closeSandboxTransportChannel,
 	copySandboxEd25519PublicKey,
+	decryptSandboxTransportFrame,
+	encryptSandboxTransportFrame,
 	generateSandboxEd25519KeyPair,
 	randomSandboxHandshakeBytes,
 	signSandboxReadinessBundle,
@@ -136,6 +144,58 @@ describe("Home-private sandbox runtime connection", () => {
 				finishRuntime?.(false);
 				return;
 			}
+			const request = encodeSandboxInferenceRequest(1n, "prime-inference/test-model", "private prompt");
+			if (!request.ok) {
+				finishRuntime?.(false);
+				return;
+			}
+			const requestFrame = await encryptSandboxTransportFrame(handshake.channel, 0n, request.value);
+			request.value.fill(0);
+			if (!requestFrame.ok || !(await io.writeExact(requestFrame.value, 3_000))) {
+				if (requestFrame.ok) requestFrame.value.fill(0);
+				finishRuntime?.(false);
+				return;
+			}
+			requestFrame.value.fill(0);
+			const ackFrame = await readFrame(io);
+			if (ackFrame === undefined) {
+				finishRuntime?.(false);
+				return;
+			}
+			const ackPlaintext = await decryptSandboxTransportFrame(handshake.channel, ackFrame);
+			ackFrame.fill(0);
+			if (!ackPlaintext.ok || ackPlaintext.value.streamId !== 0n) {
+				finishRuntime?.(false);
+				return;
+			}
+			const ack = decodeSandboxRequestDeliveryAck(ackPlaintext.value.plaintext);
+			ackPlaintext.value.plaintext.fill(0);
+			if (!ack.ok || ack.value !== 1n) {
+				finishRuntime?.(false);
+				return;
+			}
+			const replyFrame = await readFrame(io);
+			if (replyFrame === undefined) {
+				finishRuntime?.(false);
+				return;
+			}
+			const replyPlaintext = await decryptSandboxTransportFrame(handshake.channel, replyFrame);
+			replyFrame.fill(0);
+			if (!replyPlaintext.ok || replyPlaintext.value.streamId !== 0n) {
+				finishRuntime?.(false);
+				return;
+			}
+			const reply = decodeSandboxInferenceReply(replyPlaintext.value.plaintext);
+			replyPlaintext.value.plaintext.fill(0);
+			if (
+				!reply.ok ||
+				!reply.value.ok ||
+				reply.value.requestId !== 1n ||
+				reply.value.text !== "home model response"
+			) {
+				finishRuntime?.(false);
+				return;
+			}
 			await io.waitClosed();
 			closeSandboxRuntimeActivation(activated.value.activation);
 			closeSandboxTransportChannel(handshake.channel);
@@ -183,12 +243,25 @@ describe("Home-private sandbox runtime connection", () => {
 		const readiness = await provider.value.bootstrapAndLaunch();
 		if (!readiness.ok) throw new Error("launch failed");
 		expect(await provider.value.exposeRuntime()).toEqual({ ok: true });
-		const connected = await connectAndActivateSandboxRuntime(provider.value, state.homeIdentity, readiness.value);
+		const connected = await connectAndActivateSandboxRuntime(
+			provider.value,
+			state.homeIdentity,
+			readiness.value,
+			"prime-inference/test-model",
+		);
 		expect(connected.ok).toBe(true);
 		if (!connected.ok) return;
 		expect(Object.keys(connected.value)).toEqual([]);
 		expect(Object.hasOwn(connected.value, "host")).toBe(false);
 		expect(Object.hasOwn(connected.value, "port")).toBe(false);
+		let proxied: Readonly<{ model: string; input: string }> = Object.freeze({ model: "", input: "" });
+		expect(
+			await proxyNextSandboxInference(connected.value, async (request) => {
+				proxied = request;
+				return Object.freeze({ ok: true, text: "home model response" });
+			}),
+		).toEqual({ ok: true, value: true });
+		expect(proxied).toEqual({ model: "prime-inference/test-model", input: "private prompt" });
 		expect(await closeSandboxHomeRuntimeConnection(connected.value)).toEqual({ ok: true, value: true });
 		expect(await runtimeDone).toBe(true);
 		expect(await provider.value.unexposeAndProveAbsent()).toEqual({ ok: true });
@@ -261,7 +334,13 @@ describe("Home-private sandbox runtime connection", () => {
 		if (!readiness.ok) throw new Error("launch failed");
 		expect(await provider.value.exposeRuntime()).toEqual({ ok: true });
 		expect(
-			await connectAndActivateSandboxRuntime(provider.value, state.homeIdentity, readiness.value, controller.signal),
+			await connectAndActivateSandboxRuntime(
+				provider.value,
+				state.homeIdentity,
+				readiness.value,
+				"model",
+				controller.signal,
+			),
 		).toEqual({ ok: false, code: "ABORTED" });
 		expect(closed).toBe(true);
 		expect(await provider.value.unexposeAndProveAbsent()).toEqual({ ok: true });
@@ -278,7 +357,9 @@ describe("Home-private sandbox runtime connection", () => {
 		const state = await setup();
 		const provider = createPrimeSandboxProviderPort("test-api-key", SANDBOX_ID, async () => new Response("{}"));
 		if (!provider.ok) throw new Error("provider failed");
-		expect(await connectAndActivateSandboxRuntime(provider.value, state.homeIdentity, Object.freeze({}))).toEqual({
+		expect(
+			await connectAndActivateSandboxRuntime(provider.value, state.homeIdentity, Object.freeze({}), "model"),
+		).toEqual({
 			ok: false,
 			code: "READINESS_INVALID",
 		});
