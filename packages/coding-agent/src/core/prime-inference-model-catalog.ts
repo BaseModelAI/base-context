@@ -14,6 +14,11 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE = 0.5;
 const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] | undefined>>();
 
+export function isPrivatePrimeInferenceModelId(modelId: string): boolean {
+	const normalizedId = modelId.toLowerCase();
+	return normalizedId.startsWith("internal/") || normalizedId.startsWith("dev/") || normalizedId.includes(":");
+}
+
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
@@ -40,9 +45,7 @@ export function buildPrimeInferenceModels(
 	const bundled = new Map(bundledModels.map((model) => [model.id.toLowerCase(), model]));
 	const models = entries.flatMap((entry): Model<"openai-completions">[] => {
 		const normalizedId = entry.id.toLowerCase();
-		if (!options.includePrivate && (normalizedId.startsWith("internal/") || normalizedId.startsWith("dev/"))) {
-			return [];
-		}
+		if (!options.includePrivate && isPrivatePrimeInferenceModelId(normalizedId)) return [];
 		const template = bundled.get(entry.id.toLowerCase());
 		if (!template && (!entry.contextWindow || !entry.maxTokens || entry.reasoning === undefined)) return [];
 		const contextWindow = entry.contextWindow ?? template?.contextWindow ?? 0;

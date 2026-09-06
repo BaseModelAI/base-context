@@ -9,7 +9,10 @@ import {
 	PRIME_INFERENCE_BASE_URL,
 	refreshPrimeInferenceModels,
 } from "../src/core/prime-inference-model-catalog.js";
-import { fetchAuthorizedPrivatePrimeInferenceModels } from "../src/core/prime-inference-models.js";
+import {
+	fetchAuthorizedPrivatePrimeInferenceModels,
+	isPrivatePrimeInferenceModel,
+} from "../src/core/prime-inference-models.js";
 
 const directories: string[] = [];
 const model = (id: string, provider = "prime-inference"): Model<"openai-completions"> => ({
@@ -105,9 +108,17 @@ describe("Prime Inference model catalog", () => {
 		expect(
 			buildPrimeInferenceModels(
 				[model("one"), model("two"), model("three")],
-				[entry("internal/private"), entry("dev/private"), entry("one")],
+				[entry("internal/private"), entry("dev/private"), entry("poolside/model:deployment"), entry("one")],
 			),
 		).toBeUndefined();
+	});
+
+	test("requires authorization for private prefixes and deployment routes", () => {
+		for (const id of ["internal/model", "INTERNAL/model", "dev/model", "vendor/model:deployment"]) {
+			expect(isPrivatePrimeInferenceModel(model(id))).toBe(true);
+		}
+		expect(isPrivatePrimeInferenceModel(model("public/model"))).toBe(false);
+		expect(isPrivatePrimeInferenceModel(model("vendor/model:deployment", "openrouter"))).toBe(false);
 	});
 
 	test("replaces only the Prime Inference provider list", () => {

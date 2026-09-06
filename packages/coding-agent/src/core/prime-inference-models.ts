@@ -2,6 +2,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import {
 	buildPrimeInferenceModels,
 	fetchPrimeInferenceModelCatalog,
+	isPrivatePrimeInferenceModelId,
 	PRIME_INFERENCE_BASE_URL,
 	PrimeInferenceCatalogRequestError,
 } from "./prime-inference-model-catalog.js";
@@ -31,7 +32,7 @@ const PRIVATE_PRIME_INFERENCE_MODELS: readonly Model<"openai-completions">[] = [
 ];
 
 export function isPrivatePrimeInferenceModel(model: Pick<Model<string>, "provider" | "id">): boolean {
-	return model.provider === "prime-inference" && (model.id.startsWith("internal/") || model.id.startsWith("dev/"));
+	return model.provider === "prime-inference" && isPrivatePrimeInferenceModelId(model.id);
 }
 
 export function getPrivatePrimeInferenceModels(): Model<"openai-completions">[] {
@@ -67,9 +68,7 @@ export async function fetchAuthorizedPrivatePrimeInferenceModels(
 		const privateEntries = data.flatMap((item) => {
 			if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
 			const id = item.id.toLowerCase();
-			if (publicIds.has(id) || (!id.startsWith("internal/") && !id.startsWith("dev/") && !id.includes(":"))) {
-				return [];
-			}
+			if (publicIds.has(id) || !isPrivatePrimeInferenceModelId(id)) return [];
 			const parsed = entriesById.get(id);
 			if (parsed) return [parsed];
 			const template = bundledById.get(id);
