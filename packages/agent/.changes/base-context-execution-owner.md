@@ -1,0 +1,2 @@
+- Added awaited native tool-invocation admission before effects, with stable execution IDs shared by finalized evidence.
+- Added one-shot stream and tool execution owner bindings that survive caller callback reassignment.

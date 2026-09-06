@@ -31,6 +31,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	classifyStreamFailure,
@@ -409,6 +410,7 @@ async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
 	requestId?: string,
+	attempts?: ProviderAttemptTracker,
 ): AsyncGenerator<RawMessageStreamEvent> {
 	if (!response.body) {
 		throw new Error("Attempted to iterate over an Anthropic response with no body");
@@ -419,7 +421,12 @@ async function* iterateAnthropicEvents(
 
 	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
-			throw anthropicSseError(sse.data, requestId);
+			attempts?.providerError(sse.data);
+			const error = anthropicSseError(sse.data, requestId);
+			attempts?.event();
+			attempts?.response({ providerRequestId: error.info.requestId });
+			attempts?.terminal("failed");
+			throw error;
 		}
 
 		if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) {
@@ -457,6 +464,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -507,6 +515,10 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
 			const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 			const usesAnthropicCachePricing = hasStandardAnthropicCachePricing(model);
 			let cacheWriteCost =
@@ -518,6 +530,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
+			attempts.configure({ effort: params.output_config?.effort ?? undefined, serviceTier: params.service_tier });
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -531,7 +544,19 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
 
-			for await (const event of iterateAnthropicEvents(response, options?.signal, requestId)) {
+			for await (const event of iterateAnthropicEvents(response, options?.signal, requestId, attempts)) {
+				attempts.event(
+					event.type === "content_block_delta" ||
+						(event.type === "content_block_start" && event.content_block.type === "tool_use"),
+				);
+				if (event.type === "message_start") {
+					attempts.response({ providerResponseId: event.message.id, responseModel: event.message.model });
+					observeAnthropicUsage(attempts, event.message.usage, false);
+				} else if (event.type === "message_delta") {
+					observeAnthropicUsage(attempts, event.usage, !!event.delta.stop_reason);
+				} else if (event.type === "message_stop") {
+					attempts.terminal();
+				}
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event
@@ -713,8 +738,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
@@ -724,13 +748,43 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
 	return stream;
 };
+
+function observeAnthropicUsage(
+	attempts: ProviderAttemptTracker,
+	usage: {
+		input_tokens?: number | null;
+		output_tokens?: number | null;
+		cache_read_input_tokens?: number | null;
+		cache_creation_input_tokens?: number | null;
+		service_tier?: string | null;
+	},
+	complete: boolean,
+): void {
+	attempts.usage(
+		usage,
+		{
+			// Anthropic input_tokens excludes both cache token categories.
+			input: usage.input_tokens ?? undefined,
+			inputTotal:
+				usage.input_tokens != null &&
+				usage.cache_read_input_tokens != null &&
+				usage.cache_creation_input_tokens != null
+					? usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
+					: undefined,
+			output: usage.output_tokens ?? undefined,
+			cacheRead: usage.cache_read_input_tokens ?? undefined,
+			cacheWrite: usage.cache_creation_input_tokens ?? undefined,
+		},
+		complete ? "complete" : "partial",
+	);
+	attempts.response({ effectiveServiceTier: usage.service_tier });
+}
 
 /**
  * Fable/Mythos models think every turn and reject an explicit

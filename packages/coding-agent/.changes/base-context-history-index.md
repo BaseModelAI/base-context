@@ -1,0 +1,1 @@
+- Added a derived local history index with bounded pages and text search, using a separate Node.js 22.8 or newer process.

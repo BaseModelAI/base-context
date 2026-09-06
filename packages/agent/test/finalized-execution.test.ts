@@ -2,7 +2,7 @@ import { type AssistantMessage, createAssistantMessageEventStream, type Model } 
 import { Type } from "typebox";
 import { expect, it } from "vitest";
 import { Agent } from "../src/agent.js";
-import type { AgentEvent, AgentTool, FinalizedToolExchange, StreamFn } from "../src/types.js";
+import type { AgentEvent, AgentTool, FinalizedToolExchange, StreamFn, ToolInvocation } from "../src/types.js";
 
 const model: Model<"openai-responses"> = {
 	id: "fixture",
@@ -47,6 +47,7 @@ function streamResponse(message: AssistantMessage): StreamFn {
 
 it("captures invocation snapshots and final middleware results before observers, preserving parallel source order", async () => {
 	const parameters = Type.Object({ value: Type.Number(), nested: Type.Object({ stage: Type.String() }) });
+	const admitted: ToolInvocation[] = [];
 	let releaseFirst = () => {};
 	const firstCanFinish = new Promise<void>((resolve) => {
 		releaseFirst = resolve;
@@ -63,6 +64,7 @@ it("captures invocation snapshots and final middleware results before observers,
 			return { value: raw.value, nested: raw.nested };
 		},
 		async execute(id, args) {
+			expect(admitted.some((invocation) => invocation.toolCallId === id)).toBe(true);
 			args.nested.stage = "mutated during execution";
 			if (id === "first") await firstCanFinish;
 			return { content: [{ type: "text", text: "raw" }], details: { raw: true } };
@@ -89,6 +91,10 @@ it("captures invocation snapshots and final middleware results before observers,
 			isError: true,
 			terminate: true,
 		}),
+		onToolInvocationStarting: async (invocation) => {
+			await Promise.resolve();
+			admitted.push(invocation);
+		},
 		onToolExchangeFinalized: async (exchange) => {
 			await Promise.resolve();
 			committed.push(exchange);
@@ -108,6 +114,8 @@ it("captures invocation snapshots and final middleware results before observers,
 		[1, "second"],
 	]);
 	for (const exchange of turn?.exchanges ?? []) {
+		const invocation = admitted.find((intent) => intent.executionId === exchange.executionId);
+		expect(invocation?.executedInput).toEqual(exchange.executedInput);
 		expect(exchange.originalInput).toEqual({ value: "2", nested: { stage: "model" } });
 		expect(exchange.executedInput).toEqual({ value: 2, nested: { stage: "validated middleware" } });
 		expect(exchange.executionOutcome).toBe("completed");
@@ -182,3 +190,93 @@ it.each(["blocked", "invalid", "throws", "abort"] as const)(
 		expect(turn?.exchanges).toEqual(committed);
 	},
 );
+
+it("does not invoke or fabricate a tool result when intent persistence fails", async () => {
+	let executed = false;
+	const agent = new Agent({
+		initialState: {
+			model,
+			tools: [
+				{
+					name: "effect",
+					label: "Effect",
+					description: "Fixture",
+					parameters: Type.Object({}),
+					async execute() {
+						executed = true;
+						return { content: [{ type: "text", text: "unexpected" }], details: {} };
+					},
+				},
+			],
+		},
+		streamFn: streamResponse(response([{ type: "toolCall", id: "effect", name: "effect", arguments: {} }])),
+	});
+	const owner = {
+		onToolInvocationStarting: async (): Promise<void> => {
+			throw new Error("intent write failed");
+		},
+		onToolExchangeFinalized: async () => {},
+	};
+	agent.bindToolExecutionOwner(owner);
+	expect(() => agent.bindToolExecutionOwner(owner)).toThrow("already bound");
+	owner.onToolInvocationStarting = async () => {};
+	agent.onToolInvocationStarting = async () => {};
+	agent.onToolExchangeFinalized = async () => {};
+	await agent.prompt("Run effect");
+	expect(executed).toBe(false);
+	expect(agent.state.errorMessage).toBe("intent write failed");
+	expect(agent.state.messages.some((message) => message.role === "toolResult")).toBe(false);
+});
+
+it("keeps ownership until other started calls settle after an admission failure", async () => {
+	let release = () => {};
+	let started = () => {};
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const running = new Promise<void>((resolve) => {
+		started = resolve;
+	});
+	const finalized: string[] = [];
+	const agent = new Agent({
+		initialState: {
+			model,
+			tools: [
+				{
+					name: "effect",
+					label: "Effect",
+					description: "Fixture",
+					parameters: Type.Object({}),
+					async execute() {
+						started();
+						await gate;
+						return { content: [{ type: "text", text: "actual late result" }], details: {} };
+					},
+				},
+			],
+		},
+		streamFn: streamResponse(
+			response(["rejected", "late"].map((id) => ({ type: "toolCall", id, name: "effect", arguments: {} }))),
+		),
+		onToolInvocationStarting: (intent) => {
+			if (intent.toolCallId === "rejected") throw new Error("admission failed");
+		},
+		onToolExchangeFinalized: (exchange) => {
+			finalized.push(exchange.toolCallId);
+		},
+	});
+	const run = agent.prompt("Run both");
+	await running;
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	try {
+		expect(agent.state.isStreaming).toBe(true);
+	} finally {
+		release();
+	}
+	await run;
+	expect(finalized).toEqual(["late"]);
+	expect(agent.state.errorMessage).toBe("admission failed");
+	expect(agent.state.messages.some((message) => message.role === "toolResult" && message.toolCallId === "late")).toBe(
+		true,
+	);
+});

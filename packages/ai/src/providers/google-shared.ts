@@ -1,9 +1,54 @@
 /** Shared utilities for Google Generative AI and Vertex providers. */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	type GenerateContentResponse,
+	type GoogleGenAI,
+	type Part,
+} from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, TextContent, ThinkingBudgets, Tool } from "../types.js";
+import type { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { transformMessages } from "./transform-messages.js";
+
+/** These adapters set no SDK retryOptions: ApiClient.apiCall performs exactly one fetch. */
+export function instrumentGoogleAttempts(client: GoogleGenAI, attempts: ProviderAttemptTracker): void {
+	if (!attempts.enabled) return;
+	// GenAI has no public fetch injection. Scope the native API-client hook to this new client,
+	// never global fetch. Enabling SDK retryOptions requires moving this hook below its retry loop.
+	const apiClient = (client as unknown as { apiClient: { apiCall: typeof globalThis.fetch } }).apiClient;
+	apiClient.apiCall = attempts.wrapHttp(apiClient.apiCall.bind(apiClient));
+}
+
+export function observeGoogleUsage(
+	attempts: ProviderAttemptTracker,
+	usage: NonNullable<GenerateContentResponse["usageMetadata"]>,
+	complete: boolean,
+): void {
+	// promptTokenCount includes cached input. candidatesTokenCount excludes thoughtsTokenCount.
+	// Do not turn either missing breakdown into a reported zero.
+	const input =
+		usage.promptTokenCount !== undefined && usage.cachedContentTokenCount !== undefined
+			? usage.promptTokenCount - usage.cachedContentTokenCount
+			: undefined;
+	const output =
+		usage.candidatesTokenCount !== undefined && usage.thoughtsTokenCount !== undefined
+			? usage.candidatesTokenCount + usage.thoughtsTokenCount
+			: undefined;
+	attempts.usage(
+		usage,
+		{
+			input,
+			inputTotal: usage.promptTokenCount,
+			output,
+			cacheRead: usage.cachedContentTokenCount,
+			totalTokens: usage.totalTokenCount,
+		},
+		complete && input !== undefined && output !== undefined ? "complete" : "partial",
+	);
+}
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 

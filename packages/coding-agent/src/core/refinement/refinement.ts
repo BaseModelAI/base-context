@@ -12,10 +12,11 @@ import {
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model } from "@ponythewhite/base-context-ai";
-import { completeSimple } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
+import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
 import { convertToLlm } from "../messages.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import type { CustomEntry } from "../session-manager.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
@@ -887,6 +888,7 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -924,13 +926,20 @@ export async function planRefinement(
 	// Keep the refinement request non-reasoning regardless of the interactive session
 	// thinking level so the model uses its output budget for the JSON object.
 	void thinkingLevel;
-	const response = await completeSimple(
+	const response = await completeInference(
+		requests,
 		model,
 		{
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
 		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			purpose: "refine",
+			purposeDetail: "plan",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 
 	if (response.stopReason === "error") {
@@ -970,6 +979,7 @@ export async function reviewAutoRefine(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -990,13 +1000,20 @@ ${conversationText}
 	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
 	// reasoning-capable models use final text budget for the JSON object.
 	void thinkingLevel;
-	const response = await completeSimple(
+	const response = await completeInference(
+		requests,
 		model,
 		{
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
 		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			purpose: "refine",
+			purposeDetail: "auto-refine-review",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
@@ -1021,8 +1038,20 @@ export async function refineHarness(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<RefinementResult> {
-	const plan = await planRefinement(messages, state, history, model, apiKey, options, headers, signal, thinkingLevel);
+	const plan = await planRefinement(
+		messages,
+		state,
+		history,
+		model,
+		apiKey,
+		options,
+		headers,
+		signal,
+		thinkingLevel,
+		requests,
+	);
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

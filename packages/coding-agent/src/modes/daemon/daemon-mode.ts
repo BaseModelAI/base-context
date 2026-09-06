@@ -89,6 +89,7 @@ import {
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
+import { RlmJournalOwner } from "../../core/rlm-journal-owner.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
@@ -133,7 +134,7 @@ import {
 	workerRosterEntryFromSummary,
 } from "./agent-roster.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
-import { DaemonClient } from "./daemon-client.js";
+import { DaemonCapabilityUnavailableError, DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
@@ -211,8 +212,10 @@ import {
 	type LegacyRlmSubagentRegistryEntry,
 	type RlmLedgerDeleteReason,
 	type RlmLedgerEdge,
+	type RlmLedgerMutation,
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
+	rlmLedgerPath,
 	tombstoneSavedSessionDelete,
 	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
@@ -564,6 +567,8 @@ export class AgentDaemon {
 				recap: state.summaryState?.summary,
 			});
 		},
+		undefined,
+		(session) => session.requests.capture(),
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly rosterReporter: WorkerRosterReporterState = {
@@ -576,6 +581,9 @@ export class AgentDaemon {
 	private rosterFlushScheduled = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
+	private rlmJournalOwner?: RlmJournalOwner;
+	private rlmJournalAdmissionClosed = false;
+	private rlmJournalClosePromise?: Promise<void>;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
 	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
 
@@ -642,11 +650,10 @@ export class AgentDaemon {
 			});
 		}
 		this.installCrashHandlers();
-		await prepareDaemonSocketPath(this.socketPath);
-
-		this.server = createServer((socket) => this.handleConnection(socket));
-
+		await this.openRlmJournalOwner();
 		try {
+			await prepareDaemonSocketPath(this.socketPath);
+			this.server = createServer((socket) => this.handleConnection(socket));
 			await new Promise<void>((resolveListen, rejectListen) => {
 				const onError = (error: Error) => {
 					this.server?.off("listening", onListening);
@@ -672,7 +679,11 @@ export class AgentDaemon {
 				this.server?.listen(this.socketPath);
 			});
 		} catch (error) {
-			this.cleanupSocketPath();
+			try {
+				await this.closeRlmJournal();
+			} finally {
+				this.cleanupSocketPath();
+			}
 			throw error;
 		}
 
@@ -967,19 +978,79 @@ export class AgentDaemon {
 		return this.options.defaultSessionConfig.sessionDir ?? getSessionsDir(this.agentDir);
 	}
 
-	/**
-	 * Supervisor-owned spawn ledger for this daemon's sessions dir. Seeded
-	 * lazily from the existing per-parent registries via the same tolerant
-	 * reader the daemon already uses for passive hydration.
-	 */
+	private async openRlmJournalOwner(): Promise<void> {
+		if (this.options.worker) return;
+		const sessionsDir = this.rlmLedgerSessionsDir();
+		this.rlmJournalOwner = await RlmJournalOwner.open({
+			agentDir: this.agentDir,
+			sessionsDir,
+			journalPath: rlmLedgerPath(this.agentDir, sessionsDir),
+		});
+	}
+
+	/** Workers use the authenticated supervisor; standalone mode uses its external owner actor. */
+	private async sendRlmLedgerMutation(mutation: RlmLedgerMutation): Promise<void> {
+		const worker = this.options.worker;
+		if (!worker) {
+			if (!this.rlmJournalOwner) throw new Error("RLM journal owner is not running");
+			return this.rlmJournalOwner.mutate(mutation);
+		}
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
+		if (!supervisorSocketPath || !worker.workerInstanceId) {
+			throw new Error("RLM ledger mutation requires the current worker incarnation and its supervisor");
+		}
+		const client = new DaemonClient(supervisorSocketPath);
+		try {
+			await client.connect(1000);
+			await client.waitForHello(1000);
+			let response: DaemonResponse;
+			try {
+				response = await client.request(
+					{
+						type: "rlm_ledger_mutate",
+						workerToken: worker.authenticationToken,
+						workerInstanceId: worker.workerInstanceId,
+						mutation,
+					},
+					30_000,
+					{ recoverable: false },
+				);
+			} catch (error) {
+				if (error instanceof DaemonCapabilityUnavailableError) throw error;
+				throw new Error(
+					"RLM ledger mutation was not acknowledged; inspect owner state before retrying because the outcome may be unknown.",
+					{ cause: error },
+				);
+			}
+			if (!response.success) throw deserializeDaemonError(response);
+		} finally {
+			client.close();
+		}
+	}
+
 	private rlmSpawnLedger(): RlmSpawnLedger {
-		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
-			this.agentDir,
-			this.rlmLedgerSessionsDir(),
-			createRlmLedgerRegistrySeedSource(),
-			(message) => this.log(message),
-		);
+		if (!this.rlmSpawnLedgerInstance) {
+			this.rlmSpawnLedgerInstance = new RlmSpawnLedger(
+				this.agentDir,
+				this.rlmLedgerSessionsDir(),
+				createRlmLedgerRegistrySeedSource(),
+				(message) => this.log(message),
+				{ mode: "remote", mutate: (mutation) => this.sendRlmLedgerMutation(mutation) },
+			);
+			if (this.rlmJournalAdmissionClosed) this.rlmSpawnLedgerInstance.stopAdmission();
+		}
 		return this.rlmSpawnLedgerInstance;
+	}
+
+	private closeRlmJournal(): Promise<void> {
+		if (this.rlmJournalClosePromise) return this.rlmJournalClosePromise;
+		this.rlmJournalAdmissionClosed = true;
+		this.rlmSpawnLedgerInstance?.stopAdmission();
+		this.rlmJournalClosePromise = (async () => {
+			await this.rlmSpawnLedgerInstance?.flush();
+			await this.rlmJournalOwner?.close();
+		})();
+		return this.rlmJournalClosePromise;
 	}
 
 	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
@@ -987,8 +1058,12 @@ export class AgentDaemon {
 		if (sessionDir === undefined || resolve(sessionDir) === resolve(this.rlmLedgerSessionsDir())) {
 			return this.rlmSpawnLedger();
 		}
-		return new RlmSpawnLedger(this.agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
-			this.log(message),
+		return new RlmSpawnLedger(
+			this.agentDir,
+			sessionDir,
+			createRlmLedgerRegistrySeedSource(),
+			(message) => this.log(message),
+			{ mode: "reader" },
 		);
 	}
 
@@ -998,11 +1073,7 @@ export class AgentDaemon {
 		if (!childId || !child) return;
 		// Awaited: the supervisor answers sibling-name checks from the ledger,
 		// so the rename must be durable before the reservation is released.
-		await this.rlmSpawnLedger()
-			.appendRename({ childId, child, name })
-			.catch((error) => {
-				this.log(`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`);
-			});
+		await this.rlmSpawnLedger().appendRename({ childId, child, name });
 	}
 
 	/**
@@ -4083,13 +4154,7 @@ export class AgentDaemon {
 								true,
 							);
 							SessionManager.open(command.sessionPath).appendSessionInfo(name);
-							await this.rlmSpawnLedger()
-								.appendRenameByChildPath(command.sessionPath, name)
-								.catch((error) => {
-									this.log(
-										`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
-									);
-								});
+							await this.rlmSpawnLedger().appendRenameByChildPath(command.sessionPath, name);
 						},
 					);
 				}
@@ -7340,8 +7405,21 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
+		let shutdownFailure = false;
 		for (const state of [...this.sessions.values()]) {
-			await this.closeSession(state, closingReason);
+			try {
+				await this.closeSession(state, closingReason);
+			} catch (error) {
+				shutdownFailure = true;
+				this.log(`session shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		await this.mutationDrain.waitForDrain(0, new AbortController().signal, "Daemon shutdown drain cancelled");
+		try {
+			await this.closeRlmJournal();
+		} catch (error) {
+			shutdownFailure = true;
+			this.log(`RLM journal shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		for (const client of this.clients) {
 			client.detachInput();
@@ -7355,7 +7433,7 @@ export class AgentDaemon {
 			this.server.close(() => resolveClose());
 		});
 		this.cleanupSocketPath();
-		process.exit(exitCode);
+		process.exit(exitCode || (shutdownFailure ? 1 : 0));
 	}
 }
 

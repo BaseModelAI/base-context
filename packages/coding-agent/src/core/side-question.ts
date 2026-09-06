@@ -1,6 +1,6 @@
 import { Agent, type AgentMessage } from "@ponythewhite/base-context-agent";
 import type { AssistantMessage, UserMessage } from "@ponythewhite/base-context-ai";
-import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
+import { bindAuxiliaryInferenceStream } from "./inference-coordinator.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -90,8 +90,11 @@ export function startSideQuestion(
 		},
 		convertToLlm: parent.convertToLlm,
 		transformContext: parent.transformContext,
-		// Side questions are excluded from session history; their calls carry no provenance.
-		streamFn: unwrapSemanticEdgeStreamFn(parent.streamFn),
+		// The side transcript stays separate; inference still belongs to the subject session.
+		streamFn: bindAuxiliaryInferenceStream(parent.streamFn, {
+			purpose: "other",
+			purposeDetail: "side-question",
+		}),
 		getApiKey: parent.getApiKey,
 		onPayload: parent.onPayload,
 		onResponse: parent.onResponse,

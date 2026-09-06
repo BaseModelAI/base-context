@@ -1,4 +1,4 @@
-import { clearApiProviders, registerApiProvider } from "../api-registry.js";
+import { type ApiProvider, clearApiProviders, matchesApiProvider, registerApiProvider } from "../api-registry.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -10,6 +10,7 @@ import type {
 	StreamOptions,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { isNativeBedrockProvider } from "../utils/native-bedrock-provider.js";
 import type { BedrockOptions } from "./amazon-bedrock.js";
 import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
@@ -164,6 +165,17 @@ function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSim
 
 		loadModule()
 			.then((module) => {
+				if (options?.requireProviderAttempts) {
+					assertBuiltInAttemptSupport(model.api);
+					if (
+						model.api === "bedrock-converse-stream" &&
+						!isNativeBedrockProvider(module.stream, module.streamSimple)
+					) {
+						throw new Error(
+							"Native Bedrock inference requires the instrumented built-in provider module; custom module coverage is unestablished.",
+						);
+					}
+				}
 				const inner = module.stream(model, context, options);
 				forwardStream(outer, inner);
 			})
@@ -187,6 +199,17 @@ function createLazySimpleStream<
 
 		loadModule()
 			.then((module) => {
+				if (options?.requireProviderAttempts) {
+					assertBuiltInAttemptSupport(model.api);
+					if (
+						model.api === "bedrock-converse-stream" &&
+						!isNativeBedrockProvider(module.stream, module.streamSimple)
+					) {
+						throw new Error(
+							"Native Bedrock inference requires the instrumented built-in provider module; custom module coverage is unestablished.",
+						);
+					}
+				}
 				const inner = module.streamSimple(model, context, options);
 				forwardStream(outer, inner);
 			})
@@ -339,56 +362,81 @@ export const streamSimpleOpenAIResponses = createLazySimpleStream(loadOpenAIResp
 const streamBedrockLazy = createLazyStream(loadBedrockProviderModule);
 const streamSimpleBedrockLazy = createLazySimpleStream(loadBedrockProviderModule);
 
+const builtInImplementations = new Map<Api, { stream: object; streamSimple: object }>();
+
+function registerBuiltIn<TApi extends Api, TOptions extends StreamOptions>(
+	provider: ApiProvider<TApi, TOptions>,
+): void {
+	builtInImplementations.set(provider.api, { stream: provider.stream, streamSimple: provider.streamSimple });
+	registerApiProvider(provider);
+}
+
+/** Native admission trusts owned implementations, never an API name or registration claim. */
+export function assertBuiltInAttemptSupport(api: Api): void {
+	const known = builtInImplementations.get(api);
+	if (
+		!known ||
+		!matchesApiProvider(api, known.stream, known.streamSimple) ||
+		(api === "bedrock-converse-stream" &&
+			bedrockProviderModuleOverride &&
+			!isNativeBedrockProvider(bedrockProviderModuleOverride.stream, bedrockProviderModuleOverride.streamSimple))
+	) {
+		throw new Error(
+			"Native inference cannot admit this custom or proxy adapter: physical-attempt coverage is unestablished. Use an instrumented built-in API route such as openai-responses, openai-completions, or anthropic-messages; custom model IDs and base URLs are supported.",
+		);
+	}
+}
+
 export function registerBuiltInApiProviders(): void {
-	registerApiProvider({
+	registerBuiltIn({
 		api: "anthropic-messages",
 		stream: streamAnthropic,
 		streamSimple: streamSimpleAnthropic,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "openai-completions",
 		stream: streamOpenAICompletions,
 		streamSimple: streamSimpleOpenAICompletions,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "mistral-conversations",
 		stream: streamMistral,
 		streamSimple: streamSimpleMistral,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "openai-responses",
 		stream: streamOpenAIResponses,
 		streamSimple: streamSimpleOpenAIResponses,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "azure-openai-responses",
 		stream: streamAzureOpenAIResponses,
 		streamSimple: streamSimpleAzureOpenAIResponses,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "openai-codex-responses",
 		stream: streamOpenAICodexResponses,
 		streamSimple: streamSimpleOpenAICodexResponses,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "google-generative-ai",
 		stream: streamGoogle,
 		streamSimple: streamSimpleGoogle,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "google-vertex",
 		stream: streamGoogleVertex,
 		streamSimple: streamSimpleGoogleVertex,
 	});
 
-	registerApiProvider({
+	registerBuiltIn({
 		api: "bedrock-converse-stream",
 		stream: streamBedrockLazy,
 		streamSimple: streamSimpleBedrockLazy,

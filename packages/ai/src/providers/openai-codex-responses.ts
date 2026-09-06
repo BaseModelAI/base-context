@@ -40,7 +40,13 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	observeResponsesEvent,
+	processResponsesStream,
+} from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
@@ -134,6 +140,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			timestamp: Date.now(),
 		};
 
+		const attempts = new ProviderAttemptTracker(model, options);
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			if (!apiKey) {
@@ -146,6 +153,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
 			}
+			attempts.configure({
+				effort: body.reasoning?.effort,
+				serviceTier: body.service_tier,
+				previousResponseId: body.previous_response_id,
+			});
 			const websocketRequestId = options?.sessionId || createCodexRequestId();
 			const sseHeaders = buildSSEHeaders(model.headers, options?.headers, accountId, apiKey, options?.sessionId);
 			const websocketHeaders = buildWebSocketHeaders(
@@ -158,6 +170,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const bodyJson = JSON.stringify(body);
 			const transport = options?.transport || "auto";
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
+			let websocketFallback = websocketDisabledForSession;
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(options?.sessionId);
 			}
@@ -175,18 +188,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						() => {
 							websocketStarted = true;
 						},
+						attempts,
 						options,
 					);
 
 					if (options?.signal?.aborted) {
 						throw new Error("Request was aborted");
 					}
-					stream.push({
-						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
-						message: output,
-					});
-					stream.end();
 					return;
 				} catch (error) {
 					const aborted = options?.signal?.aborted;
@@ -207,6 +215,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					if (websocketStarted) {
 						throw error;
 					}
+					await attempts.settle("failed");
+					websocketFallback = true;
 					recordWebSocketSseFallback(options?.sessionId);
 				}
 			}
@@ -219,13 +229,25 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					throw new Error("Request was aborted");
 				}
 
+				await attempts.begin("http", {
+					kind:
+						attempt > 0
+							? "retry"
+							: websocketFallback
+								? "transport-fallback"
+								: body.previous_response_id
+									? "transport-continuation"
+									: "initial",
+				});
 				try {
+					attempts.sent();
 					response = await fetch(resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
 						body: bodyJson,
 						signal: options?.signal,
 					});
+					attempts.httpResponse(response.status, response.headers);
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -236,18 +258,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 
 					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
+					attempts.providerError(errorText);
+					if (!(attempt < MAX_RETRIES && isRetryableError(response.status, errorText))) {
+						const fakeResponse = new Response(errorText, {
+							status: response.status,
+							statusText: response.statusText,
+						});
+						const info = await parseErrorResponse(fakeResponse);
+						throw new Error(info.friendlyMessage || info.message);
 					}
-
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
@@ -255,13 +274,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
+					if (!(attempt < MAX_RETRIES && !lastError.message.includes("usage limit"))) {
+						throw lastError;
 					}
-					throw lastError;
 				}
+				await attempts.settle("failed");
+				const delayMs = BASE_DELAY_MS * 2 ** attempt;
+				await sleep(delayMs, options?.signal);
 			}
 
 			if (!response?.ok) {
@@ -273,14 +292,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			stream.push({ type: "start", partial: output });
-			await processStream(response, output, stream, model, options);
+			await processStream(response, output, stream, model, attempts, options);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-
-			stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
-			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -288,8 +304,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : String(error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+		} finally {
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -426,9 +442,11 @@ async function processStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
+	attempts: ProviderAttemptTracker,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
+	await processResponsesStream(mapCodexEvents(parseSSE(response), attempts), output, stream, model, {
+		attempts,
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -463,10 +481,17 @@ function isCodexNonTransportError(error: unknown): boolean {
 	return error instanceof CodexApiError || error instanceof CodexProtocolError;
 }
 
-async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): AsyncGenerator<ResponseStreamEvent> {
+async function* mapCodexEvents(
+	events: AsyncIterable<Record<string, unknown>>,
+	attempts: ProviderAttemptTracker,
+): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
+
+		if (type === "error" || type === "response.failed") {
+			observeResponsesEvent(event as unknown as ResponseStreamEvent, attempts);
+		}
 
 		if (type === "error") {
 			const code = (event as { code?: string }).code || "";
@@ -1115,6 +1140,7 @@ async function processWebSocketStream(
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
 	onStart: () => void,
+	attempts: ProviderAttemptTracker,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
@@ -1143,10 +1169,17 @@ async function processWebSocketStream(
 		}
 	}
 	try {
-		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		const requestJson = JSON.stringify({ type: "response.create", ...requestBody });
+		await attempts.begin("websocket", {
+			kind: requestBody.previous_response_id ? "transport-continuation" : "initial",
+			previousResponseId: requestBody.previous_response_id,
+		});
+		if (options?.signal?.aborted) throw new Error("Request was aborted");
+		attempts.sent();
+		socket.send(requestJson);
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, options?.signal)),
+				mapCodexEvents(parseWebSocket(socket, options?.signal), attempts),
 				output,
 				stream,
 				onStart,
@@ -1155,6 +1188,7 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
+				attempts,
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),

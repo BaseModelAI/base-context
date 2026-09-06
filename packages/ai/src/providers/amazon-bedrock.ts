@@ -15,12 +15,14 @@ import {
 	type ConverseStreamMetadataEvent,
 	ImageFormat,
 	type Message,
+	type ServiceInputTypes,
+	type ServiceOutputTypes,
 	type SystemContentBlock,
 	type ToolChoice,
 	type ToolConfiguration,
 	ToolResultStatus,
 } from "@aws-sdk/client-bedrock-runtime";
-import type { DocumentType } from "@smithy/types";
+import type { DeserializeMiddleware, DocumentType } from "@smithy/types";
 import { calculateCost, clampThinkingLevel } from "../models.js";
 import type {
 	Api,
@@ -42,6 +44,8 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { rememberNativeBedrockProvider } from "../utils/native-bedrock-provider.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { recordStreamFailure, streamFailureFromStopReason } from "../utils/stream-failure.js";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
@@ -91,6 +95,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -190,6 +195,39 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 		try {
 			const client = new BedrockRuntimeClient(config);
+			if (attempts.enabled) {
+				// Smithy invokes the resolved request handler once per SDK retry, including HTTP/2.
+				const handler = client.config.requestHandler;
+				const handle = handler.handle.bind(handler);
+				handler.handle = async (...args) => {
+					await attempts.begin("http");
+					attempts.sent();
+					try {
+						const result = await handle(...args);
+						attempts.httpResponse(result.response.statusCode, result.response.headers);
+						return result;
+					} catch (error) {
+						await attempts.settle(options.signal?.aborted ? "cancelled" : "failed");
+						throw error;
+					}
+				};
+				// Observe parsed service errors before settlement and the SDK's next retry.
+				const settleAttempt: DeserializeMiddleware<ServiceInputTypes, ServiceOutputTypes> =
+					(next) => async (args) => {
+						try {
+							return await next(args);
+						} catch (error) {
+							if (error instanceof BedrockRuntimeServiceException) attempts.providerError(error);
+							await attempts.settle(options.signal?.aborted ? "cancelled" : "failed");
+							throw error;
+						}
+					};
+				client.middlewareStack.addRelativeTo(settleAttempt, {
+					name: "providerAttemptSettlementMiddleware",
+					relation: "before",
+					toMiddleware: "deserializerMiddleware",
+				});
+			}
 			const cacheRetention = resolveCacheRetention(options.cacheRetention);
 			let commandInput = {
 				modelId: model.id,
@@ -208,10 +246,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			if (nextCommandInput !== undefined) {
 				commandInput = nextCommandInput as typeof commandInput;
 			}
+			const wireEffort = commandInput.additionalModelRequestFields?.output_config?.effort;
+			attempts.configure({ effort: typeof wireEffort === "string" ? wireEffort : undefined });
 			const command = new ConverseStreamCommand(commandInput);
 
 			const response = await client.send(command, { abortSignal: options.signal });
 			const requestId = response.$metadata.requestId;
+			attempts.response({ providerRequestId: requestId });
 			if (response.$metadata.httpStatusCode !== undefined) {
 				const responseHeaders: Record<string, string> = {};
 				if (response.$metadata.requestId) {
@@ -221,6 +262,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			}
 
 			for await (const item of response.stream!) {
+				attempts.event(
+					Boolean(
+						item.contentBlockDelta?.delta?.text ||
+							item.contentBlockDelta?.delta?.toolUse?.input ||
+							item.contentBlockDelta?.delta?.reasoningContent?.text ||
+							item.contentBlockStart?.start?.toolUse,
+					),
+				);
 				if (item.messageStart) {
 					if (item.messageStart.role !== ConversationRole.ASSISTANT) {
 						throw new Error("Unexpected assistant message start but got user message start instead");
@@ -233,21 +282,32 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				} else if (item.contentBlockStop) {
 					handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
 				} else if (item.messageStop) {
+					attempts.terminal();
 					output.stopReason = mapStopReason(item.messageStop.stopReason);
 					if (output.stopReason === "error") {
 						output.stopReasonRaw = item.messageStop.stopReason;
 					}
 				} else if (item.metadata) {
-					handleMetadata(item.metadata, model, output);
+					handleMetadata(item.metadata, model, output, attempts);
 				} else if (item.internalServerException) {
+					attempts.providerError(item.internalServerException);
+					attempts.terminal("failed");
 					throw item.internalServerException;
 				} else if (item.modelStreamErrorException) {
+					attempts.providerError(item.modelStreamErrorException);
+					attempts.terminal("failed");
 					throw item.modelStreamErrorException;
 				} else if (item.validationException) {
+					attempts.providerError(item.validationException);
+					attempts.terminal("failed");
 					throw item.validationException;
 				} else if (item.throttlingException) {
+					attempts.providerError(item.throttlingException);
+					attempts.terminal("failed");
 					throw item.throttlingException;
 				} else if (item.serviceUnavailableException) {
+					attempts.providerError(item.serviceUnavailableException);
+					attempts.terminal("failed");
 					throw item.serviceUnavailableException;
 				}
 			}
@@ -260,9 +320,12 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && error instanceof BedrockRuntimeServiceException) {
+				attempts.providerError(error);
+				attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as Block).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -271,8 +334,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatBedrockError(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -438,8 +500,30 @@ function handleMetadata(
 	event: ConverseStreamMetadataEvent,
 	model: Model<"bedrock-converse-stream">,
 	output: AssistantMessage,
+	attempts: ProviderAttemptTracker,
 ): void {
+	attempts.response({ effectiveServiceTier: event.serviceTier?.type });
 	if (event.usage) {
+		const usage = event.usage;
+		// Converse inputTokens excludes both cache categories. AWS prompt-caching docs define
+		// total input = inputTokens + cacheReadInputTokens + cacheWriteInputTokens.
+		attempts.usage(
+			usage,
+			{
+				input: usage.inputTokens,
+				inputTotal:
+					usage.inputTokens !== undefined &&
+					usage.cacheReadInputTokens !== undefined &&
+					usage.cacheWriteInputTokens !== undefined
+						? usage.inputTokens + usage.cacheReadInputTokens + usage.cacheWriteInputTokens
+						: undefined,
+				output: usage.outputTokens,
+				cacheRead: usage.cacheReadInputTokens,
+				cacheWrite: usage.cacheWriteInputTokens,
+				totalTokens: usage.totalTokens,
+			},
+			"complete",
+		);
 		output.usage.input = event.usage.inputTokens || 0;
 		output.usage.output = event.usage.outputTokens || 0;
 		output.usage.cacheRead = event.usage.cacheReadInputTokens || 0;
@@ -965,3 +1049,5 @@ function createImageBlock(mimeType: string, data: string) {
 
 	return { source: { bytes }, format };
 }
+
+rememberNativeBedrockProvider(streamBedrock, streamSimpleBedrock);

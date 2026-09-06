@@ -1,0 +1,3 @@
+- Added native tool intent and finalized execution evidence to session history without duplicate results, with assistant source order restored for parallel tools.
+- Added bounded framed family journals and explicit legacy migration that retains the original source.
+- Added a dedicated Node journal writer with SQLite-backed lifetime ownership and bounded mutation admission.

@@ -35,16 +35,10 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: [
-			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@earendil-works\/pi-ai\/mcp$/, replacement: aiSrcMcp },
-			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@earendil-works\/pi-tui$/, replacement: tuiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@mariozechner\/pi-ai\/mcp$/, replacement: aiSrcMcp },
-			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@mariozechner\/pi-tui$/, replacement: tuiSrcIndex },
-		],
-	},
+			{ find: /^@ponythewhite\/base-context-ai$/, replacement: aiSrcIndex },
+			{ find: /^@ponythewhite\/base-context-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@ponythewhite\/base-context-ai\/mcp$/, replacement: aiSrcMcp },
+			{ find: /^@ponythewhite\/base-context-agent$/, replacement: agentSrcIndex },
+			{ find: /^@ponythewhite\/base-context-tui$/, replacement: tuiSrcIndex },
+		],	},
 });

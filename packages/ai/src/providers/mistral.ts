@@ -1,4 +1,5 @@
 import { Mistral } from "@mistralai/mistralai";
+import { HTTPClient } from "@mistralai/mistralai/lib/http.js";
 import type {
 	ChatCompletionStreamRequest,
 	ChatCompletionStreamRequestMessage,
@@ -25,6 +26,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { recordStreamFailure, streamFailureFromStopReason } from "../utils/stream-failure.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -50,6 +52,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output = createOutput(model);
@@ -61,9 +64,12 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			}
 
 			// Intentionally per-request: avoids shared SDK mutable state across concurrent consumers.
+			const httpClient = attempts.enabled ? new HTTPClient() : undefined;
+			if (httpClient) httpClient.request = attempts.wrapHttp(httpClient.request.bind(httpClient));
 			const mistral = new Mistral({
 				apiKey,
 				serverURL: model.baseUrl,
+				...(httpClient ? { httpClient } : {}),
 			});
 
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
@@ -74,9 +80,10 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			if (nextPayload !== undefined) {
 				payload = nextPayload as ChatCompletionStreamRequest;
 			}
+			attempts.configure({ effort: payload.reasoningEffort ?? undefined });
 			const mistralStream = await mistral.chat.stream(payload, buildRequestOptions(model, options));
 			stream.push({ type: "start", partial: output });
-			await consumeChatStream(model, output, stream, mistralStream);
+			await consumeChatStream(model, output, stream, mistralStream, attempts);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -86,8 +93,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 				throw streamFailureFromStopReason(output.stopReasonRaw);
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
 			for (const block of output.content) {
 				// partialArgs is only a streaming scratch buffer; never persist it.
@@ -96,8 +102,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatMistralError(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -269,6 +274,7 @@ async function consumeChatStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	mistralStream: AsyncIterable<CompletionEvent>,
+	attempts: ProviderAttemptTracker,
 ): Promise<void> {
 	let currentBlock: TextContent | ThinkingContent | null = null;
 	const blocks = output.content;
@@ -298,11 +304,26 @@ async function consumeChatStream(
 
 	for await (const event of mistralStream) {
 		const chunk = event.data;
+		attempts.event();
+		attempts.response({ providerResponseId: chunk.id, responseModel: chunk.model });
 		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
 		// mirroring how OpenAI-style streaming exposes a stable response identifier per stream.
 		output.responseId ||= chunk.id;
 
 		if (chunk.usage) {
+			// Mistral exposes an unsplit prompt count, not measured cache read/write counts.
+			// Preserve the SDK-decoded vendor usage object without manufacturing uncached input.
+			attempts.usage(
+				chunk.usage,
+				{
+					inputTotal: chunk.usage.promptTokens,
+					output: chunk.usage.completionTokens,
+					totalTokens: chunk.usage.totalTokens,
+				},
+				chunk.choices.length === 0 || chunk.choices.some((choice) => !!choice.finishReason)
+					? "complete"
+					: "partial",
+			);
 			output.usage.input = chunk.usage.promptTokens || 0;
 			output.usage.output = chunk.usage.completionTokens || 0;
 			output.usage.cacheRead = 0;
@@ -315,6 +336,7 @@ async function consumeChatStream(
 		if (!choice) continue;
 
 		if (choice.finishReason) {
+			attempts.terminal(choice.finishReason === "error" ? "failed" : "completed");
 			output.stopReason = mapChatStopReason(choice.finishReason);
 			if (output.stopReason === "error") {
 				output.stopReasonRaw = choice.finishReason;
@@ -327,6 +349,7 @@ async function consumeChatStream(
 			for (const item of contentItems) {
 				if (typeof item === "string") {
 					const textDelta = sanitizeSurrogates(item);
+					if (textDelta) attempts.event(true);
 					if (!currentBlock || currentBlock.type !== "text") {
 						finishCurrentBlock(currentBlock);
 						currentBlock = { type: "text", text: "" };
@@ -350,6 +373,7 @@ async function consumeChatStream(
 						.join("");
 					const thinkingDelta = sanitizeSurrogates(deltaText);
 					if (!thinkingDelta) continue;
+					attempts.event(true);
 					if (!currentBlock || currentBlock.type !== "thinking") {
 						finishCurrentBlock(currentBlock);
 						currentBlock = { type: "thinking", thinking: "" };
@@ -368,6 +392,7 @@ async function consumeChatStream(
 
 				if (item.type === "text") {
 					const textDelta = sanitizeSurrogates(item.text);
+					if (textDelta) attempts.event(true);
 					if (!currentBlock || currentBlock.type !== "text") {
 						finishCurrentBlock(currentBlock);
 						currentBlock = { type: "text", text: "" };
@@ -387,6 +412,7 @@ async function consumeChatStream(
 
 		const toolCalls = delta.toolCalls || [];
 		for (const toolCall of toolCalls) {
+			attempts.event(true);
 			if (currentBlock) {
 				finishCurrentBlock(currentBlock);
 				currentBlock = null;

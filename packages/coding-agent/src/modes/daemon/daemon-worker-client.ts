@@ -2,17 +2,24 @@ import { createConnection, type Socket } from "node:net";
 import { serializeJsonLine } from "../rpc/jsonl.js";
 import { type PrivateFrame, PrivateFramedChannel } from "../session-worker/private-framing.js";
 import {
+	DaemonCapabilityUnavailableError,
 	type DaemonClientMessageListener,
 	type DaemonClientRequestOptions,
 	DaemonSocketClosedError,
 } from "./daemon-client.js";
-import type {
-	DaemonClosingReason,
-	DaemonCommand,
-	DaemonOutbound,
-	DaemonPeerTransportTicket,
-	DaemonResponse,
-	DaemonServerCapability,
+import {
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION,
+	DAEMON_PROTOCOL_NAME,
+	DAEMON_PROTOCOL_VERSION,
+	type DaemonClosingReason,
+	type DaemonCommand,
+	type DaemonOutbound,
+	type DaemonPeerTransportTicket,
+	type DaemonResponse,
+	type DaemonServerCapability,
+	getDaemonCommandCompatibilities,
+	meetsDaemonCommandCompatibility,
+	NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
 } from "./daemon-protocol.js";
 import {
 	type DaemonPeerCommand,
@@ -35,6 +42,16 @@ type DaemonHello = Extract<DaemonOutbound, { type: "daemon_hello" }>;
 
 export class DaemonWorkerAuthenticationError extends Error {}
 
+/** A live incompatible owner is not a dead worker or a retryable probe timeout. */
+export class DaemonWorkerCompatibilityError extends Error {
+	constructor(hello: DaemonHello) {
+		super(
+			`Daemon worker ${hello.protocol.name} protocol ${hello.protocol.version} cannot provide native inference ownership. Keep its live owner intact; update or stop it with its own runtime before recovery.`,
+		);
+		this.name = "DaemonWorkerCompatibilityError";
+	}
+}
+
 /** A probe (hello/response/connect) timed out; recovery treats the worker as live-but-slow, never dead. */
 export class DaemonWorkerProbeTimeoutError extends Error {}
 
@@ -54,6 +71,7 @@ export class DaemonWorkerClient {
 	>();
 	private requestId = 0;
 	private helloMessage?: DaemonHello;
+	private compatibilityError?: DaemonWorkerCompatibilityError;
 	private directPeer = false;
 	private directClosingReason?: DaemonClosingReason;
 	private readonly helloWaiters = new Set<{
@@ -115,6 +133,7 @@ export class DaemonWorkerClient {
 	}
 
 	waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
+		if (this.compatibilityError) return Promise.reject(this.compatibilityError);
 		if (this.helloMessage) {
 			return Promise.resolve(this.helloMessage);
 		}
@@ -149,17 +168,30 @@ export class DaemonWorkerClient {
 		return () => this.closeListeners.delete(listener);
 	}
 
-	request(
+	async request(
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
 		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
 		_options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
+		const hello = await this.waitForHello();
+		const missing = getDaemonCommandCompatibilities(command).find(
+			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
+		);
+		if (missing) throw new DaemonCapabilityUnavailableError(command.type, missing.capability);
 		return this.requestWire(command, timeoutMs);
 	}
 
-	requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
+	async requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
+		await this.requireNativeOwner();
 		return this.requestWire(command, timeoutMs);
+	}
+
+	private async requireNativeOwner(): Promise<void> {
+		const hello = await this.waitForHello();
+		if (!meetsDaemonCommandCompatibility(hello, NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY)) {
+			throw new DaemonWorkerCompatibilityError(hello);
+		}
 	}
 
 	async authenticateWorker(
@@ -175,6 +207,7 @@ export class DaemonWorkerClient {
 	}
 
 	async authenticatePeer(ticket: DaemonPeerTransportTicket, timeoutMs = 3000): Promise<void> {
+		await this.requireNativeOwner();
 		const response = await this.requestWire(
 			{
 				type: "peer_auth",
@@ -260,6 +293,16 @@ export class DaemonWorkerClient {
 			try {
 				const parsed = JSON.parse(frame.payload.toString("utf8")) as DaemonOutbound;
 				if (parsed.type === "daemon_hello") {
+					if (
+						parsed.protocol.name !== DAEMON_PROTOCOL_NAME ||
+						(parsed.protocol.version !== DAEMON_PROTOCOL_VERSION &&
+							parsed.protocol.version !== DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION)
+					) {
+						this.compatibilityError = new DaemonWorkerCompatibilityError(parsed);
+						this.rejectAll(this.compatibilityError);
+						this.close();
+						return;
+					}
 					this.helloMessage = parsed;
 					for (const waiter of [...this.helloWaiters]) {
 						clearTimeout(waiter.timeout);

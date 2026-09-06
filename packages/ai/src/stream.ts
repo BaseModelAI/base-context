@@ -1,6 +1,5 @@
-import "./providers/register-builtins.js";
-
 import { getApiProvider } from "./api-registry.js";
+import { assertBuiltInAttemptSupport } from "./providers/register-builtins.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -14,7 +13,11 @@ import type {
 
 export { getEnvApiKey } from "./env-api-keys.js";
 
-function resolveApiProvider(api: Api) {
+function resolveApiProvider(api: Api, options?: StreamOptions) {
+	if (options?.requireProviderAttempts) {
+		if (!options.attempts) throw new Error("Native inference requires physical-attempt admission and settlement");
+		assertBuiltInAttemptSupport(api);
+	}
 	const provider = getApiProvider(api);
 	if (!provider) {
 		throw new Error(`No API provider registered for api: ${api}`);
@@ -27,7 +30,7 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
-	const provider = resolveApiProvider(model.api);
+	const provider = resolveApiProvider(model.api, options as StreamOptions);
 	return provider.stream(model, context, options as StreamOptions);
 }
 
@@ -45,7 +48,7 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const provider = resolveApiProvider(model.api);
+	const provider = resolveApiProvider(model.api, options);
 	return provider.streamSimple(model, context, options);
 }
 

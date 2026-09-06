@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import type { Api, Model } from "@ponythewhite/base-context-ai";
-import { completeSimple } from "@ponythewhite/base-context-ai";
+import { completeInference, type InferenceCoordinator } from "../../core/inference-coordinator.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import type { AgentStatus, AgentTaskState } from "../../core/session-manager.js";
 import type { ActiveSessionState } from "./active-session-state.js";
@@ -145,11 +145,12 @@ export interface GenerateAgentStatusParams {
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
 	signal?: AbortSignal;
+	requests?: InferenceCoordinator;
 }
 
 /** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal } = params;
+	const { registry, messages, isWorking, signal, requests } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
@@ -162,7 +163,8 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 		return undefined;
 	}
 	try {
-		const response = await completeSimple(
+		const response = await completeInference(
+			requests,
 			model,
 			{
 				systemPrompt: AGENT_STATUS_SYSTEM_PROMPT,
@@ -175,6 +177,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 				],
 			},
 			{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+			{ purpose: "native-control", purposeDetail: "daemon-status" },
 		);
 		if (response.stopReason === "error") {
 			return undefined;
@@ -215,6 +218,7 @@ export class DaemonSessionSummarizer {
 		private readonly generate: (
 			params: GenerateAgentStatusParams,
 		) => Promise<AgentStatusResult | undefined> = generateAgentStatus,
+		private readonly getRequests?: (session: ActiveSessionState["runtime"]["session"]) => InferenceCoordinator,
 	) {}
 
 	start(): void {
@@ -318,6 +322,7 @@ export class DaemonSessionSummarizer {
 				messages: contextMessages,
 				isWorking,
 				signal: controller.signal,
+				requests: this.getRequests?.(session),
 			});
 			// A failed classification on an idle session would spin at "working"
 			// forever (the activity axis holds unjudged idle sessions there), so

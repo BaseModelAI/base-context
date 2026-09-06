@@ -5,6 +5,7 @@ import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION,
 	DAEMON_PROTOCOL_NAME,
 	DAEMON_PROTOCOL_VERSION,
 	type DaemonClosingReason,
@@ -20,6 +21,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
 	meetsDaemonCommandCompatibility,
+	NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
 
@@ -89,14 +91,16 @@ export class DaemonProtocolMismatchError extends Error {
 
 export class DaemonCapabilityUnavailableError extends Error {
 	constructor(
-		readonly command: DaemonCommand["type"],
+		readonly command: DaemonCommand["type"] | DaemonWorkerCommand["type"],
 		readonly capability: DaemonServerCapability | undefined,
 		readonly afterReconnect = false,
 	) {
 		super(
-			capability
-				? `The running Base Context daemon does not support ${capability}.`
-				: `The running Base Context daemon does not support ${command}.`,
+			capability === "native_inference_ownership"
+				? `The running Base Context daemon cannot provide native inference ownership for ${command}. Command not sent. Start an updated Base Context daemon; use the old runtime's own controls for legacy cleanup. Only passive inspection is available on this connection.`
+				: capability
+					? `The running Base Context daemon does not support ${capability}.`
+					: `The running Base Context daemon does not support ${command}.`,
 		);
 		this.name = "DaemonCapabilityUnavailableError";
 	}
@@ -362,14 +366,18 @@ export class DaemonClient {
 
 	async authenticateWorker(token: string, timeoutMs = 3000): Promise<void> {
 		const legacyAuthentication = { type: "worker_auth", token } as DaemonWorkerCommandBody;
-		const response = await this.requestWire(legacyAuthentication, timeoutMs);
+		const response = await this.requestWorker(legacyAuthentication, timeoutMs);
 		if (!response.success) {
 			throw new Error(response.error);
 		}
 	}
 
 	async requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30000): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs);
+		const hello = await this.waitForHello();
+		if (!meetsDaemonCommandCompatibility(hello, NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY)) {
+			throw new DaemonCapabilityUnavailableError(command.type, "native_inference_ownership");
+		}
+		return this.requestWire(command, timeoutMs, {}, undefined, [NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY]);
 	}
 
 	private async requestWire(
@@ -462,7 +470,11 @@ export class DaemonClient {
 		}
 
 		if (isDaemonHello(message)) {
-			if (message.protocol.name !== DAEMON_PROTOCOL_NAME || message.protocol.version !== DAEMON_PROTOCOL_VERSION) {
+			if (
+				message.protocol.name !== DAEMON_PROTOCOL_NAME ||
+				(message.protocol.version !== DAEMON_PROTOCOL_VERSION &&
+					message.protocol.version !== DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION)
+			) {
 				const error = new DaemonProtocolMismatchError(message.protocol.name, message.protocol.version);
 				this.handshakeError = error;
 				this.helloMessage = undefined;
@@ -495,6 +507,12 @@ export class DaemonClient {
 							),
 						);
 						continue;
+					}
+					// Passive reads may survive a Base9 -> Base8 inspection downgrade; keep command identity, negotiate the envelope.
+					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
+					if (wire.type === "command" && wire.protocol.version !== message.protocol.version) {
+						wire.protocol.version = message.protocol.version;
+						pending.wireData = serializeJsonLine(wire);
 					}
 					this.armPendingRequestTimeout(id, pending);
 					this.socket.write(pending.wireData);

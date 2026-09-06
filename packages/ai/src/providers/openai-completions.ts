@@ -34,6 +34,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
@@ -142,6 +143,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -172,12 +174,23 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
 			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
+			const wireEffort =
+				params.reasoning_effort ??
+				(params as typeof params & { reasoning?: { effort?: string } }).reasoning?.effort;
+			attempts.configure({
+				effort: typeof wireEffort === "string" ? wireEffort : undefined,
+				serviceTier: params.service_tier,
+			});
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -298,6 +311,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				attempts.event();
+				attempts.response({
+					providerResponseId: chunk.id,
+					responseModel: chunk.model,
+					effectiveServiceTier: chunk.service_tier,
+				});
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -306,7 +325,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.responseModel ||= chunk.model;
 				}
 				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model, cacheWriteCost);
+					output.usage = parseChunkUsage(
+						chunk.usage,
+						model,
+						cacheWriteCost,
+						attempts,
+						chunk.choices?.length === 0 || chunk.choices?.some((choice) => !!choice.finish_reason),
+					);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -315,10 +340,17 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model, cacheWriteCost);
+					output.usage = parseChunkUsage(
+						(choice as any).usage,
+						model,
+						cacheWriteCost,
+						attempts,
+						!!choice.finish_reason,
+					);
 				}
 
 				if (choice.finish_reason) {
+					attempts.terminal(String(choice.finish_reason) === "network_error" ? "failed" : "completed");
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -332,6 +364,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						choice.delta.content !== undefined &&
 						choice.delta.content.length > 0
 					) {
+						attempts.event(true);
 						const block = ensureTextBlock();
 						block.text += choice.delta.content;
 						stream.push({
@@ -360,6 +393,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (foundReasoningField) {
 						const delta = deltaFields[foundReasoningField];
 						if (typeof delta === "string" && delta.length > 0) {
+							attempts.event(true);
 							const block = ensureThinkingBlock(foundReasoningField);
 							block.thinking += delta;
 							stream.push({
@@ -373,6 +407,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls) {
+							attempts.event(true);
 							const block = ensureToolCallBlock(toolCall);
 							if (!block.id && toolCall.id) {
 								block.id = toolCall.id;
@@ -462,9 +497,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && typeof OpenAI.APIError === "function" && error instanceof OpenAI.APIError) {
+				attempts.providerError(error.error);
+				if (error.error) attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// Streaming scratch buffers are only used during parsing; never persist them.
@@ -476,8 +514,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			// Some providers via OpenRouter give additional information in this field.
 			const rawMetadata = (error as any)?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -1090,6 +1127,8 @@ function parseChunkUsage(
 	},
 	model: Model<"openai-completions">,
 	cacheWriteCost?: number,
+	attempts?: ProviderAttemptTracker,
+	complete = false,
 ): AssistantMessage["usage"] {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
@@ -1115,6 +1154,31 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
+	const observedCached = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens;
+	attempts?.usage(
+		rawUsage,
+		{
+			// OpenAI-compatible cached_tokens may include writes. Preserve direct derivations, without the legacy UI clamps.
+			input:
+				rawUsage.prompt_tokens !== undefined && observedCached !== undefined
+					? rawUsage.prompt_tokens - observedCached
+					: undefined,
+			inputTotal: rawUsage.prompt_tokens,
+			output: rawUsage.completion_tokens,
+			cacheRead:
+				observedCached !== undefined
+					? rawUsage.prompt_tokens_details?.cache_write_tokens !== undefined
+						? observedCached - rawUsage.prompt_tokens_details.cache_write_tokens
+						: observedCached
+					: undefined,
+			cacheWrite: rawUsage.prompt_tokens_details?.cache_write_tokens,
+			totalTokens:
+				rawUsage.prompt_tokens !== undefined && rawUsage.completion_tokens !== undefined
+					? rawUsage.prompt_tokens + rawUsage.completion_tokens
+					: undefined,
+		},
+		complete ? "complete" : "partial",
+	);
 	return usage;
 }
 

@@ -98,6 +98,10 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		return this._session;
 	}
 
+	get requests() {
+		return this._session.requests;
+	}
+
 	get cwd(): string {
 		return this._services.cwd;
 	}

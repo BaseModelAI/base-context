@@ -7,13 +7,14 @@
 
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { AssistantMessage, Model, Usage } from "@ponythewhite/base-context-ai";
-import { completeSimple } from "@ponythewhite/base-context-ai";
+import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
 import { addAssistantUsage, emptyUsage } from "../usage.js";
 import {
@@ -523,6 +524,7 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
@@ -549,10 +551,17 @@ export async function generateSummary(
 			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
 			: { maxTokens, signal, apiKey, headers };
 
-	const response = await completeSimple(
+	const response = await completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		completionOptions,
+		{
+			purpose: "summary",
+			purposeDetail: "compaction",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 
 	if (response.stopReason === "error") {
@@ -692,6 +701,7 @@ export async function compact(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
+	requests?: InferenceCoordinator,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -721,6 +731,7 @@ export async function compact(
 							customInstructions,
 							previousSummary,
 							thinkingLevel,
+							requests,
 						),
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
@@ -733,6 +744,7 @@ export async function compact(
 					callHeaders,
 					signal,
 					thinkingLevel,
+					requests,
 				),
 			),
 		]);
@@ -750,6 +762,7 @@ export async function compact(
 				customInstructions,
 				previousSummary,
 				thinkingLevel,
+				requests,
 			),
 		);
 		slices.push(result);
@@ -788,6 +801,7 @@ async function generateTurnPrefixSummary(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
@@ -801,12 +815,19 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await completeSimple(
+	const response = await completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		model.reasoning && thinkingLevel && thinkingLevel !== "off"
 			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
 			: { maxTokens, signal, apiKey, headers },
+		{
+			purpose: "summary",
+			purposeDetail: "compaction-turn-prefix",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 
 	if (response.stopReason === "error") {

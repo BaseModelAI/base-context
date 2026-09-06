@@ -4,6 +4,7 @@ import {
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_REVISION,
+	type DaemonCommand,
 } from "../src/modes/daemon/daemon-protocol.js";
 
 const netMock = vi.hoisted(() => {
@@ -94,7 +95,7 @@ function emitHello(
 	socket: (typeof netMock.sockets)[number],
 	version = DAEMON_PROTOCOL_VERSION,
 	serverCapabilities: string[] = ["session_input_admission"],
-	schemaRevision?: number,
+	schemaRevision = DAEMON_SCHEMA_REVISION,
 ): void {
 	socket.emit(
 		"data",
@@ -105,7 +106,10 @@ function emitHello(
 			schemaRevision,
 			appVersion: "9.9.9",
 			clientId: "client-1",
-			serverCapabilities,
+			serverCapabilities:
+				version === DAEMON_PROTOCOL_VERSION
+					? [...serverCapabilities, "native_inference_ownership"]
+					: serverCapabilities,
 		})}\n`,
 	);
 }
@@ -236,7 +240,7 @@ describe("DaemonClient", () => {
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["delete_rlm_subagent"], DAEMON_SCHEMA_REVISION - 1);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["delete_rlm_subagent"], DAEMON_SCHEMA_REVISION);
 
 		const request = client.request({
 			type: "delete_rlm_subagent",
@@ -263,13 +267,13 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
-	it("rejects an old daemon before requesting session state", async () => {
+	it("rejects a pre-Base protocol before requesting session state", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, DAEMON_PROTOCOL_VERSION - 1);
+		emitHello(socket, 7);
 
 		await expect(client.request({ type: "get_state", activeSessionId: "active-1" })).rejects.toThrow(
 			"incompatible daemon",
@@ -303,7 +307,7 @@ describe("DaemonClient", () => {
 
 		await expect(
 			client.request({ type: "prompt", activeSessionId: "active-1", message: "hello", admissionId: "a-1" }),
-		).rejects.toThrow("does not support prompt_admission_cancellation");
+		).rejects.toThrow("cannot provide native inference ownership");
 		expect(socket.writes).toEqual([]);
 		client.close();
 	});
@@ -319,7 +323,7 @@ describe("DaemonClient", () => {
 			socket,
 			compatibility.minProtocol,
 			["session_input_admission", "prompt_admission_cancellation"],
-			compatibility.minSchemaRevision + 1,
+			Math.max(compatibility.minSchemaRevision + 1, DAEMON_SCHEMA_REVISION),
 		);
 
 		const request = client.request({
@@ -795,7 +799,8 @@ describe("DaemonClient", () => {
 				socketPath: "/tmp/prime-agent.sock",
 				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
-				serverCapabilities: ["session_input_admission"],
+				schemaRevision: DAEMON_SCHEMA_REVISION,
+				serverCapabilities: ["session_input_admission", "native_inference_ownership"],
 			})}\n`,
 		);
 		expect(secondSocket.writes).toEqual([firstWireData]);
@@ -927,6 +932,84 @@ describe("DaemonClient", () => {
 			`${JSON.stringify({ id: firstEnvelope.id, type: "response", command: "list", success: true })}\n`,
 		);
 		await expect(response).resolves.toMatchObject({ id: firstEnvelope.id, success: true });
+		client.close();
+	});
+	it("keeps passive Base8 inspection but never sends work, hydration, or graceful cleanup", async () => {
+		const client = new DaemonClient("/tmp/base-legacy.sock");
+		const connected = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connected;
+		emitHello(socket, 8, ["session_input_admission", "client_owned_sessions", "agent_roster"], 27);
+		const refused: DaemonCommand[] = [
+			{ type: "create" },
+			{ type: "attach", activeSessionId: "active" },
+			{ type: "prompt", activeSessionId: "active", message: "hello" },
+			{ type: "start_side_question", activeSessionId: "active", sideQuestionId: "s", question: "hello" },
+			{ type: "compact", activeSessionId: "active" },
+			{ type: "refine", activeSessionId: "active" },
+			{ type: "resume_queue", activeSessionId: "active" },
+			{ type: "wait_for_idle", activeSessionId: "active" },
+			{ type: "wait_for_headless_completion", activeSessionId: "active" },
+			{ type: "send_message", targetActiveSessionId: "active", message: "hello" },
+			{ type: "cron_add", activeSessionId: "active", schedule: "* * * * *", prompt: "hello" },
+			{ type: "detach", activeSessionId: "active" },
+			{ type: "kill", activeSessionId: "active" },
+			{ type: "complete_owned_session", activeSessionId: "active" },
+			{ type: "shutdown", force: true },
+			{ type: "list_saved_sessions", activeSessionId: "active", scope: "current" },
+		];
+		for (const command of refused) await expect(client.request(command)).rejects.toThrow("Command not sent");
+		await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toThrow("Command not sent");
+		expect(socket.writes).toEqual([]);
+		for (const command of [
+			{ type: "list" },
+			{ type: "get_state", activeSessionId: "active" },
+			{ type: "get_messages", activeSessionId: "active" },
+			{ type: "list_saved_sessions", cwd: "/tmp", scope: "current" },
+		] satisfies DaemonCommand[]) {
+			const response = client.request(command);
+			const envelope = JSON.parse(socket.writes.at(-1)!);
+			expect(envelope.protocol.version).toBe(8);
+			socket.emit(
+				"data",
+				`${JSON.stringify({ id: envelope.id, type: "response", command: command.type, success: true })}\n`,
+			);
+			await expect(response).resolves.toMatchObject({ success: true });
+		}
+		client.close();
+	});
+
+	it("does not replay native work after a protocol9 to Base8 downgrade", async () => {
+		const client = new DaemonClient("/tmp/base-reconnect.sock");
+		client.enableRequestRecovery();
+		const connected = client.connect();
+		const first = netMock.sockets[0]!;
+		first.emit("connect");
+		await connected;
+		emitHello(first);
+		const work = client.request({ type: "prompt", activeSessionId: "active", message: "hello" });
+		const rejected = expect(work).rejects.toMatchObject({
+			capability: "native_inference_ownership",
+			afterReconnect: true,
+		});
+		const read = client.request({ type: "list" });
+		const readWire = first.writes[1]!;
+		first.emit("close");
+		const reconnected = client.connect();
+		const second = netMock.sockets[1]!;
+		second.emit("connect");
+		await reconnected;
+		emitHello(second, 8, ["session_input_admission"], 27);
+		await rejected;
+		expect(second.writes).toHaveLength(1);
+		expect(JSON.parse(second.writes[0]!)).toEqual({
+			...JSON.parse(readWire),
+			protocol: { name: "base-context.daemon", version: 8 },
+		});
+		const { id } = JSON.parse(readWire);
+		second.emit("data", `${JSON.stringify({ id, type: "response", command: "list", success: true })}\n`);
+		await read;
 		client.close();
 	});
 });

@@ -161,6 +161,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import { InferenceCoordinator, type SessionRuntimeServices } from "./inference-coordinator.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -1042,10 +1043,10 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	const parentContextTokens =
 		parentUsage.totalTokens ||
 		parentUsage.input + parentUsage.output + parentUsage.cacheRead + parentUsage.cacheWrite;
-	// Recursive children are launched from an assistant tool call, so the parent assistant
-	// message carries their billable usage for session-level cost totals.
+	// Legacy display projection only. Canonical accounting uses the child's unique
+	// physical attempt IDs; this aggregate is never another charge.
 	addAssistantUsage(parentUsage, childUsage);
-	// Child work affects session-level billable totals, not the parent's model-facing context size.
+	// Keep the legacy display total from changing the parent's model-facing context size.
 	parentUsage.totalTokens = parentContextTokens;
 }
 
@@ -1053,6 +1054,8 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
+	readonly requests: InferenceCoordinator;
+	readonly runtimeServices: SessionRuntimeServices;
 	private _serviceTierPreference: ServiceTier;
 
 	private _scopedModels: Array<{
@@ -1249,6 +1252,14 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this.agent.bindToolExecutionOwner({
+			onToolInvocationStarting: async (invocation) => {
+				await this.sessionManager.appendToolInvocation(invocation);
+			},
+			onToolExchangeFinalized: async (exchange) => {
+				await this.sessionManager.appendToolExchange(exchange);
+			},
+		});
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
@@ -1296,7 +1307,21 @@ export class AgentSession {
 			parentSessionId: config.semanticParentSessionId,
 			spawnedByRequestId: config.semanticSpawnedByRequestId,
 		});
-		this.agent.streamFn = wrapStreamFnWithSemanticEdges(this.agent.streamFn, this._semanticEdges);
+		this.requests = new InferenceCoordinator(
+			() => this.sessionManager.bindRequestSink(),
+			() => ({ parentSessionId: config.semanticParentSessionId }),
+		);
+		this.runtimeServices = { requests: this.requests };
+		this.requests.onActivityChange(() => this._notifySessionInputCheckpointChange());
+		this.agent.bindStreamOwner((streamFn) =>
+			wrapStreamFnWithSemanticEdges(
+				this.requests.bindStream(streamFn, {
+					purpose: this._rlmDepth > 0 ? "child" : "main",
+					parentOperationId: config.semanticSpawnedByRequestId,
+				}),
+				this._semanticEdges,
+			),
+		);
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
@@ -3764,6 +3789,7 @@ export class AgentSession {
 
 	private _resolveRetry(): void {
 		this._semanticEdges.clearTurnRetry();
+		this.requests.clearTurnRetry();
 		if (this._retryResolve) {
 			this._retryResolve();
 			this._retryResolve = undefined;
@@ -3927,6 +3953,7 @@ export class AgentSession {
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
 		if (this._disposed) {
+			await this.requests.waitForIdle();
 			return this._disposeCallbacksPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
@@ -3940,6 +3967,7 @@ export class AgentSession {
 			// agent_end completes instead of being aborted by dispose().
 			await this._drainPendingRefinementForDisposal();
 			if (this._disposed) {
+				await this.requests.waitForIdle();
 				return this._disposeCallbacksPromise;
 			}
 			this._disposing = true;
@@ -4082,6 +4110,11 @@ export class AgentSession {
 	}
 
 	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
+		this.requests.stopAdmission();
+		// Stop new foreground work without waiting on the action/event queue owned by teardown.
+		this.requestAbort();
+		// A failed aggregate can leave a successful sibling request still settling.
+		await this.requests.waitForIdle();
 		// Flush kernels/traces for both still-running and retained children; the sync
 		// dispose() below only tears them down synchronously.
 		for (const run of [...this._activeRlmChildRuns.values()]) {
@@ -4145,6 +4178,7 @@ export class AgentSession {
 		if (this._disposed) {
 			return;
 		}
+		this.requests.stopAdmission();
 		this._disposed = true;
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -6551,6 +6585,7 @@ export class AgentSession {
 
 	get isSessionActive(): boolean {
 		return (
+			this.requests.hasPending ||
 			this.isStreaming ||
 			this.isCompacting ||
 			this.isRetrying ||
@@ -6947,11 +6982,15 @@ export class AgentSession {
 			await this.agent.waitForIdle();
 			const agentEventQueue = this._agentEventQueue;
 			await agentEventQueue;
+			const requestSettlement = this.requests.waitForIdle();
+			await (settlement ? Promise.race([requestSettlement, settlement.promise]) : requestSettlement);
+			if (settlement && this._postCompactionContinuationSettlement !== settlement) return;
 			if (
 				pump === this._sessionInputPump &&
 				agentEventQueue === this._agentEventQueue &&
 				!this._sessionInputPumpRequested &&
 				!this.agent.state.isStreaming &&
+				!this.requests.hasPending &&
 				this.unfinishedActionCount === 0
 			) {
 				return;
@@ -7628,6 +7667,7 @@ export class AgentSession {
 					signal,
 					this.thinkingLevel,
 					summaryCall,
+					this.requests,
 				));
 			}
 
@@ -8147,6 +8187,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			this.requests,
 		);
 	}
 
@@ -8386,6 +8427,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			this.requests,
 		);
 		if (this._disposed || signal.aborted) {
 			throw new Error("Refinement cancelled because the session was disposed.");
@@ -10337,6 +10379,7 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
+		if (this.requests.hasPending) return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
@@ -11169,6 +11212,7 @@ export class AgentSession {
 		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
 		if (!this._extensionRunner.hasHandlers("before_provider_request")) {
 			this._semanticEdges.prepareTurnRetry();
+			this.requests.prepareTurnRetry();
 		}
 
 		this._emit({
@@ -11732,6 +11776,7 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
+					requests: this.requests,
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

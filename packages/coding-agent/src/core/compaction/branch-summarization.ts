@@ -7,13 +7,14 @@
 
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import type { Model, Usage } from "@ponythewhite/base-context-ai";
-import { completeSimple } from "@ponythewhite/base-context-ai";
+import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
 import { estimateTokens } from "./compaction.js";
 import {
@@ -65,6 +66,7 @@ export interface GenerateBranchSummaryOptions {
 	apiKey: string;
 	/** Request headers for the model */
 	headers?: Record<string, string>;
+	requests?: InferenceCoordinator;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -250,7 +252,16 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, headers, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
+	const {
+		model,
+		apiKey,
+		headers,
+		requests,
+		signal,
+		customInstructions,
+		replaceInstructions,
+		reserveTokens = 16384,
+	} = options;
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
 
@@ -280,10 +291,17 @@ export async function generateBranchSummary(
 			timestamp: Date.now(),
 		},
 	];
-	const response = await completeSimple(
+	const response = await completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		{ apiKey, headers, signal, maxTokens: 2048 },
+		{
+			purpose: "summary",
+			purposeDetail: "branch",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 	if (response.stopReason === "aborted") {
 		return { aborted: true };

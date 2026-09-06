@@ -140,6 +140,13 @@ export {
 } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
+export {
+	InferenceCoordinator,
+	type InferenceRequestOptions,
+	type InferenceRun,
+	type InferenceSettlement,
+	type SessionRuntimeServices,
+} from "./core/inference-coordinator.js";
 export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
 export type {
@@ -157,6 +164,15 @@ export type {
 	RefinementProposal,
 	RefinementResult,
 } from "./core/refinement/index.js";
+export type {
+	BoundRequestSink,
+	NativeRequestEvent,
+	NativeRequestMetadata,
+	RequestOwnerRef,
+	RequestPurpose,
+	ResolvedModelContract,
+	SourceSnapshotRef,
+} from "./core/request-events.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
 // SDK for programmatic usage

@@ -26,6 +26,7 @@ import type {
 	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
+	ToolInvocation,
 } from "./types.js";
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
@@ -105,6 +106,7 @@ export interface AgentOptions {
 	onResponse?: SimpleStreamOptions["onResponse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
 	onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 	shouldStopBeforeTurn?: () => boolean;
@@ -196,7 +198,24 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	public streamFn: StreamFn;
+	private configuredStreamFn!: StreamFn;
+	private effectiveStreamFn!: StreamFn;
+	private streamOwner?: (streamFn: StreamFn) => StreamFn;
+
+	get streamFn(): StreamFn {
+		return this.effectiveStreamFn;
+	}
+	set streamFn(streamFn: StreamFn) {
+		this.configuredStreamFn = streamFn;
+		this.effectiveStreamFn = this.streamOwner ? this.streamOwner(streamFn) : streamFn;
+	}
+
+	/** A native owner remains in the path when an embedding changes its configured stream. */
+	bindStreamOwner(owner: (streamFn: StreamFn) => StreamFn): void {
+		if (this.streamOwner) throw new Error("Agent stream owner is already bound");
+		this.streamOwner = owner;
+		this.effectiveStreamFn = owner(this.configuredStreamFn);
+	}
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -208,7 +227,21 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
 	public onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
+	private toolExecutionOwner?: Required<Pick<AgentOptions, "onToolInvocationStarting" | "onToolExchangeFinalized">>;
+
+	/** Native persistence runs before replaceable caller hooks. */
+	bindToolExecutionOwner(
+		owner: Required<Pick<AgentOptions, "onToolInvocationStarting" | "onToolExchangeFinalized">>,
+	): void {
+		if (this.toolExecutionOwner) throw new Error("Agent tool execution owner is already bound");
+		this.toolExecutionOwner = {
+			onToolInvocationStarting: owner.onToolInvocationStarting,
+			onToolExchangeFinalized: owner.onToolExchangeFinalized,
+		};
+	}
+
 	public shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 	public shouldStopBeforeTurn?: () => boolean;
 	public getContinuationMessages?: (
@@ -232,6 +265,7 @@ export class Agent {
 		this.onResponse = options.onResponse;
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
+		this.onToolInvocationStarting = options.onToolInvocationStarting;
 		this.onToolExchangeFinalized = options.onToolExchangeFinalized;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
 		this.shouldStopBeforeTurn = options.shouldStopBeforeTurn;
@@ -465,6 +499,8 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		const onToolInvocationStarting = this.onToolInvocationStarting;
+		const onToolExchangeFinalized = this.onToolExchangeFinalized;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,
@@ -478,7 +514,14 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			onToolExchangeFinalized: this.onToolExchangeFinalized,
+			onToolInvocationStarting: async (invocation, signal) => {
+				await this.toolExecutionOwner?.onToolInvocationStarting(invocation, signal);
+				await onToolInvocationStarting?.(invocation, signal);
+			},
+			onToolExchangeFinalized: async (exchange, signal) => {
+				await this.toolExecutionOwner?.onToolExchangeFinalized(exchange, signal);
+				await onToolExchangeFinalized?.(exchange, signal);
+			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
 			convertToLlm: this.convertToLlm,

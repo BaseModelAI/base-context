@@ -22,6 +22,7 @@ import type {
 	ToolCall,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	formatStreamFailureMessage,
@@ -33,9 +34,11 @@ import {
 	convertMessages,
 	convertTools,
 	getGoogleThinkingBudget,
+	instrumentGoogleAttempts,
 	isThinkingPart,
 	mapStopReason,
 	mapToolChoice,
+	observeGoogleUsage,
 	retainThoughtSignature,
 } from "./google-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -70,6 +73,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 	options?: GoogleVertexOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -95,11 +99,13 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			const client = apiKey
 				? createClientWithApiKey(model, apiKey, options?.headers)
 				: createClient(model, resolveProject(options), resolveLocation(options), options?.headers);
+			instrumentGoogleAttempts(client, attempts);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
+			attempts.configure({ effort: params.config?.thinkingConfig?.thinkingLevel });
 			const googleStream = await client.models.generateContentStream(params);
 
 			stream.push({ type: "start", partial: output });
@@ -107,6 +113,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			for await (const chunk of googleStream) {
+				attempts.event();
+				attempts.response({ providerResponseId: chunk.responseId, responseModel: chunk.modelVersion });
 				// Vertex uses the same @google/genai GenerateContentResponse type as Gemini.
 				// responseId is documented there as an output-only identifier for each response.
 				output.responseId ||= chunk.responseId;
@@ -114,6 +122,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				if (candidate?.content?.parts) {
 					for (const part of candidate.content.parts) {
 						if (part.text !== undefined) {
+							if (part.text.length > 0) attempts.event(true);
 							const isThinking = isThinkingPart(part);
 							if (
 								!currentBlock ||
@@ -175,6 +184,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 						}
 
 						if (part.functionCall) {
+							attempts.event(true);
 							if (currentBlock) {
 								if (currentBlock.type === "text") {
 									stream.push({
@@ -223,6 +233,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				}
 
 				if (candidate?.finishReason) {
+					attempts.terminal();
 					output.stopReason = mapStopReason(candidate.finishReason);
 					if (output.content.some((b) => b.type === "toolCall")) {
 						output.stopReason = "toolUse";
@@ -233,6 +244,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				}
 
 				if (chunk.usageMetadata) {
+					observeGoogleUsage(attempts, chunk.usageMetadata, !!candidate?.finishReason);
 					output.usage = {
 						input:
 							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
@@ -279,9 +291,12 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				throw streamFailureFromStopReason(output.stopReasonRaw);
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (error instanceof Error && error.name === "ApiError" && "status" in error) {
+				attempts.providerError(error.message);
+				attempts.terminal("failed");
+			}
 			// Remove internal index property used during streaming
 			for (const block of output.content) {
 				if ("index" in block) {
@@ -291,8 +306,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 

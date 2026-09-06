@@ -3,12 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+	closeOpenAICodexWebSocketSessions,
 	getOpenAICodexWebSocketDebugStats,
 	resetOpenAICodexWebSocketDebugStats,
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.js";
-import type { Context, Model } from "../src/types.js";
+import type { Context, Model, ProviderAttemptObserver, ProviderAttemptReceipt } from "../src/types.js";
 
 const originalFetch = global.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -22,6 +23,7 @@ afterEach(() => {
 	} else {
 		process.env.BASE_CONTEXT_HOME = originalAgentDir;
 	}
+	closeOpenAICodexWebSocketSessions();
 	resetOpenAICodexWebSocketDebugStats();
 	vi.restoreAllMocks();
 });
@@ -862,6 +864,20 @@ describe("openai-codex streaming", () => {
 	it("sends only response input deltas in websocket-cached mode", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
+		const receipts: ProviderAttemptReceipt[] = [];
+		let admitted = 0;
+		const attempts: ProviderAttemptObserver = {
+			async admit() {
+				await Promise.resolve();
+				return `attempt_${++admitted}`;
+			},
+			async settle(receipt) {
+				receipts.push(receipt);
+			},
+		};
+		global.fetch = vi.fn(async () => {
+			throw new Error("unexpected fetch");
+		}) as typeof fetch;
 		const responses = [
 			{ responseId: "resp_1", messageId: "msg_1", text: "Hello" },
 			{ responseId: "resp_2", messageId: "msg_2", text: "Done" },
@@ -890,6 +906,8 @@ describe("openai-codex streaming", () => {
 			}
 
 			send(data: string): void {
+				expect(admitted).toBe(sentBodies.length + 1);
+				expect(receipts).toHaveLength(sentBodies.length);
 				sentBodies.push(JSON.parse(data));
 				const response = responses.shift();
 				if (!response) throw new Error("unexpected websocket request");
@@ -921,12 +939,14 @@ describe("openai-codex streaming", () => {
 						type: "response.completed",
 						response: {
 							id: response.responseId,
+							model: "gpt-5.1-codex-snapshot",
 							status: "completed",
 							usage: {
 								input_tokens: 5,
 								output_tokens: 3,
 								total_tokens: 8,
-								input_tokens_details: { cached_tokens: 0 },
+								input_tokens_details: { cached_tokens: 2 },
+								output_tokens_details: { reasoning_tokens: 1 },
 							},
 						},
 					},
@@ -969,6 +989,9 @@ describe("openai-codex streaming", () => {
 		};
 
 		const first = await streamOpenAICodexResponses(model, firstContext, {
+			attempts,
+			reasoningEffort: "high",
+			serviceTier: "priority",
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
@@ -979,12 +1002,53 @@ describe("openai-codex streaming", () => {
 			messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
 		};
 		await streamOpenAICodexResponses(model, secondContext, {
+			attempts,
+			reasoningEffort: "high",
+			serviceTier: "priority",
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
 		}).result();
 
 		expect(sentBodies).toHaveLength(2);
+		expect(global.fetch).not.toHaveBeenCalled();
+		expect(receipts).toHaveLength(2);
+		expect(receipts[0]).toMatchObject({
+			attemptId: "attempt_1",
+			ordinal: 1,
+			transport: "websocket",
+			kind: "initial",
+			providerResponseId: "resp_1",
+			responseModel: "gpt-5.1-codex-snapshot",
+			effort: "high",
+			serviceTier: "priority",
+			outcome: "completed",
+			usageCompleteness: "complete",
+			usage: { input: 3, inputTotal: 5, output: 3, cacheRead: 2, totalTokens: 8 },
+		});
+		expect(receipts[1]).toMatchObject({
+			attemptId: "attempt_2",
+			ordinal: 1,
+			transport: "websocket",
+			kind: "transport-continuation",
+			previousResponseId: "resp_1",
+			providerResponseId: "resp_2",
+			outcome: "completed",
+		});
+		expect(receipts[0].rawUsage).toEqual([
+			{
+				input_tokens: 5,
+				output_tokens: 3,
+				total_tokens: 8,
+				input_tokens_details: { cached_tokens: 2 },
+				output_tokens_details: { reasoning_tokens: 1 },
+			},
+		]);
+		for (const receipt of receipts) {
+			expect(receipt.providerRequestId).toBeUndefined(); // Session/handshake IDs are not inference IDs.
+			expect(receipt.timing.sentAt).toBeGreaterThanOrEqual(receipt.timing.admittedAt);
+			expect(receipt.timing.firstContentAt).toBeGreaterThanOrEqual(receipt.timing.firstEventAt!);
+		}
 		const firstBody = sentBodies[0] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		const secondBody = sentBodies[1] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		expect(firstBody.store).toBe(false);
@@ -1004,5 +1068,91 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 1,
 			lastPreviousResponseId: "resp_1",
 		});
+	});
+
+	it("settles physical websocket fallback and SSE retry attempts without a stream listener", async () => {
+		const receipts: ProviderAttemptReceipt[] = [];
+		let admitted = 0;
+		let sent = 0;
+		let completed!: () => void;
+		const producerCompleted = new Promise<void>((resolve) => {
+			completed = resolve;
+		});
+		const attempts: ProviderAttemptObserver = {
+			async admit() {
+				await Promise.resolve();
+				return `attempt_${++admitted}`;
+			},
+			async settle(receipt) {
+				receipts.push(receipt);
+				if (receipt.outcome === "completed") completed();
+			},
+		};
+		class FailingWebSocket extends EventTarget {
+			constructor() {
+				super();
+				queueMicrotask(() => this.dispatchEvent(new Event("open")));
+			}
+			send(): void {
+				expect(admitted).toBe(++sent);
+				throw new Error("websocket send failed");
+			}
+			close(): void {}
+		}
+		globalThis.WebSocket = FailingWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => {
+			expect(admitted).toBe(++sent);
+			expect(receipts).toHaveLength(sent - 1);
+			return sent === 2
+				? new Response("overloaded", { status: 503, headers: { "x-request-id": "req_retry" } })
+				: new Response(buildSSEPayload({ status: "completed" }), {
+						status: 200,
+						headers: { "x-request-id": "req_success", authorization: "not-recorded" },
+					});
+		}) as typeof fetch;
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const resultStream = streamSimpleOpenAICodexResponses(
+			model,
+			{
+				messages: [{ role: "user", content: "Hello", timestamp: 1 }],
+			},
+			{ apiKey: mockToken(), transport: "auto", attempts, reasoning: "high" },
+		);
+		await producerCompleted;
+		expect((await resultStream.result()).stopReason).toBe("stop");
+		expect(global.fetch).toHaveBeenCalledTimes(2);
+		expect(
+			receipts.map(({ attemptId, ordinal, transport, kind, outcome }) => ({
+				attemptId,
+				ordinal,
+				transport,
+				kind,
+				outcome,
+			})),
+		).toEqual([
+			{ attemptId: "attempt_1", ordinal: 1, transport: "websocket", kind: "initial", outcome: "failed" },
+			{ attemptId: "attempt_2", ordinal: 2, transport: "http", kind: "transport-fallback", outcome: "failed" },
+			{ attemptId: "attempt_3", ordinal: 3, transport: "http", kind: "retry", outcome: "completed" },
+		]);
+		expect(receipts[0].usageCompleteness).toBe("none");
+		expect(receipts[1]).toMatchObject({ status: 503, providerRequestId: "req_retry", rawUsage: [], usage: {} });
+		expect(receipts[2]).toMatchObject({
+			status: 200,
+			providerRequestId: "req_success",
+			effort: "high",
+			usageCompleteness: "complete",
+		});
+		expect(JSON.stringify(receipts)).not.toContain("not-recorded");
 	});
 });

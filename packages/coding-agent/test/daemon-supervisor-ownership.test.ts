@@ -42,6 +42,7 @@ function createPaths(): {
 	socketPath: string;
 	agentDir: string;
 	descriptorDir: string;
+	journalPath?: string;
 } {
 	const root = mkdtempSync(join(tmpdir(), "ownership-registry-"));
 	cleanupDirs.push(root);
@@ -61,6 +62,7 @@ async function acquire(paths: ReturnType<typeof createPaths>, generation = "regi
 		agentDir: paths.agentDir,
 		appVersion: "test",
 		descriptorDir: paths.descriptorDir,
+		journalPath: paths.journalPath,
 		generation,
 		registryDir: paths.registryDir,
 		socketPath: paths.socketPath,
@@ -76,6 +78,50 @@ function readJson(path: string): OwnerRecord {
 }
 
 describe("daemon supervisor ownership registry", () => {
+	it("excludes another live owner of the same journal across independent sockets", async () => {
+		const paths = createPaths();
+		const journalPath = join(paths.agentDir, "family.jsonl");
+		const first = await acquire({ ...paths, journalPath }, "journal-first");
+		const independent = {
+			...paths,
+			socketPath: join(paths.root, "other.sock"),
+			descriptorDir: join(paths.root, "other-workers"),
+		};
+		expect(() => first.assertJournalCurrent(journalPath)).not.toThrow();
+		await expect(acquire({ ...independent, journalPath }, "journal-conflict")).rejects.toMatchObject({
+			code: "daemon_supervisor_already_running",
+		});
+		const second = await acquire(
+			{ ...independent, journalPath: join(paths.agentDir, "other-family.jsonl") },
+			"journal-independent",
+		);
+		expect(() => first.assertJournalCurrent(second.record.journalPath!)).toThrow(/no longer owns/);
+		const firstPath = join(ownerDir(paths, first.record.generation), "owner.json");
+		writeFileSync(firstPath, JSON.stringify({ ...readJson(firstPath), journalPath: second.record.journalPath }));
+		expect(() => first.assertJournalCurrent(journalPath)).toThrow(/no longer owns/);
+		await second.release();
+		await first.release();
+	});
+
+	it("does not grant a journal writer alongside an older owner with an unknown footprint", async () => {
+		const paths = createPaths();
+		const legacy = await acquire(paths, "unscoped-owner");
+		const candidate = {
+			...paths,
+			socketPath: join(paths.root, "new.sock"),
+			descriptorDir: join(paths.root, "new-workers"),
+			journalPath: join(paths.agentDir, "family.jsonl"),
+		};
+		await expect(acquire(candidate, "scoped-owner")).rejects.toMatchObject({
+			code: "daemon_supervisor_already_running",
+		});
+		await legacy.release();
+		const successor = await acquire(candidate, "scoped-owner");
+		expect(() => successor.assertJournalCurrent(candidate.journalPath)).not.toThrow();
+		await successor.release();
+		expect(() => successor.assertJournalCurrent(candidate.journalPath)).toThrow(/no longer owns/);
+	});
+
 	it("finds a live pre-move owner through the legacy registry when persisting a fence", async () => {
 		const paths = createPaths();
 		const legacyDir = join(paths.root, "legacy-registry");

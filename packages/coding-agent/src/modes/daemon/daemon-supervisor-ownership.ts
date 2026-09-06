@@ -44,6 +44,7 @@ interface DaemonSupervisorOwnerRecord extends ProcessIdentity {
 	socketPath: string;
 	descriptorDir: string;
 	agentDir: string;
+	journalPath?: string;
 	appVersion: string;
 	phase: DaemonSupervisorOwnerPhase;
 	createdAt: string;
@@ -65,6 +66,8 @@ interface DaemonSupervisorOwnerScope {
 	generation: string;
 	socketPath: string;
 	descriptorDir: string;
+	agentDir?: string;
+	journalPath?: string;
 }
 
 interface DaemonStartupFenceRecord extends ProcessIdentity {
@@ -88,6 +91,7 @@ interface AcquireDaemonSupervisorOwnershipOptions {
 	socketPath: string;
 	descriptorDir: string;
 	agentDir: string;
+	journalPath?: string;
 	generation: string;
 	appVersion: string;
 	registryDir?: string;
@@ -194,6 +198,17 @@ class DaemonSupervisorOwnership {
 	) {}
 
 	async assertCurrent(): Promise<void> {
+		this.assertCurrentSync();
+	}
+
+	assertJournalCurrent(journalPath: string): void {
+		if (this.record.journalPath !== canonicalizeFilesystemPath(assertProductStatePath(journalPath))) {
+			throw this.ownershipLostError();
+		}
+		this.assertCurrentSync();
+	}
+
+	private assertCurrentSync(): void {
 		if (this.released) {
 			throw this.ownershipLostError();
 		}
@@ -447,6 +462,9 @@ export async function acquireDaemonSupervisorOwnership(
 		socketPath: normalizeSocketPath(options.socketPath),
 		descriptorDir: canonicalizeFilesystemPath(options.descriptorDir),
 		agentDir: canonicalizeFilesystemPath(options.agentDir),
+		...(options.journalPath
+			? { journalPath: canonicalizeFilesystemPath(assertProductStatePath(options.journalPath)) }
+			: {}),
 		appVersion: options.appVersion,
 		phase: "starting",
 		createdAt: now,
@@ -711,7 +729,13 @@ function canonicalizeFilesystemPath(path: string): string {
 }
 
 function ownerConflicts(left: DaemonSupervisorOwnerScope, right: DaemonSupervisorOwnerScope): boolean {
-	return left.socketPath === right.socketPath || left.descriptorDir === right.descriptorDir;
+	if (left.socketPath === right.socketPath || left.descriptorDir === right.descriptorDir) return true;
+	if (left.journalPath && right.journalPath) return left.journalPath === right.journalPath;
+	// Older records do not identify their family journal. An unknown footprint cannot grant a writer.
+	return Boolean(
+		(left.journalPath || right.journalPath) &&
+			(!left.agentDir || !right.agentDir || left.agentDir === right.agentDir),
+	);
 }
 
 function sameOwnerRecord(left: DaemonSupervisorOwnerRecord, right: DaemonSupervisorOwnerRecord): boolean {
@@ -720,7 +744,10 @@ function sameOwnerRecord(left: DaemonSupervisorOwnerRecord, right: DaemonSupervi
 		left.generation === right.generation &&
 		left.pid === right.pid &&
 		left.processStartId === right.processStartId &&
-		left.socketPath === right.socketPath
+		left.socketPath === right.socketPath &&
+		left.descriptorDir === right.descriptorDir &&
+		left.agentDir === right.agentDir &&
+		left.journalPath === right.journalPath
 	);
 }
 
@@ -796,6 +823,7 @@ function isDaemonSupervisorOwnerRecord(value: unknown): value is DaemonSuperviso
 		typeof record.socketPath === "string" &&
 		typeof record.descriptorDir === "string" &&
 		typeof record.agentDir === "string" &&
+		(record.journalPath === undefined || typeof record.journalPath === "string") &&
 		typeof record.appVersion === "string" &&
 		(record.phase === "starting" || record.phase === "owner" || record.phase === "stopping") &&
 		typeof record.createdAt === "string" &&
@@ -826,7 +854,9 @@ function isDaemonSupervisorOwnerScope(value: unknown): value is DaemonSupervisor
 		typeof scope.token === "string" &&
 		typeof scope.generation === "string" &&
 		typeof scope.socketPath === "string" &&
-		typeof scope.descriptorDir === "string"
+		typeof scope.descriptorDir === "string" &&
+		(scope.agentDir === undefined || typeof scope.agentDir === "string") &&
+		(scope.journalPath === undefined || typeof scope.journalPath === "string")
 	);
 }
 
@@ -838,6 +868,8 @@ function writeOwnerScope(directory: string, owner: DaemonSupervisorOwnerRecord):
 		generation: owner.generation,
 		socketPath: owner.socketPath,
 		descriptorDir: owner.descriptorDir,
+		agentDir: owner.agentDir,
+		...(owner.journalPath ? { journalPath: owner.journalPath } : {}),
 	};
 	writeJsonAtomically(resolve(directory, "scope.json"), scope);
 }

@@ -1,46 +1,31 @@
 import { createHash } from "node:crypto";
-import {
-	closeSync,
-	existsSync,
-	fsyncSync,
-	linkSync,
-	mkdirSync,
-	openSync,
-	realpathSync,
-	rmSync,
-	writeSync,
-} from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync, fsyncSync, linkSync, mkdirSync, openSync, realpathSync, rmSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { stringifyBoundedJson } from "../../core/bounded-json.js";
 import { EventLog } from "../../core/event-log.js";
+import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../../core/journal-frame.js";
+import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "../../core/journal-io.js";
 import { canonicalSessionPath } from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { readFirstLineSync } from "../../utils/file-lines.js";
+import {
+	RLM_LEDGER_MAX_MUTATION_BYTES,
+	RLM_LEDGER_MAX_PENDING_BYTES,
+	RLM_LEDGER_MAX_PENDING_OPERATIONS,
+	type RlmLedgerAccess,
+	type RlmLedgerDeleteReason,
+	type RlmLedgerMutation,
+} from "./rlm-ledger-mutations.js";
 
-/**
- * Daemon-owned RLM spawn ledger.
- *
- * One append-only JSONL file per sessions dir, written by daemon processes at
- * the moments they admit a spawn, perform a rename, or record a deletion.
- * Family topology (parent/child edges, depths, names) is read back from this
- * file instead of being re-derived from writer-owned session headers,
- * registries, and bodies at read time.
- *
- * Multi-writer reality: the supervisor and each session worker hold their own
- * instance over the same file. Appends are single small O_APPEND writes (well
- * under PIPE_BUF-scale sizes), whose atomicity we rely on for interleaving;
- * reads re-read the whole file per operation, so cross-process staleness is
- * bounded to in-flight appends. In-process appends are serialized on an
- * internal queue.
- */
+export type { RlmLedgerAccess, RlmLedgerDeleteReason, RlmLedgerMutation } from "./rlm-ledger-mutations.js";
 
+/** Family topology journal. Only its supplied lifetime owner may seed, repair, or append. */
 export const RLM_LEDGER_DIR = "rlm-ledger";
 
 /** Bounded read: a ledger beyond these limits fails closed loudly. */
 export const RLM_LEDGER_MAX_BYTES = 32 * 1024 * 1024;
 export const RLM_LEDGER_MAX_RECORDS = 100_000;
-
-export type RlmLedgerDeleteReason = "user" | "parent-teardown" | "revoked" | "gc";
 
 interface RlmLedgerMetaRecord {
 	v: 1;
@@ -121,50 +106,47 @@ export async function readLegacyRlmSubagentRegistry(
 	path: string,
 	options: { throwOnReadError?: boolean; log?: (message: string) => void } = {},
 ): Promise<LegacyRlmSubagentRegistryEntry[]> {
-	let contents: string;
-	try {
-		contents = await readFile(path, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-			options.log?.(
-				`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			if (options.throwOnReadError) throw error;
-		}
-		return [];
-	}
 	const latest = new Map<string, LegacyRlmSubagentRegistryEntry>();
-	for (const line of contents.split(/\r?\n/)) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			const entry = JSON.parse(trimmed) as Partial<LegacyRlmSubagentRegistryEntry>;
-			if (
-				entry.type !== "rlm_subagent" ||
-				typeof entry.childId !== "string" ||
-				typeof entry.sessionName !== "string" ||
-				typeof entry.sessionFile !== "string" ||
-				(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
-				(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0))
-			) {
-				continue;
+	try {
+		new EventLog(path, {
+			maxBytes: RLM_LEDGER_MAX_BYTES,
+			maxRecords: RLM_LEDGER_MAX_RECORDS,
+			log: options.log,
+		}).replaySync((line) => {
+			try {
+				const entry = JSON.parse(line) as Partial<LegacyRlmSubagentRegistryEntry>;
+				if (
+					entry.type !== "rlm_subagent" ||
+					typeof entry.childId !== "string" ||
+					typeof entry.sessionName !== "string" ||
+					typeof entry.sessionFile !== "string" ||
+					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
+					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0))
+				) {
+					return undefined;
+				}
+				latest.set(entry.childId, {
+					...entry,
+					sessionDir: typeof entry.sessionDir === "string" ? entry.sessionDir : dirname(entry.sessionFile),
+					// rlmMaxDepth is optional hydration metadata the ledger seeder never
+					// reads; a damaged value must not discard the child's topology edge,
+					// so it is dropped instead of rejecting the whole entry.
+					rlmMaxDepth:
+						entry.rlmMaxDepth !== undefined && Number.isSafeInteger(entry.rlmMaxDepth) && entry.rlmMaxDepth >= 0
+							? entry.rlmMaxDepth
+							: undefined,
+				} as LegacyRlmSubagentRegistryEntry);
+			} catch (error) {
+				options.log?.(
+					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
+				);
 			}
-			latest.set(entry.childId, {
-				...entry,
-				sessionDir: typeof entry.sessionDir === "string" ? entry.sessionDir : dirname(entry.sessionFile),
-				// rlmMaxDepth is optional hydration metadata the ledger seeder never
-				// reads; a damaged value must not discard the child's topology edge,
-				// so it is dropped instead of rejecting the whole entry.
-				rlmMaxDepth:
-					entry.rlmMaxDepth !== undefined && Number.isSafeInteger(entry.rlmMaxDepth) && entry.rlmMaxDepth >= 0
-						? entry.rlmMaxDepth
-						: undefined,
-			} as LegacyRlmSubagentRegistryEntry);
-		} catch (error) {
-			options.log?.(
-				`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
+			return undefined;
+		});
+	} catch (error) {
+		options.log?.(`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`);
+		if (options.throwOnReadError) throw error;
+		return [];
 	}
 	return [...latest.values()];
 }
@@ -288,30 +270,34 @@ function edgeKey(childId: string, child: string): string {
 	return `${childId}\u0000${canonicalSessionPath(child)}`;
 }
 
-/**
- * Per-sessions-dir spawn ledger. All operations are serialized on an internal
- * queue; the first operation lazily seeds a missing ledger from the existing
- * per-parent registries (memoized; a seeding failure degrades to an empty
- * ledger and is never fail-closed).
- */
+/** One bounded queue per instance; the caller supplies the actual journal ownership or remote acknowledgement. */
 export class RlmSpawnLedger {
 	private readonly path: string;
 	private readonly eventLog: EventLog;
 	private readonly canonicalSessionsDir: string;
 	private queue: Promise<unknown> = Promise.resolve();
 	private seedAttempted = false;
+	private pendingCount = 0;
+	private pendingBytes = 0;
+	private ownerPoisoned = false;
+	private mutationAdmissionClosed = false;
 
 	constructor(
 		agentDir: string,
 		sessionsDir: string,
 		private readonly seedSource?: RlmLedgerSeedSource,
 		private readonly log: (message: string) => void = () => {},
+		private readonly access: RlmLedgerAccess = { mode: "reader" },
 	) {
 		this.canonicalSessionsDir = canonicalizeDirPath(sessionsDir);
 		this.path = rlmLedgerPath(agentDir, sessionsDir);
 		this.eventLog = new EventLog(this.path, {
 			maxBytes: RLM_LEDGER_MAX_BYTES,
 			maxRecords: RLM_LEDGER_MAX_RECORDS,
+			assertOwner: access.mode === "owner" ? () => this.assertOwner() : undefined,
+			validateRecord: (line, index) => {
+				parseLedgerLine(line, index);
+			},
 			log: (message) => this.log(`RLM ledger: ${message}`),
 		});
 	}
@@ -320,49 +306,153 @@ export class RlmSpawnLedger {
 		return this.path;
 	}
 
-	appendSpawn(input: { childId: string; parent: string; child: string; depth: number; name: string }): Promise<void> {
-		return this.enqueue(() => this.appendSpawnUnlocked(input));
+	appendSpawn(input: Omit<Extract<RlmLedgerMutation, { op: "spawn" }>, "op">): Promise<void> {
+		return this.mutate({ op: "spawn", ...input });
 	}
 
-	appendRename(input: { childId: string; child: string; name: string }): Promise<void> {
-		return this.enqueue(() => {
-			this.appendRecord({
-				v: 1,
-				op: "rename",
-				at: nowIso(),
-				childId: input.childId,
-				child: canonicalSessionPath(input.child),
-				name: input.name,
-			});
-		});
+	appendRename(input: Omit<Extract<RlmLedgerMutation, { op: "rename" }>, "op">): Promise<void> {
+		return this.mutate({ op: "rename", ...input });
 	}
 
-	/** Rename by child session path alone (offline saved-session rename knows no childId). */
 	appendRenameByChildPath(child: string, name: string): Promise<void> {
-		return this.enqueue(() => {
-			const target = canonicalSessionPath(child);
-			for (const edge of this.replaySync().values()) {
-				if (!edge.deleted && canonicalSessionPath(edge.child) === target) {
-					this.appendRecord({ v: 1, op: "rename", at: nowIso(), childId: edge.childId, child: target, name });
+		return this.mutate({ op: "rename_by_path", child, name });
+	}
+
+	appendDelete(input: Omit<Extract<RlmLedgerMutation, { op: "delete" }>, "op">): Promise<void> {
+		return this.mutate({ op: "delete", ...input });
+	}
+
+	appendDeleteByChildPath(child: string, reason: RlmLedgerDeleteReason = "user"): Promise<void> {
+		return this.mutate({ op: "delete_by_path", child, reason });
+	}
+
+	/** Resolves only after an owner write or the remote owner's durable acknowledgement. */
+	async mutate(input: RlmLedgerMutation): Promise<void> {
+		if (this.mutationAdmissionClosed) throw new Error("RLM ledger mutation admission is closed");
+		if (this.access.mode === "reader") throw new Error("RLM ledger is read-only; mutations require an owner");
+		const serialized = stringifyBoundedJson(input, RLM_LEDGER_MAX_MUTATION_BYTES);
+		const mutation = JSON.parse(serialized) as RlmLedgerMutation;
+		this.validateMutation(mutation);
+		return this.enqueue(async () => {
+			if (this.access.mode === "remote") return this.access.mutate(mutation);
+			this.assertOwner();
+			if (this.ownerPoisoned || this.eventLog.requiresRepair)
+				throw new Error("RLM ledger requires owner recovery before another mutation");
+			if (mutation.op === "spawn") return this.appendSpawnUnlocked(mutation);
+			if (mutation.op === "rename_by_path" || mutation.op === "delete_by_path") {
+				const child = canonicalSessionPath(mutation.child);
+				for (const edge of this.replaySync().values()) {
+					if (edge.deleted || canonicalSessionPath(edge.child) !== child) continue;
+					if (mutation.op === "rename_by_path")
+						this.appendRecord({
+							v: 1,
+							op: "rename",
+							at: nowIso(),
+							childId: edge.childId,
+							child,
+							name: mutation.name,
+						});
+					else
+						this.appendRecord({
+							v: 1,
+							op: "delete",
+							at: nowIso(),
+							childId: edge.childId,
+							child,
+							reason: mutation.reason,
+						});
 				}
+				return;
 			}
-		});
+			if (mutation.op === "rename")
+				this.appendRecord({
+					v: 1,
+					op: "rename",
+					at: nowIso(),
+					childId: mutation.childId,
+					child: canonicalSessionPath(mutation.child),
+					name: mutation.name,
+				});
+			else
+				this.appendRecord({
+					v: 1,
+					op: "delete",
+					at: nowIso(),
+					childId: mutation.childId,
+					child: canonicalSessionPath(mutation.child),
+					reason: mutation.reason,
+				});
+		}, Buffer.byteLength(serialized));
 	}
 
-	appendDelete(input: { childId: string; child: string; reason: RlmLedgerDeleteReason }): Promise<void> {
-		return this.enqueue(() => {
-			this.appendRecord({
-				v: 1,
-				op: "delete",
-				at: nowIso(),
-				childId: input.childId,
-				child: canonicalSessionPath(input.child),
-				reason: input.reason,
-			});
-		});
+	/** Explicit retained-input migration; neither startup nor ordinary mutation requests it implicitly. */
+	migrateLegacy(): Promise<void> {
+		if (this.mutationAdmissionClosed) return Promise.reject(new Error("RLM ledger mutation admission is closed"));
+		return this.enqueue(
+			() => {
+				this.assertOwner();
+				this.eventLog.migrateLegacySync();
+			},
+			128,
+			false,
+		);
 	}
 
-	/** Resolves once every operation enqueued so far has completed (durably, for appends). */
+	/** No automatic retry behind an uncertain append. The actual owner must request recovery. */
+	recover(): Promise<void> {
+		if (this.mutationAdmissionClosed) return Promise.reject(new Error("RLM ledger mutation admission is closed"));
+		return this.enqueue(
+			() => {
+				this.assertOwner();
+				this.eventLog.recoverSync();
+				this.ownerPoisoned = false;
+			},
+			128,
+			false,
+		);
+	}
+
+	private assertOwner(): void {
+		if (this.access.mode !== "owner") throw new Error("RLM ledger is read-only; exclusive ownership is required");
+		this.access.assertOwner();
+	}
+
+	private validateMutation(mutation: RlmLedgerMutation): void {
+		const field = (value: unknown, max: number): boolean =>
+			typeof value === "string" && value.length > 0 && Buffer.byteLength(value) <= max;
+		if (!mutation || !field(mutation.child, 4096)) throw new Error("Invalid RLM ledger child path");
+		switch (mutation.op) {
+			case "spawn":
+				if (!field(mutation.parent, 4096) || !Number.isSafeInteger(mutation.depth) || mutation.depth < 1)
+					throw new Error("Invalid RLM ledger spawn");
+				if (!field(mutation.childId, 512) || !field(mutation.name, 1024))
+					throw new Error("Invalid RLM ledger spawn identity");
+				break;
+			case "rename":
+				if (!field(mutation.childId, 512) || !field(mutation.name, 1024))
+					throw new Error("Invalid RLM ledger rename");
+				break;
+			case "delete":
+				if (!field(mutation.childId, 512) || !isDeleteReason(mutation.reason))
+					throw new Error("Invalid RLM ledger delete");
+				break;
+			case "rename_by_path":
+				if (!field(mutation.name, 1024)) throw new Error("Invalid RLM ledger rename");
+				break;
+			case "delete_by_path":
+				if (!isDeleteReason(mutation.reason)) throw new Error("Invalid RLM ledger delete");
+				break;
+			default:
+				throw new Error("Unknown RLM ledger mutation");
+		}
+	}
+
+	/** Stop new mutations without cancelling operations already admitted to the owner queue. */
+	stopAdmission(): void {
+		this.mutationAdmissionClosed = true;
+	}
+
+	/** Wait for admitted operations to settle; each mutation promise carries its own failure. */
 	flush(): Promise<void> {
 		return this.queue.then(() => undefined);
 	}
@@ -431,18 +521,30 @@ export class RlmSpawnLedger {
 		});
 	}
 
-	private enqueue<T>(fn: () => Promise<T> | T): Promise<T> {
-		const next = this.queue.then(async () => {
-			if (!this.seedAttempted) {
-				this.seedAttempted = true;
-				try {
+	private enqueue<T>(fn: () => Promise<T> | T, bytes = 128, seed = true): Promise<T> {
+		if (
+			this.pendingCount >= RLM_LEDGER_MAX_PENDING_OPERATIONS ||
+			this.pendingBytes + bytes > RLM_LEDGER_MAX_PENDING_BYTES
+		) {
+			return Promise.reject(new Error("RLM ledger queue limit reached; await pending operations"));
+		}
+		this.pendingCount++;
+		this.pendingBytes += bytes;
+		const shouldSeed = seed && !this.mutationAdmissionClosed;
+		const next = this.queue
+			.then(async () => {
+				if (shouldSeed && this.access.mode === "owner" && !this.seedAttempted) {
+					this.assertOwner();
+					if (this.ownerPoisoned) throw new Error("RLM ledger requires owner recovery");
+					this.seedAttempted = true;
 					await this.seed();
-				} catch (error) {
-					this.log(`RLM ledger seeding failed: ${error instanceof Error ? error.message : String(error)}`);
 				}
-			}
-			return fn();
-		});
+				return fn();
+			})
+			.finally(() => {
+				this.pendingCount--;
+				this.pendingBytes -= bytes;
+			});
 		this.queue = next.catch(() => undefined);
 		return next;
 	}
@@ -462,9 +564,7 @@ export class RlmSpawnLedger {
 			);
 		}
 		const childPath = canonicalSessionPath(input.child);
-		// Advisory, per-process: catches double-admission mistakes inside this
-		// daemon. It is NOT a global uniqueness guarantee — other processes
-		// append to the same file between our read and write.
+		// The supplied lifetime owner keeps this replay and append in one writer queue.
 		for (const edge of this.replaySync().values()) {
 			if (!edge.deleted && canonicalSessionPath(edge.child) === childPath && edge.childId !== input.childId) {
 				throw new Error(`RLM ledger: duplicate child session path ${childPath} (already ${edge.childId})`);
@@ -609,42 +709,52 @@ export class RlmSpawnLedger {
 	}
 
 	private async seed(): Promise<void> {
+		this.assertOwner();
 		if (!this.seedSource || existsSync(this.path)) return;
-		let rootEntries: string[] = [];
+		let rootEntries: string[];
 		try {
 			rootEntries = await readdir(this.canonicalSessionsDir);
 		} catch {
 			return;
 		}
-		// Collect the complete seed first, then publish it atomically via a
-		// temp file + rename: the ledger file only exists once seeding is
-		// complete, so an interrupted seed leaves nothing and the next
-		// construction re-seeds from scratch. A concurrent process appending
-		// before the rename creates the real file on demand and thereby
-		// suppresses this seed — the same behavior as any pre-existing ledger.
-		const records: RlmLedgerSpawnRecord[] = [];
+		const skipBounds = () => this.log("RLM ledger: seed exceeds read bounds; skipping seeding");
+		if (rootEntries.length > RLM_LEDGER_MAX_RECORDS) {
+			skipBounds();
+			return;
+		}
+		const meta: RlmLedgerMetaRecord = { v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir };
+		const first = encodeJournalFrame(meta, INITIAL_JOURNAL_CURSOR, RLM_LEDGER_MAX_MUTATION_BYTES);
+		const lines = [first.line];
+		let frameCursor = first.next;
+		let bytes = Buffer.byteLength(first.line);
 		const queue: Array<{ sessionFile: string; depth: number }> = rootEntries
 			.filter((name) => name.endsWith(".jsonl"))
 			.sort()
 			.map((name) => ({ sessionFile: join(this.canonicalSessionsDir, name), depth: 0 }));
 		const visited = new Set<string>(queue.map((item) => canonicalSessionPath(item.sessionFile)));
-		while (queue.length > 0) {
-			const { sessionFile, depth } = queue.shift()!;
-			for (const entry of await this.seedSource.readRegistryForSessionFile(sessionFile)) {
+		for (let cursor = 0; cursor < queue.length; cursor++) {
+			const { sessionFile, depth } = queue[cursor];
+			let entries: RlmLedgerSeedRegistryEntry[];
+			try {
+				entries = await this.seedSource.readRegistryForSessionFile(sessionFile);
+			} catch (error) {
+				this.log(`RLM ledger seeding failed: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
+			if (entries.length > RLM_LEDGER_MAX_RECORDS) {
+				skipBounds();
+				return;
+			}
+			for (const entry of entries) {
 				if (entry.status === "deleted") continue;
 				const childPath = canonicalSessionPath(entry.sessionFile);
 				if (visited.has(childPath)) continue;
-				visited.add(childPath);
-				// A registry depth < 1 (legacy 0-depth entries exist in real data)
-				// would be unwritable under the spawn invariants; treat it as
-				// absent and derive parent depth + 1 instead of skipping the edge.
-				const registryDepth = entry.rlmDepth !== undefined && entry.rlmDepth >= 1 ? entry.rlmDepth : undefined;
-				const childDepth = registryDepth ?? depth + 1;
 				if (!entry.childId) {
 					this.log("RLM ledger: skipped seeding a registry entry without a childId");
 					continue;
 				}
-				records.push({
+				const childDepth = entry.rlmDepth !== undefined && entry.rlmDepth >= 1 ? entry.rlmDepth : depth + 1;
+				const record: RlmLedgerSpawnRecord = {
 					v: 1,
 					op: "spawn",
 					at: nowIso(),
@@ -653,40 +763,52 @@ export class RlmSpawnLedger {
 					child: childPath,
 					depth: childDepth,
 					name: entry.sessionName,
-				});
+				};
+				let line: string;
+				try {
+					parseLedgerLine(stringifyBoundedJson(record, RLM_LEDGER_MAX_MUTATION_BYTES), lines.length);
+					const encoded = encodeJournalFrame(record, frameCursor, RLM_LEDGER_MAX_MUTATION_BYTES);
+					line = encoded.line;
+					frameCursor = encoded.next;
+				} catch {
+					skipBounds();
+					return;
+				}
+				if (
+					lines.length >= RLM_LEDGER_MAX_RECORDS ||
+					bytes + Buffer.byteLength(line) > RLM_LEDGER_MAX_BYTES ||
+					queue.length >= RLM_LEDGER_MAX_RECORDS
+				) {
+					skipBounds();
+					return;
+				}
+				bytes += Buffer.byteLength(line);
+				lines.push(line);
+				visited.add(childPath);
 				queue.push({ sessionFile: entry.sessionFile, depth: childDepth });
 			}
 		}
-		if (records.length === 0) return;
-		const meta: RlmLedgerMetaRecord = { v: 1, op: "meta", at: nowIso(), sessionsDir: this.canonicalSessionsDir };
-		const payload = [meta, ...records].map((record) => `${JSON.stringify(record)}\n`).join("");
-		// A seed beyond the read bounds would publish a ledger every replaySync
-		// refuses to read — manufacturing the exact poisoned state the bounds
-		// exist to prevent. Skip seeding entirely (flat families, the documented
-		// degradation mode) rather than publishing partial topology: profiles
-		// this large are pathological, and a truncated tree would be more
-		// confusing than a flat one. Not thrown: a hard error here would stick
-		// via seedAttempted and the next append would create an empty ledger.
-		if (records.length + 1 > RLM_LEDGER_MAX_RECORDS || Buffer.byteLength(payload) > RLM_LEDGER_MAX_BYTES) {
-			this.log(
-				`RLM ledger: seed exceeds read bounds (${records.length} records, ${Buffer.byteLength(payload)} bytes); skipping seeding`,
-			);
-			return;
-		}
+		if (lines.length === 1) return;
+		const payload = Buffer.from(lines.join(""), "utf8");
 		const dir = dirname(this.path);
+		this.assertOwner();
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const tempPath = `${this.path}.seed-${process.pid}-${Date.now()}`;
-		const handle = openSync(tempPath, "wx", 0o600);
+		let created = false;
 		try {
-			writeSync(handle, payload);
-			fsyncSync(handle);
-		} finally {
-			closeSync(handle);
-		}
-		try {
+			const handle = openSync(tempPath, "wx", 0o600);
+			created = true;
+			withJournalDescriptorSync(handle, () => {
+				writeFullySync(handle, payload);
+				fsyncSync(handle);
+			});
+			this.assertOwner();
 			this.publishSeedFile(tempPath);
+		} catch (error) {
+			this.ownerPoisoned = true;
+			throw error;
 		} finally {
-			rmSync(tempPath, { force: true });
+			if (created) rmSync(tempPath, { force: true });
 		}
 	}
 
@@ -699,6 +821,7 @@ export class RlmSpawnLedger {
 		// appends and resurrect deleted edges. Filesystems that cannot provide
 		// link() therefore get flat pre-ledger history (the documented
 		// degradation mode) rather than a check-then-rename race.
+		this.assertOwner();
 		try {
 			linkSync(tempPath, this.path);
 		} catch (error) {
@@ -707,7 +830,10 @@ export class RlmSpawnLedger {
 				return;
 			}
 			this.log(`RLM ledger: link publish unavailable (${code ?? "unknown"}); skipping seeding`);
+			return;
 		}
+		syncJournalDirectory(dirname(this.path));
+		this.assertOwner();
 	}
 
 	private appendRecord(record: RlmLedgerRecord): void {
@@ -815,8 +941,6 @@ export async function tombstoneSavedSessionDelete(
 	// Tombstone every matching edge: a duplicate edge for the path (corrupt or raced appends) left
 	// live would resurrect a later recreation at that path as a subagent.
 	const matching = edges.filter((edge) => canonicalSessionPath(edge.child) === deletedPath);
-	for (const edge of matching) {
-		await ledger.appendDelete({ childId: edge.childId, child: sessionPath, reason: "user" });
-	}
+	await ledger.appendDeleteByChildPath(sessionPath, "user");
 	return { deletedInfo, ledgerEdge: matching[0] };
 }

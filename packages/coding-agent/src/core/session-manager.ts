@@ -1,4 +1,5 @@
-import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { isDeepStrictEqual } from "node:util";
+import type { AgentMessage, FinalizedToolExchange, ToolInvocation } from "@ponythewhite/base-context-agent";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -29,6 +30,8 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js"
 import { assertProductStatePath } from "../runtime-paths.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
+import { stringifyBoundedJson } from "./bounded-json.js";
+import { appendJournalRecord, syncJournalDirectory, syncJournalFile } from "./journal-io.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -36,6 +39,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
+import type { BoundRequestSink, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -66,6 +70,9 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"label",
 	"compaction",
 	"branch_summary",
+	// Effect/accounting facts must not disappear with a message-less draft.
+	"tool_intent",
+	"request",
 ]);
 
 function realpathIfPresent(path: string): string {
@@ -113,10 +120,27 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+export type SessionExecutionEvidence = Omit<FinalizedToolExchange, "result" | "originalInput" | "executedInput"> &
+	({ invocationId: string } | { originalInput: unknown; executedInput?: unknown });
+
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Native execution evidence belongs to this result, not a second transcript. */
+	execution?: SessionExecutionEvidence;
 }
+
+export interface ToolIntentEntry extends SessionEntryBase {
+	type: "tool_intent";
+	invocation: ToolInvocation;
+}
+
+export interface RequestJournalEntry extends SessionEntryBase {
+	type: "request";
+	request: NativeRequestEvent;
+}
+
+type PrivateSessionEntry = ToolIntentEntry | RequestJournalEntry;
 
 type AssistantSessionMessageEntry = SessionMessageEntry & { message: AssistantMessage };
 
@@ -225,6 +249,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 
 export type SessionEntry =
 	| SessionMessageEntry
+	| ToolIntentEntry
+	| RequestJournalEntry
 	| ThinkingLevelChangeEntry
 	| ServiceTierChangeEntry
 	| ModelChangeEntry
@@ -242,7 +268,7 @@ export type SessionEntry =
 export type FileEntry = SessionHeader | SessionEntry;
 
 export interface SessionTreeFlatNode {
-	entry: SessionEntry;
+	entry: Exclude<SessionEntry, PrivateSessionEntry>;
 	label?: string;
 	labelTimestamp?: string;
 }
@@ -544,6 +570,27 @@ export function buildSessionContext(
 		}
 	}
 
+	// Finalized evidence is committed in completion order. The provider transcript
+	// retains the assistant's tool-call order, including when a session is reopened.
+	let callOrder = new Map<string, number>();
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message.role === "assistant") {
+			callOrder = new Map(
+				message.content.filter((part) => part.type === "toolCall").map((call, order) => [call.id, order]),
+			);
+		} else if (message.role === "toolResult" && callOrder.size > 1) {
+			let end = index + 1;
+			while (end < messages.length && messages[end].role === "toolResult") end++;
+			const results = messages.slice(index, end);
+			results.sort((left, right) => {
+				if (left.role !== "toolResult" || right.role !== "toolResult") return 0;
+				return (callOrder.get(left.toolCallId) ?? Infinity) - (callOrder.get(right.toolCallId) ?? Infinity);
+			});
+			messages.splice(index, results.length, ...results);
+			index = end - 1;
+		}
+	}
 	return { messages, thinkingLevel, serviceTier, model };
 }
 
@@ -1158,6 +1205,8 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
+	private finalizedToolMessages = new WeakMap<AgentMessage, string>();
+	private writeState: { failure?: Error } = {};
 
 	private constructor(
 		cwd: string,
@@ -1187,7 +1236,12 @@ export class SessionManager {
 	 * lets the async daemon path skip the synchronous re-read.
 	 */
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
-		this.sessionFile = this.persist ? assertProductStatePath(sessionFile) : resolve(sessionFile);
+		const target = this.persist ? assertProductStatePath(sessionFile) : resolve(sessionFile);
+		if (this.writeState.failure && target === this.sessionFile) throw this.writeState.failure;
+		if (this.fileEntries.length > 0 && !this.writeState.failure) this.flushNow();
+		this.writeState = {};
+		this.finalizedToolMessages = new WeakMap();
+		this.sessionFile = target;
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
 
@@ -1218,12 +1272,16 @@ export class SessionManager {
 			this.flushed = true;
 		} else {
 			const explicitPath = this.sessionFile;
+			this.fileEntries = [];
 			this.newSession();
 			this.sessionFile = explicitPath; // preserve explicit path from --resume selector
 		}
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		if (this.fileEntries.length > 0 && !this.writeState.failure) this.flushNow();
+		this.writeState = {};
+		this.finalizedToolMessages = new WeakMap();
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
 		const hasExplicitRlmDepth = options !== undefined && Object.hasOwn(options, "rlmDepth");
@@ -1267,9 +1325,9 @@ export class SessionManager {
 			git,
 		};
 		this.fileEntries = [header];
-		this.byId.clear();
-		this.labelsById.clear();
-		this.labelTimestampsById.clear();
+		this.byId = new Map();
+		this.labelsById = new Map();
+		this.labelTimestampsById = new Map();
 		this.leafId = null;
 		this.flushed = false;
 
@@ -1280,14 +1338,14 @@ export class SessionManager {
 	}
 
 	private _buildIndex(): void {
-		this.byId.clear();
-		this.labelsById.clear();
-		this.labelTimestampsById.clear();
+		this.byId = new Map();
+		this.labelsById = new Map();
+		this.labelTimestampsById = new Map();
 		this.leafId = null;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
-			this.leafId = entry.id;
+			if (entry.type !== "request") this.leafId = entry.id;
 			if (entry.type === "label") {
 				if (entry.label) {
 					this.labelsById.set(entry.targetId, entry.label);
@@ -1301,6 +1359,7 @@ export class SessionManager {
 	}
 
 	private _rewriteFile(): void {
+		if (this.writeState.failure) throw this.writeState.failure;
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
 		const targetPath = realpathIfPresent(assertProductStatePath(this.sessionFile));
@@ -1314,7 +1373,12 @@ export class SessionManager {
 				chownSync(tempPath, metadata.uid, metadata.gid);
 				chmodSync(tempPath, metadata.mode);
 			}
+			syncJournalFile(tempPath);
 			renameSync(tempPath, targetPath);
+			syncJournalDirectory(directory);
+		} catch (error) {
+			this.writeState.failure = new Error("Source journal requires repair after a failed rewrite", { cause: error });
+			throw error;
 		} finally {
 			rmSync(tempPath, { force: true });
 		}
@@ -1406,6 +1470,7 @@ export class SessionManager {
 	 * No-op for in-memory (non-persisted) sessions.
 	 */
 	flushNow(): void {
+		if (this.writeState.failure) throw this.writeState.failure;
 		if (!this.persist || !this.sessionFile) return;
 		if (this.flushed && existsSync(this.sessionFile)) return;
 		this._rewriteFile();
@@ -1413,6 +1478,7 @@ export class SessionManager {
 	}
 
 	_persist(entry: SessionEntry): void {
+		if (this.writeState.failure) throw this.writeState.failure;
 		if (!this.persist || !this.sessionFile) return;
 		assertProductStatePath(this.sessionFile);
 
@@ -1427,20 +1493,160 @@ export class SessionManager {
 			this._rewriteFile();
 			this.flushed = true;
 		} else {
-			mkdirSync(dirname(this.sessionFile), { recursive: true });
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			try {
+				appendJournalRecord(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			} catch (error) {
+				this.writeState.failure = new Error("Source journal requires repair after a failed append", {
+					cause: error,
+				});
+				throw error;
+			}
 			this._notifyPersistListeners();
 		}
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
+		if (this.writeState.failure) throw this.writeState.failure;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
 	}
 
+	private _flushSourceBoundary(): void {
+		try {
+			this.flushNow();
+			if (this.persist && this.sessionFile) syncJournalFile(this.sessionFile);
+		} catch (error) {
+			this.writeState.failure = new Error("Source journal requires repair after a failed persistence boundary", {
+				cause: error,
+			});
+			throw this.writeState.failure;
+		}
+	}
+
+	/** Captures one source target. Late request facts do not move the conversation leaf. */
+	bindRequestSink(): BoundRequestSink {
+		this._flushSourceBoundary();
+		const sourceFile = this.sessionFile ? realpathIfPresent(resolve(this.sessionFile)) : undefined;
+		const source: SourceSnapshotRef = Object.freeze({
+			sessionId: this.sessionId,
+			...(sourceFile ? { sessionFile: sourceFile } : {}),
+			leafId: this.leafId,
+			sourceSequence: this.fileEntries.length - 1,
+			persistent: this.persist,
+		});
+		const entries = this.fileEntries;
+		const byId = this.byId;
+		const writeState = this.writeState;
+		return {
+			source,
+			persist: async (event: NativeRequestEvent) => {
+				if (writeState.failure) throw writeState.failure;
+				const serialized = stringifyBoundedJson(event, 1024 * 1024);
+				const request = JSON.parse(serialized) as NativeRequestEvent;
+				if (!isDeepStrictEqual(request.source, source))
+					throw new Error("Request event does not match its bound source");
+				const id = `${request.attemptId}:${request.type}`;
+				const existing = byId.get(id);
+				if (existing) {
+					if (existing.type !== "request" || !isDeepStrictEqual(existing.request, request))
+						throw new Error(`Conflicting request event: ${id}`);
+					return;
+				}
+				const entry: RequestJournalEntry = {
+					type: "request",
+					id,
+					parentId: source.leafId,
+					timestamp: new Date(request.timestamp).toISOString(),
+					request,
+				};
+				const entryJson = stringifyBoundedJson(entry, 1024 * 1024 - 1);
+				const isCurrent =
+					this.fileEntries === entries &&
+					this.byId === byId &&
+					(!sourceFile ||
+						(this.sessionFile !== undefined && realpathIfPresent(resolve(this.sessionFile)) === sourceFile));
+				try {
+					if (source.persistent && source.sessionFile) {
+						if (isCurrent) this.flushNow();
+						appendJournalRecord(source.sessionFile, `${entryJson}\n`);
+					}
+				} catch (error) {
+					writeState.failure = new Error("Source journal requires repair after a failed request append", {
+						cause: error,
+					});
+					throw writeState.failure;
+				}
+				entries.push(entry);
+				byId.set(entry.id, entry);
+				if (isCurrent && source.persistent) this._notifyPersistListeners();
+			},
+		};
+	}
+
+	appendToolInvocation(invocation: ToolInvocation): string {
+		const id = `${invocation.executionId}:intent`;
+		if (this.byId.has(id)) throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
+		const entry: ToolIntentEntry = {
+			type: "tool_intent",
+			id,
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			invocation: structuredClone(invocation),
+		};
+		this._appendEntry(entry);
+		this._flushSourceBoundary();
+		return entry.id;
+	}
+
+	appendToolExchange(exchange: FinalizedToolExchange): string {
+		const existing = this.byId.get(exchange.executionId);
+		if (existing?.type === "message" && existing.execution?.executionId === exchange.executionId) {
+			this.finalizedToolMessages.set(exchange.result, existing.id);
+			return existing.id;
+		}
+		if (existing) throw new Error(`Conflicting tool execution ID: ${exchange.executionId}`);
+		const { result, originalInput, executedInput, ...outcome } = exchange;
+		const invocationId = `${exchange.executionId}:intent`;
+		const execution: SessionExecutionEvidence = this.byId.has(invocationId)
+			? { ...outcome, invocationId }
+			: { ...outcome, originalInput, ...(exchange.executionOutcome === "not_started" ? {} : { executedInput }) };
+		const entry: SessionMessageEntry = {
+			type: "message",
+			id: exchange.executionId,
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			message: structuredClone(result),
+			execution: structuredClone(execution),
+		};
+		this._appendEntry(entry);
+		this._flushSourceBoundary();
+		this.finalizedToolMessages.set(result, entry.id);
+		return entry.id;
+	}
+
+	getToolExchange(executionId: string): FinalizedToolExchange | undefined {
+		const entry = this.byId.get(executionId);
+		if (entry?.type !== "message" || entry.message.role !== "toolResult" || !entry.execution) return undefined;
+		if ("invocationId" in entry.execution) {
+			const intent = this.byId.get(entry.execution.invocationId);
+			if (intent?.type !== "tool_intent") throw new Error(`Missing invocation for tool execution ${executionId}`);
+			const { invocationId: _invocationId, ...outcome } = entry.execution;
+			const { executedInput, ...invocation } = intent.invocation;
+			return {
+				...invocation,
+				...outcome,
+				...(outcome.executionOutcome === "not_started" ? {} : { executedInput }),
+				result: entry.message,
+			};
+		}
+		return { ...entry.execution, result: entry.message };
+	}
+
 	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+		const finalized = this.finalizedToolMessages.get(message);
+		if (finalized) return finalized;
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
@@ -1738,15 +1944,12 @@ export class SessionManager {
 				this.byId.delete(this.leafId);
 				this.fileEntries.pop();
 				this.leafId = previousLeafId;
-				// The failed append may have left a torn line on disk. Restore the file
-				// from the rolled-back entries now; if that also fails (e.g. the disk is
-				// still full), fall back to forcing the next persist to rewrite.
+				// Do not rewrite a potentially damaged shared journal from this view.
+				// Tail repair must first establish exclusive writer ownership.
 				this.flushed = false;
-				try {
-					this.flushNow();
-				} catch {
-					this.flushed = false;
-				}
+				this.writeState.failure ??= new Error("Source journal requires repair after a failed append", {
+					cause: error,
+				});
 			}
 			throw error;
 		}
@@ -1833,11 +2036,25 @@ export class SessionManager {
 	}
 
 	getFlatTree(): SessionTreeFlatNode[] {
-		return this.getEntries().map((entry) => ({
-			entry,
-			label: this.labelsById.get(entry.id),
-			labelTimestamp: this.labelTimestampsById.get(entry.id),
-		}));
+		return this.getEntries()
+			.filter(
+				(entry): entry is Exclude<SessionEntry, PrivateSessionEntry> =>
+					entry.type !== "tool_intent" && entry.type !== "request",
+			)
+			.map((entry) => {
+				// Internal intent records remain in source history, not the conversation tree.
+				let parentId = entry.parentId;
+				let parent = parentId ? this.byId.get(parentId) : undefined;
+				while (parent?.type === "tool_intent" || parent?.type === "request") {
+					parentId = parent.parentId;
+					parent = parentId ? this.byId.get(parentId) : undefined;
+				}
+				return {
+					entry: parentId === entry.parentId ? entry : { ...entry, parentId },
+					label: this.labelsById.get(entry.id),
+					labelTimestamp: this.labelTimestampsById.get(entry.id),
+				};
+			});
 	}
 
 	getTree(): SessionTreeNode[] {
@@ -1914,6 +2131,7 @@ export class SessionManager {
 	}
 
 	createBranchedSession(leafId: string): string | undefined {
+		this.flushNow();
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {

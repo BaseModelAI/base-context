@@ -93,6 +93,10 @@ cd packages/coding-agent
 rm -rf binaries
 mkdir -p binaries/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64}
 
+# The external Node writer needs a self-contained payload in native archives.
+mkdir -p binaries/worker-bundles
+bun build ./dist/core/rlm-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/rlm-journal-owner-worker.js
+
 # Determine which platforms to build
 if [[ -n "$PLATFORM" ]]; then
     PLATFORMS=("$PLATFORM")
@@ -121,8 +125,10 @@ for platform in "${PLATFORMS[@]}"; do
     cp README.md binaries/$platform/
     cp CHANGELOG.md binaries/$platform/
     cp dist/LICENSE dist/NOTICE binaries/$platform/
-    mkdir -p binaries/$platform/dist
+    mkdir -p binaries/$platform/dist/core
     cp dist/build-info.json binaries/$platform/dist/
+    cp dist/core/history-index-worker.js binaries/$platform/dist/core/
+    cp binaries/worker-bundles/rlm-journal-owner-worker.js binaries/$platform/dist/core/
     cp -r dist/base-context-runtime binaries/$platform/dist/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme
@@ -142,6 +148,8 @@ for platform in "${PLATFORMS[@]}"; do
         cp ../../node_modules/koffi/build/koffi/win32_x64/koffi.node binaries/$platform/node_modules/koffi/build/koffi/win32_x64/
     fi
 done
+
+rm -rf binaries/worker-bundles
 
 # Create archives
 cd binaries

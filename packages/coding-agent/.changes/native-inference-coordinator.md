@@ -1,0 +1,6 @@
+- Added session-owned inference coordination for main, child, side-question, summary, refinement, and daemon-control calls. Physical admissions and settlements use the canonical source writer and retain their original target across UI switches.
+- Preserved retry lineage and unique physical attempt IDs without adding aggregate charges. Model profiles and catalog pricing remain explicitly unvalidated; model-input compilation and typed turn transitions are separate work.
+- Included auxiliary requests in session activity and async shutdown. Closing blocks new admissions while already-admitted receipts still settle.
+- Gated opaque custom/proxy stream handlers before native sends. Custom models and base URLs remain usable through instrumented built-in API routes; handler registration alone does not establish coverage.
+- Required protocol 9 native inference ownership before daemon work, recovery, or graceful cleanup, while retaining a small passive Base 8 inspection subset.
+- Preserved live incompatible workers without automatic replacement, and exposed optional finalized tool evidence behind a daemon capability.

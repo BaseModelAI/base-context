@@ -13,6 +13,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -60,6 +61,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
@@ -84,12 +86,17 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const client = createClient(model, apiKey, options);
+			let client = createClient(model, apiKey, options);
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
 			let params = buildParams(model, context, options, deploymentName);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
+			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -100,7 +107,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const requestId = response.headers.get("x-request-id") ?? undefined;
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model);
+			await processResponsesStream(openaiStream, output, stream, model, { attempts });
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -110,9 +117,12 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && typeof AzureOpenAI.APIError === "function" && error instanceof AzureOpenAI.APIError) {
+				attempts.providerError(error.error);
+				if (error.error) attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -121,8 +131,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 

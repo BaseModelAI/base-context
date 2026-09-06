@@ -104,16 +104,23 @@ export interface AfterToolCallContext {
 /** What is known about the actual invocation, independently of middleware result overrides. */
 export type ToolExecutionOutcome = "not_started" | "completed" | "failed" | "outcome_unknown";
 
-/** Finalized source evidence; parallel exchanges retain assistant call order via sourceOrder. */
-export interface FinalizedToolExchange {
+/** Immutable invocation admitted by the execution owner before the tool can run. */
+export interface ToolInvocation {
+	readonly executionId: string;
 	readonly sourceOrder: number;
 	readonly toolCallId: string;
 	readonly toolName: string;
 	/** Snapshot before argument preparation, validation, or tool middleware. */
 	readonly originalInput: unknown;
+	/** Arguments reserved for this invocation, not a live middleware object. */
+	readonly executedInput: unknown;
+	readonly toolExecution: ToolExecutionMode;
+}
+
+/** Finalized source evidence; parallel exchanges retain assistant call order via sourceOrder. */
+export interface FinalizedToolExchange extends Omit<ToolInvocation, "executedInput"> {
 	/** Snapshot at invocation; absent when execution never started. */
 	readonly executedInput?: unknown;
-	readonly toolExecution: ToolExecutionMode;
 	/** An aborted wait does not establish whether an external effect stopped. */
 	readonly executionOutcome: ToolExecutionOutcome;
 	readonly cancellationRequested: boolean;
@@ -268,6 +275,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * `tool_execution_end` in completion order, then emits tool-result messages in assistant source order.
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Awaited before invoking the tool. Rejection prevents execution and stops the loop.
+	 * The owner records intent here; admission is not proof that an external effect occurred.
+	 */
+	onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
 
 	/**
 	 * Native execution owner, awaited after final middleware and before observer/result events.

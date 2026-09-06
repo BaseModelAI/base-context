@@ -1,77 +1,130 @@
 import {
-	closeSync,
-	existsSync,
+	constants,
 	fstatSync,
 	fsyncSync,
 	ftruncateSync,
+	linkSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readSync,
-	statSync,
-	writeSync,
+	renameSync,
+	rmSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { stringifyBoundedJson } from "./bounded-json.js";
+import {
+	decodeJournalFrame,
+	encodeJournalFrame,
+	encodeJournalFrameJson,
+	INITIAL_JOURNAL_CURSOR,
+	type JournalCursor,
+} from "./journal-frame.js";
+import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "./journal-io.js";
 
-/**
- * Append-only JSONL event log: the shared crash-safety substrate under the
- * RLM spawn ledger and the ACP semantic-edge ledger.
- *
- * Appends are single O_APPEND writes (PIPE_BUF-scale sizes, whose atomicity
- * multi-writer consumers rely on for interleaving), fsynced only when the
- * caller needs durability. Replay tolerates exactly one torn FINAL line
- * (rejected by the consumer's parser AND unterminated: a crashed writer's
- * in-progress append) and fails closed on any malformed interior line.
- * Repair happens only on append, never on read — a viewer may replay a live
- * writer's log. EVERY unterminated tail is truncated at its byte offset,
- * even one that parses as JSON: completing it with a newline would turn a
- * line a strict consumer parser rejects into permanent fail-closed interior
- * poison. Unifying consumers keeps the union of their safety behaviors.
- */
-
+/** Bounded JSONL I/O. The caller must supply exclusive ownership; this class does not acquire it. */
 export interface EventLogOptions {
-	/** Fail closed beyond these bounds on every full read, including the repair path. */
 	maxBytes?: number;
 	maxRecords?: number;
+	maxRecordBytes?: number;
+	maxBatchBytes?: number;
+	assertOwner?: () => void;
+	validateRecord?: (line: string, index: number) => void;
 	log?: (message: string) => void;
 }
 
-/** Bounded read through the descriptor: the size check and the allocation see the same fd, so a concurrent grow cannot bypass the bound. */
-function readAllSync(fd: number, maxBytes: number | undefined, path: string): Buffer {
+function readAllSync(fd: number, maxBytes: number, path: string): Buffer {
 	const size = fstatSync(fd).size;
-	if (maxBytes !== undefined && size > maxBytes) {
-		throw new Error(`event log ${path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
-	}
+	if (size > maxBytes) throw new Error(`event log ${path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
 	const buffer = Buffer.alloc(size);
 	let offset = 0;
 	while (offset < size) {
 		const bytesRead = readSync(fd, buffer, offset, size - offset, offset);
-		if (bytesRead === 0) break;
+		if (bytesRead === 0) throw new Error(`event log ${path} changed during read`);
 		offset += bytesRead;
 	}
-	return buffer.subarray(0, offset);
-}
-
-function serializeLine(event: unknown): string {
-	const serialized = JSON.stringify(event);
-	if (typeof serialized !== "string") {
-		throw new TypeError("event is not JSON-serializable");
-	}
-	return `${serialized}\n`;
+	return buffer;
 }
 
 export class EventLog {
+	private poisoned = false;
+	private readonly maxBytes: number;
+	private readonly maxRecords: number;
+	private readonly maxRecordBytes: number;
+	private readonly maxBatchBytes: number;
+
 	constructor(
 		readonly path: string,
 		private readonly options: EventLogOptions = {},
-	) {}
+	) {
+		this.maxBytes = options.maxBytes ?? 32 * 1024 * 1024;
+		this.maxRecords = options.maxRecords ?? 100_000;
+		this.maxRecordBytes = options.maxRecordBytes ?? 64 * 1024;
+		this.maxBatchBytes = options.maxBatchBytes ?? 256 * 1024;
+	}
 
-	/**
-	 * Replay every line through `parse`. `parse` throws for a line it rejects
-	 * (fail-closed for interior lines, tolerated for a torn final line) and
-	 * returns undefined for a line it deliberately skips.
-	 */
+	get requiresRepair(): boolean {
+		return this.poisoned;
+	}
+
+	private assertOwner(): void {
+		if (!this.options.assertOwner) throw new Error("Event log is read-only; an exclusive owner is required");
+		this.options.assertOwner();
+	}
+
+	private scan<T>(
+		contents: Buffer,
+		parse: (line: string, index: number) => T | undefined,
+	): { events: T[]; keep: number; records: number; cursor: JournalCursor; format: "empty" | "legacy" | "framed" } {
+		const events: T[] = [];
+		let start = 0;
+		let index = 0;
+		let records = 0;
+		let cursor = INITIAL_JOURNAL_CURSOR;
+		let format: "empty" | "legacy" | "framed" = "empty";
+		while (start < contents.length) {
+			const end = contents.indexOf(0x0a, start);
+			if ((end < 0 ? contents.length : end + 1) - start > this.maxRecordBytes)
+				throw new Error("Event log record byte limit exceeded");
+			if (end < 0) {
+				this.options.log?.("ignored torn final line");
+				break;
+			}
+			const bytes = contents.subarray(start, end + 1);
+			let line = bytes.toString("utf8").trim();
+			if (!line && format === "framed") throw new Error("Invalid empty journal frame");
+			if (line) {
+				if (++records > this.maxRecords)
+					throw new Error(`event log ${this.path} exceeds ${this.maxRecords} records; refusing to read`);
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(line);
+				} catch {
+					/* Legacy parsing remains the caller's policy. */
+				}
+				const framed = Boolean(
+					parsed &&
+						typeof parsed === "object" &&
+						(Object.hasOwn(parsed, "journalFrame") || Object.hasOwn(parsed, "previousChecksum")),
+				);
+				if (format === "empty") format = framed ? "framed" : "legacy";
+				if (format === "legacy" && framed) throw new Error("Mixed legacy and framed event log");
+				if (format === "framed") {
+					const decoded = decodeJournalFrame(bytes, cursor, this.maxRecordBytes);
+					cursor = decoded.next;
+					line = decoded.json;
+				}
+				const event = parse(line, index);
+				if (event !== undefined) events.push(event);
+			}
+			start = end + 1;
+			index++;
+		}
+		return { events, keep: start, records, cursor, format };
+	}
+
+	/** Readers never repair or expose an unterminated record, even when its JSON parses. */
 	replaySync<T>(parse: (line: string, index: number) => T | undefined): T[] {
-		const { maxBytes, maxRecords } = this.options;
 		let fd: number;
 		try {
 			fd = openSync(this.path, "r");
@@ -79,106 +132,181 @@ export class EventLog {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 			throw error;
 		}
-		let contents: string;
-		try {
-			contents = readAllSync(fd, maxBytes, this.path).toString("utf8");
-		} finally {
-			closeSync(fd);
-		}
-		const endsWithNewline = contents.endsWith("\n");
-		const rawLines = contents.split("\n");
-		const events: T[] = [];
-		let recordCount = 0;
-		for (let index = 0; index < rawLines.length; index++) {
-			const line = rawLines[index].trim();
-			if (!line) continue;
-			if (maxRecords !== undefined && ++recordCount > maxRecords) {
-				throw new Error(`event log ${this.path} exceeds ${maxRecords} records; refusing to read`);
-			}
-			let event: T | undefined;
-			try {
-				event = parse(line, index);
-			} catch (error) {
-				if (index === rawLines.length - 1 && !endsWithNewline) {
-					this.options.log?.(`ignored torn final line: ${error instanceof Error ? error.message : String(error)}`);
-					continue;
-				}
-				throw error;
-			}
-			if (event !== undefined) events.push(event);
-		}
-		return events;
+		return withJournalDescriptorSync(fd, () => this.scan(readAllSync(fd, this.maxBytes, this.path), parse).events);
 	}
 
-	/**
-	 * Append events as one write; `durable` fsyncs before returning. When the
-	 * file is created by this append, `onCreate`'s records lead the payload.
-	 * An unserializable event throws before any byte (including repair) is
-	 * written.
-	 */
+	private validate = (line: string, index: number): undefined => {
+		if (this.options.validateRecord) this.options.validateRecord(line, index);
+		else JSON.parse(line);
+		return undefined;
+	};
+
+	/** Checked framed append. Retained unframed journals need explicit migration before writing. */
 	appendSync(events: unknown[], options?: { durable?: boolean; onCreate?: () => unknown[] }): void {
-		const lines = events.map(serializeLine);
-		mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-		let leadLines: string[] = [];
-		if (existsSync(this.path)) {
-			this.repairTailSync();
-		} else {
-			leadLines = (options?.onCreate?.() ?? []).map(serializeLine);
-		}
-		const payload = [...leadLines, ...lines].join("");
-		const handle = openSync(this.path, "a", 0o600);
+		this.assertOwner();
+		if (this.poisoned) throw new Error("Event log requires owner recovery before another append");
+		if (events.length > 128) throw new Error("Event log batch record limit exceeded");
+		let normalizedBytes = 0;
+		const normalize = (event: unknown): unknown => {
+			const json = stringifyBoundedJson(event, this.maxRecordBytes);
+			normalizedBytes += Buffer.byteLength(json);
+			if (normalizedBytes > this.maxBatchBytes) throw new Error("Event log batch byte limit exceeded");
+			return JSON.parse(json) as unknown;
+		};
+		const normalized = events.map(normalize);
+		const prepare = (contents: Buffer): { keep: number; payload: Buffer } => {
+			const scan = this.scan(contents, this.validate);
+			if (scan.format === "legacy") throw new Error("Legacy event log requires explicit migration before append");
+			const lead = scan.records === 0 ? (options?.onCreate?.() ?? []).map(normalize) : [];
+			if (lead.length + normalized.length > 128) throw new Error("Event log batch record limit exceeded");
+			let cursor = scan.cursor;
+			let bytes = 0;
+			const lines: string[] = [];
+			for (const event of [...lead, ...normalized]) {
+				const encoded = encodeJournalFrame(event, cursor, this.maxRecordBytes);
+				cursor = encoded.next;
+				bytes += Buffer.byteLength(encoded.line);
+				if (bytes > this.maxBatchBytes) throw new Error("Event log batch byte limit exceeded");
+				lines.push(encoded.line);
+			}
+			if (scan.keep + bytes > this.maxBytes) throw new Error("Event log append exceeds journal byte limit");
+			if (scan.records + lines.length > this.maxRecords)
+				throw new Error("Event log append exceeds journal record limit");
+			return { keep: scan.keep, payload: Buffer.from(lines.join(""), "utf8") };
+		};
+		let mutated = false;
+		const append = (fd: number, prepared: { keep: number; payload: Buffer }): void => {
+			this.assertOwner();
+			mutated = true;
+			if (prepared.keep !== fstatSync(fd).size) ftruncateSync(fd, prepared.keep);
+			writeFullySync(fd, prepared.payload);
+			if (options?.durable) fsyncSync(fd);
+			this.assertOwner();
+		};
+		let existing: number | undefined;
 		try {
-			writeSync(handle, payload);
-			if (options?.durable) fsyncSync(handle);
-		} finally {
-			closeSync(handle);
+			existing = openSync(this.path, constants.O_RDWR | constants.O_APPEND);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		}
+		try {
+			if (existing !== undefined) {
+				withJournalDescriptorSync(existing, (fd) => append(fd, prepare(readAllSync(fd, this.maxBytes, this.path))));
+			} else {
+				const prepared = prepare(Buffer.alloc(0));
+				mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
+				this.assertOwner();
+				const fd = openSync(
+					this.path,
+					constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_EXCL,
+					0o600,
+				);
+				mutated = true;
+				withJournalDescriptorSync(fd, () => append(fd, prepared));
+				if (options?.durable) syncJournalDirectory(dirname(this.path));
+			}
+		} catch (error) {
+			if (mutated) this.poisoned = true;
+			throw error;
 		}
 	}
 
-	/**
-	 * Truncate a torn final line from a crashed writer before appending:
-	 * otherwise the append would turn a tolerable torn tail into a fail-closed
-	 * interior line. The torn bytes were never readable data.
-	 */
-	private repairTailSync(): void {
-		const { maxBytes } = this.options;
-		let size: number;
+	/** Explicit migration under the lifetime owner. The exact old inode stays at .legacy-v1. */
+	migrateLegacySync(): void {
+		this.assertOwner();
+		if (this.poisoned) throw new Error("Event log requires owner recovery before migration");
+		const retainedPath = `${this.path}.legacy-v1`;
+		const stagedPath = `${this.path}.migration-v1.tmp`;
+		let staged = false;
+		let published = false;
 		try {
-			size = statSync(this.path).size;
-		} catch {
+			withJournalDescriptorSync(openSync(this.path, "r+"), (source) => {
+				const contents = readAllSync(source, this.maxBytes, this.path);
+				const scan = this.scan(contents, (line, index) => {
+					this.validate(line, index);
+					return line;
+				});
+				if (scan.format !== "legacy") return;
+				const complete = contents.subarray(0, scan.keep);
+				if (!Buffer.from(complete.toString("utf8"), "utf8").equals(complete)) {
+					throw new Error("Invalid legacy journal UTF8");
+				}
+				this.assertOwner();
+				// This reserved staging path is never published as a source locator.
+				rmSync(stagedPath, { force: true });
+				const target = openSync(stagedPath, "wx", 0o600);
+				staged = true;
+				withJournalDescriptorSync(target, () => {
+					let cursor = INITIAL_JOURNAL_CURSOR;
+					let bytes = 0;
+					for (const line of scan.events) {
+						const encoded = encodeJournalFrameJson(line, cursor, this.maxRecordBytes);
+						cursor = encoded.next;
+						bytes += Buffer.byteLength(encoded.line);
+						if (bytes > this.maxBytes) throw new Error("Migrated journal exceeds byte limit");
+						this.assertOwner();
+						writeFullySync(target, Buffer.from(encoded.line));
+					}
+					fsyncSync(target);
+				});
+				fsyncSync(source);
+				this.assertOwner();
+				try {
+					linkSync(this.path, retainedPath);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+					const retained = lstatSync(retainedPath);
+					const original = fstatSync(source);
+					if (!retained.isFile() || retained.ino !== original.ino || retained.dev !== original.dev) {
+						throw new Error("Retained legacy journal path already belongs to another source");
+					}
+				}
+				syncJournalDirectory(dirname(this.path));
+				this.assertOwner();
+				renameSync(stagedPath, this.path);
+				published = true;
+				staged = false;
+				syncJournalDirectory(dirname(this.path));
+				this.assertOwner();
+			});
+		} catch (error) {
+			if (published) this.poisoned = true;
+			if (staged) {
+				try {
+					rmSync(stagedPath, { force: true });
+				} catch {
+					this.poisoned = true;
+				}
+			}
+			throw error;
+		}
+	}
+
+	/** Explicit owner-only recovery. Complete interior records must validate before tail removal. */
+	recoverSync(): void {
+		this.assertOwner();
+		let fd: number;
+		try {
+			fd = openSync(this.path, "r+");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			this.poisoned = false;
 			return;
 		}
-		if (size === 0) return;
-		// Fail closed loudly at the read bound BEFORE the swallowing repair
-		// try-block: an oversized log must never trigger a file-sized
-		// allocation, and the error must not be silenced as a repair failure.
-		if (maxBytes !== undefined && size > maxBytes) {
-			throw new Error(`event log ${this.path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
-		}
-		// All offsets are BYTE offsets on raw buffers: string indices diverge
-		// from byte offsets as soon as any record carries multi-byte UTF-8,
-		// and ftruncate takes bytes.
 		try {
-			const fd = openSync(this.path, "r+");
-			try {
-				const lastByte = Buffer.alloc(1);
-				if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return;
-				// Truncate guarded by a double-read stability check (cheap
-				// cross-process hardening; a racing append between the check and
-				// the ftruncate stays in the same trust bucket as the documented
-				// O_APPEND small-write atomicity assumption).
-				const first = readAllSync(fd, maxBytes, this.path);
-				const second = readAllSync(fd, maxBytes, this.path);
-				if (second.length !== first.length || !second.equals(first)) return;
-				if (fstatSync(fd).size !== first.length) return;
-				const keep = first.lastIndexOf(0x0a) + 1;
-				ftruncateSync(fd, keep);
-				this.options.log?.(`truncated torn final line (${first.length - keep} bytes)`);
-			} finally {
-				closeSync(fd);
-			}
-		} catch {
-			// Leave the tail for the reader's torn-line tolerance.
+			withJournalDescriptorSync(fd, () => {
+				const contents = readAllSync(fd, this.maxBytes, this.path);
+				const { keep } = this.scan(contents, this.validate);
+				this.assertOwner();
+				if (keep !== contents.length) ftruncateSync(fd, keep);
+				fsyncSync(fd);
+				this.assertOwner();
+			});
+			syncJournalDirectory(dirname(this.path));
+			this.poisoned = false;
+		} catch (error) {
+			this.poisoned = true;
+			throw error;
 		}
 	}
 }

@@ -1,3 +1,4 @@
+import type * as Fs from "node:fs";
 import {
 	appendFileSync,
 	chmodSync,
@@ -31,7 +32,7 @@ const fsMocks = vi.hoisted(() => ({
 	writeFileSync: vi.fn<WriteFileSync>(),
 }));
 vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+	const actual = await importOriginal<typeof Fs>();
 	fsMocks.actualWriteFileSync = actual.writeFileSync;
 	fsMocks.chmodSync.mockImplementation(actual.chmodSync);
 	fsMocks.chownSync.mockImplementation(actual.chownSync);
@@ -346,11 +347,6 @@ function failNextOutcomeAppend(mgr: SessionManager, file: string): void {
 	};
 }
 
-const failAfterPartialTempWrite: WriteFileSync = (path, data, options) => {
-	fsMocks.actualWriteFileSync!(path, Buffer.from(String(data)).subarray(0, 12), options);
-	throw new Error("repair failed");
-};
-
 describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 	it("flushes rollback-aware value entries immediately", () => {
 		const dir = createTempDir();
@@ -374,61 +370,34 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 		expect(persisted).toContain('"customType":"compaction_outcome"');
 	});
 
-	it("repairs the session file immediately after a torn append", () => {
-		const dir = createTempDir();
-		const sessionDir = join(dir, "sessions");
-		const mgr = SessionManager.create(dir, sessionDir);
-		mgr.appendMessage({ role: "user", content: "hi", timestamp: Date.now() });
-		mgr.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "hello" }],
-			api: "openai-completions",
-			provider: "openai",
-			model: "test",
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		});
-		const file = mgr.getSessionFile()!;
-		const before = readFileSync(file, "utf8");
-
-		const internals = mgr as unknown as { _persist(entry: unknown): void };
-		const originalPersist = internals._persist.bind(mgr);
-		internals._persist = () => {
-			appendFileSync(file, '{"type":"custom_message","truncat');
-			throw new Error("disk full");
-		};
-		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow("disk full");
-		internals._persist = originalPersist;
-
-		// The rollback rewrites the file from the restored in-memory entries, so the
-		// durable session has no torn tail even if the process exits right after.
-		expect(readFileSync(file, "utf8")).toBe(before);
-	});
-
-	it("preserves old history when rollback repair fails", () => {
+	it("retains the torn tail instead of rewriting without exclusive ownership", () => {
 		const { mgr, file, before } = createPersistedSessionForRollbackTest();
 		failNextOutcomeAppend(mgr, file);
-		fsMocks.writeFileSync.mockImplementationOnce(failAfterPartialTempWrite);
-
+		fsMocks.writeFileSync.mockClear();
 		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow("append failed");
+		expect(fsMocks.writeFileSync).not.toHaveBeenCalled();
 		expect(readFileSync(file).subarray(0, before.length)).toEqual(before);
+		expect(readFileSync(file).length).toBeGreaterThan(before.length);
 	});
 
-	it("repairs a torn tail on the next successful retry", () => {
-		const { mgr, file, before } = createPersistedSessionForRollbackTest();
+	it("rolls back only the unacknowledged in-memory entry", () => {
+		const { mgr, file } = createPersistedSessionForRollbackTest();
+		const leaf = mgr.getLeafId();
+		const entries = mgr.getEntries();
 		failNextOutcomeAppend(mgr, file);
-		fsMocks.writeFileSync.mockImplementationOnce(failAfterPartialTempWrite);
-		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow();
+		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow("append failed");
+		expect(mgr.getLeafId()).toBe(leaf);
+		expect(mgr.getEntries()).toEqual(entries);
+	});
 
-		mgr.flushNow();
-		expect(readFileSync(file)).toEqual(before);
+	it("blocks retries and reopened appends until the torn tail is repaired", () => {
+		const { mgr, file } = createPersistedSessionForRollbackTest();
+		failNextOutcomeAppend(mgr, file);
+		expect(() => mgr.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).toThrow("append failed");
+		const damaged = readFileSync(file);
+		expect(() => mgr.flushNow()).toThrow("requires repair");
+		const reopened = SessionManager.open(file);
+		expect(() => reopened.appendSessionInfo("must not append")).toThrow("requires repair");
+		expect(readFileSync(file)).toEqual(damaged);
 	});
 });

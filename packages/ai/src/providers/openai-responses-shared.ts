@@ -30,6 +30,7 @@ import type {
 import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import type { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -61,6 +62,7 @@ function parseTextSignature(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	attempts?: ProviderAttemptTracker;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -265,6 +267,52 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 	}));
 }
 
+/** Observe one decoded provider event, including failures transformed by transport-specific adapters. */
+export function observeResponsesEvent(event: ResponseStreamEvent, attempts?: ProviderAttemptTracker): void {
+	attempts?.event(
+		("delta" in event && typeof event.delta === "string" && event.delta.length > 0) ||
+			(event.type === "response.output_item.added" && event.item.type === "function_call"),
+	);
+	if ("response" in event) {
+		const response = event.response;
+		if (response.error) attempts?.providerError(response.error);
+		attempts?.response({
+			providerResponseId: response.id,
+			responseModel: response.model,
+			effectiveEffort: response.reasoning?.effort ?? undefined,
+			effectiveServiceTier: response.service_tier,
+		});
+		const terminal =
+			event.type === "response.completed" ||
+			event.type === "response.failed" ||
+			event.type === "response.incomplete";
+		if (response.usage) {
+			const usage = response.usage;
+			const cached = usage.input_tokens_details?.cached_tokens;
+			attempts?.usage(
+				response.usage,
+				{
+					input:
+						cached !== undefined && usage.input_tokens !== undefined ? usage.input_tokens - cached : undefined,
+					inputTotal: usage.input_tokens,
+					output: usage.output_tokens,
+					cacheRead: cached,
+					totalTokens: usage.total_tokens,
+				},
+				terminal ? "complete" : "partial",
+			);
+		}
+		if (terminal) {
+			attempts?.terminal(
+				response.status === "failed" ? "failed" : response.status === "cancelled" ? "cancelled" : "completed",
+			);
+		}
+	} else if (event.type === "error") {
+		attempts?.providerError(event);
+		attempts?.terminal("failed");
+	}
+}
+
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
 	output: AssistantMessage,
@@ -278,6 +326,7 @@ export async function processResponsesStream<TApi extends Api>(
 	const blockIndex = () => blocks.length - 1;
 
 	for await (const event of openaiStream) {
+		observeResponsesEvent(event, options?.attempts);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {

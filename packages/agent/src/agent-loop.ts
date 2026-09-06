@@ -604,7 +604,12 @@ async function executeToolCalls(
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content
 		.filter((c) => c.type === "toolCall")
-		.map((toolCall, sourceOrder) => ({ toolCall, sourceOrder, originalInput: structuredClone(toolCall.arguments) }));
+		.map((toolCall, sourceOrder) => ({
+			toolCall,
+			sourceOrder,
+			executionId: crypto.randomUUID(),
+			originalInput: structuredClone(toolCall.arguments),
+		}));
 	const hasSequentialToolCall = toolCalls.some(
 		({ toolCall }) => currentContext.tools?.find((t) => t.name === toolCall.name)?.executionMode === "sequential",
 	);
@@ -615,6 +620,7 @@ async function executeToolCalls(
 }
 
 type ToolCallSource = {
+	executionId: string;
 	toolCall: AgentToolCall;
 	sourceOrder: number;
 	originalInput: unknown;
@@ -662,7 +668,7 @@ async function executeToolCallsSequential(
 				executionOutcome: "not_started",
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, source, "sequential", config, signal, emit);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -724,7 +730,7 @@ async function executeToolCallsParallel(
 		}
 
 		finalizedCalls.push(async () => {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, source, "parallel", config, signal, emit);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -737,9 +743,14 @@ async function executeToolCallsParallel(
 		});
 	}
 
-	const orderedFinalizedCalls = await Promise.all(
+	// An owner/publication failure must not abandon other invocations already started.
+	const settledCalls = await Promise.allSettled(
 		finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
 	);
+	const orderedFinalizedCalls = settledCalls.flatMap((settled) =>
+		settled.status === "fulfilled" ? [settled.value] : [],
+	);
+	const failure = settledCalls.find((settled) => settled.status === "rejected");
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
 		const toolResultMessage = finalized.exchange.result;
@@ -747,6 +758,7 @@ async function executeToolCallsParallel(
 		messages.push(toolResultMessage);
 	}
 
+	if (failure?.status === "rejected") throw failure.reason;
 	return {
 		messages,
 		exchanges: orderedFinalizedCalls.map((finalized) => finalized.exchange),
@@ -858,20 +870,38 @@ async function prepareToolCall(
 
 async function executePreparedToolCall(
 	prepared: PreparedToolCall,
+	source: ToolCallSource,
+	toolExecution: ToolExecutionMode,
+	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallOutcome> {
+	const invocationArgs = structuredClone(prepared.args);
+	const executedInput = structuredClone(invocationArgs);
+	if (!signal?.aborted) {
+		// Admission failures must not become synthetic tool results or fall through to effects.
+		await config.onToolInvocationStarting?.(
+			{
+				executionId: source.executionId,
+				sourceOrder: source.sourceOrder,
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				originalInput: source.originalInput,
+				executedInput,
+				toolExecution,
+			},
+			signal,
+		);
+	}
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
 	let executionStarted = false;
-	let executedInput: unknown;
 
 	try {
 		throwIfAborted(signal);
-		executedInput = structuredClone(prepared.args);
 		executionStarted = true;
 		const result = await raceWithAbort(
-			prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
+			prepared.tool.execute(prepared.toolCall.id, invocationArgs as never, signal, (partialResult) => {
 				if (!acceptingUpdates || signal?.aborted) {
 					return;
 				}
@@ -983,6 +1013,7 @@ async function publishToolExchange(
 	emit: AgentEventSink,
 ): Promise<PublishedToolCallOutcome> {
 	const exchange: FinalizedToolExchange = {
+		executionId: source.executionId,
 		sourceOrder: source.sourceOrder,
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,

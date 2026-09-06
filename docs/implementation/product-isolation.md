@@ -10,8 +10,9 @@ is Base Context 0.1.0, with Prime Agent v0.9.3 ancestry retained.
 - Commands: `base-context` and the separately installed `base-context-ai` helper.
 - State: user/project `.base-context`, explicit validated `BASE_CONTEXT_*` overrides,
   separate Python distribution/environment, and product-owned diagnostic paths.
-- Daemon: `base-context.daemon`, protocol 8, schema revision 27, home/install-scoped
-  endpoints and rejection of foreign handshakes in command and cleanup paths.
+- Daemon: `base-context.daemon`, protocol 9, schema revision 28, home/install-scoped
+  endpoints and rejection of foreign handshakes. Native work requires owned inference;
+  older Base8 permits only explicitly passive inspection, not graceful cleanup.
 - Auth: supported API-key/bearer routes remain. Copied, custom and MCP OAuth routes
   are unavailable until their distribution contract is validated. Registration alone
   does not validate a route. Provider IDs and ordinary provider endpoints stay intact.
@@ -45,6 +46,11 @@ source directory remains `prime-agent-runtime`; the distribution is
 
 Local source builds and extracted package metadata/CLI probes passed. Same-home
 running-product coexistence passed, including real Base cleanup/shutdown and upstream
-survival. Upgrade/uninstall, installed kernel, Windows execution,
-provider routes and final release tests are separate gates. No benchmark or publishing
+survival. Native upgrade to the private 0.1.1 fixture, current-daemon launch, shutdown
+and npm uninstall passed while upstream stayed responsive with unchanged settings/auth.
+A separate clean-build installed SDK probe passed explicit legacy-path write rejection.
+Those installed lifecycle probes used the earlier protocol8 checkpoint. Protocol9 has
+focused compatibility tests, not a new installed-product certification.
+Installed kernel, Windows execution, provider routes and final release tests remain
+separate gates. No benchmark or publishing
 claim follows from these source checks. The local 0.1.1 tarballs are upgrade fixtures.

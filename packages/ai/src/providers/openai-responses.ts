@@ -16,6 +16,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -68,6 +69,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -92,12 +94,17 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
+			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
@@ -109,6 +116,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
+				attempts,
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
@@ -121,9 +129,12 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && typeof OpenAI.APIError === "function" && error instanceof OpenAI.APIError) {
+				attempts.providerError(error.error);
+				if (error.error) attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -132,8 +143,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
