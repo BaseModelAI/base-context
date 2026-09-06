@@ -187,8 +187,21 @@ describe("sandbox readiness bundle", () => {
 		if (!oversized.ok) expect(oversized.code).toBe("INPUT_TOO_LARGE");
 	});
 
+	test("rejects resizable buffers even when the flag is shadowed", () => {
+		const source = bytes(PYTHON_FIXTURE);
+		const buffer: unknown = Reflect.construct(ArrayBuffer, [
+			source.byteLength,
+			{ maxByteLength: source.byteLength + 32 },
+		]);
+		if (!(buffer instanceof ArrayBuffer)) throw new Error("setup failed");
+		new Uint8Array(buffer).set(source);
+		expect(decodeSandboxReadinessBundle(buffer).ok).toBe(false);
+		Object.defineProperty(buffer, "resizable", { value: false });
+		expect(decodeSandboxReadinessBundle(buffer).ok).toBe(false);
+	});
+
 	test("capability cannot be forged and builder isolates output", () => {
-		expect(() => new SandboxReadinessBundle(Object.freeze({}))).toThrow("Sandbox readiness bundle is invalid");
+		expect(() => new SandboxReadinessBundle(Object.freeze({}))).toThrow();
 		expect(copyReadinessSignature(Object.create(SandboxReadinessBundle.prototype))).toBeUndefined();
 		const fields = validFields();
 		const result = buildSandboxReadinessBundle(fields);

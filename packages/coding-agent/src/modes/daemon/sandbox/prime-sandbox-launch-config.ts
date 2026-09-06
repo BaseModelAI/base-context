@@ -29,7 +29,7 @@ const launchConfigs = new WeakMap<object, LaunchConfigData>();
 
 export class SandboxLaunchConfig {
 	constructor(token: unknown) {
-		if (token !== ISSUE) throw new Error("Sandbox launch config is invalid");
+		if (token !== ISSUE) throw new Error();
 		Object.freeze(this);
 	}
 }
@@ -69,7 +69,9 @@ function isExactArrayBuffer(value: unknown): value is ArrayBuffer {
 			value !== null &&
 			!types.isProxy(value) &&
 			Object.getPrototypeOf(value) === ArrayBuffer.prototype &&
-			!Object.hasOwn(value, "byteLength")
+			!Object.hasOwn(value, "byteLength") &&
+			!Object.hasOwn(value, "resizable") &&
+			!Object.hasOwn(value, "maxByteLength")
 		);
 	} catch {
 		return false;

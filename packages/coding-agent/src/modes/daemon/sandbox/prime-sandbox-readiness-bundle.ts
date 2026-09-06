@@ -39,7 +39,7 @@ const readinessBundles = new WeakMap<object, ReadinessData>();
 
 export class SandboxReadinessBundle {
 	constructor(token: unknown) {
-		if (token !== ISSUE) throw new Error("Sandbox readiness bundle is invalid");
+		if (token !== ISSUE) throw new Error();
 		Object.freeze(this);
 	}
 }
@@ -79,7 +79,9 @@ function isExactArrayBuffer(value: unknown): value is ArrayBuffer {
 			value !== null &&
 			!types.isProxy(value) &&
 			Object.getPrototypeOf(value) === ArrayBuffer.prototype &&
-			!Object.hasOwn(value, "byteLength")
+			!Object.hasOwn(value, "byteLength") &&
+			!Object.hasOwn(value, "resizable") &&
+			!Object.hasOwn(value, "maxByteLength")
 		);
 	} catch {
 		return false;

@@ -162,6 +162,19 @@ describe("sandbox launch config", () => {
 		if (!oversized.ok) expect(oversized.code).toBe("INPUT_TOO_LARGE");
 	});
 
+	test("rejects resizable buffers even when the flag is shadowed", () => {
+		const source = bytes(PYTHON_FIXTURE);
+		const buffer: unknown = Reflect.construct(ArrayBuffer, [
+			source.byteLength,
+			{ maxByteLength: source.byteLength + 32 },
+		]);
+		if (!(buffer instanceof ArrayBuffer)) throw new Error("setup failed");
+		new Uint8Array(buffer).set(source);
+		expect(decodeSandboxLaunchConfig(buffer).ok).toBe(false);
+		Object.defineProperty(buffer, "resizable", { value: false });
+		expect(decodeSandboxLaunchConfig(buffer).ok).toBe(false);
+	});
+
 	test("rejects detached input", () => {
 		const buffer = bytes(PYTHON_FIXTURE).buffer;
 		structuredClone(buffer, { transfer: [buffer] });
@@ -169,7 +182,7 @@ describe("sandbox launch config", () => {
 	});
 
 	test("capability cannot be forged and build output is isolated", () => {
-		expect(() => new SandboxLaunchConfig(Object.freeze({}))).toThrow("Sandbox launch config is invalid");
+		expect(() => new SandboxLaunchConfig(Object.freeze({}))).toThrow();
 		expect(copyLaunchConfigHomePublicKey(Object.create(SandboxLaunchConfig.prototype))).toBeUndefined();
 		const first = buildSandboxLaunchConfig(validSource());
 		const second = buildSandboxLaunchConfig(validSource());
