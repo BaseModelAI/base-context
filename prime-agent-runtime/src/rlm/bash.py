@@ -45,6 +45,11 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 _COMPLETION_NOTICE_COMMAND_CAP = 1000
+_ASYNCIO_WRAPPER_CALLBACKS = {
+    ("asyncio.tasks", "gather.<locals>._done_callback"),
+    ("asyncio.tasks", "shield.<locals>._inner_done_callback"),
+    ("asyncio.tasks", "_release_waiter"),
+}
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
@@ -70,8 +75,10 @@ def _consume_notice_task(task: asyncio.Task[None]) -> None:
         task.exception()
 
 
-def _completion_reaches(start: asyncio.Future[Any], target: asyncio.Future[Any]) -> bool:
-    """Follow futures captured by asyncio wrapper completion callbacks."""
+def _completion_reaches(
+    start: asyncio.Future[Any], targets: tuple[asyncio.Future[Any], ...]
+) -> bool:
+    """Follow asyncio's wrapper and TaskGroup ownership callbacks."""
     pending = [start]
     seen_futures: set[int] = set()
     seen_values: set[int] = set()
@@ -108,13 +115,21 @@ def _completion_reaches(start: asyncio.Future[Any], target: asyncio.Future[Any])
 
     while pending:
         future = pending.pop()
-        if future is target:
+        if any(future is target for target in targets):
             return True
         if id(future) in seen_futures:
             continue
         seen_futures.add(id(future))
         for entry in getattr(future, "_callbacks", None) or ():
-            collect(entry[0] if isinstance(entry, tuple) else entry)
+            callback = entry[0] if isinstance(entry, tuple) else entry
+            base = callback.func if isinstance(callback, functools.partial) else callback
+            identity = (getattr(base, "__module__", None), getattr(base, "__qualname__", None))
+            if identity in _ASYNCIO_WRAPPER_CALLBACKS:
+                collect(callback)
+            elif identity == ("asyncio.taskgroups", "TaskGroup._on_task_done"):
+                parent = getattr(getattr(callback, "__self__", None), "_parent_task", None)
+                if isinstance(parent, asyncio.Future):
+                    pending.append(parent)
     return False
 
 
@@ -127,9 +142,10 @@ def _creating_cell_waits_for(
     if owner is awaiter:
         return True
     waiter = getattr(owner, "_fut_waiter", None)
-    if not isinstance(waiter, asyncio.Future):
-        return False
-    return _completion_reaches(awaiter, waiter)
+    targets: tuple[asyncio.Future[Any], ...] = (owner,)
+    if isinstance(waiter, asyncio.Future):
+        targets += (waiter,)
+    return _completion_reaches(awaiter, targets)
 
 
 @dataclass(frozen=True)

@@ -757,17 +757,27 @@ class ReplTest(unittest.TestCase):
         self.assertIn("detached", one(inspected, "result")["text"])
 
     def test_wrapper_awaits_in_creating_cell_suppress_bash_completion(self):
-        expressions = {
+        snippets = {
             "gather": "(await asyncio.gather(bash('printf gather')))[0].output",
             "wait-for": "(await asyncio.wait_for(bash('printf wait-for'), 1)).output",
             "shield": "(await asyncio.shield(bash('printf shield'))).output",
             "nested": "(await asyncio.shield(asyncio.gather(bash('printf nested'))))[0].output",
+            "task-group": "\n".join(
+                [
+                    "handle = bash('printf task-group')",
+                    "async def consume():",
+                    "    return await handle",
+                    "async with asyncio.TaskGroup() as group:",
+                    "    task = group.create_task(consume())",
+                    "task.result().output",
+                ]
+            ),
         }
-        for label, expression in expressions.items():
+        for label, snippet in snippets.items():
             with self.subTest(label=label):
                 completed = self.repl.execute(
                     f"bash-wrapper-{label}",
-                    f"from rlm import bash\nimport asyncio\n{expression}",
+                    f"from rlm import bash\nimport asyncio\n{snippet}",
                 )
                 self.assertIn(label, one(completed, "result")["text"])
                 probe = self.repl.execute(f"bash-wrapper-{label}-probe", "await asyncio.sleep(0.05)")
@@ -785,7 +795,12 @@ class ReplTest(unittest.TestCase):
                 "async def consume():",
                 "    globals()['task_result'] = await task_handle",
                 "waiter = asyncio.create_task(consume())",
-                "await asyncio.sleep(0.02)",
+                "bookkeeping = asyncio.get_running_loop().create_future()",
+                "def callback_for(marker):",
+                "    return lambda _: marker.cancelled()",
+                "waiter.add_done_callback(callback_for(bookkeeping))",
+                "asyncio.get_running_loop().call_later(0.02, bookkeeping.set_result, None)",
+                "await bookkeeping",
                 "task_handle.pid",
             ]
         )
