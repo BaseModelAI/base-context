@@ -18,7 +18,7 @@ function artifactFileName(kind: SandboxArtifactKind): string {
 	if (kind === "release") return "prime-agent-runtime.tar.gz";
 	if (kind === "manifest") return "prime-agent-runtime.manifest.json";
 	if (kind === "bootstrap") return "prime-agent-bootstrap.pyz";
-	return "prime-agent-trust.json";
+	return "prime-agent-bootstrap-trust.json";
 }
 
 export type VerifiedUploadCode =

@@ -181,7 +181,11 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 				fileName: "prime-agent-runtime.manifest.json",
 			},
 			{ kind: "bootstrap", path: "/tmp/prime-agent-bootstrap.pyz", fileName: "prime-agent-bootstrap.pyz" },
-			{ kind: "trust", path: "/tmp/prime-agent-trust.json", fileName: "prime-agent-trust.json" },
+			{
+				kind: "trust",
+				path: "/tmp/prime-agent-bootstrap-trust.json",
+				fileName: "prime-agent-bootstrap-trust.json",
+			},
 		];
 		for (const spec of specs) {
 			const bytes = new TextEncoder().encode(`public-${spec.kind}`);
