@@ -1,0 +1,35 @@
+{
+  "schema": "prime-context.python-realworld-task/v1",
+  "id": 21,
+  "slug": "wav-interview-chapters",
+  "title": "WAV Interview Cleanup and Chapters",
+  "pressure": "L",
+  "timeout_seconds": 900,
+  "editable_paths": [
+    "solution/",
+    "output/"
+  ],
+  "initial_prompt": "Read TASK.md and complete the requested workflow using only the Python standard library.",
+  "stages": [
+    {
+      "id": "initial",
+      "inject": "visible/",
+      "message": "Read TASK.md and complete the requested workflow using only the Python standard library.",
+      "compact_after": false
+    },
+    {
+      "id": "stereo",
+      "inject": "stages/stereo/",
+      "message": "A stereo 16-bit recording and transcript were added. Accept either mono or stereo. A frame is silent only when every channel is below the threshold. In this stage, --output names a parent directory: place all outputs for the requested WAV in <output>/<WAV-stem>/, for both mono and stereo, with chapter files below that directory. The command still processes the single WAV/transcript pair passed as arguments. Separate invocations with --output output must keep different WAV stems separate.",
+      "compact_after": false
+    }
+  ],
+  "judge_command": [
+    "python3.12",
+    "-E",
+    "-S",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

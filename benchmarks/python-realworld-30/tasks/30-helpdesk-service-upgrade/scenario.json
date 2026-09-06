@@ -1,0 +1,68 @@
+{
+  "schema": "prime-context.python-realworld-task/v1",
+  "id": 30,
+  "slug": "helpdesk-service-upgrade",
+  "title": "Helpdesk Service Upgrade",
+  "pressure": "H",
+  "timeout_seconds": 1800,
+  "editable_paths": [
+    "service/",
+    "workspace/",
+    "output/"
+  ],
+  "initial_prompt": "Read TASK.md and complete the requested workflow using only the Python standard library.",
+  "stages": [
+    {
+      "id": "initial",
+      "inject": "visible/",
+      "message": "Read TASK.md and complete the requested workflow using only the Python standard library.",
+      "compact_after": true
+    },
+    {
+      "id": "mail",
+      "inject": "stages/mail/",
+      "message": "Read `MAIL.md` and implement its exact positional command and JSON-summary contract. From `service/`, run `python -m helpdesk import-mail ../workspace/helpdesk.db ../inputs/archive.mbox`. Messages addressed to `support+<ticket-id>@example.test` become comments; unmatched threads create tickets. Preserve external `Message-ID` for deduplication.",
+      "compact_after": false
+    },
+    {
+      "id": "sla",
+      "inject": "stages/sla/",
+      "message": "Read `SLA.md` and implement its exact positional command and CSV contract. From `service/`, run `python -m helpdesk escalations ../workspace/helpdesk.db --as-of 2025-05-28T17:00:00Z --output ../output/escalations.csv`. Use the stated business hours and holidays. A customer comment reopens a resolved ticket.",
+      "compact_after": true
+    },
+    {
+      "id": "search",
+      "inject": "stages/search/",
+      "message": "Read `SEARCH.md` and implement its exact positional command, API, CSV, and ordering contracts. From `service/`, run `python -m helpdesk export ../workspace/helpdesk.db --status open --output ../output/tickets.csv`. Add deterministic token search over subject, body, and comments. Tokenize with NFKC/casefold alphanumeric runs. Query terms use AND semantics. Rank by `3 * subject_hits + 2 * body_hits + comment_hits`, then newest `updated_at`, then ticket ID. Do not rely on optional SQLite extensions.",
+      "compact_after": false
+    },
+    {
+      "id": "maintenance",
+      "inject": "stages/maintenance/",
+      "message": "Read `MAINTENANCE.md` and implement its exact positional command and JSON contract. From `service/`, run `python -m helpdesk maintenance ../workspace/helpdesk.db --as-of 2025-06-02T17:00:00Z --output ../output/maintenance.json`. Close stale `pending_customer` tickets after the configured number of business days and report every changed ticket. Retain all earlier API, import, SLA, search, and export behavior.",
+      "compact_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ],
+  "candidate_service": {
+    "command": [
+      "python",
+      "-m",
+      "helpdesk",
+      "serve",
+      "--db",
+      "../workspace/helpdesk.db",
+      "--port",
+      "0"
+    ],
+    "cwd": "{workspace}/service",
+    "url_file": "inputs/helpdesk_url.txt",
+    "start_at_stage": "initial",
+    "restart_each_stage": true
+  }
+}
