@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { describe, expect, it } from "vitest";
 import {
 	CompactAssistantStreamReconstructor,

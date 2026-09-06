@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@ponythewhite/base-context-agent";
+import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
 import { resolveKernelBashShell } from "../../utils/shell.js";
@@ -43,7 +43,7 @@ except Exception as _prime_agent_rlm_error:
             raise RuntimeError(
                 "prime-agent-runtime is not installed in this kernel. "
                 "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
-                "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
+                "BASE_CONTEXT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
 
@@ -465,8 +465,8 @@ export class IpythonKernelProvisioner {
 				// bash() reads these to pick its shell and command prefix.
 				env: {
 					...this.options?.env,
-					...(shellPath ? { PRIME_AGENT_BASH_SHELL: shellPath } : {}),
-					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
+					...(shellPath ? { BASE_CONTEXT_BASH_SHELL: shellPath } : {}),
+					...(commandPrefix ? { BASE_CONTEXT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,

@@ -10,13 +10,13 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
-import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
+import { assertProductStatePath, readAbsolutePathEnv, resolveRuntimePaths } from "../../runtime-paths.js";
+import { normalizeSocketPath } from "./daemon-socket.js";
 
-const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 
 const OWNER_VERSION = 1;
 const REGISTRY_LOCK_STALE_MS = 5000;
@@ -310,26 +310,10 @@ class DaemonShutdownAdmission {
 	}
 }
 
-/**
- * The registry is durable authority state and must be global per user so
- * ownerConflicts sees every daemon on the box; it deliberately lives outside
- * $TMPDIR (whose files macOS dirhelper deletes after 3 days) and outside the
- * per-invocation agent dir.
- */
+/** Durable supervisor authority is scoped to one product home, never an upstream registry. */
 function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
-}
-
-/** Read-only legacy registry location, disabled when the registry is overridden. */
-/**
- * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
- * from before the ~/.prime move may still be running; gated off whenever the
- * registry is overridden. Remove after one release.
- */
-function legacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]
-		? undefined
-		: resolve(defaultDaemonSocketDir(), "supervisor-owners");
+	const override = readAbsolutePathEnv(DAEMON_SUPERVISOR_REGISTRY_DIR_ENV, environment);
+	return assertProductStatePath(override ?? resolveRuntimePaths(environment).daemonRegistry);
 }
 
 /**
@@ -356,6 +340,7 @@ function readLegacyOwnersForSocket(
 }
 
 async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
+	assertProductStatePath(registryDir);
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 	const guardPath = resolve(registryDir, ".guard");
 	let compromisedError: Error | undefined;
@@ -515,7 +500,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 	},
 	validatedFingerprint?: string,
 	registryDir?: string,
-	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+	legacyRegistryDir: string | undefined = undefined,
 ): Promise<string> {
 	registryDir ??= defaultDaemonSupervisorRegistryDir();
 	const current =
@@ -574,7 +559,7 @@ export async function persistDaemonStartupFenceFromOwner(
 	socketPath: string,
 	hello: DaemonSupervisorHelloIdentity,
 	registryDir?: string,
-	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+	legacyRegistryDir: string | undefined = undefined,
 ): Promise<void> {
 	registryDir ??= defaultDaemonSupervisorRegistryDir();
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });

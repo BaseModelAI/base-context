@@ -1,4 +1,4 @@
-import type { Usage } from "@earendil-works/pi-ai";
+import type { Usage } from "@ponythewhite/base-context-ai";
 
 export interface SessionUsageSummary {
 	inputTokens: number;

@@ -1,13 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Component, OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import type { Component, OverlayHandle, TUI } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
+import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -91,6 +92,9 @@ describe("ProviderAuthFlows", () => {
 		writeFileSync(authJsonPath, "{}");
 		originalHome = process.env.HOME;
 		originalPrimeTeamId = process.env.PRIME_TEAM_ID;
+		vi.stubEnv("HOME", tempDir);
+		vi.stubEnv("BASE_CONTEXT_HOME", join(tempDir, "base-context"));
+		vi.stubEnv("PRIME_API_KEY", undefined);
 	});
 
 	afterEach(() => {
@@ -108,9 +112,11 @@ describe("ProviderAuthFlows", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 	});
 
-	it("preserves the Prime CLI team when login reuses the existing Prime CLI key", async () => {
+	it("validates a manually entered key and preserves the isolated provider team", async () => {
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("prime-cli-key");
 		process.env.PRIME_TEAM_ID = "env-team";
 		writeFileSync(
 			primeConfigPath,
@@ -156,7 +162,8 @@ describe("ProviderAuthFlows", () => {
 		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
 	});
 
-	it("stores a reused Prime CLI key when Prime CLI config sync is disabled", async () => {
+	it("stores the entered key without borrowing Prime CLI credentials when config sync is disabled", async () => {
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("manual-key");
 		process.env.HOME = tempDir;
 		process.env.PRIME_TEAM_ID = "env-team";
 		const defaultPrimeDir = join(tempDir, ".prime");
@@ -175,7 +182,12 @@ describe("ProviderAuthFlows", () => {
 		expect(errorMessages).toEqual([]);
 		expect(result.status).toBe("success");
 		expect(fetchMock).toHaveBeenCalledOnce();
-		await expect(authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID)).resolves.toBe("prime-cli-key");
+		expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.primeintellect.ai/api/v1/user/whoami");
+		expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer manual-key" });
+		expect(JSON.parse(readFileSync(join(defaultPrimeDir, "config.json"), "utf-8"))).toEqual({
+			api_key: "prime-cli-key",
+		});
+		await expect(authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID)).resolves.toBe("manual-key");
 		expect(authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
 			configured: true,
 			source: "stored",
@@ -187,11 +199,11 @@ describe("ProviderAuthFlows", () => {
 		>;
 		expect(authData[PRIME_INFERENCE_PROVIDER_ID]).toEqual({
 			type: "api_key",
-			key: "prime-cli-key",
+			key: "manual-key",
 		});
 	});
 
-	it("offers Prime Inference logout when auth comes from the Prime CLI config", async () => {
+	it("offers Prime Inference logout for isolated provider config credentials", async () => {
 		writeFileSync(primeConfigPath, JSON.stringify({ api_key: "prime-cli-key" }));
 		const authStorage = AuthStorage.create(authJsonPath, {
 			primeCliConfigPath: primeConfigPath,
@@ -205,6 +217,20 @@ describe("ProviderAuthFlows", () => {
 		expect(stripAnsi(overlays[0]?.render(80).join("\n") ?? "")).toContain("Prime Inference");
 		overlays[0]?.handleInput?.("\x1b");
 		await expect(logoutResult).resolves.toBeNull();
+	});
+
+	it("explains separate trace configuration without requesting provider credentials", async () => {
+		const authStorage = AuthStorage.inMemory({
+			[PRIME_INFERENCE_PROVIDER_ID]: { type: "api_key", key: "inference-key" },
+		});
+		const fetchMock = vi.spyOn(globalThis, "fetch");
+		const { host, errorMessages, overlays } = createHost(authStorage);
+
+		await expect(new ProviderAuthFlows(host).runPrimeAgentTracesLogin()).resolves.toEqual({ status: "failed" });
+		expect(errorMessages.join("\n")).toContain("BASE_CONTEXT_TRACES_BASE_URL");
+		expect(errorMessages.join("\n")).toContain("BASE_CONTEXT_TRACES_API_KEY");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(overlays).toHaveLength(0);
 	});
 
 	it("opens login on the requested MCP Connections category", async () => {

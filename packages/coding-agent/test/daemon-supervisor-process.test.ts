@@ -32,7 +32,7 @@ const children = new Set<ChildProcess>();
 const workerPids = new Set<number>();
 const daemonSockets = new Set<string>();
 const childDiagnostics = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
-const PROCESS_STRESS_WORKERS = Number.parseInt(process.env.PRIME_AGENT_STRESS_WORKERS ?? "10", 10);
+const PROCESS_STRESS_WORKERS = Number.parseInt(process.env.BASE_CONTEXT_STRESS_WORKERS ?? "10", 10);
 
 afterEach(async () => {
 	for (const socketPath of daemonSockets) {
@@ -101,7 +101,7 @@ function spawnSupervisor(
 				...process.env,
 				...extraEnv,
 				[ENV_AGENT_DIR]: agentDir,
-				PI_OFFLINE: "1",
+				BASE_CONTEXT_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 			},
 			stdio: ["ignore", "pipe", "pipe"],
@@ -324,7 +324,7 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-depth-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { RLM_DEPTH: "1" });
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { BASE_CONTEXT_RLM_DEPTH: "1" });
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -606,7 +606,7 @@ describe("daemon supervisor resident workers", () => {
 			type: "create",
 			sessionPath: sessionFile,
 			lifecycle: "client_owned",
-			launchEnv: { PRIME_AGENT_OWNED_TEST: launchEnvSentinel },
+			launchEnv: { BASE_CONTEXT_OWNED_TEST: launchEnvSentinel },
 			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
 		});
 		expect(created.success).toBe(true);
@@ -1615,7 +1615,7 @@ describe("daemon supervisor resident workers", () => {
 			sessionPath: sessionFile,
 			continueRecent: false,
 			config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
-			launchEnv: { PRIME_AGENT_TEST_FRESH_CONTEXT: "1" },
+			launchEnv: { BASE_CONTEXT_TEST_FRESH_CONTEXT: "1" },
 		});
 		if (!reopened.success) throw new Error(reopened.error);
 		const recovered = requireSummary(reopened.data);

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "@ponythewhite/base-context-agent";
 
 /**
  * ACP semantic-edges-v1 producer: a durable per-agent ledger of model-request

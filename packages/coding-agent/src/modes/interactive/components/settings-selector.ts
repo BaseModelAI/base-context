@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Transport } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Transport } from "@ponythewhite/base-context-ai";
 import {
 	Container,
 	type SelectItem,
@@ -9,7 +9,7 @@ import {
 	SettingsList,
 	Spacer,
 	Text,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
 import type { MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";

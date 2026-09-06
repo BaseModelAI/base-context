@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/pi-tui",
-	"version": "0.9.3",
+	"name": "@ponythewhite/base-context-tui",
+	"version": "0.1.0",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"type": "module",
 	"main": "dist/index.js",
@@ -24,15 +24,15 @@
 		"typescript",
 		"cli"
 	],
-	"author": "Mario Zechner",
+	"author": "Jacek Dąbrowski <jack.dabrowski@synerise.com>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/BaseModelAI/base-context.git",
 		"directory": "packages/tui"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.8.0"
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
@@ -48,5 +48,10 @@
 	"devDependencies": {
 		"@xterm/headless": "^6.0.0",
 		"@xterm/xterm": "^6.0.0"
-	}
+	},
+	"contributors": [
+		"Mario Zechner",
+		"Prime Intellect",
+		"BaseModelAI"
+	]
 }

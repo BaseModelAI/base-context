@@ -34,7 +34,7 @@ export interface ToolUnavailableResult {
 export type ToolEnsureResult = ToolAvailableResult | ToolUnavailableResult;
 
 function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
+	const value = process.env.BASE_CONTEXT_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
@@ -295,7 +295,7 @@ export function formatMissingRipgrepMessage(result: ToolUnavailableResult): stri
 	let reason: string;
 	switch (result.reason) {
 		case "offline":
-			reason = "Automatic installation was skipped because PI_OFFLINE is enabled.";
+			reason = "Automatic installation was skipped because BASE_CONTEXT_OFFLINE is enabled.";
 			break;
 		case "manual_install_required":
 			reason = "Prime Agent cannot install this helper automatically in Termux.";

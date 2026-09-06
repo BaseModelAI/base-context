@@ -1,4 +1,4 @@
-import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
+import type { ServiceTier, Transport } from "@ponythewhite/base-context-ai";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -136,7 +136,7 @@ export interface Settings {
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
-	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 2
+	rlmMaxDepth?: number; // default for new sessions; unset falls through to BASE_CONTEXT_RLM_MAX_DEPTH, then 2
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
@@ -852,7 +852,7 @@ export class SettingsManager {
 	}
 
 	getTelemetryEnabled(): boolean {
-		const globalEnabled = this.globalSettings.telemetry?.enabled ?? true;
+		const globalEnabled = this.globalSettings.telemetry?.enabled ?? false;
 		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
 		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
 		return globalEnabled && projectEnabled && runtimeEnabled;
@@ -1145,7 +1145,7 @@ export class SettingsManager {
 		if (this.settings.terminal?.clearOnShrink !== undefined) {
 			return this.settings.terminal.clearOnShrink;
 		}
-		return process.env.PI_CLEAR_ON_SHRINK === "1";
+		return process.env.BASE_CONTEXT_CLEAR_ON_SHRINK === "1";
 	}
 
 	setClearOnShrink(enabled: boolean): void {
@@ -1158,8 +1158,8 @@ export class SettingsManager {
 	}
 
 	getFullscreen(): boolean {
-		if (process.env.PI_FULLSCREEN !== undefined) {
-			return process.env.PI_FULLSCREEN === "1";
+		if (process.env.BASE_CONTEXT_FULLSCREEN !== undefined) {
+			return process.env.BASE_CONTEXT_FULLSCREEN === "1";
 		}
 		return this.settings.terminal?.fullscreen ?? true;
 	}
@@ -1272,7 +1272,7 @@ export class SettingsManager {
 	}
 
 	getShowHardwareCursor(): boolean {
-		return this.settings.showHardwareCursor ?? process.env.PI_HARDWARE_CURSOR === "1";
+		return this.settings.showHardwareCursor ?? process.env.BASE_CONTEXT_HARDWARE_CURSOR === "1";
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {

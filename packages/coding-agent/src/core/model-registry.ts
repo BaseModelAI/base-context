@@ -19,9 +19,9 @@ import {
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
-import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
+} from "@ponythewhite/base-context-ai";
+import { registerBuiltinMcpOAuthProviders } from "@ponythewhite/base-context-ai/mcp";
+import { registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
@@ -425,7 +425,7 @@ function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): s
 }
 
 function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
+	const value = process.env.BASE_CONTEXT_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }

@@ -1,4 +1,4 @@
-import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@earendil-works/pi-ai";
+import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { expect, it } from "vitest";
 import { Agent } from "../src/agent.js";

@@ -10,15 +10,17 @@ import { createHash } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
+	getPrimeTeamId,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
-} from "@earendil-works/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+} from "@ponythewhite/base-context-ai";
+import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 import {
 	clearPrimeCliCredentials,
 	getPrimeCliConfigPath,
@@ -68,7 +70,9 @@ export type AuthStatus = {
 };
 
 export type AuthStorageOptions = {
+	/** Optional explicit provider config; the default is Base Context prime-inference.json. */
 	primeCliConfigPath?: string;
+	/** Enable the isolated Prime Inference provider config. */
 	usePrimeCliConfig?: boolean;
 };
 
@@ -109,6 +113,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
 
 	private ensureParentDir(): void {
+		assertProductStatePath(this.authPath);
 		const dir = dirname(this.authPath);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -390,7 +395,7 @@ export class AuthStorage {
 			return undefined;
 		}
 		return {
-			label: "Prime CLI",
+			label: "Base Context provider config",
 			...this.createAuthSourceCandidate({
 				configured: false,
 				source: "prime_cli",
@@ -839,7 +844,7 @@ export class AuthStorage {
 	 * Get API key for a provider.
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)
-	 * 2. Prime Inference: environment variable, Prime CLI config, auth.json
+	 * 2. Prime Inference: environment variable, Base Context provider config, auth.json
 	 * 3. Other providers: auth.json, environment variable
 	 * 4. Fallback resolver (models.json custom providers)
 	 */
@@ -1046,6 +1051,9 @@ export class AuthStorage {
 	}
 
 	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {
+		if (getPrimeTeamId()) {
+			return undefined;
+		}
 		let config: PrimeCliConfig | undefined;
 		if (this.isPrimeCliConfigEnabled()) {
 			config = this.getPrimeCliConfig(PRIME_INFERENCE_PROVIDER_ID);
@@ -1066,7 +1074,7 @@ export class AuthStorage {
 			if (config?.teamId) {
 				return this.toPrimeTeamCredential({
 					teamId: config.teamId,
-					name: config.teamName ?? "Prime CLI team",
+					name: config.teamName ?? "Prime Inference team",
 					...(config.teamRole ? { role: config.teamRole } : {}),
 				});
 			}
@@ -1081,7 +1089,7 @@ export class AuthStorage {
 		if (!config?.apiKey && config?.teamId) {
 			return this.toPrimeTeamCredential({
 				teamId: config.teamId,
-				name: config.teamName ?? "Prime CLI team",
+				name: config.teamName ?? "Prime Inference team",
 				...(config.teamRole ? { role: config.teamRole } : {}),
 			});
 		}
@@ -1093,9 +1101,9 @@ export class AuthStorage {
 			return undefined;
 		}
 
-		const primeCliConfig = this.getPrimeCliConfig(providerId);
-		if (primeCliConfig?.teamIdFromEnv) {
-			return primeCliConfig.teamId ? { "X-Prime-Team-ID": primeCliConfig.teamId } : undefined;
+		const environmentTeamId = getPrimeTeamId();
+		if (environmentTeamId) {
+			return { "X-Prime-Team-ID": environmentTeamId };
 		}
 
 		const teamId = this.getPrimeInferenceTeamSelection()?.teamId;
@@ -1143,7 +1151,7 @@ export class AuthStorage {
 	private getEnabledPrimeCliConfigPath(): string {
 		const configPath = this.getPrimeCliConfigPath();
 		if (!configPath) {
-			throw new Error("Prime CLI config is not enabled");
+			throw new Error("Base Context Prime Inference config is not enabled");
 		}
 		return configPath;
 	}

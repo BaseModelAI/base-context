@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { registerOAuthProvider } from "@ponythewhite/base-context-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -206,7 +206,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -264,7 +264,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -286,7 +286,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -350,7 +350,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -472,35 +472,38 @@ describe("AuthStorage", () => {
 			expect(authStorage.getPrimeInferenceTeamSelection()).toBeNull();
 		});
 
-		test("prime inference environment team overrides legacy personal selection", () => {
-			const originalPrimeTeamId = process.env.PRIME_TEAM_ID;
-			process.env.PRIME_TEAM_ID = "env-team";
-			try {
-				const primeConfigPath = join(tempDir, "prime-config.json");
-				writeFileSync(primeConfigPath, JSON.stringify({ team_id: "cli-team" }));
-				writeAuthJson({
-					"prime-inference": {
-						type: "api_key",
-						key: "agent-key",
-						primeTeam: null,
-					},
-				});
+		test.each([true, false])(
+			"prime inference environment team overrides personal selection with config sync %s",
+			(syncConfig) => {
+				const originalPrimeTeamId = process.env.PRIME_TEAM_ID;
+				process.env.PRIME_TEAM_ID = "env-team";
+				try {
+					const primeConfigPath = join(tempDir, "prime-config.json");
+					writeFileSync(primeConfigPath, JSON.stringify({ team_id: "cli-team" }));
+					writeAuthJson({
+						"prime-inference": {
+							type: "api_key",
+							key: "agent-key",
+							primeTeam: null,
+						},
+					});
 
-				authStorage = AuthStorage.create(authJsonPath, {
-					primeCliConfigPath: primeConfigPath,
-					usePrimeCliConfig: true,
-				});
+					authStorage = AuthStorage.create(authJsonPath, {
+						primeCliConfigPath: syncConfig ? primeConfigPath : undefined,
+						usePrimeCliConfig: syncConfig,
+					});
 
-				expect(authStorage.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "env-team" });
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
-			} finally {
-				if (originalPrimeTeamId === undefined) {
-					delete process.env.PRIME_TEAM_ID;
-				} else {
-					process.env.PRIME_TEAM_ID = originalPrimeTeamId;
+					expect(authStorage.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "env-team" });
+					expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
+				} finally {
+					if (originalPrimeTeamId === undefined) {
+						delete process.env.PRIME_TEAM_ID;
+					} else {
+						process.env.PRIME_TEAM_ID = originalPrimeTeamId;
+					}
 				}
-			}
-		});
+			},
+		);
 
 		test("prime inference missing Agent team selection falls back to Prime CLI team", () => {
 			const primeConfigPath = join(tempDir, "prime-config.json");

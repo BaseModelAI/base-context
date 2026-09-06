@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@ponythewhite/base-context-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	defaultModelPerProvider,

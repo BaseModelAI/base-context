@@ -43,7 +43,7 @@ describe("no silent catch blocks", () => {
 
 		expect(
 			offenders,
-			`Empty catch blocks swallow errors silently. Log the error (getLogger from @earendil-works/pi-ai) or add a comment inside the block explaining why ignoring it is safe:\n${offenders.join("\n")}`,
+			`Empty catch blocks swallow errors silently. Log the error (getLogger from @ponythewhite/base-context-ai) or add a comment inside the block explaining why ignoring it is safe:\n${offenders.join("\n")}`,
 		).toEqual([]);
 	});
 });

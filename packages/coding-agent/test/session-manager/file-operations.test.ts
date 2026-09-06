@@ -160,12 +160,14 @@ describe("loadEntriesFromFile", () => {
 });
 
 describe("session tree metadata", () => {
-	it.each(["2.5", "2oops", "9007199254740993"])("rejects invalid RLM_DEPTH value %s", (value) => {
+	it.each(["2.5", "2oops", "9007199254740993"])("rejects invalid BASE_CONTEXT_RLM_DEPTH value %s", (value) => {
 		const tempDir = join(tmpdir(), `invalid-root-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
-		vi.stubEnv("RLM_DEPTH", value);
+		vi.stubEnv("BASE_CONTEXT_RLM_DEPTH", value);
 		try {
-			expect(() => SessionManager.create(tempDir, tempDir)).toThrow("RLM_DEPTH must be a non-negative integer");
+			expect(() => SessionManager.create(tempDir, tempDir)).toThrow(
+				"BASE_CONTEXT_RLM_DEPTH must be a non-negative integer",
+			);
 		} finally {
 			vi.unstubAllEnvs();
 			rmSync(tempDir, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/pi-ai",
-	"version": "0.9.3",
+	"name": "@ponythewhite/base-context-ai",
+	"version": "0.1.0",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -56,7 +56,7 @@
 		}
 	},
 	"bin": {
-		"pi-ai": "./dist/cli.js"
+		"base-context-ai": "./dist/cli.js"
 	},
 	"files": [
 		"dist",
@@ -94,19 +94,24 @@
 		"unified",
 		"api"
 	],
-	"author": "Mario Zechner",
+	"author": "Jacek Dąbrowski <jack.dabrowski@synerise.com>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/BaseModelAI/base-context.git",
 		"directory": "packages/ai"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.8.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",
 		"vitest": "^4.1.10"
-	}
+	},
+	"contributors": [
+		"Mario Zechner",
+		"Prime Intellect",
+		"BaseModelAI"
+	]
 }

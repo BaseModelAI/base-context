@@ -44,7 +44,7 @@ export async function checkForPackageUpdates(options: {
 	agentDir: string;
 	settingsManager: SettingsManager;
 }): Promise<string[]> {
-	if (process.env.PI_OFFLINE) {
+	if (process.env.BASE_CONTEXT_OFFLINE) {
 		return [];
 	}
 

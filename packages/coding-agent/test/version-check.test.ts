@@ -8,9 +8,9 @@ import {
 } from "../src/utils/version-check.js";
 
 const defaultPrimeAgentDownloadBaseUrl = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
-const originalSkipVersionCheck = process.env.PI_SKIP_VERSION_CHECK;
-const originalOffline = process.env.PI_OFFLINE;
-const originalPrimeAgentDownloadBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
+const originalSkipVersionCheck = process.env.BASE_CONTEXT_SKIP_VERSION_CHECK;
+const originalOffline = process.env.BASE_CONTEXT_OFFLINE;
+const originalPrimeAgentDownloadBaseUrl = process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL;
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -22,9 +22,9 @@ function restoreEnv(name: string, value: string | undefined): void {
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	restoreEnv("PI_SKIP_VERSION_CHECK", originalSkipVersionCheck);
-	restoreEnv("PI_OFFLINE", originalOffline);
-	restoreEnv("PRIME_AGENT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
+	restoreEnv("BASE_CONTEXT_SKIP_VERSION_CHECK", originalSkipVersionCheck);
+	restoreEnv("BASE_CONTEXT_OFFLINE", originalOffline);
+	restoreEnv("BASE_CONTEXT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
 });
 
 describe("version checks", () => {
@@ -87,7 +87,7 @@ describe("version checks", () => {
 	});
 
 	it("skips api calls when version checks are disabled", async () => {
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.BASE_CONTEXT_SKIP_VERSION_CHECK = "1";
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
 

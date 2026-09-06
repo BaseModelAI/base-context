@@ -1,4 +1,9 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+} from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {

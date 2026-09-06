@@ -17,9 +17,9 @@ import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js"
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
-const OWNED_WORKER_ENV = "PRIME_AGENT_INTERNAL_OWNED_WORKER";
-const OWNED_RECOVERY_DESCRIPTOR_ENV = "PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR";
-const OWNED_PROFILE_ENV = "PRIME_AGENT_INTERNAL_OWNED_PROFILE";
+const OWNED_WORKER_ENV = "BASE_CONTEXT_INTERNAL_OWNED_WORKER";
+const OWNED_RECOVERY_DESCRIPTOR_ENV = "BASE_CONTEXT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR";
+const OWNED_PROFILE_ENV = "BASE_CONTEXT_INTERNAL_OWNED_PROFILE";
 
 let closeOwnerWatch: (() => void) | undefined;
 
@@ -59,7 +59,7 @@ function hasNonSessionOperation(args: readonly string[]): boolean {
 }
 
 function isStartupBenchmark(environment: NodeJS.ProcessEnv): boolean {
-	const value = environment.PI_STARTUP_BENCHMARK?.toLowerCase();
+	const value = environment.BASE_CONTEXT_STARTUP_BENCHMARK?.toLowerCase();
 	return value === "1" || value === "true" || value === "yes";
 }
 
@@ -472,7 +472,7 @@ export async function maybeRunOwnedSessionWorkerFrontend(
 	args: readonly string[],
 	forceLegacyFrontend = false,
 ): Promise<boolean> {
-	if (!forceLegacyFrontend && process.env.PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
+	if (!forceLegacyFrontend && process.env.BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
 		return false;
 	}
 	const profile = classifyOwnedSessionWorkerInvocation(args, process.stdin.isTTY);

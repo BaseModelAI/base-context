@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { setKeybindings } from "@earendil-works/pi-tui";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
+import { setKeybindings } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";

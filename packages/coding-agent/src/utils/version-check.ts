@@ -86,7 +86,7 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 }
 
 function getPrimeAgentDownloadBaseUrl(): string {
-	return (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
+	return (process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
 		/\/+$/,
 		"",
 	);
@@ -115,7 +115,7 @@ export async function getLatestPiRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
-	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
+	if (process.env.BASE_CONTEXT_SKIP_VERSION_CHECK || process.env.BASE_CONTEXT_OFFLINE) return undefined;
 
 	const baseUrl = getPrimeAgentDownloadBaseUrl();
 	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {

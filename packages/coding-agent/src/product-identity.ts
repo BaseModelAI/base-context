@@ -10,7 +10,7 @@ export interface ProductIdentity {
 	readonly repository: string;
 }
 
-export const PRODUCT: ProductIdentity = Object.freeze({
+export const PRODUCT = Object.freeze({
 	name: "Base Context",
 	command: "base-context",
 	packageName: "@ponythewhite/base-context",
@@ -19,7 +19,7 @@ export const PRODUCT: ProductIdentity = Object.freeze({
 	daemonService: "base-context.daemon",
 	runtimeDistribution: "base-context-runtime",
 	repository: "https://github.com/BaseModelAI/base-context",
-});
+} as const satisfies ProductIdentity);
 
 export const PRODUCT_ENV = Object.freeze({
 	home: "BASE_CONTEXT_HOME",

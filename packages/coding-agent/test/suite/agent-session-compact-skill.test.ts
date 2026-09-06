@@ -1,5 +1,5 @@
-import type { ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { ShouldStopAfterTurnContext } from "@ponythewhite/base-context-agent";
+import { type AssistantMessage, fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 

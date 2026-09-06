@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../../src/cli/subprocess-launch.js";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
@@ -73,15 +73,15 @@ async function runCli(
 			...process.env,
 			TSX_TSCONFIG_PATH: repoTsconfigPath,
 			[ENV_AGENT_DIR]: options.agentDir,
-			PI_SKIP_VERSION_CHECK: "1",
-			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: undefined,
-			RLM_DEPTH: undefined,
-			RLM_MAX_DEPTH: undefined,
+			BASE_CONTEXT_SKIP_VERSION_CHECK: "1",
+			BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_TOKEN: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: undefined,
+			BASE_CONTEXT_RLM_DEPTH: undefined,
+			BASE_CONTEXT_RLM_MAX_DEPTH: undefined,
 			...options.environment,
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -301,7 +301,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			],
 			{
 				agentDir,
-				environment: { PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1" },
+				environment: { BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1" },
 			},
 		);
 
@@ -319,7 +319,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		daemonSockets.add(socketPath);
 		writeFileSync(
 			extensionPath,
-			'import { appendFileSync } from "node:fs";\nexport default function() { appendFileSync(process.env.PRIME_AGENT_TEST_EXTENSION_LOAD_MARKER, "loaded\\n"); }\n',
+			'import { appendFileSync } from "node:fs";\nexport default function() { appendFileSync(process.env.BASE_CONTEXT_TEST_EXTENSION_LOAD_MARKER, "loaded\\n"); }\n',
 		);
 
 		const result = await runCli(
@@ -341,7 +341,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			],
 			{
 				agentDir,
-				environment: { PRIME_AGENT_TEST_EXTENSION_LOAD_MARKER: markerPath },
+				environment: { BASE_CONTEXT_TEST_EXTENSION_LOAD_MARKER: markerPath },
 			},
 		);
 

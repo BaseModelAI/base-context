@@ -1,12 +1,16 @@
 import { appendFileSync } from "node:fs";
-import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
+import {
+	AgentContinueError,
+	type AgentMessage,
+	type ShouldStopAfterTurnContext,
+} from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
 	type Model,
 	type ToolResultMessage,
 	type Usage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";

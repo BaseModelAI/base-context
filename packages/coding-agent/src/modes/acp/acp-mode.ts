@@ -3,8 +3,8 @@ import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { Readable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { ImageContent } from "@ponythewhite/base-context-ai";
 import { VERSION } from "../../config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -19,7 +19,7 @@ import type {
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
 import { resolveAcpMcpServers } from "./acp-mcp.js";
-import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
+import { BASE_CONTEXT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
 
 /**
@@ -267,14 +267,14 @@ class AcpUpdateProducer {
 			unknown
 		>;
 		const priorPrimeMeta =
-			priorMeta[PRIME_AGENT_META_NAMESPACE] && typeof priorMeta[PRIME_AGENT_META_NAMESPACE] === "object"
-				? (priorMeta[PRIME_AGENT_META_NAMESPACE] as Record<string, unknown>)
+			priorMeta[BASE_CONTEXT_META_NAMESPACE] && typeof priorMeta[BASE_CONTEXT_META_NAMESPACE] === "object"
+				? (priorMeta[BASE_CONTEXT_META_NAMESPACE] as Record<string, unknown>)
 				: {};
 		const correlatedUpdate = {
 			...update,
 			_meta: {
 				...priorMeta,
-				[PRIME_AGENT_META_NAMESPACE]: {
+				[BASE_CONTEXT_META_NAMESPACE]: {
 					...priorPrimeMeta,
 					promptTurnId: turnId,
 					eventSequence,

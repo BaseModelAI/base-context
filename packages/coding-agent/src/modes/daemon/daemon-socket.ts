@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
+import { getAgentDir, getPackageDir } from "../../config.js";
+import { PRODUCT } from "../../product-identity.js";
 
 export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
 
@@ -69,7 +72,7 @@ export interface DaemonSocketIdentity {
 
 export function defaultDaemonSocketPath(): string {
 	if (process.platform === "win32") {
-		return "\\\\.\\pipe\\prime-agent-daemon";
+		return `\\\\.\\pipe\\${PRODUCT.command}-${daemonScopeId()}`;
 	}
 	return join(defaultDaemonSocketDir(), "daemon.sock");
 }
@@ -276,9 +279,13 @@ function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease)
 	}
 }
 
+function daemonScopeId(): string {
+	return createHash("sha256").update(`${getAgentDir()}\0${getPackageDir()}`).digest("hex").slice(0, 12);
+}
+
 export function defaultDaemonSocketDir(): string {
 	const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
-	return join(tmpdir(), `prime-agent-${suffix}`);
+	return join(tmpdir(), `bc-${suffix}-${daemonScopeId().slice(0, 8)}`);
 }
 
 function ensureDefaultDaemonSocketDir(socketPath: string): void {

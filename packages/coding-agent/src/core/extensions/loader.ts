@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { KeyId } from "@earendil-works/pi-tui";
+import type { KeyId } from "@ponythewhite/base-context-tui";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
@@ -54,17 +54,17 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@earendil-works/pi-agent-core");
-	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@earendil-works/pi-tui");
-	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@earendil-works/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@earendil-works/pi-ai/oauth");
+	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@ponythewhite/base-context-agent");
+	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@ponythewhite/base-context-tui");
+	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@ponythewhite/base-context-ai");
+	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@ponythewhite/base-context-ai/oauth");
 
 	_aliases = {
-		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core": piAgentCoreEntry,
-		"@earendil-works/pi-tui": piTuiEntry,
-		"@earendil-works/pi-ai": piAiEntry,
-		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
+		"@ponythewhite/base-context": piCodingAgentEntry,
+		"@ponythewhite/base-context-agent": piAgentCoreEntry,
+		"@ponythewhite/base-context-tui": piTuiEntry,
+		"@ponythewhite/base-context-ai": piAiEntry,
+		"@ponythewhite/base-context-ai/oauth": piAiOauthEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,

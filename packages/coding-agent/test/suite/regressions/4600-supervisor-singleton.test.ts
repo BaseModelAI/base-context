@@ -72,7 +72,7 @@ const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-exten
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
-const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorRegistryDirEnv = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<FixtureHandle>();
 const harnesses: Harness[] = [];
 const cleanupProcesses = new Map<string, CleanupProcessIdentity>();
@@ -141,7 +141,7 @@ function spawnFixture(
 			ENG_4600_GENERATION: options.generation,
 			ENG_4600_REGISTRY_DIR: paths.registryDir,
 			ENG_4600_SOCKET_PATH: paths.socketPath,
-			PI_OFFLINE: "1",
+			BASE_CONTEXT_OFFLINE: "1",
 			TSX_TSCONFIG_PATH: tsconfigPath,
 		},
 		stdio: ["ignore", "pipe", "pipe", "ipc"],
@@ -177,7 +177,7 @@ function spawnRealSupervisor(
 				...extraEnv,
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
-				PI_OFFLINE: "1",
+				BASE_CONTEXT_OFFLINE: "1",
 				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
 			stdio: ["ignore", "pipe", "pipe"],

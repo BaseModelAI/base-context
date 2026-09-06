@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component } from "@ponythewhite/base-context-tui";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.js";
 
 /**

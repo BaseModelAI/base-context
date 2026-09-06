@@ -1,5 +1,5 @@
-import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import { Agent, type AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AssistantMessage, UserMessage } from "@ponythewhite/base-context-ai";
 import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";

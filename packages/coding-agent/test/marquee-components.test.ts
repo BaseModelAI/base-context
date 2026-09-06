@@ -1,5 +1,5 @@
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import { type Component, setKeybindings, TUI, visibleWidth } from "@earendil-works/pi-tui";
+import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
+import { type Component, setKeybindings, TUI, visibleWidth } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";

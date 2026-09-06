@@ -1,4 +1,4 @@
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@ponythewhite/base-context-ai";
 import type { Args } from "./args.js";
 
 export interface InitialMessageInput {

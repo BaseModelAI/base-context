@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@ponythewhite/base-context-ai";
 import { describe, expect, test } from "vitest";
 import { resolvePrimeInferencePostLoginModelAction } from "../src/core/prime-inference-model-selection.js";
 

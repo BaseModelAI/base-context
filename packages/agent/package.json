@@ -1,6 +1,6 @@
 {
-	"name": "@earendil-works/pi-agent-core",
-	"version": "0.9.3",
+	"name": "@ponythewhite/base-context-agent",
+	"version": "0.1.0",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -17,7 +17,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^0.9.3",
+		"@ponythewhite/base-context-ai": "0.1.0",
 		"typebox": "^1.3.9"
 	},
 	"keywords": [
@@ -27,19 +27,24 @@
 		"transport",
 		"state-management"
 	],
-	"author": "Mario Zechner",
+	"author": "Jacek Dąbrowski <jack.dabrowski@synerise.com>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/BaseModelAI/base-context.git",
 		"directory": "packages/agent"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=22.8.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"
-	}
+	},
+	"contributors": [
+		"Mario Zechner",
+		"Prime Intellect",
+		"BaseModelAI"
+	]
 }

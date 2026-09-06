@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, getAgentTracesLogPath } from "../src/config.js";
 import {
@@ -16,7 +16,7 @@ import {
 	uploadAllAgentTraces,
 } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { BASE_CONTEXT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
@@ -79,11 +79,11 @@ function writeSession(cwd: string, sessionDir: string, id: string, parentSession
 /** Mirrors the outbox on-disk format: one JSON entry per session file, named by path hash. */
 function outboxEntryPath(agentDir: string, sessionFile: string): string {
 	const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
-	return join(agentDir, "agent-traces-outbox", `${key}.json`);
+	return join(agentDir, "trace-export-outbox", `${key}.json`);
 }
 
 function writeOutboxEntry(agentDir: string, sessionFile: string, signature?: { size: number; mtimeMs: number }): void {
-	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
+	mkdirSync(join(agentDir, "trace-export-outbox"), { recursive: true });
 	writeFileSync(outboxEntryPath(agentDir, sessionFile), JSON.stringify({ sessionFile, ...signature }));
 }
 
@@ -104,7 +104,7 @@ function readOutboxEntry(
 }
 
 function writeLedgerOutboxEntry(agentDir: string, ledgerFile: string, uploadedBytes?: number): void {
-	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
+	mkdirSync(join(agentDir, "trace-export-outbox"), { recursive: true });
 	writeFileSync(
 		outboxEntryPath(agentDir, ledgerFile),
 		JSON.stringify({
@@ -139,13 +139,13 @@ describe("agent trace upload", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "agent-traces-test-"));
 		originalAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = tempDir;
-		originalTraceApiKey = process.env.PRIME_AGENT_TRACES_API_KEY;
+		originalTraceApiKey = process.env.BASE_CONTEXT_TRACES_API_KEY;
 		originalPrimeApiKey = process.env.PRIME_API_KEY;
-		originalTraceBaseUrl = process.env.PRIME_AGENT_TRACES_BASE_URL;
+		originalTraceBaseUrl = process.env.BASE_CONTEXT_TRACES_BASE_URL;
 		originalPrimeBaseUrl = process.env.PRIME_API_BASE_URL;
-		delete process.env.PRIME_AGENT_TRACES_API_KEY;
+		delete process.env.BASE_CONTEXT_TRACES_API_KEY;
 		delete process.env.PRIME_API_KEY;
-		delete process.env.PRIME_AGENT_TRACES_BASE_URL;
+		delete process.env.BASE_CONTEXT_TRACES_BASE_URL;
 		delete process.env.PRIME_API_BASE_URL;
 	});
 
@@ -158,9 +158,9 @@ describe("agent trace upload", () => {
 			process.env[ENV_AGENT_DIR] = originalAgentDir;
 		}
 		if (originalTraceApiKey === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_API_KEY;
+			delete process.env.BASE_CONTEXT_TRACES_API_KEY;
 		} else {
-			process.env.PRIME_AGENT_TRACES_API_KEY = originalTraceApiKey;
+			process.env.BASE_CONTEXT_TRACES_API_KEY = originalTraceApiKey;
 		}
 		if (originalPrimeApiKey === undefined) {
 			delete process.env.PRIME_API_KEY;
@@ -168,9 +168,9 @@ describe("agent trace upload", () => {
 			process.env.PRIME_API_KEY = originalPrimeApiKey;
 		}
 		if (originalTraceBaseUrl === undefined) {
-			delete process.env.PRIME_AGENT_TRACES_BASE_URL;
+			delete process.env.BASE_CONTEXT_TRACES_BASE_URL;
 		} else {
-			process.env.PRIME_AGENT_TRACES_BASE_URL = originalTraceBaseUrl;
+			process.env.BASE_CONTEXT_TRACES_BASE_URL = originalTraceBaseUrl;
 		}
 		if (originalPrimeBaseUrl === undefined) {
 			delete process.env.PRIME_API_BASE_URL;
@@ -188,7 +188,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			baseUrl: "https://api.example.test",
@@ -206,7 +206,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			requireEnabled: false,
@@ -229,7 +229,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager,
 			baseUrl: "https://api.example.test",
@@ -252,7 +252,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager,
 			baseUrl: "https://api.example.test",
@@ -278,7 +278,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: childSessionFile,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -309,7 +309,7 @@ describe("agent trace upload", () => {
 		expect(headers.get("content-length")).toBeNull();
 	});
 
-	it("uses the production trace API unless a trace-specific base URL is configured", async () => {
+	it("requires an explicit export endpoint and still permits local preview", async () => {
 		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "prod-session");
 		const configPath = join(tempDir, "prime-config.json");
 		writeFileSync(configPath, JSON.stringify({ base_url: "https://dev-api.example/api/v1" }));
@@ -319,7 +319,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			configPath,
@@ -327,20 +327,24 @@ describe("agent trace upload", () => {
 			reloadConfig: false,
 		});
 
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-		expect(calls[0].url).toBe("https://api.primeintellect.ai/api/v1/agent-traces/sessions/prod-session");
+		expect(result).toMatchObject({
+			status: "failed",
+			message: expect.stringContaining("BASE_CONTEXT_TRACES_BASE_URL"),
+		});
+		expect(calls).toHaveLength(0);
+		const preview = await previewAgentTraceFile({ sessionFile: sessionManager.getSessionFile() });
+		expect(preview).toMatchObject({ status: "ready", uploadable: false, endpoint: undefined });
 	});
 
-	it("uses PRIME_AGENT_TRACES_BASE_URL for trace API overrides", async () => {
+	it("uses BASE_CONTEXT_TRACES_BASE_URL for trace API overrides", async () => {
 		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "override-session");
-		process.env.PRIME_AGENT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
+		process.env.BASE_CONTEXT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
 
 		const calls: FetchCall[] = [];
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			fetchFn: createFetchRecorder(calls),
@@ -352,38 +356,31 @@ describe("agent trace upload", () => {
 		expect(calls[0].url).toBe("https://trace-api.example/api/v1/agent-traces/sessions/override-session");
 	});
 
-	it("runs a startup catch-up on the first trace-upload install", async () => {
-		const cwd = join(tempDir, "project");
+	it("does not catch up an inherited outbox when trace upload is installed", async () => {
+		vi.useFakeTimers();
 		const sessionDir = join(tempDir, "sessions");
-		mkdirSync(cwd, { recursive: true });
-		const missed = writeSession(cwd, sessionDir, "missed-session");
-		const missedFile = missed.getSessionFile();
-		expect(missedFile).toBeDefined();
-		writeOutboxEntry(tempDir, missedFile as string);
-
-		const live = SessionManager.create(cwd, sessionDir);
-		live.newSession({ id: "live-session" });
+		const missed = writeSession(tempDir, sessionDir, "missed-session");
+		const inheritedOutbox = join(tempDir, "agent-traces-outbox");
+		mkdirSync(inheritedOutbox);
+		const entryPath = join(inheritedOutbox, "pending.json");
+		const entry = JSON.stringify({ sessionFile: missed.getSessionFile() });
+		writeFileSync(entryPath, entry);
+		const live = SessionManager.create(tempDir, sessionDir);
 		const calls: FetchCall[] = [];
-		installAgentTraceUpload(live, {
+		const options = {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
 			fetchFn: createFetchRecorder(calls),
-		});
-
-		await vi.waitFor(() => expect(calls).toHaveLength(1));
-		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/missed-session");
-		expect(calls[0].init.body).toBe(readFileSync(missedFile as string, "utf8"));
-		const stats = await stat(missedFile as string);
-		await vi.waitFor(() =>
-			expect(readOutboxEntry(tempDir, missedFile as string)).toEqual({
-				sessionFile: missedFile,
-				size: stats.size,
-				mtimeMs: stats.mtimeMs,
-			}),
-		);
+		};
+		installAgentTraceUpload(live, options);
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(calls).toHaveLength(0);
+		expect((await catchUpAgentTraceUploads(options)).results).toEqual([]);
+		expect(calls).toHaveLength(0);
+		expect(readFileSync(entryPath, "utf8")).toBe(entry);
 	});
 
 	it("schedules upload only after the session file is persisted", async () => {
@@ -397,7 +394,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -438,7 +435,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -479,7 +476,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -509,7 +506,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -545,7 +542,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -573,7 +570,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -609,7 +606,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -640,7 +637,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -664,7 +661,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -697,7 +694,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -733,7 +730,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -770,7 +767,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -803,7 +800,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -842,7 +839,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -872,7 +869,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -901,7 +898,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -969,7 +966,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAllAgentTraces({
 			sessionDir,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			requireEnabled: false,
@@ -1027,7 +1024,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAllAgentTraces({
 			sessionDir,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			requireEnabled: false,
@@ -1058,7 +1055,7 @@ describe("agent trace upload", () => {
 		const result = await uploadAllAgentTraces({
 			sessionDir,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			requireEnabled: false,
@@ -1108,7 +1105,7 @@ describe("agent trace upload", () => {
 		const upload = uploadAllAgentTraces({
 			sessionDir,
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			requireEnabled: false,
@@ -1138,7 +1135,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1166,7 +1163,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		const options = {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1208,7 +1205,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		const result = await catchUpAgentTraceUploads({
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1234,7 +1231,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1252,7 +1249,7 @@ describe("agent trace upload", () => {
 		const movedLedgerPath = join(tempDir, "artifacts-moved", "semantic-edges.jsonl");
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1278,7 +1275,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
 			baseUrl: "https://api.example.test",
@@ -1305,7 +1302,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1334,7 +1331,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		const options = {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1375,7 +1372,7 @@ describe("agent trace upload", () => {
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1409,7 +1406,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1437,13 +1434,13 @@ describe("agent trace upload", () => {
 		mkdirSync(cwd, { recursive: true });
 		const sessionManager = SessionManager.create(cwd, sessionDir);
 		sessionManager.newSession({ id: "marker-retry-session" });
-		const blocker = join(tempDir, "agent-traces-outbox");
+		const blocker = join(tempDir, "trace-export-outbox");
 		writeFileSync(blocker, "not a directory");
 
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1478,7 +1475,7 @@ describe("agent trace upload", () => {
 
 		installAgentTraceUpload(sessionManager, {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1494,13 +1491,13 @@ describe("agent trace upload", () => {
 
 	it("returns a retryable failure when the upload cursor cannot be persisted", async () => {
 		const session = writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
-		writeFileSync(join(tempDir, "agent-traces-outbox"), "not a directory");
+		writeFileSync(join(tempDir, "trace-export-outbox"), "not a directory");
 
 		const calls: FetchCall[] = [];
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1523,12 +1520,12 @@ describe("agent trace upload", () => {
 		const keptFile = kept.getSessionFile() as string;
 		const keptStats = await stat(keptFile);
 		writeOutboxEntry(tempDir, keptFile, { size: keptStats.size, mtimeMs: keptStats.mtimeMs });
-		writeFileSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"), "not json");
+		writeFileSync(join(tempDir, "trace-export-outbox", "deadbeef.json"), "not json");
 
 		const calls: FetchCall[] = [];
 		const options = {
 			authStorage: AuthStorage.inMemory({
-				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 			}),
 			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 			baseUrl: "https://api.example.test",
@@ -1539,16 +1536,17 @@ describe("agent trace upload", () => {
 		const result = await catchUpAgentTraceUploads(options);
 		expect(result).toEqual({ pruned: 1, semanticEdgeLedgersPending: 0, results: [] });
 		expect(calls).toHaveLength(0);
-		expect(existsSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"))).toBe(false);
+		expect(existsSync(join(tempDir, "trace-export-outbox", "deadbeef.json"))).toBe(false);
 		expect(await uploadAgentTraceFile({ ...options, sessionFile: keptFile })).toEqual({ status: "unchanged" });
 		expect(calls).toHaveLength(0);
 	});
 
-	it("prefers the prime-inference credential over the prime-cli config key", async () => {
+	it("never reuses inference or CLI credentials for trace export", async () => {
 		const session = writeSession(tempDir, join(tempDir, "sessions"), "credential-order-session");
 		const calls: FetchCall[] = [];
 		const configPath = join(tempDir, "prime-config.json");
 		writeFileSync(configPath, JSON.stringify({ api_key: "cli-fallback-key" }));
+		process.env.PRIME_API_KEY = "provider-only-key";
 
 		const result = await uploadAgentTraceFile({
 			sessionFile: session.getSessionFile(),
@@ -1562,8 +1560,7 @@ describe("agent trace upload", () => {
 			reloadConfig: false,
 		});
 
-		expect(result.status).toBe("uploaded");
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.init.headers).toMatchObject({ Authorization: "Bearer inference-key" });
+		expect(result.status).toBe("missing_credentials");
+		expect(calls).toHaveLength(0);
 	});
 });

@@ -2,7 +2,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
-import { Agent } from "@earendil-works/pi-agent-core";
+import { Agent } from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	type Context,
@@ -10,7 +10,7 @@ import {
 	getModel,
 	type TextContent,
 	type Usage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
@@ -19,7 +19,7 @@ import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { PRIME_AGENT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
+import { BASE_CONTEXT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../src/modes/acp/index.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import { createTestResourceLoader } from "./utilities.js";
@@ -142,7 +142,7 @@ describe("ACP mode surfaces RLM subagents", () => {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 
 		const subagentMeta = updates
-			.map((u) => u.update?._meta?.[PRIME_AGENT_META_NAMESPACE]?.subagents)
+			.map((u) => u.update?._meta?.[BASE_CONTEXT_META_NAMESPACE]?.subagents)
 			.filter(Boolean)
 			.flat();
 		expect(acpSession.sessionId).toBeTruthy();

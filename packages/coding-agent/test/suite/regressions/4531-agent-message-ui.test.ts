@@ -1,6 +1,11 @@
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Message, type ToolResultMessage } from "@earendil-works/pi-ai";
-import { Container, type TUI } from "@earendil-works/pi-tui";
+import type { AgentMessage, AgentTool } from "@ponythewhite/base-context-agent";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Message,
+	type ToolResultMessage,
+} from "@ponythewhite/base-context-ai";
+import { Container, type TUI } from "@ponythewhite/base-context-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {

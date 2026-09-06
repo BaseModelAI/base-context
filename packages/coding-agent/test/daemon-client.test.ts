@@ -101,7 +101,7 @@ function emitHello(
 		`${JSON.stringify({
 			type: "daemon_hello",
 			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version },
+			protocol: { name: "base-context.daemon", version },
 			schemaRevision,
 			appVersion: "9.9.9",
 			clientId: "client-1",
@@ -132,7 +132,7 @@ describe("DaemonClient", () => {
 		firstSocket.emit("error", new Error("initial connect failed"));
 
 		const firstError = await firstAttempt;
-		expect(firstError.message).toContain("Failed to connect to the Prime Agent daemon: initial connect failed.");
+		expect(firstError.message).toContain("Failed to connect to the Base Context daemon: initial connect failed.");
 		expect(firstError.message).toContain("Socket: /tmp/prime-agent-missing.sock.");
 		expect(firstError.message).toContain("Daemon log:");
 		expect(firstSocket.listenerCount("data")).toBe(0);
@@ -143,7 +143,7 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Base Context daemon: retry reached socket."),
 		});
 	});
 
@@ -156,7 +156,7 @@ describe("DaemonClient", () => {
 		const firstSocket = netMock.sockets[0]!;
 
 		const timeoutRejection = expect(firstAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Timed out after 5ms connecting to the Prime Agent daemon."),
+			message: expect.stringContaining("Timed out after 5ms connecting to the Base Context daemon."),
 		});
 		await vi.advanceTimersByTimeAsync(5);
 		await timeoutRejection;
@@ -170,7 +170,7 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Base Context daemon: retry reached socket."),
 		});
 	});
 
@@ -187,7 +187,7 @@ describe("DaemonClient", () => {
 		const hello = {
 			type: "daemon_hello",
 			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version: 1 },
+			protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 			appVersion: "9.9.9",
 			clientId: "client-1",
 			serverCapabilities: [],
@@ -195,7 +195,7 @@ describe("DaemonClient", () => {
 		socket.emit("data", `${JSON.stringify(hello)}\n`);
 
 		await expect(waited).resolves.toMatchObject({ appVersion: "9.9.9" });
-		expect(client.hello).toMatchObject({ protocol: { version: 1 }, appVersion: "9.9.9" });
+		expect(client.hello).toMatchObject({ protocol: { version: DAEMON_PROTOCOL_VERSION }, appVersion: "9.9.9" });
 		await expect(client.waitForHello()).resolves.toMatchObject({ appVersion: "9.9.9" });
 
 		client.close();
@@ -207,7 +207,7 @@ describe("DaemonClient", () => {
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, 3);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION);
 
 		expect(client.supportsServerCapability("heartbeat_catalog")).toBe(false);
 		await expect(client.request({ type: "heartbeats_list" })).rejects.toThrow("does not support heartbeat_catalog");
@@ -272,7 +272,7 @@ describe("DaemonClient", () => {
 		emitHello(socket, DAEMON_PROTOCOL_VERSION - 1);
 
 		await expect(client.request({ type: "get_state", activeSessionId: "active-1" })).rejects.toThrow(
-			"does not support get_state",
+			"incompatible daemon",
 		);
 		expect(socket.writes).toEqual([]);
 		client.close();
@@ -374,7 +374,7 @@ describe("DaemonClient", () => {
 		expect(envelope).toMatchObject({
 			type: "command",
 			clientId: expect.any(String),
-			protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+			protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 			command: { type: "attach", activeSessionId: "active-1" },
 		});
 		expect(envelope.command).not.toHaveProperty("daemonSessionId");
@@ -421,7 +421,7 @@ describe("DaemonClient", () => {
 
 		await expect(request).rejects.toMatchObject({
 			message: expect.stringContaining(
-				'Cannot send daemon command "list" because the Prime Agent daemon is not connected.',
+				'Cannot send daemon command "list" because the Base Context daemon is not connected.',
 			),
 		});
 		await expect(request).rejects.toMatchObject({
@@ -663,7 +663,7 @@ describe("DaemonClient", () => {
 		socket.emit("close");
 
 		expect(closed).toHaveLength(1);
-		expect(closed[0]?.message).toContain("Connection to the Prime Agent daemon closed.");
+		expect(closed[0]?.message).toContain("Connection to the Base Context daemon closed.");
 		expect(closed[0]?.message).toContain("Socket: /tmp/prime-agent.sock.");
 		expect(closed[0]?.message).toContain("Daemon log:");
 		expect(client.isConnected).toBe(false);
@@ -793,7 +793,7 @@ describe("DaemonClient", () => {
 			`${JSON.stringify({
 				type: "daemon_hello",
 				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				serverCapabilities: ["session_input_admission"],
 			})}\n`,
@@ -912,7 +912,7 @@ describe("DaemonClient", () => {
 			`${JSON.stringify({
 				type: "daemon_hello",
 				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				serverCapabilities: [],
 			})}\n`,

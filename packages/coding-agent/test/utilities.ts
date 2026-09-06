@@ -5,9 +5,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@earendil-works/pi-ai";
-import { getOAuthApiKey } from "@earendil-works/pi-ai/oauth";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { getModel, type OAuthCredentials, type OAuthProvider } from "@ponythewhite/base-context-ai";
+import { getOAuthApiKey } from "@ponythewhite/base-context-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createEventBus } from "../src/core/event-bus.js";
@@ -115,7 +115,7 @@ export function hasAuthForProvider(provider: string): boolean {
 }
 
 /** Path to the real pi agent config directory */
-export const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
+export const BASE_CONTEXT_AGENT_DIR = join(homedir(), ".pi", "agent");
 
 /**
  * Get an AuthStorage instance backed by ~/.pi/agent/auth.json

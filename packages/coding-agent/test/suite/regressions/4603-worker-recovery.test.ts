@@ -95,7 +95,7 @@ const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-exten
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
-const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorRegistryDirEnv = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<ProcessHandle>();
 const harnesses: Harness[] = [];
 const socketTempDirs = new Set<string>();
@@ -158,7 +158,7 @@ function spawnSupervisor(paths: TestPaths): ProcessHandle {
 				ENG_4600_FIXTURE_MODE: "supervisor",
 				ENG_4600_REGISTRY_DIR: paths.registryDir,
 				ENG_4600_SOCKET_PATH: paths.socketPath,
-				PI_OFFLINE: "1",
+				BASE_CONTEXT_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
 				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
@@ -189,7 +189,7 @@ function spawnStandaloneWorker(
 					[DAEMON_WORKER_TOKEN_ENV]: token,
 					[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: "eng-4603-worker",
 					[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: paths.socketPath,
-					PI_OFFLINE: "1",
+					BASE_CONTEXT_OFFLINE: "1",
 					TSX_TSCONFIG_PATH: tsconfigPath,
 				},
 				stdio: ["ignore", "pipe", "pipe"],
@@ -684,7 +684,7 @@ async function runCli(
 				...extraEnv,
 				[supervisorRegistryDirEnv]: paths.registryDir,
 				[ENV_AGENT_DIR]: paths.agentDir,
-				PI_OFFLINE: "1",
+				BASE_CONTEXT_OFFLINE: "1",
 				TMPDIR: paths.socketTmpDir,
 				TSX_TSCONFIG_PATH: tsconfigPath,
 			},
@@ -808,7 +808,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 					noTools: true,
 					provider: "faux",
 				},
-				launchEnv: { PRIME_AGENT_TEST_FRESH_CONTEXT: "1" },
+				launchEnv: { BASE_CONTEXT_TEST_FRESH_CONTEXT: "1" },
 			},
 			60_000,
 		);

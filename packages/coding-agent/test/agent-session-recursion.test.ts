@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type StreamFn } from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	type Context,
@@ -10,7 +10,7 @@ import {
 	getModel,
 	type TextContent,
 	type Usage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -289,8 +289,8 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
-	it("persists RLM_DEPTH for a fresh session and reports the seeded depth", () => {
-		vi.stubEnv("RLM_DEPTH", "1");
+	it("persists BASE_CONTEXT_RLM_DEPTH for a fresh session and reports the seeded depth", () => {
+		vi.stubEnv("BASE_CONTEXT_RLM_DEPTH", "1");
 		try {
 			const fresh = createSession({ maxDepth: 2 });
 			fresh.sessionManager.flushNow();
@@ -304,11 +304,11 @@ describe("AgentSession rlm recursion", () => {
 		}
 	});
 
-	it("prefers persisted depth over RLM_DEPTH when resuming a session", () => {
+	it("prefers persisted depth over BASE_CONTEXT_RLM_DEPTH when resuming a session", () => {
 		const persistedManager = SessionManager.create(tempDir, join(tempDir, "resumed-sessions"));
 		persistedManager.newSession({ rlmDepth: 2 });
 		persistedManager.flushNow();
-		vi.stubEnv("RLM_DEPTH", "1");
+		vi.stubEnv("BASE_CONTEXT_RLM_DEPTH", "1");
 		try {
 			const resumed = createSession({ maxDepth: 3, sessionManager: persistedManager });
 			expect(resumed.rlmDepth).toBe(2);
@@ -327,7 +327,7 @@ describe("AgentSession rlm recursion", () => {
 		lines[0] = JSON.stringify({ ...JSON.parse(lines[0] ?? "{}"), rlmDepth: invalidDepth });
 		writeFileSync(sessionFile, lines.join("\n"));
 		const reopened = SessionManager.open(sessionFile, join(tempDir, "invalid-depth-sessions"));
-		vi.stubEnv("RLM_DEPTH", "1");
+		vi.stubEnv("BASE_CONTEXT_RLM_DEPTH", "1");
 		try {
 			expect(createSession({ maxDepth: 2, sessionManager: reopened }).rlmDepth).toBe(1);
 		} finally {
@@ -2605,7 +2605,7 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("reloads max depth and its source when navigating to a branch without an override", async () => {
-		vi.stubEnv("RLM_MAX_DEPTH", "0");
+		vi.stubEnv("BASE_CONTEXT_RLM_MAX_DEPTH", "0");
 		try {
 			const root = createSession();
 			await root.prompt("baseline branch");
@@ -2734,7 +2734,7 @@ describe("AgentSession rlm recursion", () => {
 		if (!sessionFile) throw new Error("Missing persisted session file");
 		original.dispose();
 
-		vi.stubEnv("RLM_MAX_DEPTH", "0");
+		vi.stubEnv("BASE_CONTEXT_RLM_MAX_DEPTH", "0");
 		try {
 			const resumed = createSession({
 				sessionManager: SessionManager.open(sessionFile, join(tempDir, "sessions")),
@@ -2784,7 +2784,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(child.rlmMaxDepth).toBe(2);
 
 		await child.setRlmMaxDepth(3);
-		expect((child as unknown as InspectableRlmDirSession)._rlmKernelEnv().RLM_MAX_DEPTH).toBe("3");
+		expect((child as unknown as InspectableRlmDirSession)._rlmKernelEnv().BASE_CONTEXT_RLM_MAX_DEPTH).toBe("3");
 		expect(root.rlmMaxDepth).toBe(2);
 		const grandchildResult = await child.runRlmChild("grandchild after override");
 		if (!grandchildResult.session_dir) throw new Error("Missing grandchild session directory");
@@ -2795,7 +2795,7 @@ describe("AgentSession rlm recursion", () => {
 		await root.setRlmMaxDepth(0);
 		expect(root.systemPrompt).not.toContain("A callable `rlm`");
 		await expect(root.runRlmChild("blocked at root")).rejects.toThrow(
-			"RLM recursion depth limit reached (RLM_DEPTH=0, RLM_MAX_DEPTH=0)",
+			"RLM recursion depth limit reached (BASE_CONTEXT_RLM_DEPTH=0, BASE_CONTEXT_RLM_MAX_DEPTH=0)",
 		);
 		expect(child.rlmMaxDepth).toBe(3);
 	});
@@ -4258,7 +4258,7 @@ describe("AgentSession RLM session dir", () => {
 		return session;
 	}
 
-	it("does not create a /tmp dir or set RLM_SESSION_DIR for a non-persisted session", () => {
+	it("does not create a /tmp dir or set BASE_CONTEXT_KERNEL_SESSION_DIR for a non-persisted session", () => {
 		const root = createSession(SessionManager.inMemory(tempDir));
 		const inspectable = root as unknown as InspectableRlmDirSession;
 
@@ -4266,16 +4266,16 @@ describe("AgentSession RLM session dir", () => {
 
 		expect(inspectable._ensureRlmSessionDir()).toBeUndefined();
 		const env = inspectable._rlmKernelEnv();
-		expect(env.RLM_SESSION_DIR).toBeUndefined();
-		expect(env.RLM_HARNESS_STATE_DIR).toBeUndefined();
-		expect(env.RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
-		expect(env).toMatchObject({ RLM_DEPTH: "0" });
+		expect(env.BASE_CONTEXT_KERNEL_SESSION_DIR).toBeUndefined();
+		expect(env.BASE_CONTEXT_HARNESS_STATE_DIR).toBeUndefined();
+		expect(env.BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
+		expect(env).toMatchObject({ BASE_CONTEXT_RLM_DEPTH: "0" });
 
 		const after = readdirSync(tmpdir()).filter((name) => name.startsWith("prime-agent-rlm-"));
 		expect(after).toEqual(before);
 	});
 
-	it("uses the persistent artifact dir and sets RLM_SESSION_DIR for a persisted session", () => {
+	it("uses the persistent artifact dir and sets BASE_CONTEXT_KERNEL_SESSION_DIR for a persisted session", () => {
 		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
 		const root = createSession(sessionManager);
 		const inspectable = root as unknown as InspectableRlmDirSession;
@@ -4283,12 +4283,12 @@ describe("AgentSession RLM session dir", () => {
 		const artifactDir = sessionManager.getSessionArtifactDir();
 		expect(artifactDir).toBeDefined();
 		expect(inspectable._ensureRlmSessionDir()).toBe(artifactDir);
-		expect(inspectable._rlmKernelEnv().RLM_SESSION_DIR).toBe(artifactDir);
-		expect(inspectable._rlmKernelEnv().RLM_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
-		expect(inspectable._rlmKernelEnv().RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
+		expect(inspectable._rlmKernelEnv().BASE_CONTEXT_KERNEL_SESSION_DIR).toBe(artifactDir);
+		expect(inspectable._rlmKernelEnv().BASE_CONTEXT_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
+		expect(inspectable._rlmKernelEnv().BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
 	});
 
-	it("points RLM_HARNESS_STATE_DIR at the session's own artifact dir for subagent sessions", () => {
+	it("points BASE_CONTEXT_HARNESS_STATE_DIR at the session's own artifact dir for subagent sessions", () => {
 		// Subagent layout: the parent assigns rlmSessionDir, but the child's own
 		// sessionManager persists artifacts (and reads local harness state) elsewhere.
 		const subDir = join(tempDir, "parent-artifact", "sub-abc12345");
@@ -4301,17 +4301,17 @@ describe("AgentSession RLM session dir", () => {
 		expect(artifactDir).toBeDefined();
 		expect(artifactDir).not.toBe(subDir);
 		const env = inspectable._rlmKernelEnv();
-		expect(env.RLM_SESSION_DIR).toBe(subDir);
-		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
+		expect(env.BASE_CONTEXT_KERNEL_SESSION_DIR).toBe(subDir);
+		expect(env.BASE_CONTEXT_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
 	});
 
-	it("falls back to the rlm session dir for RLM_HARNESS_STATE_DIR without an artifact dir", () => {
+	it("falls back to the rlm session dir for BASE_CONTEXT_HARNESS_STATE_DIR without an artifact dir", () => {
 		const ephemeralDir = join(tempDir, "ephemeral-rlm");
 		mkdirSync(ephemeralDir, { recursive: true });
 		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.RLM_SESSION_DIR).toBe(ephemeralDir);
-		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
+		expect(env.BASE_CONTEXT_KERNEL_SESSION_DIR).toBe(ephemeralDir);
+		expect(env.BASE_CONTEXT_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
 	});
 
 	it("loads the ephemeral RLM harness path into the host system prompt", () => {
@@ -4359,20 +4359,20 @@ describe("AgentSession RLM session dir", () => {
 		const agentDir = join(tempDir, "custom-agent-dir");
 		const root = createSession(SessionManager.inMemory(tempDir), agentDir);
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir);
+		expect(env.BASE_CONTEXT_HOME).toBe(agentDir);
 	});
 
 	it("omits the agentDir env var when none is configured", () => {
 		const root = createSession(SessionManager.inMemory(tempDir));
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBeUndefined();
+		expect(env.BASE_CONTEXT_HOME).toBeUndefined();
 	});
 
 	it("exports agentDir but skips key injection when no websearch skill is loaded", () => {
 		const agentDir = join(tempDir, "custom-agent-dir");
 		const root = createSession(SessionManager.inMemory(tempDir), agentDir, "stored-key", false);
 		const env = (root as unknown as InspectableRlmDirSession)._rlmKernelEnv();
-		expect(env.PRIME_AGENT_CODING_AGENT_DIR).toBe(agentDir);
+		expect(env.BASE_CONTEXT_HOME).toBe(agentDir);
 		expect(env.SERPER_API_KEY).toBeUndefined();
 	});
 

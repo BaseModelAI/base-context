@@ -14,7 +14,7 @@ import {
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@ponythewhite/base-context-ai";
 import { describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 import {
@@ -29,7 +29,7 @@ import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
-import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { BASE_CONTEXT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -2081,7 +2081,7 @@ describe("daemon mode helpers", () => {
 			).sendRemoteAgentSessionMessage.bind(daemon);
 
 			await expect(sendRemoteAgentSessionMessage(makeState("source"), "remote", "continue")).rejects.toThrow(
-				"Connection to the Prime Agent daemon closed",
+				"Connection to the Base Context daemon closed",
 			);
 			expect(requestCount).toBe(1);
 		} finally {
@@ -9206,7 +9206,7 @@ function installGatedTraceUpload(sessionManager: SessionManager): {
 	});
 	installAgentTraceUpload(sessionManager, {
 		authStorage: AuthStorage.inMemory({
-			[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			[BASE_CONTEXT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
 		}),
 		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 		baseUrl: "https://api.example.test",

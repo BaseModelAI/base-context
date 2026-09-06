@@ -1,5 +1,12 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	ServiceTier,
+	TextContent,
+	Usage,
+} from "@ponythewhite/base-context-ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -703,13 +710,13 @@ function deriveChildRlmDepth(parentHeader: Partial<SessionHeader> | undefined): 
 }
 
 function rootRlmDepthFromEnv(): number {
-	const value = process.env.RLM_DEPTH;
+	const value = process.env.BASE_CONTEXT_RLM_DEPTH;
 	if (value === undefined || value === "") {
 		return 0;
 	}
 	const parsed = Number(value);
 	if (!/^\d+$/.test(value) || !isValidRlmDepth(parsed)) {
-		throw new Error("RLM_DEPTH must be a non-negative integer");
+		throw new Error("BASE_CONTEXT_RLM_DEPTH must be a non-negative integer");
 	}
 	return parsed;
 }

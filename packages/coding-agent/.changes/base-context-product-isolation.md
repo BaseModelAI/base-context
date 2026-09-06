@@ -1,0 +1,4 @@
+- Moved source packages to `@ponythewhite/base-context*` version 0.1.0 and separated product environment controls.
+- Scoped daemon sockets by installation and state home; rejected foreign or incompatible handshakes before commands or replacement.
+- Kept provider configuration in Base Context state, preserved explicit API keys and team headers, and removed copied Prime browser-challenge login.
+- Defaulted telemetry and traces off; required explicit export destinations and dedicated credentials without replaying inherited upload jobs.

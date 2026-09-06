@@ -582,7 +582,7 @@ export function appendRotatingLog(logPath: string, message: string, maxBytes: nu
 
 /** Get path to auth.json */
 export function getAuthPath(): string {
-	return join(getAgentDir(), "auth.json");
+	return resolveRuntimePaths().auth;
 }
 
 /** Get path to cron jobs store */

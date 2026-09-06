@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "fs";
+import { lstatSync, readlinkSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { PRODUCT, PRODUCT_ENV } from "./product-identity.js";
@@ -33,7 +33,16 @@ export function readAbsolutePathEnv(
 }
 
 function canonicalPath(path: string): string {
-	if (existsSync(path)) return realpathSync(path);
+	try {
+		return realpathSync(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	try {
+		if (lstatSync(path).isSymbolicLink()) return canonicalPath(resolve(dirname(path), readlinkSync(path)));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
 	const parent = dirname(path);
 	return parent === path ? path : join(canonicalPath(parent), relative(parent, path));
 }
@@ -43,7 +52,12 @@ export function assertProductStatePath(path: string, home = homedir()): string {
 	for (const directory of [".prime", ".pi", ".prime-context"]) {
 		const legacy = canonicalPath(join(home, directory));
 		const rel = relative(legacy, canonical);
-		if (rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))) {
+		if (
+			resolve(path).split(sep).includes(directory) ||
+			canonical.split(sep).includes(directory) ||
+			rel === "" ||
+			(rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+		) {
 			throw new Error(
 				`Base Context cannot write legacy state at ${path}. Choose a separate BASE_CONTEXT_HOME; use explicit import for legacy data.`,
 			);
@@ -67,10 +81,10 @@ export function resolveRuntimePaths(
 	);
 	return Object.freeze({
 		home: root,
-		project: join(cwd, PRODUCT.configDirectory),
+		project: assertProductStatePath(join(cwd, PRODUCT.configDirectory), home),
 		sessions,
-		runtime: join(root, "runtime"),
-		auth: join(root, "auth.json"),
-		daemonRegistry: join(root, "daemon-supervisors"),
+		runtime: assertProductStatePath(join(root, "runtime"), home),
+		auth: assertProductStatePath(join(root, "auth.json"), home),
+		daemonRegistry: assertProductStatePath(join(root, "daemon-supervisors"), home),
 	});
 }

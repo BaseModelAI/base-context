@@ -507,13 +507,13 @@ describe("self-update daemon restart", () => {
 		mkdirSync(packageDir, { recursive: true });
 
 		originalAgentDir = process.env[ENV_AGENT_DIR];
-		originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+		originalPiPackageDir = process.env.BASE_CONTEXT_PACKAGE_DIR;
 		originalCwd = process.cwd();
 		originalExecPath = process.execPath;
 		originalExitCode = process.exitCode;
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
-		process.env.PI_PACKAGE_DIR = packageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 		process.chdir(projectDir);
 		Object.defineProperty(process, "execPath", {
 			value: join(packageDir, "dist", "cli.js"),
@@ -536,9 +536,9 @@ describe("self-update daemon restart", () => {
 			process.env[ENV_AGENT_DIR] = originalAgentDir;
 		}
 		if (originalPiPackageDir === undefined) {
-			delete process.env.PI_PACKAGE_DIR;
+			delete process.env.BASE_CONTEXT_PACKAGE_DIR;
 		} else {
-			process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+			process.env.BASE_CONTEXT_PACKAGE_DIR = originalPiPackageDir;
 		}
 		delete process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV];
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
@@ -569,7 +569,7 @@ describe("self-update daemon restart", () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ version: "0.2.6" })),
+			vi.fn(async () => Response.json({ version: VERSION })),
 		);
 
 		await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);

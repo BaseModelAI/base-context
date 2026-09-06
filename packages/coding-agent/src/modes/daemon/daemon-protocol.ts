@@ -1,5 +1,5 @@
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { ImageContent, ServiceTier, TextContent, Transport } from "@ponythewhite/base-context-ai";
 import type {
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageReceipt,
@@ -23,6 +23,7 @@ import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/sessio
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionUsageSummary } from "../../core/usage.js";
+import { PRODUCT } from "../../product-identity.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,
@@ -52,9 +53,9 @@ import type { SessionSummary } from "./daemon-session-list.js";
  * without leaking transport details back into InteractiveMode.
  */
 
-export const DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
-export const DAEMON_PROTOCOL_VERSION = 7;
-export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
+export const DAEMON_PROTOCOL_NAME = PRODUCT.daemonService;
+export const DAEMON_PROTOCOL_VERSION = 8;
+export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
 // Revision 10 publishes persisted RLM spawn depth on all session catalog rows.
 // Revision 11 adds immediate get/set commands for active-session RLM max depth.
@@ -72,8 +73,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 24 adds the capability-gated agent-roster subscription and push.
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
-export const DAEMON_SCHEMA_REVISION = 26;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-962b8b4c5e35";
+// Revision 27 starts the incompatible, product-isolated Base Context command plane.
+export const DAEMON_SCHEMA_REVISION = 27;
+export const DAEMON_SCHEMA_ID = "protocol-8-schema-27-962b8b4c5e35";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -247,7 +249,7 @@ export function collectDaemonClientEnv(source: NodeJS.ProcessEnv = process.env):
 export function collectDaemonLaunchEnv(source: NodeJS.ProcessEnv = process.env): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(source)) {
-		if (value !== undefined && !key.startsWith("PRIME_AGENT_INTERNAL_")) {
+		if (value !== undefined && !key.startsWith("BASE_CONTEXT_INTERNAL_")) {
 			env[key] = value;
 		}
 	}
@@ -689,56 +691,56 @@ export interface DaemonCommandCompatibility {
 	capability?: DaemonServerCapability;
 }
 
-const LEGACY_DAEMON_COMMAND = { minProtocol: 7 } as const;
-const CURRENT_DAEMON_COMMAND = { minProtocol: 7 } as const;
-const RLM_MAX_DEPTH_COMMAND = { minProtocol: 7, minSchemaRevision: 11 } as const;
+const LEGACY_DAEMON_COMMAND = { minProtocol: 8 } as const;
+const CURRENT_DAEMON_COMMAND = { minProtocol: 8 } as const;
+const RLM_MAX_DEPTH_COMMAND = { minProtocol: 8, minSchemaRevision: 11 } as const;
 const SESSION_INPUT_ADMISSION_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	capability: "session_input_admission",
 } as const;
 const PROMPT_ADMISSION_CANCELLATION_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 8,
 	capability: "prompt_admission_cancellation",
 } as const;
 const OWNED_PROMPT_CANCELLATION_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 20,
 	capability: "owned_prompt_cancellation",
 } as const;
 const CLIENT_OWNED_DAEMON_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	capability: "client_owned_sessions",
 } as const;
 const DELETE_RLM_SUBAGENT_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	capability: "delete_rlm_subagent",
 } as const;
-const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
-const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const FLAT_SESSION_TREE_COMMAND = { minProtocol: 8 } as const;
+const TELEMETRY_POLICY_COMMAND = { minProtocol: 8, minSchemaRevision: 14 } as const;
 const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 17,
 	capability: "authoritative_child_roster",
 } as const;
 const OWNED_SESSION_RECOVERY_CONTEXT = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 17,
 	capability: "owned_session_recovery_context",
 } as const;
 const RLM_QUIESCENCE_BARRIER_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 18,
 	capability: "rlm_quiescence_barrier",
 } as const;
 const SESSION_INPUT_PAUSE_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 19,
 	capability: "session_input_pause",
 } as const;
-const AGENT_PEER_LIST_COMMAND = { minProtocol: 7, minSchemaRevision: 23 } as const;
+const AGENT_PEER_LIST_COMMAND = { minProtocol: 8, minSchemaRevision: 23 } as const;
 const DIRECT_PEER_TRANSPORT_COMMAND = {
-	minProtocol: 7,
+	minProtocol: 8,
 	minSchemaRevision: 25,
 	capability: "direct_peer_transport",
 } as const;
@@ -789,20 +791,20 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
-	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
-	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
+	replace_acp_mcp_servers: { minProtocol: 8, minSchemaRevision: 22, capability: "acp_mcp_servers" },
+	get_model_catalog: { minProtocol: 8, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
-	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" },
+	mutate_queued_message: { minProtocol: 8, minSchemaRevision: 15, capability: "queue_message_mutation" },
 	clear_queue: LEGACY_DAEMON_COMMAND,
 	abort_and_clear_queue: LEGACY_DAEMON_COMMAND,
 	acquire_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	release_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,
-	heartbeats_list: { minProtocol: 7, capability: "heartbeat_catalog" },
-	roster_subscribe: { minProtocol: 7, capability: "agent_roster" },
-	roster_unsubscribe: { minProtocol: 7, capability: "agent_roster" },
-	heartbeat_manage: { minProtocol: 7, capability: "heartbeat_management" },
+	heartbeats_list: { minProtocol: 8, capability: "heartbeat_catalog" },
+	roster_subscribe: { minProtocol: 8, capability: "agent_roster" },
+	roster_unsubscribe: { minProtocol: 8, capability: "agent_roster" },
+	heartbeat_manage: { minProtocol: 8, capability: "heartbeat_management" },
 	cron_add: LEGACY_DAEMON_COMMAND,
 	cron_cancel: LEGACY_DAEMON_COMMAND,
 	heartbeat_get: LEGACY_DAEMON_COMMAND,
@@ -1201,8 +1203,8 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	session_list_item: LEGACY_DAEMON_COMMAND,
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
-	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },
-	roster_update: { minProtocol: 7, capability: "agent_roster" },
+	heartbeats_changed: { minProtocol: 8, capability: "heartbeat_catalog" },
+	roster_update: { minProtocol: 8, capability: "agent_roster" },
 	session_event: LEGACY_DAEMON_COMMAND,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,

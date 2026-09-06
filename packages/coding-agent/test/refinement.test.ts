@@ -1,9 +1,9 @@
 import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type * as PiAi from "@earendil-works/pi-ai";
-import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type * as PiAi from "@ponythewhite/base-context-ai";
+import type { AssistantMessage, Model } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	appendGlobalRefinement,
@@ -34,7 +34,7 @@ const { completeSimpleMock } = vi.hoisted(() => ({
 	completeSimpleMock: vi.fn(),
 }));
 
-vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
+vi.mock("@ponythewhite/base-context-ai", async (importOriginal) => {
 	const actual = await importOriginal<typeof PiAi>();
 	return {
 		...actual,

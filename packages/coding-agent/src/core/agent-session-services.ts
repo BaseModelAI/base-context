@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Model, ServiceTier } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
@@ -189,7 +189,7 @@ export async function createAgentSessionServices(
 		diagnostics.push({
 			type: "info",
 			message:
-				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+				"Base Context analytics are opt-in. Remote export requires BASE_CONTEXT_TELEMETRY_ENDPOINT and a dedicated BASE_CONTEXT_TELEMETRY_API_KEY; inference credentials are never used. Disable with telemetry.enabled=false, BASE_CONTEXT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
 		});
 		settingsManager.setTelemetryNoticeShown(true);
 	}

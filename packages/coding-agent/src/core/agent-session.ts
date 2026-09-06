@@ -14,7 +14,7 @@ import {
 	type GetContinuationMessagesContext,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
-} from "@earendil-works/pi-agent-core";
+} from "@ponythewhite/base-context-agent";
 import type {
 	Api,
 	AssistantMessage,
@@ -24,7 +24,7 @@ import type {
 	TextContent,
 	Usage,
 	UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -33,7 +33,7 @@ import {
 	modelsAreEqual,
 	resetApiProviders,
 	supportsFastMode,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -1270,7 +1270,9 @@ export class AgentSession {
 		const headerRlmDepth = this.sessionManager.getHeader()?.rlmDepth;
 		this._rlmDepth =
 			config.rlmDepth ??
-			(isNonNegativeInteger(headerRlmDepth) ? headerRlmDepth : parseDepth(process.env.RLM_DEPTH, 0, "RLM_DEPTH"));
+			(isNonNegativeInteger(headerRlmDepth)
+				? headerRlmDepth
+				: parseDepth(process.env.BASE_CONTEXT_RLM_DEPTH, 0, "BASE_CONTEXT_RLM_DEPTH"));
 		this._configuredRlmMaxDepth = config.rlmMaxDepth;
 		if (this._configuredRlmMaxDepth !== undefined && !isNonNegativeInteger(this._configuredRlmMaxDepth)) {
 			throw new Error("rlmMaxDepth must be a non-negative integer");
@@ -1641,9 +1643,9 @@ export class AgentSession {
 		if (global !== undefined && isNonNegativeInteger(global)) {
 			return { maxDepth: global, source: "global" };
 		}
-		const env = process.env.RLM_MAX_DEPTH;
+		const env = process.env.BASE_CONTEXT_RLM_MAX_DEPTH;
 		if (env !== undefined && env !== "") {
-			return { maxDepth: parseDepth(env, 1, "RLM_MAX_DEPTH"), source: "env" };
+			return { maxDepth: parseDepth(env, 1, "BASE_CONTEXT_RLM_MAX_DEPTH"), source: "env" };
 		}
 		return { maxDepth: 2, source: "default" };
 	}
@@ -9479,20 +9481,20 @@ export class AgentSession {
 	}
 
 	private _rlmKernelEnv(): Record<string, string> {
-		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
+		// Kernel env is provisioning-time only: BASE_CONTEXT_RLM_MAX_DEPTH may be stale in an already-running kernel;
 		// the TypeScript-side spawn check remains authoritative.
 		const env: Record<string, string> = {
-			RLM_DEPTH: String(this._rlmDepth),
-			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
-			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
+			BASE_CONTEXT_RLM_DEPTH: String(this._rlmDepth),
+			BASE_CONTEXT_RLM_MAX_DEPTH: String(this._rlmMaxDepth),
+			BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
-			env.RLM_SESSION_DIR = rlmSessionDir;
+			env.BASE_CONTEXT_KERNEL_SESSION_DIR = rlmSessionDir;
 			// Keep kernel writes and host reads (system prompt, review, /refine) on
 			// the same local harness path. Subagents prefer their own artifact dir;
 			// ephemeral sessions fall back to the RLM session dir once it exists.
-			env.RLM_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
+			env.BASE_CONTEXT_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
 		}
 		this._addWebsearchKeyEnv(env);
 		return env;
@@ -9500,7 +9502,7 @@ export class AgentSession {
 
 	private _addWebsearchKeyEnv(env: Record<string, string>): void {
 		if (this._agentDir) {
-			env.PRIME_AGENT_CODING_AGENT_DIR = this._agentDir;
+			env.BASE_CONTEXT_HOME = this._agentDir;
 		}
 
 		if (process.env[SERPER_ENV_VAR]?.trim()) {
@@ -10567,7 +10569,7 @@ export class AgentSession {
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
-				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
+				`RLM recursion depth limit reached (BASE_CONTEXT_RLM_DEPTH=${this._rlmDepth}, BASE_CONTEXT_RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
 			);
 		}
 		if (requestedSessionName) {

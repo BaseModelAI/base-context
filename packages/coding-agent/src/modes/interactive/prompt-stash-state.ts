@@ -1,5 +1,5 @@
-import type { ImageContent } from "@earendil-works/pi-ai";
-import type { EditorPasteSnapshot } from "@earendil-works/pi-tui";
+import type { ImageContent } from "@ponythewhite/base-context-ai";
+import type { EditorPasteSnapshot } from "@ponythewhite/base-context-tui";
 
 export interface PromptStash {
 	text: string;

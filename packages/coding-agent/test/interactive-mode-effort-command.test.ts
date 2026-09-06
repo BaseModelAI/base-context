@@ -1,6 +1,6 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
-import type { AutocompleteItem, Component } from "@earendil-works/pi-tui";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Api, Model, ServiceTier } from "@ponythewhite/base-context-ai";
+import type { AutocompleteItem, Component } from "@ponythewhite/base-context-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ThinkingSelectorComponent } from "../src/modes/interactive/components/thinking-selector.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";

@@ -54,7 +54,7 @@ describe("RLM bootstrap", () => {
 /** Find a python with a current rlm runtime, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
-		process.env.PRIME_AGENT_KERNEL_PYTHON,
+		process.env.BASE_CONTEXT_KERNEL_PYTHON,
 		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
 		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
 	].filter((p): p is string => Boolean(p));

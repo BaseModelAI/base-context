@@ -17,9 +17,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutputDir = join(root, "packages", "coding-agent", "release");
-const defaultBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
-const publicPackageName = process.env.PRIME_AGENT_PACKAGE_NAME || "prime-agent";
-const publicCommandName = process.env.PRIME_AGENT_CMD || "prime-agent";
+const defaultBaseUrl = process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL;
+const publicPackageName = process.env.BASE_CONTEXT_PACKAGE_NAME || "prime-agent";
+const publicCommandName = process.env.BASE_CONTEXT_CMD || "prime-agent";
 const releaseChannels = new Set(["stable", "beta"]);
 
 const releasePackages = [
@@ -81,7 +81,7 @@ function parseArgs(args) {
 	}
 
 	if (!parsed.baseUrl) {
-		throw new Error("--base-url or PRIME_AGENT_DOWNLOAD_BASE_URL is required");
+		throw new Error("--base-url or BASE_CONTEXT_DOWNLOAD_BASE_URL is required");
 	}
 
 	parsed.baseUrl = parsed.baseUrl.replace(/\/+$/, "");
@@ -241,7 +241,7 @@ function main() {
 		]),
 	);
 	const cliPackage = sourcePackages.get("coding-agent");
-	const releaseVersion = args.version || normalizeVersion(process.env.PRIME_AGENT_VERSION || cliPackage.version);
+	const releaseVersion = args.version || normalizeVersion(process.env.BASE_CONTEXT_VERSION || cliPackage.version);
 
 	for (const releasePackage of releasePackages) {
 		requireBuiltPackage(releasePackage.packageDir);

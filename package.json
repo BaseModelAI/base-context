@@ -1,5 +1,5 @@
 {
-	"name": "prime-agent",
+	"name": "base-context-monorepo",
 	"private": true,
 	"type": "module",
 	"workspaces": [
@@ -49,10 +49,10 @@
 	"engines": {
 		"node": ">=22.8.0"
 	},
-	"version": "0.9.3",
+	"version": "0.1.0",
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.9.3",
-		"get-east-asian-width": "^1.6.0"
+		"get-east-asian-width": "^1.6.0",
+		"@ponythewhite/base-context": "0.1.0"
 	},
 	"overrides": {
 		"rimraf": "6.1.2",

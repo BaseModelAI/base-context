@@ -12,7 +12,7 @@ import {
 	type Rgb,
 	rgbTo256,
 	type SelectListTheme,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import chalk from "chalk";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
@@ -821,7 +821,7 @@ function getDefaultTheme(): string {
 // ============================================================================
 
 // Use globalThis to share theme across module loaders (tsx + jiti in dev mode)
-const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
+const THEME_KEY = Symbol.for("@ponythewhite/base-context:theme");
 
 // Export theme as a getter that reads from globalThis
 // This ensures all module instances (tsx, jiti) see the same theme
@@ -1354,7 +1354,7 @@ export function getEditorTheme(): EditorTheme {
 	};
 }
 
-export function getSettingsListTheme(): import("@earendil-works/pi-tui").SettingsListTheme {
+export function getSettingsListTheme(): import("@ponythewhite/base-context-tui").SettingsListTheme {
 	return {
 		label: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : text),
 		value: (text: string, selected: boolean) => (selected ? theme.fg("accent", text) : theme.fg("muted", text)),
