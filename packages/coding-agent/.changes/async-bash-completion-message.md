@@ -1,1 +1,1 @@
-- Added completion follow-ups for kernel `bash()` handles left running beyond their creating cell so the agent inspects finished async commands and continues the task.
+- Added completion follow-ups when background kernel `bash()` commands finish so agents can inspect results and continue.

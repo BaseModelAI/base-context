@@ -52,13 +52,13 @@ export interface RlmFindModelsResult {
 
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
 
-export interface AsyncBashCompletionRequest {
+interface AsyncBashCompletionRequest {
 	pid: number;
 	command: string;
 	exitCode: number;
 }
 
-export type AsyncBashCompletionHandler = (request: AsyncBashCompletionRequest) => void | Promise<void>;
+type AsyncBashCompletionHandler = (request: AsyncBashCompletionRequest) => void | Promise<void>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -189,20 +189,17 @@ export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHand
 /** Adapt detached kernel bash completions into a validated host notification. */
 export function createAsyncBashCompletionHostHandler(handler: AsyncBashCompletionHandler): HostRequestHandler {
 	return async (payload) => {
-		if (!Number.isInteger(payload.pid) || (payload.pid as number) <= 0) {
+		const { pid, command, exitCode } = payload;
+		if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) {
 			throw new Error("bash.completed pid must be a positive integer");
 		}
-		if (typeof payload.command !== "string" || !payload.command) {
+		if (typeof command !== "string" || !command) {
 			throw new Error("bash.completed command must be a non-empty string");
 		}
-		if (!Number.isInteger(payload.exitCode)) {
+		if (typeof exitCode !== "number" || !Number.isInteger(exitCode)) {
 			throw new Error("bash.completed exitCode must be an integer");
 		}
-		await handler({
-			pid: payload.pid as number,
-			command: payload.command,
-			exitCode: payload.exitCode as number,
-		});
+		await handler({ pid, command, exitCode });
 		return {};
 	};
 }

@@ -109,6 +109,19 @@ def one(events: list[dict], kind: str) -> dict | None:
     return matches[0] if matches else None
 
 
+def wait_for_host_request(repl: ReplProcess, events: list[dict]) -> dict:
+    request = one(events, "host_request")
+    while request is None:
+        event = repl.read_event()
+        if event.get("event") == "host_request":
+            request = event
+    return request
+
+
+def reply_ok(repl: ReplProcess, request: dict) -> None:
+    repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "result": {}}})
+
+
 class ReplTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repl = ReplProcess()
@@ -729,11 +742,7 @@ class ReplTest(unittest.TestCase):
             "bash-detached", "handle = bash('sleep 0.05; printf detached')\nhandle.pid"
         )
         pid = int(one(started, "result")["text"])
-        request = one(started, "host_request")
-        while request is None:
-            event = self.repl.read_event()
-            if event.get("event") == "host_request":
-                request = event
+        request = wait_for_host_request(self.repl, started)
         self.assertEqual(
             request["data"],
             {
@@ -743,13 +752,7 @@ class ReplTest(unittest.TestCase):
                 "exitCode": 0,
             },
         )
-        self.repl.send(
-            {
-                "type": "host_reply",
-                "id": request["id"],
-                "data": {"status": "ok", "result": {}},
-            }
-        )
+        reply_ok(self.repl, request)
         inspected = self.repl.execute("bash-inspect", "handle.poll().output")
         self.assertIn("detached", one(inspected, "result")["text"])
 
@@ -770,13 +773,7 @@ class ReplTest(unittest.TestCase):
                 probe = self.repl.execute(f"bash-wrapper-{label}-probe", "await asyncio.sleep(0.05)")
                 request = one(probe, "host_request")
                 if request is not None:
-                    self.repl.send(
-                        {
-                            "type": "host_reply",
-                            "id": request["id"],
-                            "data": {"status": "ok", "result": {}},
-                        }
-                    )
+                    reply_ok(self.repl, request)
                 self.assertIsNone(request)
 
     def test_background_task_await_does_not_suppress_bash_completion(self):
@@ -794,20 +791,10 @@ class ReplTest(unittest.TestCase):
         )
         started = self.repl.execute("bash-task-waiter", code)
         pid = int(one(started, "result")["text"])
-        request = one(started, "host_request")
-        while request is None:
-            event = self.repl.read_event()
-            if event.get("event") == "host_request":
-                request = event
+        request = wait_for_host_request(self.repl, started)
         self.assertEqual(request["data"]["type"], "bash.completed")
         self.assertEqual(request["data"]["pid"], pid)
-        self.repl.send(
-            {
-                "type": "host_reply",
-                "id": request["id"],
-                "data": {"status": "ok", "result": {}},
-            }
-        )
+        reply_ok(self.repl, request)
 
     def test_reused_request_id_does_not_capture_old_cell_bash_completion(self):
         setup = "\n".join(
@@ -839,13 +826,7 @@ class ReplTest(unittest.TestCase):
             self.assertFalse(event.get("event") == "done" and event.get("id") == "reused-cell-id")
         self.assertEqual(request["data"]["type"], "bash.completed")
         self.assertEqual(request["data"]["command"], "printf reused-id")
-        self.repl.send(
-            {
-                "type": "host_reply",
-                "id": request["id"],
-                "data": {"status": "ok", "result": {}},
-            }
-        )
+        reply_ok(self.repl, request)
         self.assertEqual(one(self.repl.until_done("reused-cell-id"), "done")["status"], "ok")
 
     def test_protocol_framing_under_noise(self):

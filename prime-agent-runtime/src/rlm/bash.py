@@ -70,75 +70,51 @@ def _consume_notice_task(task: asyncio.Task[None]) -> None:
         task.exception()
 
 
-def _referenced_futures(
-    value: Any, *, depth: int = 0, seen: set[int] | None = None
-) -> set[asyncio.Future[Any]]:
-    """Find futures captured by asyncio's small internal completion callbacks."""
-    if isinstance(value, asyncio.Future):
-        return {value}
-    if depth >= 4:
-        return set()
-    if seen is None:
-        seen = set()
-    identity = id(value)
-    if identity in seen:
-        return set()
-    seen.add(identity)
+def _completion_reaches(start: asyncio.Future[Any], target: asyncio.Future[Any]) -> bool:
+    """Follow futures captured by asyncio wrapper completion callbacks."""
+    pending = [start]
+    seen_futures: set[int] = set()
+    seen_values: set[int] = set()
 
-    nested: list[Any] = []
-    if isinstance(value, functools.partial):
-        nested.extend((value.func, value.args, value.keywords))
-    elif isinstance(value, dict):
-        nested.extend(value.keys())
-        nested.extend(value.values())
-    elif isinstance(value, (tuple, list, set, frozenset)):
-        nested.extend(value)
-    else:
-        closure = getattr(value, "__closure__", None)
-        if closure:
+    def collect(value: Any, depth: int = 0) -> None:
+        if isinstance(value, asyncio.Future):
+            pending.append(value)
+            return
+        identity = id(value)
+        if depth >= 4 or identity in seen_values:
+            return
+        seen_values.add(identity)
+
+        nested: list[Any] = []
+        if isinstance(value, functools.partial):
+            nested.extend((value.func, value.args, value.keywords))
+        elif isinstance(value, dict):
+            nested.extend(value.keys())
+            nested.extend(value.values())
+        elif isinstance(value, (tuple, list, set, frozenset)):
+            nested.extend(value)
+        else:
+            closure = getattr(value, "__closure__", None) or ()
             for cell in closure:
                 try:
                     nested.append(cell.cell_contents)
                 except ValueError:
                     pass
-        bound_self = getattr(value, "__self__", None)
-        if bound_self is not None:
-            nested.append(bound_self)
+            bound_self = getattr(value, "__self__", None)
+            if bound_self is not None:
+                nested.append(bound_self)
+        for item in nested:
+            collect(item, depth + 1)
 
-    futures: set[asyncio.Future[Any]] = set()
-    for item in nested:
-        futures.update(_referenced_futures(item, depth=depth + 1, seen=seen))
-    return futures
-
-
-def _future_contains(root: asyncio.Future[Any], target: asyncio.Future[Any], seen: set[int]) -> bool:
-    """Follow aggregate children, such as asyncio.gather's private future list."""
-    if root is target:
-        return True
-    if id(root) in seen:
-        return False
-    seen.add(id(root))
-    children = getattr(root, "_children", None) or ()
-    return any(
-        isinstance(child, asyncio.Future) and _future_contains(child, target, seen) for child in children
-    )
-
-
-def _completion_reaches(start: asyncio.Future[Any], target: asyncio.Future[Any]) -> bool:
-    """Follow callback-captured futures from an inner await to its wrapper future."""
-    pending = [start]
-    seen: set[int] = set()
     while pending:
         future = pending.pop()
         if future is target:
             return True
-        if id(future) in seen:
+        if id(future) in seen_futures:
             continue
-        seen.add(id(future))
-        callbacks = getattr(future, "_callbacks", None) or ()
-        for entry in callbacks:
-            callback = entry[0] if isinstance(entry, tuple) else entry
-            pending.extend(_referenced_futures(callback))
+        seen_futures.add(id(future))
+        for entry in getattr(future, "_callbacks", None) or ():
+            collect(entry[0] if isinstance(entry, tuple) else entry)
     return False
 
 
@@ -153,7 +129,7 @@ def _creating_cell_waits_for(
     waiter = getattr(owner, "_fut_waiter", None)
     if not isinstance(waiter, asyncio.Future):
         return False
-    return _future_contains(waiter, awaiter, set()) or _completion_reaches(awaiter, waiter)
+    return _completion_reaches(awaiter, waiter)
 
 
 @dataclass(frozen=True)

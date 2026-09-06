@@ -116,7 +116,7 @@ export interface AsyncBashCompletionDetails {
 	exitCode: number;
 }
 
-export interface AsyncBashCompletionMessage extends CustomMessage<AsyncBashCompletionDetails> {
+interface AsyncBashCompletionMessage extends CustomMessage<AsyncBashCompletionDetails> {
 	customType: typeof ASYNC_BASH_COMPLETION_CUSTOM_TYPE;
 	content: string;
 }
