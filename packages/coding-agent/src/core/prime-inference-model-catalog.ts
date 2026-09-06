@@ -140,14 +140,14 @@ async function readResponse(response: Response): Promise<unknown> {
 }
 
 export async function fetchPrimeInferenceModelCatalog(
-	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; timeoutMs?: number } = {},
+	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; timeoutMs?: number; allowEmpty?: boolean } = {},
 ): Promise<{ payload: unknown; entries: PrimeInferenceCatalogEntry[] }> {
 	const response = await (options.fetchFn ?? fetch)(`${PRIME_INFERENCE_BASE_URL}/models`, {
 		headers: { accept: "application/json", ...options.headers },
 		signal: AbortSignal.timeout(options.timeoutMs ?? FETCH_TIMEOUT_MS),
 	});
 	const payload = await readResponse(response);
-	return { payload, entries: parsePrimeInferenceModelCatalog(payload) };
+	return { payload, entries: parsePrimeInferenceModelCatalog(payload, { allowEmpty: options.allowEmpty }) };
 }
 
 export function readCachedPrimeInferenceModels(

@@ -23,7 +23,10 @@ function positiveInteger(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
-export function parsePrimeInferenceModelCatalog(value: unknown): PrimeInferenceCatalogEntry[] {
+export function parsePrimeInferenceModelCatalog(
+	value: unknown,
+	options: { allowEmpty?: boolean } = {},
+): PrimeInferenceCatalogEntry[] {
 	if (!isRecord(value) || !Array.isArray(value.data)) throw new Error("Invalid Prime Inference model catalog");
 	const models: PrimeInferenceCatalogEntry[] = [];
 	const seen = new Set<string>();
@@ -67,6 +70,6 @@ export function parsePrimeInferenceModelCatalog(value: unknown): PrimeInferenceC
 				: {}),
 		});
 	}
-	if (models.length === 0) throw new Error("Prime Inference model catalog is empty");
+	if (models.length === 0 && !options.allowEmpty) throw new Error("Prime Inference model catalog is empty");
 	return models;
 }

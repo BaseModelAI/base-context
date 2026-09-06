@@ -155,6 +155,16 @@ describe("Prime Inference model catalog", () => {
 		expect(models.map(({ id }) => id)).toEqual(["internal/model", "dev/model", "poolside/model:deployment"]);
 	});
 
+	test("uses bundled metadata to authorize an existing private route", async () => {
+		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
+			"secret",
+			{ "X-Prime-Team-ID": "team" },
+			new Set(),
+			vi.fn(async () => response({ id: "internal/glm-5.2-fast" })),
+		);
+		expect(models.map(({ id }) => id)).toEqual(["internal/glm-5.2-fast"]);
+	});
+
 	test("treats rejected authenticated requests as no private access", async () => {
 		const models = await fetchAuthorizedPrivatePrimeInferenceModels(
 			"bad",

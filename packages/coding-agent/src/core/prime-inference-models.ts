@@ -52,18 +52,31 @@ export async function fetchAuthorizedPrivatePrimeInferenceModels(
 ): Promise<Model<"openai-completions">[]> {
 	if (!teamHeaders["X-Prime-Team-ID"]) return [];
 	try {
-		const { entries } = await fetchPrimeInferenceModelCatalog({
+		const { payload, entries } = await fetchPrimeInferenceModelCatalog({
 			fetchFn,
 			timeoutMs,
+			allowEmpty: true,
 			headers: { ...teamHeaders, Authorization: `Bearer ${apiKey}` },
 		});
 		const publicIds = new Set([...publicModelIds].map((id) => id.toLowerCase()));
-		const privateEntries = entries.filter((entry) => {
-			const id = entry.id.toLowerCase();
-			return !publicIds.has(id) && (id.startsWith("internal/") || id.startsWith("dev/") || id.includes(":"));
+		const bundledPrivateModels = getPrivatePrimeInferenceModels();
+		const bundledById = new Map(bundledPrivateModels.map((model) => [model.id.toLowerCase(), model]));
+		const entriesById = new Map(entries.map((entry) => [entry.id.toLowerCase(), entry]));
+		const data =
+			payload && typeof payload === "object" && "data" in payload && Array.isArray(payload.data) ? payload.data : [];
+		const privateEntries = data.flatMap((item) => {
+			if (!item || typeof item !== "object" || !("id" in item) || typeof item.id !== "string") return [];
+			const id = item.id.toLowerCase();
+			if (publicIds.has(id) || (!id.startsWith("internal/") && !id.startsWith("dev/") && !id.includes(":"))) {
+				return [];
+			}
+			const parsed = entriesById.get(id);
+			if (parsed) return [parsed];
+			const template = bundledById.get(id);
+			return template ? [{ id: item.id, input: template.cost.input, output: template.cost.output }] : [];
 		});
 		return (
-			buildPrimeInferenceModels(getPrivatePrimeInferenceModels(), privateEntries, {
+			buildPrimeInferenceModels(bundledPrivateModels, privateEntries, {
 				includePrivate: true,
 				minimumModels: 0,
 			}) ?? []
