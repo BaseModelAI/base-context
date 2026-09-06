@@ -32,7 +32,12 @@ import {
 	PRIME_CLI_REQUIREMENTS_GZIP_SHA256,
 	PRIME_CLI_REQUIREMENTS_SHA256,
 } from "./prime-cli-requirements-v1.js";
-import type { RunCommand } from "./prime-sandbox-lifecycle.js";
+import { isSandboxProviderBinder, type RunCommand } from "./prime-sandbox-lifecycle.js";
+import type {
+	SandboxFetchPort,
+	SandboxProviderFactoryResult,
+	SandboxRuntimeConnectPort,
+} from "./prime-sandbox-provider.js";
 
 export const MANAGED_PRIME_CLI_LIFECYCLE_EXECUTABLE = "/prime-agent-managed/prime-cli-0.6.21";
 const PRIME_VERSION = "0.6.21";
@@ -936,6 +941,26 @@ export async function provisionPrimeCliV1(
 	}
 	if (!(await releaseLock(lock))) return failed("CLEANUP_UNCERTAIN");
 	return result;
+}
+
+export function bindPrimeSandboxProviderWithCredential(
+	binderValue: unknown,
+	handle: unknown,
+	credentialValue: unknown,
+	dispatch?: SandboxFetchPort,
+	connectRuntime?: SandboxRuntimeConnectPort,
+): SandboxProviderFactoryResult {
+	if (!isSandboxProviderBinder(binderValue) || typeof credentialValue !== "object" || credentialValue === null) {
+		return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+	}
+	const credential = credentials.get(credentialValue);
+	if (credential === undefined) return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+	try {
+		const apiKey = new TextDecoder("utf-8", { fatal: true }).decode(credential);
+		return binderValue.bind(handle, apiKey, dispatch, connectRuntime);
+	} catch {
+		return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+	}
 }
 
 export function createPrimeCliRunCommand(value: unknown, credentialValue: unknown): RunCommand | undefined {

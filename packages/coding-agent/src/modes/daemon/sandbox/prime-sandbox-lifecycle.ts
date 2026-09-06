@@ -8,6 +8,12 @@
 
 import { parsePrimeCliCreateOutput, parsePrimeCliVersionOutput } from "./prime-cli-create-version-codec.js";
 import { parsePrimeSandboxGetOutput, parsePrimeSandboxListOutput } from "./prime-cli-json-codec.js";
+import {
+	createPrimeSandboxProviderPort,
+	type SandboxFetchPort,
+	type SandboxProviderFactoryResult,
+	type SandboxRuntimeConnectPort,
+} from "./prime-sandbox-provider.js";
 
 // -- Port types --
 
@@ -119,9 +125,46 @@ export interface ProofConsumer {
 	consumeProof(proof: DeleteProof): Readonly<{ ok: true }> | LifecycleError;
 }
 
+type SandboxProviderBind = (
+	handle: unknown,
+	apiKey: string,
+	dispatch?: SandboxFetchPort,
+	connectRuntime?: SandboxRuntimeConnectPort,
+) => SandboxProviderFactoryResult;
+
+const PROVIDER_BINDER_ISSUE = Object.freeze({});
+const providerBinderFunctions = new WeakMap<object, SandboxProviderBind>();
+
+export class SandboxProviderBinder {
+	constructor(token: object) {
+		if (token !== PROVIDER_BINDER_ISSUE) throw new Error();
+		Object.freeze(this);
+	}
+
+	bind(
+		handle: unknown,
+		apiKey: string,
+		dispatch?: SandboxFetchPort,
+		connectRuntime?: SandboxRuntimeConnectPort,
+	): SandboxProviderFactoryResult {
+		const bind = providerBinderFunctions.get(this);
+		return bind === undefined
+			? Object.freeze({ ok: false, code: "INPUT_INVALID" })
+			: bind(handle, apiKey, dispatch, connectRuntime);
+	}
+}
+
+Object.freeze(SandboxProviderBinder.prototype);
+Object.freeze(SandboxProviderBinder);
+
+export function isSandboxProviderBinder(value: unknown): value is SandboxProviderBinder {
+	return typeof value === "object" && value !== null && providerBinderFunctions.has(value);
+}
+
 export type SandboxLifecycleBundle = Readonly<{
 	lifecycle: SandboxLifecycle;
 	proofConsumer: ProofConsumer;
+	providerBinder: SandboxProviderBinder;
 }>;
 
 // -- Constants --
@@ -484,6 +527,7 @@ export async function createSandboxLifecycle(
 	// Closure-private state
 	const handleIdMap = new WeakMap<SandboxHandleToken, string>();
 	const deleteIssued = new WeakSet<SandboxHandleToken>();
+	const providerBound = new WeakSet<SandboxHandleToken>();
 	const createPerms = new WeakSet<CreatePermissionToken>();
 	const createUsed = new WeakSet<CreatePermissionToken>();
 	const proofSet = new WeakSet<DeleteProofToken>();
@@ -876,9 +920,37 @@ export async function createSandboxLifecycle(
 		},
 	});
 
+	const providerBinder = new SandboxProviderBinder(PROVIDER_BINDER_ISSUE);
+	providerBinderFunctions.set(
+		providerBinder,
+		(
+			handle: unknown,
+			apiKey: string,
+			dispatch?: SandboxFetchPort,
+			connectRuntime?: SandboxRuntimeConnectPort,
+		): SandboxProviderFactoryResult => {
+			if (!(handle instanceof SandboxHandleToken)) return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+			const id = handleIdMap.get(handle);
+			if (id === undefined || deleteIssued.has(handle) || providerBound.has(handle)) {
+				return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+			}
+			let result: SandboxProviderFactoryResult;
+			if (dispatch === undefined && connectRuntime === undefined) {
+				result = createPrimeSandboxProviderPort(apiKey, id);
+			} else if (dispatch !== undefined && connectRuntime !== undefined) {
+				result = createPrimeSandboxProviderPort(apiKey, id, dispatch, connectRuntime);
+			} else {
+				return Object.freeze({ ok: false, code: "INPUT_INVALID" });
+			}
+			if (result.ok) providerBound.add(handle);
+			return result;
+		},
+	);
+
 	const bundle: SandboxLifecycleBundle = Object.freeze({
 		lifecycle,
 		proofConsumer,
+		providerBinder,
 	});
 
 	return Object.freeze({ ok: true, value: bundle });

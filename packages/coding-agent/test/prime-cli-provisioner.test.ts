@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
+	bindPrimeSandboxProviderWithCredential,
 	closePrimeCliAuthority,
 	closePrimeCliCredentialAuthority,
 	createPrimeCliCredentialAuthority,
@@ -77,6 +78,10 @@ describe("Prime CLI provisioner authority boundary", () => {
 		expect(created.ok).toBe(true);
 		if (!created.ok) return;
 		source.fill(0);
+		expect(bindPrimeSandboxProviderWithCredential({}, {}, created.value)).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
 		expect(closePrimeCliCredentialAuthority(created.value)).toBe(true);
 		expect(closePrimeCliCredentialAuthority(created.value)).toBe(false);
 		expect(createPrimeCliCredentialAuthority(new Uint8Array(0))).toEqual({ ok: false, code: "INPUT_INVALID" });

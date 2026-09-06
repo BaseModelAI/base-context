@@ -8,6 +8,7 @@ import {
 	type RunCommand,
 	type RunnerResult,
 	type SandboxHandle,
+	SandboxProviderBinder,
 } from "../src/modes/daemon/sandbox/prime-sandbox-lifecycle.js";
 import versionFixture from "./fixtures/prime-cli-0.6.21-create-version-fixture.json";
 import fixture from "./fixtures/prime-cli-0.6.21-sandbox-json-fixture.json";
@@ -88,6 +89,8 @@ describe("Construction", () => {
 			expect(typeof r.value.lifecycle.waitUntilReady).toBe("function");
 			expect(typeof r.value.lifecycle.deleteAndProveAbsent).toBe("function");
 			expect(typeof r.value.proofConsumer.consumeProof).toBe("function");
+			expect(typeof r.value.providerBinder.bind).toBe("function");
+			expect(() => new SandboxProviderBinder({})).toThrow();
 		}
 	});
 	it("CONFIG_REJECTED: rel path", async () => {
@@ -157,6 +160,47 @@ describe("Inspect", () => {
 		page: 1,
 		per_page: 100,
 		has_next: false,
+	});
+
+	it("binds one opaque provider without exposing or returning the sandbox id", async () => {
+		const r = await createSandboxLifecycle(
+			mkR(
+				new Map([
+					[VK, VR],
+					[LK, ok(oneJ)],
+					[GK, ok(JSON.stringify(fixture.get))],
+				]),
+			),
+			vc(),
+		);
+		expect(r.ok).toBe(true);
+		if (!r.ok) return;
+		const inspected = await r.value.lifecycle.inspect();
+		expect(inspected.ok).toBe(true);
+		if (!inspected.ok || inspected.kind !== "single") return;
+		expect(r.value.providerBinder.bind(inspected.value, "bad\nkey")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		const bound = r.value.providerBinder.bind(
+			inspected.value,
+			"test-only-key",
+			async () =>
+				new Response(JSON.stringify({ exposures: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				}),
+			async () => Object.freeze({ ok: false, code: "CONNECT_FAILED" }),
+		);
+		expect(bound.ok).toBe(true);
+		if (!bound.ok) return;
+		expect(Object.keys(bound.value)).not.toContain("sandboxId");
+		expect(r.value.providerBinder.bind(inspected.value, "test-only-key")).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(await bound.value.unexposeAndProveAbsent()).toEqual({ ok: true });
+		expect(await bound.value.close()).toEqual({ ok: true });
 	});
 
 	it("empty returns permission+absenceProof pair", async () => {
