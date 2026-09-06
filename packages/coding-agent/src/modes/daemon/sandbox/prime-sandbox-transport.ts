@@ -631,6 +631,7 @@ function zeroTranscript(value: TranscriptData | undefined): void {
 	zero(value.archiveSha256);
 }
 
+/** Consumes the X25519 capability after its role and transcript binding validate. */
 export async function deriveSandboxTransportKeys(
 	keyValue: unknown,
 	role: SandboxTransportRole,
@@ -949,3 +950,4 @@ export async function decryptSandboxTransportFrame(
 export const SANDBOX_TRANSPORT_HEADER_BYTES = HEADER_BYTES;
 export const SANDBOX_TRANSPORT_MAX_PLAINTEXT_BYTES = MAX_PLAINTEXT_BYTES;
 export const SANDBOX_TRANSPORT_MAX_WIRE_BYTES = MAX_WIRE_BYTES;
+export const SANDBOX_TRANSPORT_TAG_BYTES = TAG_BYTES;
