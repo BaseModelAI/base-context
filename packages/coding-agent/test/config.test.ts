@@ -4,7 +4,6 @@ import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
-	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
 	getDaemonLogPath,
 	getSelfUpdateCommand,
@@ -16,7 +15,8 @@ import { getDefaultSessionDir } from "../src/core/session-manager.js";
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
 const originalPath = process.env.PATH;
-const originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+const ENV_LEGACY_SESSION_DIR = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
+const originalPiPackageDir = process.env.BASE_CONTEXT_PACKAGE_DIR;
 const originalSessionDir = process.env[ENV_SESSION_DIR];
 const originalLegacySessionDir = process.env[ENV_LEGACY_SESSION_DIR];
 let tempDir: string | undefined;
@@ -38,9 +38,9 @@ afterEach(() => {
 		process.env.PATH = originalPath;
 	}
 	if (originalPiPackageDir === undefined) {
-		delete process.env.PI_PACKAGE_DIR;
+		delete process.env.BASE_CONTEXT_PACKAGE_DIR;
 	} else {
-		process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = originalPiPackageDir;
 	}
 	if (originalSessionDir === undefined) {
 		delete process.env[ENV_SESSION_DIR];
@@ -66,7 +66,7 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 	const packageDir = join(scopeDir, "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { prefix, packageDir };
 }
@@ -76,7 +76,7 @@ function createHomebrewInstall(): { packageDir: string } {
 	const packageDir = join(prefix, "Cellar", "prime-agent", "0.7.0", "libexec", "lib", "node_modules", "prime-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
@@ -92,7 +92,7 @@ function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(
 		join(
 			root,
@@ -119,7 +119,7 @@ function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "yarn.cmd" : "yarn"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(globalDir, ".yarn", "@mariozechner", "pi-coding-agent", "dist", "cli.js"));
 	return { globalDir, packageDir };
 }
@@ -137,7 +137,7 @@ function createBunGlobalInstall(): { packageDir: string } {
 	chmodSync(join(bunBin, process.platform === "win32" ? "bun.cmd" : "bun"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${bunBin}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
@@ -193,8 +193,8 @@ describe("detectInstallMethod", () => {
 
 		expect(detectInstallMethod()).toBe("homebrew");
 		expect(getSelfUpdateCommand("prime-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
-		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
+		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade base-context");
+		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade base-context");
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
@@ -302,7 +302,7 @@ describe("detectInstallMethod", () => {
 
 	test("does not infer Windows npm custom prefixes from package paths", () => {
 		const packageDir = "C:\\Users\\Admin\\npm prefix\\node_modules\\@earendil-works\\pi-coding-agent";
-		process.env.PI_PACKAGE_DIR = packageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 		setExecPath(`${packageDir}\\dist\\cli.js`);
 
 		expect(detectInstallMethod()).toBe("npm");
@@ -412,7 +412,7 @@ describe("detectInstallMethod", () => {
 
 describe("session paths", () => {
 	test("uses the short app-prefixed session dir env var", () => {
-		expect(ENV_SESSION_DIR).toBe("PRIME_AGENT_SESSION_DIR");
+		expect(ENV_SESSION_DIR).toBe("BASE_CONTEXT_SESSION_DIR");
 	});
 
 	test("uses the session root env var when computing sessions dir", () => {
@@ -422,12 +422,12 @@ describe("session paths", () => {
 		expect(getSessionsDir("/agent")).toBe(sessionRoot);
 	});
 
-	test("uses the legacy coding agent session root env var when the new env var is unset", () => {
+	test("ignores the legacy coding agent session root env var", () => {
 		const sessionRoot = join(tmpdir(), `pi-legacy-session-root-${Date.now()}`);
 		delete process.env[ENV_SESSION_DIR];
 		process.env[ENV_LEGACY_SESSION_DIR] = sessionRoot;
 
-		expect(getSessionsDir("/agent")).toBe(sessionRoot);
+		expect(getSessionsDir("/agent")).toBe(join("/agent", "sessions"));
 	});
 
 	test("expands tilde in the session root env var", () => {

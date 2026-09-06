@@ -7,13 +7,14 @@ import path from "node:path";
 import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { PRODUCT, PRODUCT_ENV } from "../../product-identity.js";
+import { assertProductStatePath, readAbsolutePathEnv, resolveRuntimePaths } from "../../runtime-paths.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
-const BOOTSTRAP_SCHEMA = 9;
+const BOOTSTRAP_SCHEMA = 10;
 const PYTHON_VERSION = "3.11";
-const RUNTIME_REQUIREMENT = "prime-agent-runtime";
+const RUNTIME_REQUIREMENT = PRODUCT.runtimeDistribution;
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.
 const STATE_SNAPSHOT_REQUIREMENT = "dill";
@@ -50,7 +51,7 @@ const REQUIRED_HARNESS_METHODS = [
 	"delete_prompt_note",
 	"record_refinement",
 ];
-const RUNTIME_READY_CHECK = `import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
+const RUNTIME_READY_CHECK = `import inspect; from importlib import metadata; import rlm; assert metadata.version("${RUNTIME_REQUIREMENT}"); assert "prime-agent-runtime" not in {d.metadata["Name"].lower().replace("_", "-") for d in metadata.distributions()}; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ${JSON.stringify(REQUIRED_HARNESS_METHODS)}; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert hasattr(rlm, 'run'); assert callable(rlm); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')`;
 const BOOTSTRAP_VERSION_FILE = ".bootstrap-version";
 const BOOTSTRAP_LOCK_NAME = ".bootstrap.lock";
 const BOOTSTRAP_LOCK_RETRY_MS = 100;
@@ -109,12 +110,6 @@ async function isExecutable(filePath: string): Promise<boolean> {
 	} catch {
 		return false;
 	}
-}
-
-function expandHome(filePath: string): string {
-	if (filePath === "~") return os.homedir();
-	if (filePath.startsWith("~/")) return path.join(os.homedir(), filePath.slice(2));
-	return filePath;
 }
 
 function fileContentHash(filePath: string): string {
@@ -326,47 +321,23 @@ function formatPythonSkillInstallArgs(skill: BootstrapPythonSkill): string[] {
 
 function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): string {
 	return [
-		process.env.PRIME_AGENT_KERNEL_PYTHON ?? "",
-		process.env.PRIME_AGENT_KERNEL_VENV ?? "",
+		process.env[PRODUCT_ENV.kernelPython] ?? "",
+		process.env[PRODUCT_ENV.kernelVenv] ?? "",
 		process.env.HOME ?? "",
-		process.env.XDG_DATA_HOME ?? "",
+		process.env[PRODUCT_ENV.home] ?? "",
 		JSON.stringify(pythonSkills),
 	].join("\0");
 }
 
 export function getKernelVenvDir(): string {
-	const override = process.env.PRIME_AGENT_KERNEL_VENV;
-	if (override) return path.resolve(expandHome(override));
-	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
-}
-
-function getXdgKernelVenvDir(): string {
-	const dataHome = process.env.XDG_DATA_HOME
-		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
-		: path.join(os.homedir(), ".local", "share");
-	return path.join(dataHome, "prime", "agent", "kernel-venv");
+	const override = readAbsolutePathEnv(PRODUCT_ENV.kernelVenv);
+	return assertProductStatePath(override ?? resolveRuntimePaths().runtime);
 }
 
 async function resolveWritableKernelVenvDir(): Promise<string> {
-	const primary = getKernelVenvDir();
-	try {
-		await mkdir(path.dirname(primary), { recursive: true });
-		return primary;
-	} catch (primaryError) {
-		if (process.env.PRIME_AGENT_KERNEL_VENV) {
-			throw new Error(`couldn't create kernel venv parent directory for ${primary}: ${errorMessage(primaryError)}`);
-		}
-
-		const fallback = getXdgKernelVenvDir();
-		try {
-			await mkdir(path.dirname(fallback), { recursive: true });
-			return fallback;
-		} catch (fallbackError) {
-			throw new Error(
-				`couldn't create kernel venv directory at ${primary} or ${fallback}; set PRIME_AGENT_KERNEL_PYTHON to a python with a current prime-agent-runtime installed. ${errorMessage(fallbackError)}`,
-			);
-		}
-	}
+	const venv = getKernelVenvDir();
+	await mkdir(path.dirname(venv), { recursive: true });
+	return venv;
 }
 
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
@@ -396,7 +367,7 @@ async function pythonImports(python: string, moduleName: string): Promise<boolea
 	}
 }
 
-async function hasPrimeAgentRuntime(python: string): Promise<boolean> {
+async function hasBaseContextRuntime(python: string): Promise<boolean> {
 	try {
 		await run(python, ["-c", RUNTIME_READY_CHECK], { stdio: "ignore" });
 		return true;
@@ -513,11 +484,11 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	if (await isExecutable(localUv)) return localUv;
 
 	const shouldInstallUv =
-		process.env.PRIME_AGENT_INSTALL_UV === "1" || (!options.onProgress && (await confirmUvInstall()));
+		process.env[PRODUCT_ENV.installUv] === "1" || (!options.onProgress && (await confirmUvInstall()));
 	if (!shouldInstallUv) {
 		throw new Error(
 			`uv is required to set up the Python kernel. Install uv yourself: ${UV_INSTALL_COMMAND}, ` +
-				"or set PRIME_AGENT_INSTALL_UV=1 to let prime-agent run that installer.",
+				"or set BASE_CONTEXT_INSTALL_UV=1 to let base-context run that installer.",
 		);
 	}
 
@@ -526,7 +497,7 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 		await run("sh", ["-c", UV_INSTALL_COMMAND], { stdio: options.onProgress ? "ignore" : "inherit" });
 	} catch (error) {
 		throw new Error(
-			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run prime-agent. ${errorMessage(error)}`,
+			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run base-context. ${errorMessage(error)}`,
 		);
 	}
 
@@ -537,12 +508,14 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 }
 
 async function confirmUvInstall(): Promise<boolean> {
-	if (process.env.PRIME_AGENT_INSTALL_UV === "0") return false;
+	if (process.env[PRODUCT_ENV.installUv] === "0") return false;
 	if (!stdin.isTTY || !stderr.isTTY) return false;
 
 	const rl = createInterface({ input: stdin, output: stderr });
 	try {
-		const answer = (await rl.question("Prime Agent needs uv to set up Python. Install uv from astral.sh now? [Y/n] "))
+		const answer = (
+			await rl.question("Base Context needs uv to set up Python. Install uv from astral.sh now? [Y/n] ")
+		)
 			.trim()
 			.toLowerCase();
 		return answer !== "n" && answer !== "no";
@@ -648,41 +621,27 @@ async function writeBootstrapVersion(
 }
 
 function runtimeCandidateDirs(): string[] {
-	const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-	// dist/prime-agent-runtime is listed first deliberately: it is the only path stable
-	// across every shipped layout (dist/, dist/bundle/, bun), where import.meta.url-relative
-	// resolution breaks. `npm run build` rebuilds it from live source (copy-assets does
-	// rm -rf + cp), so the staleness hash still refreshes on every build. The relative
-	// paths below cover running from source (tsx) where dist/ hasn't been built.
-	return [
-		path.join(getPackageDir(), "dist", "prime-agent-runtime"),
-		path.resolve(moduleDir, "..", "..", "prime-agent-runtime"),
-		path.resolve(moduleDir, "..", "..", "..", "..", "..", "prime-agent-runtime"),
-	];
-}
-
-async function resolveRuntimeSourceDir(): Promise<string | null> {
-	for (const candidate of runtimeCandidateDirs()) {
-		if (await exists(path.join(candidate, "pyproject.toml"))) {
-			return candidate;
-		}
+	const packageDir = getPackageDir();
+	if (existsSync(path.join(packageDir, "src"))) {
+		return [path.resolve(packageDir, "..", "..", "prime-agent-runtime")];
 	}
-	return null;
+	return [path.join(packageDir, "dist", RUNTIME_REQUIREMENT), path.join(packageDir, RUNTIME_REQUIREMENT)];
 }
 
-// Identity of the runtime to be installed. For a local source checkout this is a
-// content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
-// dependency change invalidates an existing venv automatically. Falls back to the
-// bare package name when the runtime resolves to a registry install (no local source).
+async function resolveRuntimeSourceDir(): Promise<string> {
+	for (const candidate of runtimeCandidateDirs()) {
+		if (await exists(path.join(candidate, "pyproject.toml"))) return candidate;
+	}
+	throw new Error(
+		"Base Context runtime payload is missing. Reinstall this Base Context release; registry runtime fallback is disabled.",
+	);
+}
+
 export async function resolveRuntimeIdentity(): Promise<string> {
-	const sourceDir = await resolveRuntimeSourceDir();
-	if (!sourceDir) return RUNTIME_REQUIREMENT;
-	return hashRuntimeSource(sourceDir);
+	return hashRuntimeSource(await resolveRuntimeSourceDir());
 }
 
-// Throws if the local source can't be read. A failure here must surface rather than
-// fall back to RUNTIME_REQUIREMENT: that constant is the registry-install identity, and
-// recording it for a local checkout would permanently mask later source changes.
+// A source read failure must not be replaced by a registry runtime.
 async function hashRuntimeSource(sourceDir: string): Promise<string> {
 	const rlmDir = path.join(sourceDir, "src", "rlm");
 	const files: string[] = [path.join(sourceDir, "pyproject.toml")];
@@ -718,7 +677,7 @@ async function bootstrapVenv(
 	const uv = await ensureUv(options);
 	const python = path.join(venv, "bin", "python");
 	const sourceDir = await resolveRuntimeSourceDir();
-	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
+	const runtimeRequirement = sourceDir;
 	const runtimeIdentity = await resolveRuntimeIdentity();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
@@ -815,7 +774,7 @@ async function syncPythonSkills(
 
 async function kernelBaseReady(python: string, venv: string, runtimeIdentity: string): Promise<boolean> {
 	return (
-		(await hasPrimeAgentRuntime(python)) &&
+		(await hasBaseContextRuntime(python)) &&
 		bootstrapBaseVersionCurrent(await readBootstrapVersion(venv), runtimeIdentity)
 	);
 }
@@ -827,7 +786,7 @@ async function kernelReady(
 	pythonSkills: readonly BootstrapPythonSkill[],
 ): Promise<boolean> {
 	return (
-		(await hasPrimeAgentRuntime(python)) &&
+		(await hasBaseContextRuntime(python)) &&
 		bootstrapVersionCurrent(await readBootstrapVersion(venv), runtimeIdentity, pythonSkills)
 	);
 }
@@ -835,8 +794,8 @@ async function kernelReady(
 function formatBootstrapFailure(error: unknown): Error {
 	return new Error(
 		`Failed to set up the Python kernel runtime. ${errorMessage(error)}\n` +
-			"First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. " +
-			"Set PRIME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed to skip auto-bootstrap.",
+			"First-time setup needs internet to install uv, Python, the bundled base-context-runtime, and default Python packages; once set up, base-context runs offline. " +
+			"Set BASE_CONTEXT_KERNEL_PYTHON to a Python with a current base-context-runtime and default Python packages installed to skip auto-bootstrap.",
 	);
 }
 
@@ -844,13 +803,13 @@ async function ensureKernelPythonUncached(
 	options: EnsureKernelPythonOptions,
 	pythonSkills: readonly BootstrapPythonSkill[],
 ): Promise<string> {
-	const override = process.env.PRIME_AGENT_KERNEL_PYTHON;
+	const override = readAbsolutePathEnv(PRODUCT_ENV.kernelPython);
 	if (override) {
-		const python = path.resolve(expandHome(override));
+		const python = override;
 		const missing: string[] = [];
-		if (!(await hasPrimeAgentRuntime(python))) {
+		if (!(await hasBaseContextRuntime(python))) {
 			missing.push(
-				"a current prime-agent-runtime with callable rlm.run, rlm.host_request, and explicit harness CRUD methods",
+				"a current base-context-runtime with callable rlm.run, rlm.host_request, and explicit harness CRUD methods",
 			);
 		}
 		if (missing.length === 0) {
@@ -864,12 +823,12 @@ async function ensureKernelPythonUncached(
 			if (missingPythonSkills.length > 0) {
 				reportProgress(
 					options,
-					`Warning: Python skills unavailable in PRIME_AGENT_KERNEL_PYTHON and will be disabled: ${missingPythonSkills.join(", ")}`,
+					`Warning: Python skills unavailable in BASE_CONTEXT_KERNEL_PYTHON and will be disabled: ${missingPythonSkills.join(", ")}`,
 				);
 			}
 		}
 		if (missing.length === 0) return python;
-		throw new Error(`PRIME_AGENT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
+		throw new Error(`BASE_CONTEXT_KERNEL_PYTHON points to a Python missing ${missing.join(" and ")}: ${python}`);
 	}
 
 	const venv = await resolveWritableKernelVenvDir();

@@ -1,0 +1,1 @@
+- Added Base Context identity and separate state roots that ignore legacy environment overrides.

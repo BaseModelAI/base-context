@@ -15,6 +15,8 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
+import { PRODUCT, PRODUCT_ENV } from "./product-identity.js";
+import { assertProductStatePath, expandHomePath, readAbsolutePathEnv, resolveRuntimePaths } from "./runtime-paths.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
@@ -35,7 +37,7 @@ export const isBunBinary =
 /** Detect if Bun is the runtime (compiled binary or bun run) */
 export const isBunRuntime = !!process.versions.bun;
 
-export const SELF_UPDATE_INTERACTIVE_CHILD_ENV = "PRIME_AGENT_INTERACTIVE_SELF_UPDATE";
+export const SELF_UPDATE_INTERACTIVE_CHILD_ENV = PRODUCT_ENV.interactiveSelfUpdate;
 export const SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE = 75;
 
 // =============================================================================
@@ -328,7 +330,7 @@ export function getSelfUpdateUnavailableInstruction(
 ): string {
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest`;
+		return `Download from: ${PRODUCT.repository}/releases/latest`;
 	}
 	if (method === "homebrew") {
 		return `Update with: brew upgrade ${APP_NAME}`;
@@ -364,7 +366,7 @@ export function getUpdateInstruction(packageName: string): string {
  */
 export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
-	const envDir = process.env.PI_PACKAGE_DIR;
+	const envDir = process.env[PRODUCT_ENV.packageDirectory];
 	if (envDir) {
 		if (envDir === "~") return homedir();
 		if (envDir.startsWith("~/")) return homedir() + envDir.slice(1);
@@ -472,49 +474,30 @@ export function getBundledSkillsDir(): string {
 }
 
 // =============================================================================
-// App Config (from package.json piConfig)
-// =============================================================================
-
+// Product identity is not supplied by upstream package aliases or legacy environment variables.
 interface PackageJson {
 	name?: string;
 	version?: string;
-	piConfig?: {
-		name?: string;
-		configDir?: string;
-	};
 }
 
 const pkg = JSON.parse(readFileSync(getPackageJsonPath(), "utf-8")) as PackageJson;
 
-const piConfigName: string | undefined = pkg.piConfig?.name;
-const envPrefix =
-	(piConfigName || "pi")
-		.toUpperCase()
-		.replace(/[^A-Z0-9]+/g, "_")
-		.replace(/^_+|_+$/g, "") || "PI";
-export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
-export const APP_NAME: string = piConfigName || "pi";
-export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
-export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".prime/agent";
+export const PACKAGE_NAME: string = PRODUCT.packageName;
+export const APP_NAME: string = PRODUCT.command;
+export const APP_TITLE: string = PRODUCT.name;
+export const CONFIG_DIR_NAME: string = PRODUCT.configDirectory;
 export const VERSION: string = pkg.version || "0.0.0";
-
-// e.g., PI_CODING_AGENT_DIR or PRIME_AGENT_CODING_AGENT_DIR
-export const ENV_AGENT_DIR = `${envPrefix}_CODING_AGENT_DIR`;
-export const ENV_SESSION_DIR = `${envPrefix}_SESSION_DIR`;
-export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
+export const ENV_AGENT_DIR = PRODUCT_ENV.home;
+export const ENV_SESSION_DIR = PRODUCT_ENV.sessions;
 
 export function expandTildePath(path: string): string {
-	if (path === "~") return homedir();
-	if (path.startsWith("~/")) return homedir() + path.slice(1);
-	return path;
+	return expandHomePath(path);
 }
 
-const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
-
-/** Get the share viewer URL for a gist ID */
+/** Sharing is explicit; no upstream session viewer receives fork sessions by default. */
 export function getShareViewerUrl(gistId: string): string {
-	const baseUrl = process.env.PI_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL;
-	return `${baseUrl}#${gistId}`;
+	const baseUrl = process.env[PRODUCT_ENV.shareViewer];
+	return baseUrl ? `${baseUrl}#${gistId}` : `https://gist.github.com/${gistId}`;
 }
 
 // =============================================================================
@@ -523,11 +506,7 @@ export function getShareViewerUrl(gistId: string): string {
 
 /** Get the agent config directory (e.g., ~/.prime/agent/) */
 export function getAgentDir(): string {
-	const envDir = process.env[ENV_AGENT_DIR];
-	if (envDir) {
-		return expandTildePath(envDir);
-	}
-	return join(homedir(), CONFIG_DIR_NAME);
+	return resolveRuntimePaths().home;
 }
 
 /** Get path to user's custom themes directory */
@@ -626,8 +605,8 @@ export function getSessionsDir(agentDir: string = getAgentDir()): string {
 }
 
 export function getSessionDirEnvOverride(): string | undefined {
-	const envDir = process.env[ENV_SESSION_DIR] ?? process.env[ENV_LEGACY_SESSION_DIR];
-	return envDir ? expandTildePath(envDir) : undefined;
+	const envDir = readAbsolutePathEnv(PRODUCT_ENV.sessions);
+	return envDir ? assertProductStatePath(envDir) : undefined;
 }
 
 /** Get path to debug log file */

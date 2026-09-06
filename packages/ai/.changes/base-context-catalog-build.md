@@ -1,0 +1,1 @@
+- Changed builds to use the checked-in model catalog; model discovery remains an explicit operation.
