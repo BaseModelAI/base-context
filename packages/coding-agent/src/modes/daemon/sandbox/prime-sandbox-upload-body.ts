@@ -3,17 +3,25 @@ import { type BigIntStats, constants } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
 import process from "node:process";
 
-const MIN_ARCHIVE_BYTES = 1;
-const MAX_ARCHIVE_BYTES = 96 * 1024 * 1024;
+const MIN_FILE_BYTES = 1;
+const MAX_FILE_BYTES = 96 * 1024 * 1024;
 const CHUNK_BYTES = 64 * 1024;
 const MAX_PATH_BYTES = 4096;
 const FILE_MODE = 0o600n;
 const MODE_MASK = 0o7777n;
 const FIELD_NAME = "file";
-const FILE_NAME = "prime-agent-runtime.tar.gz";
 const CRLF = "\r\n";
 
-export type ArchiveUploadCode =
+export type SandboxArtifactKind = "release" | "manifest" | "bootstrap" | "trust";
+
+function artifactFileName(kind: SandboxArtifactKind): string {
+	if (kind === "release") return "prime-agent-runtime.tar.gz";
+	if (kind === "manifest") return "prime-agent-runtime.manifest.json";
+	if (kind === "bootstrap") return "prime-agent-bootstrap.pyz";
+	return "prime-agent-trust.json";
+}
+
+export type VerifiedUploadCode =
 	| "INPUT_INVALID"
 	| "OPEN_FAILED"
 	| "FILE_UNSAFE"
@@ -25,26 +33,29 @@ export type ArchiveUploadCode =
 	| "CANCELLED"
 	| "CLEANUP_UNCERTAIN";
 
-export type ArchiveUploadFailure = Readonly<{ ok: false; code: ArchiveUploadCode }>;
-export type ArchiveUploadCompletion = Readonly<{ ok: true }> | ArchiveUploadFailure;
-export type ArchiveUploadCloseResult = Readonly<{ ok: true }> | Readonly<{ ok: false; code: "CLEANUP_UNCERTAIN" }>;
+export type VerifiedUploadFailure = Readonly<{ ok: false; code: VerifiedUploadCode }>;
+export type VerifiedUploadCompletion = Readonly<{ ok: true }> | VerifiedUploadFailure;
+export type VerifiedUploadCloseResult = Readonly<{ ok: true }> | Readonly<{ ok: false; code: "CLEANUP_UNCERTAIN" }>;
 
-export interface ArchiveUploadBody {
-	readonly archiveSize: number;
+export interface VerifiedUploadBody {
+	readonly kind: SandboxArtifactKind;
+	readonly fileSize: number;
 	readonly contentType: string;
 	readonly contentLength: number;
 	readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>;
-	readonly completion: Promise<ArchiveUploadCompletion>;
-	cancelAndSettle(): Promise<ArchiveUploadCompletion>;
-	retryCleanup(): Promise<ArchiveUploadCloseResult>;
+	readonly completion: Promise<VerifiedUploadCompletion>;
+	cancelAndSettle(): Promise<VerifiedUploadCompletion>;
+	retryCleanup(): Promise<VerifiedUploadCloseResult>;
 }
 
-export type PreparedArchiveUpload = PreparedArchiveUploadImpl;
+export type PreparedFileUpload = PreparedFileUploadImpl;
 
-const issuedPreparedUploads = new WeakSet<object>();
+const issuedPreparedUploads = new WeakMap<object, SandboxArtifactKind>();
 
-export function isPreparedArchiveUpload(value: unknown): value is PreparedArchiveUpload {
-	return typeof value === "object" && value !== null && issuedPreparedUploads.has(value);
+export function isPreparedFileUpload(value: unknown, expectedKind?: SandboxArtifactKind): value is PreparedFileUpload {
+	if (typeof value !== "object" || value === null) return false;
+	const kind = issuedPreparedUploads.get(value);
+	return kind !== undefined && (expectedKind === undefined || kind === expectedKind);
 }
 
 interface FileIdentity {
@@ -60,6 +71,7 @@ interface FileIdentity {
 
 interface UploadState {
 	fd: FileHandle | undefined;
+	readonly kind: SandboxArtifactKind;
 	readonly identity: FileIdentity;
 	readonly expectedSize: number;
 	readonly expectedDigest: string;
@@ -73,14 +85,14 @@ interface UploadState {
 	cancelRequested: boolean;
 	controller: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>> | undefined;
 	activePull: Promise<void> | undefined;
-	finalizing: Promise<ArchiveUploadCompletion> | undefined;
-	resolveCompletion: (value: ArchiveUploadCompletion) => void;
-	readonly completion: Promise<ArchiveUploadCompletion>;
-	settled: ArchiveUploadCompletion | undefined;
+	finalizing: Promise<VerifiedUploadCompletion> | undefined;
+	resolveCompletion: (value: VerifiedUploadCompletion) => void;
+	readonly completion: Promise<VerifiedUploadCompletion>;
+	settled: VerifiedUploadCompletion | undefined;
 	readonly hasher: Hash;
 }
 
-function failure(code: ArchiveUploadCode): ArchiveUploadFailure {
+function failure(code: VerifiedUploadCode): VerifiedUploadFailure {
 	return Object.freeze({ ok: false, code });
 }
 
@@ -117,8 +129,14 @@ function validPath(value: string): boolean {
 	return true;
 }
 
-function validSize(value: number): boolean {
-	return Number.isSafeInteger(value) && value >= MIN_ARCHIVE_BYTES && value <= MAX_ARCHIVE_BYTES;
+function artifactMaximumBytes(kind: SandboxArtifactKind): number {
+	if (kind === "release") return MAX_FILE_BYTES;
+	if (kind === "trust") return 4096;
+	return 1024 * 1024;
+}
+
+function validSize(kind: SandboxArtifactKind, value: number): boolean {
+	return Number.isSafeInteger(value) && value >= MIN_FILE_BYTES && value <= artifactMaximumBytes(kind);
 }
 
 function validDigest(value: string): boolean {
@@ -186,7 +204,7 @@ async function statIdentity(fd: FileHandle): Promise<FileIdentity | undefined> {
 	}
 }
 
-async function closeFd(state: { fd: FileHandle | undefined }): Promise<ArchiveUploadCloseResult> {
+async function closeFd(state: { fd: FileHandle | undefined }): Promise<VerifiedUploadCloseResult> {
 	const fd = state.fd;
 	if (fd === undefined) return closeSuccess();
 	try {
@@ -239,10 +257,10 @@ function encode(value: string): Uint8Array<ArrayBuffer> {
 	return copy;
 }
 
-async function finishFailure(state: UploadState, code: ArchiveUploadCode): Promise<ArchiveUploadCompletion> {
+async function finishFailure(state: UploadState, code: VerifiedUploadCode): Promise<VerifiedUploadCompletion> {
 	if (state.settled !== undefined) return state.settled;
 	if (state.finalizing !== undefined) return state.finalizing;
-	const operation = (async (): Promise<ArchiveUploadCompletion> => {
+	const operation = (async (): Promise<VerifiedUploadCompletion> => {
 		const closed = await closeFd(state);
 		const result = closed.ok ? failure(code) : failure("CLEANUP_UNCERTAIN");
 		state.phase = "done";
@@ -299,7 +317,7 @@ async function pullFile(
 		return;
 	}
 
-	let code: ArchiveUploadCode | undefined;
+	let code: VerifiedUploadCode | undefined;
 	try {
 		const extra = new Uint8Array(new ArrayBuffer(1));
 		const tail = await fd.read(extra, 0, 1, state.expectedSize);
@@ -338,7 +356,7 @@ async function pullFile(
 	state.phase = "suffix";
 }
 
-function buildBody(state: UploadState): ArchiveUploadBody {
+function buildBody(state: UploadState): VerifiedUploadBody {
 	const stream = new ReadableStream<Uint8Array<ArrayBuffer>>(
 		{
 			start(controller): void {
@@ -406,13 +424,14 @@ function buildBody(state: UploadState): ArchiveUploadBody {
 		{ highWaterMark: 0 },
 	);
 
-	const body: ArchiveUploadBody = Object.freeze({
-		archiveSize: state.expectedSize,
+	const body: VerifiedUploadBody = Object.freeze({
+		kind: state.kind,
+		fileSize: state.expectedSize,
 		contentType: state.contentType,
 		contentLength: state.contentLength,
 		stream,
 		completion: state.completion,
-		async cancelAndSettle(): Promise<ArchiveUploadCompletion> {
+		async cancelAndSettle(): Promise<VerifiedUploadCompletion> {
 			state.cancelRequested = true;
 			const controller = state.controller;
 			if (controller !== undefined && state.phase !== "done") {
@@ -432,29 +451,29 @@ function buildBody(state: UploadState): ArchiveUploadBody {
 			}
 			return finishFailure(state, "CANCELLED");
 		},
-		async retryCleanup(): Promise<ArchiveUploadCloseResult> {
+		async retryCleanup(): Promise<VerifiedUploadCloseResult> {
 			return closeFd(state);
 		},
 	});
 	return body;
 }
 
-class PreparedArchiveUploadImpl {
+class PreparedFileUploadImpl {
 	readonly #state: UploadState;
 
 	constructor(state: UploadState) {
 		this.#state = state;
-		issuedPreparedUploads.add(this);
+		issuedPreparedUploads.set(this, state.kind);
 		Object.freeze(this);
 	}
 
-	take(): Readonly<{ ok: true; value: ArchiveUploadBody }> | ArchiveUploadFailure {
+	take(): Readonly<{ ok: true; value: VerifiedUploadBody }> | VerifiedUploadFailure {
 		if (this.#state.taken || this.#state.phase === "done") return failure("ALREADY_USED");
 		this.#state.taken = true;
 		return Object.freeze({ ok: true, value: buildBody(this.#state) });
 	}
 
-	async close(): Promise<ArchiveUploadCloseResult> {
+	async close(): Promise<VerifiedUploadCloseResult> {
 		this.#state.cancelRequested = true;
 		const controller = this.#state.controller;
 		if (controller !== undefined && this.#state.phase !== "done") {
@@ -477,12 +496,19 @@ class PreparedArchiveUploadImpl {
 	}
 }
 
-export async function prepareArchiveUpload(
+export async function prepareFileUpload(
+	kind: SandboxArtifactKind,
 	path: string,
 	expectedSize: number,
 	expectedDigest: string,
-): Promise<Readonly<{ ok: true; value: PreparedArchiveUpload }> | ArchiveUploadFailure> {
-	if (typeof path !== "string" || !validPath(path) || !validSize(expectedSize) || !validDigest(expectedDigest)) {
+): Promise<Readonly<{ ok: true; value: PreparedFileUpload }> | VerifiedUploadFailure> {
+	if (
+		(kind !== "release" && kind !== "manifest" && kind !== "bootstrap" && kind !== "trust") ||
+		typeof path !== "string" ||
+		!validPath(path) ||
+		!validSize(kind, expectedSize) ||
+		!validDigest(expectedDigest)
+	) {
 		return failure("INPUT_INVALID");
 	}
 	if (typeof process.getuid !== "function") return failure("FILE_UNSAFE");
@@ -526,8 +552,10 @@ export async function prepareArchiveUpload(
 		const closed = await closeFd(closeOwner);
 		return closed.ok ? failure("RNG_FAILED") : failure("CLEANUP_UNCERTAIN");
 	}
+	const fileName = artifactFileName(kind);
+	const mediaType = kind === "release" ? "application/gzip" : "application/octet-stream";
 	const prefix = encode(
-		`--${boundary}${CRLF}Content-Disposition: form-data; name="${FIELD_NAME}"; filename="${FILE_NAME}"${CRLF}Content-Type: application/gzip${CRLF}${CRLF}`,
+		`--${boundary}${CRLF}Content-Disposition: form-data; name="${FIELD_NAME}"; filename="${fileName}"${CRLF}Content-Type: ${mediaType}${CRLF}${CRLF}`,
 	);
 	const suffix = encode(`${CRLF}--${boundary}--${CRLF}`);
 	const contentLength = prefix.byteLength + expectedSize + suffix.byteLength;
@@ -535,12 +563,13 @@ export async function prepareArchiveUpload(
 		const closed = await closeFd(closeOwner);
 		return closed.ok ? failure("INPUT_INVALID") : failure("CLEANUP_UNCERTAIN");
 	}
-	let resolveCompletion: (value: ArchiveUploadCompletion) => void = () => {};
-	const completion = new Promise<ArchiveUploadCompletion>((resolve) => {
+	let resolveCompletion: (value: VerifiedUploadCompletion) => void = () => {};
+	const completion = new Promise<VerifiedUploadCompletion>((resolve) => {
 		resolveCompletion = resolve;
 	});
 	const state: UploadState = {
 		fd,
+		kind,
 		identity: initial,
 		expectedSize,
 		expectedDigest,
@@ -560,5 +589,5 @@ export async function prepareArchiveUpload(
 		settled: undefined,
 		hasher: createHash("sha256"),
 	};
-	return Object.freeze({ ok: true, value: new PreparedArchiveUploadImpl(state) });
+	return Object.freeze({ ok: true, value: new PreparedFileUploadImpl(state) });
 }

@@ -2,21 +2,33 @@ import { isIP } from "node:net";
 import { types } from "node:util";
 import { parseBoundedJson } from "./prime-sandbox-json.js";
 import {
-	type ArchiveUploadBody,
-	type ArchiveUploadCompletion,
-	isPreparedArchiveUpload,
-	type PreparedArchiveUpload,
+	isPreparedFileUpload,
+	type PreparedFileUpload,
+	type SandboxArtifactKind,
+	type VerifiedUploadBody,
+	type VerifiedUploadCompletion,
 } from "./prime-sandbox-upload-body.js";
 
 const CONTROL_ORIGIN = "https://api.primeintellect.ai";
 const REMOTE_ARCHIVE_PATH = "/tmp/prime-agent-runtime.tar.gz";
+const REMOTE_MANIFEST_PATH = "/tmp/prime-agent-runtime.manifest.json";
+const REMOTE_BOOTSTRAP_PATH = "/tmp/prime-agent-bootstrap.pyz";
+const REMOTE_TRUST_PATH = "/tmp/prime-agent-trust.json";
+const MAX_PUBLIC_ARTIFACT_BYTES = 1024 * 1024;
+const MAX_TRUST_BYTES = 4096;
 const RUNTIME_PORT = 9443;
 const EXPOSURE_NAME = "prime-agent-runtime-v1";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const MAX_ARCHIVE_BYTES = 96 * 1024 * 1024;
+const MAX_FILE_BYTES = 96 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const UPLOAD_TIMEOUT_MS = 300_000;
 const CLEANUP_TIMEOUT_MS = 5_000;
+const AUTH_MARGIN_MS = 60_000;
+const BOOTSTRAP_COMMAND_SECONDS = 180;
+const BOOTSTRAP_REQUEST_TIMEOUT_MS = (BOOTSTRAP_COMMAND_SECONDS + 5) * 1000;
+const BOOTSTRAP_COMMAND = "/usr/local/bin/python3.11 /tmp/prime-agent-bootstrap.pyz";
+const MAX_COMMAND_RESPONSE_BYTES = 8192;
+const MAX_READINESS_LINE_BYTES = 512;
 const MISSING = Symbol("missing");
 
 type Missing = typeof MISSING;
@@ -34,6 +46,8 @@ export type SandboxProviderCode =
 	| "BODY_TOO_LARGE"
 	| "INVALID_RESPONSE"
 	| "UPLOAD_SOURCE"
+	| "COMMAND_FAILED"
+	| "LAUNCH_ALREADY_ATTEMPTED"
 	| "EXPOSURE_CONFLICT"
 	| "ABSENCE_UNPROVEN";
 
@@ -43,10 +57,48 @@ export type SandboxProviderFactoryResult =
 	| Readonly<{ ok: true; value: PrimeSandboxProviderPort }>
 	| SandboxProviderFailure;
 
+class SandboxRuntimeReadinessCapability {
+	constructor(line: Uint8Array<ArrayBuffer>) {
+		readinessBytes.set(this, line);
+		Object.freeze(this);
+	}
+
+	private copy(): Uint8Array<ArrayBuffer> | undefined {
+		const line = readinessBytes.get(this);
+		if (line === undefined) return undefined;
+		const copy = new Uint8Array(new ArrayBuffer(line.byteLength));
+		copy.set(line);
+		return copy;
+	}
+
+	static copyIssued(value: unknown): Uint8Array<ArrayBuffer> | undefined {
+		return value instanceof SandboxRuntimeReadinessCapability && readinessBytes.has(value) ? value.copy() : undefined;
+	}
+}
+
+export type SandboxRuntimeReadiness = SandboxRuntimeReadinessCapability;
+export type SandboxProviderReadinessResult =
+	| Readonly<{ ok: true; value: SandboxRuntimeReadiness }>
+	| SandboxProviderFailure;
+
+const readinessBytes = new WeakMap<object, Uint8Array<ArrayBuffer>>();
+
+export function copySandboxRuntimeReadiness(value: unknown): Uint8Array<ArrayBuffer> | undefined {
+	try {
+		return SandboxRuntimeReadinessCapability.copyIssued(value);
+	} catch {
+		return undefined;
+	}
+}
+
 export type SandboxFetchPort = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface PrimeSandboxProviderPort {
-	uploadRelease(source: PreparedArchiveUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
+	uploadRelease(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
+	uploadManifest(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
+	uploadBootstrap(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
+	uploadTrust(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult>;
+	bootstrapAndLaunch(signal?: AbortSignal): Promise<SandboxProviderReadinessResult>;
 	exposeRuntime(signal?: AbortSignal): Promise<SandboxProviderResult>;
 	unexposeAndProveAbsent(signal?: AbortSignal): Promise<SandboxProviderResult>;
 	close(): Promise<SandboxProviderResult>;
@@ -65,7 +117,7 @@ type CancelCode = "ABORTED" | "TIMED_OUT" | "CLOSED";
 interface ActiveRequest {
 	readonly abort: AbortController;
 	readonly fetchOutcome: Promise<FetchOutcome>;
-	readonly body: ArchiveUploadBody | undefined;
+	readonly body: VerifiedUploadBody | undefined;
 	response: Response | undefined;
 	reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 	responseDone: boolean;
@@ -286,15 +338,56 @@ function parseAuth(bytes: Uint8Array, minimumExpiresAt: number): AuthState | und
 	return Object.freeze({ gatewayBase, userNs, jobId, token });
 }
 
-function validUpload(bytes: Uint8Array, expectedSize: number): boolean {
+function validUpload(bytes: Uint8Array, expectedPath: string, expectedSize: number): boolean {
 	const parsed = parseBoundedJson(bytes);
 	if (!parsed.ok || !exactObject(parsed.value, ["success", "path", "size", "timestamp"])) return false;
 	return (
 		ownData(parsed.value, "success") === true &&
-		ownData(parsed.value, "path") === REMOTE_ARCHIVE_PATH &&
+		ownData(parsed.value, "path") === expectedPath &&
 		ownData(parsed.value, "size") === expectedSize &&
 		validRfc3339(ownData(parsed.value, "timestamp"))
 	);
+}
+
+function parseCommandReadiness(bytes: Uint8Array): SandboxProviderReadinessResult {
+	const parsed = parseBoundedJson(bytes);
+	if (!parsed.ok || !exactObject(parsed.value, ["stdout", "stderr", "exit_code"])) {
+		return failure("INVALID_RESPONSE");
+	}
+	const stdout = ownData(parsed.value, "stdout");
+	const stderr = ownData(parsed.value, "stderr");
+	const exitCode = ownData(parsed.value, "exit_code");
+	if (
+		typeof stdout !== "string" ||
+		typeof stderr !== "string" ||
+		typeof exitCode !== "number" ||
+		!Number.isSafeInteger(exitCode) ||
+		exitCode < -255 ||
+		exitCode > 255
+	) {
+		return failure("INVALID_RESPONSE");
+	}
+	if (exitCode !== 0) return failure("COMMAND_FAILED");
+	if (stderr !== "" || !stdout.endsWith("\n") || stdout.length < 10 || stdout.length > MAX_READINESS_LINE_BYTES + 1) {
+		return failure("INVALID_RESPONSE");
+	}
+	const line = stdout.slice(0, -1);
+	for (let index = 0; index < line.length; index += 1) {
+		const unit = line.charCodeAt(index);
+		if (unit < 0x20 || unit > 0x7e) return failure("INVALID_RESPONSE");
+	}
+	const parts = line.split(" ");
+	if (parts.length !== 9 || parts[0] !== "BUNDLE" || parts[1] !== "v3") return failure("INVALID_RESPONSE");
+	for (let index = 2; index < 8; index += 1) {
+		if (!/^[A-Za-z0-9+/]{43}=$/.test(parts[index] ?? "")) return failure("INVALID_RESPONSE");
+	}
+	if (!/^[A-Za-z0-9+/]{86}==$/.test(parts[8] ?? "")) return failure("INVALID_RESPONSE");
+	const encoded = new TextEncoder().encode(line);
+	if (encoded.byteLength > MAX_READINESS_LINE_BYTES) {
+		encoded.fill(0);
+		return failure("INVALID_RESPONSE");
+	}
+	return Object.freeze({ ok: true, value: new SandboxRuntimeReadinessCapability(encoded) });
 }
 
 function parseExposureRow(value: unknown, expectedSandboxId: string): ExposureRow | undefined {
@@ -465,12 +558,13 @@ export function createPrimeSandboxProviderPort(
 		return failure("INPUT_INVALID");
 	}
 	const records = new Set<ActiveRequest>();
-	const bodyCleanups = new Set<ArchiveUploadBody>();
+	const bodyCleanups = new Set<VerifiedUploadBody>();
 	let closed = false;
 	let exposure: ExposureState | undefined;
 	let exposureAbsenceProven = false;
+	let launchClaimed = false;
 
-	async function settleUploadBody(body: ArchiveUploadBody | undefined): Promise<boolean> {
+	async function settleUploadBody(body: VerifiedUploadBody | undefined): Promise<boolean> {
 		if (body === undefined) return true;
 		try {
 			const result = await body.cancelAndSettle();
@@ -545,7 +639,7 @@ export function createPrimeSandboxProviderPort(
 	}
 
 	async function failedBeforeDispatch(
-		body: ArchiveUploadBody | undefined,
+		body: VerifiedUploadBody | undefined,
 		code: SandboxProviderCode,
 	): Promise<SandboxProviderFailure> {
 		if (body === undefined) return failure(code);
@@ -564,7 +658,7 @@ export function createPrimeSandboxProviderPort(
 		url: string,
 		headers: Headers,
 		bodyBytes: Uint8Array<ArrayBuffer> | undefined,
-		uploadBody: ArchiveUploadBody | undefined,
+		uploadBody: VerifiedUploadBody | undefined,
 		timeoutMs: number,
 		responseLimit: number,
 		signal: AbortSignal | undefined,
@@ -719,7 +813,7 @@ export function createPrimeSandboxProviderPort(
 		if (uploadBody !== undefined) {
 			const bodyState = await Promise.race([
 				uploadBody.completion.then(
-					(result): Readonly<{ kind: "body"; result: ArchiveUploadCompletion }> =>
+					(result): Readonly<{ kind: "body"; result: VerifiedUploadCompletion }> =>
 						Object.freeze({ kind: "body", result }),
 				),
 				cancelled.then(
@@ -840,7 +934,10 @@ export function createPrimeSandboxProviderPort(
 		return headers;
 	}
 
-	async function authenticate(signal: AbortSignal | undefined): Promise<InternalResult<AuthState>> {
+	async function authenticate(
+		minimumLifetimeMs: number,
+		signal: AbortSignal | undefined,
+	): Promise<InternalResult<AuthState>> {
 		const url = `${CONTROL_ORIGIN}/api/v1/sandbox/${expectedSandboxId}/auth`;
 		const result = await request(
 			"POST",
@@ -853,7 +950,7 @@ export function createPrimeSandboxProviderPort(
 			signal,
 		);
 		if (!result.ok) return result;
-		const auth = parseAuth(result.body, Date.now() + UPLOAD_TIMEOUT_MS + 5_000);
+		const auth = parseAuth(result.body, Date.now() + minimumLifetimeMs);
 		result.body.fill(0);
 		return auth === undefined ? failure("INVALID_RESPONSE") : Object.freeze({ ok: true, value: auth });
 	}
@@ -876,49 +973,128 @@ export function createPrimeSandboxProviderPort(
 		return rows === undefined ? failure("INVALID_RESPONSE") : Object.freeze({ ok: true, value: rows });
 	}
 
+	async function uploadArtifact(
+		kind: SandboxArtifactKind,
+		remotePath: string,
+		maximumBytes: number,
+		source: PreparedFileUpload,
+		signal: AbortSignal | undefined,
+	): Promise<SandboxProviderResult> {
+		if (closed) return failure("CLOSED");
+		if (!isPreparedFileUpload(source, kind)) return failure("INPUT_INVALID");
+		let taken: ReturnType<PreparedFileUpload["take"]>;
+		try {
+			taken = source.take();
+		} catch {
+			return failure("INPUT_INVALID");
+		}
+		if (!taken.ok) return failure("UPLOAD_SOURCE");
+		const body = taken.value;
+		if (
+			body.kind !== kind ||
+			!safeInteger(body.fileSize, 1, maximumBytes) ||
+			!safeInteger(body.contentLength, body.fileSize + 1, maximumBytes + 4096)
+		) {
+			return failedBeforeDispatch(body, "UPLOAD_SOURCE");
+		}
+		const authResult = await authenticate(UPLOAD_TIMEOUT_MS + AUTH_MARGIN_MS, signal);
+		if (!authResult.ok) return failedBeforeDispatch(body, authResult.code);
+		const auth = authResult.value;
+		const url = new URL(`${auth.gatewayBase}/${auth.userNs}/${auth.jobId}/upload`);
+		url.searchParams.set("path", remotePath);
+		url.searchParams.set("sandbox_id", expectedSandboxId);
+		const headers = new Headers();
+		headers.set("accept", "application/json");
+		headers.set("authorization", `Bearer ${auth.token}`);
+		headers.set("content-type", body.contentType);
+		headers.set("content-length", String(body.contentLength));
+		const result = await request(
+			"POST",
+			url.href,
+			headers,
+			undefined,
+			body,
+			UPLOAD_TIMEOUT_MS,
+			MAX_RESPONSE_BYTES,
+			signal,
+		);
+		if (!result.ok) return result;
+		const valid = validUpload(result.body, remotePath, body.fileSize);
+		result.body.fill(0);
+		return valid ? success() : failure("INVALID_RESPONSE");
+	}
+
 	const port: PrimeSandboxProviderPort = Object.freeze({
-		async uploadRelease(source: PreparedArchiveUpload, signal?: AbortSignal): Promise<SandboxProviderResult> {
+		async uploadRelease(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult> {
+			return uploadArtifact("release", REMOTE_ARCHIVE_PATH, MAX_FILE_BYTES, source, signal);
+		},
+
+		async uploadManifest(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult> {
+			return uploadArtifact("manifest", REMOTE_MANIFEST_PATH, MAX_PUBLIC_ARTIFACT_BYTES, source, signal);
+		},
+
+		async uploadBootstrap(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult> {
+			return uploadArtifact("bootstrap", REMOTE_BOOTSTRAP_PATH, MAX_PUBLIC_ARTIFACT_BYTES, source, signal);
+		},
+
+		async uploadTrust(source: PreparedFileUpload, signal?: AbortSignal): Promise<SandboxProviderResult> {
+			return uploadArtifact("trust", REMOTE_TRUST_PATH, MAX_TRUST_BYTES, source, signal);
+		},
+
+		async bootstrapAndLaunch(signal?: AbortSignal): Promise<SandboxProviderReadinessResult> {
 			if (closed) return failure("CLOSED");
-			if (!isPreparedArchiveUpload(source)) return failure("INPUT_INVALID");
-			let taken: ReturnType<PreparedArchiveUpload["take"]>;
+			if (launchClaimed) return failure("LAUNCH_ALREADY_ATTEMPTED");
+			launchClaimed = true;
+			const authResult = await authenticate(BOOTSTRAP_REQUEST_TIMEOUT_MS + AUTH_MARGIN_MS, signal);
+			if (!authResult.ok) {
+				launchClaimed = false;
+				return authResult;
+			}
+			const auth = authResult.value;
+			let serialized: string | undefined;
 			try {
-				taken = source.take();
+				serialized = JSON.stringify({
+					command: BOOTSTRAP_COMMAND,
+					working_dir: null,
+					env: {},
+					sandbox_id: expectedSandboxId,
+					timeout: BOOTSTRAP_COMMAND_SECONDS,
+				});
 			} catch {
+				launchClaimed = false;
 				return failure("INPUT_INVALID");
 			}
-			if (!taken.ok) return failure("UPLOAD_SOURCE");
-			const body = taken.value;
-			if (
-				!safeInteger(body.archiveSize, 1, MAX_ARCHIVE_BYTES) ||
-				!safeInteger(body.contentLength, body.archiveSize + 1, MAX_ARCHIVE_BYTES + 4096)
-			) {
-				return failedBeforeDispatch(body, "UPLOAD_SOURCE");
+			if (serialized === undefined) {
+				launchClaimed = false;
+				return failure("INPUT_INVALID");
 			}
-			const authResult = await authenticate(signal);
-			if (!authResult.ok) return failedBeforeDispatch(body, authResult.code);
-			const auth = authResult.value;
-			const url = new URL(`${auth.gatewayBase}/${auth.userNs}/${auth.jobId}/upload`);
-			url.searchParams.set("path", REMOTE_ARCHIVE_PATH);
-			url.searchParams.set("sandbox_id", expectedSandboxId);
+			const payload = encodeJson(serialized);
 			const headers = new Headers();
 			headers.set("accept", "application/json");
 			headers.set("authorization", `Bearer ${auth.token}`);
-			headers.set("content-type", body.contentType);
-			headers.set("content-length", String(body.contentLength));
+			headers.set("content-type", "application/json");
+			headers.set("content-length", String(payload.byteLength));
+			const url = `${auth.gatewayBase}/${auth.userNs}/${auth.jobId}/exec`;
 			const result = await request(
 				"POST",
-				url.href,
+				url,
 				headers,
+				payload,
 				undefined,
-				body,
-				UPLOAD_TIMEOUT_MS,
-				MAX_RESPONSE_BYTES,
+				BOOTSTRAP_REQUEST_TIMEOUT_MS,
+				MAX_COMMAND_RESPONSE_BYTES,
 				signal,
 			);
-			if (!result.ok) return result;
-			const valid = validUpload(result.body, body.archiveSize);
+			payload.fill(0);
+			if (!result.ok) {
+				if (result.code === "NOT_SENT" || result.code === "CLOSED" || result.code === "INPUT_INVALID") {
+					launchClaimed = false;
+				}
+				return result;
+			}
+			const readiness = parseCommandReadiness(result.body);
 			result.body.fill(0);
-			return valid ? success() : failure("INVALID_RESPONSE");
+			return readiness;
 		},
 
 		async exposeRuntime(signal?: AbortSignal): Promise<SandboxProviderResult> {

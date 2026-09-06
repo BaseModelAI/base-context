@@ -4,9 +4,9 @@ import { chmod, link, mkdtemp, open, rm, symlink, writeFile } from "node:fs/prom
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	type ArchiveUploadBody,
-	type PreparedArchiveUpload,
-	prepareArchiveUpload,
+	type PreparedFileUpload,
+	prepareFileUpload,
+	type VerifiedUploadBody,
 } from "../src/modes/daemon/sandbox/prime-sandbox-upload-body.js";
 
 const roots: string[] = [];
@@ -29,20 +29,20 @@ async function archive(bytes: Uint8Array): Promise<Readonly<{ path: string; byte
 	return Object.freeze({ path, bytes });
 }
 
-async function prepared(bytes: Uint8Array): Promise<PreparedArchiveUpload> {
+async function prepared(bytes: Uint8Array): Promise<PreparedFileUpload> {
 	const file = await archive(bytes);
-	const result = await prepareArchiveUpload(file.path, bytes.byteLength, digest(bytes));
+	const result = await prepareFileUpload("release", file.path, bytes.byteLength, digest(bytes));
 	if (!result.ok) throw new Error(result.code);
 	return result.value;
 }
 
-function take(value: PreparedArchiveUpload): ArchiveUploadBody {
+function take(value: PreparedFileUpload): VerifiedUploadBody {
 	const result = value.take();
 	if (!result.ok) throw new Error(result.code);
 	return result.value;
 }
 
-async function readAll(body: ArchiveUploadBody): Promise<Uint8Array> {
+async function readAll(body: VerifiedUploadBody): Promise<Uint8Array> {
 	const reader = body.stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let total = 0;
@@ -100,7 +100,7 @@ describe("prime sandbox streaming archive body", () => {
 		const bytes = new Uint8Array(3 * 64 * 1024 + 17);
 		for (let index = 0; index < bytes.byteLength; index += 1) bytes[index] = index % 251;
 		const file = await archive(bytes);
-		const result = await prepareArchiveUpload(file.path, bytes.byteLength, digest(bytes));
+		const result = await prepareFileUpload("release", file.path, bytes.byteLength, digest(bytes));
 		if (!result.ok) throw new Error(result.code);
 		const body = take(result.value);
 		const reader = body.stream.getReader();
@@ -184,14 +184,14 @@ describe("prime sandbox streaming archive body", () => {
 
 	test("rejects a digest mismatch before a stream can be taken", async () => {
 		const file = await archive(new Uint8Array([1, 2, 3]));
-		const result = await prepareArchiveUpload(file.path, 3, "0".repeat(64));
+		const result = await prepareFileUpload("release", file.path, 3, "0".repeat(64));
 		expect(result).toEqual({ ok: false, code: "DIGEST_MISMATCH" });
 	});
 
 	test("rejects a size mismatch before a stream can be taken", async () => {
 		const bytes = new Uint8Array([1, 2, 3]);
 		const file = await archive(bytes);
-		const result = await prepareArchiveUpload(file.path, 2, digest(bytes));
+		const result = await prepareFileUpload("release", file.path, 2, digest(bytes));
 		expect(result).toEqual({ ok: false, code: "FILE_UNSAFE" });
 	});
 
@@ -199,7 +199,7 @@ describe("prime sandbox streaming archive body", () => {
 		const bytes = new Uint8Array([1, 2, 3]);
 		const file = await archive(bytes);
 		await chmod(file.path, 0o640);
-		const result = await prepareArchiveUpload(file.path, bytes.byteLength, digest(bytes));
+		const result = await prepareFileUpload("release", file.path, bytes.byteLength, digest(bytes));
 		expect(result).toEqual({ ok: false, code: "FILE_UNSAFE" });
 	});
 
@@ -208,7 +208,7 @@ describe("prime sandbox streaming archive body", () => {
 		const file = await archive(bytes);
 		const linkedPath = join(await root(), "linked.tar.gz");
 		await symlink(file.path, linkedPath);
-		const result = await prepareArchiveUpload(linkedPath, bytes.byteLength, digest(bytes));
+		const result = await prepareFileUpload("release", linkedPath, bytes.byteLength, digest(bytes));
 		expect(result).toEqual({ ok: false, code: "OPEN_FAILED" });
 	});
 
@@ -216,24 +216,28 @@ describe("prime sandbox streaming archive body", () => {
 		const bytes = new Uint8Array([1, 2, 3]);
 		const file = await archive(bytes);
 		await link(file.path, join(await root(), "second-link.tar.gz"));
-		const result = await prepareArchiveUpload(file.path, bytes.byteLength, digest(bytes));
+		const result = await prepareFileUpload("release", file.path, bytes.byteLength, digest(bytes));
 		expect(result).toEqual({ ok: false, code: "FILE_UNSAFE" });
 	});
 
 	test("rejects relative paths and malformed metadata without opening a file", async () => {
-		expect(await prepareArchiveUpload("relative.tar.gz", 1, "0".repeat(64))).toEqual({
+		expect(await prepareFileUpload("release", "relative.tar.gz", 1, "0".repeat(64))).toEqual({
 			ok: false,
 			code: "INPUT_INVALID",
 		});
-		expect(await prepareArchiveUpload("/missing", 0, "0".repeat(64))).toEqual({
+		expect(await prepareFileUpload("release", "/missing", 0, "0".repeat(64))).toEqual({
 			ok: false,
 			code: "INPUT_INVALID",
 		});
-		expect(await prepareArchiveUpload("/missing", 96 * 1024 * 1024 + 1, "0".repeat(64))).toEqual({
+		expect(await prepareFileUpload("release", "/missing", 96 * 1024 * 1024 + 1, "0".repeat(64))).toEqual({
 			ok: false,
 			code: "INPUT_INVALID",
 		});
-		expect(await prepareArchiveUpload("/missing", 1, "A".repeat(64))).toEqual({
+		expect(await prepareFileUpload("trust", "/missing", 4097, "0".repeat(64))).toEqual({
+			ok: false,
+			code: "INPUT_INVALID",
+		});
+		expect(await prepareFileUpload("release", "/missing", 1, "A".repeat(64))).toEqual({
 			ok: false,
 			code: "INPUT_INVALID",
 		});
@@ -243,7 +247,7 @@ describe("prime sandbox streaming archive body", () => {
 		const bytes = new Uint8Array(80_000);
 		bytes.fill(0x41);
 		const file = await archive(bytes);
-		const result = await prepareArchiveUpload(file.path, bytes.byteLength, digest(bytes));
+		const result = await prepareFileUpload("release", file.path, bytes.byteLength, digest(bytes));
 		if (!result.ok) throw new Error(result.code);
 		const body = take(result.value);
 

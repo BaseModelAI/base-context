@@ -4,11 +4,12 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	copySandboxRuntimeReadiness,
 	createPrimeSandboxProviderPort,
 	type PrimeSandboxProviderPort,
 	type SandboxFetchPort,
 } from "../src/modes/daemon/sandbox/prime-sandbox-provider.js";
-import { prepareArchiveUpload } from "../src/modes/daemon/sandbox/prime-sandbox-upload-body.js";
+import { prepareFileUpload, type SandboxArtifactKind } from "../src/modes/daemon/sandbox/prime-sandbox-upload-body.js";
 
 const API_KEY = "pi_test_control_key";
 const SANDBOX_ID = "sb_abcdef012345";
@@ -66,16 +67,26 @@ async function bodyBytes(init: RequestInit): Promise<Uint8Array> {
 	throw new Error("unexpected test request body");
 }
 
-async function archive(bytes: Uint8Array) {
+async function artifact(kind: SandboxArtifactKind, bytes: Uint8Array) {
 	const directory = await mkdtemp(join(tmpdir(), "prime-provider-test-"));
 	roots.push(directory);
 	const path = join(directory, "runtime.tar.gz");
 	await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
 	await chmod(path, 0o600);
 	const digest = createHash("sha256").update(bytes).digest("hex");
-	const result = await prepareArchiveUpload(path, bytes.byteLength, digest);
+	const result = await prepareFileUpload(kind, path, bytes.byteLength, digest);
 	if (!result.ok) throw new Error(result.code);
 	return result.value;
+}
+
+async function archive(bytes: Uint8Array) {
+	return artifact("release", bytes);
+}
+
+function readinessLine(): string {
+	const key = `${"A".repeat(43)}=`;
+	const signature = `${"A".repeat(86)}==`;
+	return `BUNDLE v3 ${key} ${key} ${key} ${key} ${key} ${key} ${signature}`;
 }
 
 function provider(dispatch: SandboxFetchPort): PrimeSandboxProviderPort {
@@ -158,6 +169,69 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 		expect(calls).toBe(3);
 	});
 
+	test("uploads each small public artifact only to its fixed path", async () => {
+		const specs: readonly Readonly<{
+			kind: SandboxArtifactKind;
+			path: string;
+			fileName: string;
+		}>[] = [
+			{
+				kind: "manifest",
+				path: "/tmp/prime-agent-runtime.manifest.json",
+				fileName: "prime-agent-runtime.manifest.json",
+			},
+			{ kind: "bootstrap", path: "/tmp/prime-agent-bootstrap.pyz", fileName: "prime-agent-bootstrap.pyz" },
+			{ kind: "trust", path: "/tmp/prime-agent-trust.json", fileName: "prime-agent-trust.json" },
+		];
+		for (const spec of specs) {
+			const bytes = new TextEncoder().encode(`public-${spec.kind}`);
+			const source = await artifact(spec.kind, bytes);
+			let calls = 0;
+			const port = provider(async (url, init) => {
+				calls += 1;
+				if (calls === 1) return authResponse();
+				const parsed = new URL(url);
+				expect(parsed.searchParams.get("path")).toBe(spec.path);
+				const received = await bodyBytes(init);
+				expect(new TextDecoder().decode(received)).toContain(`filename="${spec.fileName}"`);
+				return jsonResponse({
+					success: true,
+					path: spec.path,
+					size: bytes.byteLength,
+					timestamp: "2099-09-04T12:30:00Z",
+				});
+			});
+			const result =
+				spec.kind === "manifest"
+					? await port.uploadManifest(source)
+					: spec.kind === "bootstrap"
+						? await port.uploadBootstrap(source)
+						: await port.uploadTrust(source);
+			expect(result).toEqual({ ok: true });
+			expect(calls).toBe(2);
+		}
+	});
+
+	test("does not consume a prepared artifact through the wrong operation", async () => {
+		const bytes = new TextEncoder().encode("public-trust");
+		const source = await artifact("trust", bytes);
+		let calls = 0;
+		const port = provider(async (url, init) => {
+			calls += 1;
+			if (calls === 1) return authResponse();
+			await bodyBytes(init);
+			return jsonResponse({
+				success: true,
+				path: new URL(url).searchParams.get("path"),
+				size: bytes.byteLength,
+				timestamp: "2099-09-04T12:30:00Z",
+			});
+		});
+		expect(await port.uploadRelease(source)).toEqual({ ok: false, code: "INPUT_INVALID" });
+		expect(await port.uploadTrust(source)).toEqual({ ok: true });
+		expect(calls).toBe(2);
+	});
+
 	test("pre-abort is definitely not sent and the prepared body is settled", async () => {
 		const source = await archive(new Uint8Array([1, 2, 3]));
 		let calls = 0;
@@ -202,6 +276,63 @@ describe("Home-private Prime Sandbox provider adapter", () => {
 			expect(await port.uploadRelease(source)).toEqual({ ok: false, code: "INVALID_RESPONSE" });
 			expect(calls).toBe(mode === "auth" ? 1 : 2);
 		}
+	});
+
+	test("runs only the fixed bootstrap command once and returns nominal readiness", async () => {
+		let calls = 0;
+		const line = readinessLine();
+		const port = provider(async (url, init) => {
+			calls += 1;
+			if (calls === 1) return authResponse();
+			if (calls === 2) {
+				expect(url).toBe("https://gateway.example.com/base/user_ns/job_123/exec");
+				expect(init.method).toBe("POST");
+				expect(headers(init).get("authorization")).toBe(`Bearer ${TOKEN}`);
+				const body = await bodyBytes(init);
+				expect(headers(init).get("content-length")).toBe(String(body.byteLength));
+				expect(new TextDecoder().decode(body)).toBe(
+					`{"command":"/usr/local/bin/python3.11 /tmp/prime-agent-bootstrap.pyz","working_dir":null,"env":{},"sandbox_id":"${SANDBOX_ID}","timeout":180}`,
+				);
+				return jsonResponse({ stdout: `${line}\n`, stderr: "", exit_code: 0 });
+			}
+			return jsonResponse({ exposures: [] });
+		});
+		const launched = await port.bootstrapAndLaunch();
+		expect(launched.ok).toBe(true);
+		if (launched.ok) {
+			const copied = copySandboxRuntimeReadiness(launched.value);
+			expect(copied).toBeDefined();
+			if (copied !== undefined) expect(new TextDecoder().decode(copied)).toBe(line);
+			expect(copySandboxRuntimeReadiness(Object.freeze({}))).toBeUndefined();
+		}
+		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "LAUNCH_ALREADY_ATTEMPTED" });
+		expect(await port.unexposeAndProveAbsent()).toEqual({ ok: true });
+		expect(await port.close()).toEqual({ ok: true });
+		expect(calls).toBe(3);
+	});
+
+	test("a definitely-not-sent launch does not consume the one-shot claim", async () => {
+		let calls = 0;
+		const port = provider(async () => {
+			calls += 1;
+			return jsonResponse({});
+		});
+		const controller = new AbortController();
+		controller.abort();
+		expect(await port.bootstrapAndLaunch(controller.signal)).toEqual({ ok: false, code: "NOT_SENT" });
+		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "INVALID_RESPONSE" });
+		expect(calls).toBe(1);
+	});
+
+	test("a completed failing bootstrap is never executed twice", async () => {
+		let calls = 0;
+		const port = provider(async () => {
+			calls += 1;
+			return calls === 1 ? authResponse() : jsonResponse({ stdout: "", stderr: "failed", exit_code: 1 });
+		});
+		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "COMMAND_FAILED" });
+		expect(await port.bootstrapAndLaunch()).toEqual({ ok: false, code: "LAUNCH_ALREADY_ATTEMPTED" });
+		expect(calls).toBe(2);
 	});
 
 	test("exposes fixed TCP 9443 then unexposes and proves zero matches", async () => {
