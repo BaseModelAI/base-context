@@ -1,0 +1,1 @@
+- Added ordered finalized tool exchanges with original and executed arguments, final middleware results, and explicit interrupted-effect outcomes.

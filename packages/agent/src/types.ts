@@ -101,6 +101,26 @@ export interface AfterToolCallContext {
 	context: AgentContext;
 }
 
+/** What is known about the actual invocation, independently of middleware result overrides. */
+export type ToolExecutionOutcome = "not_started" | "completed" | "failed" | "outcome_unknown";
+
+/** Finalized source evidence; parallel exchanges retain assistant call order via sourceOrder. */
+export interface FinalizedToolExchange {
+	readonly sourceOrder: number;
+	readonly toolCallId: string;
+	readonly toolName: string;
+	/** Snapshot before argument preparation, validation, or tool middleware. */
+	readonly originalInput: unknown;
+	/** Snapshot at invocation; absent when execution never started. */
+	readonly executedInput?: unknown;
+	readonly toolExecution: ToolExecutionMode;
+	/** An aborted wait does not establish whether an external effect stopped. */
+	readonly executionOutcome: ToolExecutionOutcome;
+	readonly cancellationRequested: boolean;
+	/** Final middleware result, also used for the tool-result message. */
+	readonly result: ToolResultMessage;
+}
+
 /** Context passed to `shouldStopAfterTurn` and `getContinuationMessages`. */
 export interface ShouldStopAfterTurnContext {
 	/** Assistant message that completed the turn. */
@@ -250,6 +270,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	toolExecution?: ToolExecutionMode;
 
 	/**
+	 * Native execution owner, awaited after final middleware and before observer/result events.
+	 * Persist source evidence here. Rejection stops publication; this is not an observer hook.
+	 * Cancellation does not skip settlement. The owner must bound its own persistence work.
+	 */
+	onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
+
+	/**
 	 * Called before a tool is executed, after arguments have been validated.
 	 *
 	 * Return `{ block: true }` to prevent execution. The loop emits an error tool result instead.
@@ -393,7 +420,15 @@ export type AgentEvent =
 	| { type: "agent_end"; messages: AgentMessage[] }
 	/** One assistant response and its resulting tool calls. */
 	| { type: "turn_start" }
-	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	| {
+			type: "turn_end";
+			message: AgentMessage;
+			toolResults: ToolResultMessage[];
+			/** Always populated by native execution; historical observer events may omit it. */
+			toolExecution?: ToolExecutionMode;
+			/** Settled calls in source order. Absent historical evidence is not reconstructed. */
+			exchanges?: readonly FinalizedToolExchange[];
+	  }
 	/** Lifecycle events for user, assistant, and tool-result messages. */
 	| { type: "message_start"; message: AgentMessage }
 	/** Only emitted for assistant messages during streaming. */
@@ -402,4 +437,12 @@ export type AgentEvent =
 	/** Tool execution events; parallel calls may end in completion rather than source order. */
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError: boolean;
+			/** Always populated by native execution; absent for older observer events. */
+			exchange?: FinalizedToolExchange;
+	  };
