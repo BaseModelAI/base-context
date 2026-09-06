@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build pi binaries for all platforms locally.
+# Build base-context binaries for all platforms locally.
 # Mirrors .github/workflows/build-binaries.yml
 #
 # Usage:
@@ -12,11 +12,11 @@
 #
 # Output:
 #   packages/coding-agent/binaries/
-#     pi-darwin-arm64.tar.gz
-#     pi-darwin-x64.tar.gz
-#     pi-linux-x64.tar.gz
-#     pi-linux-arm64.tar.gz
-#     pi-windows-x64.zip
+#     base-context-darwin-arm64.tar.gz
+#     base-context-darwin-x64.tar.gz
+#     base-context-linux-x64.tar.gz
+#     base-context-linux-arm64.tar.gz
+#     base-context-windows-x64.zip
 
 set -euo pipefail
 
@@ -84,7 +84,7 @@ else
 fi
 
 echo "==> Building all packages..."
-npm run build
+npm run build:source
 
 echo "==> Building binaries..."
 cd packages/coding-agent
@@ -107,9 +107,9 @@ for platform in "${PLATFORMS[@]}"; do
     # call site has a try/catch fallback. For Windows builds, we copy the
     # appropriate .node file alongside the binary below.
     if [[ "$platform" == "windows-x64" ]]; then
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi.exe
+        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/base-context.exe
     else
-        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/pi
+        bun build --compile --external koffi --target=bun-$platform ./dist/bun/cli.js --outfile binaries/$platform/base-context
     fi
 done
 
@@ -120,6 +120,10 @@ for platform in "${PLATFORMS[@]}"; do
     cp package.json binaries/$platform/
     cp README.md binaries/$platform/
     cp CHANGELOG.md binaries/$platform/
+    cp dist/LICENSE dist/NOTICE binaries/$platform/
+    mkdir -p binaries/$platform/dist
+    cp dist/build-info.json binaries/$platform/dist/
+    cp -r dist/base-context-runtime binaries/$platform/dist/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme
     cp dist/modes/interactive/theme/*.json binaries/$platform/theme/
@@ -145,12 +149,12 @@ cd binaries
 for platform in "${PLATFORMS[@]}"; do
     if [[ "$platform" == "windows-x64" ]]; then
         # Windows (zip)
-        echo "Creating pi-$platform.zip..."
-        (cd $platform && zip -r ../pi-$platform.zip .)
+        echo "Creating base-context-$platform.zip..."
+        (cd $platform && zip -r ../base-context-$platform.zip .)
     else
         # Unix platforms (tar.gz) - use wrapper directory for mise compatibility
-        echo "Creating pi-$platform.tar.gz..."
-        mv $platform pi && tar -czf pi-$platform.tar.gz pi && mv pi $platform
+        echo "Creating base-context-$platform.tar.gz..."
+        mv $platform base-context && tar -czf base-context-$platform.tar.gz base-context && mv base-context $platform
     fi
 done
 
@@ -159,9 +163,9 @@ echo "==> Extracting archives for testing..."
 for platform in "${PLATFORMS[@]}"; do
     rm -rf $platform
     if [[ "$platform" == "windows-x64" ]]; then
-        mkdir -p $platform && (cd $platform && unzip -q ../pi-$platform.zip)
+        mkdir -p $platform && (cd $platform && unzip -q ../base-context-$platform.zip)
     else
-        tar -xzf pi-$platform.tar.gz && mv pi $platform
+        tar -xzf base-context-$platform.tar.gz && mv base-context $platform
     fi
 done
 
@@ -172,5 +176,5 @@ ls -lh *.tar.gz *.zip 2>/dev/null || true
 echo ""
 echo "Extracted directories for testing:"
 for platform in "${PLATFORMS[@]}"; do
-    echo "  binaries/$platform/pi"
+    echo "  binaries/$platform/base-context"
 done

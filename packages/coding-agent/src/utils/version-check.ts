@@ -1,6 +1,7 @@
+import { PRODUCT } from "../product-identity.js";
 import { getPiUserAgent } from "./pi-user-agent.js";
 
-const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
+const PACKAGE_REGISTRY_URL = "https://registry.npmjs.org";
 const STABLE_VERSION_MANIFEST_PATH = "latest.json";
 const BETA_VERSION_MANIFEST_PATH = "beta.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
@@ -85,11 +86,8 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
-function getPrimeAgentDownloadBaseUrl(): string {
-	return (process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
-		/\/+$/,
-		"",
-	);
+function getDownloadBaseUrl(): string | undefined {
+	return process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL?.trim().replace(/\/+$/, "") || undefined;
 }
 
 function normalizeReleaseVersion(version: string): string {
@@ -117,8 +115,13 @@ export async function getLatestPiRelease(
 ): Promise<LatestPiRelease | undefined> {
 	if (process.env.BASE_CONTEXT_SKIP_VERSION_CHECK || process.env.BASE_CONTEXT_OFFLINE) return undefined;
 
-	const baseUrl = getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {
+	const baseUrl = getDownloadBaseUrl();
+	const manifestPath = getReleaseManifestPath(currentVersion);
+	const channel = manifestPath === BETA_VERSION_MANIFEST_PATH ? "beta" : "latest";
+	const manifestUrl = baseUrl
+		? `${baseUrl}/${manifestPath}`
+		: `${PACKAGE_REGISTRY_URL}/${encodeURIComponent(PRODUCT.packageName)}/${channel}`;
+	const response = await fetch(manifestUrl, {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",
@@ -142,7 +145,9 @@ export async function getLatestPiRelease(
 			: typeof data.packageName === "string" && data.packageName.trim()
 				? data.packageName.trim()
 				: undefined;
-	const installSpec = typeof data.tarball === "string" ? resolveReleaseUrl(baseUrl, data.tarball) : undefined;
+	if (packageName && packageName !== PRODUCT.packageName) return undefined;
+	const installSpec =
+		baseUrl && typeof data.tarball === "string" ? resolveReleaseUrl(baseUrl, data.tarball) : undefined;
 	const release: LatestPiRelease = { version: normalizeReleaseVersion(data.version) };
 	if (packageName) {
 		release.packageName = packageName;

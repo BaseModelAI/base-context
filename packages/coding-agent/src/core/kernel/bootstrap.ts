@@ -620,7 +620,7 @@ async function writeBootstrapVersion(
 	await writeFile(path.join(venv, BOOTSTRAP_VERSION_FILE), `${JSON.stringify(version)}\n`, "utf8");
 }
 
-function runtimeCandidateDirs(): string[] {
+export function runtimeCandidateDirs(): string[] {
 	const packageDir = getPackageDir();
 	if (existsSync(path.join(packageDir, "src"))) {
 		return [path.resolve(packageDir, "..", "..", "prime-agent-runtime")];

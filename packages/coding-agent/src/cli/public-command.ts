@@ -18,6 +18,7 @@ import {
 import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
+import { getProductDiagnostics } from "./product-doctor.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -123,7 +124,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			);
 			if (hasLegacySelfTarget && hasLegacyPackageTarget) {
 				return fail(
-					"Prime Agent and package updates are now separate.",
+					"Base Context and package updates are now separate.",
 					`Run "${APP_NAME} update [--force]" and "${APP_NAME} package update [source]" separately.`,
 				);
 			}
@@ -204,15 +205,15 @@ function rejectRemovedCommand(args: string[]): PublicCommandResult {
 	const [command, subcommand] = args;
 	let replacement: string | undefined;
 	if (command === "daemon") {
-		replacement = 'Run "prime-agent help" to see the agent commands.';
+		replacement = 'Run "base-context help" to see the agent commands.';
 	} else if (command === "app" && subcommand === "update") {
-		replacement = 'Use "prime-agent update".';
+		replacement = 'Use "base-context update".';
 	} else if (command === "install") {
-		replacement = 'Use "prime-agent package install".';
+		replacement = 'Use "base-context package install".';
 	} else if (command === "remove" || command === "uninstall") {
-		replacement = 'Use "prime-agent package remove".';
+		replacement = 'Use "base-context package remove".';
 	} else if (command === "manage") {
-		replacement = 'Use "prime-agent agents".';
+		replacement = 'Use "base-context agents".';
 	}
 	return fail(`Unknown command: ${args.slice(0, 2).join(" ")}`, replacement);
 }
@@ -255,10 +256,11 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const report = getProductDiagnostics();
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await runReap(options.has("--json"), false, report);
 	} else {
-		await runPs(options.has("--json"));
+		await runPs(options.has("--json"), report);
 	}
 	return HANDLED;
 }
@@ -299,14 +301,14 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 			rest.some((arg) => arg === "--self" || arg === "--extensions" || arg === "--extension" || arg === "--force")
 		) {
 			return fail(
-				'Package updates accept only an optional source. Use "prime-agent update --force" to update Prime Agent.',
+				'Package updates accept only an optional source. Use "base-context update --force" to update Base Context.',
 			);
 		}
 		if (rest.length > 1) {
 			return fail(`Usage: ${APP_NAME} package update [source]`);
 		}
 		if (rest[0] && isSelfUpdateSource(rest[0])) {
-			return fail('Use "prime-agent update" to update Prime Agent.');
+			return fail('Use "base-context update" to update Base Context.');
 		}
 		await handlePackageCommand(["update", ...(rest.length === 0 ? ["--extensions"] : rest)]);
 		return HANDLED;

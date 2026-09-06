@@ -10,7 +10,7 @@ import {
 	shouldReapOrphanProcess,
 } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
-import { DaemonClient } from "../modes/daemon/daemon-client.js";
+import { DaemonClient, DaemonProtocolMismatchError } from "../modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
@@ -22,17 +22,18 @@ import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-proto
 import { signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
+import { formatProductDiagnostics, type ProductDiagnostics } from "./product-doctor.js";
 
 /**
- * `daemon ps` discovers every prime-agent daemon on the machine, not just the
+ * `daemon ps` discovers every base-context daemon on the machine, not just the
  * one on a single socket. Discovery has two sources merged by socket path:
  *
- *  1. The OS list of listening unix sockets owned by a prime-agent process
+ *  1. The OS list of listening unix sockets owned by a base-context process
  *     (`ss -lxp` on Linux, `lsof` on macOS). Daemons set process.title to
  *     APP_NAME and carry nothing useful in argv, so the socket→pid mapping the
  *     kernel keeps is the only reliable way to find daemons on arbitrary
  *     `--daemon-socket` paths. This is the same data as `ss -lxp | grep
- *     prime-agent`, just parsed.
+ *     base-context`, just parsed.
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
@@ -88,7 +89,7 @@ function processNameMatches(name: string, appName: string): boolean {
 	return name === appName || appName.slice(0, MAX_COMM_LENGTH) === name;
 }
 
-/** Parse `ss -lxp` output into the prime-agent daemons listening on unix sockets. */
+/** Parse `ss -lxp` output into the base-context daemons listening on unix sockets. */
 export function parseSsListeners(stdout: string, appName: string): DiscoveredDaemonProcess[] {
 	const daemons: DiscoveredDaemonProcess[] = [];
 	for (const line of stdout.split("\n")) {
@@ -249,7 +250,7 @@ interface ProbeResult {
 	reachable: boolean;
 }
 
-async function probeDaemon(socketPath: string): Promise<ProbeResult> {
+export async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(300);
@@ -274,8 +275,9 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 			supervisorPid = hello.supervisorPid;
 			supervisorProcessStartId = hello.supervisorProcessStartId;
 			greeted = true;
-		} catch {
-			// Connected but no recognizable greeting: an old/foreign daemon.
+		} catch (error) {
+			if (error instanceof DaemonProtocolMismatchError) throw error;
+			// A silent peer is not evidence of a compatible command plane.
 		}
 		let sessionCount: number | undefined;
 		try {
@@ -286,7 +288,8 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 					sessionCount = sessions.length;
 				}
 			}
-		} catch {
+		} catch (error) {
+			if (error instanceof DaemonProtocolMismatchError) throw error;
 			// Leave sessionCount undefined when the daemon will not answer list.
 		}
 		return {
@@ -401,12 +404,13 @@ export function sortDaemons(infos: DaemonInfo[]): DaemonInfo[] {
 	});
 }
 
-export async function runPs(json: boolean): Promise<void> {
+export async function runPs(json: boolean, report?: ProductDiagnostics): Promise<void> {
 	const daemons = await discoverDaemons();
 	if (json) {
-		console.log(JSON.stringify(daemons, null, 2));
+		console.log(JSON.stringify(report ? { ...report, daemons } : daemons, null, 2));
 		return;
 	}
+	if (report) console.log(formatProductDiagnostics(report));
 	if (daemons.length === 0) {
 		console.log("No background services found.");
 		return;
@@ -455,7 +459,7 @@ export function planReap(daemons: readonly DaemonInfo[], force: boolean): ReapAc
 		}
 		if (daemon.status === "unreachable") {
 			if (!force || daemon.pid === undefined) {
-				return { kind: "skip", daemon, reason: 'unreachable; use "prime-agent shutdown --force" to stop it' };
+				return { kind: "skip", daemon, reason: 'unreachable; use "base-context shutdown --force" to stop it' };
 			}
 			if ((pidCounts.get(daemon.pid) ?? 0) > 1) {
 				return {
@@ -521,7 +525,7 @@ export async function runShutdownAll(json: boolean, force: boolean): Promise<voi
 						stopped: [],
 						failed: daemons.map(({ socketPath }) => ({
 							socketPath,
-							reason: 'confirmation required; use "prime-agent shutdown --force --json"',
+							reason: 'confirmation required; use "base-context shutdown --force --json"',
 						})),
 					},
 					null,
@@ -531,7 +535,7 @@ export async function runShutdownAll(json: boolean, force: boolean): Promise<voi
 			return;
 		case "tty-error":
 			throw new Error(
-				'Shutdown requires confirmation in an interactive terminal. Use "prime-agent shutdown --force".',
+				'Shutdown requires confirmation in an interactive terminal. Use "base-context shutdown --force".',
 			);
 		case "prompt": {
 			const confirmed = await promptYesNo(
@@ -1091,7 +1095,7 @@ async function stopTrackedProcess(
 	return !isProcessAlive(pid);
 }
 
-export async function runReap(json: boolean, force: boolean): Promise<void> {
+export async function runReap(json: boolean, force: boolean, report?: ProductDiagnostics): Promise<void> {
 	const daemons = await discoverDaemons();
 	const reaped: Array<{ socketPath: string; action: string }> = [];
 	const skipped: Array<{ socketPath: string; reason: string }> = [];
@@ -1137,9 +1141,10 @@ export async function runReap(json: boolean, force: boolean): Promise<void> {
 	}
 
 	if (json) {
-		console.log(JSON.stringify({ reaped, skipped }, null, 2));
+		console.log(JSON.stringify({ ...report, reaped, skipped }, null, 2));
 		return;
 	}
+	if (report) console.log(formatProductDiagnostics(report));
 	if (reaped.length === 0 && skipped.length === 0) {
 		console.log("No background services found.");
 		return;
@@ -1260,7 +1265,8 @@ async function shutdownDaemon(socketPath: string, force: boolean): Promise<boole
 	}
 	try {
 		await client.request({ type: "shutdown", force }, 1500);
-	} catch {
+	} catch (error) {
+		if (error instanceof DaemonProtocolMismatchError) throw error;
 		// The daemon may still stop; the connectivity check below is the source of truth.
 	} finally {
 		client.close();

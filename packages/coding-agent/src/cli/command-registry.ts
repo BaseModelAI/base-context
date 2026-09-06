@@ -82,7 +82,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["doctor"],
 		usage: "doctor [--fix] [--json]",
-		summary: "Inspect and safely clean up background services",
+		summary: "Show product, source, paths, auth contracts and background services",
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
@@ -149,7 +149,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["update"],
 		usage: "update [--force]",
-		summary: "Update Prime Agent",
+		summary: "Update Base Context",
 	},
 	{
 		path: ["model"],

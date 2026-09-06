@@ -18,15 +18,15 @@ import { fileURLToPath } from "node:url";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOutputDir = join(root, "packages", "coding-agent", "release");
 const defaultBaseUrl = process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL;
-const publicPackageName = process.env.BASE_CONTEXT_PACKAGE_NAME || "prime-agent";
-const publicCommandName = process.env.BASE_CONTEXT_CMD || "prime-agent";
+const publicPackageName = process.env.BASE_CONTEXT_PACKAGE_NAME || "@ponythewhite/base-context";
+const publicCommandName = process.env.BASE_CONTEXT_CMD || "base-context";
 const releaseChannels = new Set(["stable", "beta"]);
 
 const releasePackages = [
-	{ packageDir: "ai", publicName: undefined, artifactName: "prime-agent-ai" },
-	{ packageDir: "tui", publicName: undefined, artifactName: "prime-agent-tui" },
-	{ packageDir: "agent", publicName: undefined, artifactName: "prime-agent-core" },
-	{ packageDir: "coding-agent", publicName: publicPackageName, artifactName: publicPackageName },
+	{ packageDir: "ai", publicName: undefined, artifactName: "base-context-ai" },
+	{ packageDir: "tui", publicName: undefined, artifactName: "base-context-tui" },
+	{ packageDir: "agent", publicName: undefined, artifactName: "base-context-agent" },
+	{ packageDir: "coding-agent", publicName: publicPackageName, artifactName: "base-context" },
 ];
 
 function parseArgs(args) {
@@ -89,14 +89,14 @@ function parseArgs(args) {
 }
 
 function printHelp() {
-	console.log(`Usage: node scripts/pack-prime-agent-release.mjs --base-url url [--channel stable|beta] [--version x.y.z] [--out-dir path]
+	console.log(`Usage: node scripts/pack-base-context-release.mjs --base-url url [--channel stable|beta] [--version x.y.z] [--out-dir path]
 
 Creates private npm tarballs for R2 distribution:
 
-  <out-dir>/artifacts/prime-agent-<version>.tgz
-  <out-dir>/artifacts/prime-agent-ai-<version>.tgz
-  <out-dir>/artifacts/prime-agent-core-<version>.tgz
-  <out-dir>/artifacts/prime-agent-tui-<version>.tgz
+  <out-dir>/artifacts/base-context-<version>.tgz
+  <out-dir>/artifacts/base-context-ai-<version>.tgz
+  <out-dir>/artifacts/base-context-agent-<version>.tgz
+  <out-dir>/artifacts/base-context-tui-<version>.tgz
   <out-dir>/artifacts/SHA256SUMS
   <out-dir>/artifacts/<channel>
   <out-dir>/artifacts/latest.json (stable) or beta.json (beta)
@@ -138,7 +138,7 @@ function packageJsonPath(packageDir) {
 function requireBuiltPackage(packageDir) {
 	const dist = join(packagePath(packageDir), "dist");
 	if (!existsSync(dist)) {
-		throw new Error(`Missing ${dist}. Run npm run build before packing a release.`);
+		throw new Error(`Missing ${dist}. Run npm run build:source before packing a release.`);
 	}
 }
 
@@ -190,11 +190,7 @@ function createReleasePackageJson(sourcePackage, packageName, releaseVersion, in
 		packageJson.bin = {
 			[publicCommandName]: "dist/bundle/cli.js",
 		};
-		packageJson.piConfig = {
-			...(packageJson.piConfig || {}),
-			name: publicCommandName,
-			configDir: ".prime/agent",
-		};
+
 	}
 
 	return packageJson;
@@ -247,14 +243,14 @@ function main() {
 		requireBuiltPackage(releasePackage.packageDir);
 	}
 
-	// Dependency keys stay on the source package names so existing compiled imports
-	// keep resolving, while release package names and artifact filenames are branded.
+	// Package names and dependency keys match the compiled source graph.
+	// Only artifact filenames and explicit download URLs vary for private distribution.
 	const sourcePackageNames = new Map();
 	const packageNames = new Map();
 	const artifactFiles = new Map();
 	for (const releasePackage of releasePackages) {
 		const sourcePackage = sourcePackages.get(releasePackage.packageDir);
-		const packageName = releasePackage.publicName || releasePackage.artifactName || sourcePackage.name;
+		const packageName = releasePackage.publicName || sourcePackage.name;
 		sourcePackageNames.set(releasePackage.packageDir, sourcePackage.name);
 		packageNames.set(releasePackage.packageDir, packageName);
 		artifactFiles.set(

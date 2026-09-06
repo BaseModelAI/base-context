@@ -20,7 +20,7 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | Work | Status |
 |---|---|
 | W0 controls, source audit, baseline build | In progress; S retrieved; npm ci, native check and all four package compilations passed |
-| W1 product/state/runtime/package isolation | In progress: connected identity/paths and source-only runtime bootstrap; namespace and daemon sweep pending |
+| W1 product/state/runtime/package isolation | Own packages, state, daemon, auth/export gates and source artifacts implemented; same-home installed coexistence passed; upgrade/uninstall checks in progress |
 | W2 native semantic ports | Inventory complete; generic finalized execution edge implemented and tested; session persistence/compiler integration pending |
 | W3 source durability, effects, complete receipts | Not implemented |
 | W4 durable task truth and SQLite evidence index | Not implemented |
@@ -30,8 +30,8 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W8 atomic checkpoints and continuation | Not implemented |
 | W9 Astra policy and route-scoped advanced features | Inherited catalog only; no certification claim |
 | W10 owned scheduler | Not implemented; preserve conservative child default |
-| W11 non-destructive migration and doctor | Not implemented |
-| W12 benchmark, installed artifacts and publication | Current 30-task corpus copied unchanged and validates; runner port pending |
+| W11 non-destructive migration and recovery | Not implemented; W1 diagnostic doctor is available |
+| W12 benchmark, installed artifacts and publication | Corpus unchanged; local package probes underway; runner port and release certification pending |
 | W13 maintenance and upstream intake | Not implemented |
 
 ## Evaluation rules
@@ -70,6 +70,31 @@ control checkouts, command logs, future run artifacts. Credentials must not ente
 - Executed 24 config/identity tests and 21 mocked-bootstrap tests successfully.
   Execution-edge tests are tracked in the port worker's implementation commit.
 
-This checkpoint is not complete W1 or W2. Package names/version, remaining direct
-Python/TypeScript path/environment references, daemon identity, provider auth,
-telemetry defaults, updater/installer and release packaging remain in progress.
+- Moved the connected source graph to `@ponythewhite/base-context*` version 0.1.0.
+  Namespace/auth-export commit `9d455584b` is pushed to the implementation branch.
+- Isolated daemon protocol, sockets, worker pipes, and writable diagnostics. Foreign
+  protocol handshakes fail before commands, replacement, or cleanup.
+- Kept ordinary supported API-key/bearer routes. Unvalidated OAuth login, refresh,
+  and credential-use paths are unavailable, including custom and MCP registrations.
+- Defaulted traces/telemetry off. Remote export requires an explicit destination and
+  dedicated credentials. Legacy credential and outbox import is not automatic.
+- Added diagnostic `doctor` output. It reports build identity, resolved paths and
+  provider contracts. Native context is explicitly reported as not implemented.
+- Source build and private pack probes passed. Extracted 0.1.0 reports the owned
+  package and state paths outside the checkout. The private 0.1.1 package is only an
+  upgrade fixture, not a release. Both versions include runtime source and notices.
+- OAuth/MCP tests passed 179 TypeScript and 4 Python cases. Remaining identity tests
+  passed 410 cases. Global checks and the source build passed. Windows pipe code
+  compiles but has not run on Windows.
+
+The installed same-home coexistence fixture passed: foreign handshake rejection sent
+zero command bytes; Base doctor cleanup and shutdown left upstream responsive.
+W1 remains open until installed update/uninstall fixtures finish.
+The locally installed H tarballs are unmodified, but their newly resolved external
+npm dependencies are not the certified frozen W0 benchmark graph. Npm lifecycle
+permission was explicit for the Base Context postinstall; managed-kernel bootstrap
+was disabled for this package probe. Heavy installed-kernel validation remains open.
+
+No live provider validation, benchmark campaign, publication, or release certification
+has occurred. W2 canonical session integration and W3–W13 implementation remain
+pending. See `product-isolation.md` for the model-visible identity differences.

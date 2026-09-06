@@ -69,7 +69,7 @@
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm --prefix ../.. run build:source"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",

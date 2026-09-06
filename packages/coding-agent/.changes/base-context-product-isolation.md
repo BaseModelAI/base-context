@@ -2,3 +2,6 @@
 - Scoped daemon sockets by installation and state home; rejected foreign or incompatible handshakes before commands or replacement.
 - Kept provider configuration in Base Context state, preserved explicit API keys and team headers, and removed copied Prime browser-challenge login.
 - Defaulted telemetry and traces off; required explicit export destinations and dedicated credentials without replaying inherited upload jobs.
+- Disabled unvalidated OAuth login, refresh, and credential-use routes while preserving supported API-key and bearer-token routes.
+- Added product, source-build, schema, path, and provider-contract diagnostics to `doctor`.
+- Changed installer, updater, release artifacts, and prepublish builds to use the owned product and bundled source runtime.

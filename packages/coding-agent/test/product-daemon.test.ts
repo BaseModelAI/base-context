@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { ensureInteractiveDaemonRunning } from "../src/cli/daemon-launch.js";
+import { probeDaemon } from "../src/cli/daemon-ps.js";
 import { DaemonClient, DaemonProtocolMismatchError } from "../src/modes/daemon/daemon-client.js";
 import {
 	createDaemonCommandEnvelope,
@@ -48,6 +49,7 @@ test("rejects an upstream hello without sending a command or changing its daemon
 		await client.connect();
 		await expect(client.waitForHello()).rejects.toBeInstanceOf(DaemonProtocolMismatchError);
 		await expect(ensureInteractiveDaemonRunning(path)).rejects.toBeInstanceOf(DaemonProtocolMismatchError);
+		await expect(probeDaemon(path)).rejects.toBeInstanceOf(DaemonProtocolMismatchError);
 		expect(received).toEqual([]);
 		expect(server.listening).toBe(true);
 		const oldEnvelope = {
