@@ -279,6 +279,9 @@ describe("Home-private sandbox runtime connection", () => {
 				controller.abort();
 				return undefined;
 			},
+			async readClassified() {
+				return Object.freeze({ type: "IO_FAILURE" });
+			},
 			async writeExact() {
 				return false;
 			},
