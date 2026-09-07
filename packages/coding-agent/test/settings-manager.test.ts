@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.js";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.js";
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -273,6 +273,51 @@ describe("SettingsManager", () => {
 			const settings = manager.getAutoRefineSettings();
 			expect(settings.turnInterval).toBe(5);
 			expect(settings.cooldownMs).toBe(1000);
+		});
+	});
+
+	describe("canonical context resource limits", () => {
+		it("resolves detached canonical context resource limits", () => {
+			const defaults = { maxMessages: 16384, maxSourceBytes: 64 * 1024 * 1024 };
+			const cases: [Settings, Settings, typeof defaults][] = [
+				[{}, {}, defaults],
+				[{ canonicalContext: { maxMessages: 32 } }, {}, { ...defaults, maxMessages: 32 }],
+				[{ canonicalContext: { maxSourceBytes: 4096 } }, {}, { ...defaults, maxSourceBytes: 4096 }],
+				[
+					{ canonicalContext: { maxMessages: 32, maxSourceBytes: 4096 } },
+					{ canonicalContext: { maxMessages: 64 } },
+					{ maxMessages: 64, maxSourceBytes: 4096 },
+				],
+				[
+					{ canonicalContext: { maxMessages: 32, maxSourceBytes: 4096 } },
+					{ canonicalContext: { maxSourceBytes: 2048 } },
+					{ maxMessages: 32, maxSourceBytes: 2048 },
+				],
+			];
+
+			for (const [globalSettings, projectSettings, expected] of cases) {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify(globalSettings));
+				writeFileSync(join(projectDir, ".base-context", "settings.json"), JSON.stringify(projectSettings));
+				const manager = SettingsManager.create(projectDir, agentDir);
+				const limits = manager.getCanonicalContextLimits();
+
+				expect(limits).toEqual(expected);
+				limits.maxMessages = 1;
+				limits.maxSourceBytes = 1;
+				expect(manager.getCanonicalContextLimits()).toEqual(expected);
+			}
+		});
+
+		it("rejects invalid explicit canonical context resource limits", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ canonicalContext: { maxMessages: 0 } }));
+			expect(() => SettingsManager.create(projectDir, agentDir).getCanonicalContextLimits()).toThrow(
+				/canonicalContext\.maxMessages.*positive safe integer/,
+			);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ canonicalContext: { maxSourceBytes: null } }));
+			expect(() => SettingsManager.create(projectDir, agentDir).getCanonicalContextLimits()).toThrow(
+				/canonicalContext\.maxSourceBytes.*positive safe integer/,
+			);
 		});
 	});
 

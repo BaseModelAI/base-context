@@ -244,7 +244,7 @@ These probes do not certify full binaries, npm's Node floor, Windows or network 
 Whole-history arrays, bounded query work and the native context compiler remain unfinished.
 
 
-## Captured reads and projection boundary (work in progress)
+## Captured reads and projection boundary (`8565f4c5d`)
 
 - History reads and request receipts share one source barrier, physical snapshot and
   branch frontier. A capture remains tied to that source after a session switch.
@@ -257,6 +257,58 @@ Whole-history arrays, bounded query work and the native context compiler remain 
   not provider arguments or options. Terminal handling joins projection cleanup and
   preserves both primary and cleanup errors. Effective stream identity is preserved.
 
-The native compiler is not enabled by this boundary alone. Agent lifecycle arrays,
-Manager loading/storage, and paged search/task ancestry work remain unbounded by this
-slice. Current checks are scoped source cases, not the declared large-history campaign.
+This checkpoint is committed and pushed. Normal hooks, the full check and the clean
+source build pass. Private Node22.8 and two tiny Bun host layouts pass schema6 exact
+lookup and captured-history reads after a real source switch. These are packaged worker
+probes, not full binary, installer, npm-floor, Windows or network-filesystem certification.
+The native compiler is not enabled by this boundary alone.
+
+## Canonical context reconstruction (work in progress)
+
+- Schema7 manifests select the complete active branch context across bounded pages,
+  with a separate latest compaction summary and an exact first-kept boundary. Unknown
+  lineage and invalid boundaries fail explicitly; selection is never silent last-N.
+- Schema8 related-update references restore the latest whole-source assistant usage
+  aggregate and full-branch late ipython message annotations. Related payload access
+  checks the relationship before reading bytes. Ordinary payload access stays branch-only.
+  Candidate and response limits reject incomplete results rather than clipping them.
+- The compiler uses explicit message/source-byte limits and an active revision cache.
+  Output is detached from raw canonical entries. Shared conversion and complete tool-result
+  ordering preserve context barriers across pages and compaction boundaries. Related
+  source bytes count on each application, including cache hits.
+- These aggregates are context projections, not billing or own-spend reduction. Existing
+  Manager loading still rejects earlier malformed usage aggregates; the latest-ref reader
+  does not certify equivalent behavior after archive eviction.
+- The semantic wrapper and inference coordinator carry the same captured source through
+  the opaque native stream argument. Provider calls keep their ordinary three arguments.
+  Persistent AgentSession requests now use that captured compiler path, with configurable
+  `canonicalContext.maxMessages` (16384) and `maxSourceBytes` (64MiB). In-memory sessions
+  retain their explicit nonpersistent path; index failure is not a fallback condition.
+  Native retry controls capture exact acknowledged assistant IDs for transient omission.
+  Full context rebuilds reset those omissions as before; no blanket error filter is added.
+- Page, search and task queries use indexed candidate scans capped at 256 plus an overflow
+  sentinel. They return an exact selection or an explicit budget error. Coverage checks
+  have their own bounded scans. Recursive ancestry queries are removed; one-time creation
+  of ordinary derived indexes is not a bounded-startup claim.
+- The retained index2, compiler2, coordinator4, native binding2, retry1, settings2,
+  context-tree14, semantic2 and late-message1 cases pass in separate scoped commands.
+  The native binding cases use the real loop and local faux, including real index-open
+  failure without a fallback. The retry case preserves actual JSON bodies and request IDs.
+  Its initial fixture tried to clone executable tool functions; only the capture was fixed.
+  Corrective runs are the same cases, not added coverage. The full source check passes
+  (1015 files, TypeScript, installer and browser smoke); the clean build and current
+  packaged probes have not yet run.
+
+Agent lifecycle arrays, Manager loading/storage, task truth/import trust, model budget
+profiles and the remaining release gates are unfinished.
+Source-byte limits are not token limits or a total process-tree memory claim. No model
+campaign, publication or release trigger has run for this work.
+
+## Release workflow migration (not executed)
+
+The inherited release workflow now uses Base Context build commands, artifacts,
+installer variables and explicitly configured destination credentials. It has only
+manual dispatch. Publication defaults off and needs an explicit dispatch approval.
+YAML parsing and shell syntax checking pass. No workflow, installer smoke, npm
+publication, hosted release or remote upload was executed by this migration. Final
+CI isolation/toolchain validation and release approvals remain open.

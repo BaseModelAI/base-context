@@ -63,12 +63,91 @@ export interface TaskEvidencePage {
 	nextAfter: TaskEvidenceCursor | null;
 }
 
+export interface ContextManifestCursor {
+	version: 1;
+	sessionId: string;
+	journalPath: string;
+	dev: number;
+	ino: number;
+	leafId: string | null;
+	through: number;
+	throughRevision: string;
+	nextOrdinal: number;
+}
+
+/** Exact canonical source ref, not a decoded message or provider-ordered item. */
+export interface ContextRef {
+	entryId: string;
+	sequence: number;
+	kind: "message" | "custom_message" | "branch_summary" | "compaction";
+	locator: IndexedSourceEvent["locator"];
+	revision: string;
+}
+export interface ContextManifestOptions {
+	cursor?: ContextManifestCursor;
+	limit?: number;
+}
+export type ContextManifestPage =
+	| {
+			selection: "known";
+			summaryRef: ContextRef | null;
+			activeBase: number;
+			retainedMessageCount: number;
+			activeMessageCount: number;
+			refs: (ContextRef & { ordinal: number })[];
+			order: "source";
+			nextCursor: ContextManifestCursor | null;
+	  }
+	| {
+			selection: "unresolved-lineage" | "invalid-first-kept";
+			summaryRef: ContextRef | null;
+			refs: [];
+			order: "source";
+			nextCursor: null;
+	  };
+
+export type ContextUpdateTarget =
+	| { kind: "assistant-usage"; targetId: string }
+	| { kind: "ipython-sent-message"; toolCallId: string };
+
+/** A related canonical record, not a copied usage value or sent message. */
+export interface ContextUpdateRef extends Omit<ContextRef, "kind"> {
+	kind: "child_usage_attributed" | "custom";
+}
+export interface ContextUpdates {
+	refs: ContextUpdateRef[];
+	order: "source";
+}
+
 export interface HistoryPayloadReadOptions {
 	cursor?: CanonicalPayloadCursor;
 	maxBytes?: number;
 }
 
 export type HistoryIndexRequest =
+	| {
+			id: number;
+			action: "context_updates";
+			sessionId: string;
+			scope: HistoryIndexScope & { through: number };
+			target: ContextUpdateTarget;
+	  }
+	| {
+			id: number;
+			action: "read_context_update_payload";
+			sessionId: string;
+			eventId: string;
+			scope: HistoryIndexScope & { through: number };
+			target: ContextUpdateTarget;
+			options: HistoryPayloadReadOptions;
+	  }
+	| {
+			id: number;
+			action: "context_manifest";
+			sessionId: string;
+			scope: HistoryIndexScope & { through: number };
+			options: ContextManifestOptions;
+	  }
 	| {
 			id: number;
 			action: "read_payload";
@@ -222,7 +301,10 @@ export class HistoryIndex {
 		if (this.closed || (this.closing && message.action !== "close")) throw new Error("History index is closed");
 		if (
 			("sessionId" in message && message.sessionId.length > 512) ||
-			((message.action === "get" || message.action === "read_payload") && message.eventId.length > 512) ||
+			((message.action === "get" ||
+				message.action === "read_payload" ||
+				message.action === "read_context_update_payload") &&
+				message.eventId.length > 512) ||
 			(message.action === "search" && message.query.length > 8192)
 		) {
 			throw new Error("History-index request field limit exceeded");
@@ -320,6 +402,7 @@ export class HistoryIndex {
 			...(scope ? { scope: { leafId: scope.leafId, through: scope.through } } : {}),
 		})) as IndexedSourceEvent | undefined;
 	}
+	/** Exact ordered page; rejects if 256 candidates cannot establish the page and lookahead. */
 	async page(
 		sessionId: string,
 		after: number,
@@ -337,6 +420,7 @@ export class HistoryIndex {
 			...(scope ? { scope: { leafId: scope.leafId } } : {}),
 		})) as HistoryIndexPage;
 	}
+	/** Selection and text-coverage scans each reject after 256 unresolved candidates. */
 	async search(
 		sessionId: string,
 		query: string,
@@ -354,6 +438,7 @@ export class HistoryIndex {
 			...(scope ? { scope: { leafId: scope.leafId } } : {}),
 		})) as HistoryIndexPage;
 	}
+	/** Selection and import-loss scans each have a 256-candidate exact-or-refuse budget. */
 	async taskEvidence(
 		sessionId: string,
 		scope: HistoryIndexScope & { through: number },
@@ -372,6 +457,59 @@ export class HistoryIndex {
 			scope: { leafId: scope.leafId, through: scope.through },
 			options: selection,
 		})) as TaskEvidencePage;
+	}
+	/** Context-visible source refs; compiler ordering and LLM filtering happen after selection. */
+	async contextUpdates(
+		sessionId: string,
+		scope: HistoryIndexScope & { through: number },
+		target: ContextUpdateTarget,
+	): Promise<ContextUpdates> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "context_updates",
+			sessionId,
+			scope: { leafId: scope.leafId, through: scope.through },
+			target:
+				target.kind === "assistant-usage"
+					? { kind: target.kind, targetId: target.targetId }
+					: { kind: target.kind, toolCallId: target.toolCallId },
+		})) as ContextUpdates;
+	}
+	async readContextUpdatePayload(
+		sessionId: string,
+		eventId: string,
+		scope: HistoryIndexScope & { through: number },
+		target: ContextUpdateTarget,
+		options: HistoryPayloadReadOptions = {},
+	): Promise<CanonicalPayloadFragment | undefined> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "read_context_update_payload",
+			sessionId,
+			eventId,
+			scope: { leafId: scope.leafId, through: scope.through },
+			target:
+				target.kind === "assistant-usage"
+					? { kind: target.kind, targetId: target.targetId }
+					: { kind: target.kind, toolCallId: target.toolCallId },
+			options: { ...options, cursor: options.cursor ? { ...options.cursor } : undefined },
+		})) as CanonicalPayloadFragment | undefined;
+	}
+	async contextManifest(
+		sessionId: string,
+		scope: HistoryIndexScope & { through: number },
+		options: ContextManifestOptions = {},
+	): Promise<ContextManifestPage> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "context_manifest",
+			sessionId,
+			scope: { leafId: scope.leafId, through: scope.through },
+			options: {
+				...(options.cursor ? { cursor: { ...options.cursor } } : {}),
+				...(options.limit !== undefined ? { limit: options.limit } : {}),
+			},
+		})) as ContextManifestPage;
 	}
 	async readPayload(
 		sessionId: string,

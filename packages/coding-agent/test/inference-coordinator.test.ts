@@ -241,6 +241,35 @@ describe("native inference coordination", () => {
 		await (await noSemantic(model, context)).result();
 		expect(facts.at(-1)?.operationId).toBe(original.operationId);
 		expect(facts.at(-1)?.attemptId).not.toBe(original.attemptId);
+
+		const firstCompiled = requests.capture();
+		const compiledSource = current;
+		current = source("after-compiler-capture");
+		try {
+			await (await main(model, context, options, firstCompiled)).result();
+			expect(facts.at(-1)).toMatchObject({ source: compiledSource, operationId: "same-operation" });
+			expect(vi.mocked(ai.streamSimple).mock.calls.at(-1)).toHaveLength(3);
+			expect(vi.mocked(ai.streamSimple).mock.calls.at(-1)?.[2]).not.toHaveProperty("streamContext");
+		} finally {
+			await firstCompiled.dispose();
+		}
+		const nextCompiled = requests.capture();
+		const nextCompiledSource = current;
+		current = source("after-next-capture");
+		try {
+			await (await main(model, context, options, nextCompiled)).result();
+			expect(facts.at(-1)).toMatchObject({ source: nextCompiledSource, operationId: "same-operation" });
+		} finally {
+			await nextCompiled.dispose();
+		}
+		const foreign = child.capture();
+		const countBeforeForeign = facts.length;
+		try {
+			await expect(main(model, context, options, foreign)).rejects.toThrow("not a capture of this inference owner");
+			expect(facts).toHaveLength(countBeforeForeign);
+		} finally {
+			await foreign.dispose();
+		}
 	});
 	it("keeps a rejected aggregate's captured sibling owned through receipt persistence", async () => {
 		const facts: NativeRequestEvent[] = [];

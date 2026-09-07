@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { StreamFn } from "@ponythewhite/base-context-agent";
+import type { AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
 
 /**
  * ACP semantic-edges-v1 producer: a durable per-agent ledger of model-request
@@ -571,8 +571,8 @@ export function deriveSemanticEdges(ledgers: SemanticEdgeLedgerEvent[][]): { edg
 const SEMANTIC_INNER_STREAM_FN = Symbol.for("prime-agent.semantic-edges.inner-stream-fn");
 
 /** Unwrap a semantic-edge-bound stream function; aux calls outside session history use this. */
-export function unwrapSemanticEdgeStreamFn(streamFn: StreamFn): StreamFn {
-	return ((streamFn as { [SEMANTIC_INNER_STREAM_FN]?: StreamFn })[SEMANTIC_INNER_STREAM_FN] ?? streamFn) as StreamFn;
+export function unwrapSemanticEdgeStreamFn(streamFn: AgentOwnedStreamFn): AgentOwnedStreamFn {
+	return (streamFn as { [SEMANTIC_INNER_STREAM_FN]?: AgentOwnedStreamFn })[SEMANTIC_INNER_STREAM_FN] ?? streamFn;
 }
 
 /**
@@ -583,12 +583,17 @@ export function unwrapSemanticEdgeStreamFn(streamFn: StreamFn): StreamFn {
  * resolves (an error/aborted final message is a failure). When the recorder is
  * disabled (its ledger failed), calls carry no request ID at all.
  */
-export function wrapStreamFnWithSemanticEdges(streamFn: StreamFn, recorder: SemanticEdgeRecorder): StreamFn {
+export function wrapStreamFnWithSemanticEdges(
+	streamFn: AgentOwnedStreamFn,
+	recorder: SemanticEdgeRecorder,
+): AgentOwnedStreamFn {
 	const inner = unwrapSemanticEdgeStreamFn(streamFn);
-	const wrapped: StreamFn = (model, context, options) => {
+	const wrapped: AgentOwnedStreamFn = (model, context, options, streamContext) => {
 		const requestId = recorder.startTurnRequest(hashTurnBody(model, context, options));
 		if (requestId === undefined) {
-			return inner(model, context, options);
+			return streamContext === undefined
+				? inner(model, context, options)
+				: inner(model, context, options, streamContext);
 		}
 		const observe = (stream: Awaited<ReturnType<StreamFn>>) => {
 			void stream.result().then(
@@ -605,10 +610,14 @@ export function wrapStreamFnWithSemanticEdges(streamFn: StreamFn, recorder: Sema
 		};
 		let result: ReturnType<StreamFn>;
 		try {
-			result = inner(model, context, {
+			const requestOptions = {
 				...options,
 				headers: { ...options?.headers, ...modelRequestHeaders(requestId) },
-			});
+			};
+			result =
+				streamContext === undefined
+					? inner(model, context, requestOptions)
+					: inner(model, context, requestOptions, streamContext);
 		} catch (error) {
 			recorder.failRequest(requestId);
 			throw error;
@@ -621,6 +630,6 @@ export function wrapStreamFnWithSemanticEdges(streamFn: StreamFn, recorder: Sema
 		}
 		return observe(result);
 	};
-	(wrapped as { [SEMANTIC_INNER_STREAM_FN]?: StreamFn })[SEMANTIC_INNER_STREAM_FN] = inner;
+	(wrapped as { [SEMANTIC_INNER_STREAM_FN]?: AgentOwnedStreamFn })[SEMANTIC_INNER_STREAM_FN] = inner;
 	return wrapped;
 }

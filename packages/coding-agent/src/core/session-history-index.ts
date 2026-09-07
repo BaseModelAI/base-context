@@ -1,5 +1,9 @@
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import {
+	type ContextManifestOptions,
+	type ContextManifestPage,
+	type ContextUpdates,
+	type ContextUpdateTarget,
 	HistoryIndex,
 	type HistoryIndexPage,
 	type HistoryPayloadReadOptions,
@@ -13,6 +17,13 @@ import type { SessionJournalState } from "./session-journal-owner.js";
 /** One source/branch frontier shared by every operation in a captured request. */
 export interface SessionHistoryReadView {
 	readonly source: SourceSnapshotRef;
+	contextManifest(options?: ContextManifestOptions): Promise<ContextManifestPage>;
+	contextUpdates(target: ContextUpdateTarget): Promise<ContextUpdates>;
+	readContextUpdatePayload(
+		id: string,
+		target: ContextUpdateTarget,
+		options?: HistoryPayloadReadOptions,
+	): Promise<CanonicalPayloadFragment | undefined>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
 	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
 	search(query: string, limit?: number): Promise<HistoryIndexPage>;

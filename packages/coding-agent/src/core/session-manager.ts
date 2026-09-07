@@ -19,20 +19,18 @@ import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/g
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import type {
+	ContextManifestOptions,
+	ContextManifestPage,
+	ContextUpdateTarget,
 	HistoryIndexPage,
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
 	TaskEvidenceOptions,
 	TaskEvidencePage,
 } from "./history-index.js";
-import {
-	type BashExecutionMessage,
-	type CustomMessage,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "./messages.js";
+import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
 import {
 	type BoundSessionRequestSink,
@@ -501,15 +499,8 @@ export function buildSessionContext(
 	const messages: AgentMessage[] = [];
 
 	const appendMessage = (entry: SessionEntry, target = messages) => {
-		if (entry.type === "message") {
-			target.push(entry.message);
-		} else if (entry.type === "custom_message") {
-			target.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-			);
-		} else if (entry.type === "branch_summary" && entry.summary) {
-			target.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
-		}
+		const message = sessionEntryMessage(entry);
+		if (message) target.push(message);
 	};
 
 	if (compaction) {
@@ -551,27 +542,7 @@ export function buildSessionContext(
 		}
 	}
 
-	// Finalized evidence is committed in completion order. The provider transcript
-	// retains the assistant's tool-call order, including when a session is reopened.
-	let callOrder = new Map<string, number>();
-	for (let index = 0; index < messages.length; index++) {
-		const message = messages[index];
-		if (message.role === "assistant") {
-			callOrder = new Map(
-				message.content.filter((part) => part.type === "toolCall").map((call, order) => [call.id, order]),
-			);
-		} else if (message.role === "toolResult" && callOrder.size > 1) {
-			let end = index + 1;
-			while (end < messages.length && messages[end].role === "toolResult") end++;
-			const results = messages.slice(index, end);
-			results.sort((left, right) => {
-				if (left.role !== "toolResult" || right.role !== "toolResult") return 0;
-				return (callOrder.get(left.toolCallId) ?? Infinity) - (callOrder.get(right.toolCallId) ?? Infinity);
-			});
-			messages.splice(index, results.length, ...results);
-			index = end - 1;
-		}
-	}
+	orderContextToolResults(messages);
 	return { messages, thinkingLevel, serviceTier, model };
 }
 
@@ -1465,6 +1436,12 @@ export class SessionManager {
 		return this._readHistory((view) => view.search(query, limit));
 	}
 
+	/** Source-order active-context references, not a last-N transcript. */
+	contextManifest(options: ContextManifestOptions = {}): Promise<ContextManifestPage> {
+		const captured = { ...options, ...(options.cursor ? { cursor: { ...options.cursor } } : {}) };
+		return this._readHistory((view) => view.contextManifest(captured));
+	}
+
 	/** Structured descriptive evidence; selective output is not an exhaustive requirements list. */
 	taskEvidence(options: TaskEvidenceOptions = {}): Promise<TaskEvidencePage> {
 		const captured = { ...options, ...(options.after ? { after: { ...options.after } } : {}) };
@@ -1755,6 +1732,15 @@ export class SessionManager {
 					};
 					const view: SessionHistoryReadView = Object.freeze({
 						source: boundSource,
+						contextManifest: (options: ContextManifestOptions = {}) =>
+							query(() => index.contextManifest(sessionId, scope, options)),
+						contextUpdates: (target: ContextUpdateTarget) =>
+							query(() => index.contextUpdates(sessionId, scope, target)),
+						readContextUpdatePayload: (
+							id: string,
+							target: ContextUpdateTarget,
+							options: HistoryPayloadReadOptions = {},
+						) => query(() => index.readContextUpdatePayload(sessionId, id, scope, target, options)),
 						get: (id: string) => query(() => index.get(sessionId, id, scope)),
 						page: (after = 0, limit = 64) =>
 							query(() => index.page(sessionId, after, scope.through, limit, scope)),

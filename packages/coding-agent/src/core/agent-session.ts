@@ -93,6 +93,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { CanonicalContextCompiler } from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
@@ -257,6 +258,11 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
+import {
+	appendSentAgentMessageToToolResult,
+	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
+	parsePersistedIpythonSentAgentMessage,
+} from "./session-context-updates.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
 import {
@@ -763,67 +769,6 @@ function visibleSessionActionProjection(actions: readonly QueuedSessionAction[])
 	);
 }
 
-const IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY = "ipython_sent_agent_message";
-
-interface PersistedIpythonSentAgentMessage {
-	toolCallId: string;
-	message: KernelSentAgentMessage;
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parsePersistedIpythonSentAgentMessage(value: unknown): PersistedIpythonSentAgentMessage | undefined {
-	if (!isObjectRecord(value) || typeof value.toolCallId !== "string" || !isObjectRecord(value.message)) {
-		return undefined;
-	}
-	const { id, message, deliveryStatus, target } = value.message;
-	if (
-		typeof id !== "string" ||
-		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
-		!isObjectRecord(target) ||
-		typeof target.activeSessionId !== "string" ||
-		typeof target.sessionId !== "string"
-	) {
-		return undefined;
-	}
-	return {
-		toolCallId: value.toolCallId,
-		message: {
-			id,
-			message,
-			deliveryStatus,
-			target: {
-				activeSessionId: target.activeSessionId,
-				sessionId: target.sessionId,
-				...(typeof target.sessionName === "string" ? { sessionName: target.sessionName } : {}),
-			},
-		},
-	};
-}
-
-function appendSentAgentMessageToToolResult(
-	message: AgentMessage,
-	toolCallId: string,
-	sentMessage: KernelSentAgentMessage,
-): boolean {
-	if (message.role !== "toolResult" || message.toolName !== "ipython" || message.toolCallId !== toolCallId) {
-		return false;
-	}
-	const details = isObjectRecord(message.details) ? message.details : {};
-	const current = Array.isArray(details.sentAgentMessages) ? details.sentAgentMessages : [];
-	if (current.some((entry) => isObjectRecord(entry) && entry.id === sentMessage.id)) {
-		return true;
-	}
-	message.details = {
-		...details,
-		sentAgentMessages: [...current, sentMessage],
-	};
-	return true;
-}
-
 function injectedMessagePreviewLabel(message: CustomMessage): string | undefined {
 	switch (message.customType) {
 		case HEARTBEAT_PROMPT_CUSTOM_TYPE:
@@ -1060,6 +1005,8 @@ export class AgentSession {
 	readonly settingsManager: SettingsManager;
 	readonly requests: InferenceCoordinator;
 	readonly runtimeServices: SessionRuntimeServices;
+	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private _contextOmissions?: { sessionId: string; sessionFile: string | undefined; ids: Set<string> };
 	private _serviceTierPreference: ServiceTier;
 
 	private _scopedModels: Array<{
@@ -1268,6 +1215,41 @@ export class AgentSession {
 			await this._agentEventQueue;
 			await this._waitForChildUsageWrites();
 			await this.sessionManager.flushNow();
+			// In-memory sessions have no canonical archive. This is an explicit mode, not an index-error fallback.
+			if (!this.sessionManager.isPersisted()) return;
+			const limits = this.settingsManager.getCanonicalContextLimits();
+			const outcomes = structuredClone(this._unpersistedOutcomes);
+			if (
+				this._contextOmissions?.sessionId !== this.sessionId ||
+				this._contextOmissions?.sessionFile !== this.sessionFile
+			)
+				this._contextOmissions = undefined;
+			const controls = this._contextOmissions;
+			const omitted = new Set(controls?.ids);
+			const captured = this.requests.capture();
+			try {
+				const messages = await captured.readHistory(async (view) => {
+					const sameSource =
+						controls?.sessionId === view.source.sessionId && controls?.sessionFile === view.source.sessionFile;
+					const result = await this._contextCompiler.compile(view, limits, sameSource ? omitted : undefined);
+					if (sameSource && this._contextOmissions === controls) {
+						// Only prune this captured set. A newer control or source switch must survive this read.
+						for (const id of omitted) if (!this._contextCompiler.hasActiveEntry(id)) controls.ids.delete(id);
+					}
+					return result;
+				});
+				// Failed persistence outcomes are transient UI/request facts, never canonical history authority.
+				this._mergeUnpersistedOutcomes(messages, outcomes);
+				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
+				return { messages, streamContext: captured, release: () => captured.dispose() };
+			} catch (error) {
+				try {
+					await captured.dispose();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "Canonical context build and release failed");
+				}
+				throw error;
+			}
 		});
 		this.agent.bindToolExecutionOwner({
 			onToolInvocationStarting: async (invocation) => {
@@ -4455,8 +4437,11 @@ export class AgentSession {
 		return context;
 	}
 
-	private _mergeUnpersistedOutcomes(messages: AgentMessage[]): void {
-		for (const outcome of this._unpersistedOutcomes) {
+	private _mergeUnpersistedOutcomes(
+		messages: AgentMessage[],
+		outcomes: readonly CustomMessage[] = this._unpersistedOutcomes,
+	): void {
+		for (const outcome of outcomes) {
 			let insertAt = messages.length;
 			while (insertAt > 0 && messages[insertAt - 1]!.timestamp > outcome.timestamp) {
 				insertAt -= 1;
@@ -7895,6 +7880,7 @@ export class AgentSession {
 		}
 		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		this._contextOmissions = undefined;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
@@ -8884,7 +8870,7 @@ export class AgentSession {
 			// but we don't want it in context for the retry)
 			const messages = this.agent.state.messages;
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
+				this._removeLastAssistantFromContext();
 			}
 			return await this._runAutoCompaction("overflow", true);
 		}
@@ -9067,7 +9053,7 @@ export class AgentSession {
 				const messages = this.agent.state.messages;
 				const lastMsg = messages[messages.length - 1];
 				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
-					this.agent.state.messages = messages.slice(0, -1);
+					this._removeLastAssistantFromContext();
 				}
 
 				this._schedulePostCompactionContinue(true);
@@ -9853,6 +9839,23 @@ export class AgentSession {
 
 	getCurrentRecap(): string | undefined {
 		return this._currentRecap;
+	}
+
+	private _removeLastAssistantFromContext(): void {
+		const messages = this.agent.state.messages;
+		const message = messages.at(-1);
+		if (message?.role !== "assistant") return;
+		if (this.sessionManager.isPersisted()) {
+			const entry = this._findAssistantEntryForMessage(message);
+			if (!entry) throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
+			if (
+				this._contextOmissions?.sessionId !== this.sessionId ||
+				this._contextOmissions?.sessionFile !== this.sessionFile
+			)
+				this._contextOmissions = { sessionId: this.sessionId, sessionFile: this.sessionFile, ids: new Set() };
+			this._contextOmissions.ids.add(entry.id);
+		}
+		this.agent.state.messages = messages.slice(0, -1);
 	}
 
 	private _findAssistantEntryForMessage(message: AssistantMessage): SessionMessageEntry | undefined {
@@ -11491,7 +11494,7 @@ export class AgentSession {
 
 		const messages = this.agent.state.messages;
 		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
+			this._removeLastAssistantFromContext();
 		}
 
 		this._retryAbortController = new AbortController();
@@ -12116,6 +12119,7 @@ export class AgentSession {
 
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+			this._contextOmissions = undefined;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 			this._reloadGoalStateFromBranch();

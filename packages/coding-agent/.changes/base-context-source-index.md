@@ -4,3 +4,7 @@
 - Added bounded canonical JSON fragment recovery with UTF8 byte cursors and at most one 64KiB source-part read per call.
 - Shared one captured source frontier between request receipts and history reads, with active reads included in request drain and disposal.
 - Replaced full ancestry scans for exact indexed lookups and payload reads with ancestor jumps; unresolved links use bounded traversal and explicit errors.
+- Added bounded manifests for complete active context, with exact compaction boundaries and related usage/late-message source references.
+- Bounded page, search, task and coverage candidate scans with indexed seeks and explicit limit errors instead of recursive ancestry scans.
+- Reconstructed detached canonical context through an active revision cache with explicit message and canonical-source-byte limits.
+- Connected persistent native requests to the same captured compiler and receipt source, preserving transient outcomes and exact native retry removals.

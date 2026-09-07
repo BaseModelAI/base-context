@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { StreamFn } from "@ponythewhite/base-context-agent";
+import type { AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
 import {
 	type Api,
 	type AssistantMessage,
@@ -65,7 +65,7 @@ interface StreamBinding {
 	readonly coordinator: InferenceCoordinator;
 	readonly inner: StreamFn;
 }
-type BoundStreamFn = StreamFn & { [REQUEST_STREAM_BINDING]?: StreamBinding };
+type BoundStreamFn = AgentOwnedStreamFn & { [REQUEST_STREAM_BINDING]?: StreamBinding };
 
 function modelContract(model: Model<Api>): ResolvedModelContract {
 	return {
@@ -433,14 +433,25 @@ export class InferenceCoordinator {
 		return (await (await this.start(model, context, options, request)).settled).message;
 	}
 
-	bindStream(streamFn: StreamFn, request: InferenceRequestOptions): StreamFn {
+	bindStream(streamFn: StreamFn, request: InferenceRequestOptions): AgentOwnedStreamFn {
 		const unwrapped = unwrapSemanticEdgeStreamFn(streamFn) as BoundStreamFn;
 		const inner = unwrapped[REQUEST_STREAM_BINDING]?.inner ?? unwrapped;
 		// One Agent stream is serial. Keep only its latest binding for semantic retries.
 		// A side question or child gets its own closure, not the parent's source binding.
 		let previous: BoundOperation | undefined;
 		let previousBody: string | undefined;
-		const wrapped: BoundStreamFn = async (model, context, options) => {
+		const wrapped: BoundStreamFn = async (model, context, options, streamContext) => {
+			let captured: InferenceCoordinator | undefined;
+			if (streamContext !== undefined) {
+				if (
+					!(streamContext instanceof InferenceCoordinator) ||
+					streamContext.work !== this.work ||
+					!streamContext.capturedSink
+				)
+					throw new Error("Native stream context is not a capture of this inference owner");
+				captured = streamContext;
+			}
+			const executor = captured ?? this;
 			const semanticEdgeId = request.semanticEdgeId ?? options?.headers?.[MODEL_REQUEST_ID_HEADER];
 			// Reuse the existing semantic body identity if its best-effort recorder is unavailable.
 			const body = semanticEdgeId ? undefined : hashTurnBody(model, context, options);
@@ -449,10 +460,11 @@ export class InferenceCoordinator {
 			this.retryTurn = false;
 			const operationId = request.operationId ?? semanticEdgeId ?? retryId ?? randomUUID();
 			previousBody = body;
-			if (previous?.metadata.operationId !== operationId) {
-				previous = this.bindOperation(model, { ...request, semanticEdgeId }, operationId);
+			if (captured || previous?.metadata.operationId !== operationId) {
+				// A semantic retry can reuse its operation ID, but compilation owns this exact source frontier.
+				previous = executor.bindOperation(model, { ...request, semanticEdgeId }, operationId);
 			}
-			return (await this.execute(previous, model, context, options, inner)).events;
+			return (await executor.execute(previous, model, context, options, inner)).events;
 		};
 		wrapped[REQUEST_STREAM_BINDING] = { coordinator: this, inner };
 		return wrapped;

@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { StreamFn } from "@ponythewhite/base-context-agent";
+import type { AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
 import { createAssistantMessageEventStream } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -13,6 +13,7 @@ import {
 	readSemanticEdgeLedger,
 	type SemanticEdgeLedgerEvent,
 	SemanticEdgeRecorder,
+	unwrapSemanticEdgeStreamFn,
 	wrapStreamFnWithSemanticEdges,
 } from "../src/core/semantic-edges.js";
 
@@ -847,17 +848,29 @@ describe("wrapStreamFnWithSemanticEdges", () => {
 		process.on("unhandledRejection", onUnhandled);
 		try {
 			const captured: Array<Record<string, string> | undefined> = [];
+			const streamContexts = [{}, {}];
+			const capturedContexts: unknown[] = [];
 			const streams: Array<ReturnType<typeof createAssistantMessageEventStream>> = [];
-			const inner: StreamFn = (_model, _context, options) => {
+			const configuredStream: StreamFn = (...args) => {
+				expect(args).toHaveLength(3);
+				const [_model, _context, options] = args;
+				expect(options ?? {}).not.toHaveProperty("streamContext");
 				captured.push(options?.headers);
 				const stream = createAssistantMessageEventStream();
 				streams.push(stream);
 				return stream;
 			};
+			const inner: AgentOwnedStreamFn = (model, context, options, streamContext) => {
+				capturedContexts.push(streamContext);
+				return configuredStream(model, context, options);
+			};
 			const wrapped = wrapStreamFnWithSemanticEdges(inner, recorder);
 
-			const returned = wrapped(model, context, undefined) as ReturnType<typeof createAssistantMessageEventStream>;
+			const returned = wrapped(model, context, undefined, streamContexts[0]) as ReturnType<
+				typeof createAssistantMessageEventStream
+			>;
 			expect(captured[0]?.[MODEL_REQUEST_ID_HEADER]).toBeDefined();
+			expect(capturedContexts[0]).toBe(streamContexts[0]);
 
 			// The ledger breaks while the call is in flight; the outcome write disables the recorder.
 			rmSync(join(tempDir, "degrade.jsonl"));
@@ -871,7 +884,9 @@ describe("wrapStreamFnWithSemanticEdges", () => {
 			expect(warn).toHaveBeenCalledOnce();
 
 			// Later calls carry no request ID: their request_started can never be durable.
-			wrapped(model, context, undefined);
+			wrapped(model, context, undefined, streamContexts[1]);
+			expect(capturedContexts).toHaveLength(2);
+			expect(capturedContexts[1]).toBe(streamContexts[1]);
 			expect(captured[1]?.[MODEL_REQUEST_ID_HEADER]).toBeUndefined();
 			expect(captured[1]?.[IDEMPOTENCY_KEY_HEADER]).toBeUndefined();
 			streams[1]!.push({ type: "done", reason: "stop", message: message("stop") as never });
@@ -900,14 +915,23 @@ describe("wrapStreamFnWithSemanticEdges", () => {
 		const parentRecorder = recorderIn("parent.jsonl");
 		const childRecorder = recorderIn("child.jsonl");
 		let innerCalls = 0;
-		const inner: StreamFn = () => {
-			innerCalls += 1;
+		const streamContext = {};
+		const configuredStream: StreamFn = (...args) => {
+			expect(args).toHaveLength(3);
+			expect(args[2] ?? {}).not.toHaveProperty("streamContext");
 			return createAssistantMessageEventStream();
+		};
+		const inner: AgentOwnedStreamFn = (model, context, options, receivedContext) => {
+			innerCalls += 1;
+			expect(receivedContext).toBe(streamContext);
+			return configuredStream(model, context, options);
 		};
 		const parentWrapped = wrapStreamFnWithSemanticEdges(inner, parentRecorder);
 		const childWrapped = wrapStreamFnWithSemanticEdges(parentWrapped, childRecorder);
 
-		childWrapped(model, context, undefined);
+		expect(unwrapSemanticEdgeStreamFn(parentWrapped)).toBe(inner);
+		expect(unwrapSemanticEdgeStreamFn(childWrapped)).toBe(inner);
+		childWrapped(model, context, undefined, streamContext);
 
 		expect(innerCalls).toBe(1);
 		expect(childRecorder.lastTurnRequestId).toBeDefined();

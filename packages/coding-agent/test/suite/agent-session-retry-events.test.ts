@@ -2,6 +2,7 @@ import type { AgentEvent, AgentTool } from "@ponythewhite/base-context-agent";
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { IDEMPOTENCY_KEY_HEADER, MODEL_REQUEST_ID_HEADER } from "../../src/core/semantic-edges.js";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -59,17 +60,27 @@ describe("AgentSession retry and event characterization", () => {
 	});
 
 	it("retries after a transient error and succeeds", async () => {
-		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		});
 		harnesses.push(harness);
 		const retryEvents: string[] = [];
+		const requests: { body: string; headers: Record<string, string> }[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
 			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}`);
 		});
 
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
-			fauxAssistantMessage("recovered"),
+			(context, options) => {
+				requests.push({ body: JSON.stringify(context), headers: { ...options?.headers } });
+				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+			},
+			(context, options) => {
+				requests.push({ body: JSON.stringify(context), headers: { ...options?.headers } });
+				return fauxAssistantMessage("recovered");
+			},
 		]);
 
 		await harness.session.prompt("test");
@@ -77,6 +88,23 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEvents).toEqual(["start:1", "end:true"]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+		expect(requests).toHaveLength(2);
+		expect(requests[1].body).toBe(requests[0].body);
+		const requestId = requests[0].headers[MODEL_REQUEST_ID_HEADER];
+		expect(requestId).toEqual(expect.stringMatching(/\S/));
+		expect(requests.map((request) => request.headers[MODEL_REQUEST_ID_HEADER])).toEqual([requestId, requestId]);
+		expect(requests.map((request) => request.headers[IDEMPOTENCY_KEY_HEADER])).toEqual([requestId, requestId]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.stopReason === "error" &&
+						entry.message.errorMessage === "overloaded_error",
+				),
+		).toBe(true);
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

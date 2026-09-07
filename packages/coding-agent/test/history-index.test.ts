@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { HistoryIndex, type IndexedSourceEvent } from "../src/core/history-index.js";
+import { type ContextManifestCursor, HistoryIndex, type IndexedSourceEvent } from "../src/core/history-index.js";
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES, SessionJournalOwner } from "../src/core/session-journal-owner.js";
 import { TASK_STATE_SCHEMA } from "../src/core/task-state.js";
@@ -40,6 +40,9 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	expect(await index.get("session", "Item", { leafId: "item", through: 2 })).toEqual(events[0]);
 	expect(await index.get("session", "item", { leafId: "Item", through: 2 })).toBeUndefined();
 	expect(await index.get("other", "Item")).toBeUndefined();
+	await expect(index.contextManifest("session", { leafId: "item", through: 2 })).rejects.toThrow(
+		"index is unavailable",
+	);
 	expect((await index.page("session", 0, 2, 1)).events).toEqual([events[0]]);
 	expect((await index.search("session", "parser", 2)).events).toEqual([events[0]]);
 	await index.clear("session");
@@ -103,6 +106,33 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const chosen = await index.get("canonical", "chosen");
 		expect(Buffer.byteLength(chosen!.text)).toBeLessThanOrEqual(8192);
 		expect(chosen?.textComplete).toBe(false);
+		const contextScope = { leafId: "chosen", through: 5 };
+		const contextFirst = await index.contextManifest("canonical", contextScope, { limit: 1 });
+		expect(contextFirst).toMatchObject({
+			selection: "known",
+			summaryRef: null,
+			activeBase: 0,
+			retainedMessageCount: 0,
+			activeMessageCount: 2,
+			order: "source",
+		});
+		expect(contextFirst.refs.map((ref) => ref.entryId)).toEqual(["root"]);
+		expect(contextFirst.refs[0].ordinal).toBe(1);
+		expect(contextFirst.nextCursor).toMatchObject({
+			version: 1,
+			sessionId: "canonical",
+			journalPath,
+			leafId: "chosen",
+			through: 5,
+			throughRevision: latest.checksum,
+			nextOrdinal: 2,
+		});
+		expect(await index.contextManifest("canonical", { leafId: null, through: 0 })).toMatchObject({
+			selection: "known",
+			activeMessageCount: 0,
+			refs: [],
+			nextCursor: null,
+		});
 
 		await owner.appendJson(
 			JSON.stringify({
@@ -133,6 +163,27 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			).events,
 		).toEqual([]);
 		expect((await index.get("canonical", "root"))?.authority).toBe("unrecorded");
+
+		const contextSecond = await index.contextManifest("canonical", contextScope, {
+			cursor: contextFirst.nextCursor!,
+		});
+		expect(contextSecond.refs.map((ref) => ref.entryId)).toEqual(["chosen"]);
+		expect(contextSecond.nextCursor).toBeNull();
+		expect(
+			await index.contextManifest("canonical", contextScope, {
+				cursor: { ...contextFirst.nextCursor!, nextOrdinal: 3 },
+			}),
+		).toMatchObject({ refs: [], nextCursor: null });
+		await expect(
+			index.contextManifest("canonical", contextScope, {
+				cursor: { ...contextFirst.nextCursor!, throughRevision: "0".repeat(64) },
+			}),
+		).rejects.toThrow("cursor mismatch");
+		await expect(
+			index.contextManifest("canonical", contextScope, {
+				cursor: { ...contextFirst.nextCursor!, journalPath: `${journalPath}.other` },
+			}),
+		).rejects.toThrow("cursor mismatch");
 		const taskKey = "Task/Case";
 		const constraints = Array.from({ length: 13 }, (_, number) => ({
 			id: number === 0 ? "Item" : number === 1 ? "item" : `item-${number}`,
@@ -189,6 +240,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const taskSnapshot = owner.getSnapshot();
 		const taskScope = { leafId: "empty-import", through: taskSnapshot.nextSequence - 1 };
 		await index.syncSource("canonical", taskSnapshot);
+		expect((await index.contextManifest("canonical", taskScope)).selection).toBe("invalid-first-kept");
 		const tasks = await index.taskEvidence("canonical", taskScope, { taskKey });
 		expect(tasks.entries).toHaveLength(16);
 		expect(tasks).toMatchObject({ structuredOnly: true, selective: true, coverage: "partial", truncated: true });
@@ -264,6 +316,51 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const chainScope = { leafId: chainLeaf, through: chainSnapshot.nextSequence - 1 };
 		await index.syncSource("canonical", chainSnapshot);
 		expect((await index.get("canonical", "root", chainScope))?.id).toBe("root");
+		const chainIds: string[] = [];
+		let chainAfter = 0;
+		while (true) {
+			const page = await index.page("canonical", chainAfter, chainScope.through, 64, chainScope);
+			chainIds.push(...page.events.map((event) => event.id));
+			expect(page.coverage).toBe("complete");
+			expect(page.truncated).toBe(page.nextAfter !== null);
+			if (page.nextAfter === null) break;
+			expect(page.nextAfter).toBe(page.events.at(-1)?.sequence);
+			expect(page.nextAfter).toBeGreaterThan(chainAfter);
+			chainAfter = page.nextAfter;
+		}
+		expect(chainIds).toEqual([
+			"root",
+			"chosen",
+			"root-request",
+			"media",
+			"legacy-tasks",
+			"updated-task",
+			"huge-task",
+			"after-huge",
+			"other-task",
+			"empty-import",
+			...Array.from({ length: 130 }, (_, n) => `chain-${n}`),
+		]);
+		const chainSearch = await index.search("canonical", "chain node", chainScope.through, 2, chainScope);
+		expect(chainSearch.events.map((event) => event.id)).toEqual(["chain-129", "chain-128"]);
+		expect(chainSearch).toMatchObject({ truncated: true, nextAfter: null, coverage: "partial" });
+		expect((await index.search("canonical", "sibling", chainScope.through, 2, chainScope)).events).toEqual([]);
+		expect(
+			(
+				await index.search("canonical", "root request", chainScope.through, 2, { leafId: "root-request" })
+			).events.map((event) => event.id),
+		).toEqual(["root-request"]);
+		expect((await index.taskEvidence("canonical", chainScope, { taskKey })).entries).toEqual(tasks.entries);
+		const chainTasks = await index.taskEvidence("canonical", chainScope, { taskKey, limit: 2 });
+		expect(chainTasks.entries).toEqual(tasks.entries.slice(0, 2));
+		expect(chainTasks.nextAfter).toEqual({ sequence: tasks.entries[1].sequence, ordinal: 1 });
+		const nextChainTasks = await index.taskEvidence("canonical", chainScope, {
+			taskKey,
+			limit: 2,
+			after: chainTasks.nextAfter,
+		});
+		expect(nextChainTasks.entries).toEqual(tasks.entries.slice(2, 4));
+		expect(nextChainTasks.nextAfter).toEqual({ sequence: tasks.entries[3].sequence, ordinal: 3 });
 		expect(await index.get("canonical", "sibling", chainScope)).toBeUndefined();
 		expect((await index.get("canonical", "root-request", chainScope))?.id).toBe("root-request");
 		expect(await index.get("canonical", "sibling-request", chainScope)).toBeUndefined();
@@ -286,22 +383,435 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		await index.apply("canonical", [], chainScope.through);
 		expect((await index.get("canonical", "root"))?.id).toBe("root");
 		await expect(index.get("canonical", "root", chainScope)).rejects.toThrow("parent lookup budget");
+		await expect(index.page("canonical", chainScope.through, chainScope.through, 2, chainScope)).rejects.toThrow(
+			"parent lookup budget",
+		);
+		await expect(index.search("canonical", "absent", chainScope.through, 2, chainScope)).rejects.toThrow(
+			"parent lookup budget",
+		);
 		expect((await index.get("canonical", "chain-128", chainScope))?.id).toBe("chain-128");
 		await expect(index.readPayload("canonical", "root", chainScope)).rejects.toThrow("index is unavailable");
 		await index.syncSource("canonical", chainSnapshot);
 		expect((await index.get("canonical", "root", chainScope))?.id).toBe("root");
 
+		let contextParentId = chainLeaf;
+		const contextEntries = [
+			{ id: "context-boundary", type: "tool_intent" },
+			{
+				id: "context-assistant",
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "a" },
+						{ type: "toolCall", id: "b" },
+					],
+				},
+			},
+			{ id: "context-result-b", type: "message", message: { role: "toolResult", toolCallId: "b", content: [] } },
+			{ id: "context-request", type: "request" },
+			{ id: "context-result-a", type: "message", message: { role: "toolResult", toolCallId: "a", content: [] } },
+			{
+				id: "context-ui",
+				type: "custom_message",
+				customType: "session_slash_command",
+				content: "UI only",
+				display: false,
+			},
+			{
+				id: "context-bash",
+				type: "message",
+				message: { role: "bashExecution", command: "true", output: "", excludeFromContext: true },
+			},
+			{ id: "context-branch", type: "branch_summary", summary: "branch summary", fromId: "root" },
+			{ id: "context-empty", type: "branch_summary", summary: "", fromId: "root" },
+			{
+				id: "context-compact",
+				type: "compaction",
+				summary: "latest summary",
+				firstKeptEntryId: "chain-0",
+				tokensBefore: 99,
+				customInstructions: "exact instructions",
+			},
+			{ id: "context-after", type: "message", message: { role: "user", content: "after compaction" } },
+		];
+		for (const value of contextEntries) {
+			await owner.appendJson(
+				JSON.stringify({ ...value, parentId: contextParentId, timestamp: "2026-01-01T00:00:00Z" }),
+			);
+			contextParentId = value.id;
+		}
+		const contextSnapshot = owner.getSnapshot();
+		const visibleScope = { leafId: contextParentId, through: contextSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", contextSnapshot);
+		const visibleIds: string[] = [];
+		const visibleOrdinals: number[] = [];
+		let contextCursor: ContextManifestCursor | undefined;
+		do {
+			const page = await index.contextManifest("canonical", visibleScope, { cursor: contextCursor });
+			expect(page.selection).toBe("known");
+			if (page.selection !== "known") throw new Error("Expected a known context selection");
+			expect(page.activeMessageCount).toBe(137);
+			expect(page.retainedMessageCount).toBe(136);
+			expect(page.summaryRef).toMatchObject({ entryId: "context-compact", kind: "compaction" });
+			expect(page.refs.length).toBeLessThanOrEqual(64);
+			expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(1024 * 1024);
+			visibleIds.push(...page.refs.map((ref) => ref.entryId));
+			visibleOrdinals.push(...page.refs.map((ref) => ref.ordinal));
+			contextCursor = page.nextCursor ?? undefined;
+		} while (contextCursor);
+		expect(visibleIds).toEqual([
+			...Array.from({ length: 130 }, (_, n) => `chain-${n}`),
+			"context-assistant",
+			"context-result-b",
+			"context-result-a",
+			"context-ui",
+			"context-bash",
+			"context-branch",
+			"context-after",
+		]);
+		expect(visibleOrdinals).toEqual(Array.from({ length: 137 }, (_, n) => visibleOrdinals[0] + n));
+		await owner.appendJson(
+			JSON.stringify({
+				id: "context-compact2",
+				parentId: contextParentId,
+				type: "compaction",
+				summary: "new summary",
+				firstKeptEntryId: "context-boundary",
+				tokensBefore: 50,
+			}),
+		);
+		const invisibleBoundarySnapshot = owner.getSnapshot();
+		const invisibleBoundaryScope = {
+			leafId: "context-compact2",
+			through: invisibleBoundarySnapshot.nextSequence - 1,
+		};
+		await index.syncSource("canonical", invisibleBoundarySnapshot);
+		expect(await index.contextManifest("canonical", invisibleBoundaryScope)).toMatchObject({
+			selection: "known",
+			activeMessageCount: 7,
+			retainedMessageCount: 7,
+			summaryRef: { entryId: "context-compact2" },
+		});
+		expect((await index.contextManifest("canonical", invisibleBoundaryScope)).refs.map((ref) => ref.entryId)).toEqual(
+			visibleIds.slice(130),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				id: "context-bad-request",
+				parentId: "context-compact2",
+				type: "compaction",
+				summary: "bad boundary",
+				firstKeptEntryId: "root-request",
+			}),
+		);
+		const badBoundarySnapshot = owner.getSnapshot();
+		const badBoundaryScope = { leafId: "context-bad-request", through: badBoundarySnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", badBoundarySnapshot);
+		expect(await index.get("canonical", "root-request", badBoundaryScope)).toBeDefined();
+		expect(await index.contextManifest("canonical", badBoundaryScope)).toMatchObject({
+			selection: "invalid-first-kept",
+			refs: [],
+			nextCursor: null,
+		});
+		const usageTarget = { kind: "assistant-usage", targetId: "update-assistant" } as const;
+		const sentTarget = { kind: "ipython-sent-message", toolCallId: "IPython/Case" } as const;
+		const sentData = (id: string, message: string, toolCallId: string = sentTarget.toolCallId) => ({
+			toolCallId,
+			message: {
+				id,
+				message,
+				deliveryStatus: "delivered",
+				target: { activeSessionId: "active-child", sessionId: "child", sessionName: 17 },
+			},
+		});
+		const relatedRefs = async (ids: string[]) =>
+			Promise.all(
+				ids.map(async (entryId) => {
+					const event = (await index.get("canonical", entryId))!;
+					return {
+						entryId,
+						sequence: event.sequence,
+						kind: event.kind,
+						locator: event.locator,
+						revision: event.revision,
+					};
+				}),
+			);
+		const earlyUsageJson = JSON.stringify({
+			id: "usage-before-assistant",
+			parentId: "sibling",
+			type: "child_usage_attributed",
+			targetId: usageTarget.targetId,
+			aggregateUsage: {
+				input: 1,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+		await owner.appendJson(earlyUsageJson);
+		await owner.appendJson(
+			JSON.stringify({
+				id: usageTarget.targetId,
+				parentId: "context-compact2",
+				type: "message",
+				message: { role: "assistant", content: [] },
+			}),
+		);
+		const earlyUpdateSnapshot = owner.getSnapshot();
+		const earlyUpdateScope = { leafId: usageTarget.targetId, through: earlyUpdateSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", earlyUpdateSnapshot);
+		expect(await index.contextUpdates("canonical", earlyUpdateScope, usageTarget)).toEqual({
+			refs: await relatedRefs(["usage-before-assistant"]),
+			order: "source",
+		});
+		expect(
+			(await index.readContextUpdatePayload("canonical", "usage-before-assistant", earlyUpdateScope, usageTarget))
+				?.text,
+		).toBe(earlyUsageJson);
+		expect(await index.readPayload("canonical", "usage-before-assistant", earlyUpdateScope)).toBeUndefined();
+
+		const sentBeforeJson = JSON.stringify({
+			id: "sent-before-compaction",
+			parentId: usageTarget.targetId,
+			type: "custom",
+			customType: "ipython_sent_agent_message",
+			data: sentData("duplicate", "before compaction"),
+		});
+		await owner.appendJson(sentBeforeJson);
+		const updateEntries = [
+			{ id: "update-boundary", type: "tool_intent" },
+			{
+				id: "update-compaction",
+				type: "compaction",
+				summary: "update summary",
+				firstKeptEntryId: "update-boundary",
+			},
+			{
+				id: "sent-late",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: sentData("duplicate", "late update"),
+			},
+			{
+				id: "sent-invalid",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: {
+					...sentData("invalid", "not delivered"),
+					message: { ...sentData("invalid", "not delivered").message, deliveryStatus: "failed" },
+				},
+			},
+			{
+				id: "sent-wrong-kind",
+				type: "custom_message",
+				customType: "ipython_sent_agent_message",
+				data: sentData("wrong-kind", "wrong kind"),
+			},
+			{
+				id: "sent-wrong-type",
+				type: "custom",
+				customType: "IPYTHON_SENT_AGENT_MESSAGE",
+				data: sentData("wrong-type", "wrong custom type"),
+			},
+			{
+				id: "sent-wrong-key",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: sentData("wrong-key", "wrong key", "ipython/case"),
+			},
+			{
+				id: "sent-empty",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: {
+					toolCallId: "",
+					message: {
+						id: "",
+						message: "",
+						deliveryStatus: "queued",
+						target: { activeSessionId: "", sessionId: "" },
+					},
+				},
+			},
+			{ id: "usage-forged", type: "custom", targetId: usageTarget.targetId, aggregateUsage: {} },
+		];
+		let updateLeaf = "sent-before-compaction";
+		for (const value of updateEntries) {
+			await owner.appendJson(JSON.stringify({ ...value, parentId: updateLeaf }));
+			updateLeaf = value.id;
+		}
+		await owner.appendJson(
+			JSON.stringify({
+				id: "sent-sibling",
+				parentId: "sibling",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: sentData("sibling", "sibling only"),
+			}),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				id: "usage-unrelated",
+				parentId: "sibling",
+				type: "child_usage_attributed",
+				targetId: "other-assistant",
+				aggregateUsage: {},
+			}),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				id: "usage-nonassistant",
+				parentId: "sibling",
+				type: "child_usage_attributed",
+				targetId: "root",
+				aggregateUsage: {},
+			}),
+		);
+		const latestUsageJson = JSON.stringify({
+			id: "usage-latest",
+			parentId: "sibling",
+			type: "child_usage_attributed",
+			targetId: usageTarget.targetId,
+			aggregateUsage: "é".repeat(70 * 1024),
+		});
+		await owner.appendJson(latestUsageJson);
+		const updateSnapshot = owner.getSnapshot();
+		const updateScope = { leafId: updateLeaf, through: updateSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", updateSnapshot);
+		const latestUsageRefs = await relatedRefs(["usage-latest"]);
+		const sentRefs = await relatedRefs(["sent-before-compaction", "sent-late"]);
+		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
+			refs: latestUsageRefs,
+			order: "source",
+		});
+		expect(await index.contextUpdates("canonical", earlyUpdateScope, usageTarget)).toEqual({
+			refs: await relatedRefs(["usage-before-assistant"]),
+			order: "source",
+		});
+		await expect(
+			index.contextUpdates("canonical", updateScope, { kind: "assistant-usage", targetId: "root" }),
+		).rejects.toThrow("assistant");
+		await expect(
+			index.contextUpdates("canonical", { ...updateScope, leafId: "sibling" }, usageTarget),
+		).rejects.toThrow();
+		expect(await index.contextUpdates("canonical", updateScope, sentTarget)).toEqual({
+			refs: sentRefs,
+			order: "source",
+		});
+		expect(
+			await index.contextUpdates("canonical", updateScope, { kind: "ipython-sent-message", toolCallId: "" }),
+		).toEqual({
+			refs: await relatedRefs(["sent-empty"]),
+			order: "source",
+		});
+		expect(await index.contextUpdates("canonical", earlyUpdateScope, sentTarget)).toEqual({
+			refs: [],
+			order: "source",
+		});
+		expect(
+			(await index.readContextUpdatePayload("canonical", "sent-before-compaction", updateScope, sentTarget))?.text,
+		).toBe(sentBeforeJson);
+		for (const eventId of [
+			"sent-sibling",
+			"sent-invalid",
+			"sent-wrong-kind",
+			"sent-wrong-type",
+			"sent-wrong-key",
+			"sent-empty",
+			"usage-latest",
+		]) {
+			expect(await index.readContextUpdatePayload("canonical", eventId, updateScope, sentTarget)).toBeUndefined();
+		}
+		for (const eventId of ["usage-before-assistant", "usage-forged", "usage-unrelated", "sent-late", "absent"]) {
+			expect(await index.readContextUpdatePayload("canonical", eventId, updateScope, usageTarget)).toBeUndefined();
+		}
+		await expect(
+			index.readContextUpdatePayload(
+				"canonical",
+				"usage-latest",
+				{ ...updateScope, leafId: "sibling" },
+				usageTarget,
+			),
+		).rejects.toThrow("assistant");
+		await expect(
+			index.readContextUpdatePayload("canonical", "usage-nonassistant", updateScope, {
+				kind: "assistant-usage",
+				targetId: "root",
+			}),
+		).rejects.toThrow("assistant");
+		expect(
+			(await index.readContextUpdatePayload("canonical", "usage-before-assistant", earlyUpdateScope, usageTarget))
+				?.text,
+		).toBe(earlyUsageJson);
+		expect(
+			await index.readContextUpdatePayload("canonical", "usage-latest", earlyUpdateScope, usageTarget),
+		).toBeUndefined();
+		expect(await index.readPayload("canonical", "usage-latest", updateScope)).toBeUndefined();
+		const updatePayload = await index.readContextUpdatePayload("canonical", "usage-latest", updateScope, usageTarget);
+		expect(updatePayload?.format).toBe("canonical-json-fragment");
+		expect(updatePayload?.byteOffset).toBe(0);
+		expect(updatePayload!.byteLength).toBeLessThanOrEqual(64 * 1024);
+		expect(Buffer.byteLength(updatePayload!.text)).toBe(updatePayload!.byteLength);
+		expect(updatePayload?.text).toBe(
+			Buffer.from(latestUsageJson).subarray(0, updatePayload!.byteLength).toString("utf8"),
+		);
+		expect(updatePayload?.nextCursor).not.toBeNull();
+		const updateContinuation = await index.readContextUpdatePayload(
+			"canonical",
+			"usage-latest",
+			updateScope,
+			usageTarget,
+			{
+				cursor: updatePayload!.nextCursor!,
+				maxBytes: 31,
+			},
+		);
+		expect(updateContinuation?.byteOffset).toBe(updatePayload!.byteLength);
+		expect(updateContinuation!.byteLength).toBeLessThanOrEqual(31);
+		expect(Buffer.byteLength(updateContinuation!.text)).toBe(updateContinuation!.byteLength);
+		expect(updateContinuation?.text).toBe(
+			Buffer.from(latestUsageJson)
+				.subarray(updatePayload!.byteLength, updatePayload!.byteLength + updateContinuation!.byteLength)
+				.toString("utf8"),
+		);
+		await expect(
+			index.readContextUpdatePayload("canonical", "sent-before-compaction", updateScope, sentTarget, {
+				cursor: updatePayload!.nextCursor!,
+			}),
+		).rejects.toThrow("cursor mismatch");
+		await index.apply("canonical", [], updateScope.through);
+		await expect(index.contextUpdates("canonical", updateScope, sentTarget)).rejects.toThrow("index is unavailable");
+		await expect(
+			index.readContextUpdatePayload("canonical", "usage-latest", updateScope, usageTarget),
+		).rejects.toThrow("index is unavailable");
+		await index.syncSource("canonical", updateSnapshot);
+		expect(await index.contextUpdates("canonical", updateScope, sentTarget)).toEqual({
+			refs: sentRefs,
+			order: "source",
+		});
+		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
+			refs: latestUsageRefs,
+			order: "source",
+		});
 		await index.close();
 		execFileSync(process.execPath, [
 			"--experimental-sqlite",
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=5;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; DROP TABLE context_node; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
 		expect(await index.get("canonical", "root")).toBeUndefined();
+		await expect(index.contextUpdates("canonical", updateScope, sentTarget)).rejects.toThrow("index is unavailable");
+		await expect(
+			index.readContextUpdatePayload("canonical", "usage-latest", updateScope, usageTarget),
+		).rejects.toThrow("index is unavailable");
 		await expect(index.readPayload("canonical", "root", taskScope)).rejects.toThrow("index is unavailable");
 		expect(await index.taskEvidence("canonical", taskScope, { taskKey })).toMatchObject({
 			entries: [],
@@ -325,7 +835,139 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"chosen",
 			"root-request",
 		]);
+		await index.syncSource("canonical", invisibleBoundarySnapshot);
+		expect((await index.contextManifest("canonical", invisibleBoundaryScope)).refs.map((ref) => ref.entryId)).toEqual(
+			visibleIds.slice(130),
+		);
+		await index.syncSource("canonical", updateSnapshot);
+		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
+			refs: latestUsageRefs,
+			order: "source",
+		});
+		expect(await index.contextUpdates("canonical", updateScope, sentTarget)).toEqual({
+			refs: sentRefs,
+			order: "source",
+		});
+		expect((await index.readContextUpdatePayload("canonical", "usage-latest", updateScope, usageTarget))?.text).toBe(
+			updatePayload?.text,
+		);
 		expect(readFileSync(journalPath)).toEqual(before);
+		const budgetOwner = await SessionJournalOwner.open({
+			journalPath: join(dir, "query-budget.jsonl"),
+			create: true,
+		});
+		try {
+			await budgetOwner.appendJson(
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "query-budget",
+					timestamp: "2026-01-01T00:00:00Z",
+					cwd: dir,
+				}),
+			);
+			await budgetOwner.appendJson(entry("root", null, "budget root"));
+			const budgetKey = "Budget/Case";
+			const budgetTask = await budgetOwner.appendJson(
+				JSON.stringify({
+					id: "budget-task",
+					parentId: "root",
+					type: "custom",
+					customType: "prime-context.task-snapshot",
+					data: {
+						schema: "prime-context.task-snapshot/v2",
+						taskKey: budgetKey,
+						explicitConstraints: Array.from({ length: 256 }, () => ({ id: "Budget", text: "candidate" })),
+					},
+				}),
+			);
+			const taskBudgetSnapshot = budgetOwner.getSnapshot();
+			const taskBudgetScope = { leafId: "root", through: taskBudgetSnapshot.nextSequence - 1 };
+			await index.syncSource("query-budget", taskBudgetSnapshot);
+			const taskSelections = [
+				{ taskKey: budgetKey },
+				{ itemId: "Budget" },
+				{ taskKey: budgetKey, itemId: "Budget" },
+			];
+			for (const options of taskSelections) {
+				expect(await index.taskEvidence("query-budget", taskBudgetScope, options)).toMatchObject({
+					entries: [],
+					coverage: "complete",
+					truncated: false,
+					nextAfter: null,
+				});
+			}
+			await budgetOwner.appendJson(task("budget-task-extra", "root", "Budget", "extra candidate", budgetKey));
+			const taskOverflowSnapshot = budgetOwner.getSnapshot();
+			const taskOverflowScope = { ...taskBudgetScope, through: taskOverflowSnapshot.nextSequence - 1 };
+			await index.syncSource("query-budget", taskOverflowSnapshot);
+			for (const options of taskSelections) {
+				await expect(index.taskEvidence("query-budget", taskOverflowScope, options)).rejects.toThrow(
+					"candidate budget",
+				);
+			}
+			expect(
+				await index.taskEvidence("query-budget", taskOverflowScope, { taskKey: budgetKey, itemId: "absent" }),
+			).toMatchObject({ entries: [], coverage: "complete" });
+			const taskTail = await index.taskEvidence(
+				"query-budget",
+				{ ...taskOverflowScope, leafId: "budget-task" },
+				{ taskKey: budgetKey, itemId: "Budget", limit: 1, after: { sequence: budgetTask.sequence, ordinal: 254 } },
+			);
+			expect(taskTail.entries).toHaveLength(1);
+			expect(taskTail.entries[0]).toMatchObject({ sequence: budgetTask.sequence, ordinal: 255 });
+			expect(taskTail).toMatchObject({ coverage: "partial", truncated: false, nextAfter: null });
+			const lossKey = "Budget/Loss";
+			const lossStart = budgetOwner.getSnapshot().nextSequence;
+			for (let n = 0; n < 257; n++) {
+				await budgetOwner.appendJson(
+					JSON.stringify({
+						id: `loss-${n}`,
+						parentId: "root",
+						type: "custom",
+						customType: "prime-context.task-snapshot",
+						data: {
+							schema: "prime-context.task-snapshot/v2",
+							taskKey: n % 2 === 0 ? lossKey : undefined,
+							explicitConstraints: [],
+						},
+					}),
+				);
+			}
+			const lossSnapshot = budgetOwner.getSnapshot();
+			await index.syncSource("query-budget", lossSnapshot);
+			// Empty NULL/key carriers count together, before item and cursor filtering.
+			const lossOptions = {
+				taskKey: lossKey,
+				itemId: "absent",
+				after: { sequence: lossSnapshot.nextSequence - 1, ordinal: 0 },
+			};
+			expect(
+				await index.taskEvidence("query-budget", { leafId: "root", through: lossStart + 255 }, lossOptions),
+			).toMatchObject({ entries: [], coverage: "complete" });
+			for (const [leafId, taskKey] of [
+				["loss-254", lossKey],
+				["loss-255", "unrelated-key"],
+			]) {
+				expect(
+					await index.taskEvidence(
+						"query-budget",
+						{ leafId, through: lossSnapshot.nextSequence - 1 },
+						{
+							...lossOptions,
+							taskKey,
+						},
+					),
+				).toMatchObject({ entries: [], coverage: "partial" });
+			}
+			for (const leafId of ["root", "loss-256"]) {
+				await expect(
+					index.taskEvidence("query-budget", { leafId, through: lossSnapshot.nextSequence - 1 }, lossOptions),
+				).rejects.toThrow("candidate budget");
+			}
+		} finally {
+			await budgetOwner.close();
+		}
 	} finally {
 		await owner.close();
 	}
@@ -339,6 +981,62 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 	await expect(index.page("session", 0, 1, 129)).rejects.toThrow("page limit");
 	await expect(index.apply("session", [], 2)).rejects.toThrow("unindexed source coverage");
 	expect((await index.page("session", 0, 2)).indexedThrough).toBe(1);
+	const applyBatches = async (sessionId: string, values: IndexedSourceEvent[]) => {
+		for (let offset = 0; offset < values.length; offset += 128) {
+			const batch = values.slice(offset, offset + 128);
+			await index.apply(sessionId, batch, batch[batch.length - 1].sequence);
+		}
+	};
+	const siblings = Array.from({ length: 257 }, (_, n) => source(`candidate-${n}`, n + 2, "candidate common"));
+	await applyBatches("bounded", [source("Item", 1, "root"), ...siblings]);
+	for (const select of [
+		(through: number, leafId = "Item") => index.page("bounded", 1, through, 1, { leafId }),
+		(through: number, leafId = "Item") => index.search("bounded", "candidate common", through, 1, { leafId }),
+	]) {
+		expect(await select(257)).toMatchObject({ events: [], coverage: "complete", truncated: false, nextAfter: null });
+		const last = await select(257, "candidate-255");
+		expect(last.events.map((event) => event.id)).toEqual(["candidate-255"]);
+		expect(last).toMatchObject({ coverage: "complete", truncated: false, nextAfter: null });
+		await expect(select(258)).rejects.toThrow("candidate budget");
+	}
+	expect(await index.page("bounded", 1, 258, 1)).toMatchObject({
+		events: [siblings[0]],
+		truncated: true,
+		nextAfter: 2,
+	});
+	expect(await index.search("bounded", "candidate common", 258, 1)).toMatchObject({
+		events: [siblings[256]],
+		truncated: true,
+		nextAfter: null,
+	});
+	// Bound the rarest postings before probing the other term.
+	const conjunction = [
+		source("Item", 1, "common"),
+		...siblings.map((event) => ({ ...event, text: "rare" })),
+		...Array.from({ length: 257 }, (_, n) => source(`common-${n}`, n + 259, "common")),
+	];
+	await applyBatches("conjunction", conjunction);
+	expect(await index.search("conjunction", "rare common", 257, 1)).toMatchObject({
+		events: [],
+		coverage: "complete",
+		truncated: false,
+	});
+	await expect(index.search("conjunction", "rare common", 258, 1)).rejects.toThrow("candidate budget");
+	// Selection and incomplete-text coverage each get their own candidate budget.
+	await applyBatches("sparse", [
+		source("Item", 1, "root"),
+		...siblings.map((event) => ({ ...event, textComplete: false })),
+	]);
+	expect(await index.search("sparse", "absent", 257, 1, { leafId: "Item" })).toMatchObject({
+		events: [],
+		coverage: "complete",
+	});
+	expect((await index.search("sparse", "candidate common", 257, 1, { leafId: "candidate-255" })).coverage).toBe(
+		"partial",
+	);
+	for (const leafId of ["Item", "candidate-256"]) {
+		await expect(index.search("sparse", "absent", 258, 1, { leafId })).rejects.toThrow("candidate budget");
+	}
 	const journalPath = join(dir, "edge.jsonl");
 	const owner = await SessionJournalOwner.open({ journalPath, create: true });
 	try {
@@ -390,9 +1088,21 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		const orphanScope = { leafId: "orphan", through: unresolved.nextSequence - 1 };
 		await index.syncSource("edge", unresolved);
 		expect((await index.get("edge", "orphan", orphanScope))?.parentId).toBe("late");
+		expect(await index.contextManifest("edge", orphanScope)).toMatchObject({
+			selection: "unresolved-lineage",
+			refs: [],
+			nextCursor: null,
+		});
 		expect(await index.get("edge", "absent", orphanScope)).toBeUndefined();
 		await expect(index.get("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
 		await expect(index.readPayload("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
+		await expect(index.page("edge", orphanScope.through, orphanScope.through, 1, orphanScope)).rejects.toThrow(
+			"missing parent",
+		);
+		await expect(index.search("edge", "absent", orphanScope.through, 1, orphanScope)).rejects.toThrow(
+			"missing parent",
+		);
+		await expect(index.taskEvidence("edge", orphanScope, { taskKey: "absent" })).rejects.toThrow("missing parent");
 		await owner.appendJson(JSON.stringify({ type: "message", id: "late", parentId: "kept" }));
 		await owner.appendJson(JSON.stringify({ type: "message", id: "cycle-a", parentId: "cycle-b" }));
 		await owner.appendJson(JSON.stringify({ type: "message", id: "cycle-b", parentId: "cycle-a" }));
@@ -404,7 +1114,86 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.get("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
 		await expect(index.get("edge", "kept", { ...linkedScope, leafId: "cycle-a" })).rejects.toThrow("cycle");
 		expect((await index.get("edge", "cycle-a", { ...linkedScope, leafId: "cycle-a" }))?.id).toBe("cycle-a");
+		const cycleScope = { ...linkedScope, leafId: "cycle-a" };
+		await expect(index.page("edge", linkedScope.through, linkedScope.through, 1, cycleScope)).rejects.toThrow(
+			"cycle",
+		);
+		await expect(index.search("edge", "absent", linkedScope.through, 1, cycleScope)).rejects.toThrow("cycle");
+		await expect(index.taskEvidence("edge", cycleScope, { taskKey: "absent" })).rejects.toThrow("cycle");
+		expect((await index.search("edge", "absent", linkedScope.through, 1, linkedScope)).events).toEqual([]);
 		expect(await index.get("edge", "orphan", { ...linkedScope, leafId: "kept" })).toBeUndefined();
+		expect((await index.contextManifest("edge", linkedScope)).selection).toBe("unresolved-lineage");
+		await owner.appendJson(
+			JSON.stringify({
+				id: "empty-boundary",
+				parentId: "kept",
+				type: "compaction",
+				summary: "empty",
+				firstKeptEntryId: "",
+			}),
+		);
+		const emptyBoundarySnapshot = owner.getSnapshot();
+		await index.syncSource("edge", emptyBoundarySnapshot);
+		expect(
+			(
+				await index.contextManifest("edge", {
+					leafId: "empty-boundary",
+					through: emptyBoundarySnapshot.nextSequence - 1,
+				})
+			).selection,
+		).toBe("invalid-first-kept");
+		const budgetTarget = { kind: "ipython-sent-message", toolCallId: "budget-call" } as const;
+		const budgetEntry = (number: number) =>
+			JSON.stringify({
+				id: `budget-${number}`,
+				parentId: "kept",
+				type: "custom",
+				customType: "ipython_sent_agent_message",
+				data: {
+					toolCallId: budgetTarget.toolCallId,
+					message: {
+						id: `sent-${number}`,
+						message: "candidate",
+						deliveryStatus: "queued",
+						target: { activeSessionId: "active", sessionId: "child" },
+					},
+				},
+			});
+		for (let number = 0; number < 128; number++) {
+			await owner.appendJson(budgetEntry(number));
+		}
+		const budgetSnapshot = owner.getSnapshot();
+		const budgetScope = { leafId: "budget-0", through: budgetSnapshot.nextSequence - 1 };
+		await index.syncSource("edge", budgetSnapshot);
+		const firstCandidate = (await index.get("edge", "budget-0"))!;
+		expect(await index.contextUpdates("edge", budgetScope, budgetTarget)).toEqual({
+			refs: [
+				{
+					entryId: firstCandidate.id,
+					sequence: firstCandidate.sequence,
+					kind: "custom",
+					locator: firstCandidate.locator,
+					revision: firstCandidate.revision,
+				},
+			],
+			order: "source",
+		});
+		expect(await index.contextUpdates("edge", { ...budgetScope, leafId: "kept" }, budgetTarget)).toEqual({
+			refs: [],
+			order: "source",
+		});
+		expect((await index.readContextUpdatePayload("edge", "budget-0", budgetScope, budgetTarget))?.text).toBe(
+			budgetEntry(0),
+		);
+		await owner.appendJson(budgetEntry(128));
+		const exhaustedSnapshot = owner.getSnapshot();
+		const exhaustedScope = { ...budgetScope, through: exhaustedSnapshot.nextSequence - 1 };
+		await index.syncSource("edge", exhaustedSnapshot);
+		await expect(index.contextUpdates("edge", exhaustedScope, budgetTarget)).rejects.toThrow("candidate budget");
+		await expect(index.contextUpdates("edge", { ...exhaustedScope, leafId: "kept" }, budgetTarget)).rejects.toThrow(
+			"candidate budget",
+		);
+		expect((await index.contextUpdates("edge", budgetScope, budgetTarget)).refs).toHaveLength(1);
 		await owner.close();
 		writeFileSync(`${journalPath}.replacement`, bytes);
 		renameSync(`${journalPath}.replacement`, journalPath);

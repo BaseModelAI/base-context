@@ -1,20 +1,26 @@
-name: Release Prime Agent
+name: Release Base Context
 
 on:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Production release tag to create or update (e.g., v0.0.1)'
+        description: 'Base Context version to package (e.g., v0.1.0)'
         required: true
         type: string
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        options: [stable, beta]
+        default: stable
+      publish:
+        description: 'Approve publication to the configured Base Context destination and GitHub releases'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
-  group: release-prime-agent
+  group: release-base-context
   cancel-in-progress: false
   queue: max
 
@@ -43,13 +49,11 @@ jobs:
       - name: Resolve release context
         id: context
         env:
-          BEFORE_SHA: ${{ github.event.before || '' }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          EVENT_NAME: ${{ github.event_name }}
           GITHUB_SHA_VALUE: ${{ github.sha }}
-          INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag || '' }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
           REF_NAME: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
@@ -59,49 +63,20 @@ jobs:
           publish_beta=false
           publish_production=false
 
-          if [ "$EVENT_NAME" = workflow_dispatch ]; then
-            if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
-              echo "Manual releases must run from the default branch (${DEFAULT_BRANCH}), not ${REF_NAME}." >&2
-              exit 1
-            fi
-            production_version="${INPUT_RELEASE_TAG#v}"
-            build_ref="$GITHUB_SHA_VALUE"
-            publish_production=true
-          elif [ "$REF_TYPE" = tag ]; then
-            production_version="${REF_NAME#v}"
-            build_ref="$REF_NAME"
-            publish_production=true
-          else
-            production_version=$(node -p "require('./package.json').version")
-            build_ref="$GITHUB_SHA_VALUE"
+          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "Manual releases must run from the default branch (${DEFAULT_BRANCH}), not ${REF_NAME}." >&2
+            exit 1
+          fi
+          production_version="${INPUT_RELEASE_TAG#v}"
+          build_ref="$GITHUB_SHA_VALUE"
+          if [ "$RELEASE_CHANNEL" = beta ]; then
             beta_version="${production_version}-beta.${RUN_NUMBER}.${RUN_ATTEMPT}.${GITHUB_SHA_VALUE::7}"
             publish_beta=true
-
-            previous_version=
-            if [ -n "$BEFORE_SHA" ] && ! printf '%s\n' "$BEFORE_SHA" | grep -Eq '^0+$' && git cat-file -e "${BEFORE_SHA}:package.json"; then
-              git show "${BEFORE_SHA}:package.json" > /tmp/previous-package.json
-              previous_version=$(node -p "require('/tmp/previous-package.json').version")
-            fi
-
-            if [ -z "$previous_version" ] || [ "$production_version" != "$previous_version" ]; then
-              if git show-ref --verify --quiet "refs/tags/v${production_version}"; then
-                tagged_commit=$(git rev-list -n 1 "v${production_version}")
-                if [ "$tagged_commit" != "$GITHUB_SHA_VALUE" ]; then
-                  echo "Production v${production_version} already points to ${tagged_commit}, not ${GITHUB_SHA_VALUE}." >&2
-                  exit 1
-                fi
-                echo "Retrying production v${production_version} for ${GITHUB_SHA_VALUE}."
-              fi
-              publish_production=true
-            elif ! git show-ref --verify --quiet "refs/tags/v${production_version}"; then
-              echo "Production v${production_version} has no tag; retrying the failed release."
-              publish_production=true
-            else
-              echo "Package version is unchanged at ${production_version}; only beta will advance."
-            fi
+          else
+            publish_production=true
           fi
 
-          if [ "$publish_production" = true ] && ! printf '%s\n' "$production_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s\n' "$production_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Production version must be plain semver like 0.0.1: ${production_version}" >&2
             exit 1
           fi
@@ -142,34 +117,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
-
       - name: Check
         run: npm run check
+
+      - name: Build
+        run: npm run build:source
 
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
         env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          BASE_CONTEXT_DOWNLOAD_BASE_URL: ${{ vars.BASE_CONTEXT_DOWNLOAD_BASE_URL }}
         run: |
-          test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
+          test -n "$BASE_CONTEXT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
             --channel stable \
             --version "$PRODUCTION_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --base-url "$BASE_CONTEXT_DOWNLOAD_BASE_URL" \
             --out-dir packages/coding-agent/release/production
 
       - name: Pack beta release
         if: env.PUBLISH_BETA == 'true'
         env:
-          PRIME_AGENT_DOWNLOAD_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          BASE_CONTEXT_DOWNLOAD_BASE_URL: ${{ vars.BASE_CONTEXT_DOWNLOAD_BASE_URL }}
         run: |
-          test -n "$PRIME_AGENT_DOWNLOAD_BASE_URL"
+          test -n "$BASE_CONTEXT_DOWNLOAD_BASE_URL"
           npm run release:pack -- \
             --channel beta \
             --version "$BETA_VERSION" \
-            --base-url "$PRIME_AGENT_DOWNLOAD_BASE_URL" \
+            --base-url "$BASE_CONTEXT_DOWNLOAD_BASE_URL" \
             --out-dir packages/coding-agent/release/beta
 
       - name: Smoke test installer with npm 12
@@ -191,27 +166,27 @@ jobs:
           mkdir -p "$SMOKE_ROOT/releases/v$SMOKE_VERSION"
           cp "$SMOKE_OUT/artifacts/"* "$SMOKE_ROOT/releases/v$SMOKE_VERSION/"
           sed \
-            -e "s|__PRIME_AGENT_DOWNLOAD_BASE_URL__|$SMOKE_BASE_URL|g" \
-            -e 's|__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__|stable|g' \
-            install.sh > /tmp/prime-agent-npm12-install.sh
+            -e "s|__BASE_CONTEXT_DOWNLOAD_BASE_URL__|$SMOKE_BASE_URL|g" \
+            -e 's|__BASE_CONTEXT_DEFAULT_RELEASE_CHANNEL__|stable|g' \
+            install.sh > /tmp/base-context-npm12-install.sh
 
-          python3 -m http.server 18188 --bind 127.0.0.1 --directory "$SMOKE_ROOT" >/tmp/prime-agent-npm12-http.log 2>&1 &
+          python3 -m http.server 18188 --bind 127.0.0.1 --directory "$SMOKE_ROOT" >/tmp/base-context-npm12-http.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$SMOKE_ROOT" "$SMOKE_OUT"' EXIT
 
           curl -fsS --retry 5 --retry-connrefused "$SMOKE_BASE_URL/releases/v$SMOKE_VERSION/SHA256SUMS"
           export NPM_CONFIG_PREFIX="$SMOKE_ROOT/npm-prefix"
           PATH="$NPM_CONFIG_PREFIX/bin:$PATH" \
-            PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \
-            PRIME_AGENT_INSTALLER_PLAIN=1 \
-            sh /tmp/prime-agent-npm12-install.sh "$SMOKE_VERSION"
-          test -x "$NPM_CONFIG_PREFIX/bin/prime-agent"
+            BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \
+            BASE_CONTEXT_INSTALLER_PLAIN=1 \
+            sh /tmp/base-context-npm12-install.sh "$SMOKE_VERSION"
+          test -x "$NPM_CONFIG_PREFIX/bin/base-context"
 
       - name: Upload production artifacts
         if: env.PUBLISH_PRODUCTION == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: prime-agent-production
+          name: base-context-production
           path: packages/coding-agent/release/production/artifacts/*
           if-no-files-found: error
 
@@ -219,27 +194,28 @@ jobs:
         if: env.PUBLISH_BETA == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: prime-agent-beta
+          name: base-context-beta
           path: packages/coding-agent/release/beta/artifacts/*
           if-no-files-found: error
 
   publish:
+    if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     needs: [release-context, build]
     permissions:
       contents: write
     env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.BASE_CONTEXT_R2_ACCESS_KEY_ID }}
       AWS_DEFAULT_REGION: auto
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.BASE_CONTEXT_R2_SECRET_ACCESS_KEY }}
       BETA_VERSION: ${{ needs.release-context.outputs.beta_version }}
       BUILD_REF: ${{ needs.release-context.outputs.build_ref }}
       PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
       PUBLISH_BETA: ${{ needs.release-context.outputs.publish_beta }}
       PUBLISH_PRODUCTION: ${{ needs.release-context.outputs.publish_production }}
-      R2_BUCKET: ${{ secrets.R2_BUCKET }}
-      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
-      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      R2_BUCKET: ${{ secrets.BASE_CONTEXT_R2_BUCKET }}
+      R2_ENDPOINT_URL: ${{ secrets.BASE_CONTEXT_R2_ENDPOINT_URL }}
+      R2_PUBLIC_BASE_URL: ${{ vars.BASE_CONTEXT_DOWNLOAD_BASE_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -251,14 +227,14 @@ jobs:
         if: env.PUBLISH_PRODUCTION == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: prime-agent-production
+          name: base-context-production
           path: release-artifacts/production
 
       - name: Download beta artifacts
         if: env.PUBLISH_BETA == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: prime-agent-beta
+          name: base-context-beta
           path: release-artifacts/beta
 
       - name: Prepare installer
@@ -273,10 +249,10 @@ jobs:
           if (!baseUrl) throw new Error("INSTALL_BASE_URL is required");
           const installer = fs.readFileSync("install.sh", "utf8");
           const renderInstaller = (channel) => installer
-            .replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", baseUrl)
-            .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
-          fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
-          fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
+            .replaceAll("__BASE_CONTEXT_DOWNLOAD_BASE_URL__", baseUrl)
+            .replaceAll("__BASE_CONTEXT_DEFAULT_RELEASE_CHANNEL__", channel);
+          fs.writeFileSync("/tmp/base-context-install.sh", renderInstaller("stable"));
+          fs.writeFileSync("/tmp/base-context-install-beta.sh", renderInstaller("beta"));
           NODE
 
       - name: Extract production release notes
@@ -292,7 +268,7 @@ jobs:
         run: |
           PRODUCTION_DIR=release-artifacts/production
           RELEASE_PREFIX="releases/v${PRODUCTION_VERSION}"
-          TARBALL="$PRODUCTION_DIR/prime-agent-${PRODUCTION_VERSION}.tgz"
+          TARBALL="$PRODUCTION_DIR/base-context-${PRODUCTION_VERSION}.tgz"
 
           test -f "$TARBALL"
           test -f "$PRODUCTION_DIR/SHA256SUMS"
@@ -323,12 +299,12 @@ jobs:
             --content-type text/plain \
             --cache-control no-cache
 
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
+          aws s3 cp /tmp/base-context-install.sh "s3://${R2_BUCKET}/install.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
             --cache-control no-cache
 
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+          aws s3 cp /tmp/base-context-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
             --cache-control no-cache
@@ -360,7 +336,7 @@ jobs:
         run: |
           BETA_DIR=release-artifacts/beta
           RELEASE_PREFIX="releases/v${BETA_VERSION}"
-          TARBALL="$BETA_DIR/prime-agent-${BETA_VERSION}.tgz"
+          TARBALL="$BETA_DIR/base-context-${BETA_VERSION}.tgz"
 
           test -f "$TARBALL"
           test -f "$BETA_DIR/SHA256SUMS"
@@ -404,12 +380,12 @@ jobs:
             --content-type text/plain \
             --cache-control no-cache
 
-          aws s3 cp /tmp/prime-agent-install.sh "s3://${R2_BUCKET}/install.sh" \
+          aws s3 cp /tmp/base-context-install.sh "s3://${R2_BUCKET}/install.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
             --cache-control no-cache
 
-          aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
+          aws s3 cp /tmp/base-context-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
             --cache-control no-cache

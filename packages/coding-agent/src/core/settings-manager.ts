@@ -142,6 +142,8 @@ export interface Settings {
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
+	/** Resource caps on complete canonical reconstruction, not model/token/heap limits. */
+	canonicalContext?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
@@ -823,6 +825,25 @@ export class SettingsManager {
 		this.globalSettings.transport = transport;
 		this.markModified("transport");
 		this.save();
+	}
+
+	/** Resolve resource caps without truncating or changing context selection. */
+	getCanonicalContextLimits(): { maxMessages: number; maxSourceBytes: number } {
+		const configured = this.settings.canonicalContext;
+		if (
+			configured !== undefined &&
+			(typeof configured !== "object" || configured === null || Array.isArray(configured))
+		)
+			throw new Error("canonicalContext must be an object");
+		const limits = {
+			maxMessages: configured?.maxMessages === undefined ? 16384 : configured.maxMessages,
+			maxSourceBytes: configured?.maxSourceBytes === undefined ? 64 * 1024 * 1024 : configured.maxSourceBytes,
+		};
+		for (const [field, value] of Object.entries(limits)) {
+			if (!Number.isSafeInteger(value) || value <= 0)
+				throw new Error(`canonicalContext.${field} must be a positive safe integer`);
+		}
+		return limits;
 	}
 
 	getCompactionEnabled(): boolean {

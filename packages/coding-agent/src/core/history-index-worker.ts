@@ -4,13 +4,29 @@ import { DatabaseSync } from "node:sqlite";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import { type CanonicalPayloadParts, readCanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import type {
+	ContextManifestCursor,
+	ContextManifestPage,
+	ContextRef,
+	ContextUpdateRef,
+	ContextUpdates,
+	ContextUpdateTarget,
 	HistoryIndexRequest,
+	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
 	IndexedTaskEvidence,
 	TaskEvidencePage,
 } from "./history-index.js";
-import { projectSessionSourceEvent, readSessionSource, type SourceIndexCursor } from "./history-source.js";
+import {
+	projectSessionSourceEvent,
+	readSessionSource,
+	type SessionSourceEntry,
+	type SourceIndexCursor,
+} from "./history-source.js";
 import { withJournalDescriptorSync } from "./journal-io.js";
+import {
+	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
+	parsePersistedIpythonSentAgentMessage,
+} from "./session-context-updates.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import { getTaskStateImportCoverage, projectTaskStateSource } from "./task-state.js";
 
@@ -27,7 +43,9 @@ if (
 		schemaVersion !== 3 &&
 		schemaVersion !== 4 &&
 		schemaVersion !== 5 &&
-		schemaVersion !== 6)
+		schemaVersion !== 6 &&
+		schemaVersion !== 7 &&
+		schemaVersion !== 8)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -61,6 +79,8 @@ const TASK_PAGE_BYTES = 1024 * 1024 - 1024;
 const MAX_JUMP_LEVELS = 53;
 const MAX_PARENT_LOOKUPS = 128;
 const DERIVED_TABLES = [
+	"context_update",
+	"context_node",
 	"source_ancestry",
 	"source_jump",
 	"source_term",
@@ -91,10 +111,24 @@ transaction(() => {
  CREATE TABLE IF NOT EXISTS source_jump (
   session TEXT NOT NULL, id TEXT NOT NULL, level INTEGER NOT NULL, ancestor_id TEXT NOT NULL,
   PRIMARY KEY(session,id,level)
- );`);
+ );
+ CREATE TABLE IF NOT EXISTS context_node (
+ session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,PRIMARY KEY(session,id)
+ );
+ CREATE TABLE IF NOT EXISTS context_update (
+  session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
+  PRIMARY KEY(session,update_kind,event_id)
+ );
+ CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 6) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
-	db.exec("PRAGMA user_version=6");
+	if (schemaVersion !== 8) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+	db.exec(`
+ CREATE INDEX IF NOT EXISTS source_incomplete ON source_event(session,sequence) WHERE text_complete=0;
+ CREATE INDEX IF NOT EXISTS task_sequence ON task_evidence(session,task_key,sequence,ordinal);
+ CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
+ CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
+ `);
+	db.exec("PRAGMA user_version=8");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -176,17 +210,83 @@ const sourceParent = db.prepare(
 const insertDepth = db.prepare("INSERT INTO source_ancestry VALUES (?,?,?)");
 const insertJump = db.prepare("INSERT INTO source_jump VALUES (?,?,?,?)");
 const ancestorJump = db.prepare("SELECT ancestor_id FROM source_jump WHERE session=? AND id=? AND level=?");
-function insertAncestry(sessionId: string, item: IndexedSourceEvent): void {
+function insertAncestry(sessionId: string, item: IndexedSourceEvent): number | null {
 	const parent = item.parentId === null ? undefined : sourceParent.get(sessionId, item.parentId, item.sequence);
 	const depth = item.parentId === null ? 0 : parent?.depth == null ? null : Number(parent.depth) + 1;
 	insertDepth.run(sessionId, item.id, depth);
-	if (depth === null || depth === 0) return;
+	if (depth === null || depth === 0) return depth;
 	let ancestorId = item.parentId!;
 	for (let level = 0; level < MAX_JUMP_LEVELS && 2 ** level <= depth; level++) {
 		if (level > 0) ancestorId = String(ancestorJump.get(sessionId, ancestorId, level - 1)!.ancestor_id);
 		insertJump.run(sessionId, item.id, level, ancestorId);
 	}
+	return depth;
 }
+type ContextState = {
+	visible_head: string | null;
+	previous_visible: string | null;
+	visible_count: number | null;
+	latest_compaction: string | null;
+	first_kept_id: string | null;
+};
+const contextParent = db.prepare("SELECT * FROM context_node WHERE session=? AND id=?");
+const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?)");
+function insertContext(
+	sessionId: string,
+	item: IndexedSourceEvent,
+	entry: SessionSourceEntry,
+	depth: number | null,
+): void {
+	const parent =
+		item.parentId === null ? undefined : (contextParent.get(sessionId, item.parentId) as ContextState | undefined);
+	if (depth !== null && item.parentId !== null && parent?.visible_count == null)
+		throw new Error("Context ancestry metadata is incomplete");
+	// Match buildSessionContext before provider filtering: !! bash/UI-only messages remain ordering barriers.
+	const visible =
+		entry.type === "message" ||
+		entry.type === "custom_message" ||
+		(entry.type === "branch_summary" && !!entry.summary);
+	const head = parent?.visible_head ?? null;
+	const count = depth === null ? null : Number(parent?.visible_count ?? 0) + (visible ? 1 : 0);
+	const compaction = entry.type === "compaction";
+	const firstKept =
+		compaction &&
+		typeof entry.firstKeptEntryId === "string" &&
+		entry.firstKeptEntryId.length > 0 &&
+		entry.firstKeptEntryId.length <= 512
+			? entry.firstKeptEntryId
+			: null;
+	insertContextNode.run(
+		sessionId,
+		item.id,
+		visible ? item.id : head,
+		visible ? head : null,
+		count,
+		compaction ? item.id : (parent?.latest_compaction ?? null),
+		firstKept,
+	);
+}
+// Only bounded relation keys and source refs live here; never usage or sent-message bodies.
+const MAX_CONTEXT_UPDATE_KEY = 8192;
+const MAX_CONTEXT_UPDATE_CANDIDATES = 128;
+const insertUpdate = db.prepare("INSERT INTO context_update VALUES (?,?,?,?,?)");
+function insertContextUpdates(sessionId: string, item: IndexedSourceEvent, entry: SessionSourceEntry): void {
+	if (entry.type === "message" && (entry.message as { role?: unknown } | null)?.role === "assistant") {
+		insertUpdate.run(sessionId, item.id, "assistant-target", item.id, item.sequence);
+	} else if (
+		entry.type === "child_usage_attributed" &&
+		typeof entry.targetId === "string" &&
+		entry.targetId.length <= 512
+	) {
+		// The source aggregate is intentionally not validated or replaced by an older value.
+		insertUpdate.run(sessionId, item.id, "assistant-usage", entry.targetId, item.sequence);
+	} else if (entry.type === "custom" && entry.customType === IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
+		const parsed = parsePersistedIpythonSentAgentMessage(entry.data);
+		if (parsed && parsed.toolCallId.length <= MAX_CONTEXT_UPDATE_KEY)
+			insertUpdate.run(sessionId, item.id, "ipython-sent-message", parsed.toolCallId, item.sequence);
+	}
+}
+
 function clearSession(sessionId: string): void {
 	for (const table of DERIVED_TABLES) db.prepare(`DELETE FROM ${table} WHERE session=?`).run(sessionId);
 }
@@ -218,7 +318,9 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			(entry, sequence, locator, revision, parts) => {
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
 				insertEvent(sessionId, item);
-				insertAncestry(sessionId, item);
+				const depth = insertAncestry(sessionId, item);
+				insertContext(sessionId, item, entry, depth);
+				insertContextUpdates(sessionId, item, entry);
 				db.prepare("INSERT INTO source_payload VALUES (?,?,?)").run(sessionId, sequence, JSON.stringify(parts));
 				const imported = getTaskStateImportCoverage({ sessionId, sequence, entry, locator, revision });
 				if (imported)
@@ -274,6 +376,8 @@ function apply(sessionId: string, events: IndexedSourceEvent[], committedThrough
 		db.prepare("DELETE FROM source_cursor WHERE session=?").run(sessionId);
 		db.prepare("DELETE FROM source_ancestry WHERE session=?").run(sessionId);
 		db.prepare("DELETE FROM source_jump WHERE session=?").run(sessionId);
+		db.prepare("DELETE FROM context_node WHERE session=?").run(sessionId);
+		db.prepare("DELETE FROM context_update WHERE session=?").run(sessionId);
 		const current = db.prepare("SELECT sequence FROM coverage WHERE session=?").get(sessionId)?.sequence ?? 0;
 		if (committedThrough < Number(current)) throw new Error("Index coverage cannot move backwards");
 		let expected = Number(current) + 1;
@@ -376,72 +480,128 @@ function pointEvent(
 		current = parent;
 	}
 }
-function branchQuery(sessionId: string, through: number, scope?: { leafId: string | null }) {
-	if (!scope) return { prefix: "", condition: "", values: [] as (string | number | null)[] };
-	validateBranchScope(sessionId, through, scope);
+type QueryCandidate = Pick<Row, "id" | "parent_id" | "kind" | "sequence">;
+const MAX_QUERY_CANDIDATES = 256;
+const queryCandidate = db.prepare("SELECT id,parent_id,kind,sequence FROM source_event WHERE session=? AND sequence=?");
+function sourceCandidate(sessionId: string, sequence: number): QueryCandidate {
+	const row = queryCandidate.get(sessionId, sequence) as QueryCandidate | undefined;
+	if (!row) throw new Error("History query source metadata is unavailable");
+	return row;
+}
+function branchFilter(sessionId: string, through: number, scope?: { leafId: string | null }) {
+	if (!scope) return { empty: false, matches: (_row: QueryCandidate) => true };
+	const leaf = validateBranchScope(sessionId, through, scope);
+	if (!leaf) return { empty: true, matches: (_row: QueryCandidate) => false };
+	if (leaf.depth !== null)
+		return {
+			empty: false,
+			matches: (row: QueryCandidate) => pointEvent(sessionId, row.id, { ...scope, through }) !== undefined,
+		};
+	// A short arbitrary SDK/apply branch can be proved, but an unfinished walk is never empty ancestry.
+	const ancestors = new Set<string>([leaf.id]);
+	let current = leaf;
+	let lookups = 0;
+	while (current.parent_id !== null) {
+		if (ancestors.has(current.parent_id)) throw new Error("History branch ancestry contains a cycle");
+		if (lookups++ === MAX_PARENT_LOOKUPS) throw new Error("History branch ancestry parent lookup budget exceeded");
+		const parent = branchNode.get(sessionId, current.parent_id, through) as BranchNode | undefined;
+		if (!parent) throw new Error("History branch ancestry has a missing parent in the indexed prefix");
+		ancestors.add(parent.id);
+		current = parent;
+	}
 	return {
-		prefix: `WITH RECURSIVE branch(id,parent_id) AS (
-   SELECT id,parent_id FROM source_event WHERE session=? AND id=? AND sequence<=?
-   UNION
-   SELECT p.id,p.parent_id FROM source_event p JOIN branch b ON p.id=b.parent_id WHERE p.session=? AND p.sequence<=?
-  ) `,
-		condition:
-			" AND (e.id IN (SELECT id FROM branch) OR (e.kind='request' AND e.parent_id IN (SELECT id FROM branch)))",
-		values: [sessionId, scope.leafId, through, sessionId, through],
+		empty: false,
+		matches: (row: QueryCandidate) =>
+			ancestors.has(row.id) || (row.kind === "request" && row.parent_id !== null && ancestors.has(row.parent_id)),
 	};
+}
+function selectCandidates<T>(
+	rows: T[],
+	matches: (row: T) => boolean,
+	limit: number,
+	label: string,
+	budget = { remaining: MAX_QUERY_CANDIDATES },
+): T[] {
+	const selected: T[] = [];
+	for (const row of rows) {
+		if (budget.remaining === 0) throw new Error(`${label} candidate budget exceeded`);
+		budget.remaining--;
+		if (matches(row)) selected.push(row);
+		if (selected.length === limit + 1) break;
+	}
+	return selected;
 }
 function query(request: Extract<HistoryIndexRequest, { action: "page" | "search" }>) {
 	if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 128)
 		throw new Error("Index page limit must be between1 and128");
+	if (
+		!Number.isSafeInteger(request.through) ||
+		request.through < 0 ||
+		(request.action === "page" && (!Number.isSafeInteger(request.after) || request.after < 0))
+	)
+		throw new Error("Invalid history query source range");
 	const indexedThrough = Number(
 		db.prepare("SELECT sequence FROM coverage WHERE session=?").get(request.sessionId)?.sequence ?? 0,
 	);
-	const branch = branchQuery(request.sessionId, request.through, request.scope);
-	let rows: Row[];
+	const branch = branchFilter(request.sessionId, request.through, request.scope);
+	let rows: QueryCandidate[];
 	if (request.action === "page") {
-		rows = db
-			.prepare(
-				`${branch.prefix}SELECT e.* FROM source_event e WHERE e.session=? AND e.sequence>? AND e.sequence<=?${branch.condition} ORDER BY e.sequence LIMIT ?`,
-			)
-			.all(...branch.values, request.sessionId, request.after, request.through, request.limit + 1) as Row[];
+		const candidates = branch.empty
+			? []
+			: (db
+					.prepare(
+						"SELECT id,parent_id,kind,sequence FROM source_event INDEXED BY sqlite_autoindex_source_event_2 WHERE session=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?",
+					)
+					.all(request.sessionId, request.after, request.through, MAX_QUERY_CANDIDATES + 1) as QueryCandidate[]);
+		rows = selectCandidates(candidates, branch.matches, request.limit, "History page selection");
 	} else {
 		if (Buffer.byteLength(request.query) > 8192) throw new Error("Index query limit exceeded");
 		const queryTerms = terms(request.query);
 		if (queryTerms.length > 32) throw new Error("Index query term limit exceeded");
-		queryTerms.sort((left, right) => {
-			const count = (term: string) =>
-				Number(
-					db.prepare("SELECT count FROM term_count WHERE session=? AND term=?").get(request.sessionId, term)
-						?.count ?? 0,
+		const queryTermCount = db.prepare("SELECT count FROM term_count WHERE session=? AND term=?");
+		const counted = queryTerms.map((term) => ({
+			term,
+			count: Number(queryTermCount.get(request.sessionId, term)?.count ?? 0),
+		}));
+		counted.sort((left, right) => left.count - right.count);
+		const [first, ...rest] = counted.map(({ term }) => term);
+		const postings =
+			first && !branch.empty
+				? db
+						.prepare(
+							"SELECT sequence FROM source_term INDEXED BY sqlite_autoindex_source_term_1 WHERE session=? AND term=? AND sequence<=? ORDER BY sequence DESC LIMIT ?",
+						)
+						.all(request.sessionId, first, request.through, MAX_QUERY_CANDIDATES + 1)
+				: [];
+		const requiredTerm = db.prepare("SELECT 1 FROM source_term WHERE session=? AND term=? AND sequence=?");
+		const selected = selectCandidates(
+			postings,
+			(posting) => {
+				const sequence = Number(posting.sequence);
+				return (
+					rest.every((term) => !!requiredTerm.get(request.sessionId, term, sequence)) &&
+					branch.matches(sourceCandidate(request.sessionId, sequence))
 				);
-			return count(left) - count(right);
-		});
-		const [first, ...rest] = queryTerms;
-		const required = rest
-			.map(
-				() =>
-					"AND EXISTS (SELECT 1 FROM source_term required WHERE required.session=t.session AND required.sequence=t.sequence AND required.term=?)",
-			)
-			.join(" ");
-		rows = first
-			? (db
-					.prepare(
-						`${branch.prefix}SELECT e.* FROM source_term t JOIN source_event e ON e.session=t.session AND e.sequence=t.sequence WHERE t.session=? AND t.term=? AND t.sequence<=? ${required}${branch.condition} ORDER BY t.sequence DESC LIMIT ?`,
-					)
-					.all(...branch.values, request.sessionId, first, request.through, ...rest, request.limit + 1) as Row[])
-			: [];
+			},
+			request.limit,
+			"History search selection",
+		);
+		rows = selected.map((posting) => sourceCandidate(request.sessionId, Number(posting.sequence)));
 	}
-	const incompleteText =
-		request.action === "search" &&
-		!!db
+	let incompleteText = false;
+	if (request.action === "search" && !branch.empty) {
+		const candidates = db
 			.prepare(
-				`${branch.prefix}SELECT 1 FROM source_event e WHERE e.session=? AND e.text_complete=0 AND e.sequence<=?${branch.condition} LIMIT 1`,
+				"SELECT id,parent_id,kind,sequence FROM source_event INDEXED BY source_incomplete WHERE session=? AND text_complete=0 AND sequence<=? ORDER BY sequence LIMIT ?",
 			)
-			.get(...branch.values, request.sessionId, request.through);
+			.all(request.sessionId, request.through, MAX_QUERY_CANDIDATES + 1) as QueryCandidate[];
+		incompleteText = selectCandidates(candidates, branch.matches, 0, "History search coverage").length > 0;
+	}
 	const events: IndexedSourceEvent[] = [];
 	let bytes = 0;
+	const content = db.prepare("SELECT * FROM source_event WHERE session=? AND sequence=?");
 	for (const row of rows.slice(0, request.limit)) {
-		const indexed = event(row);
+		const indexed = event(content.get(request.sessionId, row.sequence) as Row);
 		bytes += Buffer.byteLength(JSON.stringify(indexed));
 		if (bytes > 1024 * 1024) break;
 		events.push(indexed);
@@ -482,33 +642,64 @@ function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evid
 		nextAfter: null,
 	};
 	if (!cursor) return page;
-	const branch = branchQuery(sessionId, scope.through, scope);
-	const task = options.taskKey === undefined ? "" : " AND t.task_key=?";
-	const taskValues = options.taskKey === undefined ? [] : [options.taskKey];
-	const lossTask = options.taskKey === undefined ? "" : " AND (t.task_key=? OR t.task_key IS NULL)";
-	const importedLoss = !!db
-		.prepare(
-			`${branch.prefix}SELECT 1 FROM task_import_loss t JOIN source_event e ON e.session=t.session AND e.sequence=t.sequence WHERE t.session=? AND t.sequence<=?${branch.condition}${lossTask} LIMIT 1`,
-		)
-		.get(...branch.values, sessionId, scope.through, ...taskValues);
+	const branch = branchFilter(sessionId, scope.through, scope);
+	const coverageBudget = { remaining: MAX_QUERY_CANDIDATES };
+	const lossKeys = options.taskKey === undefined ? [undefined] : [null, options.taskKey];
+	let importedLoss = false;
+	if (!branch.empty)
+		for (const key of lossKeys) {
+			const keyed = key !== undefined;
+			const loss = db
+				.prepare(
+					`SELECT sequence FROM task_import_loss ${keyed ? "INDEXED BY task_loss_key" : "INDEXED BY sqlite_autoindex_task_import_loss_1"} WHERE session=? AND sequence<=?${keyed ? " AND task_key IS ?" : ""} ORDER BY sequence LIMIT ?`,
+				)
+				.all(sessionId, scope.through, ...(key === undefined ? [] : [key]), coverageBudget.remaining + 1);
+			if (
+				selectCandidates(
+					loss,
+					(row) => branch.matches(sourceCandidate(sessionId, Number(row.sequence))),
+					0,
+					"Task evidence coverage",
+					coverageBudget,
+				).length
+			) {
+				importedLoss = true;
+				break;
+			}
+		}
 	page.coverage = page.indexedThrough >= scope.through && !importedLoss ? "complete" : "partial";
-	const item = options.itemId === undefined ? "" : " AND t.item_id=?";
-	// Fetch bounded keys first, not up to128 potentially large projection bodies.
-	const rows = db
-		.prepare(
-			`${branch.prefix}SELECT t.sequence,t.ordinal FROM task_evidence t JOIN source_event e ON e.session=t.session AND e.sequence=t.sequence WHERE t.session=? AND t.sequence<=?${branch.condition}${task}${item} AND (t.sequence>? OR (t.sequence=? AND t.ordinal>?)) ORDER BY t.sequence,t.ordinal LIMIT ?`,
-		)
-		.all(
-			...branch.values,
-			sessionId,
-			scope.through,
-			...taskValues,
-			...(options.itemId === undefined ? [] : [options.itemId]),
-			after.sequence,
-			after.sequence,
-			after.ordinal,
-			limit + 1,
-		);
+	const task = options.taskKey === undefined ? "" : " AND task_key=?";
+	const item = options.itemId === undefined ? "" : " AND item_id=?";
+	const indexName =
+		options.taskKey !== undefined
+			? options.itemId !== undefined
+				? "task_item"
+				: "task_sequence"
+			: options.itemId !== undefined
+				? "task_item_sequence"
+				: "sqlite_autoindex_task_evidence_1";
+	// Each filter shape has an ordered index seek; SQL LIMIT is before branch filtering.
+	const candidates = branch.empty
+		? []
+		: db
+				.prepare(
+					`SELECT sequence,ordinal FROM task_evidence INDEXED BY ${indexName} WHERE session=?${task}${item} AND (sequence,ordinal)>(?,?) AND sequence<=? ORDER BY sequence,ordinal LIMIT ?`,
+				)
+				.all(
+					sessionId,
+					...(options.taskKey === undefined ? [] : [options.taskKey]),
+					...(options.itemId === undefined ? [] : [options.itemId]),
+					after.sequence,
+					after.ordinal,
+					scope.through,
+					MAX_QUERY_CANDIDATES + 1,
+				);
+	const rows = selectCandidates(
+		candidates,
+		(row) => branch.matches(sourceCandidate(sessionId, Number(row.sequence))),
+		limit,
+		"Task evidence selection",
+	);
 	const content = db.prepare(
 		"SELECT source_ref,projection FROM task_evidence WHERE session=? AND sequence=? AND ordinal=?",
 	);
@@ -567,6 +758,249 @@ function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evid
 	return page;
 }
 
+type ContextNode = BranchNode & ContextState & Pick<Row, "sequence" | "kind" | "locator" | "revision">;
+const manifestNode =
+	db.prepare(`SELECT e.id,e.parent_id,e.sequence,e.kind,e.locator,e.revision,a.depth,c.visible_head,c.previous_visible,c.visible_count,c.latest_compaction,c.first_kept_id
+ FROM source_event e JOIN context_node c ON c.session=e.session AND c.id=e.id
+ LEFT JOIN source_ancestry a ON a.session=e.session AND a.id=e.id
+ WHERE e.session=? AND e.id=? AND e.sequence<=?`);
+const visibleJump = db.prepare(`SELECT j.ancestor_id,c.visible_count FROM source_jump j
+ JOIN context_node c ON c.session=j.session AND c.id=j.ancestor_id
+ WHERE j.session=? AND j.id=? AND j.level=?`);
+function contextRef(node: ContextNode): ContextRef {
+	return {
+		entryId: node.id,
+		sequence: node.sequence,
+		kind: node.kind as ContextRef["kind"],
+		locator: JSON.parse(node.locator) as ContextRef["locator"],
+		revision: node.revision,
+	};
+}
+function contextManifest(request: Extract<HistoryIndexRequest, { action: "context_manifest" }>): ContextManifestPage {
+	const { sessionId, scope, options } = request;
+	const limit = options.limit ?? 64;
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128)
+		throw new Error("Context manifest limit must be between1 and128");
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Context manifest index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < scope.through)
+		throw new Error("Context manifest index has not reached the requested source prefix");
+	validateBranchScope(sessionId, scope.through, scope);
+	const revision =
+		scope.through === 0
+			? saved.header_checksum
+			: db.prepare("SELECT revision FROM source_event WHERE session=? AND sequence=?").get(sessionId, scope.through)
+					?.revision;
+	if (typeof revision !== "string") throw new Error("Context manifest source prefix is unavailable");
+	const anchor: Omit<ContextManifestCursor, "nextOrdinal"> = {
+		version: 1,
+		sessionId,
+		journalPath: snapshot.journalPath,
+		dev: snapshot.dev,
+		ino: snapshot.ino,
+		leafId: scope.leafId,
+		through: scope.through,
+		throughRevision: revision,
+	};
+	const cursor = options.cursor;
+	if (
+		cursor &&
+		(cursor.version !== 1 ||
+			cursor.sessionId !== sessionId ||
+			cursor.journalPath !== snapshot.journalPath ||
+			cursor.dev !== snapshot.dev ||
+			cursor.ino !== snapshot.ino ||
+			cursor.leafId !== scope.leafId ||
+			cursor.through !== scope.through ||
+			cursor.throughRevision !== revision)
+	)
+		throw new Error("Context manifest cursor mismatch");
+	if (cursor && (!Number.isSafeInteger(cursor.nextOrdinal) || cursor.nextOrdinal < 1))
+		throw new Error("Invalid context manifest cursor ordinal");
+	const result: Extract<ContextManifestPage, { selection: "known" }> = {
+		selection: "known",
+		summaryRef: null,
+		activeBase: 0,
+		retainedMessageCount: 0,
+		activeMessageCount: 0,
+		refs: [],
+		order: "source",
+		nextCursor: null,
+	};
+	const node = (id: string): ContextNode => {
+		const value = manifestNode.get(sessionId, id, scope.through) as ContextNode | undefined;
+		if (!value) throw new Error("Context manifest metadata is unavailable; rebuild the derived index");
+		return value;
+	};
+	const qualified = (selection: "unresolved-lineage" | "invalid-first-kept"): ContextManifestPage => ({
+		selection,
+		summaryRef: result.summaryRef,
+		refs: [],
+		order: "source",
+		nextCursor: null,
+	});
+	const leaf = scope.leafId === null ? undefined : node(scope.leafId);
+	if (leaf && (leaf.depth === null || leaf.visible_count === null)) return qualified("unresolved-lineage");
+	const total = leaf?.visible_count ?? 0;
+	if (leaf?.latest_compaction) {
+		const compaction = node(leaf.latest_compaction);
+		if (compaction.kind !== "compaction" || compaction.depth === null || compaction.visible_count === null)
+			throw new Error("Context manifest compaction metadata is incomplete");
+		result.summaryRef = contextRef(compaction);
+		if (!compaction.first_kept_id) return qualified("invalid-first-kept");
+		const first = manifestNode.get(sessionId, compaction.first_kept_id, scope.through) as ContextNode | undefined;
+		// Exact parent-chain membership, never the broader evidence/request-parent scope rule.
+		if (
+			!first ||
+			first.depth === null ||
+			first.visible_count === null ||
+			first.depth >= compaction.depth ||
+			!resolvedAncestor(sessionId, compaction, first)
+		)
+			return qualified("invalid-first-kept");
+		result.activeBase = first.visible_count - (first.visible_head === first.id ? 1 : 0);
+		result.retainedMessageCount = compaction.visible_count - result.activeBase;
+	}
+	result.activeMessageCount = total - result.activeBase;
+	const start = cursor?.nextOrdinal ?? result.activeBase + 1;
+	if (start < result.activeBase + 1 || start > total + 1)
+		throw new Error("Context manifest cursor ordinal is outside active selection");
+	if (start === total + 1) return result;
+	const end = Math.min(start + limit - 1, total);
+	let seekId = leaf!.id;
+	// Locate page END using physical ancestry jumps and monotonic visible counts, then reverse only this bounded page.
+	for (let level = MAX_JUMP_LEVELS - 1; level >= 0; level--) {
+		const jump = visibleJump.get(sessionId, seekId, level);
+		if (jump && jump.visible_count !== null && Number(jump.visible_count) >= end) seekId = String(jump.ancestor_id);
+	}
+	const seek = node(seekId);
+	if (seek.visible_head === null) throw new Error("Context manifest visible metadata is incomplete");
+	let current = seek.visible_head === seek.id ? seek : node(seek.visible_head);
+	const refs: (ContextRef & { ordinal: number })[] = [];
+	for (let ordinal = end; ordinal >= start; ordinal--) {
+		if (current.visible_count !== ordinal || current.visible_head !== current.id)
+			throw new Error("Context manifest visible ordinal metadata is incomplete");
+		refs.push({ ...contextRef(current), ordinal });
+		if (ordinal > start) {
+			if (current.previous_visible === null) throw new Error("Context manifest previous visible ref is missing");
+			current = node(current.previous_visible);
+		}
+	}
+	refs.reverse();
+	// Include the largest continuation envelope in the byte count; never advance over an unreturned ref.
+	const pageBytes = 1024 * 1024 - 1024;
+	let bytes = Buffer.byteLength(
+		JSON.stringify({ ...result, nextCursor: { ...anchor, nextOrdinal: Number.MAX_SAFE_INTEGER } }),
+	);
+	for (const ref of refs) {
+		const addition = Buffer.byteLength(JSON.stringify(ref)) + (result.refs.length ? 1 : 0);
+		if (bytes + addition > pageBytes) break;
+		result.refs.push(ref);
+		bytes += addition;
+	}
+	if (result.refs.length === 0) throw new Error("Context manifest metadata exceeds the page byte limit");
+	const next = result.refs[result.refs.length - 1].ordinal + 1;
+	result.nextCursor = next <= total ? { ...anchor, nextOrdinal: next } : null;
+	return result;
+}
+
+type SourceRefRow = Pick<Row, "id" | "sequence" | "kind" | "locator" | "revision">;
+type ContextUpdateScope = { leafId: string | null; through: number };
+const latestUsageUpdate = db.prepare(`SELECT e.id,e.sequence,e.kind,e.locator,e.revision FROM context_update u
+ JOIN source_event e ON e.session=u.session AND e.id=u.event_id
+ WHERE u.session=? AND u.update_kind='assistant-usage' AND u.target_key=? AND u.sequence<=?
+ ORDER BY u.sequence DESC LIMIT 1`);
+const ipythonUpdates = db.prepare(`SELECT e.id,e.sequence,e.kind,e.locator,e.revision FROM context_update u
+ JOIN source_event e ON e.session=u.session AND e.id=u.event_id
+ WHERE u.session=? AND u.update_kind='ipython-sent-message' AND u.target_key=? AND u.sequence<=?
+ ORDER BY u.sequence LIMIT ?`);
+function contextUpdateSource(sessionId: string, scope: ContextUpdateScope) {
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Context update index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < scope.through)
+		throw new Error("Context update index has not reached the requested source prefix");
+	const leaf = validateBranchScope(sessionId, scope.through, scope);
+	if (leaf?.depth === null) throw new Error("Context update branch lineage is unresolved");
+	if (
+		scope.through > 0 &&
+		!db.prepare("SELECT 1 FROM source_event WHERE session=? AND sequence=?").get(sessionId, scope.through)
+	)
+		throw new Error("Context update source prefix is unavailable");
+	return snapshot;
+}
+function contextUpdateKey(sessionId: string, scope: ContextUpdateScope, target: ContextUpdateTarget): string {
+	if (target.kind !== "assistant-usage" && target.kind !== "ipython-sent-message")
+		throw new Error("Invalid context update target");
+	const key = target.kind === "assistant-usage" ? target.targetId : target.toolCallId;
+	if (typeof key !== "string" || key.length > (target.kind === "assistant-usage" ? 512 : MAX_CONTEXT_UPDATE_KEY))
+		throw new Error("Context update target key limit exceeded");
+	if (target.kind === "assistant-usage") {
+		const assistant = db
+			.prepare(
+				"SELECT 1 FROM context_update WHERE session=? AND update_kind='assistant-target' AND target_key=? AND sequence<=?",
+			)
+			.get(sessionId, key, scope.through);
+		if (!assistant || !pointEvent(sessionId, key, scope))
+			throw new Error("Context update target is not an assistant message on the captured branch");
+	}
+	return key;
+}
+function contextUpdateRef(row: SourceRefRow): ContextUpdateRef {
+	return {
+		entryId: row.id,
+		sequence: row.sequence,
+		kind: row.kind as ContextUpdateRef["kind"],
+		locator: JSON.parse(row.locator) as ContextUpdateRef["locator"],
+		revision: row.revision,
+	};
+}
+function contextUpdates(request: Extract<HistoryIndexRequest, { action: "context_updates" }>): ContextUpdates {
+	const { sessionId, scope, target } = request;
+	contextUpdateSource(sessionId, scope);
+	const key = contextUpdateKey(sessionId, scope, target);
+	let rows: SourceRefRow[];
+	if (target.kind === "assistant-usage") {
+		const latest = latestUsageUpdate.get(sessionId, key, scope.through) as SourceRefRow | undefined;
+		rows = latest ? [latest] : [];
+	} else {
+		rows =
+			scope.leafId === null
+				? []
+				: (ipythonUpdates.all(sessionId, key, scope.through, MAX_CONTEXT_UPDATE_CANDIDATES + 1) as SourceRefRow[]);
+		if (rows.length > MAX_CONTEXT_UPDATE_CANDIDATES) throw new Error("Context update candidate budget exceeded");
+		rows = rows.filter((row) => pointEvent(sessionId, row.id, scope) !== undefined);
+	}
+	const result: ContextUpdates = { refs: rows.map(contextUpdateRef), order: "source" };
+	try {
+		stringifyBoundedJson(result, TASK_PAGE_BYTES);
+	} catch (error) {
+		if (!(error instanceof Error) || error.message !== "JSON byte limit exceeded") throw error;
+		throw new Error("Context update refs exceed the byte budget");
+	}
+	return result;
+}
+function readContextUpdatePayload(request: Extract<HistoryIndexRequest, { action: "read_context_update_payload" }>) {
+	const { sessionId, eventId, scope, target, options } = request;
+	const snapshot = contextUpdateSource(sessionId, scope);
+	const key = contextUpdateKey(sessionId, scope, target);
+	let row: SourceRefRow | undefined;
+	if (target.kind === "assistant-usage") {
+		row = latestUsageUpdate.get(sessionId, key, scope.through) as SourceRefRow | undefined;
+		if (row?.id !== eventId) return undefined;
+	} else {
+		const related = db
+			.prepare(
+				"SELECT 1 FROM context_update WHERE session=? AND update_kind='ipython-sent-message' AND event_id=? AND target_key=? AND sequence<=?",
+			)
+			.get(sessionId, eventId, key, scope.through);
+		if (!related) return undefined;
+		row = pointEvent(sessionId, eventId, scope);
+	}
+	return row ? readPayloadRow(sessionId, row, snapshot, options) : undefined;
+}
+
 function readPayload(request: Extract<HistoryIndexRequest, { action: "read_payload" }>) {
 	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(request.sessionId);
 	if (!saved) throw new Error("Canonical payload index is unavailable; synchronize the source first");
@@ -575,9 +1009,17 @@ function readPayload(request: Extract<HistoryIndexRequest, { action: "read_paylo
 		throw new Error("Canonical payload index has not reached the requested source prefix");
 	const row = pointEvent(request.sessionId, request.eventId, request.scope);
 	if (!row) return undefined;
+	return readPayloadRow(request.sessionId, row, snapshot, request.options);
+}
+function readPayloadRow(
+	sessionId: string,
+	row: SourceRefRow,
+	snapshot: SessionJournalState,
+	options: HistoryPayloadReadOptions,
+) {
 	const savedParts = db
 		.prepare("SELECT parts FROM source_payload WHERE session=? AND sequence=?")
-		.get(request.sessionId, row.sequence);
+		.get(sessionId, row.sequence);
 	if (!savedParts) throw new Error("Canonical payload parts are unavailable; rebuild the derived index");
 	const parts = JSON.parse(String(savedParts.parts)) as CanonicalPayloadParts;
 	const locator = JSON.parse(row.locator) as IndexedSourceEvent["locator"];
@@ -597,7 +1039,7 @@ function readPayload(request: Extract<HistoryIndexRequest, { action: "read_paylo
 	};
 	return withJournalDescriptorSync(openSync(snapshot.journalPath, "r"), (fd) => {
 		identity(fstatSync(fd));
-		const fragment = readCanonicalPayloadFragment(fd, parts, request.options.cursor, request.options.maxBytes);
+		const fragment = readCanonicalPayloadFragment(fd, parts, options.cursor, options.maxBytes);
 		identity(statSync(snapshot.journalPath));
 		return fragment;
 	});
@@ -611,6 +1053,12 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 			return taskEvidence(request);
 		case "read_payload":
 			return readPayload(request);
+		case "context_manifest":
+			return contextManifest(request);
+		case "context_updates":
+			return contextUpdates(request);
+		case "read_context_update_payload":
+			return readContextUpdatePayload(request);
 		case "apply":
 			apply(request.sessionId, request.events, request.committedThrough);
 			return;
