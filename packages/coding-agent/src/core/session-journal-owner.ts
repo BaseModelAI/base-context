@@ -1,7 +1,7 @@
 import { type ChildProcess, fork } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
@@ -25,6 +25,10 @@ export interface SessionJournalState {
 	journalPath: string;
 	nextSequence: number;
 	format: "legacy" | "framed";
+	byteLength: number;
+	checksum: string | null;
+	dev: number;
+	ino: number;
 }
 
 export type SessionJournalRequest =
@@ -96,7 +100,7 @@ export class SessionJournalOwner {
 	private readonly child: ChildProcess;
 	private readonly ready: Promise<void>;
 	private readonly exited: Promise<void>;
-	private snapshot: SessionJournalState;
+	private snapshot!: SessionJournalState;
 	private accepting = true;
 	private failure: Error | undefined;
 	private closePromise: Promise<void> | undefined;
@@ -165,8 +169,6 @@ export class SessionJournalOwner {
 	}
 
 	private constructor(options: SessionJournalOwnerOptions) {
-		const journalPath = assertProductStatePath(options.journalPath);
-		this.snapshot = { journalPath: resolve(journalPath), nextSequence: 0, format: "framed" };
 		this.child = forkWorker(options);
 		let diagnostics = "";
 		this.child.stderr?.on("data", (data: Buffer) => {
@@ -232,6 +234,11 @@ export class SessionJournalOwner {
 	}
 	get format(): "legacy" | "framed" {
 		return this.snapshot.format;
+	}
+
+	/** A copy of the latest actor ready state or completed acknowledgement. */
+	getSnapshot(): SessionJournalState {
+		return { ...this.snapshot };
 	}
 
 	private request(message: SessionJournalRequest): Promise<ResponseResult> {

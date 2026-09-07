@@ -186,6 +186,29 @@ describe("AgentSession goals", () => {
 			lastReason: "Goal achieved",
 		});
 		expect(harness.getPendingResponseCount()).toBe(0);
+		const goalEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE);
+		const operations = goalEntries
+			.map((entry) => entry.nativeOrigin)
+			.filter((origin) => origin?.kind === "goal_operation");
+		expect(operations.map((origin) => origin.operation)).toEqual(["create", "complete"]);
+		expect(operations[0]).toMatchObject({
+			version: 1,
+			kind: "goal_operation",
+			operation: "create",
+			actor: "interactive",
+			actionId: expect.any(String),
+			submittedText: "/goal finish the task",
+		});
+		expect(operations[1]).toMatchObject({
+			version: 1,
+			kind: "goal_operation",
+			operation: "complete",
+			actor: "runtime",
+			previousGoalId: harness.session.goalState.goalId,
+		});
+		expect(goalEntries.some((entry) => entry.nativeOrigin === undefined)).toBe(true);
 	});
 
 	it("counts tokens from the goal completion turn", async () => {
@@ -431,6 +454,15 @@ describe("AgentSession goals", () => {
 			objective: "write a benchmark note",
 			continuationsUsed: 1,
 		});
+		const operations = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE)
+			.map((entry) => entry.nativeOrigin)
+			.filter((origin) => origin?.kind === "goal_operation");
+		expect(operations.map((origin) => origin.operation)).toEqual(["create", "complete"]);
+		expect(operations.every((origin) => origin.actor === "runtime")).toBe(true);
+		expect(operations[0]?.submittedText).toBe("write a benchmark note");
+		expect(operations[1]?.previousGoalId).toBe(harness.session.goalState.goalId);
 	});
 
 	it("reloads goal state after tree navigation", async () => {

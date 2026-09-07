@@ -22,8 +22,8 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W0 controls, source audit, baseline build | In progress; S retrieved; npm ci, native check and all four package compilations passed |
 | W1 product/state/runtime/package isolation | Linux native isolation gate passed: own packages/state, same-home coexistence, upgrade/uninstall and installed session-write guards |
 | W2 native semantic ports | Native tool/request/context ownership and protocol10 compatibility implemented; typed turn transitions and integrated artifacts pending |
-| W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks and scoped integration tests pass, artifact build pending |
-| W4 durable task truth and SQLite evidence index | Derived metadata index passes Node22.8 and Bun-to-Node probes; canonical feed, task truth and compiler integration pending |
+| W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks, scoped integration tests and clean packaged-worker probes pass; index feed work is active |
+| W4 durable task truth and SQLite evidence index | Canonical indexing, branch-scoped queries, native input/goal provenance and bounded payload recovery pass focused tests; authoritative item reduction, import trust and compiler integration remain open |
 | W5 bounded hot history and process memory | Not implemented |
 | W6 compiler, batch recovery, evidence-local work | Not implemented |
 | W7 Sol control and generic deployment | S frozen; no parity or live validation claim |
@@ -164,10 +164,10 @@ migration before any release trigger is used. See `product-isolation.md` for mod
 identity differences.
 
 
-## Canonical session integration after `70b0ae86b`
+## Canonical session checkpoint (`fcbc28a45`)
 
-This source checkpoint connects canonical storage. Index/compiler work and release
-certification remain open; a clean-commit artifact build is next.
+This checkpoint is committed and pushed. The clean source build and private packaged
+worker probes pass. Index/compiler work and release certification remain open.
 
 - SessionManager writes through an external Node actor with the canonical journal's
   SQLite lifetime lock. Append acknowledgement follows complete writes and fsync.
@@ -192,11 +192,47 @@ certification remain open; a clean-commit artifact build is next.
   check passes: 1003 files, TypeScript, installer and browser smoke. The 115 recursion cases
   passed in two disjoint commands: 114 cases and one genuine owned-runtime case.
   This is not a single combined run or installed-product certification.
-- Runtime asset copying now excludes Python caches, and binary packaging includes
-  the canonical session worker. A current source build and package probe are pending.
+- Runtime asset copying excludes Python caches. The clean four-package set identifies
+  `fcbc28a4500f670f951de9788408709c3783c04e` with `sourceDirty:false`.
+  The packaged Node22.8 worker and two tiny Bun1.3.10 host layouts pass append/drain,
+  exclusive ownership and owned-removal checks. No source rebuild or publication ran
+  during these probes. They do not certify full binaries, npm's Node floor, installers,
+  Windows or network filesystems.
 
 Whole-history arrays, canonical index feed, task truth and the native compiler remain
 unfinished. Existing test cases passed across scoped and corrective runs, not one
 combined suite. The real-peer forced-cleanup fixture passes without weakening live-peer
 verification. No publication, release trigger or model campaign is authorized by these
 local results.
+
+
+## Source index and task evidence (work in progress)
+
+- A lazy external index consumes ACKed source prefixes. It stores exact frame locators,
+  verifies the target prefix before publishing coverage, and reads only new suffixes
+  on ordinary updates. Missing derived data rebuilds from canonical bytes, not effects.
+- SessionManager history reads capture and pin the original source, branch and sequence.
+  New ACKs feed a coalesced metadata queue. Index failure does not erase canonical
+  facts or turn a known append ACK into an unknown outcome. Literal history remains
+  available; projected references must wait for indexed coverage.
+- Task evidence retains all supplied identities and explicit relationships. Legacy
+  snapshots, including empty carriers, retain earlier-loss markers. Exact misses are
+  partial when imported coverage is uncertain. `Foo.txt` and `foo.txt` stay distinct.
+  Pages are selective structured evidence, not exhaustive semantic requirement lists.
+- Native admission captures original input before transforms, queue waits and delivery.
+  Per-call goal operations record their actual actor without copying provenance into
+  later usage snapshots. Generic transformed previews remain unrecorded; only exact
+  native submitted fields receive user attribution. Imported envelope trust and full
+  authoritative item reduction remain open.
+- Bounded recovery reads exact canonical JSON fragments from one UTF8-aligned part
+  per call, at most 64KiB of source data. Per-part metadata is derived in the same
+  verified source transaction, not stored as a second payload copy. Branch scope and
+  indexed coverage are checked before file access. Changed selected bytes or physical
+  identity cause failure; unrequested bytes are not reread as a whole frame.
+- Focused actor, codec, prompt/goal, index, payload and integration checks pass in
+  separate commands. These are scoped component/source results, not one combined
+  test invocation, a live provider run, or full-history memory certification.
+
+The source checkpoint passes `npm run check` (1011 files), TypeScript, and the
+installer/browser smoke checks. This does not certify a packaged artifact or release.
+Whole-history arrays and the native context compiler are still unfinished.

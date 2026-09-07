@@ -257,6 +257,7 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
+import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
 import {
 	CURRENT_SESSION_VERSION,
@@ -602,6 +603,7 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 }
 
 interface PreparedTurnPayload extends SessionTurnPayload {
+	submitted?: NativeSubmittedInput;
 	images?: ImageContent[];
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
@@ -615,6 +617,7 @@ interface PreparedTurnPayload extends SessionTurnPayload {
 }
 
 interface PreparedCommandPayload extends SessionCommandPayload {
+	submitted?: NativeSubmittedInput;
 	images?: ImageContent[];
 }
 
@@ -661,6 +664,7 @@ export interface SessionActionRecoveryRecord {
 export type SessionActionRecoveryPayload =
 	| {
 			kind: "turn";
+			submitted?: NativeSubmittedInput;
 			text: string;
 			preview?: string;
 			records: SessionActionRecoveryRecord[];
@@ -674,6 +678,7 @@ export type SessionActionRecoveryPayload =
 	  }
 	| {
 			kind: "session_command";
+			submitted?: NativeSubmittedInput;
 			text: string;
 			command: SessionSlashCommand;
 			images?: ImageContent[];
@@ -693,6 +698,16 @@ export interface SessionActionRecoveryAction {
 export interface SessionActionRecoverySnapshot {
 	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION;
 	actions: SessionActionRecoveryAction[];
+}
+
+type GoalOperationOrigin = Extract<NativeEntryOrigin, { kind: "goal_operation" }>;
+type GoalOriginContext = Pick<GoalOperationOrigin, "actor" | "actionId" | "submittedText">;
+
+function captureSubmittedInput(
+	text: string,
+	input: { content?: (TextContent | ImageContent)[]; images?: ImageContent[] } = {},
+): NativeSubmittedInput {
+	return structuredClone({ text, content: input.content, images: input.images });
 }
 
 function cloneCustomMessage(message: CustomMessage): CustomMessage {
@@ -1749,21 +1764,24 @@ export class AgentSession {
 		}
 	}
 
-	private async _persistGoalState(goal: GoalState): Promise<void> {
-		await this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
+	private async _persistGoalState(goal: GoalState, nativeOrigin?: GoalOperationOrigin): Promise<void> {
+		await this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal, nativeOrigin);
 		// Force flush so the goal state is durable on disk immediately,
 		// even before the first assistant response. This ensures idempotent
 		// restart/rehydration can detect the persisted goal.
 		await this.sessionManager.flushNow();
 	}
 
-	private async _setGoalState(next: GoalState, options: { persist?: boolean } = {}): Promise<GoalState> {
+	private async _setGoalState(
+		next: GoalState,
+		options: { persist?: boolean; nativeOrigin?: GoalOperationOrigin } = {},
+	): Promise<GoalState> {
 		const normalized = normalizeGoalState({
 			...next,
 			updatedAt: Date.now(),
 		});
 		if (options.persist !== false) {
-			await this._persistGoalState(normalized);
+			await this._persistGoalState(normalized, options.nativeOrigin);
 		}
 		this._goalState = normalized;
 		if (normalized.status === "active") {
@@ -1877,7 +1895,11 @@ export class AgentSession {
 		this._emitQueueUpdate();
 	}
 
-	private async _startGoal(objectiveText: string, tokenBudget: number | undefined): Promise<GoalState> {
+	private async _startGoal(
+		objectiveText: string,
+		tokenBudget: number | undefined,
+		nativeOrigin?: GoalOperationOrigin,
+	): Promise<GoalState> {
 		const objective = validateGoalObjective(objectiveText);
 		const budget = validateGoalBudget(tokenBudget);
 		const now = Date.now();
@@ -1895,31 +1917,34 @@ export class AgentSession {
 		};
 		this._goalAccountingStartedAt = now;
 		this._goalContinuationAwaitsRlmWork = false;
-		return this._setGoalState(goal);
+		return this._setGoalState(goal, { nativeOrigin });
 	}
 
-	private async _clearGoal(): Promise<void> {
+	private async _clearGoal(nativeOrigin?: GoalOperationOrigin): Promise<void> {
 		this._clearQueuedGoalContexts();
-		await this._setGoalState(emptyGoalState());
+		await this._setGoalState(emptyGoalState(), { nativeOrigin });
 	}
 
-	private async _pauseGoal(reason = "Paused by user"): Promise<void> {
+	private async _pauseGoal(reason = "Paused by user", nativeOrigin?: GoalOperationOrigin): Promise<void> {
 		this._clearQueuedGoalContexts();
 		if (this._goalState.status !== "active") {
 			this._emitGoalUpdate();
 			return;
 		}
 		const goal = this._goalWithAccountedWallClock();
-		await this._setGoalState({
-			...goal,
-			active: false,
-			status: "paused",
-			lastReason: reason,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "paused",
+				lastReason: reason,
+				lastError: undefined,
+			},
+			{ nativeOrigin },
+		);
 	}
 
-	private async _resumeGoal(): Promise<void> {
+	private async _resumeGoal(nativeOrigin?: GoalOperationOrigin): Promise<void> {
 		if (!this._goalState.objective) {
 			this._emitGoalUpdate();
 			return;
@@ -1931,13 +1956,16 @@ export class AgentSession {
 		const exhausted =
 			this._goalState.tokenBudget !== undefined && this._goalState.tokensUsed >= this._goalState.tokenBudget;
 		const nextStatus: GoalStatus = exhausted ? "budget_limited" : "active";
-		await this._setGoalState({
-			...this._goalState,
-			active: nextStatus === "active",
-			status: nextStatus,
-			lastReason: exhausted ? "Goal token budget already reached" : undefined,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...this._goalState,
+				active: nextStatus === "active",
+				status: nextStatus,
+				lastReason: exhausted ? "Goal token budget already reached" : undefined,
+				lastError: undefined,
+			},
+			{ nativeOrigin },
+		);
 		if (nextStatus === "active") {
 			await this._runOrQueueGoalContext("continuation");
 		}
@@ -2213,11 +2241,20 @@ export class AgentSession {
 		this._admitSessionInput(action, { front: true, wake: false });
 	}
 
-	private async _handleGoalSlashCommand(text: string, images: ImageContent[] | undefined): Promise<boolean> {
+	private async _handleGoalSlashCommand(
+		text: string,
+		images: ImageContent[] | undefined,
+		context?: GoalOriginContext,
+	): Promise<boolean> {
 		const command = this._parseGoalSlashCommand(text);
 		if (!command) {
 			return false;
 		}
+
+		const previousGoalId = this._goalState.goalId;
+		const replacementOperation = this._goalState.objective ? "revise" : "create";
+		const origin = (operation: GoalOperationOrigin["operation"]): GoalOperationOrigin | undefined =>
+			context ? { version: 1, kind: "goal_operation", ...context, operation, previousGoalId } : undefined;
 
 		if (command.kind === "status") {
 			this._emitGoalUpdate();
@@ -2225,17 +2262,17 @@ export class AgentSession {
 		}
 
 		if (command.kind === "clear") {
-			await this._clearGoal();
+			await this._clearGoal(origin("clear"));
 			return true;
 		}
 
 		if (command.kind === "pause") {
-			await this._pauseGoal();
+			await this._pauseGoal(undefined, origin("pause"));
 			return true;
 		}
 
 		if (command.kind === "resume") {
-			await this._resumeGoal();
+			await this._resumeGoal(origin("resume"));
 			return true;
 		}
 
@@ -2245,7 +2282,7 @@ export class AgentSession {
 		}
 		this._ensureGoalRuntimeActive();
 		this._clearQueuedGoalContexts();
-		await this._startGoal(command.objective, command.tokenBudget);
+		await this._startGoal(command.objective, command.tokenBudget, origin(replacementOperation));
 		await this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images);
 		return true;
 	}
@@ -3361,7 +3398,13 @@ export class AgentSession {
 				);
 			default:
 				// idle, or a terminal record (complete / error): nothing pending, start fresh.
-				return this._startGoal(objective, tokenBudget);
+				return this._startGoal(objective, tokenBudget, {
+					version: 1,
+					kind: "goal_operation",
+					operation: "create",
+					actor: "runtime",
+					submittedText: objective,
+				});
 		}
 	}
 
@@ -3374,13 +3417,24 @@ export class AgentSession {
 		// runs at message_end, before the completing ipython cell executes, so a
 		// budget-limit context may already be steered. It is stale now — drop it.
 		this._clearQueuedGoalContexts();
-		return this._setGoalState({
-			...goal,
-			active: false,
-			status: "complete",
-			lastReason: "Goal achieved",
-			lastError: undefined,
-		});
+		return this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "complete",
+				lastReason: "Goal achieved",
+				lastError: undefined,
+			},
+			{
+				nativeOrigin: {
+					version: 1,
+					kind: "goal_operation",
+					operation: "complete",
+					actor: "runtime",
+					previousGoalId: goal.goalId,
+				},
+			},
+		);
 	}
 
 	private async _getGoalContinuationMessages(
@@ -3532,7 +3586,30 @@ export class AgentSession {
 			);
 	}
 
+	private _captureInputOrigin(message: UserMessage | CustomMessage): NativeEntryOrigin | undefined {
+		const actions = this._actionStore.actionsForMessage(message);
+		if (actions.length !== 1) return undefined;
+		const action = actions[0];
+		if (action.payload.kind !== "turn") return undefined;
+		const record = action.payload.records.find((record) => record.message === message);
+		if (!record) return undefined;
+		return {
+			version: 1,
+			kind: "input",
+			actionId: action.id,
+			recordId: record.id,
+			inputSource: action.payload.acceptedAgentMessage ? "internal" : action.source,
+			recordRole: record.role,
+			...(record.role === "primary" && action.payload.submitted ? { submitted: action.payload.submitted } : {}),
+		};
+	}
+
 	private _handleAgentEvent = (event: AgentEvent): void => {
+		const nativeOrigin =
+			(event.type === "message_start" || event.type === "message_end") &&
+			(event.message.role === "user" || event.message.role === "custom")
+				? this._captureInputOrigin(event.message)
+				: undefined;
 		this._createRetryPromiseForAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
@@ -3570,8 +3647,8 @@ export class AgentSession {
 			}
 		}
 		this._agentEventQueue = this._agentEventQueue.then(
-			() => this._processAgentEvent(event),
-			() => this._processAgentEvent(event),
+			() => this._processAgentEvent(event, nativeOrigin),
+			() => this._processAgentEvent(event, nativeOrigin),
 		);
 		this._agentEventQueue.catch(() => {});
 	};
@@ -3626,7 +3703,7 @@ export class AgentSession {
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
 	}
 
-	private async _processAgentEvent(event: AgentEvent): Promise<void> {
+	private async _processAgentEvent(event: AgentEvent, nativeOrigin?: NativeEntryOrigin): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
 			this._applyLateIpythonSentAgentMessages(event.message);
@@ -3689,6 +3766,7 @@ export class AgentSession {
 					event.message.content,
 					event.message.display,
 					event.message.details,
+					nativeOrigin,
 				);
 			} else if (
 				event.message.role === "user" ||
@@ -3696,7 +3774,7 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				const sessionId = this.sessionManager.getSessionId();
-				const entryId = await this.sessionManager.appendMessage(event.message);
+				const entryId = await this.sessionManager.appendMessage(event.message, nativeOrigin);
 				if (event.message.role === "assistant") this._assistantEntryIds.set(event.message, { sessionId, entryId });
 			}
 			if (event.message.role === "user" || event.message.role === "custom") {
@@ -4980,6 +5058,10 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		const submitted = captureSubmittedInput(text, options);
+		const isInternalPrompt = options?.internalPrompt === true;
+		const acceptedAgentMessage = options?.skipPrePromptWork === true && options.returnAfterAccepted === true;
+		const inputSource = isInternalPrompt ? "internal" : (options?.source ?? "interactive");
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -5000,13 +5082,14 @@ export class AgentSession {
 					throw new Error("Session input was invalidated before admission");
 				}
 				options?.admissionCommitted?.();
-				const isInternalPrompt = options?.internalPrompt === true;
 				const expandPromptTemplates = isInternalPrompt ? false : (options?.expandPromptTemplates ?? true);
 				const normalizationResult = this._normalizeSubmission(text, options?.images, {
 					parseSessionCommands: !isInternalPrompt && !options?.skipPrePromptWork,
 					extensionCommands: expandPromptTemplates ? "execute" : "ignore",
 					inputSource:
-						!isInternalPrompt && !options?.skipInputHandlers ? (options?.source ?? "interactive") : undefined,
+						!isInternalPrompt && !options?.skipInputHandlers && inputSource !== "internal"
+							? inputSource
+							: undefined,
 					expandSkills: expandPromptTemplates,
 					expandPromptTemplates,
 				});
@@ -5045,7 +5128,8 @@ export class AgentSession {
 						schedule,
 						{
 							agentMessageId: options?.agentMessageId,
-							source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+							source: inputSource,
+							submitted,
 						},
 					);
 					const result = this._admitSessionInput(action, {
@@ -5087,7 +5171,6 @@ export class AgentSession {
 							content: content.map((block) => ({ ...block })),
 							timestamp: Date.now(),
 						} satisfies UserMessage);
-				const acceptedAgentMessage = options?.skipPrePromptWork === true && options.returnAfterAccepted === true;
 				const action = this._createPreparedTurnAction(schedule, normalized.text, normalized.images, {
 					agentMessageId: options?.agentMessageId,
 					queueKey: options?.followUpQueueKey,
@@ -5099,7 +5182,8 @@ export class AgentSession {
 						!visibleQueued ||
 						options?.resumeIfIdle ||
 						(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
-					source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+					source: inputSource,
+					submitted,
 					executionPolicy: visibleQueued
 						? this._turnExecutionPolicy("queued")
 						: this._turnExecutionPolicy("directPrompt", {
@@ -5249,6 +5333,7 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<void> {
+		const submitted = captureSubmittedInput(text, { images });
 		const normalized = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
@@ -5260,6 +5345,7 @@ export class AgentSession {
 		}
 
 		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+			submitted,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -5282,6 +5368,7 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<boolean> {
+		const submitted = captureSubmittedInput(text, { images });
 		const normalized = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
@@ -5293,6 +5380,7 @@ export class AgentSession {
 		}
 
 		return this._queuePreparedPrompt("followUp", normalized.text, normalized.images, {
+			submitted,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -5318,6 +5406,9 @@ export class AgentSession {
 					? {
 							kind: "turn",
 							text: recovered.payload.text,
+							...(recovered.payload.submitted
+								? { submitted: structuredClone(recovered.payload.submitted) }
+								: {}),
 							...(recovered.payload.preview ? { preview: recovered.payload.preview } : {}),
 							records: recovered.payload.records.map((record) => ({
 								id: record.id,
@@ -5359,6 +5450,9 @@ export class AgentSession {
 					: {
 							kind: "session_command",
 							text: recovered.payload.text,
+							...(recovered.payload.submitted
+								? { submitted: structuredClone(recovered.payload.submitted) }
+								: {}),
 							command: { ...recovered.payload.command },
 							...(recovered.payload.images
 								? {
@@ -5591,6 +5685,7 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			submitted?: NativeSubmittedInput;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -5617,6 +5712,7 @@ export class AgentSession {
 		const preview = options.previewLabel ? `${options.previewLabel}: ${text}` : undefined;
 		const payload: PreparedTurnPayload = {
 			kind: "turn",
+			submitted: options.submitted,
 			text,
 			records: [
 				...prefixMessages.map((prefix) => this._createDeliveryRecord(id, "prefix", prefix)),
@@ -5656,6 +5752,7 @@ export class AgentSession {
 		schedule: SessionInputSchedule,
 		options: {
 			agentMessageId?: string;
+			submitted?: NativeSubmittedInput;
 			source?: InputSource | "internal";
 		} = {},
 	): QueuedSessionAction {
@@ -5664,7 +5761,7 @@ export class AgentSession {
 			source: options.source ?? "internal",
 			delivery: this._deliveryPolicy(schedule),
 			wake: "immediate",
-			payload: { kind: "session_command", text, command, images },
+			payload: { kind: "session_command", submitted: options.submitted, text, command, images },
 			lifecycle: { state: "queued" },
 			agentMessageId: options.agentMessageId,
 		};
@@ -5772,6 +5869,7 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			submitted?: NativeSubmittedInput;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6220,6 +6318,11 @@ export class AgentSession {
 	private async _executeQueuedSessionCommand(action: QueuedSessionAction): Promise<void> {
 		if (action.payload.kind !== "session_command") throw new Error("Expected a session command action");
 		const input = action.payload;
+		const goalOrigin: GoalOriginContext = {
+			actor: action.source,
+			actionId: action.id,
+			submittedText: input.submitted?.text,
+		};
 		try {
 			let resultText: string | undefined;
 			let displayResult = true;
@@ -6246,7 +6349,7 @@ export class AgentSession {
 					break;
 				}
 				case "goal":
-					await this._handleGoalSlashCommand(input.text, input.images);
+					await this._handleGoalSlashCommand(input.text, input.images, goalOrigin);
 					resultText = this._goalState.objective
 						? `Goal ${this._goalState.status}: ${this._goalState.objective}`
 						: "No active goal.";
@@ -6598,6 +6701,19 @@ export class AgentSession {
 				}
 			}
 		}
+		if (item.payload.submitted) {
+			const previous = item.payload.submitted;
+			const content = previous.content
+				? [
+						{ type: "text" as const, text: mutation.text },
+						...(mutation.images ?? previous.content.filter((block) => block.type !== "text")),
+					]
+				: undefined;
+			item.payload.submitted = captureSubmittedInput(mutation.text, {
+				content,
+				images: mutation.images ?? previous.images,
+			});
+		}
 		const targetPolicy = queuedMessageLaneDeliveryPolicy(mutation.lane);
 		if (targetPolicy !== policy) {
 			item.queueKey = undefined;
@@ -6707,6 +6823,7 @@ export class AgentSession {
 						? {
 								kind: "turn",
 								text: action.payload.text,
+								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
 								...(action.payload.preview ? { preview: action.payload.preview } : {}),
 								records: action.payload.records.map((record) => ({
 									id: record.id,
@@ -6746,6 +6863,7 @@ export class AgentSession {
 						: {
 								kind: "session_command",
 								text: action.payload.text,
+								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
 								command: { ...action.payload.command },
 								...(action.payload.images
 									? {

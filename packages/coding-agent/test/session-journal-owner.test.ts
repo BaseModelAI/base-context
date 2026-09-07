@@ -7,6 +7,7 @@ import {
 	realpathSync,
 	renameSync,
 	rmSync,
+	statSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
@@ -97,9 +98,33 @@ describe("session journal owner process", () => {
 		expect(owner.journalPath).toBe(journalPath);
 		expect(owner.format).toBe("framed");
 		expect(owner.nextSequence).toBe(0);
+		const identity = statSync(journalPath);
+		const created = owner.getSnapshot();
+		expect(created).toEqual({
+			journalPath,
+			nextSequence: 0,
+			format: "framed",
+			byteLength: 0,
+			checksum: null,
+			dev: identity.dev,
+			ino: identity.ino,
+		});
+		const copy = owner.getSnapshot();
+		copy.byteLength = -1;
+		expect(owner.getSnapshot()).toEqual(created);
 		expect(existsSync(`${journalPath}.owner.sqlite`)).toBe(true);
-		await expect(owner.appendJson(header)).resolves.toEqual({ sequence: 0 });
+		const appendingHeader = owner.appendJson(header);
+		expect(owner.getSnapshot()).toEqual(created);
+		await expect(appendingHeader).resolves.toEqual({ sequence: 0 });
 		const prefix = readFileSync(journalPath);
+		const first = decodeJournalFrame(prefix, INITIAL_JOURNAL_CURSOR, SESSION_JOURNAL_MAX_FRAME_BYTES);
+		expect(owner.getSnapshot()).toEqual({
+			...created,
+			nextSequence: 1,
+			byteLength: prefix.length,
+			checksum: first.next.checksum,
+		});
+		expect(created.byteLength).toBe(0);
 
 		const aliasDir = join(root, "journal-alias");
 		symlinkSync(dirname(journalPath), aliasDir, process.platform === "win32" ? "junction" : "dir");
@@ -114,9 +139,11 @@ describe("session journal owner process", () => {
 		expect(Buffer.byteLength(large)).toBeGreaterThan(3 * 1024 * 1024);
 		await expect(owner.appendJson(large)).resolves.toEqual({ sequence: 1 });
 		await owner.flush();
-		expect(readFileSync(journalPath).subarray(0, prefix.length)).toEqual(prefix);
+		const twoFrames = readFileSync(journalPath);
+		expect(twoFrames.subarray(0, prefix.length)).toEqual(prefix);
 		expect(framedJson(journalPath)).toEqual([header, large]);
 		expect(owner.nextSequence).toBe(2);
+		expect(owner.getSnapshot().byteLength).toBe(twoFrames.length);
 
 		const admitted = owner.appendJson(lexical);
 		const exited = once(actor(owner), "exit");
@@ -133,6 +160,7 @@ describe("session journal owner process", () => {
 		const successor = await open(join(aliasDir, basename(journalPath)));
 		expect(successor.journalPath).toBe(journalPath);
 		expect(successor.nextSequence).toBe(3);
+		expect(successor.getSnapshot()).toEqual(owner.getSnapshot());
 		const next = '{"type":"message","id":"successor"}';
 		await expect(successor.appendJson(next)).resolves.toEqual({ sequence: 3 });
 		await successor.close();
@@ -149,15 +177,42 @@ describe("session journal owner process", () => {
 	it("retains legacy bytes, requires explicit torn-tail repair, rejects complete corruption, and survives POSIX owner death", async () => {
 		const original = Buffer.from(`${header}\n${lexical}\n{"type":"message","id":"torn"`);
 		writeFileSync(journalPath, original);
+		const originalIdentity = statSync(journalPath);
+		const first = encodeJournalFrameJson(header, INITIAL_JOURNAL_CURSOR, SESSION_JOURNAL_MAX_FRAME_BYTES);
+		const second = encodeJournalFrameJson(lexical, first.next, SESSION_JOURNAL_MAX_FRAME_BYTES);
 		const legacy = await open();
 		expect(legacy.format).toBe("legacy");
+		const legacySnapshot = legacy.getSnapshot();
+		expect(legacySnapshot).toEqual({
+			journalPath,
+			nextSequence: 2,
+			format: "legacy",
+			byteLength: Buffer.byteLength(`${header}\n${lexical}\n`),
+			checksum: null,
+			dev: originalIdentity.dev,
+			ino: originalIdentity.ino,
+		});
 		expect(readFileSync(journalPath)).toEqual(original);
 		expect(existsSync(`${journalPath}.legacy-v3`)).toBe(false);
 		await expect(legacy.appendJson('{"id":"not-migrated"}')).rejects.toThrow(/migrat|legacy/i);
 		expect(readFileSync(journalPath)).toEqual(original);
-		await legacy.migrateLegacy();
+		expect(legacy.getSnapshot()).toEqual(legacySnapshot);
+		const migrating = legacy.migrateLegacy();
+		expect(legacy.getSnapshot()).toEqual(legacySnapshot);
+		await migrating;
 		expect(legacy.format).toBe("framed");
 		expect(legacy.nextSequence).toBe(2);
+		const migratedIdentity = statSync(journalPath);
+		expect(legacy.getSnapshot()).toEqual({
+			...legacySnapshot,
+			format: "framed",
+			byteLength: Buffer.byteLength(first.line + second.line),
+			checksum: second.next.checksum,
+			dev: migratedIdentity.dev,
+			ino: migratedIdentity.ino,
+		});
+		expect(migratedIdentity.ino).not.toBe(originalIdentity.ino);
+		expect(statSync(`${journalPath}.legacy-v3`).ino).toBe(originalIdentity.ino);
 		expect(readFileSync(`${journalPath}.legacy-v3`)).toEqual(original);
 		expect(framedJson(journalPath)).toEqual([header, lexical]);
 		const migrated = '{"type":"message","id":"after-migration"}';
@@ -166,20 +221,37 @@ describe("session journal owner process", () => {
 		expect(framedJson(journalPath)).toEqual([header, lexical, migrated]);
 		expect(readFileSync(`${journalPath}.legacy-v3`)).toEqual(original);
 
-		const first = encodeJournalFrameJson(header, INITIAL_JOURNAL_CURSOR, SESSION_JOURNAL_MAX_FRAME_BYTES);
-		const second = encodeJournalFrameJson(lexical, first.next, SESSION_JOURNAL_MAX_FRAME_BYTES);
 		const tornPath = join(root, "torn.jsonl");
 		const tornBytes = Buffer.from(first.line + second.line.slice(0, -10));
 		writeFileSync(tornPath, tornBytes);
 		const torn = await open(tornPath);
 		expect(torn.format).toBe("framed");
 		expect(torn.nextSequence).toBe(1);
+		const tornIdentity = statSync(tornPath);
+		const tornSnapshot = torn.getSnapshot();
+		expect(tornSnapshot).toEqual({
+			journalPath: tornPath,
+			nextSequence: 1,
+			format: "framed",
+			byteLength: Buffer.byteLength(first.line),
+			checksum: first.next.checksum,
+			dev: tornIdentity.dev,
+			ino: tornIdentity.ino,
+		});
+		expect(tornSnapshot.byteLength).toBeLessThan(tornBytes.length);
 		expect(readFileSync(tornPath)).toEqual(tornBytes);
 		await expect(torn.appendJson(lexical)).rejects.toThrow(/recover|repair|tail/i);
 		expect(readFileSync(tornPath)).toEqual(tornBytes);
 		await torn.recover();
 		expect(readFileSync(tornPath)).toEqual(Buffer.from(first.line));
+		expect(torn.getSnapshot()).toEqual(tornSnapshot);
 		await expect(torn.appendJson(lexical)).resolves.toEqual({ sequence: 1 });
+		expect(torn.getSnapshot()).toEqual({
+			...tornSnapshot,
+			nextSequence: 2,
+			byteLength: Buffer.byteLength(first.line + second.line),
+			checksum: second.next.checksum,
+		});
 		await torn.close();
 		expect(framedJson(tornPath)).toEqual([header, lexical]);
 
@@ -197,11 +269,14 @@ describe("session journal owner process", () => {
 		const replacementPath = join(root, "replacement.jsonl");
 		writeFileSync(replacedPath, first.line);
 		const replaced = await open(replacedPath);
+		const admittedSnapshot = replaced.getSnapshot();
 		// Identical bytes and size do not make a different inode the admitted source.
 		writeFileSync(replacementPath, first.line);
 		renameSync(replacementPath, replacedPath);
 		await expect(replaced.appendJson(lexical)).rejects.toThrow(/file identity changed/i);
 		await expect(replaced.recover()).rejects.toThrow(/file identity changed/i);
+		expect(replaced.getSnapshot()).toEqual(admittedSnapshot);
+		expect(replaced.getSnapshot().ino).not.toBe(statSync(replacedPath).ino);
 		expect(readFileSync(replacedPath)).toEqual(Buffer.from(first.line));
 		await replaced.close();
 
@@ -213,12 +288,15 @@ describe("session journal owner process", () => {
 		const child = actor(owner);
 		// Stop before admission so there can be no acknowledgement for the pending append.
 		expect(child.kill("SIGSTOP")).toBe(true);
+		const acknowledged = owner.getSnapshot();
 		const uncertain = '{"type":"message","id":"uncertain"}';
 		const pending = owner.appendJson(uncertain);
+		expect(owner.getSnapshot()).toEqual(acknowledged);
 		const rejected = expect(pending).rejects.toThrow(/outcome.*unknown/i);
 		const exited = once(child, "exit");
 		expect(child.kill("SIGKILL")).toBe(true);
 		await rejected;
+		expect(owner.getSnapshot()).toEqual(acknowledged);
 		expect(await exited).toEqual([null, "SIGKILL"]);
 		await expect(owner.close()).resolves.toBeUndefined();
 		await expect(owner.appendJson('{"id":"after-death"}')).rejects.toThrow();

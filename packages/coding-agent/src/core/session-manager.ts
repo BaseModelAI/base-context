@@ -17,6 +17,15 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js"
 import { assertProductStatePath } from "../runtime-paths.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
+import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import type {
+	HistoryIndex,
+	HistoryIndexPage,
+	HistoryPayloadReadOptions,
+	IndexedSourceEvent,
+	TaskEvidenceOptions,
+	TaskEvidencePage,
+} from "./history-index.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -25,6 +34,8 @@ import {
 	createCustomMessage,
 } from "./messages.js";
 import type { BoundRequestSink, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import type { NativeEntryOrigin } from "./session-entry-origin.js";
+import { SessionHistoryIndex } from "./session-history-index.js";
 import {
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
 	SessionJournalOwner,
@@ -97,6 +108,8 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** Native admission/control metadata, never read from the entry's arbitrary data payload. */
+	nativeOrigin?: NativeEntryOrigin;
 }
 
 export type SessionExecutionEvidence = Omit<FinalizedToolExchange, "result" | "originalInput" | "executedInput"> &
@@ -1131,6 +1144,7 @@ async function listSessionsFromDir(
 
 interface SessionWriteState {
 	owner?: SessionJournalOwner;
+	history?: SessionHistoryIndex;
 	tail: Promise<void>;
 	pending: number;
 	bytes: number;
@@ -1426,6 +1440,102 @@ export class SessionManager {
 			: undefined;
 	}
 
+	/** Exact source metadata within the captured current branch, not a scan of message arrays. */
+	getHistoryEntry(id: string): Promise<IndexedSourceEvent | undefined> {
+		return this._readHistory((index, sessionId, scope) => index.get(sessionId, id, scope));
+	}
+
+	/** Exact canonical JSON bytes as bounded UTF8 fragments, within the captured branch. */
+	readHistoryPayload(
+		id: string,
+		options: HistoryPayloadReadOptions = {},
+	): Promise<CanonicalPayloadFragment | undefined> {
+		const captured = { ...options, ...(options.cursor ? { cursor: { ...options.cursor } } : {}) };
+		return this._readHistory((index, sessionId, scope) => index.readPayload(sessionId, id, scope, captured));
+	}
+
+	pageHistory(after = 0, limit = 64): Promise<HistoryIndexPage> {
+		return this._readHistory((index, sessionId, scope) => index.page(sessionId, after, scope.through, limit, scope));
+	}
+
+	searchHistory(query: string, limit = 16): Promise<HistoryIndexPage> {
+		return this._readHistory((index, sessionId, scope) =>
+			index.search(sessionId, query, scope.through, limit, scope),
+		);
+	}
+
+	/** Structured descriptive evidence; selective output is not an exhaustive requirements list. */
+	taskEvidence(options: TaskEvidenceOptions = {}): Promise<TaskEvidencePage> {
+		const captured = { ...options, ...(options.after ? { after: { ...options.after } } : {}) };
+		return this._readHistory((index, sessionId, scope) => index.taskEvidence(sessionId, scope, captured));
+	}
+
+	private async _readHistory<T>(
+		read: (index: HistoryIndex, sessionId: string, scope: { leafId: string | null; through: number }) => Promise<T>,
+	): Promise<T> {
+		this._assertMutable();
+		const state = this.writeState;
+		const sessionId = this.sessionId;
+		const owner = state.owner;
+		if (!owner || owner.format !== "framed" || state.sourceVersion !== CURRENT_SESSION_VERSION)
+			throw new Error(
+				"Indexed history requires an owned canonical session; import or migrate legacy history explicitly",
+			);
+		state.pins++;
+		try {
+			const captured = await this._enqueue(state, 0, async () => {
+				await owner.flush();
+				state.history ??= new SessionHistoryIndex(
+					sessionId,
+					join(
+						assertProductStatePath(getSessionArtifactPathForFile(owner.journalPath, sessionId)),
+						"history.sqlite",
+					),
+				);
+				return {
+					history: state.history,
+					snapshot: owner.getSnapshot(),
+					scope: { leafId: state.leafId, through: state.sequence },
+				};
+			});
+			const index = await captured.history.synchronize(captured.snapshot);
+			return await read(index, sessionId, captured.scope);
+		} finally {
+			await this._releaseSourcePin(state);
+		}
+	}
+
+	private _publishHistory(state: SessionWriteState): void {
+		if (state.history && state.owner) state.history.publish(state.owner.getSnapshot());
+	}
+
+	private async _releaseSourcePin(state: SessionWriteState): Promise<void> {
+		state.pins--;
+		if (state.pins === 0) {
+			state.onUnpinned?.();
+			state.onUnpinned = undefined;
+			state.unpinned = undefined;
+		}
+		await this._closeRetired(state);
+	}
+
+	private async _closeSourceActors(state: SessionWriteState): Promise<void> {
+		const errors: unknown[] = [];
+		try {
+			await state.history?.close();
+		} catch (error) {
+			errors.push(error);
+		}
+		// Keep the canonical fence until the derived reader has exited, including failed shutdown.
+		try {
+			await state.owner?.close();
+		} catch (error) {
+			errors.push(error);
+		}
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Session source actors failed to close");
+	}
+
 	/** Wait for all previously admitted writes and the writer's durability barrier. */
 	async flushNow(): Promise<void> {
 		const state = this.writeState;
@@ -1443,6 +1553,7 @@ export class SessionManager {
 				throw new Error("Legacy session payload requires an explicit retained import before writing");
 			await state.owner.migrateLegacy();
 			state.sequence = state.owner.nextSequence - 1;
+			this._publishHistory(state);
 		});
 	}
 
@@ -1457,7 +1568,7 @@ export class SessionManager {
 		this.switching = true;
 		try {
 			await previous.tail;
-			await previous.owner?.close();
+			await this._closeSourceActors(previous);
 			previous.closed = true;
 			const owner = await SessionJournalOwner.open({ journalPath: this.sessionFile });
 			try {
@@ -1548,6 +1659,7 @@ export class SessionManager {
 					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
 					throw error;
 				}
+				this._publishHistory(state);
 				entries.push(snapshot);
 				byId.set(snapshot.id, snapshot);
 				if (snapshot.type === "label") {
@@ -1579,7 +1691,7 @@ export class SessionManager {
 		if (!state.retired || state.pins > 0) return;
 		state.closing ??= (async () => {
 			await state.tail;
-			await state.owner?.close();
+			await this._closeSourceActors(state);
 			state.closed = true;
 			this.retiredSources.delete(state);
 		})();
@@ -1644,13 +1756,7 @@ export class SessionManager {
 			release: async () => {
 				if (!held) return;
 				held = false;
-				state.pins--;
-				if (state.pins === 0) {
-					state.onUnpinned?.();
-					state.onUnpinned = undefined;
-					state.unpinned = undefined;
-				}
-				await this._closeRetired(state);
+				await this._releaseSourcePin(state);
 			},
 			persist: async (event: NativeRequestEvent) => {
 				if (!held) throw new Error("Captured request sink is not retained");
@@ -1683,6 +1789,7 @@ export class SessionManager {
 						state.failure = new Error("Session request append failed; outcome may be unknown", { cause: error });
 						throw error;
 					}
+					this._publishHistory(state);
 					entries.push(entry);
 					byId.set(id, entry);
 					if (this.writeState === state) this._notifyPersistListeners();
@@ -1759,7 +1866,10 @@ export class SessionManager {
 		return { ...entry.execution, result: entry.message };
 	}
 
-	async appendMessage(message: Message | CustomMessage | BashExecutionMessage): Promise<string> {
+	async appendMessage(
+		message: Message | CustomMessage | BashExecutionMessage,
+		nativeOrigin?: NativeEntryOrigin,
+	): Promise<string> {
 		const finalized = this.finalizedToolMessages.get(message);
 		if (finalized) return finalized;
 		const entry: SessionMessageEntry = {
@@ -1768,6 +1878,7 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
+			...(nativeOrigin ? { nativeOrigin } : {}),
 		};
 		await this._appendEntry(entry);
 		return entry.id;
@@ -1836,11 +1947,12 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	async appendCustomEntry(customType: string, data?: unknown): Promise<string> {
+	async appendCustomEntry(customType: string, data?: unknown, nativeOrigin?: NativeEntryOrigin): Promise<string> {
 		const entry: CustomEntry = {
 			type: "custom",
 			customType,
 			data,
+			...(nativeOrigin ? { nativeOrigin } : {}),
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
@@ -2033,6 +2145,7 @@ export class SessionManager {
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
+		nativeOrigin?: NativeEntryOrigin,
 	): Promise<string> {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -2040,6 +2153,7 @@ export class SessionManager {
 			content,
 			display,
 			details,
+			...(nativeOrigin ? { nativeOrigin } : {}),
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),

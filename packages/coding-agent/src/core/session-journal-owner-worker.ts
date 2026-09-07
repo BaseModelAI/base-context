@@ -131,11 +131,15 @@ async function start(): Promise<void> {
 	const migrationPath = assertProductStatePath(`${journalPath}.migrate-tmp`);
 	const retainedPath = assertProductStatePath(`${journalPath}.legacy-v3`);
 	let state: ScanResult = { format: "framed", cursor: INITIAL_JOURNAL_CURSOR, nextSequence: 0, keep: 0, size: 0 };
-	let fileIdentity: Pick<Stats, "dev" | "ino"> | undefined;
+	let fileIdentity: Pick<Stats, "dev" | "ino">;
 	const snapshot = (): SessionJournalState => ({
 		journalPath,
 		nextSequence: state.nextSequence,
 		format: state.format,
+		byteLength: state.keep,
+		checksum: state.cursor.checksum,
+		dev: fileIdentity.dev,
+		ino: fileIdentity.ino,
 	});
 	const assertOwner = () => {
 		if (!lockHeld || parentGone || !process.connected || process.ppid !== options.parentPid) {

@@ -1,0 +1,4 @@
+- Added lazy canonical history indexing and branch-scoped metadata, search and task-evidence queries without making index failure erase acknowledged source facts.
+- Preserved exact imported task identities, explicit relations and incomplete-history coverage instead of treating missing items as retired.
+- Recorded original native input and per-call goal provenance on existing session entries without granting transformed previews user authority.
+- Added bounded canonical JSON fragment recovery with UTF8 byte cursors and at most one 64KiB source-part read per call.

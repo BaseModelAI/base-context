@@ -379,6 +379,20 @@ describe("AgentSession prompt characterization", () => {
 		await harness.session.prompt("/review src/index.ts");
 
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+		const userEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toMatchObject({
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "/review src/index.ts" },
+			},
+		});
 	});
 
 	it("dispatches extension commands without consuming a provider response", async () => {
@@ -1371,16 +1385,42 @@ stale post-hook extension instructions`,
 				settled = true;
 			});
 		await vi.waitFor(() => expect(harness.session.getFollowUpMessages()).toEqual(["second"]));
+		expect(
+			harness.session.mutateQueuedMessage("followUp", 0, "second", {
+				type: "replace",
+				text: "replacement second",
+				lane: "followUp",
+			}),
+		).toBe("applied");
 		expect(settled).toBe(false);
 
 		releaseFirst?.();
-		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["first", "second"]));
+		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["first", "replacement second"]));
 		expect(settled).toBe(false);
 
 		releaseSecond?.();
 		await Promise.all([first, queued]);
 		expect(settled).toBe(true);
 		expect(getAssistantTexts(harness)).toEqual(["first done", "second done"]);
+		const replacementEntry = harness.sessionManager
+			.getEntries()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					getMessageText(entry.message) === "replacement second",
+			);
+		expect(replacementEntry).toMatchObject({
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "replacement second" },
+			},
+		});
 	});
 
 	it("drops generated prompt-wait outcome entries after completion", async () => {
@@ -1477,6 +1517,7 @@ stale post-hook extension instructions`,
 		};
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
+			persistSession: true,
 			resourceLoader,
 			extensionFactories: [
 				(pi) => {
@@ -1497,6 +1538,20 @@ stale post-hook extension instructions`,
 		expect(harness.session.getFollowUpMessages()).toEqual(["/review keep literal", "/testcmd keep literal"]);
 		expect(commandRuns).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(0);
+
+		harness.setResponses([fauxAssistantMessage("review delivered"), fauxAssistantMessage("command delivered")]);
+		harness.session.resumeQueuedWork();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["/review keep literal", "/testcmd keep literal"]);
+		const primaryEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(primaryEntries).toHaveLength(2);
+		for (const entry of primaryEntries) {
+			expect(entry).toMatchObject({
+				nativeOrigin: { kind: "input", recordRole: "primary", inputSource: "internal" },
+			});
+		}
 	});
 
 	it("keeps an ordinary direct prompt fenced until its primary message starts", async () => {

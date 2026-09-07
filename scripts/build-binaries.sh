@@ -97,6 +97,7 @@ mkdir -p binaries/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64}
 mkdir -p binaries/worker-bundles
 bun build ./dist/core/rlm-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/rlm-journal-owner-worker.js
 bun build ./dist/core/session-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/session-journal-owner-worker.js
+bun build ./dist/core/history-index-worker.js --target=node --format=esm --outfile binaries/worker-bundles/history-index-worker.js
 
 # Determine which platforms to build
 if [[ -n "$PLATFORM" ]]; then
@@ -128,7 +129,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp dist/LICENSE dist/NOTICE binaries/$platform/
     mkdir -p binaries/$platform/dist/core
     cp dist/build-info.json binaries/$platform/dist/
-    cp dist/core/history-index-worker.js binaries/$platform/dist/core/
+    cp binaries/worker-bundles/history-index-worker.js binaries/$platform/dist/core/
     cp binaries/worker-bundles/rlm-journal-owner-worker.js binaries/$platform/dist/core/
     cp binaries/worker-bundles/session-journal-owner-worker.js binaries/$platform/dist/core/
     cp -r dist/base-context-runtime binaries/$platform/dist/
