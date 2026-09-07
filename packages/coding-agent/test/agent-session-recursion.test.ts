@@ -284,6 +284,7 @@ describe("AgentSession rlm recursion", () => {
 			rlmDepth: options.depth,
 			rlmMaxDepth: options.maxDepth,
 			rlmSessionDir: options.rlmSessionDir,
+			prewarmIpythonKernel: false,
 		});
 		sessions.add(session);
 		await session.initialize();
@@ -1276,10 +1277,17 @@ describe("AgentSession rlm recursion", () => {
 
 	it("leaves replied state unknown when a child session is rehydrated", async () => {
 		const manager = await SessionManager.create(tempDir, join(tempDir, "resumed-child"), { rlmDepth: 1 });
+		await manager.appendCustomMessageEntry("bootstrap-notice", "Custom context, not a message entry", false);
+		const initial = await createSession({ depth: 1, sessionManager: manager });
+		expect(initial.repliedToParentSinceTask).toBe(false);
 		await manager.appendMessage({ role: "user", content: "previous task", timestamp: 1 });
 		await manager.flushNow();
 
-		const resumed = await createSession({ depth: 1, sessionManager: manager });
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Missing persisted child session file");
+		await initial.disposeAsync();
+		const reopened = await SessionManager.open(sessionFile, join(tempDir, "resumed-child"));
+		const resumed = await createSession({ depth: 1, sessionManager: reopened });
 		expect(resumed.repliedToParentSinceTask).toBeUndefined();
 	});
 
@@ -2600,6 +2608,7 @@ describe("AgentSession rlm recursion", () => {
 	it("rehydrates chat max depth ahead of reconstruction config", async () => {
 		const root = await createSession();
 		await root.setRlmMaxDepth(3);
+		await root.sessionManager.appendCustomEntry("rlm_max_depth_state", { maxDepth: 1.5 });
 		if (!root.sessionFile) throw new Error("Missing persisted session file");
 		const sessionFile = root.sessionFile;
 		await root.disposeAsync();
@@ -2607,6 +2616,15 @@ describe("AgentSession rlm recursion", () => {
 		const resumedManager = await SessionManager.open(sessionFile, join(tempDir, "sessions"));
 		const resumed = await createSession({ sessionManager: resumedManager, maxDepth: 4 });
 		expect(resumed.getRlmMaxDepthStatus()).toEqual({ maxDepth: 3, source: "chat" });
+		await resumed.disposeAsync();
+
+		const retainedManager = await SessionManager.importRetainedFrom(
+			sessionFile,
+			tempDir,
+			join(tempDir, "retained-depth"),
+		);
+		const retained = await createSession({ sessionManager: retainedManager, maxDepth: 4 });
+		expect(retained.getRlmMaxDepthStatus()).toEqual({ maxDepth: 3, source: "chat" });
 	});
 
 	it("reloads max depth and its source when navigating to a branch without an override", async () => {

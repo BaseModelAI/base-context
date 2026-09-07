@@ -155,6 +155,8 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 	expect(executionIds).toHaveLength(2);
 	const journal = readFileSync(manager.getSessionFile()!, "utf8");
 	for (const executionId of executionIds) expect(journal).toContain(executionId);
+	const exported = await owner.exportToJsonl(join(dir, "native-export.jsonl"));
+	for (const executionId of executionIds) expect(readFileSync(exported, "utf8")).toContain(executionId);
 });
 
 it("follows the session owner after a source-history switch", async () => {

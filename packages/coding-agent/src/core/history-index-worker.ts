@@ -52,7 +52,8 @@ if (
 		schemaVersion !== 8 &&
 		schemaVersion !== 9 &&
 		schemaVersion !== 10 &&
-		schemaVersion !== 11)
+		schemaVersion !== 11 &&
+		schemaVersion !== 12)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -121,7 +122,8 @@ transaction(() => {
  );
  CREATE TABLE IF NOT EXISTS context_node (
  session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,
- latest_model TEXT,latest_thinking TEXT,latest_service_tier TEXT,latest_goal TEXT,has_session_message INTEGER,goal_seedable INTEGER,PRIMARY KEY(session,id)
+ latest_model TEXT,latest_thinking TEXT,latest_service_tier TEXT,latest_goal TEXT,has_session_message INTEGER,goal_seedable INTEGER,
+ latest_rlm_max_depth TEXT,has_branch_message INTEGER,PRIMARY KEY(session,id)
  );
  CREATE TABLE IF NOT EXISTS context_update (
   session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
@@ -129,7 +131,7 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 11) {
+	if (schemaVersion !== 12) {
 		if (
 			!db
 				.prepare("PRAGMA table_info(source_event)")
@@ -151,6 +153,16 @@ transaction(() => {
  ALTER TABLE context_node ADD COLUMN has_session_message INTEGER;
  ALTER TABLE context_node ADD COLUMN goal_seedable INTEGER;
  `);
+		if (
+			!db
+				.prepare("PRAGMA table_info(context_node)")
+				.all()
+				.some((column) => column.name === "latest_rlm_max_depth")
+		)
+			db.exec(`
+ ALTER TABLE context_node ADD COLUMN latest_rlm_max_depth TEXT;
+ ALTER TABLE context_node ADD COLUMN has_branch_message INTEGER;
+ `);
 		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
 	}
 	db.exec(`
@@ -159,7 +171,7 @@ transaction(() => {
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=11");
+	db.exec("PRAGMA user_version=12");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -272,9 +284,16 @@ type BootstrapColumns = {
 	latest_goal: string | null;
 	has_session_message: number;
 	goal_seedable: number;
+	latest_rlm_max_depth: string | null;
+	has_branch_message: number;
 };
+function isPersistedRlmMaxDepthState(value: unknown): boolean {
+	if (typeof value !== "object" || value === null) return false;
+	const maxDepth = (value as { maxDepth?: unknown }).maxDepth;
+	return typeof maxDepth === "number" && Number.isSafeInteger(maxDepth) && maxDepth >= 0;
+}
 const contextParent = db.prepare("SELECT * FROM context_node WHERE session=? AND id=?");
-const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
+const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 function insertContext(
 	sessionId: string,
 	item: IndexedSourceEvent,
@@ -310,6 +329,8 @@ function insertContext(
 		entry.customType === GOAL_STATE_CUSTOM_TYPE &&
 		item.retention !== "retained-import" &&
 		isPersistedGoalState(entry.data);
+	const eligibleRlmMaxDepth =
+		entry.type === "custom" && entry.customType === "rlm_max_depth_state" && isPersistedRlmMaxDepthState(entry.data);
 	const seedControl =
 		entry.type === "model_change" || entry.type === "thinking_level_change" || entry.type === "service_tier_change";
 	// A manifest ref exists for a message envelope even when its message value is falsy.
@@ -328,6 +349,8 @@ function insertContext(
 		eligibleGoal ? item.id : (parent?.latest_goal ?? null),
 		parent?.has_session_message === 1 || hasSessionMessage ? 1 : 0,
 		seedControl && (item.parentId === null || parent?.goal_seedable === 1) ? 1 : 0,
+		eligibleRlmMaxDepth ? item.id : (parent?.latest_rlm_max_depth ?? null),
+		parent?.has_branch_message === 1 || entry.type === "message" ? 1 : 0,
 	);
 }
 // Only bounded relation keys and source refs live here; never usage or sent-message bodies.
@@ -961,6 +984,8 @@ function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch
 		thinkingLevel: reference(state?.latest_thinking),
 		serviceTier: reference(state?.latest_service_tier),
 		goalState: reference(state?.latest_goal),
+		rlmMaxDepth: reference(state?.latest_rlm_max_depth),
+		hasBranchMessage: state?.has_branch_message === 1,
 		hasContextMessages: !!state && (state.has_session_message === 1 || state.latest_compaction !== null),
 		goalSeedable: !state || state.goal_seedable === 1,
 	};

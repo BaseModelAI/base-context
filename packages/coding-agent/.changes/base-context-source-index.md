@@ -12,3 +12,4 @@
 - Added captured branch/whole-source readers and entry/byte-capped detached materialization. Reduced eager tree work and used exact ACK IDs for compaction events.
 - Restored SDK settings/context and native goals through captured bootstrap references, without their full-branch scans.
 - Added exact captured parent-path pages, bounded complete tree reads, and asynchronous source-backed context rebuilds for native sessions and connection snapshots.
+- Restored native RLM controls through captured bootstrap, added an early Agent initialization owner, streamed native JSONL branch export, and bounded complete fork-picker reads.

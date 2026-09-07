@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { emptyGoalState } from "../src/core/goals.js";
+import { DEFAULT_FORK_MESSAGE_LIMITS, readUserMessagesForForking } from "../src/core/session-fork-messages.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { DEFAULT_SESSION_TREE_LIMITS, readSessionTree } from "../src/core/session-tree.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
@@ -299,6 +300,9 @@ describe("InProcessAgentConnection", () => {
 		expect(getEntries).not.toHaveBeenCalled();
 		await expect(connection.getSessionTree()).resolves.toEqual({ tree: [], leafId: "snapshot-leaf" });
 		expect(materialize).toHaveBeenCalledWith(DEFAULT_SESSION_TREE_LIMITS);
+		await expect(connection.getUserMessagesForForking()).resolves.toEqual([]);
+		expect(materialize).toHaveBeenCalledWith(DEFAULT_FORK_MESSAGE_LIMITS);
+		expect(getEntries).not.toHaveBeenCalled();
 		expect(getTree).not.toHaveBeenCalled();
 		expect(snapshot.sessionContext).not.toBeInstanceOf(Promise);
 		messages.push(userMessage("later context", 2));
@@ -310,7 +314,7 @@ describe("InProcessAgentConnection", () => {
 			const first = await manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
 			const branchA = await manager.appendMessage({ role: "user", content: "branch A", timestamp: 2 });
 			manager.branch(first);
-			await manager.appendMessage({ role: "user", content: "branch B", timestamp: 3 });
+			const branchB = await manager.appendMessage({ role: "user", content: "branch B", timestamp: 3 });
 			await manager.appendLabelChange(first, "root label");
 			manager.branch(branchA);
 			const expected = structuredClone(manager.getTree());
@@ -327,7 +331,7 @@ describe("InProcessAgentConnection", () => {
 			Object.assign(fake.session, { sessionManager: manager });
 			const nativeConnection = new InProcessAgentConnection(asRuntime(new FakeRuntime(fake.session)));
 			const pending = nativeConnection.getSessionTree();
-			await manager.appendMessage({ role: "user", content: "later append", timestamp: 4 });
+			const later = await manager.appendMessage({ role: "user", content: "later append", timestamp: 4 });
 			const captured = await pending;
 			expect(captured).toEqual({ tree: expected, leafId: branchA });
 			const copied = captured.tree[0].entry;
@@ -339,6 +343,60 @@ describe("InProcessAgentConnection", () => {
 			await expect(readSessionTree(manager, { ...DEFAULT_SESSION_TREE_LIMITS, maxSourceBytes: 1 })).rejects.toThrow(
 				"History source byte budget exceeded",
 			);
+			const image = { type: "image" as const, data: "AA==", mimeType: "image/png" };
+			const whitespace = await manager.appendMessage({ role: "user", content: " \t", timestamp: 0 });
+			const mixed = await manager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: " first" }, image, { type: "text", text: "second " }],
+				timestamp: 0,
+			});
+			await manager.appendMessage({ role: "user", content: "", timestamp: 0 });
+			await manager.appendMessage({ role: "user", content: [], timestamp: 0 });
+			await manager.appendMessage({ role: "user", content: [image], timestamp: 0 });
+			await manager.appendCustomMessageEntry("notice", "not a user message", true);
+			await manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "ipython",
+				content: [{ type: "text", text: "not a user message" }],
+				isError: false,
+				timestamp: 0,
+			});
+			manager.branch(branchA);
+			const expectedFork = [
+				{ entryId: first, text: "root" },
+				{ entryId: branchA, text: "branch A" },
+				{ entryId: branchB, text: "branch B" },
+				{ entryId: later, text: "later append" },
+				{ entryId: whitespace, text: " \t" },
+				{ entryId: mixed, text: " firstsecond " },
+			];
+			expect(manager.supportsCapturedHistoryReads()).toBe(true);
+			const sourceRead = vi.spyOn(manager, "materializeSourceHistory");
+			const residentRead = vi.spyOn(manager, "materializeResidentHistory");
+			const pendingFork = nativeConnection.getUserMessagesForForking();
+			const future = await manager.appendMessage({ role: "user", content: "future fork", timestamp: 5 });
+			await expect(pendingFork).resolves.toEqual(expectedFork);
+			expect(sourceRead).toHaveBeenCalledWith(DEFAULT_FORK_MESSAGE_LIMITS);
+			expect(residentRead).not.toHaveBeenCalled();
+			await manager.appendCustomEntry("filtered tail", { text: "still charged to the limits" });
+			const complete = await manager.materializeSourceHistory(DEFAULT_FORK_MESSAGE_LIMITS);
+			await expect(nativeConnection.getUserMessagesForForking()).resolves.toEqual([
+				...expectedFork,
+				{ entryId: future, text: "future fork" },
+			]);
+			await expect(
+				readUserMessagesForForking(manager, {
+					...DEFAULT_FORK_MESSAGE_LIMITS,
+					maxEntries: complete.entries.length - 1,
+				}),
+			).rejects.toThrow("History entry budget exceeded");
+			await expect(
+				readUserMessagesForForking(manager, {
+					...DEFAULT_FORK_MESSAGE_LIMITS,
+					maxSourceBytes: complete.sourceBytes - 1,
+				}),
+			).rejects.toThrow("History source byte budget exceeded");
 			await nativeConnection.dispose();
 
 			const at = (seconds: number) => `2026-01-01T00:00:0${seconds}.000Z`;
@@ -401,6 +459,27 @@ describe("InProcessAgentConnection", () => {
 				await expect(
 					readSessionTree(resident, { ...DEFAULT_SESSION_TREE_LIMITS, maxSourceBytes: 1 }),
 				).rejects.toThrow("JSON byte limit exceeded");
+				expect(resident.supportsCapturedHistoryReads()).toBe(false);
+				const residentSourceRead = vi.spyOn(resident, "materializeSourceHistory");
+				const residentSession = createFakeSession("resident-fork", []);
+				Object.assign(residentSession.session, { sessionManager: resident });
+				const residentConnection = new InProcessAgentConnection(
+					asRuntime(new FakeRuntime(residentSession.session)),
+				);
+				await expect(residentConnection.getUserMessagesForForking()).resolves.toEqual([
+					{ entryId: "root", text: "root" },
+					{ entryId: "late", text: "late" },
+					{ entryId: "early", text: "early" },
+					{ entryId: "orphan", text: "orphan" },
+				]);
+				expect(residentSourceRead).not.toHaveBeenCalled();
+				await expect(
+					readUserMessagesForForking(resident, { ...DEFAULT_FORK_MESSAGE_LIMITS, maxEntries: entries.length - 1 }),
+				).rejects.toThrow("Resident history entry budget exceeded");
+				await expect(
+					readUserMessagesForForking(resident, { ...DEFAULT_FORK_MESSAGE_LIMITS, maxSourceBytes: 1 }),
+				).rejects.toThrow("JSON byte limit exceeded");
+				await residentConnection.dispose();
 			} finally {
 				await resident.close();
 			}

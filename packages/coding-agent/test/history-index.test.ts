@@ -193,6 +193,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			thinkingLevel: null,
 			serviceTier: null,
 			goalState: null,
+			rlmMaxDepth: null,
+			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
 		});
@@ -504,6 +506,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			thinkingLevel: await index.getSource("canonical", "bootstrap-thinking", controlScope.through),
 			serviceTier: await index.getSource("canonical", "bootstrap-tier", controlScope.through),
 			goalState: null,
+			rlmMaxDepth: null,
+			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
 		});
@@ -530,6 +534,13 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 				data: { ...bootstrapGoal, active: "claimed" },
 			},
 			{ id: "bootstrap-retained-goal", type: "custom", customType: "thread_goal_state", data: bootstrapGoal },
+			{ id: "bootstrap-rlm-depth", type: "custom", customType: "rlm_max_depth_state", data: { maxDepth: 0 } },
+			{
+				id: "bootstrap-invalid-rlm-depth",
+				type: "custom",
+				customType: "rlm_max_depth_state",
+				data: { maxDepth: 1.5 },
+			},
 			{
 				id: "context-assistant",
 				type: "message",
@@ -574,7 +585,9 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		for (const value of contextEntries) {
 			await owner.appendJson(
 				JSON.stringify({ ...value, parentId: contextParentId, timestamp: "2026-01-01T00:00:00Z" }),
-				value.id === "bootstrap-retained-goal" ? "retained-import" : undefined,
+				value.id === "bootstrap-retained-goal" || value.id === "bootstrap-rlm-depth"
+					? "retained-import"
+					: undefined,
 			);
 			contextParentId = value.id;
 		}
@@ -587,9 +600,12 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			thinkingLevel: null,
 			serviceTier: null,
 			goalState: await index.getSource("canonical", "bootstrap-goal", visibleScope.through),
+			rlmMaxDepth: await index.getSource("canonical", "bootstrap-rlm-depth", visibleScope.through),
+			hasBranchMessage: true,
 			hasContextMessages: true,
 			goalSeedable: false,
 		});
+		expect(contextBootstrap.rlmMaxDepth?.retention).toBe("retained-import");
 		expect(await index.branchBootstrap("canonical", controlScope)).toEqual(controlBootstrap);
 		const visibleIds: string[] = [];
 		const visibleOrdinals: number[] = [];
@@ -950,7 +966,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -1245,6 +1261,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		const emptyMessageScope = { leafId: "bootstrap-empty-message", through: emptyMessageSnapshot.nextSequence - 1 };
 		await index.syncSource("edge", emptyMessageSnapshot);
 		expect(await index.branchBootstrap("edge", emptyMessageScope)).toMatchObject({
+			hasBranchMessage: true,
 			hasContextMessages: false,
 			goalSeedable: false,
 		});

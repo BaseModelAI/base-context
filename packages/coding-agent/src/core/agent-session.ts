@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -265,13 +265,9 @@ import {
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
+import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import type { BranchSummaryEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
-import {
-	CURRENT_SESSION_VERSION,
-	getLatestCompactionEntry,
-	type SessionHeader,
-	SessionManager,
-} from "./session-manager.js";
+import { getLatestCompactionEntry, SessionManager } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
@@ -1210,6 +1206,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this.agent.bindInitializationOwner(() => this.initialize());
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
 			await this._goalResumeOperation;
@@ -1291,7 +1288,10 @@ export class AgentSession {
 		if (this._configuredRlmMaxDepth !== undefined && !isNonNegativeInteger(this._configuredRlmMaxDepth)) {
 			throw new Error("rlmMaxDepth must be a non-negative integer");
 		}
-		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
+		// Persistent controls are restored before constructing the runtime in initialize().
+		const resolvedRlmMaxDepth = this.sessionManager.isPersisted()
+			? { maxDepth: 2, source: "default" as const }
+			: this._resolveRlmMaxDepth(this._loadPersistedRlmMaxDepthState());
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
@@ -1327,7 +1327,9 @@ export class AgentSession {
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
-			this._rlmDepth > 0 && this.sessionManager.getBranch().some((entry) => entry.type === "message")
+			this._rlmDepth > 0 &&
+			(this.sessionManager.isPersisted() ||
+				this.sessionManager.getBranch().some((entry) => entry.type === "message"))
 				? undefined
 				: false;
 		this._subagentRuntimeHost = config.subagentRuntimeHost;
@@ -1346,10 +1348,12 @@ export class AgentSession {
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
 
-		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
-			includeAllExtensionTools: true,
-		});
+		if (!this.sessionManager.isPersisted()) {
+			this._buildRuntime({
+				activeToolNames: this._initialActiveToolNames,
+				includeAllExtensionTools: true,
+			});
+		}
 	}
 
 	private async _waitForChildUsageWrites(): Promise<void> {
@@ -1365,10 +1369,18 @@ export class AgentSession {
 	private async _initialize(): Promise<void> {
 		let goalSeedable = false;
 		if (this.sessionManager.isPersisted()) {
-			const bootstrap = await this._readGoalBootstrap();
+			const bootstrap = await this._readRuntimeBootstrap();
 			this._goalState = bootstrap.goalState;
 			this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 			goalSeedable = bootstrap.goalSeedable;
+			const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
+			this._rlmMaxDepth = resolved.maxDepth;
+			this._rlmMaxDepthSource = resolved.source;
+			this._repliedToParentSinceTask = this._rlmDepth > 0 && bootstrap.hasBranchMessage ? undefined : false;
+			this._buildRuntime({
+				activeToolNames: this._initialActiveToolNames,
+				includeAllExtensionTools: true,
+			});
 			if (
 				this._goalState.status === "active" &&
 				this._includeGoals &&
@@ -1682,11 +1694,10 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _resolveRlmMaxDepth(): {
+	private _resolveRlmMaxDepth(persisted: PersistedRlmMaxDepthState | undefined): {
 		maxDepth: number;
 		source: RlmMaxDepthSource;
 	} {
-		const persisted = this._loadPersistedRlmMaxDepthState();
 		if (persisted) {
 			return { maxDepth: persisted.maxDepth, source: "chat" };
 		}
@@ -1704,13 +1715,22 @@ export class AgentSession {
 		return { maxDepth: 2, source: "default" };
 	}
 
-	private async _readGoalBootstrap(): Promise<{ goalState: GoalState; goalSeedable: boolean }> {
+	private async _readRuntimeBootstrap(): Promise<{
+		goalState: GoalState;
+		goalSeedable: boolean;
+		rlmMaxDepth: PersistedRlmMaxDepthState | undefined;
+		hasBranchMessage: boolean;
+	}> {
 		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
 		return this.sessionManager.readBranchHistory(async (view) => {
 			const bootstrap = await view.branchBootstrap();
+			let remaining = maxSourceBytes;
 			let goalState = emptyGoalState();
 			if (bootstrap.goalState) {
-				const hydrated = await view.hydrateEntry(bootstrap.goalState.id, maxSourceBytes);
+				if (bootstrap.goalState.locator.length > remaining)
+					throw new Error("Runtime bootstrap source byte budget exceeded");
+				const hydrated = await view.hydrateEntry(bootstrap.goalState.id, remaining);
+				remaining -= bootstrap.goalState.locator.length;
 				if (
 					!hydrated ||
 					hydrated.source.retention === "retained-import" ||
@@ -1721,7 +1741,26 @@ export class AgentSession {
 					throw new Error("Bootstrap goal source is unavailable or ineligible");
 				goalState = normalizeGoalState(hydrated.entry.data);
 			}
-			return { goalState, goalSeedable: bootstrap.goalSeedable };
+			let rlmMaxDepth: PersistedRlmMaxDepthState | undefined;
+			if (bootstrap.rlmMaxDepth) {
+				if (bootstrap.rlmMaxDepth.locator.length > remaining)
+					throw new Error("Runtime bootstrap source byte budget exceeded");
+				const hydrated = await view.hydrateEntry(bootstrap.rlmMaxDepth.id, remaining);
+				if (
+					!hydrated ||
+					hydrated.entry.type !== "custom" ||
+					hydrated.entry.customType !== RLM_MAX_DEPTH_STATE_CUSTOM_TYPE ||
+					!isPersistedRlmMaxDepthState(hydrated.entry.data)
+				)
+					throw new Error("Bootstrap RLM depth source is unavailable or ineligible");
+				rlmMaxDepth = hydrated.entry.data;
+			}
+			return {
+				goalState,
+				goalSeedable: bootstrap.goalSeedable,
+				rlmMaxDepth,
+				hasBranchMessage: bootstrap.hasBranchMessage,
+			};
 		});
 	}
 
@@ -1769,17 +1808,15 @@ export class AgentSession {
 		return true;
 	}
 
-	private async _reloadGoalStateFromBranch(): Promise<void> {
-		this._goalState = this.sessionManager.isPersisted()
-			? (await this._readGoalBootstrap()).goalState
-			: this._loadPersistedGoalState();
+	private async _reloadBranchRuntimeState(): Promise<void> {
+		const bootstrap = this.sessionManager.isPersisted()
+			? await this._readRuntimeBootstrap()
+			: { goalState: this._loadPersistedGoalState(), rlmMaxDepth: this._loadPersistedRlmMaxDepthState() };
+		this._goalState = bootstrap.goalState;
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
-	}
-
-	private _reloadRlmMaxDepthFromBranch(): void {
 		const previousMaxDepth = this._rlmMaxDepth;
-		const resolved = this._resolveRlmMaxDepth();
+		const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
 		this._rlmMaxDepth = resolved.maxDepth;
 		this._rlmMaxDepthSource = resolved.source;
 		if (resolved.maxDepth !== previousMaxDepth) {
@@ -3954,6 +3991,8 @@ export class AgentSession {
 	}
 
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
+		// Failed native initialization can emit a lifecycle error before extensions exist.
+		if (!this._extensionRunner) return;
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			await this.sessionManager.recordGitStateIfChanged();
@@ -4367,7 +4406,7 @@ export class AgentSession {
 			}
 			this._cancelSessionActions(() => true, deliveryError);
 			this.agent.clearAllQueues();
-			this._extensionRunner.invalidate(
+			this._extensionRunner?.invalidate(
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 			);
 			this._disconnectFromAgent();
@@ -12175,8 +12214,7 @@ export class AgentSession {
 			this._contextOmissions = undefined;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
-			await this._reloadGoalStateFromBranch();
-			this._reloadRlmMaxDepthFromBranch();
+			await this._reloadBranchRuntimeState();
 			this._invalidateQueuedPromptPreparation();
 
 			await this._extensionRunner.emit({
@@ -12435,39 +12473,7 @@ export class AgentSession {
 		if (this.sessionManager.getSessionId() !== sourceId || this.sessionManager.getSessionFile() !== sourceFile) {
 			throw new Error("Session source changed during export");
 		}
-		const dir = dirname(filePath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionManager.getSessionId(),
-			timestamp: new Date().toISOString(),
-			cwd: this.sessionManager.getCwd(),
-		};
-
-		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
-		}
-
-		try {
-			writeFileSync(filePath, `${lines.join("\n")}\n`, { encoding: "utf-8", flag: "wx" });
-		} catch (error) {
-			if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-				throw new Error(`Export output already exists; choose a new filename: ${filePath}`);
-			}
-			throw error;
-		}
-		return filePath;
+		return exportSessionBranchToJsonl(this.sessionManager, filePath);
 	}
 
 	/**

@@ -39,6 +39,8 @@ describe("session write isolation", () => {
 			thinkingLevel: null,
 			serviceTier: null,
 			goalState: null,
+			rlmMaxDepth: null,
+			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
 			source: { sessionId: session.getSessionId(), leafId: null },
@@ -139,6 +141,8 @@ describe("session write isolation", () => {
 				serviceTier: { id: tierId },
 				goalState: null,
 				hasContextMessages: false,
+				hasBranchMessage: false,
+				rlmMaxDepth: null,
 				goalSeedable: true,
 				source: { sessionId: session.getSessionId(), leafId: tierId },
 			});
@@ -162,6 +166,14 @@ describe("session write isolation", () => {
 			thinkingLevel: null,
 			serviceTier: null,
 			hasContextMessages: true,
+			hasBranchMessage: true,
+			goalSeedable: false,
+		});
+		session.resetLeaf();
+		await session.appendCustomMessageEntry("bootstrap-notice", "Custom context", false);
+		expect(await session.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			hasContextMessages: true,
+			hasBranchMessage: false,
 			goalSeedable: false,
 		});
 
@@ -306,6 +318,23 @@ describe("session write isolation", () => {
 				entry: { data: nativeGoal },
 			});
 		});
+		const depthId = await copied.appendCustomEntry("rlm_max_depth_state", { maxDepth: 0 });
+		await copied.appendCustomEntry("rlm_max_depth_state", { maxDepth: -1 });
+		await copied.readBranchHistory(async (history) => {
+			const bootstrap = await history.branchBootstrap();
+			expect(bootstrap.rlmMaxDepth?.id).toBe(depthId);
+			expect(bootstrap.hasBranchMessage).toBe(true);
+			expect(await history.hydrateEntry(bootstrap.rlmMaxDepth!.id, 64 * 1024)).toMatchObject({
+				entry: { data: { maxDepth: 0 } },
+			});
+		});
+		const retainedDepth = await SessionManager.importRetainedFrom(copied.getSessionFile()!, dir, ownedDir);
+		managers.push(retainedDepth);
+		expect(await retainedDepth.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			rlmMaxDepth: { id: depthId, retention: "retained-import" },
+			goalState: null,
+			hasBranchMessage: true,
+		});
 		expect(readFileSync(rawPath, "utf8")).toBe(raw);
 
 		const migrated = await SessionManager.open(rawPath, ownedDir);
@@ -334,6 +363,8 @@ describe("session write isolation", () => {
 			const bootstrap = await history.branchBootstrap();
 			expect(bootstrap).toMatchObject({
 				hasContextMessages: false,
+				hasBranchMessage: false,
+				rlmMaxDepth: null,
 				goalSeedable: false,
 				model: { id: rootModelId },
 			});

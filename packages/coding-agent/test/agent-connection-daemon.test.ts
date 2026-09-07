@@ -247,6 +247,19 @@ class FakeDaemonClient {
 						leafId: "user-1",
 					},
 				};
+			case "get_user_messages_for_forking":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						messages: [
+							{ entryId: "user-1", text: "hello" },
+							{ entryId: "offbranch", text: " firstsecond " },
+							{ entryId: "whitespace", text: " \t" },
+						],
+					},
+				};
 			case "get_tool_definition":
 				return {
 					type: "response",
@@ -3395,6 +3408,22 @@ describe("DaemonAgentConnection", () => {
 			error: "History source byte budget exceeded",
 		});
 		await expect(connection.getSessionTree()).rejects.toThrow("History source byte budget exceeded");
+		await expect(connection.getUserMessagesForForking()).resolves.toEqual([
+			{ entryId: "user-1", text: "hello" },
+			{ entryId: "offbranch", text: " firstsecond " },
+			{ entryId: "whitespace", text: " \t" },
+		]);
+		expect(fakeClient.requests.at(-1)).toEqual({
+			type: "get_user_messages_for_forking",
+			activeSessionId: "active-1",
+		});
+		vi.spyOn(fakeClient, "request").mockResolvedValueOnce({
+			type: "response",
+			command: "get_user_messages_for_forking",
+			success: false,
+			error: "History entry budget exceeded",
+		});
+		await expect(connection.getUserMessagesForForking()).rejects.toThrow("History entry budget exceeded");
 		await connection.dispose();
 	});
 

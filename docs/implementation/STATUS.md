@@ -429,3 +429,27 @@ Manager2 (including the capped wrapper), mode2, and direct context4. The later s
 ordering correction captures child metadata before awaiting context and reruns only its
 existing affected case. No provider, kernel, packaged-product or whole-memory claim.
 These changes prepare removal of persistent body stores; they do not remove them yet.
+
+
+## Runtime bootstrap and streaming branch export
+
+Schema12 adds the latest eligible RLM-depth source and an exact parent-path message-entry
+bit to branch bootstrap. The RLM predicate and retained-control behavior remain unchanged;
+this does not strengthen control authority. Goal and depth restoration share one capture
+and a source-byte cap. Native runtime construction follows that restoration, so kernel
+configuration does not capture a provisional depth. Direct Agent entry points now run the
+bound native initialization callback before context snapshots and loop events. A failed
+initializer does not dispatch extension events when no extension runtime was created.
+
+JSONL export retains the existing admission drains and source-change check. The native
+helper streams actual parent-path pages and one bounded record at a time, restores selected
+assistant usage, and re-chains parent IDs into a fresh raw v3 header. It has no native
+whole-branch accumulation or total-branch entry cap. Non-indexed sources use an explicit
+bounded resident snapshot. Existing destinations are refused; failed new outputs are
+removed and cleanup errors are retained. This is not an import or authority operation.
+
+Fork-picker mode reads use complete capped source materialization rather than getEntries.
+The 16,384-entry/64 MiB defaults count all source entries before filtering, including other
+branches. Text order, whitespace and joined text-part behavior remain unchanged.
+The synchronous AgentSession picker API, other branch/control scans, late-IPython startup
+map, persistent Manager stores and current-invocation Agent output collectors remain.

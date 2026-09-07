@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import type { Usage } from "@ponythewhite/base-context-ai";
 import type { Component } from "@ponythewhite/base-context-tui";
 import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -8,8 +10,24 @@ import { exportFromFile, exportSessionToHtml } from "../src/core/export-html/ind
 import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
-import { type SessionEntry, SessionManager } from "../src/core/session-manager.js";
+import * as journalIo from "../src/core/journal-io.js";
+import { exportSessionBranchToJsonl } from "../src/core/session-jsonl-export.js";
+import {
+	CURRENT_SESSION_VERSION,
+	type SessionEntry,
+	type SessionHeader,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const original = await importOriginal<typeof fs>();
+	return { ...original, closeSync: vi.fn(original.closeSync), unlinkSync: vi.fn(original.unlinkSync) };
+});
+vi.mock("../src/core/journal-io.js", async (importOriginal) => {
+	const original = await importOriginal<typeof journalIo>();
+	return { ...original, writeFullySync: vi.fn(original.writeFullySync) };
+});
 
 function exportedHistory(path: string): { entries: SessionEntry[]; leafId: string | null; header: { id: string } } {
 	const encoded = readFileSync(path, "utf8").match(
@@ -17,6 +35,16 @@ function exportedHistory(path: string): { entries: SessionEntry[]; leafId: strin
 	)?.[1];
 	if (!encoded) throw new Error("Missing exported session data");
 	return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+}
+
+function exportedJsonl(path: string): { header: SessionHeader; entries: SessionEntry[] } {
+	const text = readFileSync(path, "utf8");
+	expect(text.endsWith("\n")).toBe(true);
+	const [header, ...entries] = text
+		.trimEnd()
+		.split("\n")
+		.map((line) => JSON.parse(line));
+	return { header, entries };
 }
 
 describe("export HTML tool output whitespace", () => {
@@ -61,6 +89,118 @@ describe("export HTML tool output whitespace", () => {
 			).rejects.toThrow("JSON byte limit exceeded");
 			expect(existsSync(join(root, "count.html"))).toBe(false);
 			expect(existsSync(join(root, "bytes.html"))).toBe(false);
+
+			// Extend this HTML case with JSONL's captured actual-parent-path export.
+			const pathIds = [first, manager.getLeafId()!];
+			for (let i = 0; i < 65; i++) {
+				pathIds.push(await manager.appendMessage({ role: "user", content: `path żółć ${i}`, timestamp: 10 + i }));
+			}
+			const usage: Usage = {
+				input: 1,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const assistant = await manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "captured answer" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "fixture",
+				usage,
+				stopReason: "stop",
+				timestamp: 100,
+			});
+			pathIds.push(assistant);
+			const sibling = await manager.appendMessage({ role: "user", content: "usage branch", timestamp: 101 });
+			await manager.appendChildUsageAttribution(assistant, usage, { ...usage, input: 5 });
+			const aggregateUsage: Usage = { ...usage, input: 11, output: 22, totalTokens: 33 };
+			const attributed = await manager.appendChildUsageAttribution(assistant, usage, aggregateUsage);
+			manager.branch(assistant);
+			const sink = manager.bindRequestSink();
+			try {
+				const source = await sink.source;
+				await sink.persist({
+					type: "attempt_admitted",
+					attemptId: "jsonl-attempt",
+					operationId: "jsonl-operation",
+					timestamp: 102,
+					source,
+					owner: { sessionId: source.sessionId },
+					purpose: "summary",
+					modelContract: {
+						api: "openai-responses",
+						provider: "openai",
+						model: "fixture",
+						profile: { id: "native", status: "unvalidated" },
+						pricing: { status: "unavailable" },
+					},
+					descriptor: {
+						api: "openai-responses",
+						provider: "openai",
+						model: "fixture",
+						transport: "http",
+						ordinal: 0,
+						kind: "initial",
+					},
+				});
+			} finally {
+				await sink.release();
+			}
+			expect((await manager.pageHistory()).events.map((entry) => entry.id)).toContain(first);
+			expect(await manager.getHistoryEntry("jsonl-attempt:attempt_admitted")).toBeDefined();
+			const uncappedBranch = vi.spyOn(manager, "getBranch").mockImplementation(() => {
+				throw new Error("uncapped JSONL branch read");
+			});
+			const materialized = vi.spyOn(manager, "materializeParentPathHistory").mockImplementation(() => {
+				throw new Error("whole JSONL branch materialization");
+			});
+			const resident = vi.spyOn(manager, "materializeResidentHistory").mockImplementation(() => {
+				throw new Error("resident JSONL canonical fallback");
+			});
+			const capturedRead = vi.spyOn(manager, "readBranchHistory");
+			const originalSessionId = manager.getSessionId();
+			const jsonlPath = join(root, "nested", "captured.jsonl");
+			const jsonlPending = exportSessionBranchToJsonl(manager, jsonlPath, {
+				residentLimits: { maxEntries: 1, maxSourceBytes: 1 },
+			});
+			const lateUsage = await manager.appendChildUsageAttribution(assistant, usage, {
+				...usage,
+				input: 111,
+				output: 222,
+				totalTokens: 333,
+			});
+			await manager.newSession();
+			const replacement = await manager.appendSessionInfo("not the exported source");
+			expect(await jsonlPending).toBe(jsonlPath);
+			const jsonl = exportedJsonl(jsonlPath);
+			expect(jsonl.header).toMatchObject({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: originalSessionId,
+				cwd: root,
+			});
+			expect(new Date(jsonl.header.timestamp).toISOString()).toBe(jsonl.header.timestamp);
+			expect(jsonl.entries.map((entry) => entry.id)).toEqual(pathIds);
+			expect(jsonl.entries.map((entry) => entry.parentId)).toEqual([null, ...pathIds.slice(0, -1)]);
+			expect(jsonl.entries.at(-1)).toMatchObject({ id: assistant, message: { usage: aggregateUsage } });
+			for (const excluded of [
+				offBranch,
+				sibling,
+				attributed,
+				"jsonl-attempt:attempt_admitted",
+				lateUsage,
+				replacement,
+			]) {
+				expect(jsonl.entries.map((entry) => entry.id)).not.toContain(excluded);
+			}
+			expect(uncapped).not.toHaveBeenCalled();
+			expect(uncappedBranch).not.toHaveBeenCalled();
+			expect(materialized).not.toHaveBeenCalled();
+			expect(resident).not.toHaveBeenCalled();
+			expect(capturedRead).toHaveBeenCalledTimes(1);
 		} finally {
 			vi.restoreAllMocks();
 			await manager.close();
@@ -183,6 +323,90 @@ describe("export HTML tool output whitespace", () => {
 					exportSessionToHtml(readonly, undefined, { outputPath: rejected, maxSourceBytes: 1 }),
 				).rejects.toThrow("JSON byte limit exceeded");
 				expect(existsSync(rejected)).toBe(false);
+
+				// Extend this HTML case with bounded old-view JSONL and output cleanup.
+				const uncappedBranch = vi.spyOn(readonly, "getBranch").mockImplementation(() => {
+					throw new Error("uncapped readonly JSONL branch read");
+				});
+				const residentLimits = { maxEntries: 2, maxSourceBytes: 65_536 };
+				const jsonlPath = join(root, "readonly.jsonl");
+				await exportSessionBranchToJsonl(readonly, jsonlPath, { residentLimits });
+				const jsonl = exportedJsonl(jsonlPath);
+				expect(jsonl.header).toMatchObject({
+					type: "session",
+					version: CURRENT_SESSION_VERSION,
+					id: "retained",
+					cwd: root,
+				});
+				expect(jsonl.entries).toEqual(records.slice(1));
+				expect(uncappedBranch).not.toHaveBeenCalled();
+				const originalJsonl = readFileSync(jsonlPath);
+				vi.mocked(fs.unlinkSync).mockClear();
+				await expect(exportSessionBranchToJsonl(readonly, jsonlPath, { residentLimits })).rejects.toThrow(
+					`Export output already exists; choose a new filename: ${jsonlPath}`,
+				);
+				expect(readFileSync(jsonlPath)).toEqual(originalJsonl);
+				expect(fs.unlinkSync).not.toHaveBeenCalled();
+				const refusedJsonl = join(root, "readonly-refused.jsonl");
+				await expect(
+					exportSessionBranchToJsonl(readonly, refusedJsonl, {
+						residentLimits: { ...residentLimits, maxEntries: 1 },
+					}),
+				).rejects.toThrow("Resident history entry budget exceeded");
+				await expect(
+					exportSessionBranchToJsonl(readonly, refusedJsonl, {
+						residentLimits: { ...residentLimits, maxSourceBytes: 1 },
+					}),
+				).rejects.toThrow("JSON byte limit exceeded");
+				await expect(
+					exportSessionBranchToJsonl(readonly, refusedJsonl, { residentLimits, maxRecordBytes: 1 }),
+				).rejects.toThrow();
+				expect(existsSync(refusedJsonl)).toBe(false);
+
+				const primary = new Error("JSONL write failed");
+				const closeError = new Error("JSONL close failed");
+				const unlinkError = new Error("JSONL unlink failed");
+				const realFs = await vi.importActual<typeof fs>("node:fs");
+				const realJournalIo = await vi.importActual<typeof journalIo>("../src/core/journal-io.js");
+				for (const cleanupFails of [false, true]) {
+					const failedPath = join(root, `failed-${cleanupFails}.jsonl`);
+					let outputFd: number | undefined;
+					vi.mocked(journalIo.writeFullySync)
+						.mockImplementationOnce(realJournalIo.writeFullySync)
+						.mockImplementationOnce((fd) => {
+							outputFd = fd;
+							throw primary;
+						});
+					vi.mocked(fs.closeSync).mockClear();
+					vi.mocked(fs.unlinkSync).mockClear();
+					if (cleanupFails) {
+						vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
+							realFs.closeSync(fd);
+							throw closeError;
+						});
+						vi.mocked(fs.unlinkSync).mockImplementationOnce(() => {
+							throw unlinkError;
+						});
+					}
+					try {
+						const failed = exportSessionBranchToJsonl(readonly, failedPath, { residentLimits });
+						if (cleanupFails) {
+							await expect(failed).rejects.toBeInstanceOf(AggregateError);
+							await expect(failed).rejects.toMatchObject({ errors: [primary, closeError, unlinkError] });
+						} else {
+							await expect(failed).rejects.toBe(primary);
+						}
+						expect(outputFd).toBeDefined();
+						expect(fs.closeSync).toHaveBeenCalledExactlyOnceWith(outputFd);
+						expect(() => realFs.fstatSync(outputFd!)).toThrow();
+						expect(fs.unlinkSync).toHaveBeenCalledExactlyOnceWith(failedPath);
+						expect(existsSync(failedPath)).toBe(cleanupFails);
+					} finally {
+						vi.mocked(journalIo.writeFullySync).mockReset();
+						vi.mocked(fs.closeSync).mockReset();
+						vi.mocked(fs.unlinkSync).mockReset();
+					}
+				}
 			} finally {
 				vi.restoreAllMocks();
 				await readonly.close();

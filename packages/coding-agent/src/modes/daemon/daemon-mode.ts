@@ -97,6 +97,7 @@ import {
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
 import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
+import { readUserMessagesForForking } from "../../core/session-fork-messages.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
 	findMostRecentSessionForCwd,
@@ -5130,7 +5131,7 @@ export class AgentDaemon {
 			case "get_user_messages_for_forking": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_user_messages_for_forking", {
-					messages: state.runtime.session.getUserMessagesForForking(),
+					messages: await readUserMessagesForForking(state.runtime.session.sessionManager),
 				});
 			}
 

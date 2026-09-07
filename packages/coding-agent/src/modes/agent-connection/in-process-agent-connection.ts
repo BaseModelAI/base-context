@@ -17,6 +17,7 @@ import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
+import { readUserMessagesForForking } from "../../core/session-fork-messages.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { readSessionTree } from "../../core/session-tree.js";
@@ -307,7 +308,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getUserMessagesForForking(): Promise<AgentConnectionUserMessage[]> {
-		return this.session.getUserMessagesForForking();
+		return readUserMessagesForForking(this.session.sessionManager);
 	}
 
 	async getLastAssistantText(): Promise<string | undefined> {

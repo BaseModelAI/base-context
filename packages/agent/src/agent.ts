@@ -200,7 +200,14 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	private initializationOwner?: () => Promise<void>;
 	private contextOwner?: () => Promise<AgentContextBuildResult>;
+
+	/** Finish native initialization before capturing context or emitting loop events. */
+	bindInitializationOwner(owner: () => Promise<void>): void {
+		if (this.initializationOwner) throw new Error("Agent initialization owner is already bound");
+		this.initializationOwner = owner;
+	}
 
 	/** Native persistence remains ahead of replaceable context callbacks. */
 	bindContextOwner(owner: () => Promise<AgentContextBuildResult>): void {
@@ -575,6 +582,10 @@ export class Agent {
 		this._state.errorMessage = undefined;
 
 		try {
+			if (this.initializationOwner) {
+				await this.initializationOwner();
+				abortController.signal.throwIfAborted();
+			}
 			await executor(abortController.signal);
 		} catch (error) {
 			await this.handleRunFailure(error, abortController.signal.aborted);

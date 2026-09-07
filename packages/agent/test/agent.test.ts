@@ -362,6 +362,11 @@ describe("Agent", () => {
 	});
 
 	it("should settle when aborting a tool that ignores the abort signal", async () => {
+		const initialization = createDeferred();
+		const initializationStarted = createDeferred();
+		const events: string[] = [];
+		let streamCalls = 0;
+		let toolCalls = 0;
 		let toolStarted = () => {};
 		const toolStartedPromise = new Promise<void>((resolve) => {
 			toolStarted = resolve;
@@ -372,7 +377,11 @@ describe("Agent", () => {
 			label: "hang",
 			description: "Never resolves",
 			parameters: schema,
-			execute: () => new Promise(() => {}),
+			execute: () => {
+				toolCalls++;
+				toolStarted();
+				return new Promise(() => {});
+			},
 		};
 		const agent = new Agent({
 			initialState: {
@@ -380,6 +389,7 @@ describe("Agent", () => {
 			},
 			toolExecution: "sequential",
 			streamFn: () => {
+				streamCalls++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "toolUse", message: createToolUseMessage("hang") });
@@ -387,11 +397,35 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
-		agent.subscribe((event) => {
-			if (event.type === "tool_execution_start") {
-				toolStarted();
-			}
+		agent.bindInitializationOwner(async () => {
+			initializationStarted.resolve();
+			await initialization.promise;
 		});
+		agent.subscribe((event) => {
+			events.push(event.type);
+		});
+
+		const initializingPrompt = agent.prompt("wait for initialization");
+		await initializationStarted.promise;
+		try {
+			expect(agent.state.isStreaming).toBe(true);
+			await expect(agent.prompt("busy prompt")).rejects.toThrow("already processing a prompt");
+			expect(streamCalls).toBe(0);
+			expect(toolCalls).toBe(0);
+			expect(events).toEqual([]);
+		} finally {
+			agent.abort();
+			initialization.resolve();
+			await initializingPrompt;
+		}
+		await agent.waitForIdle();
+		expect(streamCalls).toBe(0);
+		expect(toolCalls).toBe(0);
+		expect(events).toEqual(["message_start", "message_end", "agent_end"]);
+		expect(agent.state.messages).toHaveLength(1);
+		expect(agent.state.messages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.pendingToolCalls.size).toBe(0);
 
 		const promptPromise = agent.prompt("hello");
 		await toolStartedPromise;
@@ -408,6 +442,9 @@ describe("Agent", () => {
 		}
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 		expect(agent.state.isStreaming).toBe(false);
+		expect(streamCalls).toBe(1);
+		expect(toolCalls).toBe(1);
+		expect(events.filter((type) => type === "agent_end")).toHaveLength(2);
 	});
 
 	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
