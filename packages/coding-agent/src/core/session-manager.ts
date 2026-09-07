@@ -28,6 +28,7 @@ import type {
 	TaskEvidenceOptions,
 	TaskEvidencePage,
 } from "./history-index.js";
+import type { JournalFrameRetention } from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
@@ -303,6 +304,7 @@ export type ReadonlySessionManager = Pick<
 	| "getLeafId"
 	| "getLeafEntry"
 	| "getEntry"
+	| "getEntryRetention"
 	| "getLabel"
 	| "getBranch"
 	| "getHeader"
@@ -550,10 +552,18 @@ export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefault
 	return getSessionsDir(agentDir);
 }
 
-function sessionFileEntry(value: unknown): FileEntry {
+// Actual reader/import control metadata, never a field in the entry payload.
+const entryRetentions = new WeakMap<FileEntry, JournalFrameRetention>();
+
+function withEntryRetention<T extends FileEntry>(entry: T, retention?: JournalFrameRetention): T {
+	if (retention !== undefined) entryRetentions.set(entry, retention);
+	return entry;
+}
+
+function sessionFileEntry(value: unknown, retention?: JournalFrameRetention): FileEntry {
 	if (!value || typeof value !== "object" || !("type" in value) || typeof value.type !== "string")
 		throw new Error("Invalid session journal entry");
-	return value as FileEntry;
+	return withEntryRetention(value as FileEntry, retention);
 }
 
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
@@ -564,7 +574,7 @@ function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
 		const end = buffer.indexOf(0x0a, start);
 		if (end === -1) break; // Only exclusive recovery may change an incomplete tail.
 		const record = decoder.decode(buffer.subarray(start, end + 1));
-		if (record) entries.push(sessionFileEntry(record.entry));
+		if (record) entries.push(sessionFileEntry(record.entry, record.retention));
 		start = end + 1;
 	}
 	return entries;
@@ -592,7 +602,7 @@ export async function loadEntriesFromFileAsync(
 	const entries: FileEntry[] = [];
 	let bytesSinceYield = 0;
 	for await (const record of readSessionJournal(filePath)) {
-		entries.push(sessionFileEntry(record.entry));
+		entries.push(sessionFileEntry(record.entry, record.retention));
 		bytesSinceYield += Buffer.byteLength(record.json);
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 			bytesSinceYield = 0;
@@ -1251,7 +1261,10 @@ export class SessionManager {
 		this.sessionFile = owner.journalPath;
 		try {
 			for (const entry of this.fileEntries) {
-				const ack = await owner.appendJson(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES));
+				const ack = await owner.appendJson(
+					stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES),
+					entryRetentions.get(entry),
+				);
 				state.sequence = ack.sequence;
 			}
 		} catch (error) {
@@ -1583,7 +1596,8 @@ export class SessionManager {
 			throw new Error(`Duplicate session entry: ${entry.id}`);
 		if (!explicitParent) entry.parentId = state.pending ? state.reservedLeaf : this.leafId;
 		let json = stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES);
-		const snapshot = JSON.parse(json) as SessionEntry;
+		const retention = entryRetentions.get(entry);
+		const snapshot = withEntryRetention(JSON.parse(json) as SessionEntry, retention);
 		// Queued usage projection only changes a fixed set of numeric fields.
 		const admittedBytes = Buffer.byteLength(json) + (prepare ? 16 * 1024 : 0);
 		const entries = this.fileEntries;
@@ -1602,7 +1616,7 @@ export class SessionManager {
 						json = stringifyBoundedJson(snapshot, admittedBytes);
 					}
 					if (state.owner) {
-						const ack = await state.owner.appendJson(json);
+						const ack = await state.owner.appendJson(json, retention);
 						state.sequence = ack.sequence;
 					} else {
 						state.sequence++;
@@ -2253,6 +2267,12 @@ export class SessionManager {
 		return h ? (h as SessionHeader) : null;
 	}
 
+	/** A lowering-only source qualification; absence does not establish native authorship. */
+	getEntryRetention(entryId: string): JournalFrameRetention | undefined {
+		const entry = this.byId.get(entryId);
+		return entry ? entryRetentions.get(entry) : undefined;
+	}
+
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
@@ -2370,12 +2390,19 @@ export class SessionManager {
 		const path =
 			leafId === null
 				? []
-				: this.getBranch(leafId).map(
-						(entry) => JSON.parse(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
+				: this.getBranch(leafId).map((entry) =>
+						withEntryRetention(
+							JSON.parse(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
+							entryRetentions.get(entry),
+						),
 					);
 		if (leafId !== null && path.length === 0) throw new Error(`Entry ${leafId} not found`);
 		const labels = new Map(this.labelsById);
 		const labelTimes = new Map(this.labelTimestampsById);
+		const labelRetentions = new Map<string, JournalFrameRetention | undefined>();
+		for (const entry of this.fileEntries) {
+			if (entry.type === "label") labelRetentions.set(entry.targetId, entryRetentions.get(entry));
+		}
 		await this.flushNow();
 		const next = new SessionManager(cwd, sessionDir, persistent, { parentSession: sourceFile, rlmDepth });
 		const copied = path.filter((entry) => entry.type !== "label");
@@ -2393,7 +2420,7 @@ export class SessionManager {
 				label,
 			};
 			ids.add(entry.id);
-			next.fileEntries.push(entry);
+			next.fileEntries.push(withEntryRetention(entry, labelRetentions.get(targetId)));
 			parentId = entry.id;
 		}
 		next._buildIndex();
@@ -2503,6 +2530,24 @@ export class SessionManager {
 	}
 
 	static async forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string): Promise<SessionManager> {
+		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir);
+	}
+
+	/** Explicit external import: copied payload claims cannot establish native source authority. */
+	static async importRetainedFrom(
+		sourcePath: string,
+		targetCwd: string,
+		sessionDir?: string,
+	): Promise<SessionManager> {
+		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, "retained-import");
+	}
+
+	private static async _copyFrom(
+		sourcePath: string,
+		targetCwd: string,
+		sessionDir?: string,
+		retention?: JournalFrameRetention,
+	): Promise<SessionManager> {
 		const sourceEntries = await loadEntriesFromFileAsync(sourcePath);
 		const sourceHeader = sourceEntries[0];
 		if (!sourceHeader || sourceHeader.type !== "session")
@@ -2519,7 +2564,12 @@ export class SessionManager {
 			if (entry.type === "session" || entry.type === "git_state") continue;
 			let parentId = entry.parentId;
 			while (parentId !== null && dropped.has(parentId)) parentId = dropped.get(parentId) ?? null;
-			manager.fileEntries.push(parentId === entry.parentId ? entry : { ...entry, parentId });
+			manager.fileEntries.push(
+				withEntryRetention(
+					parentId === entry.parentId ? entry : { ...entry, parentId },
+					retention ?? entryRetentions.get(entry),
+				),
+			);
 		}
 		manager._buildIndex();
 		await manager._openNew();

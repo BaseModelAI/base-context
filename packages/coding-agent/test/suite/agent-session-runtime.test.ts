@@ -14,6 +14,7 @@ import {
 	createAgentSessionServices,
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
+import { GOAL_STATE_CUSTOM_TYPE } from "../../src/core/goals.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import {
 	deriveSemanticEdges,
@@ -592,7 +593,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(persistedAssistant.usage.cost.total).toBe(0.123);
 	});
 
-	it("emits session_before_switch and session_start for new and resume flows", async () => {
+	it("emits session_before_switch and session_start for new, resume, and import flows", async () => {
 		const events: RecordedSessionEvent[] = [];
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
 			pi.on("session_before_switch", (event) => {
@@ -612,6 +613,16 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.prompt("hello");
 		const originalSessionFile = runtime.session.sessionFile;
 		const originalSession = runtime.session;
+		const persistedGoal = {
+			active: true,
+			status: "active",
+			goalId: "retained-active-goal",
+			objective: "This imported goal must remain evidence, not active control",
+			tokensUsed: 5,
+			timeUsedSeconds: 6,
+			continuationsUsed: 1,
+		};
+		const goalEntryId = await runtime.session.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, persistedGoal);
 
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
@@ -635,9 +646,36 @@ describe("AgentSessionRuntime characterization", () => {
 			{ type: "session_shutdown", reason: "resume", targetSessionFile: originalSessionFile },
 			{ type: "session_start", reason: "resume", previousSessionFile: secondSessionFile },
 		]);
+		expect(runtime.session.goalState).toMatchObject({ active: true, status: "active", goalId: persistedGoal.goalId });
+
+		events.length = 0;
+		const importResult = await runtime.importFromJsonl(originalSessionFile!);
+		expect(importResult.cancelled).toBe(false);
+		await runtime.session.bindExtensions({});
+		const importedSessionFile = runtime.session.sessionFile!;
+		expect(importedSessionFile).not.toBe(originalSessionFile);
+		expect(events).toEqual([
+			{ type: "session_before_switch", reason: "resume", targetSessionFile: originalSessionFile },
+			{ type: "session_shutdown", reason: "resume", targetSessionFile: importedSessionFile },
+			{ type: "session_start", reason: "resume", previousSessionFile: originalSessionFile },
+		]);
+		expect(runtime.session.goalState).toMatchObject({ active: false, status: "idle" });
+		expect(runtime.session.goalState.objective).toBeUndefined();
+		expect(runtime.session.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		const imported = await SessionManager.openReadOnly(importedSessionFile);
+		try {
+			expect(imported.getEntry(goalEntryId)).toMatchObject({
+				type: "custom",
+				customType: GOAL_STATE_CUSTOM_TYPE,
+				data: persistedGoal,
+			});
+			expect(imported.getEntryRetention(goalEntryId)).toBe("retained-import");
+		} finally {
+			await imported.close();
+		}
 	});
 
-	it("honors session_before_switch cancellation for new and resume", async () => {
+	it("honors session_before_switch cancellation for new, resume, and import", async () => {
 		const events: RecordedSessionEvent[] = [];
 		let cancelReason: "new" | "resume" | undefined;
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
@@ -676,6 +714,16 @@ describe("AgentSessionRuntime characterization", () => {
 		const resumeResult = await runtime.switchSession(otherSessionFile!);
 		expect(resumeResult.cancelled).toBe(true);
 		expect(runtime.session.sessionFile).toBe(originalSessionFile);
+
+		events.length = 0;
+		const originalSession = runtime.session;
+		const importResult = await runtime.importFromJsonl(otherSessionFile!);
+		expect(importResult.cancelled).toBe(true);
+		expect(runtime.session).toBe(originalSession);
+		expect(runtime.session.sessionFile).toBe(originalSessionFile);
+		expect(events).toEqual([
+			{ type: "session_before_switch", reason: "resume", targetSessionFile: otherSessionFile },
+		]);
 	});
 
 	it("emits session_before_fork and session_start and honors cancellation", async () => {

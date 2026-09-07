@@ -1,7 +1,12 @@
 import { type FileHandle, open, stat } from "node:fs/promises";
 import { type CanonicalPayloadParts, indexCanonicalPayloadParts } from "./canonical-payload-parts.js";
 import type { HistoryIndexFrontier, IndexedSourceEvent } from "./history-index.js";
-import { decodeJournalFrame, INITIAL_JOURNAL_CURSOR, type JournalCursor } from "./journal-frame.js";
+import {
+	decodeJournalFrame,
+	INITIAL_JOURNAL_CURSOR,
+	type JournalCursor,
+	type JournalFrameRetention,
+} from "./journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES, type SessionJournalState } from "./session-journal-owner.js";
 
 export interface SessionSourceEntry {
@@ -130,6 +135,7 @@ async function* frames(file: FileHandle, start: number, end: number, initial: Jo
 					frameBytes.length - Buffer.byteLength(`,"checksum":"${decoded.next.checksum}"}\n`) - payloadLength;
 				yield {
 					payload: decoded.payload,
+					retention: decoded.retention,
 					payloadBytes: frameBytes.subarray(payloadStart, payloadStart + payloadLength),
 					payloadOffset: offset + payloadStart,
 					sequence: cursor.sequence,
@@ -159,6 +165,7 @@ export async function readSessionSource(
 		locator: IndexedSourceEvent["locator"],
 		revision: string,
 		parts: CanonicalPayloadParts,
+		retention?: JournalFrameRetention,
 	) => void,
 ): Promise<SourceIndexCursor> {
 	if (
@@ -230,6 +237,7 @@ export async function readSessionSource(
 						frameChecksum: frame.checksum,
 						payloadOffset: frame.payloadOffset,
 					}),
+					frame.retention,
 				);
 			}
 			cursor = { sequence: frame.sequence + 1, checksum: frame.checksum };

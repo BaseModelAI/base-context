@@ -1,13 +1,13 @@
 # Settings
 
-Prime Agent uses JSON settings files with project settings overriding global settings.
+Base Context uses JSON settings files with project settings overriding global settings.
 
 | Location | Scope |
 |----------|-------|
-| `~/.prime/agent/settings.json` | Global (all projects) |
-| `.prime/agent/settings.json` | Project (current directory) |
+| `~/.base-context/settings.json` | Global (all projects) |
+| `.base-context/settings.json` | Project (current directory) |
 
-Edit directly or use `/settings` for common options.
+Edit directly or use `/settings` for common options. `BASE_CONTEXT_HOME` overrides the global state directory; it must be an absolute path.
 
 ## All Settings
 
@@ -48,33 +48,33 @@ Edit directly or use `/settings` for common options.
 
 ### Update Checks
 
-Stable builds fetch the release manifest at `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json`. Beta builds fetch `beta.json` and continue following beta updates. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`.
+Updates use the owned npm package `@ponythewhite/base-context` by default. To use a private download destination, explicitly set `BASE_CONTEXT_DOWNLOAD_BASE_URL`. Stable builds then fetch `latest.json`; beta builds fetch `beta.json`. No inherited upstream download destination is used.
 
-Set `PI_SKIP_VERSION_CHECK=1` to disable the Prime Agent version update check. Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
+Set `BASE_CONTEXT_SKIP_VERSION_CHECK=1` to disable the Base Context version update check. Use `--offline` or `BASE_CONTEXT_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
 
 The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 
 ```json
 {
-  "version": "0.73.1",
-  "package": "prime-agent",
-  "tarball": "releases/v0.73.1/prime-agent-0.73.1.tgz"
+  "version": "0.1.0",
+  "package": "@ponythewhite/base-context",
+  "tarball": "releases/v0.1.0/base-context-0.1.0.tgz"
 }
 ```
 
-`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Prime Agent installs that tarball instead of the package name. Relative tarball paths resolve against `PRIME_AGENT_DOWNLOAD_BASE_URL`.
+`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Base Context installs that tarball instead of the package name. Relative tarball paths resolve against `BASE_CONTEXT_DOWNLOAD_BASE_URL`. Manifests naming another product are refused.
 
 ### Pseudonymous usage analytics
 
-Prime Agent sends pseudonymous, aggregate usage and performance events to Prime Intellect. These events include version and operating-system category, onboarding outcome and duration, execution mode (`interactive`, `print`, `json`, `rpc`, or `acp`), run outcomes, TTFT and latency, prompt and turn counts, token usage, tool success counts, retries, and compactions.
+Analytics are off by default. Remote analytics require explicit opt-in, `BASE_CONTEXT_TELEMETRY_ENDPOINT`, and a dedicated `BASE_CONTEXT_TELEMETRY_API_KEY`. There is no inherited endpoint or inference-key fallback. When enabled, events include aggregate usage and performance data such as execution mode, token usage, tool counts, retries, and compactions.
 
-Prime Agent does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.prime/agent/`).
+Base Context does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.base-context/`).
 
 Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `telemetry.enabled` | boolean | `true` | Send pseudonymous aggregate usage and performance events |
+| `telemetry.enabled` | boolean | `false` | Opt in to aggregate events at an explicitly configured destination |
 
 Disable analytics with any of:
 
@@ -87,12 +87,12 @@ Disable analytics with any of:
 ```
 
 ```bash
-PRIME_AGENT_TELEMETRY=0 prime-agent
-DO_NOT_TRACK=1 prime-agent
-prime-agent --offline
+BASE_CONTEXT_TELEMETRY=0 base-context
+DO_NOT_TRACK=1 base-context
+base-context --offline
 ```
 
-`PRIME_AGENT_TELEMETRY_ENDPOINT` overrides the ingestion endpoint for development and self-hosted deployments.
+Opt-in alone does not send events without both the explicit endpoint and dedicated key.
 
 ### Warnings
 
@@ -122,6 +122,32 @@ prime-agent --offline
     "enabled": true,
     "reserveTokens": 16384,
     "keepRecentTokens": 20000
+  }
+}
+```
+
+### Canonical Context Resources
+
+Persistent sessions reconstruct inference context from the captured canonical source.
+These settings bound that reconstruction; they do not select a last-N transcript.
+Edit the JSON settings directly to change them.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `canonicalContext.maxMessages` | integer | `16384` | Maximum active canonical message count, including a compaction summary; transient outcomes must also fit the final count |
+| `canonicalContext.maxSourceBytes` | integer | `67108864` | Maximum canonical frame bytes used for reconstruction; related updates count on each application |
+
+Both values must be positive safe integers. Invalid values, incomplete indexed
+coverage, or exhausted limits fail locally instead of silently dropping context or
+falling back to live message arrays. Source bytes are not model tokens or an estimate
+of total process memory. Model context limits and compaction settings remain separate.
+Explicit in-memory SDK sessions retain their nonpersistent context path.
+
+```json
+{
+  "canonicalContext": {
+    "maxMessages": 16384,
+    "maxSourceBytes": 67108864
   }
 }
 ```
@@ -167,7 +193,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 |---------|------|---------|-------------|
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
-| `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
 
 ### Terminal & Images
 
@@ -202,7 +228,7 @@ Normally the package manager's global modules location is queried using `root -g
 |---------|------|---------|-------------|
 | `idleEvictionMinutes` | number or `"off"` | `90` | Idle threshold in minutes for whole-tree worker eviction and individual idle-child passivation; `"off"` disables both. |
 
-`idleEvictionMinutes` is a global daemon policy and is read only from `~/.prime/agent/settings.json`. Set it to a positive number to configure the idle threshold.
+`idleEvictionMinutes` is a global daemon policy and is read only from `~/.base-context/settings.json`. Set it to a positive number to configure the idle threshold.
 
 ### Sessions
 
@@ -211,10 +237,10 @@ Normally the package manager's global modules location is queried using `root -g
 | `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
-{ "sessionDir": ".prime/agent/sessions" }
+{ "sessionDir": ".base-context/sessions" }
 ```
 
-When multiple sources specify a session directory, precedence is `--session-dir`, `PRIME_AGENT_SESSION_DIR`, the legacy `PRIME_AGENT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in `settings.json`.
+When multiple sources specify a session directory, precedence is `--session-dir`, `BASE_CONTEXT_SESSION_DIR`, then `sessionDir` in `settings.json`. Environment path overrides must be absolute (`~/` is supported). Writable upstream `.prime`, `.pi`, and `.prime-context` state paths are refused.
 
 ### Model Cycling
 
@@ -238,7 +264,7 @@ When multiple sources specify a session directory, precedence is `--session-dir`
 
 These settings define where to load extensions, skills, prompts, and themes from.
 
-Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Paths in `.prime/agent/settings.json` resolve relative to `.prime/agent`. Absolute paths and `~` are supported.
+Paths in `~/.base-context/settings.json` resolve relative to `~/.base-context`. Paths in `.base-context/settings.json` resolve relative to `.base-context`. Absolute paths and `~` are supported.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -248,7 +274,7 @@ Paths in `~/.prime/agent/settings.json` resolve relative to `~/.prime/agent`. Pa
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
-| `enableBuiltinSkills` | boolean | `true` | Load built-in skills shipped with prime-agent |
+| `enableBuiltinSkills` | boolean | `true` | Load built-in skills shipped with base-context |
 | `bundledSkills.websearch` | boolean | `true` | Load the built-in `websearch` skill |
 
 Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
@@ -316,16 +342,16 @@ See [packages.md](packages.md) for package management details.
 
 ## Project Overrides
 
-Project settings (`.prime/agent/settings.json`) override global settings. Nested objects are merged:
+Project settings (`.base-context/settings.json`) override global settings. Nested objects are merged:
 
 ```json
-// ~/.prime/agent/settings.json (global)
+// ~/.base-context/settings.json (global)
 {
   "theme": "dark",
   "compaction": { "enabled": true, "reserveTokens": 16384 }
 }
 
-// .prime/agent/settings.json (project)
+// .base-context/settings.json (project)
 {
   "compaction": { "reserveTokens": 8192 }
 }

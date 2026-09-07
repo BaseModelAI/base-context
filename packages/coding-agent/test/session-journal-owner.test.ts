@@ -20,6 +20,7 @@ import {
 	SESSION_JOURNAL_MAX_RECORD_BYTES,
 	SessionJournalOwner,
 } from "../src/core/session-journal-owner.js";
+import { readSessionJournal } from "../src/core/session-journal-reader.js";
 
 function actor(owner: SessionJournalOwner): ChildProcess {
 	return (owner as unknown as { child: ChildProcess }).child;
@@ -178,8 +179,13 @@ describe("session journal owner process", () => {
 		const original = Buffer.from(`${header}\n${lexical}\n{"type":"message","id":"torn"`);
 		writeFileSync(journalPath, original);
 		const originalIdentity = statSync(journalPath);
-		const first = encodeJournalFrameJson(header, INITIAL_JOURNAL_CURSOR, SESSION_JOURNAL_MAX_FRAME_BYTES);
-		const second = encodeJournalFrameJson(lexical, first.next, SESSION_JOURNAL_MAX_FRAME_BYTES);
+		const first = encodeJournalFrameJson(
+			header,
+			INITIAL_JOURNAL_CURSOR,
+			SESSION_JOURNAL_MAX_FRAME_BYTES,
+			"retained-import",
+		);
+		const second = encodeJournalFrameJson(lexical, first.next, SESSION_JOURNAL_MAX_FRAME_BYTES, "retained-import");
 		const legacy = await open();
 		expect(legacy.format).toBe("legacy");
 		const legacySnapshot = legacy.getSnapshot();
@@ -219,6 +225,10 @@ describe("session journal owner process", () => {
 		await expect(legacy.appendJson(migrated)).resolves.toEqual({ sequence: 2 });
 		await legacy.close();
 		expect(framedJson(journalPath)).toEqual([header, lexical, migrated]);
+		const records = [];
+		for await (const record of readSessionJournal(journalPath)) records.push(record);
+		expect(records.map((record) => record.retention)).toEqual(["retained-import", "retained-import", undefined]);
+		expect(records.map((record) => record.json)).toEqual([header, lexical, migrated]);
 		expect(readFileSync(`${journalPath}.legacy-v3`)).toEqual(original);
 
 		const tornPath = join(root, "torn.jsonl");
@@ -245,7 +255,7 @@ describe("session journal owner process", () => {
 		await torn.recover();
 		expect(readFileSync(tornPath)).toEqual(Buffer.from(first.line));
 		expect(torn.getSnapshot()).toEqual(tornSnapshot);
-		await expect(torn.appendJson(lexical)).resolves.toEqual({ sequence: 1 });
+		await expect(torn.appendJson(lexical, "retained-import")).resolves.toEqual({ sequence: 1 });
 		expect(torn.getSnapshot()).toEqual({
 			...tornSnapshot,
 			nextSequence: 2,

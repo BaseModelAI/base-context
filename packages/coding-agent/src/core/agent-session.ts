@@ -1693,6 +1693,7 @@ export class AgentSession {
 			if (
 				entry.type === "custom" &&
 				entry.customType === GOAL_STATE_CUSTOM_TYPE &&
+				this.sessionManager.getEntryRetention(entry.id) !== "retained-import" &&
 				isPersistedGoalState(entry.data)
 			) {
 				return normalizeGoalState(entry.data);

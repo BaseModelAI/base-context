@@ -8,3 +8,4 @@
 - Bounded page, search, task and coverage candidate scans with indexed seeks and explicit limit errors instead of recursive ancestry scans.
 - Reconstructed detached canonical context through an active revision cache with explicit message and canonical-source-byte limits.
 - Connected persistent native requests to the same captured compiler and receipt source, preserving transient outcomes and exact native retry removals.
+- Qualified controlled legacy/imported history outside unchanged JSON payloads, preserved that qualification through forks, and kept imported task claims and goals from gaining native authority or activation.

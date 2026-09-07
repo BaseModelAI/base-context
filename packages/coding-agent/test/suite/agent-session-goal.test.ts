@@ -1100,12 +1100,23 @@ describe("initial goal seeding from config", () => {
 			timestamp: Date.now(),
 		});
 
+		// Older native goal snapshots do not require operation-level nativeOrigin.
+		const goalEntryId = await harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, {
+			...harness.session.goalState,
+			tokensUsed: 7,
+		});
+
 		// Simulate restart on the same session file
 		const newSession = await createRestartSession(harness);
+		const reopenedGoalEntry = newSession.sessionManager.getEntry(goalEntryId);
+		expect(reopenedGoalEntry).toMatchObject({ data: { tokensUsed: 7 } });
+		expect(reopenedGoalEntry).not.toHaveProperty("nativeOrigin");
+		expect(newSession.sessionManager.getEntryRetention(goalEntryId)).toBeUndefined();
 
-		// Goal should be the persisted active goal, not the new initialGoal
+		// Restore the latest native goal snapshot, not the original seed or new initialGoal.
 		expect(newSession.goalState.status).toBe("active");
 		expect(newSession.goalState.objective).toBe("Initial goal");
+		expect(newSession.goalState.tokensUsed).toBe(7);
 		await newSession.disposeAsync();
 	});
 });

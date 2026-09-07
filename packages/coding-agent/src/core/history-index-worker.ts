@@ -45,7 +45,8 @@ if (
 		schemaVersion !== 5 &&
 		schemaVersion !== 6 &&
 		schemaVersion !== 7 &&
-		schemaVersion !== 8)
+		schemaVersion !== 8 &&
+		schemaVersion !== 9)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -121,14 +122,14 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 8) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+	if (schemaVersion !== 9) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
 	db.exec(`
  CREATE INDEX IF NOT EXISTS source_incomplete ON source_event(session,sequence) WHERE text_complete=0;
  CREATE INDEX IF NOT EXISTS task_sequence ON task_evidence(session,task_key,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=8");
+	db.exec("PRAGMA user_version=9");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -315,14 +316,15 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			sessionId,
 			snapshot,
 			previous,
-			(entry, sequence, locator, revision, parts) => {
+			(entry, sequence, locator, revision, parts, retention) => {
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
 				insertEvent(sessionId, item);
 				const depth = insertAncestry(sessionId, item);
 				insertContext(sessionId, item, entry, depth);
 				insertContextUpdates(sessionId, item, entry);
 				db.prepare("INSERT INTO source_payload VALUES (?,?,?)").run(sessionId, sequence, JSON.stringify(parts));
-				const imported = getTaskStateImportCoverage({ sessionId, sequence, entry, locator, revision });
+				const source = { sessionId, sequence, entry, locator, revision, retention };
+				const imported = getTaskStateImportCoverage(source);
 				if (imported)
 					db.prepare("INSERT INTO task_import_loss VALUES (?,?,?)").run(
 						sessionId,
@@ -330,7 +332,7 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 						imported.taskKey ?? null,
 					);
 				let ordinal = 0;
-				for (const projection of projectTaskStateSource({ sessionId, sequence, entry, locator, revision })) {
+				for (const projection of projectTaskStateSource(source)) {
 					let payload: string | null;
 					try {
 						payload = stringifyBoundedJson(projection, TASK_PAGE_BYTES);

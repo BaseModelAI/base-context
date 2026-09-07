@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
+import type { JournalFrameRetention } from "./journal-frame.js";
 import type { DeleteSessionFileResult } from "./session-file-removal.js";
 
 export const SESSION_JOURNAL_MAX_RECORD_BYTES = 64 * 1024 * 1024;
@@ -32,7 +33,7 @@ export interface SessionJournalState {
 }
 
 export type SessionJournalRequest =
-	| { id: number; action: "begin"; bytes: number }
+	| { id: number; action: "begin"; bytes: number; retention?: JournalFrameRetention }
 	| { id: number; action: "chunk"; data: string }
 	| { id: number; action: "commit" | "abort" | "flush" | "migrate" | "recover" | "close" };
 
@@ -284,12 +285,12 @@ export class SessionJournalOwner {
 		return task;
 	}
 
-	async appendJson(json: string): Promise<{ sequence: number }> {
+	async appendJson(json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
 		const bytes = Buffer.byteLength(json);
 		if (bytes === 0 || bytes > SESSION_JOURNAL_MAX_RECORD_BYTES)
 			throw new Error("Session journal record byte limit exceeded");
 		return this.enqueue(bytes, async () => {
-			await this.request({ id: this.nextId++, action: "begin", bytes });
+			await this.request({ id: this.nextId++, action: "begin", bytes, retention });
 			try {
 				for (const chunk of sessionJournalUtf8Chunks(json)) {
 					await this.request({ id: this.nextId++, action: "chunk", data: chunk.toString("base64") });

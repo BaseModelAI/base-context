@@ -1,6 +1,11 @@
 import { TextDecoder } from "node:util";
 import { readFirstLineBufferSync, readLinesAsBuffers } from "../utils/file-lines.js";
-import { decodeJournalFrame, INITIAL_JOURNAL_CURSOR, type JournalCursor } from "./journal-frame.js";
+import {
+	decodeJournalFrame,
+	INITIAL_JOURNAL_CURSOR,
+	type JournalCursor,
+	type JournalFrameRetention,
+} from "./journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES } from "./session-journal-owner.js";
 
 /** Read-only validation. No loader removes a tail or changes a source generation. */
@@ -9,7 +14,7 @@ export class SessionJournalDecoder {
 	private cursor: JournalCursor = INITIAL_JOURNAL_CURSOR;
 	private utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-	decode(line: Buffer): { json: string; entry: unknown } | undefined {
+	decode(line: Buffer): { json: string; entry: unknown; retention?: JournalFrameRetention } | undefined {
 		if (line.length > SESSION_JOURNAL_MAX_FRAME_BYTES) throw new Error("Session journal frame byte limit exceeded");
 		if (line[line.length - 1] !== 0x0a) throw new Error("Incomplete session journal record");
 		const text = this.utf8.decode(line);
@@ -25,14 +30,20 @@ export class SessionJournalDecoder {
 		const format = framed ? "framed" : "legacy";
 		if (this.format !== undefined && this.format !== format) throw new Error("Mixed session journal formats");
 		this.format = format;
-		if (!framed) return { json: text.trimEnd(), entry: raw };
+		if (!framed) return { json: text.trimEnd(), entry: raw, retention: "retained-import" };
 		const decoded = decodeJournalFrame(line, this.cursor, SESSION_JOURNAL_MAX_FRAME_BYTES);
 		this.cursor = decoded.next;
-		return { json: decoded.json, entry: decoded.payload };
+		return {
+			json: decoded.json,
+			entry: decoded.payload,
+			...(decoded.retention === undefined ? {} : { retention: decoded.retention }),
+		};
 	}
 }
 
-export async function* readSessionJournal(filePath: string): AsyncGenerator<{ json: string; entry: unknown }> {
+export async function* readSessionJournal(
+	filePath: string,
+): AsyncGenerator<{ json: string; entry: unknown; retention?: JournalFrameRetention }> {
 	const decoder = new SessionJournalDecoder();
 	for await (const line of readLinesAsBuffers(filePath, {
 		maxLineBytes: SESSION_JOURNAL_MAX_FRAME_BYTES,

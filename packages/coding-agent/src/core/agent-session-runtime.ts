@@ -558,7 +558,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		} finally {
 			await view.close();
 		}
-		const sessionManager = await SessionManager.forkFrom(resolvedPath, targetCwd, sessionDir);
+		const sessionManager = await SessionManager.importRetainedFrom(resolvedPath, targetCwd, sessionDir);
 		await this.replaceWithManager(sessionManager, source, "resume");
 		await this.finishSessionReplacement();
 		return { cancelled: false };

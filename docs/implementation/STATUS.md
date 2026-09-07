@@ -263,7 +263,7 @@ lookup and captured-history reads after a real source switch. These are packaged
 probes, not full binary, installer, npm-floor, Windows or network-filesystem certification.
 The native compiler is not enabled by this boundary alone.
 
-## Canonical context reconstruction (work in progress)
+## Canonical context reconstruction (`6559f4a99`)
 
 - Schema7 manifests select the complete active branch context across bounded pages,
   with a separate latest compaction summary and an exact first-kept boundary. Unknown
@@ -296,8 +296,15 @@ The native compiler is not enabled by this boundary alone.
   failure without a fallback. The retry case preserves actual JSON bodies and request IDs.
   Its initial fixture tried to clone executable tool functions; only the capture was fixed.
   Corrective runs are the same cases, not added coverage. The full source check passes
-  (1015 files, TypeScript, installer and browser smoke); the clean build and current
-  packaged probes have not yet run.
+  (1015 files, TypeScript, installer and browser smoke). The checkpoint is committed
+  and pushed; normal hooks and the clean source build pass.
+- One private package set identifies clean `6559f4a9915760e4555652bd5211808a11992eee`.
+  Node22.8 and both tiny Bun1.3.10 layouts pass schema8 manifests, bounded queries,
+  related payload recovery and captured compiler reads after a real session switch.
+  All 18 observed workers use the current private JavaScript helpers under Node22.8
+  and exit cleanly. No repack, fixture correction or runtime retry was needed.
+  These are component/worker probes, not NativeAgentSession, provider-wire, full-binary,
+  installer, npm-floor, Windows or network-filesystem certification.
 
 Agent lifecycle arrays, Manager loading/storage, task truth/import trust, model budget
 profiles and the remaining release gates are unfinished.
@@ -312,3 +319,24 @@ manual dispatch. Publication defaults off and needs an explicit dispatch approva
 YAML parsing and shell syntax checking pass. No workflow, installer smoke, npm
 publication, hosted release or remote upload was executed by this migration. Final
 CI isolation/toolchain validation and release approvals remain open.
+
+## Retained import qualification
+
+A lowering-only `retained-import` qualifier now belongs to the canonical frame, not
+its JSON payload. Raw legacy decoding/migration derives it from the actual operation;
+explicit JSONL import qualifies all copied rows. Ordinary framed forks preserve each
+row's existing qualification. Migration still preserves the original raw JSON bytes.
+The existing frame checksum covers the qualifier, and schema9 rebuilds derived task
+projections. Original submitted text, goal IDs, operations and relations remain visible
+as unrecorded claims when imported. Imported goal controls do not activate a goal;
+ordinary unqualified native framed goal resumption is unchanged.
+
+This does not authenticate arbitrary forged unqualified framed files, direct SDK
+nativeOrigin claims, or old unqualified import destinations. Absence of a qualifier is
+not proof of native authorship. Seven existing cases pass in four isolated commands:
+frame encoding/owner migration (3), Manager read/copy/materialization/indexed claims (1),
+native import/cancellation (2), and native framed goal restart without nativeOrigin (1).
+These cover local source/control behavior, not provider or kernel execution. The full
+project check passes (1015 files, TypeScript, installer and browser smoke); its three
+format-only changes do not alter the tested behavior. The earlier `6559f4a99` package
+probes do not cover this change.

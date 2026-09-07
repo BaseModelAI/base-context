@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { stringifyBoundedJson } from "./bounded-json.js";
 
+export type JournalFrameRetention = "retained-import";
+
 export interface JournalCursor {
 	readonly sequence: number;
 	readonly checksum: string | null;
@@ -9,8 +11,9 @@ export interface JournalCursor {
 export const INITIAL_JOURNAL_CURSOR: JournalCursor = Object.freeze({ sequence: 0, checksum: null });
 export const MAX_JOURNAL_FRAME_BYTES = 1024 * 1024;
 
-function framePrefix(cursor: JournalCursor): string {
-	return `{"journalFrame":1,"sequence":${cursor.sequence},"previousChecksum":${JSON.stringify(cursor.checksum)},"payload":`;
+function framePrefix(cursor: JournalCursor, retention?: JournalFrameRetention): string {
+	const qualifier = retention === undefined ? "" : `,"retention":${JSON.stringify(retention)}`;
+	return `{"journalFrame":1,"sequence":${cursor.sequence},"previousChecksum":${JSON.stringify(cursor.checksum)}${qualifier},"payload":`;
 }
 
 function assertCursor(cursor: JournalCursor): void {
@@ -28,8 +31,9 @@ export function encodeJournalFrame(
 	payload: unknown,
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
+	retention?: JournalFrameRetention,
 ): { line: string; next: JournalCursor } {
-	return encodeJournalFrameJson(stringifyBoundedJson(payload, maxBytes), cursor, maxBytes);
+	return encodeJournalFrameJson(stringifyBoundedJson(payload, maxBytes), cursor, maxBytes, retention);
 }
 
 /** Preserve validated retained JSON text, including numeric lexemes that a parse/stringify would change. */
@@ -37,10 +41,13 @@ export function encodeJournalFrameJson(
 	json: string,
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
+	retention?: JournalFrameRetention,
 ): { line: string; next: JournalCursor } {
 	assertCursor(cursor);
 	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("Invalid journal frame byte limit");
-	const prefix = framePrefix(cursor);
+	if (retention !== undefined && retention !== "retained-import")
+		throw new Error("Unsupported journal frame retention");
+	const prefix = framePrefix(cursor, retention);
 	const suffixBytes = Buffer.byteLength(`,"checksum":"${"0".repeat(64)}"}\n`);
 	if (Buffer.byteLength(prefix) + Buffer.byteLength(json) + suffixBytes > maxBytes) {
 		throw new Error("Journal frame byte limit exceeded");
@@ -60,7 +67,7 @@ export function decodeJournalFrame(
 	bytes: Buffer,
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
-): { payload: unknown; json: string; next: JournalCursor } {
+): { payload: unknown; json: string; next: JournalCursor; retention?: JournalFrameRetention } {
 	assertCursor(cursor);
 	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || bytes.length > maxBytes) {
 		throw new Error("Journal frame byte limit exceeded");
@@ -77,6 +84,9 @@ export function decodeJournalFrame(
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid journal frame");
 	const frame = parsed as Record<string, unknown>;
 	if (frame.journalFrame !== 1 || !Object.hasOwn(frame, "payload")) throw new Error("Unsupported journal frame");
+	const retention = frame.retention;
+	if (retention !== undefined && retention !== "retained-import")
+		throw new Error("Unsupported journal frame retention");
 	if (frame.sequence !== cursor.sequence || frame.previousChecksum !== cursor.checksum) {
 		throw new Error("Journal frame sequence or predecessor mismatch");
 	}
@@ -89,9 +99,14 @@ export function decodeJournalFrame(
 	if (createHash("sha256").update(body).digest("hex") !== frame.checksum) {
 		throw new Error("Journal frame checksum mismatch");
 	}
-	const prefix = framePrefix(cursor);
+	const prefix = framePrefix(cursor, retention);
 	if (!body.startsWith(prefix)) throw new Error("Invalid journal frame encoding");
 	const json = body.slice(prefix.length, -1);
 	JSON.parse(json);
-	return { payload: frame.payload, json, next: { sequence: cursor.sequence + 1, checksum: frame.checksum } };
+	return {
+		payload: frame.payload,
+		json,
+		next: { sequence: cursor.sequence + 1, checksum: frame.checksum },
+		...(retention === undefined ? {} : { retention }),
+	};
 }

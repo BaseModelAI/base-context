@@ -28,6 +28,7 @@ import {
 	encodeJournalFrameJson,
 	INITIAL_JOURNAL_CURSOR,
 	type JournalCursor,
+	type JournalFrameRetention,
 } from "./journal-frame.js";
 import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "./journal-io.js";
 import { removeSessionFile } from "./session-file-removal.js";
@@ -53,6 +54,7 @@ interface Upload {
 	fd: number;
 	expected: number;
 	received: number;
+	retention?: JournalFrameRetention;
 }
 
 function errorText(error: unknown): string {
@@ -294,7 +296,7 @@ async function start(): Promise<void> {
 		closeSync(current.fd);
 		const json = decoder.decode(readFileSync(uploadPath));
 		if (json.includes("\n")) throw new Error("Session JSON must be a single logical line");
-		const encoded = encodeJournalFrameJson(json, state.cursor, SESSION_JOURNAL_MAX_FRAME_BYTES);
+		const encoded = encodeJournalFrameJson(json, state.cursor, SESSION_JOURNAL_MAX_FRAME_BYTES, current.retention);
 		const sequence = state.cursor.sequence;
 		const bytes = Buffer.byteLength(encoded.line);
 		rmSync(uploadPath, { force: true });
@@ -371,7 +373,12 @@ async function start(): Promise<void> {
 					fchownSync(fd, original.uid, original.gid);
 					fchmodSync(fd, original.mode & 0o777);
 					const scanned = await scan((json) => {
-						const encoded = encodeJournalFrameJson(json, next, SESSION_JOURNAL_MAX_FRAME_BYTES);
+						const encoded = encodeJournalFrameJson(
+							json,
+							next,
+							SESSION_JOURNAL_MAX_FRAME_BYTES,
+							"retained-import",
+						);
 						writeText(fd, encoded.line);
 						next = encoded.next;
 						bytes += Buffer.byteLength(encoded.line);
@@ -491,13 +498,20 @@ async function start(): Promise<void> {
 				case "begin":
 					requireAppendable();
 					if (upload) throw new Error("Session journal upload already active");
+					if (request.retention !== undefined && request.retention !== "retained-import")
+						throw new Error("Unsupported journal frame retention");
 					if (
 						!Number.isSafeInteger(request.bytes) ||
 						request.bytes < 1 ||
 						request.bytes > SESSION_JOURNAL_MAX_RECORD_BYTES
 					)
 						throw new Error("Session journal record byte limit exceeded");
-					upload = { fd: openSync(uploadPath, "wx", 0o600), expected: request.bytes, received: 0 };
+					upload = {
+						fd: openSync(uploadPath, "wx", 0o600),
+						expected: request.bytes,
+						received: 0,
+						retention: request.retention,
+					};
 					return;
 				case "chunk": {
 					if (!upload || typeof request.data !== "string") throw new Error("Session journal upload is not active");

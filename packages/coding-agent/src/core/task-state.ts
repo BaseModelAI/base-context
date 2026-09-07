@@ -1,4 +1,5 @@
 import { GOAL_STATE_CUSTOM_TYPE, isPersistedGoalState } from "./goals.js";
+import type { JournalFrameRetention } from "./journal-frame.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
 
 export const TASK_STATE_CUSTOM_TYPE = "task_state";
@@ -29,6 +30,8 @@ export interface TaskStateSource {
 	sequence: number;
 	locator?: TaskStateLocator;
 	revision?: string;
+	/** Decoded frame/import control, not a claim inside entry data. */
+	retention?: JournalFrameRetention;
 	entry: {
 		id: string;
 		parentId: string | null;
@@ -49,6 +52,7 @@ export interface TaskStateSourceRef {
 	field: string;
 	locator?: TaskStateLocator;
 	revision?: string;
+	retention?: JournalFrameRetention;
 }
 
 export interface TaskStateOriginalSource {
@@ -126,6 +130,7 @@ function sourceRef(source: TaskStateSource, field: string): TaskStateSourceRef {
 		field,
 		locator: source.locator,
 		revision: source.revision,
+		...(source.retention === undefined ? {} : { retention: source.retention }),
 	};
 }
 
@@ -289,14 +294,16 @@ function* nativeInput(source: TaskStateSource): Generator<TaskStateProjection> {
 		typeof submitted?.text !== "string"
 	)
 		return;
+	const retained = source.retention === "retained-import";
 	const input = (value: string, field: string): TaskStateProjection => ({
 		source: sourceRef(source, field),
 		kind: "user_requirement",
 		text: value,
 		operation: "observe",
 		relations: [],
-		authority: "user",
-		attribution: "source-backed",
+		authority: retained ? "unrecorded" : "user",
+		attribution: retained ? "proposal" : "source-backed",
+		...(retained ? { claimedAuthority: "user" } : {}),
 	});
 	// These are complete source text fields, not extracted or inferred individual requirements.
 	yield input(submitted.text, "/nativeOrigin/submitted/text");
@@ -343,6 +350,9 @@ function nativeGoalOrigin(
  * Original text remains addressable through source even when no structured item is decoded.
  */
 export function* projectTaskStateSource(source: TaskStateSource): Generator<TaskStateProjection> {
+	if (source.retention !== undefined && source.retention !== "retained-import")
+		throw new Error("Unsupported task source retention");
+	const retained = source.retention === "retained-import";
 	const { entry } = source;
 	const data = record(entry.data);
 	if (entry.type === "message") {
@@ -402,8 +412,17 @@ export function* projectTaskStateSource(source: TaskStateSource): Generator<Task
 						field: "/nativeOrigin/submittedText",
 					}
 				: undefined,
-			authority: userControl ? "user" : origin?.actor === "runtime" ? "tool-data" : "unrecorded",
-			attribution: userRevision ? "source-backed" : "descriptive",
+			authority: retained
+				? "unrecorded"
+				: userControl
+					? "user"
+					: origin?.actor === "runtime"
+						? "tool-data"
+						: "unrecorded",
+			attribution: retained ? "proposal" : userRevision ? "source-backed" : "descriptive",
+			...(retained && (userControl || origin?.actor === "runtime")
+				? { claimedAuthority: userControl ? "user" : "tool-data" }
+				: {}),
 			goalState: { goalId: text(data.goalId), status: data.status, operation: origin?.operation },
 		};
 	} else {
