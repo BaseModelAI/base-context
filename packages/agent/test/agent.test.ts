@@ -690,6 +690,7 @@ describe("Agent", () => {
 
 	it("forwards sessionId to streamFn options", async () => {
 		let receivedSessionId: string | undefined;
+		const adoptedPrompt: AgentMessage = { role: "user", content: "owned current turn", timestamp: 3 };
 		const projections: AgentContextProjection[] = [
 			{
 				messages: [{ role: "user", content: "compiled hello", timestamp: 0 }],
@@ -697,6 +698,12 @@ describe("Agent", () => {
 				release: vi.fn(async () => {}),
 			},
 			{ messages: [], streamContext: {}, release: vi.fn(async () => {}) },
+			{
+				messages: [{ role: "user", content: "complete compiled summary", timestamp: 0 }, adoptedPrompt],
+				adoptMessages: true,
+				streamContext: {},
+				release: vi.fn(async () => {}),
+			},
 		];
 		let buildIndex = 0;
 		let activeProjection = projections[0];
@@ -705,6 +712,7 @@ describe("Agent", () => {
 			sessionId: "session-abc",
 			transformContext: async (messages) => {
 				expect(messages).not.toBe(activeProjection.messages);
+				if (activeProjection.adoptMessages) messages.shift(); // Transform-only filtering must not prune lifecycle state.
 				return messages;
 			},
 			streamFn: (...args) => {
@@ -712,6 +720,8 @@ describe("Agent", () => {
 				const [_model, context, options] = args;
 				expect(options).not.toHaveProperty("beforeContextBuild");
 				expect(options).not.toHaveProperty("ownedStreamFn");
+				expect(options).not.toHaveProperty("onContextAdopted");
+				expect(options).not.toHaveProperty("adoptMessages");
 				expect(options).not.toHaveProperty("streamContext");
 				receivedMessages.push(context.messages);
 				receivedSessionId = options?.sessionId;
@@ -731,6 +741,11 @@ describe("Agent", () => {
 			expect(args).toHaveLength(4);
 			const [model, context, options, streamContext] = args;
 			expect(streamContext).toBe(activeProjection.streamContext);
+			if (activeProjection.adoptMessages) {
+				expect(agent.state.messages).toEqual(activeProjection.messages);
+				expect(agent.state.messages).not.toBe(activeProjection.messages);
+				expect(context.messages).not.toBe(agent.state.messages);
+			}
 			return configuredStream(model, context, options);
 		});
 
@@ -744,9 +759,25 @@ describe("Agent", () => {
 		expect(receivedSessionId).toBe("session-def");
 		expect(receivedMessages).toEqual([projections[0].messages, []]);
 		expect(buildIndex).toBe(2);
-		for (const projection of projections) expect(projection.release).toHaveBeenCalledOnce();
+		for (const projection of projections.slice(0, 2)) expect(projection.release).toHaveBeenCalledOnce();
 		expect(agent.state.messages).not.toContain(projections[0].messages[0]);
 		expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+
+		agent.shouldStopAfterTurn = ({ context, newMessages }) => {
+			expect(context.messages).toEqual(agent.state.messages);
+			expect(context.messages).not.toBe(agent.state.messages);
+			expect(context.messages).not.toBe(projections[2].messages);
+			expect(newMessages).toHaveLength(2);
+			expect(newMessages[0]).toBe(adoptedPrompt);
+			return false;
+		};
+		await agent.prompt(adoptedPrompt);
+		expect(receivedMessages[2]).toEqual([adoptedPrompt]);
+		expect(agent.state.messages.slice(0, 2)).toEqual(projections[2].messages);
+		expect(agent.state.messages).toHaveLength(3);
+		expect(agent.state.messages[2].role).toBe("assistant");
+		expect(buildIndex).toBe(3);
+		for (const projection of projections) expect(projection.release).toHaveBeenCalledOnce();
 	});
 
 	it("forwards the service tier to streamFn options", async () => {

@@ -364,23 +364,22 @@ def make_writable_tree(path: Path) -> None:
             pass
 
 
-def clean_environment(config: Path, pc_home: Path, home: Path) -> dict[str, str]:
-    environment = dict(os.environ)
-    for key in list(environment):
-        if key.startswith("PRIME_AGENT_INTERNAL_") or key.startswith("PRIME_CONTEXT_"):
-            environment.pop(key, None)
-    for key in ("PI_OFFLINE", "DO_NOT_TRACK", "FORCE_COLOR", "PRIME_AGENT_KERNEL_PYTHON", "PYTHONPATH"):
-        environment.pop(key, None)
-    environment.update(
-        {
-            "PRIME_AGENT_CODING_AGENT_DIR": str(config),
-            "PRIME_CONTEXT_HOME": str(pc_home),
-            "PRIME_AGENT_TELEMETRY": "0",
-            "HOME": str(home),
-            "NO_COLOR": "1",
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-    )
+def clean_environment(
+    config: Path, home: Path, *, variant: str, api_key: str, node: Path, tmpdir: Path,
+) -> dict[str, str]:
+    environment = {
+        "HOME": str(home), "PATH": f"{node.parent}:/usr/bin:/bin", "TMPDIR": str(tmpdir),
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "dumb", "TZ": "UTC",
+        "DO_NOT_TRACK": "1", "NO_COLOR": "1", "OPENAI_API_KEY": api_key,
+        "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "UV_OFFLINE": "1",
+        "npm_config_offline": "true", "npm_config_audit": "false", "npm_config_fund": "false",
+    }
+    if variant == "vanilla":
+        environment.update({"PRIME_AGENT_CODING_AGENT_DIR": str(config), "PI_OFFLINE": "1", "PRIME_AGENT_TELEMETRY": "0"})
+    elif variant == "current":
+        environment.update({"BASE_CONTEXT_HOME": str(config), "BASE_CONTEXT_OFFLINE": "1", "BASE_CONTEXT_TELEMETRY": "0"})
+    else:
+        raise ValueError(f"unknown benchmark variant: {variant}")
     return environment
 
 

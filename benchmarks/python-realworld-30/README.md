@@ -9,29 +9,41 @@ Candidate solutions and all fixture code use only the Python standard library.
 - `tasks.json` indexes the 30 scenarios.
 - `tasks/<id>-<slug>/` contains `TASK.md`, `scenario.json`, `seed.py`, initial and staged payloads, and an external `judge.py`.
 - `benchlib.py` contains deterministic setup, staging, metrics, and judge helpers.
-- `prepare-hosts.py` installs the two pinned npm prefixes and applies the packaged host patch.
-- `run.py` is the paired Prime Agent RPC runner for all tasks and variants.
+- `prepare-hosts.py` maps local H0.9.3 archives and an already frozen native candidate. It does not install, download, rebuild, or patch products.
+- `run.py` is the paired H/native Base Context RPC runner for all tasks and variants.
 - `run_codex.py` is the stock Codex CLI runner.
 - `generate_charts.py` regenerates the published SVG scorecard and per-task advantage charts.
 - `bash-tool.mjs` is a neutral benchmark adapter that exposes the same isolated `bash` tool, including optional per-command millisecond timeouts, to all variants.
 
-The runner creates a separate workspace, config directory, session directory,
-Prime Context home, and process for every task/variant/attempt. It generates
-future-stage payloads outside the workspace, injects them only after the prior
-assistant turn is idle, makes task inputs read-only, and exposes only declared
-editable paths. The agent tool allowlist contains only `bash` and, when the
-extension provides it, `prime_context`; Prime Agent 0.9.1's persistent REPL tools are
-disabled. The runner loads `bash-tool.mjs` identically for all variants so host tool
-changes cannot alter the comparison. The adapter only forwards a command to the
-generated Bubblewrap launcher and does not add variant-specific context behavior. A generated Bubblewrap shell exposes only the candidate workspace, Python 3.12 standard
-library, and a small file-inspection/management command set. It hides the host repository,
-judges, later stages, credentials, package managers, and all public network
-interfaces. Runner-managed services are replicated inside its loopback
-namespace. Judges run after the measured agent interval. Each judge rebuilds
-clean main and edge fixtures and copies only declared candidate artifacts.
+The runner creates a separate workspace, HOME, config, session directory,
+temporary directory, daemon socket, and process for every attempt. Each RPC
+process has a private PID/mount view. Its published package image, local
+dependencies, Node executable, and neutral adapter are read-only. Only its own
+attempt and socket state are writable. No source checkout or user home is
+mounted. A private tmpfs `/tmp` and `/rpc/daemon.sock` keep Unix socket paths
+short, even when the result directory has a long name. The RPC process keeps
+network access for the explicitly selected API.
 
-The host needs `bwrap` and Python 3.12. The runner never installs or updates
-packages.
+Both hosts load the same `bash-tool.mjs` adapter and use `--tools bash`.
+Neither activates `ipython`, so neither prewarms its kernel. No SDK shim,
+product extension, goal, resume snapshot, or product patch is used. Resource
+discovery is disabled, and fresh settings contain `packages: []`.
+
+The generated Bubblewrap tool shell has a separate network/PID namespace and
+cleared environment. It exposes only the candidate workspace, Python 3.12
+standard library, and a small command set. It hides judges, later stages,
+credentials, package managers, and public network interfaces. Runner-managed
+services are replicated inside its loopback namespace. Future payloads are
+injected only between stages. Inputs are read-only; only declared candidate
+paths are editable. Judges run outside the measured agent interval.
+
+RPC `agent_end` gates an ordinary stage. A matching `compact` response gates
+the next stage after manual compaction. The runner does not invent a
+`needs_input`, public `wait_for_idle`, or `shutdown` command. Final stdin EOF
+uses the product's wait-idle/dispose route, followed by actual process exit.
+
+The host needs `bwrap`, Python 3.12, and an explicit Node >=22.8.0 executable.
+The runner never installs or updates packages.
 
 ## Validate the corpus
 
@@ -41,29 +53,42 @@ python3.12 -E -S run.py --validate-only
 
 ## Run
 
-Prepare fresh, separate npm prefixes. This installs vanilla `prime-agent@0.9.1`
-in both arms, installs `prime-agent-context@9.2.0` only in the current arm, and
-runs the installed patch command in this order: `--check-stock`, patch, and
-`--check`. It writes a host manifest only after the vanilla tree passes the stock
-check and the current tree passes the patched check.
+Prepare one fresh host directory from existing local inputs. The original S/D
+controls and H archives stay unchanged. The native four-core extraction and
+private mappings are reused from the frozen candidate; setup does not repack
+it. The dependency directory must match the candidate's existing local mapping.
 
 ```sh
-python3.12 -E -S prepare-hosts.py --force
+python3.12 -E -S -B prepare-hosts.py \
+  --h-artifacts ../../.work/controls/H-artifacts \
+  --candidate-root /absolute/path/to/frozen-candidate \
+  --dependency-root /absolute/path/to/base-context/node_modules \
+  --node /absolute/path/to/node \
+  --root /absolute/path/to/new-host-directory
 ```
 
-The setup uses the release tarball and the npm script policy from the public
-9.2.0 installation procedure. Its npm prefix, cache, home, Prime Agent config,
-and Prime Context home are arm-local. It does not read or modify a machine-wide
-Prime Agent or Prime Context installation.
+Setup only reads local packages, queries `node --version`, extracts H, and
+writes a v2 `hosts.json`. It does not launch a product or copy auth. `vanilla`
+uses `@earendil-works/pi-coding-agent@0.9.3`; `current` uses the clean candidate's
+`@ponythewhite/base-context`. Both launch their published `dist/bundle/cli.js`.
 
-Run the full comparison with the fixed publication settings:
+Inference requires explicit admission and a real OpenAI API key. Put the key
+in a private, user-readable-only file. Pass its path with `--api-key-file`.
+The file must contain one API key, not an `auth.json` or subscription token.
+There is no default auth lookup, credential copy, or inherited OAuth fallback.
+The runner passes only the deliberate key as `OPENAI_API_KEY` in a fresh
+allowlisted environment. It never puts the key in argv or invocation metadata.
+The tool sandbox clears it before executing a command.
+
+After admission, the full comparison command is:
 
 ```sh
-python3.12 -E -S run.py \
-  --hosts-manifest ../../.benchmark-runs/hosts-pa091-pc911/hosts.json \
+python3.12 -E -S -B run.py \
+  --hosts-manifest /absolute/path/to/new-host-directory/hosts.json \
+  --api-key-file /absolute/private/path/openai-api-key \
   --tasks all \
   --variants vanilla,current \
-  --provider openai-codex \
+  --provider openai \
   --model gpt-5.6-sol \
   --thinking medium \
   --timeout-seconds 1800 \
@@ -72,6 +97,12 @@ python3.12 -E -S run.py \
   --retry-failed 1
 ```
 
+Both local catalogs contain exact `gpt-5.6-sol` and `gpt-6-astra` under
+`openai` / `openai-responses`. `--model gpt-6-astra` selects the other supported
+model; no aliases or catalog overrides are added. Catalog recognition does
+not establish account access. `openai-codex` is not a supported native route.
+`--offline` prevents background package/catalog access, not admitted inference.
+
 Each wave contains three tasks in two flavors, for at most six isolated agent
 processes. The first valid attempt is the primary and drives every headline,
 including when it fails. A non-strict primary may receive one diagnostic retry
@@ -79,8 +110,9 @@ in either arm. A retry never replaces the primary. Speed or cost regressions do
 not trigger retries.
 
 An exact confirmed provider error, `Selected model is at capacity.`, invalidates
-that run. Native receipts expose this as `capacityConfirmed: true`; legacy RPC
-requires the exact assistant error message. These invalidations do not consume
+that run. Native receipts expose this as `capacityConfirmed: true`; H RPC
+requires the exact error in an assistant error, failed prompt/compact response,
+or `compaction_end.errorMessage`. These invalidations do not consume
 the primary or retry allowance. Their attempts and any incurred spend remain in
 the output. At most two **valid** attempts run per task/variant; capacity-invalid
 attempts are counted separately.
@@ -139,10 +171,7 @@ labels the result `catalog_estimate`. Missing rates, usage components, receipts,
 or observed costs remain `null` with incomplete flags. Aggregates preserve
 unknown values; Markdown prints `n/a`. An unavailable total is never zero.
 
-The existing pinned host adapter also accepts raw assistant session accounting.
-For its `current` arm, `PRIME_CONTEXT_BENCHMARK_METRICS` points to an attempt-local
-observational file for `semantic-distill`, `task-scout`, `stall-recovery`, and
-`knowledge-compile`. Only this non-native path combines auxiliary and solver
-accounting. Missing current auxiliary data leaves the combined amount unknown.
-Vanilla leaves unavailable auxiliary/refinement fields unknown. Provider prompt
-anchors count input, cache-read, and cache-write tokens, excluding output.
+H raw sessions use their observed assistant accounting. Unavailable physical
+request coverage and auxiliary/refinement fields remain unknown. Neither arm
+reads the old Prime Context accounting sidecar or archive directory. Provider
+prompt anchors count input, cache-read, and cache-write tokens, excluding output.

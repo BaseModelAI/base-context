@@ -1241,7 +1241,7 @@ export class AgentSession {
 				// Failed persistence outcomes are transient UI/request facts, never canonical history authority.
 				this._mergeUnpersistedOutcomes(messages, outcomes);
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
-				return { messages, streamContext: captured, release: () => captured.dispose() };
+				return { messages, adoptMessages: true, streamContext: captured, release: () => captured.dispose() };
 			} catch (error) {
 				try {
 					await captured.dispose();
@@ -1333,7 +1333,7 @@ export class AgentSession {
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
 		});
-		this._goalState = this._loadPersistedGoalState();
+		this._goalState = this.sessionManager.isPersisted() ? emptyGoalState() : this._loadPersistedGoalState();
 		this._initialGoal = config.initialGoal ? { ...config.initialGoal } : undefined;
 		this._restoreLateIpythonSentAgentMessages();
 		if (this._goalState.status === "active") {
@@ -1362,7 +1362,24 @@ export class AgentSession {
 	}
 
 	private async _initialize(): Promise<void> {
-		if (this._rlmDepth === 0 && this._initialGoal && this._isBranchSeedable()) {
+		let goalSeedable = false;
+		if (this.sessionManager.isPersisted()) {
+			const bootstrap = await this._readGoalBootstrap();
+			this._goalState = bootstrap.goalState;
+			this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
+			goalSeedable = bootstrap.goalSeedable;
+			if (
+				this._goalState.status === "active" &&
+				this._includeGoals &&
+				!this.getActiveToolNames().includes("ipython")
+			) {
+				this.setActiveToolsByName([...this.getActiveToolNames(), "ipython"]);
+				this._prewarmIpythonIfNeeded();
+			}
+		} else if (this._rlmDepth === 0 && this._initialGoal) {
+			goalSeedable = this._isBranchSeedable();
+		}
+		if (this._rlmDepth === 0 && this._initialGoal && goalSeedable) {
 			const goal = await this._startGoal(this._initialGoal.objective, this._initialGoal.tokenBudget);
 			this._pendingNextTurnMessages.push(createGoalContextMessage(goal, "continuation"));
 			this._ensureGoalRuntimeActive();
@@ -1686,6 +1703,27 @@ export class AgentSession {
 		return { maxDepth: 2, source: "default" };
 	}
 
+	private async _readGoalBootstrap(): Promise<{ goalState: GoalState; goalSeedable: boolean }> {
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return this.sessionManager.readBranchHistory(async (view) => {
+			const bootstrap = await view.branchBootstrap();
+			let goalState = emptyGoalState();
+			if (bootstrap.goalState) {
+				const hydrated = await view.hydrateEntry(bootstrap.goalState.id, maxSourceBytes);
+				if (
+					!hydrated ||
+					hydrated.source.retention === "retained-import" ||
+					hydrated.entry.type !== "custom" ||
+					hydrated.entry.customType !== GOAL_STATE_CUSTOM_TYPE ||
+					!isPersistedGoalState(hydrated.entry.data)
+				)
+					throw new Error("Bootstrap goal source is unavailable or ineligible");
+				goalState = normalizeGoalState(hydrated.entry.data);
+			}
+			return { goalState, goalSeedable: bootstrap.goalSeedable };
+		});
+	}
+
 	private _loadPersistedGoalState(): GoalState {
 		const branch = this.sessionManager.getBranch();
 		for (let i = branch.length - 1; i >= 0; i--) {
@@ -1730,8 +1768,10 @@ export class AgentSession {
 		return true;
 	}
 
-	private _reloadGoalStateFromBranch(): void {
-		this._goalState = this._loadPersistedGoalState();
+	private async _reloadGoalStateFromBranch(): Promise<void> {
+		this._goalState = this.sessionManager.isPersisted()
+			? (await this._readGoalBootstrap()).goalState
+			: this._loadPersistedGoalState();
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
 	}
@@ -4425,6 +4465,7 @@ export class AgentSession {
 		);
 	}
 
+	/** Active working context; use captured history readers for the complete source. */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
@@ -9559,18 +9600,19 @@ export class AgentSession {
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
 
-		// Prewarm when configured, or whenever we're resuming a session that already
-		// has a kernel snapshot — so its state is revived and the model is told what
-		// came back before the first turn, rather than a turn later when the kernel
-		// would otherwise lazily start on first use.
+		this._prewarmIpythonIfNeeded();
+
+		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
+		this._ipythonRuntimeBuilt = true;
+	}
+
+	private _prewarmIpythonIfNeeded(): void {
+		// Also used when an asynchronously restored goal enables ipython after construction.
 		const hasSnapshot =
 			!!this._ipythonKernelSnapshotDir && existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
 		if ((this._prewarmIpythonKernel || hasSnapshot) && this.getActiveToolNames().includes("ipython")) {
 			this._ipythonKernelProvisioner?.prewarm();
 		}
-
-		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
-		this._ipythonRuntimeBuilt = true;
 	}
 
 	/**
@@ -12121,7 +12163,7 @@ export class AgentSession {
 			this._contextOmissions = undefined;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
-			this._reloadGoalStateFromBranch();
+			await this._reloadGoalStateFromBranch();
 			this._reloadRlmMaxDepthFromBranch();
 			this._invalidateQueuedPromptPreparation();
 

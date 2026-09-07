@@ -538,6 +538,9 @@ export class Agent {
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
 			beforeContextBuild: async () => this.contextOwner?.(),
+			onContextAdopted: (messages) => {
+				this._state.messages = messages;
+			},
 			ownedStreamFn: this.ownedStreamFn,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,

@@ -113,12 +113,21 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 			(message) => message.role === "user" && message.content === canonicalOnly.content,
 		),
 	).toBe(false);
+	owner.agent.state.messages = [{ role: "user", content: "Unrecorded old working view", timestamp: 0 }];
 	let sawCanonicalOnly = false;
 	faux.setResponses([
 		(context) => {
 			sawCanonicalOnly = context.messages.some(
 				(message) => message.role === "user" && message.content === canonicalOnly.content,
 			);
+			expect(
+				owner.messages.some((message) => message.role === "user" && message.content === canonicalOnly.content),
+			).toBe(true);
+			expect(
+				owner.messages.some(
+					(message) => message.role === "user" && message.content === "Unrecorded old working view",
+				),
+			).toBe(false);
 			return fauxAssistantMessage(fauxToolCall("fixture", { value: "raw" }), { stopReason: "toolUse" });
 		},
 		fauxAssistantMessage("First turn complete."),

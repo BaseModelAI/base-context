@@ -4,6 +4,7 @@ import {
 	MAX_CANONICAL_PAYLOAD_PART_BYTES,
 } from "./canonical-payload-parts.js";
 import {
+	type BranchBootstrapState,
 	type ContextManifestOptions,
 	type ContextManifestPage,
 	type ContextUpdates,
@@ -61,10 +62,18 @@ export interface MaterializedSessionHistory {
 	sourceBytes: number;
 }
 
+/** Bootstrap refs and booleans from the same pinned branch used for exact hydration. */
+export interface SessionBranchBootstrapState extends BranchBootstrapState {
+	readonly source: SourceSnapshotRef;
+}
+
 /** Consume iterators inside the owning read callback. Materialized results are detached. */
 export interface SessionHistoryReadScope {
 	readonly source: SourceSnapshotRef;
 	readonly scope: "branch" | "source";
+	readonly branchContext: SessionHistoryReadView;
+	/** Select the captured branch even when invoked from an explicit whole-source scope. */
+	branchBootstrap(): Promise<SessionBranchBootstrapState>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
 	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
 	search(query: string, limit?: number): Promise<HistoryIndexPage>;
@@ -184,6 +193,8 @@ export function createSessionHistoryReadScope(
 	return Object.freeze({
 		source,
 		scope,
+		branchContext: createBranchHistoryReadView(index, source, query),
+		branchBootstrap: () => query(async () => ({ ...(await index.branchBootstrap(sessionId, branch)), source })),
 		get,
 		page,
 		search: (text: string, limit = 16) =>

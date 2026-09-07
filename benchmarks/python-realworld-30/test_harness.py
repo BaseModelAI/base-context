@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from benchlib import aggregate_sessions, collect_sessions, parse_session_file
 
@@ -117,9 +118,55 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
         self.assertEqual(metrics["cost_basis"], "catalog_estimate")
         self.assertTrue(metrics["cost_complete"])
-        benchmark.merge_current_accounting(metrics, {"total_calls": 10, "cost": 99}, auxiliary_expected=True)
-        self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
-        self.assertEqual(metrics["all_model_calls"], 1)
+        # The actual runner gates compaction on its matched response, not a
+        # nonexistent needs_input/extra agent_end event. This is mocked RPC,
+        # with no provider, fixture service, judge, or subprocess execution.
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            node = Path("/usr/bin/node")
+            host = {"package_root": str(root / "image/unpacked/base-context/package"), "argv": [str(node), "/frozen/cli.js"]}
+            args = argparse.Namespace(
+                api_key="explicit-unit-key", model="gpt-5.6-sol", thinking="medium",
+                bwrap="/usr/bin/bwrap", timeout_seconds=10, hosts={"current": host},
+                host_manifest={"node_executable": str(node), "dependency_root": str(root / "dependencies"), "hosts": {"current": host}},
+            )
+            events = [
+                {"type": "agent_end"},
+                {"type": "compaction_end", "result": {"tokensBefore": 100}},
+                {"type": "response", "id": "request-2-after-initial", "command": "compact", "success": True},
+                {"type": "agent_end"},
+            ]
+            process = Mock(pid=1234)
+            process.stdout = io.StringIO("".join(json.dumps(event) + "\n" for event in events))
+            process.wait.return_value = 0
+            process.poll.return_value = 0
+            scenario = {"initial_prompt": "initial", "timeout_seconds": 10, "editable_paths": [],
+                        "stages": [{"id": "initial", "compact_after": True}, {"id": "followup", "message": "continue"}]}
+            with patch.object(benchmark.subprocess, "Popen", return_value=process) as launch, \
+                    patch.object(benchmark, "inject_stage"), patch.object(benchmark, "stop_process"), \
+                    patch.object(benchmark, "stop_attempt_processes"):
+                observed = benchmark.run_rpc("current", root, scenario, workspace, root, args)
+            self.assertIsNone(observed["error"])
+            self.assertEqual(observed["metrics"]["compaction_completions"], 1)
+            sent = [json.loads(call.args[0]) for call in process.stdin.write.call_args_list]
+            self.assertEqual([item["type"] for item in sent], ["prompt", "compact", "prompt"])
+            self.assertEqual(sent[-1]["streamingBehavior"], "followUp")
+            process.stdin.close.assert_called_once()
+            process.wait.assert_called_once_with(timeout=30)
+            command, environment = launch.call_args.args[0], launch.call_args.kwargs["env"]
+            self.assertEqual(command[:4], ["/usr/bin/bwrap", "--die-with-parent", "--unshare-pid", "--new-session"])
+            self.assertIn("--ro-bind", command)
+            self.assertNotIn(["--ro-bind", "/", "/"], [command[index:index + 3] for index in range(len(command) - 2)])
+            self.assertEqual(command[command.index("--tools") + 1], "bash")
+            self.assertNotIn("prime_context", command)
+            self.assertNotIn("explicit-unit-key", command)
+            self.assertEqual(environment["OPENAI_API_KEY"], "explicit-unit-key")
+            self.assertEqual(environment["TMPDIR"], "/tmp")
+            self.assertEqual(command[command.index("--daemon-socket") + 1], "/rpc/daemon.sock")
+            self.assertIn("BASE_CONTEXT_HOME", environment)
+            self.assertFalse((root / "config/auth.json").exists())
 
     def test_vanilla_failure_is_a_current_correctness_win(self) -> None:
         vanilla_attempt = attempt(wall=12.0, cost=0.12, progress=3)
@@ -152,6 +199,20 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertTrue(benchmark.provider_capacity_error(exact_error))
         self.assertFalse(benchmark.provider_capacity_error({**exact_error, "message": {**exact_error["message"], "stopReason": "stop"}}))
         self.assertFalse(benchmark.provider_capacity_error({**exact_error, "message": {**exact_error["message"], "errorMessage": "Selected model is at capacity. Maybe."}}))
+        compact_error = {"type": "response", "command": "compact", "success": False, "error": "Selected model is at capacity."}
+        self.assertTrue(benchmark.provider_capacity_error(compact_error))
+        self.assertFalse(benchmark.provider_capacity_error({**compact_error, "success": True}))
+        self.assertTrue(benchmark.provider_capacity_error({"type": "compaction_end", "errorMessage": compact_error["error"]}))
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "ambient-key", "PRIME_API_KEY": "ambient-key", "HTTP_PROXY": "ambient-proxy", "NODE_OPTIONS": "ambient-options"}):
+            for variant, config_key in (("vanilla", "PRIME_AGENT_CODING_AGENT_DIR"), ("current", "BASE_CONTEXT_HOME")):
+                environment = benchmark.clean_environment(
+                    Path("/private/config"), Path("/private/home"), variant=variant,
+                    api_key="explicit-key", node=Path("/private/node/bin/node"), tmpdir=Path("/private/tmp"),
+                )
+                self.assertEqual(environment["OPENAI_API_KEY"], "explicit-key")
+                self.assertEqual(environment[config_key], "/private/config")
+                for name in ("PRIME_API_KEY", "HTTP_PROXY", "NODE_OPTIONS", "CODEX_HOME", "PRIME_CONTEXT_HOME", "PYTHONPATH"):
+                    self.assertNotIn(name, environment)
         sequence = [
             {**attempt(wall=1, cost=0.02), "capacity_invalid": True},
             attempt(wall=12, cost=0.10, progress=3),

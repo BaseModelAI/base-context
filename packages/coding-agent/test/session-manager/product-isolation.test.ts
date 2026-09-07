@@ -28,6 +28,15 @@ describe("session write isolation", () => {
 		const ownedDir = join(dir, "owned");
 		const session = await SessionManager.create(dir, ownedDir);
 		managers.push(session);
+		expect(await session.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			model: null,
+			thinkingLevel: null,
+			serviceTier: null,
+			goalState: null,
+			hasContextMessages: false,
+			goalSeedable: true,
+			source: { sessionId: session.getSessionId(), leafId: null },
+		});
 		const ownedInfoId = await session.appendSessionInfo("owned");
 		expect(readFileSync(session.getSessionFile()!, "utf8")).toContain("owned");
 		expect(loadEntriesFromFile(legacyFile)[0]).toMatchObject({ id: "legacy", version: 2 });
@@ -83,6 +92,42 @@ describe("session write isolation", () => {
 		await expect(session.readSourceHistory((history) => history.hydrateEntry(branchA, 1))).rejects.toThrow(
 			"entry source byte budget exceeded",
 		);
+
+		session.resetLeaf();
+		const modelId = await session.appendModelChange("openai", "gpt-4.1");
+		const thinkingId = await session.appendThinkingLevelChange("high");
+		const tierId = await session.appendServiceTierChange("priority");
+		const capturedBootstrap = await session.readBranchHistory(async (history) => {
+			expect(history.branchContext.source).toBe(history.source);
+			const before = await history.branchBootstrap();
+			expect(before).toMatchObject({
+				model: { id: modelId },
+				thinkingLevel: { id: thinkingId },
+				serviceTier: { id: tierId },
+				goalState: null,
+				hasContextMessages: false,
+				goalSeedable: true,
+				source: { sessionId: session.getSessionId(), leafId: tierId },
+			});
+			expect(await history.hydrateEntry(before.model!.id, 64 * 1024)).toMatchObject({
+				entry: { type: "model_change", provider: "openai", modelId: "gpt-4.1" },
+			});
+			const replacement = await session.appendModelChange("openai", "gpt-4.1-mini");
+			await session.pageHistory();
+			expect(await history.branchBootstrap()).toEqual(before);
+			return { before, replacement };
+		});
+		expect((await session.readBranchHistory((history) => history.branchBootstrap())).model?.id).toBe(
+			capturedBootstrap.replacement,
+		);
+		session.branch(branchB);
+		expect(await session.readSourceHistory((history) => history.branchBootstrap())).toMatchObject({
+			model: null,
+			thinkingLevel: null,
+			serviceTier: null,
+			hasContextMessages: true,
+			goalSeedable: false,
+		});
 
 		const submittedText = "  Keep Foo.txt != foo.txt exactly.  ";
 		const longText = `Exact original text: ${"x".repeat(1024 * 1024)}`;
@@ -189,6 +234,30 @@ describe("session write isolation", () => {
 			"retained-import",
 			undefined,
 		]);
+
+		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			goalState: null,
+			hasContextMessages: true,
+			goalSeedable: false,
+		});
+		const nativeGoal = {
+			active: true,
+			status: "active",
+			goalId: "Native-Goal",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+		};
+		const nativeGoalId = await copied.appendCustomEntry("thread_goal_state", nativeGoal);
+		await copied.appendCustomEntry("thread_goal_state", { active: false });
+		await copied.readBranchHistory(async (history) => {
+			const bootstrap = await history.branchBootstrap();
+			expect(bootstrap.goalState?.id).toBe(nativeGoalId);
+			expect(bootstrap.goalState?.retention).toBeUndefined();
+			expect(await history.hydrateEntry(bootstrap.goalState!.id, 64 * 1024)).toMatchObject({
+				entry: { data: nativeGoal },
+			});
+		});
 		expect(readFileSync(rawPath, "utf8")).toBe(raw);
 
 		const migrated = await SessionManager.open(rawPath, ownedDir);
@@ -211,11 +280,15 @@ describe("session write isolation", () => {
 		const ownedId = await session.appendSessionInfo("owned");
 		const originalSource = session.getSessionId();
 		const escaped = await session.readSourceHistory(async (history) => {
+			const bootstrap = await history.branchBootstrap();
+			expect(bootstrap).toMatchObject({ hasContextMessages: false, goalSeedable: false, model: null });
 			const lateId = await session.appendSessionInfo("outside captured prefix");
 			await session.pageHistory();
 			expect(await history.get(lateId)).toBeUndefined();
 			await session.newSession();
 			const replacementId = await session.appendSessionInfo("owned replacement");
+			await session.appendModelChange("openai", "gpt-4.1");
+			expect(await history.branchBootstrap()).toEqual(bootstrap);
 			expect(history.source.sessionId).toBe(originalSource);
 			expect(await history.hydrateEntry(ownedId, 64 * 1024)).toMatchObject({
 				entry: { id: ownedId, name: "owned" },
@@ -224,6 +297,7 @@ describe("session write isolation", () => {
 			return history;
 		});
 		await expect(escaped.get(ownedId)).rejects.toThrow("Captured history read has ended");
+		await expect(escaped.branchBootstrap()).rejects.toThrow("Captured history read has ended");
 		const path = session.getSessionFile()!;
 		rmSync(path);
 		symlinkSync(legacyFile, path);

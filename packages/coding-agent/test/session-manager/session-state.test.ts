@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { loadEntriesFromFile, SessionManager, type SessionStateEntry } from "../../src/core/session-manager.js";
 import { inactiveLifecycleForSession } from "../../src/modes/daemon/daemon-session-list.js";
 import { assistantMsg, userMsg } from "../utilities.js";
@@ -73,6 +73,9 @@ describe("SessionManager session state", () => {
 			const sessionDir = join(tempDir, "sessions");
 			const session = await createSession(cwd, sessionDir);
 
+			await session.appendSessionInfo("old name");
+			await session.appendSessionInfo("  ");
+			expect(session.getSessionName()).toBeUndefined();
 			await session.appendSessionInfo("empty");
 			await session.appendSessionState({ status: "archived" });
 
@@ -105,7 +108,18 @@ describe("SessionManager session state", () => {
 			expect(sessionFile).toBeDefined();
 
 			await session.close();
-			await (await openSession(sessionFile!, sessionDir)).appendSessionInfo("Renamed draft");
+			const reopened = await openSession(sessionFile!, sessionDir);
+			expect(reopened.getSessionName()).toBeUndefined();
+			const previousLeaf = reopened.getLeafId()!;
+			const rename = reopened.appendSessionInfo("Renamed draft");
+			expect(reopened.getSessionName()).toBeUndefined();
+			await rename;
+			reopened.branch(previousLeaf);
+			const entries = vi.spyOn(reopened, "getEntries");
+			expect(reopened.getSessionName()).toBe("Renamed draft");
+			expect(entries).not.toHaveBeenCalled();
+			await reopened.close();
+			expect((await openSession(sessionFile!, sessionDir)).getSessionName()).toBe("Renamed draft");
 
 			await expect(SessionManager.list(cwd, sessionDir)).resolves.toEqual([
 				expect.objectContaining({ id: session.getSessionId(), name: "Renamed draft" }),

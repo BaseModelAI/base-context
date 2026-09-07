@@ -28,6 +28,12 @@ export type StreamFn = (
 
 export interface AgentContextProjection {
 	messages: AgentMessage[];
+	/**
+	 * Adopt this complete working set in the owning Agent and loop, not only for inference.
+	 * It must include the current turn and pending tool closure. This is not a last-N tail.
+	 * Omitted/false preserves the existing inference-only projection behavior.
+	 */
+	adoptMessages?: boolean;
 	streamContext?: unknown;
 	release?: () => Promise<void>;
 }
@@ -158,6 +164,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Native owner barrier before transform/convert. Rejection stops context construction. */
 	beforeContextBuild?: () => Promise<AgentContextBuildResult>;
+
+	/** Internal state mirror for adopted working sets. Awaited and excluded from provider options. */
+	onContextAdopted?: (messages: AgentMessage[]) => void | Promise<void>;
 
 	/** Copied native owner callback; excluded from configured/provider stream options. */
 	ownedStreamFn?: AgentOwnedStreamFn;

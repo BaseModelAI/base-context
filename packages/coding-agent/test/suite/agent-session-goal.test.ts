@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentContext, AgentTool } from "@ponythewhite/base-context-agent";
 import { Agent } from "@ponythewhite/base-context-agent";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type Usage } from "@ponythewhite/base-context-ai";
@@ -976,11 +977,17 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.active).toBe(false);
 	});
 
-	async function createRestartSession(harness: Harness): Promise<AgentSession> {
+	async function createRestartSession(harness: Harness, retainedImport = false): Promise<AgentSession> {
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		expect(existsSync(sessionFile)).toBe(true);
 		await harness.session.disposeAsync();
-		const newSessionManager = await SessionManager.open(sessionFile);
+		const newSessionManager = retainedImport
+			? await SessionManager.importRetainedFrom(
+					sessionFile,
+					harness.tempDir,
+					join(harness.tempDir, "retained-sessions"),
+				)
+			: await SessionManager.open(sessionFile);
 
 		// Assert the reopened branch contains a thread_goal_state custom entry
 		// before constructing the new AgentSession. This proves the goal was
@@ -1015,6 +1022,8 @@ describe("initial goal seeding from config", () => {
 			resourceLoader: createTestResourceLoader(),
 			rlmDepth: 0,
 			initialGoal: { objective: "Should not reseed" },
+			initialActiveToolNames: [],
+			prewarmIpythonKernel: false,
 		});
 		restartedSessions.push(restarted);
 		await restarted.initialize();
@@ -1056,6 +1065,10 @@ describe("initial goal seeding from config", () => {
 		// Complete the goal via host request
 		await harness.session.handleGoalHostRequest("goal.complete");
 		expect(harness.session.goalState.status).toBe("complete");
+		expect(await harness.sessionManager.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			hasContextMessages: false,
+			goalSeedable: false,
+		});
 
 		// Simulate restart on the same session file
 		const newSession = await createRestartSession(harness);
@@ -1063,6 +1076,7 @@ describe("initial goal seeding from config", () => {
 		// Goal should remain complete, not reseeded
 		expect(newSession.goalState.status).toBe("complete");
 		expect(newSession.goalState.objective).toBe("Complete me");
+		expect(newSession.getActiveToolNames()).not.toContain("ipython");
 		await newSession.disposeAsync();
 	});
 
@@ -1106,6 +1120,9 @@ describe("initial goal seeding from config", () => {
 			tokensUsed: 7,
 		});
 
+		// A newer malformed goal must not replace the latest eligible native snapshot.
+		await harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { active: false });
+
 		// Simulate restart on the same session file
 		const newSession = await createRestartSession(harness);
 		const reopenedGoalEntry = newSession.sessionManager.getEntry(goalEntryId);
@@ -1117,6 +1134,16 @@ describe("initial goal seeding from config", () => {
 		expect(newSession.goalState.status).toBe("active");
 		expect(newSession.goalState.objective).toBe("Initial goal");
 		expect(newSession.goalState.tokensUsed).toBe(7);
+		expect(newSession.getActiveToolNames()).toContain("ipython");
+		expect(newSession.agent.state.tools.some((tool) => tool.name === "ipython")).toBe(true);
 		await newSession.disposeAsync();
+
+		// The same real source imported as retained history must not activate that goal or reseed.
+		const retainedSession = await createRestartSession(harness, true);
+		expect(retainedSession.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		expect(retainedSession.goalState).toMatchObject({ active: false, status: "idle" });
+		expect(retainedSession.goalState.objective).toBeUndefined();
+		expect(retainedSession.getActiveToolNames()).not.toContain("ipython");
+		await retainedSession.disposeAsync();
 	});
 });

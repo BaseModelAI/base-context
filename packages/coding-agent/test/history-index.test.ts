@@ -41,6 +41,9 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	expect(await index.get("session", "item", { leafId: "Item", through: 2 })).toBeUndefined();
 	expect(await index.get("other", "Item")).toBeUndefined();
 	await expect(index.getSource("session", "Item", 2)).rejects.toThrow("index is unavailable");
+	await expect(index.branchBootstrap("session", { leafId: "item", through: 2 })).rejects.toThrow(
+		"index is unavailable",
+	);
 	await expect(index.contextManifest("session", { leafId: "item", through: 2 })).rejects.toThrow(
 		"index is unavailable",
 	);
@@ -179,6 +182,14 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		).toEqual([]);
 		expect((await index.get("canonical", "root"))?.authority).toBe("unrecorded");
 
+		expect(await index.branchBootstrap("canonical", { leafId: null, through: 0 })).toEqual({
+			model: null,
+			thinkingLevel: null,
+			serviceTier: null,
+			goalState: null,
+			hasContextMessages: false,
+			goalSeedable: true,
+		});
 		const contextSecond = await index.contextManifest("canonical", contextScope, {
 			cursor: contextFirst.nextCursor!,
 		});
@@ -416,14 +427,60 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		await index.syncSource("canonical", chainSnapshot);
 		expect((await index.get("canonical", "root", chainScope))?.id).toBe("root");
 
+		const bootstrapControls = [
+			{ id: "bootstrap-model", type: "model_change", provider: "fixture", modelId: "configured" },
+			{ id: "bootstrap-thinking", type: "thinking_level_change", thinkingLevel: "high" },
+			{ id: "bootstrap-tier", type: "service_tier_change", serviceTier: "priority" },
+		];
+		let controlParent: string | null = null;
+		for (const value of bootstrapControls) {
+			await owner.appendJson(JSON.stringify({ ...value, parentId: controlParent }), "retained-import");
+			controlParent = value.id;
+		}
+		await owner.appendJson(entry("bootstrap-request", controlParent, "attached request", "request"));
+		const controlSnapshot = owner.getSnapshot();
+		const controlScope = { leafId: controlParent, through: controlSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", controlSnapshot);
+		const controlBootstrap = await index.branchBootstrap("canonical", controlScope);
+		expect(controlBootstrap).toEqual({
+			model: await index.getSource("canonical", "bootstrap-model", controlScope.through),
+			thinkingLevel: await index.getSource("canonical", "bootstrap-thinking", controlScope.through),
+			serviceTier: await index.getSource("canonical", "bootstrap-tier", controlScope.through),
+			goalState: null,
+			hasContextMessages: false,
+			goalSeedable: true,
+		});
+		expect(controlBootstrap.model?.retention).toBe("retained-import");
+		expect(await index.branchBootstrap("canonical", { ...controlScope, leafId: "bootstrap-request" })).toMatchObject({
+			hasContextMessages: false,
+			goalSeedable: false,
+		});
+		const bootstrapGoal = {
+			active: true,
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+		};
 		let contextParentId = chainLeaf;
 		const contextEntries = [
-			{ id: "context-boundary", type: "tool_intent" },
+			{ id: "context-boundary", type: "model_change", provider: "fixture", modelId: "before-assistant" },
+			{ id: "bootstrap-goal", type: "custom", customType: "thread_goal_state", data: bootstrapGoal },
+			{
+				id: "bootstrap-malformed-goal",
+				type: "custom",
+				customType: "thread_goal_state",
+				data: { ...bootstrapGoal, active: "claimed" },
+			},
+			{ id: "bootstrap-retained-goal", type: "custom", customType: "thread_goal_state", data: bootstrapGoal },
 			{
 				id: "context-assistant",
 				type: "message",
 				message: {
 					role: "assistant",
+					provider: "fixture",
+					model: "error-assistant",
+					stopReason: "error",
 					content: [
 						{ type: "toolCall", id: "a" },
 						{ type: "toolCall", id: "b" },
@@ -460,12 +517,23 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		for (const value of contextEntries) {
 			await owner.appendJson(
 				JSON.stringify({ ...value, parentId: contextParentId, timestamp: "2026-01-01T00:00:00Z" }),
+				value.id === "bootstrap-retained-goal" ? "retained-import" : undefined,
 			);
 			contextParentId = value.id;
 		}
 		const contextSnapshot = owner.getSnapshot();
 		const visibleScope = { leafId: contextParentId, through: contextSnapshot.nextSequence - 1 };
 		await index.syncSource("canonical", contextSnapshot);
+		const contextBootstrap = await index.branchBootstrap("canonical", visibleScope);
+		expect(contextBootstrap).toEqual({
+			model: await index.getSource("canonical", "context-assistant", visibleScope.through),
+			thinkingLevel: null,
+			serviceTier: null,
+			goalState: await index.getSource("canonical", "bootstrap-goal", visibleScope.through),
+			hasContextMessages: true,
+			goalSeedable: false,
+		});
+		expect(await index.branchBootstrap("canonical", controlScope)).toEqual(controlBootstrap);
 		const visibleIds: string[] = [];
 		const visibleOrdinals: number[] = [];
 		let contextCursor: ContextManifestCursor | undefined;
@@ -825,7 +893,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; DROP TABLE context_node; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -859,6 +927,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"root-request",
 		]);
 		await index.syncSource("canonical", invisibleBoundarySnapshot);
+		expect(await index.branchBootstrap("canonical", visibleScope)).toEqual(contextBootstrap);
 		expect((await index.contextManifest("canonical", invisibleBoundaryScope)).refs.map((ref) => ref.entryId)).toEqual(
 			visibleIds.slice(130),
 		);
@@ -1094,6 +1163,9 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.readPayload("edge", "staged", { leafId: "staged", through: 2 })).rejects.toThrow(
 			"requested source prefix",
 		);
+		await expect(index.branchBootstrap("edge", { leafId: "kept", through: 2 })).rejects.toThrow(
+			"requested source prefix",
+		);
 		await expect(index.getSource("edge", "kept", 2)).rejects.toThrow("requested source prefix");
 		await expect(index.readSourcePayload("edge", "kept", 2)).rejects.toThrow("requested source prefix");
 		await expect(index.getSource("edge", "kept", -1)).rejects.toThrow("Invalid history source prefix");
@@ -1109,10 +1181,20 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 			).entries,
 		).toHaveLength(1);
 		expect(readFileSync(journalPath)).toEqual(bytes);
+		await owner.appendJson(JSON.stringify({ type: "message", id: "bootstrap-empty-message", parentId: null }));
+		const emptyMessageSnapshot = owner.getSnapshot();
+		const emptyMessageScope = { leafId: "bootstrap-empty-message", through: emptyMessageSnapshot.nextSequence - 1 };
+		await index.syncSource("edge", emptyMessageSnapshot);
+		expect(await index.branchBootstrap("edge", emptyMessageScope)).toMatchObject({
+			hasContextMessages: false,
+			goalSeedable: false,
+		});
+		expect(await index.contextManifest("edge", emptyMessageScope)).toMatchObject({ activeMessageCount: 1 });
 		await owner.appendJson(JSON.stringify({ type: "message", id: "orphan", parentId: "late" }));
 		const unresolved = owner.getSnapshot();
 		const orphanScope = { leafId: "orphan", through: unresolved.nextSequence - 1 };
 		await index.syncSource("edge", unresolved);
+		await expect(index.branchBootstrap("edge", orphanScope)).rejects.toThrow("lineage is unresolved");
 		expect((await index.get("edge", "orphan", orphanScope))?.parentId).toBe("late");
 		expect(await index.contextManifest("edge", orphanScope)).toMatchObject({
 			selection: "unresolved-lineage",
@@ -1141,6 +1223,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.get("edge", "kept", { ...linkedScope, leafId: "cycle-a" })).rejects.toThrow("cycle");
 		expect((await index.get("edge", "cycle-a", { ...linkedScope, leafId: "cycle-a" }))?.id).toBe("cycle-a");
 		const cycleScope = { ...linkedScope, leafId: "cycle-a" };
+		await expect(index.branchBootstrap("edge", cycleScope)).rejects.toThrow("lineage is unresolved");
 		await expect(index.page("edge", linkedScope.through, linkedScope.through, 1, cycleScope)).rejects.toThrow(
 			"cycle",
 		);
@@ -1152,14 +1235,20 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await owner.appendJson(
 			JSON.stringify({
 				id: "empty-boundary",
-				parentId: "kept",
+				parentId: "bootstrap-empty-message",
 				type: "compaction",
-				summary: "empty",
+				summary: "",
 				firstKeptEntryId: "",
 			}),
 		);
 		const emptyBoundarySnapshot = owner.getSnapshot();
 		await index.syncSource("edge", emptyBoundarySnapshot);
+		expect(
+			await index.branchBootstrap("edge", {
+				leafId: "empty-boundary",
+				through: emptyBoundarySnapshot.nextSequence - 1,
+			}),
+		).toMatchObject({ hasContextMessages: true, goalSeedable: false });
 		expect(
 			(
 				await index.contextManifest("edge", {

@@ -42,6 +42,16 @@ export interface HistoryIndexScope {
 	leafId: string | null;
 }
 
+/** Captured parent-chain state. Values remain in the referenced canonical payloads. */
+export interface BranchBootstrapState {
+	model: IndexedSourceEvent | null;
+	thinkingLevel: IndexedSourceEvent | null;
+	serviceTier: IndexedSourceEvent | null;
+	goalState: IndexedSourceEvent | null;
+	hasContextMessages: boolean;
+	goalSeedable: boolean;
+}
+
 export interface TaskEvidenceCursor {
 	sequence: number;
 	ordinal: number;
@@ -128,6 +138,12 @@ export interface HistoryPayloadReadOptions {
 }
 
 export type HistoryIndexRequest =
+	| {
+			id: number;
+			action: "branch_bootstrap";
+			sessionId: string;
+			scope: HistoryIndexScope & { through: number };
+	  }
 	| {
 			id: number;
 			action: "context_updates";
@@ -482,6 +498,18 @@ export class HistoryIndex {
 			scope: { leafId: scope.leafId, through: scope.through },
 			options: selection,
 		})) as TaskEvidencePage;
+	}
+	/** At most four source refs and exact context/goal-seeding facts for the captured branch. */
+	async branchBootstrap(
+		sessionId: string,
+		scope: HistoryIndexScope & { through: number },
+	): Promise<BranchBootstrapState> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "branch_bootstrap",
+			sessionId,
+			scope: { leafId: scope.leafId, through: scope.through },
+		})) as BranchBootstrapState;
 	}
 	/** Context-visible source refs; compiler ordering and LLM filtering happen after selection. */
 	async contextUpdates(

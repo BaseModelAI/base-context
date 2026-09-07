@@ -1,147 +1,199 @@
 #!/usr/bin/env python3
-"""Prepare isolated Prime Agent 0.9.1 benchmark hosts."""
+"""Prepare local H 0.9.3 and frozen native Base Context benchmark hosts."""
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
+import re
 import subprocess
+import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-PRIME_AGENT_VERSION = "0.9.1"
-PRIME_CONTEXT_VERSION = "9.2.0"
-PRIME_AGENT_URL = (
-    "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/"
-    "v0.9.1/prime-agent-0.9.1.tgz"
-)
-ALLOW_SCRIPTS = f"{PRIME_AGENT_URL},@google/genai,koffi,protobufjs"
-HOSTS_SCHEMA = "prime-context.python-realworld-hosts/v1"
-ROOT = Path(__file__).resolve().parent
-
-
-def run(command: list[str], environment: dict[str, str]) -> None:
-    print("+ " + " ".join(command), flush=True)
-    subprocess.run(command, env=environment, check=True)
+HOSTS_SCHEMA = "prime-context.python-realworld-hosts/v2"
+H_VERSION = "0.9.3"
+H_PACKAGES = ("pi-coding-agent", "pi-agent-core", "pi-ai", "pi-tui")
+NATIVE_PACKAGES = ("base-context", "base-context-agent", "base-context-ai", "base-context-tui")
+CORE_SCOPES = ("@earendil-works", "@ponythewhite")
+CLI_PATH = "dist/bundle/cli.js"
+NODE_FLAGS = ("--experimental-sqlite", "--disable-warning=ExperimentalWarning", "--max-old-space-size=8192")
 
 
-def isolated_environment(prefix: Path) -> dict[str, str]:
-    home = prefix / "home"
-    config = prefix / "config"
-    cache = prefix / "npm-cache"
-    for path in (home, config, cache):
-        path.mkdir(parents=True, exist_ok=True)
-    user_config = prefix / "npmrc"
-    user_config.write_text("")
-    environment = dict(os.environ)
-    for key in list(environment):
-        if key.startswith("PRIME_AGENT_") or key.startswith("PRIME_CONTEXT_"):
-            environment.pop(key, None)
-    environment.pop("NODE_PATH", None)
-    environment.update({
-        "HOME": str(home),
-        "PATH": f"{prefix / 'bin'}:{os.environ.get('PATH', '')}",
-        "PRIME_AGENT_CODING_AGENT_DIR": str(config),
-        "PRIME_CONTEXT_HOME": str(prefix / "prime-context-home"),
-        "PRIME_AGENT_TELEMETRY": "0",
-        "NPM_CONFIG_PREFIX": str(prefix),
-        "NPM_CONFIG_CACHE": str(cache),
-        "NPM_CONFIG_USERCONFIG": str(user_config),
-        "NPM_CONFIG_AUDIT": "false",
-        "NPM_CONFIG_FUND": "false",
-    })
-    return environment
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text())
 
 
-def executable(prefix: Path, name: str) -> Path:
-    path = prefix / "bin" / name
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise RuntimeError(f"expected executable was not installed: {path}")
-    return path.resolve()
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--root",
-        type=Path,
-        default=ROOT.parent.parent / ".benchmark-runs" / "hosts-pa091-pc911",
+def require_node(node: Path) -> tuple[Path, str]:
+    node = node.expanduser()
+    if not node.is_absolute():
+        raise ValueError("--node must be an absolute executable path")
+    node = node.resolve(strict=True)
+    if not node.is_file() or not os.access(node, os.X_OK):
+        raise ValueError(f"not an executable Node path: {node}")
+    result = subprocess.run(
+        [str(node), "--version"], env={}, text=True, capture_output=True, check=True, timeout=20,
     )
-    parser.add_argument("--force", action="store_true", help="replace an existing host root")
-    parser.add_argument("--npm", default=shutil.which("npm") or "npm")
-    args = parser.parse_args()
+    version = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
+    if not version or tuple(map(int, version.groups())) < (22, 8, 0):
+        raise ValueError(f"Node >=22.8.0 is required; got {result.stdout.strip()!r}")
+    return node, result.stdout.strip().removeprefix("v")
 
-    root = args.root.expanduser().resolve()
+
+def read_h_artifacts(directory: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
+    packages = {}
+    for short_name in H_PACKAGES:
+        path = directory / f"earendil-works-{short_name}-{H_VERSION}.tgz"
+        name = f"@earendil-works/{short_name}"
+        with tarfile.open(path, "r:gz") as archive:
+            metadata_file = archive.extractfile("package/package.json")
+            if metadata_file is None:
+                raise ValueError(f"missing package metadata: {path}")
+            metadata = json.load(metadata_file)
+            if metadata.get("name") != name or metadata.get("version") != H_VERSION:
+                raise ValueError(f"expected {name}@{H_VERSION}: {path}")
+            if any(member.name != "package" and not member.name.startswith("package/") for member in archive):
+                raise ValueError(f"archive must contain only package/: {path}")
+            if short_name == "pi-coding-agent":
+                if metadata.get("bin", {}).get("pi") != CLI_PATH:
+                    raise ValueError(f"unexpected H published bin: {path}")
+                if not archive.getmember(f"package/{CLI_PATH}").isfile():
+                    raise ValueError(f"missing H published entrypoint: {path}")
+        packages[name] = (path, metadata)
+    return packages
+
+
+def read_candidate(candidate: Path, dependency_root: Path) -> tuple[str, dict[str, Path], dict[str, dict[str, Any]]]:
+    inspection = read_json(candidate / "package-inspection.json")
+    commit = inspection["commit"]
+    roots = {}
+    metadata = {}
+    inspected_packages = {item["name"]: item for item in inspection["packages"]}
+    for short_name in NATIVE_PACKAGES:
+        name = f"@ponythewhite/{short_name}"
+        package_root = Path(inspection["privateCoreRoots"][name]).resolve(strict=True)
+        if not package_root.is_relative_to(candidate):
+            raise ValueError(f"native core package is outside the frozen candidate: {package_root}")
+        if (candidate / "node_modules" / name).resolve(strict=True) != package_root:
+            raise ValueError(f"native core mapping is not private: {name}")
+        package = read_json(package_root / "package.json")
+        if package.get("name") != name or package.get("version") != inspected_packages[name]["version"]:
+            raise ValueError(f"native package does not match package-inspection.json: {name}")
+        roots[name] = package_root
+        metadata[name] = package
+    coding_root = roots["@ponythewhite/base-context"]
+    build_info = read_json(coding_root / "dist/build-info.json")
+    for info in (inspection["buildInfo"], build_info):
+        if not commit or info.get("sourceDirty") is not False or info.get("sourceCommit") != commit:
+            raise ValueError("candidate must be a clean build matching package-inspection.json commit")
+    if Path(inspection["dependencyRoot"]).resolve(strict=True) != dependency_root:
+        raise ValueError("frozen candidate dependency root does not match --dependency-root")
+    if metadata["@ponythewhite/base-context"].get("bin", {}).get("base-context") != CLI_PATH:
+        raise ValueError("unexpected native published bin")
+    if not (coding_root / CLI_PATH).is_file():
+        raise ValueError("missing native published entrypoint")
+    return commit, roots, metadata
+
+
+def require_dependencies(packages: dict[str, dict[str, Any]], dependency_root: Path) -> None:
+    for package in packages.values():
+        for name in package.get("dependencies", {}):
+            if name in packages:
+                continue
+            if name.split("/", 1)[0] in CORE_SCOPES:
+                raise ValueError(f"unmapped private core dependency: {name}")
+            if not (dependency_root / name / "package.json").is_file():
+                raise ValueError(f"missing installed dependency: {dependency_root / name}")
+
+
+def link_dependencies(source: Path, destination: Path) -> None:
+    destination.mkdir(parents=True)
+    for entry in sorted(source.iterdir()):
+        if entry.name.startswith(".") or entry.name in CORE_SCOPES or not entry.is_dir():
+            continue
+        if entry.name.startswith("@"):
+            scope = destination / entry.name
+            scope.mkdir()
+            for package in sorted(entry.iterdir()):
+                if package.is_dir():
+                    (scope / package.name).symlink_to(package.resolve(), target_is_directory=True)
+        else:
+            (destination / entry.name).symlink_to(entry.resolve(), target_is_directory=True)
+
+
+def prepare_hosts(
+    h_artifacts: Path, candidate_root: Path, dependency_root: Path, node: Path, root: Path,
+) -> dict[str, Any]:
+    """Use local artifacts only. The sole executed command is Node --version."""
+    h_artifacts = Path(h_artifacts).expanduser().resolve(strict=True)
+    candidate_root = Path(candidate_root).expanduser().resolve(strict=True)
+    dependency_root = Path(dependency_root).expanduser().resolve(strict=True)
+    root = Path(root).expanduser().resolve()
     if root.exists():
-        if not args.force:
-            raise SystemExit(f"host root already exists: {root}; pass --force to replace it")
-        shutil.rmtree(root)
+        raise FileExistsError(f"host root must be fresh: {root}")
+    for source in (h_artifacts, candidate_root, dependency_root):
+        if root.is_relative_to(source):
+            raise ValueError(f"host root must be outside input directories: {source}")
+    h_packages = read_h_artifacts(h_artifacts)
+    commit, native_roots, native_metadata = read_candidate(candidate_root, dependency_root)
+    require_dependencies({name: item[1] for name, item in h_packages.items()}, dependency_root)
+    require_dependencies(native_metadata, dependency_root)
+    node, node_version = require_node(Path(node))
+
     root.mkdir(parents=True)
+    modules = root / "node_modules"
+    link_dependencies(dependency_root, modules)
+    (modules / "@earendil-works").mkdir()
+    h_roots = {}
+    for name, (archive_path, _) in h_packages.items():
+        destination = root / "unpacked" / name.split("/", 1)[1]
+        destination.mkdir(parents=True)
+        with tarfile.open(archive_path, "r:gz") as archive:
+            archive.extractall(destination, filter="data")
+        package_root = destination / "package"
+        (modules / name).symlink_to(package_root, target_is_directory=True)
+        h_roots[name] = package_root
 
-    vanilla = root / "vanilla"
-    current = root / "prime-context"
-    vanilla_env = isolated_environment(vanilla)
-    current_env = isolated_environment(current)
+    def host(kind: str, name: str, version: str, package_root: Path) -> dict[str, Any]:
+        entrypoint = package_root / CLI_PATH
+        return {
+            "kind": kind,
+            "package_name": name,
+            "version": version,
+            "package_root": str(package_root),
+            "entrypoint": str(entrypoint),
+            "argv": [str(node), *NODE_FLAGS, str(entrypoint)],
+        }
 
-    for prefix, environment in ((vanilla, vanilla_env), (current, current_env)):
-        install_env = dict(environment)
-        install_env["NPM_CONFIG_ALLOW_SCRIPTS"] = ALLOW_SCRIPTS
-        run(
-            [args.npm, "install", "--global", "--prefix", str(prefix), PRIME_AGENT_URL],
-            install_env,
-        )
-        version_result = subprocess.run(
-            [str(executable(prefix, "prime-agent")), "--version"],
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        version = "\n".join((version_result.stdout, version_result.stderr)).strip()
-        if version != PRIME_AGENT_VERSION:
-            raise RuntimeError(f"expected prime-agent {PRIME_AGENT_VERSION}, got {version!r}")
-
-    package_env = dict(current_env)
-    package_env["NPM_CONFIG_ALLOW_SCRIPTS"] = ALLOW_SCRIPTS
-    current_agent = executable(current, "prime-agent")
-    run(
-        [str(current_agent), "package", "install", f"npm:prime-agent-context@{PRIME_CONTEXT_VERSION}"],
-        package_env,
-    )
-
-    patcher = executable(current, "prime-context-patch-agent")
-    vanilla_root = vanilla / "lib" / "node_modules" / "prime-agent"
-    current_root = current / "lib" / "node_modules" / "prime-agent"
-    extension = current / "lib" / "node_modules" / "prime-agent-context"
-    extension_manifest = json.loads((extension / "package.json").read_text())
-    if extension_manifest.get("name") != "prime-agent-context" or extension_manifest.get("version") != PRIME_CONTEXT_VERSION:
-        raise RuntimeError(f"unexpected installed Prime Context manifest: {extension_manifest}")
-
-    run([str(patcher), "--check-stock", str(vanilla_root)], current_env)
-    run([str(patcher), "--check-stock", str(current_root)], current_env)
-    run([str(patcher), str(current_root)], current_env)
-    run([str(patcher), "--check", str(current_root)], current_env)
-
+    native_name = "@ponythewhite/base-context"
     manifest = {
         "schema": HOSTS_SCHEMA,
         "prepared_at": datetime.now(timezone.utc).isoformat(),
         "root": str(root),
-        "prime_agent_version": PRIME_AGENT_VERSION,
-        "prime_context_version": PRIME_CONTEXT_VERSION,
-        "vanilla_prime_agent": str(executable(vanilla, "prime-agent")),
-        "current_prime_agent": str(current_agent),
-        "current_extension": str(extension.resolve()),
-        "vanilla_package_root": str(vanilla_root.resolve()),
-        "current_package_root": str(current_root.resolve()),
+        "node_executable": str(node),
+        "node_version": node_version,
+        "dependency_root": str(dependency_root),
+        "candidate_commit": commit,
+        "hosts": {
+            "vanilla": host("h093", "@earendil-works/pi-coding-agent", H_VERSION, h_roots["@earendil-works/pi-coding-agent"]),
+            "current": host("native-base-context", native_name, native_metadata[native_name]["version"], native_roots[native_name]),
+        },
     }
-    manifest_path = root / "hosts.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    print(f"prepared {manifest_path}")
-    print(
-        f"python3.12 -E -S {ROOT / 'run.py'} --hosts-manifest {manifest_path}",
-        flush=True,
-    )
+    (root / "hosts.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return manifest
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--h-artifacts", type=Path, required=True, help="directory containing the four local H 0.9.3 archives")
+    parser.add_argument("--candidate-root", type=Path, required=True, help="frozen native candidate with package-inspection.json")
+    parser.add_argument("--dependency-root", type=Path, required=True, help="existing installed third-party node_modules directory")
+    parser.add_argument("--node", type=Path, required=True, help="absolute Node >=22.8.0 executable")
+    parser.add_argument("--root", type=Path, required=True, help="new host directory; existing directories are never replaced")
+    args = parser.parse_args()
+    manifest = prepare_hosts(args.h_artifacts, args.candidate_root, args.dependency_root, args.node, args.root)
+    print(f"prepared {Path(manifest['root']) / 'hosts.json'}")
     return 0
 
 

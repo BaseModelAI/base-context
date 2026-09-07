@@ -257,7 +257,8 @@ export async function runAgentLoop(
 	streamFn?: StreamFn,
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [...prompts];
-	const currentContext: AgentContext = {
+	// Keep only the working wrapper across awaits, not the initial snapshot.
+	context = {
 		...context,
 		messages: [...context.messages, ...prompts],
 	};
@@ -269,7 +270,7 @@ export async function runAgentLoop(
 		await emit({ type: "message_end", message: prompt });
 	}
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(context, newMessages, config, signal, emit, streamFn);
 	return newMessages;
 }
 
@@ -289,12 +290,13 @@ export async function runAgentLoopContinue(
 	}
 
 	const newMessages: AgentMessage[] = [];
-	const currentContext: AgentContext = { ...context };
+	// Rebinding also drops the initial wrapper after an owned projection is adopted.
+	context = { ...context };
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
 
-	await runLoop(currentContext, newMessages, config, signal, emit, streamFn);
+	await runLoop(context, newMessages, config, signal, emit, streamFn);
 	return newMessages;
 }
 
@@ -490,6 +492,10 @@ async function streamAssistantResponse(
 			// Do not race source persistence against cancellation; drain it before leaving this build.
 			const projection = await config.beforeContextBuild?.();
 			build.projection = projection;
+			if (projection && projection.adoptMessages === true) {
+				context.messages = projection.messages.slice();
+				await config.onContextAdopted?.(context.messages);
+			}
 			throwIfAborted(signal);
 			let messages = projection ? projection.messages.slice() : context.messages;
 			if (config.transformContext) {
@@ -511,7 +517,12 @@ async function streamAssistantResponse(
 				tools: context.tools,
 			};
 
-			const { beforeContextBuild: _beforeContextBuild, ownedStreamFn, ...streamOptions } = config;
+			const {
+				beforeContextBuild: _beforeContextBuild,
+				onContextAdopted: _onContextAdopted,
+				ownedStreamFn,
+				...streamOptions
+			} = config;
 			const options = { ...streamOptions, apiKey: resolvedApiKey, signal };
 			const response = await maybePromiseWithAbort(
 				ownedStreamFn

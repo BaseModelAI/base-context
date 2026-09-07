@@ -369,6 +369,16 @@ describe("agentLoop with AgentMessage", () => {
 
 	it("should stop a sequential tool batch after aborting a tool call", async () => {
 		const controller = new AbortController();
+		const oldMessage = createUserMessage("obsolete history");
+		const retainedMessage = createUserMessage("required earlier context");
+		const prompt = createUserMessage("Hello");
+		const projectionMessages: AgentMessage[] = [retainedMessage, prompt];
+		const opaqueContext = {};
+		const order: string[] = [];
+		let adoptedMessages: AgentMessage[] | undefined;
+		const release = vi.fn(async () => {
+			order.push("release");
+		});
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -389,12 +399,42 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
-			messages: [],
+			messages: [oldMessage],
 			tools: [tool],
 		};
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			beforeContextBuild: async () => {
+				order.push("build");
+				return { messages: projectionMessages, adoptMessages: true, streamContext: opaqueContext, release };
+			},
+			onContextAdopted: async (messages) => {
+				await Promise.resolve();
+				adoptedMessages = messages;
+				order.push("adopt");
+			},
+			transformContext: async (messages) => {
+				order.push("transform");
+				expect(messages).not.toBe(adoptedMessages);
+				messages.push(createUserMessage("inference-only view"));
+				return messages;
+			},
+			ownedStreamFn: (_model, llmContext, options, streamContext) => {
+				order.push("stream");
+				expect(streamContext).toBe(opaqueContext);
+				expect(llmContext.messages).toHaveLength(3);
+				expect(options).not.toHaveProperty("onContextAdopted");
+				expect(options).not.toHaveProperty("adoptMessages");
+				return streamFn();
+			},
+			beforeToolCall: async ({ context: toolContext }) => {
+				order.push("tool");
+				expect(toolContext.messages).toBe(adoptedMessages);
+				expect(toolContext.messages).toEqual([retainedMessage, prompt, assistantMessage]);
+				expect(release).toHaveBeenCalledOnce();
+				return undefined;
+			},
 			toolExecution: "sequential",
 		};
 		const assistantMessage = createAssistantMessage(
@@ -413,8 +453,8 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const events: AgentEvent[] = [];
 
-		await runAgentLoop(
-			[createUserMessage("Hello")],
+		const messages = await runAgentLoop(
+			[prompt],
 			context,
 			config,
 			(event) => {
@@ -429,6 +469,13 @@ describe("agentLoop with AgentMessage", () => {
 			event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
 		);
 
+		expect(order).toEqual(["build", "adopt", "transform", "stream", "release", "tool"]);
+		expect(release).toHaveBeenCalledOnce();
+		expect(projectionMessages).toEqual([retainedMessage, prompt]);
+		expect(context.messages).toEqual([oldMessage]);
+		expect(adoptedMessages).toEqual([retainedMessage, ...messages]);
+		expect(messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		expect(messages[0]).toBe(prompt);
 		expect(executed).toEqual(["first"]);
 		expect(toolStartIds).toEqual(["tool_1"]);
 		expect(toolResultIds).toEqual(["tool_1"]);

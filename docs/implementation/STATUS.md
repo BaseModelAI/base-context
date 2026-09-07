@@ -25,7 +25,7 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks, scoped integration tests and clean packaged-worker probes pass; index feed work is active |
 | W4 durable task truth and SQLite evidence index | Canonical indexing, branch-scoped queries, native input/goal provenance and bounded payload recovery pass focused tests; authoritative item reduction, import trust and compiler integration remain open |
 | W5 bounded hot history and process memory | Captured read lifetimes and bounded exact branch membership implemented; whole-history resident stores and paged-query work remain open |
-| W6 compiler, batch recovery, evidence-local work | Owned projection boundary implemented; native compiler selection and activation remain open |
+| W6 compiler, batch recovery, evidence-local work | Captured native compiler active; model token profiles, dependency closure and selective recovery remain open |
 | W7 Sol control and generic deployment | S frozen; no parity or live validation claim |
 | W8 atomic checkpoints and continuation | Not implemented |
 | W9 Astra policy and route-scoped advanced features | Inherited catalog only; no certification claim |
@@ -360,3 +360,51 @@ do not consume the valid retry allowance. Missing usage and cost remain incomple
 native physical receipts are counted once and catalog estimates are not invoices.
 The inherited host/setup constraints still need migration before a model sample can run.
 No model campaign has started.
+
+
+## Captured branch bootstrap
+
+Schema11 adds four source-linked setting/goal references and two exact parent-chain
+bits to the existing derived context index. Lookup uses one resolved leaf and at most
+four source lookups. Unknown lineage fails explicitly. Goal seedability is separate
+from context-message presence. Retained model/thinking/tier behavior is unchanged;
+goal selection skips retained or malformed controls using the existing predicate.
+
+Persistent SDK startup now hydrates settings and compiles active context within the
+same captured branch read. It no longer uses the live Manager context/branch builders.
+Persistent goal restoration and seedability move to async initialization; tree reload
+awaits goal restoration. Active-goal tool activation and prewarm policy are retained.
+Explicit in-memory behavior remains separate. Bootstrap setting hydration has a source
+byte budget; active context has its existing independent message/source-byte budget.
+These limits are not token limits or total process-memory bounds.
+
+Manager loading, other native metadata scans, and Agent lifecycle arrays still remain.
+The frozen benchmark candidate is clean `93bfa8416`, not this later bootstrap source.
+It was packed once; no repeated three-host component campaign ran. Model samples need
+an OpenAI API key: the interactive bashrc-loaded setup found no configured OpenAI,
+OpenRouter, Prime or Azure OpenAI key variable. Source implementation continues.
+
+
+## Active working views and bounded export materialization
+
+Native AgentSession now opts into adopting the complete canonical projection in the
+Agent state and continuing loop context. Generic projections remain inference-only
+unless explicitly opted in. Inference transforms get separate arrays; source callbacks,
+opaque request context and release ordering remain intact. This does not bound the
+complete current-invocation `newMessages`/`agent_end` output collector, which is unchanged.
+
+Session names now use whole-source ACK-derived metadata, including empty-name clearing,
+branch changes and reopening. Resident snapshots support explicit entry/serialized-JSON
+limits and detached header/entry copies. Per-row retention remains outside payloads.
+They preserve a supplied readonly Manager's captured view rather than rereading a later
+file. HTML export uses bounded complete materialization or a bounded standalone file
+capture; it never silently picks a last-N suffix.
+
+The name cases use an immutable committed Agent dependency. Native adoption integration
+uses an immutable committed export dependency while export development proceeds. These
+are scoped source results, not coverage of those later dependency changes. The first
+native integration happy run used a nonexistent fixture API; the actual copying state
+setter corrected that same case. The original failure remains recorded.
+
+Manager body stores and the per-invocation collector are still unbounded. No large-history
+RSS, full-product binary, live-provider or release claim follows from these changes.

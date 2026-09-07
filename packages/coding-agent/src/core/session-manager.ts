@@ -278,6 +278,16 @@ export interface SessionTreeNode extends SessionTreeFlatNode {
 	children: SessionTreeNode[];
 }
 
+export interface ResidentSessionHistory {
+	header: SessionHeader | null;
+	entries: SessionEntry[];
+	/** Per-row lowering metadata, outside the unchanged entry payloads. */
+	retentions: (JournalFrameRetention | null)[];
+	leafId: string | null;
+	/** Serialized header/entry JSON bytes, not physical frame bytes or heap size. */
+	sourceBytes: number;
+}
+
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
@@ -312,6 +322,8 @@ export type ReadonlySessionManager = Pick<
 	| "getLeafEntry"
 	| "getEntry"
 	| "getEntryRetention"
+	| "supportsCapturedHistoryReads"
+	| "materializeResidentHistory"
 	| "readBranchHistory"
 	| "readSourceHistory"
 	| "materializeBranchHistory"
@@ -1151,6 +1163,7 @@ interface SessionWriteState {
 	closed: boolean;
 	sequence: number;
 	compactionCount: number;
+	sessionName?: string;
 	sourceVersion: number;
 	pendingIds: Set<string>;
 	failure?: Error;
@@ -1357,10 +1370,12 @@ export class SessionManager {
 		this.labelTimestampsById = new Map();
 		this.leafId = null;
 		this.writeState.compactionCount = 0;
+		this.writeState.sessionName = undefined;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
 			if (entry.type === "compaction") this.writeState.compactionCount++;
+			if (entry.type === "session_info") this.writeState.sessionName = entry.name;
 			if (entry.type !== "request") this.leafId = entry.id;
 			if (entry.type === "label") {
 				if (entry.label) {
@@ -1398,6 +1413,11 @@ export class SessionManager {
 
 	isPersisted(): boolean {
 		return this.persist;
+	}
+
+	/** Captured indexed reads require this manager's owned, framed source. */
+	supportsCapturedHistoryReads(): boolean {
+		return this.persist && !this.readOnly && this.writeState.owner?.format === "framed";
 	}
 
 	getCwd(): string {
@@ -1689,6 +1709,7 @@ export class SessionManager {
 				entries.push(snapshot);
 				byId.set(snapshot.id, snapshot);
 				if (snapshot.type === "compaction") state.compactionCount++;
+				if (snapshot.type === "session_info") state.sessionName = snapshot.name;
 				if (snapshot.type === "label") {
 					if (snapshot.label) {
 						labels.set(snapshot.targetId, snapshot.label);
@@ -2098,14 +2119,7 @@ export class SessionManager {
 	}
 
 	getSessionName(): string | undefined {
-		const entries = this.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry.type === "session_info") {
-				return entry.name?.trim() || undefined;
-			}
-		}
-		return undefined;
+		return this.writeState.sessionName?.trim() || undefined;
 	}
 
 	getSessionState(): SessionState | undefined {
@@ -2322,6 +2336,36 @@ export class SessionManager {
 	/** Whole-source count published with acknowledged entries, independent of the current branch. */
 	getCompactionCount(): number {
 		return this.writeState.compactionCount;
+	}
+
+	/** Complete detached snapshot of this resident view, including readonly and in-memory views. */
+	materializeResidentHistory(limits: SessionHistoryReadLimits): ResidentSessionHistory {
+		const { maxEntries, maxSourceBytes } = limits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid resident history materialization limits");
+		const leafId = this.leafId;
+		let sourceBytes = 0;
+		const clone = <T extends FileEntry>(entry: T): T => {
+			const json = stringifyBoundedJson(entry, maxSourceBytes - sourceBytes);
+			sourceBytes += Buffer.byteLength(json);
+			return JSON.parse(json) as T;
+		};
+		const originalHeader = this.getHeader();
+		const header = originalHeader ? clone(originalHeader) : null;
+		const entries: SessionEntry[] = [];
+		const retentions: (JournalFrameRetention | null)[] = [];
+		for (const entry of this.fileEntries) {
+			if (entry.type === "session") continue;
+			if (entries.length >= maxEntries) throw new Error("Resident history entry budget exceeded");
+			entries.push(clone(entry));
+			retentions.push(entryRetentions.get(entry) ?? null);
+		}
+		return { header, entries, retentions, leafId, sourceBytes };
 	}
 
 	getEntries(): SessionEntry[] {

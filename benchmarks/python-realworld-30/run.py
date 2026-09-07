@@ -41,11 +41,11 @@ from benchlib import (
 )
 
 ROOT = Path(__file__).resolve().parent
-PRIME_AGENT_VERSION = "0.9.1"
-PRIME_CONTEXT_VERSION = "9.2.0"
+H_VERSION = "0.9.3"
+NATIVE_PACKAGE = "@ponythewhite/base-context"
 VARIANTS = ("vanilla", "current")
 AUXILIARY_KINDS = ("semantic-distill", "task-scout", "stall-recovery", "knowledge-compile")
-HOSTS_SCHEMA = "prime-context.python-realworld-hosts/v1"
+HOSTS_SCHEMA = "prime-context.python-realworld-hosts/v2"
 
 
 def utc_now() -> str:
@@ -71,13 +71,18 @@ def metric_text(value, digits: int = 3) -> str:
 
 
 def provider_capacity_error(event: dict[str, Any]) -> bool:
+    exact = "Selected model is at capacity."
+    if event.get("type") == "compaction_end":
+        return event.get("errorMessage") == exact
+    if event.get("type") == "response" and event.get("command") in {"prompt", "compact"}:
+        return event.get("success") is False and event.get("error") == exact
     message = event.get("message")
     return (
         event.get("type") == "message_end"
         and isinstance(message, dict)
         and message.get("role") == "assistant"
         and message.get("stopReason") == "error"
-        and message.get("errorMessage") == "Selected model is at capacity."
+        and message.get("errorMessage") == exact
     )
 
 
@@ -218,7 +223,7 @@ raise SystemExit(completed.returncode)
         "--dir", "/etc",
         "--ro-bind", "/etc/hosts", "/etc/hosts",
         "--ro-bind", "/etc/localtime", "/etc/localtime",
-        "--dev-bind", "/dev", "/dev",
+        "--dev", "/dev",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
         "--bind", str(run_dir / "workspace"), "/workspace",
@@ -292,118 +297,41 @@ def sandbox_service_specs(
     return result
 
 
-def copy_auth(config: Path, source: Path | None) -> None:
-    if source is None:
-        configured = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        source = Path(configured) / "auth.json" if configured else Path.home() / ".prime" / "agent" / "auth.json"
-    if source.is_file():
-        shutil.copy2(source, config / "auth.json")
-        (config / "auth.json").chmod(0o600)
+
 
 
 def prepare_agent_home(run_dir: Path, args: argparse.Namespace) -> dict[str, Path]:
-    roots = {name: run_dir / name for name in ("config", "home", "pc-home", "sessions")}
+    roots = {name: run_dir / name for name in ("config", "home", "sessions", "tmp")}
     for path in roots.values():
         path.mkdir(parents=True, exist_ok=True)
-    launcher = create_sandbox_scripts(run_dir, args)
-    roots["launcher"] = launcher
-    copy_auth(roots["config"], args.auth_file)
+    roots["launcher"] = create_sandbox_scripts(run_dir, args)
+    # No auth file, OAuth copy, package resolution, or inherited user settings.
     settings = {
-        "defaultProvider": args.provider,
+        "defaultProvider": "openai",
         "defaultModel": args.model,
         "defaultThinkingLevel": args.thinking,
-        "shellPath": str(launcher),
+        "shellPath": str(roots["launcher"]),
         "telemetry": {"enabled": False, "noticeShown": True},
         "packages": [],
     }
     json_dump(roots["config"] / "settings.json", settings)
-    (roots["config"] / "AGENTS.md").write_text("")
+    json_dump(roots["config"] / "models.json", {})
     return roots
 
 
-def require_prime_agent(executable: str | None, label: str) -> tuple[str, Path]:
-    if not executable:
-        raise ValueError(f"{label} requires an explicit isolated executable path")
-    path = Path(executable).expanduser()
-    if not path.is_absolute():
-        raise ValueError(f"{label} must be an absolute path, not a PATH lookup: {executable}")
-    path = path.resolve(strict=True)
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise ValueError(f"{label} is not an executable file: {path}")
-    completed = subprocess.run(
-        [str(path), "--version"], text=True, capture_output=True, timeout=20
-    )
-    output = "\n".join((completed.stdout, completed.stderr)).strip()
-    if completed.returncode != 0 or PRIME_AGENT_VERSION not in output.split():
-        raise ValueError(f"{label} must be prime-agent@{PRIME_AGENT_VERSION}; got {output!r}")
-    return PRIME_AGENT_VERSION, path
 
 
-def prime_agent_package_root(executable: Path) -> Path:
-    for root in executable.parents:
-        manifest_path = root / "package.json"
-        if not manifest_path.is_file():
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if manifest.get("name") == "prime-agent" and manifest.get("version") == PRIME_AGENT_VERSION:
-            return root
-    raise ValueError(f"cannot locate the Prime Agent package root for {executable}")
 
 
-def prime_context_package_root(value: Path) -> Path:
-    path = value.expanduser().resolve(strict=True)
-    candidates = [path, *path.parents] if path.is_file() else [path, *path.parents]
-    for root in candidates:
-        manifest_path = root / "package.json"
-        if not manifest_path.is_file():
-            continue
-        try:
-            manifest = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        if manifest.get("name") != "prime-agent-context":
-            continue
-        if manifest.get("version") != PRIME_CONTEXT_VERSION:
-            raise ValueError(
-                f"Prime Context must be version {PRIME_CONTEXT_VERSION}; "
-                f"got {manifest.get('version')!r} at {root}"
-            )
-        return root
-    raise ValueError(f"cannot locate prime-agent-context@{PRIME_CONTEXT_VERSION} for {value}")
 
 
-def require_host_contract(
-    executable: Path,
-    label: str,
-    *,
-    patched: bool,
-    patcher: Path,
-) -> Path:
-    root = prime_agent_package_root(executable)
-    node = shutil.which("node")
-    if not node:
-        raise ValueError("node is required for Prime Agent host-contract preflight")
-    mode = "--check" if patched else "--check-stock"
-    completed = subprocess.run(
-        [node, str(patcher), mode, str(root)], text=True, capture_output=True, timeout=60
-    )
-    if completed.returncode != 0:
-        output = "\n".join((completed.stdout, completed.stderr)).strip().splitlines()
-        detail = next((line for line in output if line.startswith("Error:")), output[-1] if output else "check failed")
-        expected = "fully patched" if patched else "pristine stock"
-        raise ValueError(f"{label} must be a {expected} Prime Agent 0.9.1 host: {detail}")
-    return root
 
 
-def variant_extension(variant: str, args: argparse.Namespace) -> Path | None:
-    if variant == "vanilla":
-        return None
-    if args.current_extension is None:
-        raise ValueError("--current-extension is required")
-    return prime_context_package_root(args.current_extension)
+
+
+
+
+
 
 
 def agent_command(
@@ -413,28 +341,45 @@ def agent_command(
     daemon_socket: Path,
     args: argparse.Namespace,
 ) -> list[str]:
-    executable = args.current_prime_agent if variant == "current" else args.baseline_prime_agent
-    command = [
-        executable,
-        "--mode", "rpc",
-        "--offline",
+    return [
+        *args.hosts[variant]["argv"],
+        "--mode", "rpc", "--offline",
         "--cwd", str(workspace),
         "--session-dir", str(roots["sessions"]),
         "--daemon-socket", str(daemon_socket),
-        "--provider", args.provider,
-        "--model", args.model,
-        "--thinking", args.thinking,
-        "--tools", "bash,prime_context",
-        "--no-context-files",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-themes",
+        "--provider", "openai", "--model", args.model, "--thinking", args.thinking,
+        "--tools", "bash",
+        "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-themes",
+        "--no-extensions", "--extension", str(ROOT / "bash-tool.mjs"),
     ]
-    command.extend(["--no-extensions", "--extension", str(ROOT / "bash-tool.mjs")])
-    extension = variant_extension(variant, args)
-    if extension is not None:
-        command.extend(["--extension", str(extension)])
-    return command
+
+
+def isolated_agent_command(
+    command: list[str], host: dict[str, Any], run_dir: Path, daemon_root: Path, args: argparse.Namespace,
+) -> list[str]:
+    manifest = args.host_manifest
+    image = Path(host["package_root"])
+    # The package sits at IMAGE/unpacked/<package>/package. Its private module
+    # mappings live at IMAGE/node_modules; no source checkout is mounted.
+    image = image.parents[2]
+    mounts = [image, Path(manifest["dependency_root"]), Path(manifest["node_executable"])]
+    native_image = Path(manifest["hosts"]["current"]["package_root"]).parents[2]
+    # Shared dependencies can be the candidate's private module mapping.
+    if Path(manifest["dependency_root"]).is_relative_to(native_image):
+        mounts.append(native_image)
+    result = [str(Path(args.bwrap).resolve()), "--die-with-parent", "--unshare-pid", "--new-session",
+              "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+              "--symlink", "usr/bin", "/bin", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    for source in ("/etc/ld.so.cache", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/ssl", "/etc/localtime"):
+        if Path(source).exists():
+            result.extend(["--ro-bind", source, source])
+    for source in dict.fromkeys(path.resolve() for path in mounts):
+        result.extend(["--ro-bind", str(source), str(source)])
+    adapter = ROOT / "bash-tool.mjs"
+    result.extend(["--ro-bind", str(adapter), str(adapter), "--bind", str(run_dir), str(run_dir),
+                   "--bind", str(daemon_root), "/rpc", "--chdir", str(run_dir / "workspace"),
+                   "--", "/usr/bin/env", "-u", "PWD", *command])
+    return result
 
 
 def service_command(command: list[Any]) -> list[str]:
@@ -640,114 +585,13 @@ def empty_metrics() -> dict[str, Any]:
     return metrics
 
 
-def read_current_accounting(path: Path) -> dict[str, Any] | None:
-    try:
-        document = json.loads(path.read_text())
-        accounting = document["auxiliary"]
-        by_kind = accounting["byKind"]
-        if document.get("schema") != "prime-context.benchmark-accounting/v1":
-            return None
-        if set(by_kind) != set(AUXILIARY_KINDS):
-            return None
-        calls = {kind: by_kind[kind].get("callsAttempted") for kind in AUXILIARY_KINDS}
-        usage = {
-            key: sum_known(item.get(field) for item in by_kind.values())
-            for key, field in (("input", "inputTokens"), ("output", "outputTokens"),
-                               ("cacheRead", "cacheReadTokens"), ("cacheWrite", "cacheWriteTokens"))
-        }
-        usage["inputTotal"] = sum_known(usage[key] for key in ("input", "cacheRead", "cacheWrite"))
-        usage["totalTokens"] = sum_known(usage[key] for key in ("input", "output", "cacheRead", "cacheWrite"))
-        return {
-            "calls": calls,
-            "total_calls": sum_known(calls.values()),
-            "usage": usage,
-            "cost": sum_known(item.get("cost") for item in by_kind.values()),
-            "accounting": accounting,
-        }
-    except (OSError, KeyError, TypeError, ValueError):
-        return None
 
 
-def archive_metrics(prime_context_home: Path) -> dict[str, int]:
-    writes = 0
-    archive_bytes = 0
-    sessions = prime_context_home / "sessions"
-    if not sessions.is_dir():
-        return {"archive_writes": 0, "archive_bytes": 0}
-    for session_file in sessions.glob("*/session.json"):
-        observation_count: int | None = None
-        try:
-            session = json.loads(session_file.read_text())
-            value = session.get("observationCount") if isinstance(session, dict) else None
-            if isinstance(value, int) and value >= 0:
-                observation_count = value
-        except (OSError, ValueError, json.JSONDecodeError):
-            pass
-        if observation_count is None:
-            observation_count = sum(1 for _ in (session_file.parent / "observations").glob("*.meta.json"))
-        writes += observation_count
-    for observations in sessions.glob("*/observations"):
-        for artifact in observations.rglob("*"):
-            if artifact.is_file():
-                try:
-                    archive_bytes += artifact.stat().st_size
-                except OSError:
-                    pass
-    return {"archive_writes": writes, "archive_bytes": archive_bytes}
 
 
-def merge_current_accounting(
-    metrics: dict[str, Any], accounting: dict[str, Any] | None, *, auxiliary_expected: bool = False,
-) -> None:
-    # Native receipts already include every physical purpose; adding auxiliary
-    # observational totals again would double-charge those same attempts.
-    if metrics.get("accounting_source") == "native_request_receipts":
-        return
-    solver_usage = dict(metrics.get("provider_usage") or {})
-    solver_cost = dict(metrics.get("api_cost") or {})
-    metrics["solver_model_calls"] = metrics.get("all_model_calls")
-    metrics["solver_provider_usage"] = solver_usage
-    metrics["solver_api_cost"] = solver_cost
-    metrics.update({
-        "auxiliary_model_calls": None,
-        "auxiliary_model_calls_by_kind": {kind: None for kind in AUXILIARY_KINDS},
-        "auxiliary_provider_usage": None,
-        "auxiliary_api_cost": None,
-        "zero_extra_call": None,
-        "explicit_compiler_calls": None,
-        "explicit_compiler_cost": None,
-        "automatic_compiler_calls": None,
-        "automatic_compiler_cost": None,
-        "automatic_refinement_model_calls": None,
-    })
-    if accounting is None:
-        if auxiliary_expected:
-            metrics["all_model_calls"] = None
-            metrics["provider_usage"] = {key: None for key in USAGE_KEYS}
-            metrics["api_cost"] = {key: None for key in COST_KEYS}
-            metrics["usage_complete"] = metrics["cost_complete"] = False
-            metrics["prompt_cache_reuse"] = None
-        return
-    metrics["auxiliary_model_calls"] = accounting["total_calls"]
-    metrics["auxiliary_model_calls_by_kind"] = accounting["calls"]
-    metrics["auxiliary_provider_usage"] = accounting["usage"]
-    metrics["auxiliary_api_cost"] = accounting["cost"]
-    metrics["zero_extra_call"] = accounting["total_calls"] == 0 if accounting["total_calls"] is not None else None
-    metrics["auxiliary_accounting"] = accounting["accounting"]
-    compiler = accounting["accounting"]["byKind"]["knowledge-compile"]
-    metrics["automatic_compiler_calls"] = compiler.get("callsAttempted")
-    metrics["automatic_compiler_cost"] = compiler.get("cost")
-    metrics["all_model_calls"] = sum_known([metrics["solver_model_calls"], accounting["total_calls"]])
-    metrics["provider_usage"] = {
-        key: sum_known([solver_usage.get(key), accounting["usage"].get(key)]) for key in USAGE_KEYS
-    }
-    # The auxiliary API exposes total cost only, not component costs.
-    metrics["api_cost"] = {key: None for key in COST_KEYS}
-    metrics["api_cost"]["total"] = sum_known([solver_cost.get("total"), accounting["cost"]])
-    metrics["usage_complete"] = all(value is not None for value in metrics["provider_usage"].values())
-    metrics["cost_complete"] = metrics["api_cost"]["total"] is not None
-    denominator = sum_known(metrics["provider_usage"].get(key) for key in ("input", "cacheRead", "cacheWrite"))
-    metrics["prompt_cache_reuse"] = metrics["provider_usage"]["cacheRead"] / denominator if denominator else None
+
+
+
 
 
 def strict_pass(attempt: dict[str, Any]) -> bool:
@@ -764,25 +608,19 @@ def run_rpc(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     roots = prepare_agent_home(run_dir, args)
-    environment = clean_environment(roots["config"], roots["pc-home"], roots["home"])
-    environment.update({
-        "PIP_NO_INDEX": "1",
-        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-        "UV_OFFLINE": "1",
-        "npm_config_offline": "true",
-        "npm_config_audit": "false",
-        "npm_config_fund": "false",
-        "NODE_OPTIONS": "--max-old-space-size=8192",
-        "PRIME_CONTEXT_BENCHMARK_SHELL": str(roots["launcher"]),
-        "PRIME_CONTEXT_BENCHMARK_METRICS": str(run_dir / "prime-context-accounting.json"),
-    })
+    environment = clean_environment(
+        roots["config"], roots["home"], variant=variant, api_key=args.api_key,
+        node=Path(args.host_manifest["node_executable"]), tmpdir=Path("/tmp"),
+    )
+    # Adapter-owned variable, not a Prime Context product extension.
+    environment["PRIME_CONTEXT_BENCHMARK_SHELL"] = str(roots["launcher"])
     events_path = run_dir / "rpc-events.jsonl"
     stderr_path = run_dir / "rpc-stderr.txt"
     transcript_path = run_dir / "transcript.jsonl"
     q: queue.Queue[str | None] = queue.Queue()
-    daemon_root = Path(tempfile.mkdtemp(prefix="pcb-daemon-"))
-    daemon_socket = daemon_root / "daemon.sock"
-    command = agent_command(variant, workspace, roots, daemon_socket, args)
+    daemon_root = Path(tempfile.mkdtemp(prefix="pcb-daemon-", dir=roots["tmp"]))
+    daemon_socket = Path("/rpc/daemon.sock")
+    command = isolated_agent_command(agent_command(variant, workspace, roots, daemon_socket, args), args.hosts[variant], run_dir, daemon_root, args)
     services: list[Service] = []
     service_events: list[dict[str, Any]] = []
     fixture = scenario.get("fixture_service")
@@ -819,7 +657,8 @@ def run_rpc(
                 q.put(line)
             q.put(None)
 
-        threading.Thread(target=reader, daemon=True).start()
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
         request_counter = 0
         responses: list[dict[str, Any]] = []
         compaction_requests: list[dict[str, Any]] = []
@@ -827,11 +666,7 @@ def run_rpc(
         stage_events: list[dict[str, Any]] = []
         stage_index = 0
         awaiting_compaction = False
-        input_ready_after_compaction = False
         compaction_request_id: str | None = None
-        compaction_response_seen = False
-        send_stage_after_compaction_response = False
-        pending_stage_after_compaction: int | None = None
         done = False
         error: str | None = None
         capacity_confirmed = False
@@ -907,6 +742,23 @@ def run_rpc(
             request_id = send("prompt", f"stage-{stage['id']}", message)
             stage_events.append({"stage": stage["id"], "request_id": request_id, "sent_at": utc_now()})
 
+        def record(line: str) -> dict[str, Any] | None:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                event_log.write(line)
+                event_log.flush()
+                return None
+            if not isinstance(event, dict):
+                return None
+            if event.get("type") != "message_update":
+                event_log.write(line)
+                event_log.flush()
+            if event.get("type") == "message_end":
+                transcript.write(json.dumps({"at": utc_now(), "message": event.get("message")}, sort_keys=True) + "\n")
+                transcript.flush()
+            return event
+
         started = time.monotonic()
         try:
             send_stage(0)
@@ -914,122 +766,90 @@ def run_rpc(
             while not done:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"agent exceeded {min(int(args.timeout_seconds), int(scenario['timeout_seconds']))} seconds")
+                    raise TimeoutError("agent exceeded the task timeout")
                 try:
                     line = q.get(timeout=remaining)
                 except queue.Empty as exc:
-                    raise TimeoutError("agent produced no terminal idle event before timeout") from exc
+                    raise TimeoutError("agent produced no terminal run event before timeout") from exc
                 if line is None:
-                    raise RuntimeError(f"prime-agent exited with code {process.poll()}")
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    event_log.write(line)
-                    event_log.flush()
+                    raise RuntimeError(f"RPC host exited before completion with code {process.poll()}")
+                event = record(line)
+                if event is None:
                     continue
                 kind = event.get("type")
-                # Incremental message snapshots are superseded by message_end and can
-                # grow quadratically for large tool evidence. Preserve terminal
-                # messages and all tool/lifecycle events instead.
-                if kind != "message_update":
-                    event_log.write(line)
-                    event_log.flush()
+                if provider_capacity_error(event):
+                    capacity_confirmed = True
+                    error = "AgentError: Selected model is at capacity."
+                    done = True
+                    continue
                 if kind == "message_end":
-                    transcript.write(json.dumps({"at": utc_now(), "message": event.get("message")}, sort_keys=True) + "\n")
-                    transcript.flush()
                     terminal_error = message_end_error(event)
                     if terminal_error is not None:
-                        error = terminal_error
-                        capacity_confirmed = capacity_confirmed or provider_capacity_error(event)
-                        done = True
-                if kind == "response":
-                    response = {
-                        "id": event.get("id"),
-                        "success": bool(event.get("success")),
-                        "error": event.get("error"),
-                    }
+                        error, done = terminal_error, True
+                elif kind == "response":
+                    response = {"id": event.get("id"), "success": bool(event.get("success")), "error": event.get("error")}
                     responses.append(response)
-                    transient_suspension = (
-                        not response["success"]
-                        and isinstance(response["error"], str)
-                        and "queued session input is suspended" in response["error"]
-                    )
-                    if transient_suspension:
-                        sent_stage = next(
-                            (item for item in reversed(stage_events) if item["request_id"] == response["id"]),
-                            None,
-                        )
-                        if sent_stage is not None:
-                            pending_stage_after_compaction = next(
-                                index for index, stage in enumerate(scenario["stages"])
-                                if stage["id"] == sent_stage["stage"]
-                            )
                     if response["id"] == compaction_request_id:
-                        compaction_response_seen = True
-                        if send_stage_after_compaction_response and pending_stage_after_compaction is not None:
-                            send_stage(pending_stage_after_compaction)
-                            pending_stage_after_compaction = None
-                            send_stage_after_compaction_response = False
-                elif kind == "compaction_start":
-                    compaction_events.append({"event": "start", "at": utc_now(), "reason": event.get("reason")})
-                elif kind == "compaction_end":
-                    item = {
-                        "event": "end",
-                        "at": utc_now(),
-                        "reason": event.get("reason"),
-                        "aborted": bool(event.get("aborted")),
-                        "error": event.get("errorMessage"),
-                        "will_retry": bool(event.get("willRetry")),
-                    }
-                    compaction_events.append(item)
-                    tokens_before = (event.get("result") or {}).get("tokensBefore")
-                    if isinstance(tokens_before, int):
-                        peak_provider_bound = max(peak_provider_bound or 0, tokens_before)
-                    if awaiting_compaction and not item["will_retry"]:
-                        # A requested compaction is interaction data, not a pass
-                        # criterion. The daemon emits no reliable needs_input after
-                        # manual compaction. Wait for the compact RPC response, then
-                        # use follow-up admission to resume its suspended input pump.
+                        # Public RPC compact resolves after compact() finishes. A
+                        # needs_input or extra agent_end event does not exist.
                         awaiting_compaction = False
                         stage_index += 1
                         if stage_index < len(scenario["stages"]):
-                            pending_stage_after_compaction = stage_index
-                            if compaction_response_seen or input_ready_after_compaction:
-                                send_stage(pending_stage_after_compaction)
-                                pending_stage_after_compaction = None
-                                input_ready_after_compaction = False
-                            else:
-                                send_stage_after_compaction_response = True
+                            send_stage(stage_index)
                         else:
                             done = True
-                elif kind == "needs_input":
-                    if pending_stage_after_compaction is not None:
-                        send_stage(pending_stage_after_compaction)
-                        pending_stage_after_compaction = None
-                        input_ready_after_compaction = False
-                        send_stage_after_compaction_response = False
-                    elif awaiting_compaction:
-                        input_ready_after_compaction = True
+                    elif not response["success"]:
+                        error, done = str(response["error"] or "RPC request failed"), True
+                elif kind == "compaction_start":
+                    compaction_events.append({"event": "start", "at": utc_now(), "reason": event.get("reason")})
+                elif kind == "compaction_end":
+                    compaction_events.append({
+                        "event": "end", "at": utc_now(), "reason": event.get("reason"),
+                        "aborted": bool(event.get("aborted")), "error": event.get("errorMessage"),
+                        "will_retry": bool(event.get("willRetry")),
+                    })
+                    tokens_before = (event.get("result") or {}).get("tokensBefore")
+                    if isinstance(tokens_before, int):
+                        peak_provider_bound = max(peak_provider_bound or 0, tokens_before)
                 elif kind == "agent_end" and not awaiting_compaction:
                     stage = scenario["stages"][stage_index]
                     if stage_index + 1 >= len(scenario["stages"]):
                         done = True
                     elif stage.get("compact_after") is True:
                         awaiting_compaction = True
-                        input_ready_after_compaction = False
-                        request_id = send("compact", f"after-{stage['id']}")
-                        compaction_request_id = request_id
-                        compaction_response_seen = False
-                        send_stage_after_compaction_response = False
-                        compaction_requests.append({"stage": stage["id"], "request_id": request_id, "at": utc_now()})
+                        compaction_request_id = send("compact", f"after-{stage['id']}")
+                        compaction_requests.append({"stage": stage["id"], "request_id": compaction_request_id, "at": utc_now()})
                     else:
                         stage_index += 1
                         send_stage(stage_index)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
         finally:
+            if done and error is None:
+                # EOF is the public RPC graceful-close route: waitForIdle,
+                # connection.dispose, then real process exit before accounting.
+                process.stdin.close()
+                try:
+                    code = process.wait(timeout=30)
+                    if code:
+                        error = f"RPC host exited with code {code}"
+                except subprocess.TimeoutExpired:
+                    error = "RPC host did not drain after stdin EOF"
             agent_wall = time.monotonic() - started
             stop_process(process)
+            reader_thread.join(timeout=2)
+            while True:
+                try:
+                    trailing = q.get_nowait()
+                except queue.Empty:
+                    break
+                if trailing is not None:
+                    event = record(trailing)
+                    capacity_confirmed = capacity_confirmed or (event is not None and provider_capacity_error(event))
+                    if event is not None and error is None:
+                        error = message_end_error(event)
+                        if event.get("type") == "response" and event.get("success") is False:
+                            error = str(event.get("error") or "RPC request failed")
             for service in reversed(services):
                 service.stop()
                 service_events.append({"kind": service.name.replace("-", "_"), "event": "stopped", "at": utc_now()})
@@ -1041,14 +861,14 @@ def run_rpc(
         "compaction_completions": sum(1 for item in compaction_events if item["event"] == "end" and not item["aborted"] and not item["error"]),
         "compaction_failures": sum(1 for item in compaction_events if item["event"] == "end" and (item["aborted"] or item["error"])),
         "peak_provider_bound_token_estimate": peak_provider_bound,
-        **archive_metrics(roots["pc-home"]),
+        "archive_writes": None,
+        "archive_bytes": None,
     })
-    merge_current_accounting(metrics, read_current_accounting(run_dir / "prime-context-accounting.json"), auxiliary_expected=variant == "current")
-    (roots["config"] / "auth.json").unlink(missing_ok=True)
     shutil.rmtree(daemon_root, ignore_errors=True)
     return {
         "agent_wall_seconds": agent_wall,
         "capacity_invalid": capacity_confirmed or metrics.get("provider_capacity_confirmed") is True,
+        "rpc_process": {"pid": process.pid, "exit_code": process.poll()},
         "error": error,
         "command": command,
         "responses": responses,
@@ -1121,7 +941,6 @@ def safe_run_attempt(
     except Exception as exc:
         attempt_dir.mkdir(parents=True, exist_ok=True)
         metrics = aggregate_sessions(collect_sessions(attempt_dir / "sessions"))
-        merge_current_accounting(metrics, read_current_accounting(attempt_dir / "prime-context-accounting.json"), auxiliary_expected=variant == "current")
         result = {
             "schema": RUN_SCHEMA,
             "variant": variant,
@@ -1148,8 +967,6 @@ def safe_run_attempt(
         }
         json_dump(attempt_dir / "result.json", result)
         return result
-    finally:
-        (attempt_dir / "config" / "auth.json").unlink(missing_ok=True)
 
 
 def run_case(
@@ -1539,32 +1356,39 @@ def parse_variants(value: str) -> list[str]:
     return variants
 
 
-def apply_hosts_manifest(args: argparse.Namespace) -> dict[str, Any] | None:
+def apply_hosts_manifest(args: argparse.Namespace) -> dict[str, Any]:
     if args.hosts_manifest is None:
-        return None
+        raise ValueError("--hosts-manifest from the local H/native setup is required")
     path = args.hosts_manifest.expanduser().resolve(strict=True)
     manifest = json.loads(path.read_text())
     if manifest.get("schema") != HOSTS_SCHEMA:
         raise ValueError(f"unsupported hosts manifest: {manifest.get('schema')!r}")
-    if manifest.get("prime_agent_version") != PRIME_AGENT_VERSION:
-        raise ValueError(f"hosts manifest must use prime-agent@{PRIME_AGENT_VERSION}")
-    if manifest.get("prime_context_version") != PRIME_CONTEXT_VERSION:
-        raise ValueError(f"hosts manifest must use prime-agent-context@{PRIME_CONTEXT_VERSION}")
-    bindings = {
-        "baseline_prime_agent": "vanilla_prime_agent",
-        "current_prime_agent": "current_prime_agent",
-        "current_extension": "current_extension",
-    }
-    for argument, key in bindings.items():
-        supplied = getattr(args, argument)
-        value = manifest.get(key)
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"hosts manifest is missing {key!r}")
-        resolved = str(Path(value).expanduser().resolve(strict=True))
-        if supplied is not None and str(Path(supplied).expanduser().resolve(strict=True)) != resolved:
-            raise ValueError(f"--{argument.replace('_', '-')} conflicts with --hosts-manifest")
-        setattr(args, argument, Path(resolved) if argument == "current_extension" else resolved)
+    node = Path(manifest["node_executable"]).resolve(strict=True)
+    dependencies = Path(manifest["dependency_root"]).resolve(strict=True)
+    if not dependencies.is_dir():
+        raise ValueError("hosts dependency_root must be an existing local directory")
+    hosts = manifest["hosts"]
+    if set(hosts) != set(VARIANTS):
+        raise ValueError("hosts manifest must contain exactly vanilla and current")
+    for variant, host in hosts.items():
+        package = Path(host["package_root"]).resolve(strict=True)
+        metadata = json.loads((package / "package.json").read_text())
+        expected_name = "@earendil-works/pi-coding-agent" if variant == "vanilla" else NATIVE_PACKAGE
+        if metadata.get("name") != expected_name or metadata.get("version") != host.get("version"):
+            raise ValueError(f"{variant} host package metadata mismatch")
+        if variant == "vanilla" and metadata["version"] != H_VERSION:
+            raise ValueError(f"vanilla requires pinned local H{H_VERSION}")
+        if variant == "current":
+            info = json.loads((package / "dist/build-info.json").read_text())
+            if info.get("sourceDirty") is not False or info.get("sourceCommit") != manifest.get("candidate_commit"):
+                raise ValueError("current host is not the frozen clean candidate")
+        entrypoint = (package / "dist/bundle/cli.js").resolve(strict=True)
+        expected = [str(node), "--experimental-sqlite", "--disable-warning=ExperimentalWarning", "--max-old-space-size=8192", str(entrypoint)]
+        if host.get("argv") != expected or Path(host["entrypoint"]).resolve() != entrypoint:
+            raise ValueError(f"{variant} host command does not use the pinned Node/package entrypoint")
     args.hosts_manifest = path
+    args.hosts = hosts
+    args.host_manifest = manifest
     return manifest
 
 
@@ -1624,19 +1448,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", default="all")
     parser.add_argument("--variants", default=",".join(VARIANTS))
     parser.add_argument("--output", type=Path, default=ROOT / "results" / datetime.now().strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--provider", default="openai-codex")
-    parser.add_argument("--model", default="gpt-5.6-sol")
+    parser.add_argument("--provider", choices=("openai",), default="openai")
+    parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-5.6-sol")
     parser.add_argument("--thinking", default="medium")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--max-workers", type=int, default=6)
     parser.add_argument("--retry-failed", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--hosts-manifest", type=Path, help="manifest written by prepare-hosts.py")
-    parser.add_argument("--baseline-prime-agent", help="explicit isolated stock prime-agent@0.9.1 executable")
-    parser.add_argument("--current-prime-agent", help="explicit isolated patched prime-agent@0.9.1 executable")
-    parser.add_argument("--auth-file", type=Path)
-    parser.add_argument("--bwrap", default=shutil.which("bwrap") or "", help="bubblewrap executable used to deny non-loopback tool network access")
-    parser.add_argument("--current-extension", type=Path, help="installed prime-agent-context@9.2.0 package root")
+    parser.add_argument("--hosts-manifest", type=Path, help="local-only H0.9.3/native manifest from prepare-hosts.py")
+    parser.add_argument("--api-key-file", type=Path, help="explicit file containing one OpenAI API key; never copied into agent state")
+    parser.add_argument("--bwrap", default=shutil.which("bwrap") or "", help="bubblewrap executable for RPC and tool isolation")
     parser.add_argument("--validate-only", action="store_true")
     return parser
 
@@ -1659,51 +1480,24 @@ def main() -> int:
         raise SystemExit("--group-size must equal the number of selected variants so each task runs as one comparison group")
     if not args.bwrap:
         raise SystemExit("bubblewrap (bwrap) is required for hermetic tool execution")
-    if args.current_extension is None:
-        raise ValueError("--current-extension or --hosts-manifest is required")
-    extension_root = prime_context_package_root(args.current_extension)
-    args.current_extension = extension_root
-    patcher = extension_root / "scripts" / "patch-prime-agent.mjs"
-    if not patcher.is_file():
-        raise FileNotFoundError(f"installed Prime Context patcher not found: {patcher}")
+    if args.api_key_file is None:
+        raise ValueError("--api-key-file is required; no inherited credentials or OAuth fallback are used")
+    args.api_key_file = args.api_key_file.expanduser().resolve(strict=True)
+    args.api_key = args.api_key_file.read_text().strip()
+    if not args.api_key or any(character.isspace() for character in args.api_key):
+        raise ValueError("--api-key-file must contain one non-empty OpenAI API key")
     for variant in variants:
-        variant_extension(variant, args)
-    uses_baseline = "vanilla" in variants
-    uses_current = "current" in variants
-    baseline_version = None
-    current_version = None
-    baseline_path = None
-    current_path = None
-    baseline_root = None
-    current_root = None
-    if uses_baseline:
-        baseline_version, baseline_path = require_prime_agent(args.baseline_prime_agent, "--baseline-prime-agent")
-        args.baseline_prime_agent = str(baseline_path)
-        baseline_root = require_host_contract(
-            baseline_path, "--baseline-prime-agent", patched=False, patcher=patcher,
-        )
-    if uses_current:
-        current_version, current_path = require_prime_agent(args.current_prime_agent, "--current-prime-agent")
-        args.current_prime_agent = str(current_path)
-        current_root = require_host_contract(
-            current_path, "--current-prime-agent", patched=True, patcher=patcher,
-        )
-    if baseline_root is not None and current_root is not None and baseline_root == current_root:
-        raise ValueError("baseline and current must use distinct isolated Prime Agent hosts")
-    if current_root is not None and extension_root.parent != current_root.parent:
-        raise ValueError(
-            "current Prime Agent and prime-agent-context must be sibling packages "
-            "inside the same isolated npm prefix"
-        )
+        if variant not in hosts_manifest["hosts"]:
+            raise ValueError(f"host not prepared: {variant}")
     publication_blockers: list[str] = []
     if task_ids != sorted(scenarios):
         publication_blockers.append("tasks must contain all 30 scenarios")
     if variants != list(VARIANTS):
         publication_blockers.append("variants must be vanilla,current")
-    if args.provider != "openai-codex":
-        publication_blockers.append("provider must be openai-codex")
-    if args.model != "gpt-5.6-sol":
-        publication_blockers.append("model must be gpt-5.6-sol")
+    if args.provider != "openai":
+        publication_blockers.append("provider must be openai")
+    if args.model not in {"gpt-5.6-sol", "gpt-6-astra"}:
+        publication_blockers.append("model must be an exact supported Sol/Astra ID")
     if args.thinking != "medium":
         publication_blockers.append("thinking must be medium")
     if args.timeout_seconds != 1800:
@@ -1734,12 +1528,12 @@ def main() -> int:
         "tool_network": "loopback-only",
         "hosts_manifest": str(args.hosts_manifest) if args.hosts_manifest else None,
         "hosts_prepared_at": (hosts_manifest or {}).get("prepared_at"),
-        "baseline_prime_agent": args.baseline_prime_agent,
-        "current_prime_agent": args.current_prime_agent,
-        "current_extension": str(extension_root),
-        "baseline_prime_agent_version": baseline_version,
-        "current_prime_agent_version": current_version,
-        "prime_context_version": PRIME_CONTEXT_VERSION,
+        "hosts": hosts_manifest["hosts"],
+        "node_executable": hosts_manifest["node_executable"],
+        "candidate_commit": hosts_manifest["candidate_commit"],
+        "auth_route": "explicit-openai-api-key-file",
+        "rpc_process_isolation": "private PID/mount view; read-only package inputs; allowlisted environment",
+        "host_version": H_VERSION,
         "publication_protocol": not publication_blockers,
         "publication_blockers": publication_blockers,
     }

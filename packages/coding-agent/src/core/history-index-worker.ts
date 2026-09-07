@@ -3,7 +3,9 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import { type CanonicalPayloadParts, readCanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import { GOAL_STATE_CUSTOM_TYPE, isPersistedGoalState } from "./goals.js";
 import type {
+	BranchBootstrapState,
 	ContextManifestCursor,
 	ContextManifestPage,
 	ContextRef,
@@ -47,7 +49,8 @@ if (
 		schemaVersion !== 7 &&
 		schemaVersion !== 8 &&
 		schemaVersion !== 9 &&
-		schemaVersion !== 10)
+		schemaVersion !== 10 &&
+		schemaVersion !== 11)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -115,7 +118,8 @@ transaction(() => {
   PRIMARY KEY(session,id,level)
  );
  CREATE TABLE IF NOT EXISTS context_node (
- session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,PRIMARY KEY(session,id)
+ session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,
+ latest_model TEXT,latest_thinking TEXT,latest_service_tier TEXT,latest_goal TEXT,has_session_message INTEGER,goal_seedable INTEGER,PRIMARY KEY(session,id)
  );
  CREATE TABLE IF NOT EXISTS context_update (
   session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
@@ -123,7 +127,7 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 10) {
+	if (schemaVersion !== 11) {
 		if (
 			!db
 				.prepare("PRAGMA table_info(source_event)")
@@ -131,6 +135,20 @@ transaction(() => {
 				.some((column) => column.name === "retention")
 		)
 			db.exec("ALTER TABLE source_event ADD COLUMN retention TEXT");
+		if (
+			!db
+				.prepare("PRAGMA table_info(context_node)")
+				.all()
+				.some((column) => column.name === "latest_model")
+		)
+			db.exec(`
+ ALTER TABLE context_node ADD COLUMN latest_model TEXT;
+ ALTER TABLE context_node ADD COLUMN latest_thinking TEXT;
+ ALTER TABLE context_node ADD COLUMN latest_service_tier TEXT;
+ ALTER TABLE context_node ADD COLUMN latest_goal TEXT;
+ ALTER TABLE context_node ADD COLUMN has_session_message INTEGER;
+ ALTER TABLE context_node ADD COLUMN goal_seedable INTEGER;
+ `);
 		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
 	}
 	db.exec(`
@@ -139,7 +157,7 @@ transaction(() => {
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=10");
+	db.exec("PRAGMA user_version=11");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -245,8 +263,16 @@ type ContextState = {
 	latest_compaction: string | null;
 	first_kept_id: string | null;
 };
+type BootstrapColumns = {
+	latest_model: string | null;
+	latest_thinking: string | null;
+	latest_service_tier: string | null;
+	latest_goal: string | null;
+	has_session_message: number;
+	goal_seedable: number;
+};
 const contextParent = db.prepare("SELECT * FROM context_node WHERE session=? AND id=?");
-const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?)");
+const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)");
 function insertContext(
 	sessionId: string,
 	item: IndexedSourceEvent,
@@ -254,7 +280,9 @@ function insertContext(
 	depth: number | null,
 ): void {
 	const parent =
-		item.parentId === null ? undefined : (contextParent.get(sessionId, item.parentId) as ContextState | undefined);
+		item.parentId === null
+			? undefined
+			: (contextParent.get(sessionId, item.parentId) as (ContextState & BootstrapColumns) | undefined);
 	if (depth !== null && item.parentId !== null && parent?.visible_count == null)
 		throw new Error("Context ancestry metadata is incomplete");
 	// Match buildSessionContext before provider filtering: !! bash/UI-only messages remain ordering barriers.
@@ -272,6 +300,18 @@ function insertContext(
 		entry.firstKeptEntryId.length <= 512
 			? entry.firstKeptEntryId
 			: null;
+	const modelProducer =
+		entry.type === "model_change" ||
+		(entry.type === "message" && (entry.message as { role?: unknown } | null)?.role === "assistant");
+	const eligibleGoal =
+		entry.type === "custom" &&
+		entry.customType === GOAL_STATE_CUSTOM_TYPE &&
+		item.retention !== "retained-import" &&
+		isPersistedGoalState(entry.data);
+	const seedControl =
+		entry.type === "model_change" || entry.type === "thinking_level_change" || entry.type === "service_tier_change";
+	// A manifest ref exists for a message envelope even when its message value is falsy.
+	const hasSessionMessage = entry.type === "message" ? !!entry.message : visible;
 	insertContextNode.run(
 		sessionId,
 		item.id,
@@ -280,6 +320,12 @@ function insertContext(
 		count,
 		compaction ? item.id : (parent?.latest_compaction ?? null),
 		firstKept,
+		modelProducer ? item.id : (parent?.latest_model ?? null),
+		entry.type === "thinking_level_change" ? item.id : (parent?.latest_thinking ?? null),
+		entry.type === "service_tier_change" ? item.id : (parent?.latest_service_tier ?? null),
+		eligibleGoal ? item.id : (parent?.latest_goal ?? null),
+		parent?.has_session_message === 1 || hasSessionMessage ? 1 : 0,
+		seedControl && (item.parentId === null || parent?.goal_seedable === 1) ? 1 : 0,
 	);
 }
 // Only bounded relation keys and source refs live here; never usage or sent-message bodies.
@@ -794,6 +840,41 @@ function contextRef(node: ContextNode): ContextRef {
 		revision: node.revision,
 	};
 }
+function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch_bootstrap" }>): BranchBootstrapState {
+	const { sessionId, scope } = request;
+	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Branch bootstrap index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < scope.through)
+		throw new Error("Branch bootstrap index has not reached the requested source prefix");
+	const leaf = validateBranchScope(sessionId, scope.through, scope);
+	if (leaf?.depth === null) throw new Error("Branch bootstrap branch lineage is unresolved");
+	if (
+		scope.through > 0 &&
+		!db.prepare("SELECT 1 FROM source_event WHERE session=? AND sequence=?").get(sessionId, scope.through)
+	)
+		throw new Error("Branch bootstrap source prefix is unavailable");
+	const state = leaf
+		? (contextParent.get(sessionId, leaf.id) as (ContextState & BootstrapColumns) | undefined)
+		: undefined;
+	if (leaf && !state) throw new Error("Branch bootstrap metadata is unavailable; rebuild the derived index");
+	const reference = (id: string | null | undefined): IndexedSourceEvent | null => {
+		if (id == null) return null;
+		const row = db
+			.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?")
+			.get(sessionId, id, scope.through) as Row | undefined;
+		if (!row) throw new Error("Branch bootstrap source metadata is unavailable; rebuild the derived index");
+		return event(row);
+	};
+	return {
+		model: reference(state?.latest_model),
+		thinkingLevel: reference(state?.latest_thinking),
+		serviceTier: reference(state?.latest_service_tier),
+		goalState: reference(state?.latest_goal),
+		hasContextMessages: !!state && (state.has_session_message === 1 || state.latest_compaction !== null),
+		goalSeedable: !state || state.goal_seedable === 1,
+	};
+}
 function contextManifest(request: Extract<HistoryIndexRequest, { action: "context_manifest" }>): ContextManifestPage {
 	const { sessionId, scope, options } = request;
 	const limit = options.limit ?? 64;
@@ -1084,6 +1165,8 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 			return taskEvidence(request);
 		case "read_payload":
 			return readPayload(request);
+		case "branch_bootstrap":
+			return branchBootstrap(request);
 		case "context_manifest":
 			return contextManifest(request);
 		case "context_updates":

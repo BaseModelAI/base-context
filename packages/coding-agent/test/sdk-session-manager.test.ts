@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@ponythewhite/base-context-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 
@@ -39,13 +40,60 @@ describe("createAgentSession session manager defaults", () => {
 		});
 
 		const expectedSessionDir = join(agentDir, "sessions");
-		const sessionDir = session.sessionManager.getSessionDir();
-		const sessionFile = session.sessionManager.getSessionFile();
+		const sessionFile = session.sessionManager.getSessionFile()!;
+		const restoredModel = getModel("openai", "gpt-5.6-sol");
+		try {
+			expect(session.sessionManager.getSessionDir()).toBe(expectedSessionDir);
+			expect(sessionFile.startsWith(`${expectedSessionDir}/`)).toBe(true);
+			await session.sessionManager.appendMessage({ role: "user", content: "Canonical-only input", timestamp: 1 });
+			// Historical data only. Error assistants remain model-setting producers.
+			await session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [],
+				api: restoredModel.api,
+				provider: restoredModel.provider,
+				model: restoredModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "error",
+				errorMessage: "Historical failure",
+				timestamp: 2,
+			});
+			await session.sessionManager.appendThinkingLevelChange("off");
+		} finally {
+			await session.disposeAsync();
+		}
 
-		expect(sessionDir).toBe(expectedSessionDir);
-		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
-
-		await session.disposeAsync();
+		const reopened = await SessionManager.open(sessionFile);
+		const liveContext = vi.spyOn(reopened, "buildSessionContext").mockImplementation(() => {
+			throw new Error("Persistent SDK bootstrap must use captured history");
+		});
+		const { session: resumed } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: reopened,
+			authStorage: AuthStorage.inMemory({ openai: { type: "api_key", key: "offline-fixture-key" } }),
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
+		});
+		try {
+			expect(resumed.model?.id).toBe(restoredModel.id);
+			expect(resumed.model?.provider).toBe(restoredModel.provider);
+			expect(resumed.messages[0]).toMatchObject({ role: "user", content: "Canonical-only input" });
+			expect(resumed.thinkingLevel).toBe("off");
+			expect(reopened.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(2);
+			expect(reopened.getEntries().filter((entry) => entry.type === "service_tier_change")).toHaveLength(1);
+			expect(liveContext).not.toHaveBeenCalled();
+		} finally {
+			await resumed.disposeAsync();
+		}
 	});
 
 	it("keeps an explicit sessionManager override", async () => {
