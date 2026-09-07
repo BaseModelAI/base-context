@@ -258,6 +258,7 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
+import { readSessionBootstrap } from "./session-bootstrap.js";
 import {
 	appendSentAgentMessageToToolResult,
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
@@ -4470,12 +4471,18 @@ export class AgentSession {
 		return this.agent.state.messages;
 	}
 
-	buildSessionContext(): SessionContext {
-		const context = this.sessionManager.buildSessionContext();
-		for (const message of context.messages) {
-			this._applyLateIpythonSentAgentMessages(message);
+	async buildSessionContext(): Promise<SessionContext> {
+		if (!this.sessionManager.isPersisted()) {
+			const context = this.sessionManager.buildSessionContext();
+			for (const message of context.messages) this._applyLateIpythonSentAgentMessages(message);
+			this._mergeUnpersistedOutcomes(context.messages);
+			return context;
 		}
-		this._mergeUnpersistedOutcomes(context.messages);
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		const outcomes = structuredClone(this._unpersistedOutcomes);
+		const { context } = await readSessionBootstrap(this.sessionManager, limits);
+		this._mergeUnpersistedOutcomes(context.messages, outcomes);
+		if (context.messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 		return context;
 	}
 
@@ -7921,7 +7928,9 @@ export class AgentSession {
 			}
 			throw error;
 		}
-		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		this.agent.state.messages = (
+			await readSessionBootstrap(this.sessionManager, this.settingsManager.getCanonicalContextLimits())
+		).context.messages;
 		this._contextOmissions = undefined;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
@@ -12158,7 +12167,10 @@ export class AgentSession {
 				await this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const { context: sessionContext } = await readSessionBootstrap(
+				this.sessionManager,
+				this.settingsManager.getCanonicalContextLimits(),
+			);
 			this.agent.state.messages = sessionContext.messages;
 			this._contextOmissions = undefined;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);

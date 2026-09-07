@@ -100,6 +100,28 @@ export interface ContextManifestOptions {
 	cursor?: ContextManifestCursor;
 	limit?: number;
 }
+
+export interface ParentPathCursor {
+	version: 1;
+	sessionId: string;
+	journalPath: string;
+	dev: number;
+	ino: number;
+	leafId: string | null;
+	through: number;
+	throughRevision: string;
+	/** Zero-based depth of the next entry on the captured parent path. */
+	nextDepth: number;
+}
+export interface ParentPathOptions {
+	cursor?: ParentPathCursor;
+	limit?: number;
+}
+export interface ParentPathPage {
+	events: IndexedSourceEvent[];
+	nextCursor: ParentPathCursor | null;
+	totalEntries: number;
+}
 export type ContextManifestPage =
 	| {
 			selection: "known";
@@ -138,6 +160,13 @@ export interface HistoryPayloadReadOptions {
 }
 
 export type HistoryIndexRequest =
+	| {
+			id: number;
+			action: "parent_path";
+			sessionId: string;
+			scope: HistoryIndexScope & { through: number };
+			options: ParentPathOptions;
+	  }
 	| {
 			id: number;
 			action: "branch_bootstrap";
@@ -498,6 +527,38 @@ export class HistoryIndex {
 			scope: { leafId: scope.leafId, through: scope.through },
 			options: selection,
 		})) as TaskEvidencePage;
+	}
+	/** Chronological pages of the exact parent chain, never attached request evidence. */
+	async parentPath(
+		sessionId: string,
+		scope: HistoryIndexScope & { through: number },
+		options: ParentPathOptions = {},
+	): Promise<ParentPathPage> {
+		const cursor = options.cursor;
+		return (await this.request({
+			id: this.nextId++,
+			action: "parent_path",
+			sessionId,
+			scope: { leafId: scope.leafId, through: scope.through },
+			options: {
+				...(cursor
+					? {
+							cursor: {
+								version: cursor.version,
+								sessionId: cursor.sessionId,
+								journalPath: cursor.journalPath,
+								dev: cursor.dev,
+								ino: cursor.ino,
+								leafId: cursor.leafId,
+								through: cursor.through,
+								throughRevision: cursor.throughRevision,
+								nextDepth: cursor.nextDepth,
+							},
+						}
+					: {}),
+				...(options.limit !== undefined ? { limit: options.limit } : {}),
+			},
+		})) as ParentPathPage;
 	}
 	/** At most four source refs and exact context/goal-seeding facts for the captured branch. */
 	async branchBootstrap(

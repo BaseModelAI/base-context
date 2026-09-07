@@ -188,7 +188,7 @@ describe("ENG-4531 agent message UI", () => {
 			fauxAssistantMessage(fauxToolCall("ipython", { code: "background_send" }), { stopReason: "toolUse" }),
 		);
 		const beforeLateEntryId = await harness.session.sessionManager.appendMessage(toolResult);
-		harness.session.agent.state.messages = harness.session.buildSessionContext().messages;
+		harness.session.agent.state.messages = (await harness.session.buildSessionContext()).messages;
 		const publishedToolResult = harness.session.messages.find(
 			(message): message is ToolResultMessage =>
 				message.role === "toolResult" && message.toolCallId === toolResult.toolCallId,
@@ -220,12 +220,10 @@ describe("ENG-4531 agent message UI", () => {
 		).toBe(true);
 		expect(events).toContain("ipython_sent_agent_message");
 		expect(
-			harness.session
-				.buildSessionContext()
-				.messages.find(
-					(message): message is ToolResultMessage =>
-						message.role === "toolResult" && message.toolCallId === toolResult.toolCallId,
-				)?.details,
+			(await harness.session.buildSessionContext()).messages.find(
+				(message): message is ToolResultMessage =>
+					message.role === "toolResult" && message.toolCallId === toolResult.toolCallId,
+			)?.details,
 		).toMatchObject({ sentAgentMessages: [lateMessage] });
 
 		publishedToolResult.details = { status: "ok" };

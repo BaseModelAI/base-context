@@ -13,6 +13,8 @@ import {
 	type HistoryIndexPage,
 	type HistoryPayloadReadOptions,
 	type IndexedSourceEvent,
+	type ParentPathOptions,
+	type ParentPathPage,
 	type TaskEvidenceOptions,
 	type TaskEvidencePage,
 } from "./history-index.js";
@@ -67,6 +69,11 @@ export interface SessionBranchBootstrapState extends BranchBootstrapState {
 	readonly source: SourceSnapshotRef;
 }
 
+/** Exact parent-chain metadata from one captured canonical source and leaf. */
+export interface SessionParentPathPage extends ParentPathPage {
+	readonly source: SourceSnapshotRef;
+}
+
 /** Consume iterators inside the owning read callback. Materialized results are detached. */
 export interface SessionHistoryReadScope {
 	readonly source: SourceSnapshotRef;
@@ -74,6 +81,8 @@ export interface SessionHistoryReadScope {
 	readonly branchContext: SessionHistoryReadView;
 	/** Select the captured branch even when invoked from an explicit whole-source scope. */
 	branchBootstrap(): Promise<SessionBranchBootstrapState>;
+	/** Chronological parent chain only; attached request evidence is not an ancestor. */
+	parentPath(options?: ParentPathOptions): Promise<SessionParentPathPage>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
 	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
 	search(query: string, limit?: number): Promise<HistoryIndexPage>;
@@ -195,6 +204,8 @@ export function createSessionHistoryReadScope(
 		scope,
 		branchContext: createBranchHistoryReadView(index, source, query),
 		branchBootstrap: () => query(async () => ({ ...(await index.branchBootstrap(sessionId, branch)), source })),
+		parentPath: (options: ParentPathOptions = {}) =>
+			query(async () => ({ ...(await index.parentPath(sessionId, branch, options)), source })),
 		get,
 		page,
 		search: (text: string, limit = 16) =>

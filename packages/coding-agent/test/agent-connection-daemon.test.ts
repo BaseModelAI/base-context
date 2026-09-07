@@ -3367,21 +3367,6 @@ describe("DaemonAgentConnection", () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		await connection.attach();
-		fakeClient.emitMessage({
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: {
-				type: "session_action_update",
-				actions: { queuedCount: 0, steering: [], followUps: [] },
-			},
-			meta: {
-				id: "active-1:13",
-				protocol: DAEMON_PROTOCOL_INFO,
-				activeSessionId: "active-1",
-				sequence: 13,
-				emittedAt: "2026-01-01T00:00:00.000Z",
-			},
-		});
 
 		await expect(connection.getSessionTree()).resolves.toEqual({
 			tree: [
@@ -3403,6 +3388,14 @@ describe("DaemonAgentConnection", () => {
 			type: "get_session_tree",
 			activeSessionId: "active-1",
 		});
+		vi.spyOn(fakeClient, "request").mockResolvedValueOnce({
+			type: "response",
+			command: "get_session_tree",
+			success: false,
+			error: "History source byte budget exceeded",
+		});
+		await expect(connection.getSessionTree()).rejects.toThrow("History source byte budget exceeded");
+		await connection.dispose();
 	});
 
 	it("loads serializable tool metadata through the daemon protocol", async () => {

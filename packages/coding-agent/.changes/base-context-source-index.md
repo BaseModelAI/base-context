@@ -11,3 +11,4 @@
 - Qualified controlled legacy/imported history outside unchanged JSON payloads, preserved that qualification through forks, and kept imported task claims and goals from gaining native authority or activation.
 - Added captured branch/whole-source readers and entry/byte-capped detached materialization. Reduced eager tree work and used exact ACK IDs for compaction events.
 - Restored SDK settings/context and native goals through captured bootstrap references, without their full-branch scans.
+- Added exact captured parent-path pages, bounded complete tree reads, and asynchronous source-backed context rebuilds for native sessions and connection snapshots.

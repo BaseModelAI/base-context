@@ -408,3 +408,24 @@ setter corrected that same case. The original failure remains recorded.
 
 Manager body stores and the per-invocation collector are still unbounded. No large-history
 RSS, full-product binary, live-provider or release claim follows from these changes.
+
+
+## Bounded parent-path and context consumers
+
+The shared captured bootstrap reader now also reconstructs AgentSession context after
+compaction and tree navigation. Persistent public context rebuilding is asynchronous;
+mode snapshots and daemon context replies await it. Transient outcomes are copied before
+the read and remain separate from canonical history. Explicit in-memory behavior remains.
+
+Actual parent-path pages are separate from attached request evidence. The Manager's
+capped parent-path materializer keeps each hydrated row's source metadata. Tree consumers
+now use complete bounded source materialization rather than the eager tree cache.
+The default tree caps are 16,384 source entries and 64 MiB. Native byte accounting counts
+canonical entry frames; resident views count serialized header/entry JSON. Exceeding a
+cap refuses the complete tree rather than returning a last-N subset.
+
+Ten existing cases passed across four separate source invocations: parent-path index2,
+Manager2 (including the capped wrapper), mode2, and direct context4. The later snapshot
+ordering correction captures child metadata before awaiting context and reruns only its
+existing affected case. No provider, kernel, packaged-product or whole-memory claim.
+These changes prepare removal of persistent body stores; they do not remove them yet.

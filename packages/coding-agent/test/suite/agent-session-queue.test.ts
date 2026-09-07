@@ -1140,7 +1140,7 @@ describe("AgentSession queue characterization", () => {
 
 			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
 			// The outcome survives context rebuilds even when neither session entry could persist.
-			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect((await harness.session.buildSessionContext()).messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) {
 				delete process.env.BASE_CONTEXT_HOME;
@@ -1166,7 +1166,7 @@ describe("AgentSession queue characterization", () => {
 			);
 
 			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
-			const outcome = harness.session.buildSessionContext().messages.find(isRefinementOutcomeMessage);
+			const outcome = (await harness.session.buildSessionContext()).messages.find(isRefinementOutcomeMessage);
 			expect(outcome?.details.summary).toBe("no-op");
 			expect(
 				harness.sessionManager
@@ -1174,7 +1174,7 @@ describe("AgentSession queue characterization", () => {
 					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
 			).toBe(false);
 			// The memory-only outcome survives context rebuilds despite the failed write.
-			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect((await harness.session.buildSessionContext()).messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) {
 				delete process.env.BASE_CONTEXT_HOME;

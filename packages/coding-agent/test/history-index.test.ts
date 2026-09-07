@@ -3,7 +3,12 @@ import { mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
-import { type ContextManifestCursor, HistoryIndex, type IndexedSourceEvent } from "../src/core/history-index.js";
+import {
+	type ContextManifestCursor,
+	HistoryIndex,
+	type IndexedSourceEvent,
+	type ParentPathCursor,
+} from "../src/core/history-index.js";
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES, SessionJournalOwner } from "../src/core/session-journal-owner.js";
 import { TASK_STATE_SCHEMA } from "../src/core/task-state.js";
@@ -41,6 +46,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	expect(await index.get("session", "item", { leafId: "Item", through: 2 })).toBeUndefined();
 	expect(await index.get("other", "Item")).toBeUndefined();
 	await expect(index.getSource("session", "Item", 2)).rejects.toThrow("index is unavailable");
+	await expect(index.parentPath("session", { leafId: "item", through: 2 })).rejects.toThrow("index is unavailable");
 	await expect(index.branchBootstrap("session", { leafId: "item", through: 2 })).rejects.toThrow(
 		"index is unavailable",
 	);
@@ -189,6 +195,11 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			goalState: null,
 			hasContextMessages: false,
 			goalSeedable: true,
+		});
+		expect(await index.parentPath("canonical", { leafId: null, through: 0 })).toEqual({
+			events: [],
+			nextCursor: null,
+			totalEntries: 0,
 		});
 		const contextSecond = await index.contextManifest("canonical", contextScope, {
 			cursor: contextFirst.nextCursor!,
@@ -374,6 +385,47 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"empty-import",
 			...Array.from({ length: 130 }, (_, n) => `chain-${n}`),
 		]);
+		const firstPath = await index.parentPath("canonical", chainScope, { limit: 1 });
+		expect(firstPath).toEqual({
+			events: [indexed],
+			totalEntries: chainIds.length - 1,
+			nextCursor: {
+				version: 1,
+				sessionId: "canonical",
+				journalPath,
+				dev: chainSnapshot.dev,
+				ino: chainSnapshot.ino,
+				leafId: chainLeaf,
+				through: chainScope.through,
+				throughRevision: chainSnapshot.checksum,
+				nextDepth: 1,
+			},
+		});
+		const parentIds = firstPath.events.map((event) => event.id);
+		let parentCursor: ParentPathCursor | null = firstPath.nextCursor;
+		while (parentCursor) {
+			const page = await index.parentPath("canonical", chainScope, { cursor: parentCursor });
+			expect(page.events.length).toBeLessThanOrEqual(64);
+			expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThanOrEqual(1024 * 1024);
+			parentIds.push(...page.events.map((event) => event.id));
+			parentCursor = page.nextCursor;
+		}
+		expect(parentIds).toEqual(chainIds.filter((id) => id !== "root-request"));
+		expect(
+			(await index.parentPath("canonical", { leafId: "root-request", through: 5 })).events.map((event) => event.id),
+		).toEqual(["root", "root-request"]);
+		await expect(index.parentPath("canonical", chainScope, { limit: 129 })).rejects.toThrow("path limit");
+		await expect(
+			index.parentPath("canonical", { ...chainScope, leafId: "root" }, { cursor: firstPath.nextCursor! }),
+		).rejects.toThrow("cursor mismatch");
+		await expect(
+			index.parentPath("canonical", chainScope, {
+				cursor: { ...firstPath.nextCursor!, throughRevision: "0".repeat(64) },
+			}),
+		).rejects.toThrow("cursor mismatch");
+		await expect(
+			index.parentPath("canonical", chainScope, { cursor: { ...firstPath.nextCursor!, nextDepth: -1 } }),
+		).rejects.toThrow("cursor position");
 		const chainSearch = await index.search("canonical", "chain node", chainScope.through, 2, chainScope);
 		expect(chainSearch.events.map((event) => event.id)).toEqual(["chain-129", "chain-128"]);
 		expect(chainSearch).toMatchObject({ truncated: true, nextAfter: null, coverage: "partial" });
@@ -441,6 +493,11 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const controlSnapshot = owner.getSnapshot();
 		const controlScope = { leafId: controlParent, through: controlSnapshot.nextSequence - 1 };
 		await index.syncSource("canonical", controlSnapshot);
+		expect(
+			(await index.parentPath("canonical", chainScope, { cursor: firstPath.nextCursor!, limit: 1 })).events.map(
+				(event) => event.id,
+			),
+		).toEqual(["chosen"]);
 		const controlBootstrap = await index.branchBootstrap("canonical", controlScope);
 		expect(controlBootstrap).toEqual({
 			model: await index.getSource("canonical", "bootstrap-model", controlScope.through),
@@ -927,6 +984,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"root-request",
 		]);
 		await index.syncSource("canonical", invisibleBoundarySnapshot);
+		expect(await index.parentPath("canonical", chainScope, { limit: 1 })).toEqual(firstPath);
 		expect(await index.branchBootstrap("canonical", visibleScope)).toEqual(contextBootstrap);
 		expect((await index.contextManifest("canonical", invisibleBoundaryScope)).refs.map((ref) => ref.entryId)).toEqual(
 			visibleIds.slice(130),
@@ -1166,6 +1224,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.branchBootstrap("edge", { leafId: "kept", through: 2 })).rejects.toThrow(
 			"requested source prefix",
 		);
+		await expect(index.parentPath("edge", { leafId: "kept", through: 2 })).rejects.toThrow("requested source prefix");
 		await expect(index.getSource("edge", "kept", 2)).rejects.toThrow("requested source prefix");
 		await expect(index.readSourcePayload("edge", "kept", 2)).rejects.toThrow("requested source prefix");
 		await expect(index.getSource("edge", "kept", -1)).rejects.toThrow("Invalid history source prefix");
@@ -1195,6 +1254,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		const orphanScope = { leafId: "orphan", through: unresolved.nextSequence - 1 };
 		await index.syncSource("edge", unresolved);
 		await expect(index.branchBootstrap("edge", orphanScope)).rejects.toThrow("lineage is unresolved");
+		await expect(index.parentPath("edge", orphanScope)).rejects.toThrow("lineage is unresolved");
 		expect((await index.get("edge", "orphan", orphanScope))?.parentId).toBe("late");
 		expect(await index.contextManifest("edge", orphanScope)).toMatchObject({
 			selection: "unresolved-lineage",
@@ -1224,6 +1284,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		expect((await index.get("edge", "cycle-a", { ...linkedScope, leafId: "cycle-a" }))?.id).toBe("cycle-a");
 		const cycleScope = { ...linkedScope, leafId: "cycle-a" };
 		await expect(index.branchBootstrap("edge", cycleScope)).rejects.toThrow("lineage is unresolved");
+		await expect(index.parentPath("edge", cycleScope)).rejects.toThrow("lineage is unresolved");
 		await expect(index.page("edge", linkedScope.through, linkedScope.through, 1, cycleScope)).rejects.toThrow(
 			"cycle",
 		);

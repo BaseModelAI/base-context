@@ -16,6 +16,8 @@ import type {
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
 	IndexedTaskEvidence,
+	ParentPathCursor,
+	ParentPathPage,
 	TaskEvidencePage,
 } from "./history-index.js";
 import {
@@ -840,6 +842,94 @@ function contextRef(node: ContextNode): ContextRef {
 		revision: node.revision,
 	};
 }
+function parentPath(request: Extract<HistoryIndexRequest, { action: "parent_path" }>): ParentPathPage {
+	const { sessionId, scope, options } = request;
+	const limit = options.limit ?? 64;
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128)
+		throw new Error("Parent path limit must be between1 and128");
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Parent path index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < scope.through)
+		throw new Error("Parent path index has not reached the requested source prefix");
+	const leaf = validateBranchScope(sessionId, scope.through, scope);
+	if (leaf?.depth === null) throw new Error("Parent path lineage is unresolved");
+	const revision =
+		scope.through === 0
+			? saved.header_checksum
+			: db.prepare("SELECT revision FROM source_event WHERE session=? AND sequence=?").get(sessionId, scope.through)
+					?.revision;
+	if (typeof revision !== "string") throw new Error("Parent path source prefix is unavailable");
+	const anchor: Omit<ParentPathCursor, "nextDepth"> = {
+		version: 1,
+		sessionId,
+		journalPath: snapshot.journalPath,
+		dev: snapshot.dev,
+		ino: snapshot.ino,
+		leafId: scope.leafId,
+		through: scope.through,
+		throughRevision: revision,
+	};
+	const cursor = options.cursor;
+	if (
+		cursor &&
+		(cursor.version !== 1 ||
+			cursor.sessionId !== sessionId ||
+			cursor.journalPath !== snapshot.journalPath ||
+			cursor.dev !== snapshot.dev ||
+			cursor.ino !== snapshot.ino ||
+			cursor.leafId !== scope.leafId ||
+			cursor.through !== scope.through ||
+			cursor.throughRevision !== revision)
+	)
+		throw new Error("Parent path cursor mismatch");
+	const count = leaf ? leaf.depth! + 1 : 0;
+	const start = cursor ? cursor.nextDepth : 0;
+	if (!Number.isSafeInteger(start) || start < 0 || start > count)
+		throw new Error("Invalid parent path cursor position");
+	const page: ParentPathPage = { events: [], nextCursor: null, totalEntries: count };
+	if (start === count) return page;
+	const end = Math.min(start + limit - 1, count - 1);
+	let id = leaf!.id;
+	let difference = leaf!.depth! - end;
+	for (let level = 0; difference > 0 && level < MAX_JUMP_LEVELS; level++) {
+		if (difference % 2 === 1) {
+			const jump = ancestorJump.get(sessionId, id, level);
+			if (!jump) throw new Error("Parent path ancestry metadata is incomplete");
+			id = String(jump.ancestor_id);
+		}
+		difference = Math.floor(difference / 2);
+	}
+	// Reverse only this bounded page of IDs, then load metadata in chronological order.
+	const ids: string[] = [];
+	for (let depth = end; depth >= start; depth--) {
+		const node = branchNode.get(sessionId, id, scope.through) as BranchNode | undefined;
+		if (!node || node.depth !== depth) throw new Error("Parent path ancestry metadata is incomplete");
+		ids.push(node.id);
+		if (depth > start) {
+			if (node.parent_id === null) throw new Error("Parent path parent reference is missing");
+			id = node.parent_id;
+		}
+	}
+	ids.reverse();
+	const content = db.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?");
+	let bytes = Buffer.byteLength(
+		JSON.stringify({ ...page, nextCursor: { ...anchor, nextDepth: Number.MAX_SAFE_INTEGER } }),
+	);
+	for (const entryId of ids) {
+		const row = content.get(sessionId, entryId, scope.through) as Row | undefined;
+		if (!row) throw new Error("Parent path source metadata is unavailable; rebuild the derived index");
+		const item = event(row);
+		const addition = Buffer.byteLength(JSON.stringify(item)) + (page.events.length ? 1 : 0);
+		if (bytes + addition > 1024 * 1024 - 1024) break;
+		page.events.push(item);
+		bytes += addition;
+	}
+	if (page.events.length === 0) throw new Error("Parent path metadata exceeds the page byte limit");
+	const next = start + page.events.length;
+	page.nextCursor = next < count ? { ...anchor, nextDepth: next } : null;
+	return page;
+}
 function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch_bootstrap" }>): BranchBootstrapState {
 	const { sessionId, scope } = request;
 	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
@@ -1165,6 +1255,8 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 			return taskEvidence(request);
 		case "read_payload":
 			return readPayload(request);
+		case "parent_path":
+			return parentPath(request);
 		case "branch_bootstrap":
 			return branchBootstrap(request);
 		case "context_manifest":

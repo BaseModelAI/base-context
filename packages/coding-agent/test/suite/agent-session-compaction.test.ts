@@ -1521,7 +1521,7 @@ describe("AgentSession compaction characterization", () => {
 			expect.objectContaining({ type: "custom_message", customType: "compaction_outcome" }),
 		);
 		// The unpersisted disclosure survives context rebuilds (e.g. thinking toggle).
-		const rebuilt = harness.session.buildSessionContext();
+		const rebuilt = await harness.session.buildSessionContext();
 		expect(rebuilt.messages.at(-1)).toMatchObject({
 			role: "custom",
 			customType: "compaction_outcome",
@@ -1532,7 +1532,7 @@ describe("AgentSession compaction characterization", () => {
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		harness.setResponses([fauxAssistantMessage("later response")]);
 		await harness.session.prompt("later turn");
-		const reordered = harness.session.buildSessionContext().messages;
+		const reordered = (await harness.session.buildSessionContext()).messages;
 		const outcomeIndex = reordered.findIndex(
 			(message) => message.role === "custom" && message.customType === "compaction_outcome",
 		);

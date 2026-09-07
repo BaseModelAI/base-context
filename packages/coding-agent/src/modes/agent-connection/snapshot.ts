@@ -59,17 +59,18 @@ export function createAgentConnectionState(
 	};
 }
 
-export function createAgentConnectionSnapshot(
+export async function createAgentConnectionSnapshot(
 	runtime: AgentSessionRuntime,
 	activeSessionId?: string,
-): AgentConnectionSnapshot {
+): Promise<AgentConnectionSnapshot> {
 	const session = runtime.session;
+	const children = session.getRlmChildSnapshots();
 	return {
 		state: createAgentConnectionState(runtime, activeSessionId),
 		messages: [...session.messages],
 		...(session.state?.streamingMessage ? { streamingMessage: session.state.streamingMessage } : {}),
-		sessionContext: session.buildSessionContext(),
-		children: session.getRlmChildSnapshots(),
+		sessionContext: await session.buildSessionContext(),
+		children,
 	};
 }
 

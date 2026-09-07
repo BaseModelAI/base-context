@@ -7,7 +7,6 @@ import type { AgentSessionCreationOptions } from "./agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
-import { CanonicalContextCompiler, type CanonicalContextLimits } from "./canonical-context.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { createNativeInferenceStream } from "./inference-coordinator.js";
@@ -17,7 +16,8 @@ import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
-import { getDefaultSessionDir, type SessionContext, SessionManager } from "./session-manager.js";
+import { readSessionBootstrap } from "./session-bootstrap.js";
+import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { time } from "./timings.js";
 import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue } from "./tools/index.js";
@@ -107,58 +107,6 @@ export { createBashTool, createEditTool, createIpythonTool, withFileMutationQueu
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
-}
-
-/** Restore active messages and setting producers from one captured branch. */
-async function readSessionBootstrap(sessionManager: SessionManager, limits: CanonicalContextLimits) {
-	if (!sessionManager.isPersisted()) {
-		const context = sessionManager.buildSessionContext();
-		const branch = sessionManager.getBranch();
-		return {
-			context,
-			hasExistingSession: context.messages.length > 0,
-			hasThinkingEntry: branch.some((entry) => entry.type === "thinking_level_change"),
-			hasServiceTierEntry: branch.some((entry) => entry.type === "service_tier_change"),
-		};
-	}
-	return sessionManager.readBranchHistory(async (view) => {
-		const bootstrap = await view.branchBootstrap();
-		const context: SessionContext = { messages: [], thinkingLevel: "off", serviceTier: "default", model: null };
-		let sourceBytes = 0;
-		for (const ref of [bootstrap.model, bootstrap.thinkingLevel, bootstrap.serviceTier]) {
-			if (!ref) continue;
-			const remaining = limits.maxSourceBytes - sourceBytes;
-			sourceBytes += ref.locator.length;
-			if (sourceBytes > limits.maxSourceBytes) throw new Error("Bootstrap source byte budget exceeded");
-			const hydrated = await view.hydrateEntry(ref.id, remaining);
-			if (!hydrated) throw new Error("Bootstrap setting source is unavailable");
-			const entry = hydrated.entry;
-			switch (entry.type) {
-				case "model_change":
-					context.model = { provider: entry.provider, modelId: entry.modelId };
-					break;
-				case "message":
-					if (entry.message.role !== "assistant") throw new Error("Bootstrap model source is not an assistant");
-					context.model = { provider: entry.message.provider, modelId: entry.message.model };
-					break;
-				case "thinking_level_change":
-					context.thinkingLevel = entry.thinkingLevel;
-					break;
-				case "service_tier_change":
-					context.serviceTier = entry.serviceTier;
-					break;
-				default:
-					throw new Error("Unexpected bootstrap setting source kind");
-			}
-		}
-		context.messages = await new CanonicalContextCompiler().compile(view.branchContext, limits);
-		return {
-			context,
-			hasExistingSession: bootstrap.hasContextMessages,
-			hasThinkingEntry: bootstrap.thinkingLevel !== null,
-			hasServiceTierEntry: bootstrap.serviceTier !== null,
-		};
-	});
 }
 
 /**

@@ -109,6 +109,7 @@ import {
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { readSessionTreeFlatNodes } from "../../core/session-tree.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
@@ -5113,16 +5114,17 @@ export class AgentDaemon {
 			case "get_session_context": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_session_context", {
-					context: state.runtime.session.buildSessionContext(),
+					context: await state.runtime.session.buildSessionContext(),
 				});
 			}
 
 			case "get_session_tree": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_session_tree", {
-					flatNodes: state.runtime.session.sessionManager.getFlatTree(),
-					leafId: state.runtime.session.sessionManager.getLeafId(),
-				});
+				return success(
+					command.id,
+					"get_session_tree",
+					await readSessionTreeFlatNodes(state.runtime.session.sessionManager),
+				);
 			}
 
 			case "get_user_messages_for_forking": {

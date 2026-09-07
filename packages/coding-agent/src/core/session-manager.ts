@@ -326,6 +326,7 @@ export type ReadonlySessionManager = Pick<
 	| "materializeResidentHistory"
 	| "readBranchHistory"
 	| "readSourceHistory"
+	| "materializeParentPathHistory"
 	| "materializeBranchHistory"
 	| "materializeSourceHistory"
 	| "getLabel"
@@ -1520,6 +1521,39 @@ export class SessionManager {
 			),
 			read,
 		);
+	}
+
+	/** Complete actual parent chain, excluding merely attached request evidence. */
+	async materializeParentPathHistory(
+		limits: SessionHistoryReadLimits,
+	): Promise<Omit<MaterializedSessionHistory, "scope">> {
+		const { maxEntries, maxSourceBytes } = limits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid parent-path materialization limits");
+		return this.readBranchHistory(async (view) => {
+			const entries: MaterializedSessionHistory["entries"] = [];
+			let sourceBytes = 0;
+			let page = await view.parentPath();
+			for (;;) {
+				if (page.totalEntries > maxEntries) throw new Error("Parent-path entry budget exceeded");
+				for (const ref of page.events) {
+					if (entries.length >= maxEntries) throw new Error("Parent-path entry budget exceeded");
+					const remaining = maxSourceBytes - sourceBytes;
+					sourceBytes += ref.locator.length;
+					if (sourceBytes > maxSourceBytes) throw new Error("Parent-path source byte budget exceeded");
+					const hydrated = await view.hydrateEntry(ref.id, remaining);
+					if (!hydrated) throw new Error("Parent-path entry source is unavailable");
+					entries.push(hydrated);
+				}
+				if (!page.nextCursor) return { source: view.source, entries, sourceBytes };
+				page = await view.parentPath({ cursor: page.nextCursor });
+			}
+		});
 	}
 
 	materializeBranchHistory(limits: SessionHistoryReadLimits): Promise<MaterializedSessionHistory> {

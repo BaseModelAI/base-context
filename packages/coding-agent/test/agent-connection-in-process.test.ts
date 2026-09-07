@@ -1,9 +1,14 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { getModel } from "@ponythewhite/base-context-ai";
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { emptyGoalState } from "../src/core/goals.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { DEFAULT_SESSION_TREE_LIMITS, readSessionTree } from "../src/core/session-tree.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type { AgentConnectionEvent, AgentConnectionState } from "../src/modes/agent-connection/types.js";
 
@@ -70,7 +75,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 	const listeners = new Set<AgentSessionEventListener>();
 	let unsubscriptions = 0;
 	const thinkingLevel: AgentConnectionState["thinkingLevel"] = "medium";
-	const buildSessionContext = () => ({
+	const buildSessionContext = async () => ({
 		messages,
 		thinkingLevel,
 		model: null,
@@ -84,6 +89,14 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 			getEntries: () => [],
 			getCompactionCount: () => 0,
 			getTree: () => [],
+			supportsCapturedHistoryReads: () => false,
+			materializeResidentHistory: () => ({
+				header: null,
+				entries: [],
+				retentions: [],
+				leafId: `${id}-leaf`,
+				sourceBytes: 0,
+			}),
 			buildSessionContext,
 		},
 		buildSessionContext,
@@ -258,10 +271,14 @@ describe("InProcessAgentConnection", () => {
 		const session = createFakeSession("snapshot", messages);
 		const getTree = vi.spyOn(session.session.sessionManager, "getTree");
 		const getEntries = vi.spyOn(session.session.sessionManager, "getEntries");
+		const materialize = vi.spyOn(session.session.sessionManager, "materializeResidentHistory");
 		const runtime = new FakeRuntime(session.session);
 		const connection = new InProcessAgentConnection(asRuntime(runtime));
 
-		const snapshot = await connection.getInitialSnapshot();
+		const getChildren = vi.spyOn(session.session, "getRlmChildSnapshots");
+		const pendingSnapshot = connection.getInitialSnapshot();
+		expect(getChildren).toHaveBeenCalledTimes(1);
+		const snapshot = await pendingSnapshot;
 
 		expect(snapshot).toMatchObject({
 			state: {
@@ -281,9 +298,117 @@ describe("InProcessAgentConnection", () => {
 		expect(getTree).not.toHaveBeenCalled();
 		expect(getEntries).not.toHaveBeenCalled();
 		await expect(connection.getSessionTree()).resolves.toEqual({ tree: [], leafId: "snapshot-leaf" });
-		expect(getTree).toHaveBeenCalledOnce();
+		expect(materialize).toHaveBeenCalledWith(DEFAULT_SESSION_TREE_LIMITS);
+		expect(getTree).not.toHaveBeenCalled();
+		expect(snapshot.sessionContext).not.toBeInstanceOf(Promise);
 		messages.push(userMessage("later context", 2));
 		expect(snapshot.messages).toEqual([userMessage("snapshot context", 1)]);
+
+		const root = mkdtempSync(join(tmpdir(), "bc-session-tree-"));
+		const manager = await SessionManager.create(root, join(root, "sessions"));
+		try {
+			const first = await manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+			const branchA = await manager.appendMessage({ role: "user", content: "branch A", timestamp: 2 });
+			manager.branch(first);
+			await manager.appendMessage({ role: "user", content: "branch B", timestamp: 3 });
+			await manager.appendLabelChange(first, "root label");
+			manager.branch(branchA);
+			const expected = structuredClone(manager.getTree());
+			vi.spyOn(manager, "getEntries").mockImplementation(() => {
+				throw new Error("uncapped entries");
+			});
+			vi.spyOn(manager, "getFlatTree").mockImplementation(() => {
+				throw new Error("uncapped flat tree");
+			});
+			vi.spyOn(manager, "getTree").mockImplementation(() => {
+				throw new Error("uncapped tree");
+			});
+			const fake = createFakeSession("native-tree", []);
+			Object.assign(fake.session, { sessionManager: manager });
+			const nativeConnection = new InProcessAgentConnection(asRuntime(new FakeRuntime(fake.session)));
+			const pending = nativeConnection.getSessionTree();
+			await manager.appendMessage({ role: "user", content: "later append", timestamp: 4 });
+			const captured = await pending;
+			expect(captured).toEqual({ tree: expected, leafId: branchA });
+			const copied = captured.tree[0].entry;
+			if (copied.type === "message" && copied.message.role === "user") copied.message.content = "changed copy";
+			expect(manager.getEntry(first)).toMatchObject({ message: { content: "root" } });
+			await expect(readSessionTree(manager, { ...DEFAULT_SESSION_TREE_LIMITS, maxEntries: 1 })).rejects.toThrow(
+				"History entry budget exceeded",
+			);
+			await expect(readSessionTree(manager, { ...DEFAULT_SESSION_TREE_LIMITS, maxSourceBytes: 1 })).rejects.toThrow(
+				"History source byte budget exceeded",
+			);
+			await nativeConnection.dispose();
+
+			const at = (seconds: number) => `2026-01-01T00:00:0${seconds}.000Z`;
+			const message = (id: string, parentId: string | null, seconds: number) => ({
+				type: "message",
+				id,
+				parentId,
+				timestamp: at(seconds),
+				message: { role: "user", content: id, timestamp: seconds },
+			});
+			const entries = [
+				message("root", null, 2),
+				{ type: "tool_intent", id: "hidden-intent", parentId: "root", timestamp: at(2) },
+				{ type: "request", id: "hidden-request", parentId: "hidden-intent", timestamp: at(2) },
+				message("late", "hidden-request", 3),
+				message("early", "root", 1),
+				message("orphan", "missing", 0),
+				{ type: "label", id: "label-1", parentId: "late", targetId: "late", label: "kept label", timestamp: at(4) },
+				{
+					type: "label",
+					id: "label-2",
+					parentId: "label-1",
+					targetId: "early",
+					label: "removed",
+					timestamp: at(5),
+				},
+				{ type: "label", id: "label-3", parentId: "label-2", targetId: "early", timestamp: at(6) },
+			];
+			const input = join(root, "resident.jsonl");
+			writeFileSync(
+				input,
+				[{ type: "session", version: 3, id: "resident", timestamp: at(0), cwd: root }, ...entries]
+					.map((entry) => `${JSON.stringify(entry)}\n`)
+					.join(""),
+			);
+			const resident = await SessionManager.openReadOnly(input);
+			try {
+				const expectedResident = resident.getTree();
+				vi.spyOn(resident, "getEntries").mockImplementation(() => {
+					throw new Error("uncapped resident entries");
+				});
+				vi.spyOn(resident, "getTree").mockImplementation(() => {
+					throw new Error("uncapped resident tree");
+				});
+				appendFileSync(input, `${JSON.stringify(message("future", "root", 7))}\n`);
+				const actual = await readSessionTree(resident);
+				expect(actual.tree).toEqual(expectedResident);
+				expect(actual.leafId).toBe("label-3");
+				expect(actual.tree.map((node) => node.entry.id)).toEqual(["root", "orphan"]);
+				expect(actual.tree[0].children.map((node) => node.entry.id)).toEqual(["early", "late"]);
+				expect(actual.tree[0].children[0].label).toBeUndefined();
+				expect(actual.tree[0].children[1]).toMatchObject({
+					entry: { parentId: "root" },
+					label: "kept label",
+					labelTimestamp: at(4),
+				});
+				await expect(
+					readSessionTree(resident, { ...DEFAULT_SESSION_TREE_LIMITS, maxEntries: entries.length - 1 }),
+				).rejects.toThrow("Resident history entry budget exceeded");
+				await expect(
+					readSessionTree(resident, { ...DEFAULT_SESSION_TREE_LIMITS, maxSourceBytes: 1 }),
+				).rejects.toThrow("JSON byte limit exceeded");
+			} finally {
+				await resident.close();
+			}
+		} finally {
+			vi.restoreAllMocks();
+			await manager.close();
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("emits replacement snapshots and rebinds events when the runtime replaces its session", async () => {

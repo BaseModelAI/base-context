@@ -651,9 +651,6 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {
-		if (this.latestSnapshotIsFresh && this.latestSnapshot?.sessionTree) {
-			return this.latestSnapshot.sessionTree;
-		}
 		const data = await this.requestData<{
 			flatNodes: AgentConnectionSessionTreeFlatNode[];
 			leafId: string | null;

@@ -19,6 +19,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { readSessionTree } from "../../core/session-tree.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import {
@@ -186,10 +187,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {
-		return {
-			tree: this.session.sessionManager.getTree(),
-			leafId: this.session.sessionManager.getLeafId(),
-		};
+		return readSessionTree(this.session.sessionManager);
 	}
 
 	async listSavedSessions(

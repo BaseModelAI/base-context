@@ -28,6 +28,12 @@ describe("session write isolation", () => {
 		const ownedDir = join(dir, "owned");
 		const session = await SessionManager.create(dir, ownedDir);
 		managers.push(session);
+		expect(await session.readBranchHistory((history) => history.parentPath())).toMatchObject({
+			events: [],
+			nextCursor: null,
+			totalEntries: 0,
+			source: { sessionId: session.getSessionId(), leafId: null },
+		});
 		expect(await session.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			model: null,
 			thinkingLevel: null,
@@ -60,10 +66,28 @@ describe("session write isolation", () => {
 		const limits = { maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 };
 		const branchHistory = await session.materializeBranchHistory(limits);
 		const sourceHistory = await session.materializeSourceHistory(limits);
+		const parentHistory = await session.materializeParentPathHistory(limits);
+		expect(parentHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchB]);
+		expect(parentHistory).not.toHaveProperty("scope");
+		expect(parentHistory.source.leafId).toBe(branchB);
+		expect(parentHistory.sourceBytes).toBe(
+			parentHistory.entries.reduce((bytes, item) => bytes + item.source.locator.length, 0),
+		);
+		expect(parentHistory.entries[0].entry).not.toBe(session.getEntry(ownedInfoId));
 		expect(branchHistory.scope).toBe("branch");
 		expect(branchHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchB]);
 		expect(sourceHistory.scope).toBe("source");
 		expect(sourceHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchA, branchB]);
+		await session.readSourceHistory(async (history) => {
+			const first = await history.parentPath({ limit: 1 });
+			expect(first.totalEntries).toBe(2);
+			expect(first.events.map((entry) => entry.id)).toEqual([ownedInfoId]);
+			expect(first.nextCursor).not.toBeNull();
+			const second = await history.parentPath({ cursor: first.nextCursor!, limit: 1 });
+			expect(second.events.map((entry) => entry.id)).toEqual([branchB]);
+			expect(second.nextCursor).toBeNull();
+			expect(second.source).toBe(first.source);
+		});
 		expect(await session.getHistoryEntry(branchA)).toBeUndefined();
 		const hydrated = await session.readSourceHistory((history) => history.hydrateEntry(branchA, 64 * 1024));
 		expect(hydrated?.entry).toMatchObject({ id: branchA, message: { role: "user", content: branchText } });
@@ -83,6 +107,12 @@ describe("session write isolation", () => {
 			first.value.source.locator.length = 0;
 			await expect(iterator.next()).rejects.toThrow("source byte budget exceeded");
 		});
+		await expect(session.materializeParentPathHistory({ ...limits, maxEntries: 1 })).rejects.toThrow(
+			"entry budget exceeded",
+		);
+		await expect(session.materializeParentPathHistory({ ...limits, maxSourceBytes: 1 })).rejects.toThrow(
+			"source byte budget exceeded",
+		);
 		await expect(session.materializeSourceHistory({ ...limits, maxEntries: 1 })).rejects.toThrow(
 			"entry budget exceeded",
 		);
@@ -98,6 +128,9 @@ describe("session write isolation", () => {
 		const thinkingId = await session.appendThinkingLevelChange("high");
 		const tierId = await session.appendServiceTierChange("priority");
 		const capturedBootstrap = await session.readBranchHistory(async (history) => {
+			const firstPath = await history.parentPath({ limit: 1 });
+			expect(firstPath.events.map((entry) => entry.id)).toEqual([modelId]);
+			expect(firstPath.totalEntries).toBe(3);
 			expect(history.branchContext.source).toBe(history.source);
 			const before = await history.branchBootstrap();
 			expect(before).toMatchObject({
@@ -115,6 +148,9 @@ describe("session write isolation", () => {
 			const replacement = await session.appendModelChange("openai", "gpt-4.1-mini");
 			await session.pageHistory();
 			expect(await history.branchBootstrap()).toEqual(before);
+			const rest = await history.parentPath({ cursor: firstPath.nextCursor!, limit: 2 });
+			expect(rest.events.map((entry) => entry.id)).toEqual([thinkingId, tierId]);
+			expect(rest.nextCursor).toBeNull();
 			return { before, replacement };
 		});
 		expect((await session.readBranchHistory((history) => history.branchBootstrap())).model?.id).toBe(
@@ -228,6 +264,18 @@ describe("session write isolation", () => {
 		expect(cold?.entry.nativeOrigin).toEqual(inputOrigin);
 		expect(cold?.entry).not.toBe(copied.getEntry("Imported-User"));
 		expect(cold?.source).toMatchObject({ id: "Imported-User", retention: "retained-import" });
+		await copied.readBranchHistory(async (history) => {
+			const path = await history.parentPath();
+			expect(path.events.map((entry) => entry.id)).toEqual(["Imported-User", "Imported-Goal", newNativeId]);
+			expect(path.events.map((entry) => entry.retention)).toEqual(["retained-import", "retained-import", undefined]);
+			expect(path.nextCursor).toBeNull();
+		});
+		const retainedParentHistory = await copied.materializeParentPathHistory(limits);
+		expect(retainedParentHistory.entries.map((item) => item.source.retention)).toEqual([
+			"retained-import",
+			"retained-import",
+			undefined,
+		]);
 		const retainedHistory = await copied.materializeSourceHistory(limits);
 		expect(retainedHistory.entries.map((item) => item.source.retention)).toEqual([
 			"retained-import",
@@ -277,11 +325,18 @@ describe("session write isolation", () => {
 		await expect(SessionManager.create(dir, join(dir, ".prime", "new"))).rejects.toThrow("cannot write legacy state");
 		const session = await SessionManager.create(dir, join(dir, "owned"));
 		managers.push(session);
+		const rootModelId = await session.appendModelChange("openai", "gpt-4.1");
 		const ownedId = await session.appendSessionInfo("owned");
 		const originalSource = session.getSessionId();
 		const escaped = await session.readSourceHistory(async (history) => {
+			const firstPath = await history.parentPath({ limit: 1 });
+			expect(firstPath.events.map((entry) => entry.id)).toEqual([rootModelId]);
 			const bootstrap = await history.branchBootstrap();
-			expect(bootstrap).toMatchObject({ hasContextMessages: false, goalSeedable: false, model: null });
+			expect(bootstrap).toMatchObject({
+				hasContextMessages: false,
+				goalSeedable: false,
+				model: { id: rootModelId },
+			});
 			const lateId = await session.appendSessionInfo("outside captured prefix");
 			await session.pageHistory();
 			expect(await history.get(lateId)).toBeUndefined();
@@ -294,10 +349,17 @@ describe("session write isolation", () => {
 				entry: { id: ownedId, name: "owned" },
 			});
 			expect(await history.get(replacementId)).toBeUndefined();
+			const lastPath = await history.parentPath({ cursor: firstPath.nextCursor!, limit: 1 });
+			expect(lastPath.events.map((entry) => entry.id)).toEqual([ownedId]);
+			expect(lastPath.nextCursor).toBeNull();
+			await expect(
+				session.readBranchHistory((current) => current.parentPath({ cursor: firstPath.nextCursor! })),
+			).rejects.toThrow("cursor");
 			return history;
 		});
 		await expect(escaped.get(ownedId)).rejects.toThrow("Captured history read has ended");
 		await expect(escaped.branchBootstrap()).rejects.toThrow("Captured history read has ended");
+		await expect(escaped.parentPath()).rejects.toThrow("Captured history read has ended");
 		const path = session.getSessionFile()!;
 		rmSync(path);
 		symlinkSync(legacyFile, path);
