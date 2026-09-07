@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import argparse
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from benchlib import aggregate_sessions, collect_sessions, parse_session_file
 
 import run as benchmark
 import run_codex as codex_benchmark
 
 
-def attempt(*, wall: float, cost: float, progress: int = 5) -> dict:
+def attempt(*, wall: float, cost: float | None, progress: int = 5) -> dict:
     passed = progress == 5
     return {
         "agent_wall_seconds": wall,
@@ -22,6 +27,7 @@ def attempt(*, wall: float, cost: float, progress: int = 5) -> dict:
         },
         "metrics": {
             "api_cost": {"total": cost},
+            "cost_complete": cost is not None,
             "provider_usage": {"totalTokens": 100},
         },
     }
@@ -35,10 +41,50 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
         "task_slug": "example",
         "pressure": "N",
         "primary_attempt": 0,
-        "selected_attempt": 0,
         "retry_triggers": [],
         "attempts": values,
     }
+
+
+def native_journal(path: Path, *, session_id: str = "root", incomplete: bool = False) -> None:
+    timestamp = "2026-09-07T00:00:00.000Z"
+    descriptor = {
+        "api": "openai-completions", "provider": "openai", "model": "fixture",
+        "transport": "http", "ordinal": 1, "kind": "initial",
+    }
+    metadata = {
+        "operationId": "operation",
+        "source": {"sessionId": "root", "leafId": None, "sourceSequence": 0, "persistent": True},
+        "owner": {"sessionId": "root"}, "purpose": "main",
+        "modelContract": {
+            "api": "openai-completions", "provider": "openai", "model": "fixture",
+            "profile": {"id": "native-default", "status": "unvalidated"},
+            "pricing": {"status": "unvalidated", "currency": "USD", "unit": "million-tokens",
+                        "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
+        },
+    }
+    usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
+    if incomplete:
+        usage.pop("cacheWrite")
+    receipt = {
+        **descriptor, "attemptId": "physical-attempt", "outcome": "failed" if incomplete else "completed",
+        "rawUsage": [], "usage": usage, "usageCompleteness": "partial" if incomplete else "complete",
+        "timing": {"queuedAt": 0, "admittedAt": 1, "sentAt": 1, "settledAt": 2},
+        **({"capacityConfirmed": True} if incomplete else {}),
+    }
+    events = [
+        {**metadata, "type": "attempt_admitted", "attemptId": "physical-attempt", "timestamp": 1, "descriptor": descriptor},
+        {**metadata, "type": "attempt_settled", "attemptId": "physical-attempt", "timestamp": 2, "receipt": receipt},
+    ]
+    entries = [
+        {"type": "session", "version": 3, "id": session_id, "timestamp": timestamp, "cwd": "/tmp"},
+        *[{"type": "request", "id": f"physical-attempt:{event['type']}", "parentId": None,
+           "timestamp": timestamp, "request": event} for event in events],
+        {"type": "message", "message": {"role": "assistant", "content": [],
+                                       "usage": {"input": 99999, "output": 99999, "cost": {"total": 99}}}},
+    ]
+    # Accounting consumes the documented payload envelope, not frame-integrity validation.
+    path.write_text("".join(json.dumps({"journalFrame": 1, "payload": entry}) + "\n" for entry in entries))
 
 
 class HarnessComparisonTests(unittest.TestCase):
@@ -52,13 +98,28 @@ class HarnessComparisonTests(unittest.TestCase):
             "AgentError: WebSocket closed 1006",
         )
 
-    def test_current_win_needs_no_retry_or_regression(self) -> None:
+    def test_current_win_uses_primary_and_native_physical_receipts(self) -> None:
         vanilla = result("vanilla", attempt(wall=10.0, cost=0.10))
         current = result("current", attempt(wall=8.0, cost=0.08))
-        self.assertEqual(benchmark.comparison_retry_reasons(vanilla, current), [])
+        self.assertEqual(benchmark.primary_attempt_index(current["attempts"]), 0)
         summary = benchmark.comprehensive_summary([vanilla, current])
         self.assertEqual(summary["regressions"], [])
         self.assertFalse(summary["publication_ready"])
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            native_journal(root / "root.jsonl")
+            native_journal(root / "fork.jsonl", session_id="fork")
+            metrics = aggregate_sessions(collect_sessions(root))
+        self.assertEqual(metrics["accounting_source"], "native_request_receipts")
+        self.assertEqual(metrics["all_model_calls"], 1)
+        self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})
+        self.assertEqual(metrics["provider_usage"]["totalTokens"], 145)
+        self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
+        self.assertEqual(metrics["cost_basis"], "catalog_estimate")
+        self.assertTrue(metrics["cost_complete"])
+        benchmark.merge_current_accounting(metrics, {"total_calls": 10, "cost": 99}, auxiliary_expected=True)
+        self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
+        self.assertEqual(metrics["all_model_calls"], 1)
 
     def test_vanilla_failure_is_a_current_correctness_win(self) -> None:
         vanilla_attempt = attempt(wall=12.0, cost=0.12, progress=3)
@@ -84,28 +145,54 @@ class HarnessComparisonTests(unittest.TestCase):
             full_results.extend((full_vanilla, full_current))
         self.assertTrue(benchmark.comprehensive_summary(full_results)["publication_ready"])
 
-    def test_current_metric_loss_gets_only_one_retry(self) -> None:
-        vanilla = result("vanilla", attempt(wall=10.0, cost=0.10))
-        current_attempt = attempt(wall=12.0, cost=0.12)
-        current = result("current", current_attempt)
-        self.assertEqual(
-            benchmark.comparison_retry_reasons(vanilla, current),
-            ["speed_regression", "cost_regression"],
-        )
-        current["attempts"].append(attempt(wall=11.0, cost=0.11))
-        self.assertEqual(benchmark.comparison_retry_reasons(vanilla, current), [])
-        self.assertEqual(
-            benchmark.choose_better_attempt([
-                attempt(wall=9.0, cost=0.05),
-                attempt(wall=8.0, cost=0.15),
-            ]),
-            1,
-        )
-        summary = benchmark.comprehensive_summary([vanilla, current])
-        self.assertEqual(
-            {item["kind"] for item in summary["regressions"]},
-            {"speed", "cost"},
-        )
+    def test_capacity_invalidations_do_not_replace_primary_or_unknown_cost(self) -> None:
+        exact_error = {"type": "message_end", "message": {
+            "role": "assistant", "stopReason": "error", "errorMessage": "Selected model is at capacity.",
+        }}
+        self.assertTrue(benchmark.provider_capacity_error(exact_error))
+        self.assertFalse(benchmark.provider_capacity_error({**exact_error, "message": {**exact_error["message"], "stopReason": "stop"}}))
+        self.assertFalse(benchmark.provider_capacity_error({**exact_error, "message": {**exact_error["message"], "errorMessage": "Selected model is at capacity. Maybe."}}))
+        sequence = [
+            {**attempt(wall=1, cost=0.02), "capacity_invalid": True},
+            attempt(wall=12, cost=0.10, progress=3),
+            {**attempt(wall=1, cost=0.03), "capacity_invalid": True},
+            attempt(wall=8, cost=0.05),
+        ]
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            with patch.object(benchmark, "safe_run_attempt", side_effect=sequence) as run:
+                current = benchmark.run_case("current", root, {"id": 1, "slug": "example", "pressure": "N"}, root, argparse.Namespace(retry_failed=1))
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(current["primary_attempt"], 1)
+            self.assertEqual(current["valid_attempts"], 2)
+            self.assertEqual(current["capacity_invalid_attempts"], 2)
+            self.assertEqual(current["retry_triggers"], [{"attempt": 4, "reasons": ["strict_failure"]}])
+            vanilla = result("vanilla", attempt(wall=10, cost=0.10))
+            # Historical winner metadata must not promote the diagnostic success.
+            current["selected_attempt"] = 3
+            summary = benchmark.comprehensive_summary([vanilla, current])
+            self.assertEqual(summary["by_variant"]["current"]["strict_passes"], 0)
+            self.assertAlmostEqual(summary["by_variant"]["current"]["all_attempts"]["api_cost"]["total"], 0.20)
+            self.assertEqual(len(current["attempts"]), 4)
+            with patch.object(benchmark, "safe_run_attempt", return_value=attempt(wall=12, cost=0.12)) as run:
+                slower = benchmark.run_case("current", root, {"id": 2, "slug": "slower", "pressure": "N"}, root, argparse.Namespace(retry_failed=1))
+            self.assertEqual(run.call_count, 1)  # A valid pass never triggers a performance retry.
+            self.assertEqual(slower["retry_triggers"], [])
+            native_journal(root / "partial.jsonl", incomplete=True)
+            metrics = aggregate_sessions([parse_session_file(root / "partial.jsonl")])
+            self.assertTrue(metrics["provider_capacity_confirmed"])
+            self.assertIsNone(metrics["provider_usage"]["cacheWrite"])
+            self.assertIsNone(metrics["api_cost"]["total"])
+            self.assertFalse(metrics["cost_complete"])
+            current = result("current", attempt(wall=8, cost=None))
+            summary = benchmark.comprehensive_summary([vanilla, current])
+            self.assertIsNone(summary["matched_strict_pass_comparisons"][0]["api_cost_delta_current_minus_baseline"])
+            self.assertEqual(len(summary["incomplete_comparisons"]), 1)
+            self.assertFalse(summary["publication_ready"])
+            self.assertIsNone(summary["by_variant"]["current"]["all_attempts"]["api_cost"]["total"])
+            output = root / "summary.md"
+            benchmark.write_summary_markdown(output, summary, [vanilla, current])
+            self.assertIn("n/a", output.read_text())
 
 
 class CodexAdapterTests(unittest.TestCase):

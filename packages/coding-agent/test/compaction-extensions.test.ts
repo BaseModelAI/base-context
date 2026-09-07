@@ -169,6 +169,7 @@ describe("Compaction extensions (local simulation)", () => {
 		expect(afterEvent.compactionEntry.summary.length).toBeGreaterThan(0);
 		expect(afterEvent.compactionEntry.tokensBefore).toBeGreaterThanOrEqual(0);
 		expect(afterEvent.fromExtension).toBe(false);
+		expect(session.sessionManager.getCompactionCount()).toBe(1);
 	}, 120000);
 
 	it("should allow extensions to cancel compaction", async () => {
@@ -207,6 +208,11 @@ describe("Compaction extensions (local simulation)", () => {
 		await session.prompt("What is 3+3? Reply with just the number.");
 		await session.waitForIdle();
 
+		const originalLeafId = session.sessionManager.getLeafId()!;
+		const earlierCompactionId = await session.sessionManager.appendCompaction(customSummary, originalLeafId, 0);
+		await session.sessionManager.branch(originalLeafId);
+		expect(session.sessionManager.getCompactionCount()).toBe(1);
+
 		const result = await session.compact();
 
 		expect(result.summary).toBe(customSummary);
@@ -217,7 +223,16 @@ describe("Compaction extensions (local simulation)", () => {
 		const afterEvent = compactEvents[0];
 		if (afterEvent.type === "session_compact") {
 			expect(afterEvent.compactionEntry.summary).toBe(customSummary);
+			expect(afterEvent.compactionEntry.id).not.toBe(earlierCompactionId);
+			expect(afterEvent.compactionEntry.id).toBe(session.sessionManager.getLeafId());
 			expect(afterEvent.fromExtension).toBe(true);
+		}
+		expect(session.sessionManager.getCompactionCount()).toBe(2);
+		const reopened = await SessionManager.openReadOnly(session.sessionManager.getSessionFile()!);
+		try {
+			expect(reopened.getCompactionCount()).toBe(2);
+		} finally {
+			await reopened.close();
 		}
 	}, 120000);
 

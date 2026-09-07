@@ -264,7 +264,7 @@ import {
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
+import type { BranchSummaryEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
 import {
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
@@ -7782,6 +7782,7 @@ export class AgentSession {
 		let tokensBefore: number;
 		let details: CompactionResult["details"];
 		let usage: CompactionResult["usage"];
+		let savedCompactionId: string;
 		try {
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
@@ -7858,7 +7859,7 @@ export class AgentSession {
 				this._semanticEdges.finishRequest(requestId);
 			}
 			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
-			await this.sessionManager.appendCompaction(
+			savedCompactionId = await this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
@@ -7879,16 +7880,13 @@ export class AgentSession {
 			}
 			throw error;
 		}
-		const newEntries = this.sessionManager.getEntries();
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		this._contextOmissions = undefined;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
-		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-			| CompactionEntry
-			| undefined;
-		if (savedCompactionEntry) {
+		const savedCompactionEntry = this.sessionManager.getEntry(savedCompactionId);
+		if (savedCompactionEntry?.type === "compaction") {
 			await this._extensionRunner.emit({
 				type: "session_compact",
 				compactionEntry: savedCompactionEntry,

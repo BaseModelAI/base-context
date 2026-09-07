@@ -24,7 +24,7 @@ import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueu
 export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
-	/** Global config directory. Default: ~/.pi/agent */
+	/** Global config directory. Default: ~/.base-context */
 	agentDir?: string;
 
 	/** Auth storage for credentials. Default: AuthStorage.create(agentDir/auth.json) */
@@ -50,7 +50,7 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi enables the default built-in tool (ipython)
+	 * When omitted, Base Context enables the default built-in tool (ipython)
 	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
 	 * When provided, only the listed tool names are enabled.
 	 */
@@ -179,8 +179,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const existingSession = sessionManager.buildSessionContext();
 		const hasExistingSession = existingSession.messages.length > 0;
-		const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
-		const hasServiceTierEntry = sessionManager.getBranch().some((entry) => entry.type === "service_tier_change");
+		const branchEntries = sessionManager.getBranch();
+		const hasThinkingEntry = branchEntries.some((entry) => entry.type === "thinking_level_change");
+		const hasServiceTierEntry = branchEntries.some((entry) => entry.type === "service_tier_change");
 
 		let model = options.model;
 		let modelFallbackMessage: string | undefined;

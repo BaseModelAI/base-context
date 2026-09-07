@@ -8373,7 +8373,7 @@ export class InteractiveMode {
 
 	private async handleCloneCommand(): Promise<void> {
 		try {
-			const { leafId } = await this.agentConnection.getSessionTree();
+			const { leafId } = await this.agentConnection.getState();
 			if (!leafId) {
 				this.showStatus("Nothing to clone yet");
 				return;

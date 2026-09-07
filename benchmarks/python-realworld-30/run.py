@@ -23,7 +23,9 @@ from typing import Any
 from benchlib import (
     RUN_SCHEMA,
     aggregate_sessions,
-    choose_better_attempt,
+    COST_KEYS,
+    USAGE_KEYS,
+    primary_attempt_index,
     clean_environment,
     collect_sessions,
     inject_stage,
@@ -53,6 +55,30 @@ def utc_now() -> str:
 def json_dump(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def sum_known(values) -> int | float | None:
+    values = list(values)
+    return sum(values) if all(value is not None for value in values) else None
+
+
+def difference_known(current, baseline) -> int | float | None:
+    return current - baseline if current is not None and baseline is not None else None
+
+
+def metric_text(value, digits: int = 3) -> str:
+    return f"{value:.{digits}f}" if value is not None else "n/a"
+
+
+def provider_capacity_error(event: dict[str, Any]) -> bool:
+    message = event.get("message")
+    return (
+        event.get("type") == "message_end"
+        and isinstance(message, dict)
+        and message.get("role") == "assistant"
+        and message.get("stopReason") == "error"
+        and message.get("errorMessage") == "Selected model is at capacity."
+    )
 
 
 def message_end_error(event: dict[str, Any]) -> str | None:
@@ -623,23 +649,23 @@ def read_current_accounting(path: Path) -> dict[str, Any] | None:
             return None
         if set(by_kind) != set(AUXILIARY_KINDS):
             return None
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        calls = {kind: by_kind[kind].get("callsAttempted") for kind in AUXILIARY_KINDS}
+        usage = {
+            key: sum_known(item.get(field) for item in by_kind.values())
+            for key, field in (("input", "inputTokens"), ("output", "outputTokens"),
+                               ("cacheRead", "cacheReadTokens"), ("cacheWrite", "cacheWriteTokens"))
+        }
+        usage["inputTotal"] = sum_known(usage[key] for key in ("input", "cacheRead", "cacheWrite"))
+        usage["totalTokens"] = sum_known(usage[key] for key in ("input", "output", "cacheRead", "cacheWrite"))
+        return {
+            "calls": calls,
+            "total_calls": sum_known(calls.values()),
+            "usage": usage,
+            "cost": sum_known(item.get("cost") for item in by_kind.values()),
+            "accounting": accounting,
+        }
+    except (OSError, KeyError, TypeError, ValueError):
         return None
-    calls = {kind: int(by_kind[kind].get("callsAttempted") or 0) for kind in AUXILIARY_KINDS}
-    usage = {
-        "input": sum(int(item.get("inputTokens") or 0) for item in by_kind.values()),
-        "output": sum(int(item.get("outputTokens") or 0) for item in by_kind.values()),
-        "cacheRead": sum(int(item.get("cacheReadTokens") or 0) for item in by_kind.values()),
-        "cacheWrite": sum(int(item.get("cacheWriteTokens") or 0) for item in by_kind.values()),
-    }
-    usage["totalTokens"] = sum(usage[key] for key in ("input", "output", "cacheRead", "cacheWrite"))
-    return {
-        "calls": calls,
-        "total_calls": sum(calls.values()),
-        "usage": usage,
-        "cost": sum(float(item.get("cost") or 0) for item in by_kind.values()),
-        "accounting": accounting,
-    }
 
 
 def archive_metrics(prime_context_home: Path) -> dict[str, int]:
@@ -670,51 +696,63 @@ def archive_metrics(prime_context_home: Path) -> dict[str, int]:
     return {"archive_writes": writes, "archive_bytes": archive_bytes}
 
 
-def merge_current_accounting(metrics: dict[str, Any], accounting: dict[str, Any] | None) -> None:
+def merge_current_accounting(
+    metrics: dict[str, Any], accounting: dict[str, Any] | None, *, auxiliary_expected: bool = False,
+) -> None:
+    # Native receipts already include every physical purpose; adding auxiliary
+    # observational totals again would double-charge those same attempts.
+    if metrics.get("accounting_source") == "native_request_receipts":
+        return
     solver_usage = dict(metrics.get("provider_usage") or {})
     solver_cost = dict(metrics.get("api_cost") or {})
-    metrics["solver_model_calls"] = int(metrics.get("all_model_calls") or 0)
+    metrics["solver_model_calls"] = metrics.get("all_model_calls")
     metrics["solver_provider_usage"] = solver_usage
     metrics["solver_api_cost"] = solver_cost
+    metrics.update({
+        "auxiliary_model_calls": None,
+        "auxiliary_model_calls_by_kind": {kind: None for kind in AUXILIARY_KINDS},
+        "auxiliary_provider_usage": None,
+        "auxiliary_api_cost": None,
+        "zero_extra_call": None,
+        "explicit_compiler_calls": None,
+        "explicit_compiler_cost": None,
+        "automatic_compiler_calls": None,
+        "automatic_compiler_cost": None,
+        "automatic_refinement_model_calls": None,
+    })
     if accounting is None:
-        metrics["auxiliary_model_calls"] = None
-        metrics["auxiliary_model_calls_by_kind"] = {kind: None for kind in AUXILIARY_KINDS}
-        metrics["auxiliary_provider_usage"] = None
-        metrics["auxiliary_api_cost"] = None
-        metrics["zero_extra_call"] = None
-        metrics["explicit_compiler_calls"] = None
-        metrics["explicit_compiler_cost"] = None
-        metrics["automatic_compiler_calls"] = None
-        metrics["automatic_compiler_cost"] = None
-        metrics["automatic_refinement_model_calls"] = None
+        if auxiliary_expected:
+            metrics["all_model_calls"] = None
+            metrics["provider_usage"] = {key: None for key in USAGE_KEYS}
+            metrics["api_cost"] = {key: None for key in COST_KEYS}
+            metrics["usage_complete"] = metrics["cost_complete"] = False
+            metrics["prompt_cache_reuse"] = None
         return
     metrics["auxiliary_model_calls"] = accounting["total_calls"]
     metrics["auxiliary_model_calls_by_kind"] = accounting["calls"]
     metrics["auxiliary_provider_usage"] = accounting["usage"]
     metrics["auxiliary_api_cost"] = accounting["cost"]
-    metrics["zero_extra_call"] = accounting["total_calls"] == 0
+    metrics["zero_extra_call"] = accounting["total_calls"] == 0 if accounting["total_calls"] is not None else None
     metrics["auxiliary_accounting"] = accounting["accounting"]
     compiler = accounting["accounting"]["byKind"]["knowledge-compile"]
-    metrics["explicit_compiler_calls"] = 0
-    metrics["explicit_compiler_cost"] = 0.0
-    metrics["automatic_compiler_calls"] = int(compiler.get("callsAttempted") or 0)
-    metrics["automatic_compiler_cost"] = float(compiler.get("cost") or 0)
-    metrics["automatic_refinement_model_calls"] = 0
-    metrics["all_model_calls"] = metrics["solver_model_calls"] + accounting["total_calls"]
+    metrics["automatic_compiler_calls"] = compiler.get("callsAttempted")
+    metrics["automatic_compiler_cost"] = compiler.get("cost")
+    metrics["all_model_calls"] = sum_known([metrics["solver_model_calls"], accounting["total_calls"]])
     metrics["provider_usage"] = {
-        key: int(solver_usage.get(key) or 0) + int(accounting["usage"].get(key) or 0)
-        for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
+        key: sum_known([solver_usage.get(key), accounting["usage"].get(key)]) for key in USAGE_KEYS
     }
-    combined_cost = dict(solver_cost)
-    combined_cost["total"] = float(solver_cost.get("total") or 0) + float(accounting["cost"])
-    metrics["api_cost"] = combined_cost
-    denominator = sum(metrics["provider_usage"][key] for key in ("input", "cacheRead", "cacheWrite"))
+    # The auxiliary API exposes total cost only, not component costs.
+    metrics["api_cost"] = {key: None for key in COST_KEYS}
+    metrics["api_cost"]["total"] = sum_known([solver_cost.get("total"), accounting["cost"]])
+    metrics["usage_complete"] = all(value is not None for value in metrics["provider_usage"].values())
+    metrics["cost_complete"] = metrics["api_cost"]["total"] is not None
+    denominator = sum_known(metrics["provider_usage"].get(key) for key in ("input", "cacheRead", "cacheWrite"))
     metrics["prompt_cache_reuse"] = metrics["provider_usage"]["cacheRead"] / denominator if denominator else None
 
 
 def strict_pass(attempt: dict[str, Any]) -> bool:
     judge = attempt.get("judge") or {}
-    return judge.get("status") == "pass" and judge.get("progress_level") == 5
+    return attempt.get("capacity_invalid") is not True and judge.get("status") == "pass" and judge.get("progress_level") == 5
 
 
 def run_rpc(
@@ -796,6 +834,7 @@ def run_rpc(
         pending_stage_after_compaction: int | None = None
         done = False
         error: str | None = None
+        capacity_confirmed = False
         peak_provider_bound: int | None = None
 
         def send(kind: str, label: str, message: str | None = None) -> str:
@@ -901,6 +940,7 @@ def run_rpc(
                     terminal_error = message_end_error(event)
                     if terminal_error is not None:
                         error = terminal_error
+                        capacity_confirmed = capacity_confirmed or provider_capacity_error(event)
                         done = True
                 if kind == "response":
                     response = {
@@ -1003,11 +1043,12 @@ def run_rpc(
         "peak_provider_bound_token_estimate": peak_provider_bound,
         **archive_metrics(roots["pc-home"]),
     })
-    merge_current_accounting(metrics, read_current_accounting(run_dir / "prime-context-accounting.json"))
+    merge_current_accounting(metrics, read_current_accounting(run_dir / "prime-context-accounting.json"), auxiliary_expected=variant == "current")
     (roots["config"] / "auth.json").unlink(missing_ok=True)
     shutil.rmtree(daemon_root, ignore_errors=True)
     return {
         "agent_wall_seconds": agent_wall,
+        "capacity_invalid": capacity_confirmed or metrics.get("provider_capacity_confirmed") is True,
         "error": error,
         "command": command,
         "responses": responses,
@@ -1034,7 +1075,18 @@ def run_attempt(
     prepare_workspace(task_dir, scenario, workspace)
     setup_seconds = time.monotonic() - setup_started
     rpc = run_rpc(variant, task_dir, scenario, workspace, attempt_dir, args)
-    judge, judge_seconds, judge_log = run_judge(task_dir, scenario, workspace, args.bwrap)
+    judge_started = time.monotonic()
+    if rpc["capacity_invalid"]:
+        judge = {"status": "invalid", "progress_level": None, "notes": ["Confirmed provider capacity interruption"]}
+        judge_seconds, judge_log = 0.0, "Not judged: confirmed provider capacity interruption.\n"
+    else:
+        try:
+            judge, judge_seconds, judge_log = run_judge(task_dir, scenario, workspace, args.bwrap)
+        except Exception as exc:
+            # A judge failure must not discard already incurred provider spend.
+            judge_log = f"{type(exc).__name__}: {exc}"
+            judge = {"status": "error", "progress_level": 0, "notes": [judge_log]}
+            judge_seconds = time.monotonic() - judge_started
     (attempt_dir / "judge.log").write_text(judge_log)
     lifecycle_seconds = time.monotonic() - lifecycle_started
     result = {
@@ -1063,10 +1115,13 @@ def safe_run_attempt(
     attempt_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    started = time.monotonic()
     try:
         return run_attempt(variant, task_dir, scenario, attempt_dir, args)
     except Exception as exc:
         attempt_dir.mkdir(parents=True, exist_ok=True)
+        metrics = aggregate_sessions(collect_sessions(attempt_dir / "sessions"))
+        merge_current_accounting(metrics, read_current_accounting(attempt_dir / "prime-context-accounting.json"), auxiliary_expected=variant == "current")
         result = {
             "schema": RUN_SCHEMA,
             "variant": variant,
@@ -1075,10 +1130,11 @@ def safe_run_attempt(
             "pressure": scenario["pressure"],
             "started_at": utc_now(),
             "completed_at": utc_now(),
-            "setup_seconds": 0.0,
-            "agent_wall_seconds": 0.0,
-            "judge_seconds": 0.0,
-            "lifecycle_wall_seconds": 0.0,
+            "setup_seconds": None,
+            "agent_wall_seconds": None,
+            "judge_seconds": None,
+            "lifecycle_wall_seconds": time.monotonic() - started,
+            "capacity_invalid": metrics.get("provider_capacity_confirmed") is True,
             "judge": {
                 "status": "error",
                 "progress_level": 0,
@@ -1088,7 +1144,7 @@ def safe_run_attempt(
                 "notes": [f"runner failure: {type(exc).__name__}: {exc}"],
             },
             "error": f"{type(exc).__name__}: {exc}",
-            "metrics": empty_metrics(),
+            "metrics": metrics,
         }
         json_dump(attempt_dir / "result.json", result)
         return result
@@ -1104,28 +1160,39 @@ def run_case(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     case_dir = output / f"task-{scenario['id']:02d}-{scenario['slug']}" / variant
-    attempts = [safe_run_attempt(variant, task_dir, scenario, case_dir / "attempt-1", args)]
+    attempts: list[dict[str, Any]] = []
     retry_triggers: list[dict[str, Any]] = []
-    if not strict_pass(attempts[0]) and args.retry_failed:
-        attempts.append(safe_run_attempt(variant, task_dir, scenario, case_dir / "attempt-2-diagnostic", args))
-        retry_triggers.append({"attempt": 2, "reasons": ["strict_failure"]})
-    selected = choose_better_attempt(attempts)
-    result = {
-        "variant": variant,
-        "task_id": scenario["id"],
-        "task_slug": scenario["slug"],
-        "pressure": scenario["pressure"],
-        "primary_attempt": 0,
-        "selected_attempt": selected,
-        "retry_triggers": retry_triggers,
-        "attempts": attempts,
-    }
-    json_dump(case_dir / "case.json", result)
-    return result
+    valid_attempts = 0
+    while True:
+        attempt_number = len(attempts) + 1
+        attempt = safe_run_attempt(variant, task_dir, scenario, case_dir / f"attempt-{attempt_number}", args)
+        attempts.append(attempt)
+        invalid = attempt.get("capacity_invalid") is True
+        if not invalid:
+            valid_attempts += 1
+            if valid_attempts > 1:
+                retry_triggers.append({"attempt": attempt_number, "reasons": ["strict_failure"]})
+        result = {
+            "variant": variant,
+            "task_id": scenario["id"],
+            "task_slug": scenario["slug"],
+            "pressure": scenario["pressure"],
+            "primary_attempt": primary_attempt_index(attempts),
+            "valid_attempts": valid_attempts,
+            "capacity_invalid_attempts": len(attempts) - valid_attempts,
+            "retry_triggers": retry_triggers,
+            "attempts": attempts,
+        }
+        json_dump(case_dir / "case.json", result)
+        if invalid:
+            continue  # A capacity interruption never consumes a valid retry.
+        if strict_pass(attempt) or valid_attempts >= 1 + args.retry_failed:
+            return result
 
 
-def selected_attempt(result: dict[str, Any]) -> dict[str, Any]:
-    return result["attempts"][result["selected_attempt"]]
+def primary_attempt(result: dict[str, Any]) -> dict[str, Any] | None:
+    index = primary_attempt_index(result.get("attempts") or [])
+    return result["attempts"][index] if index is not None else None
 
 
 def attempt_accuracy(attempt: dict[str, Any]) -> tuple[int, int, int]:
@@ -1137,139 +1204,86 @@ def attempt_accuracy(attempt: dict[str, Any]) -> tuple[int, int, int]:
     )
 
 
-def attempt_cost(attempt: dict[str, Any]) -> float:
-    return float((((attempt.get("metrics") or {}).get("api_cost") or {}).get("total")) or 0)
+def attempt_cost(attempt: dict[str, Any]) -> float | None:
+    metrics = attempt.get("metrics") or {}
+    if metrics.get("cost_complete") is False:
+        return None
+    return (metrics.get("api_cost") or {}).get("total")
 
 
-def comparison_retry_reasons(
-    vanilla: dict[str, Any], current: dict[str, Any]
-) -> list[str]:
-    if len(current.get("attempts") or []) != 1:
-        return []
-    baseline_attempt = selected_attempt(vanilla)
-    current_attempt = selected_attempt(current)
-    reasons: list[str] = []
-    if attempt_accuracy(baseline_attempt) > attempt_accuracy(current_attempt):
-        reasons.append("correctness_regression")
-    if strict_pass(baseline_attempt) and strict_pass(current_attempt):
-        if float(current_attempt.get("agent_wall_seconds") or 0) >= float(baseline_attempt.get("agent_wall_seconds") or 0):
-            reasons.append("speed_regression")
-        if attempt_cost(current_attempt) >= attempt_cost(baseline_attempt):
-            reasons.append("cost_regression")
-    return reasons
 
 
-def retry_case_for_regression(
-    result: dict[str, Any],
-    task_dir: Path,
-    scenario: dict[str, Any],
-    output: Path,
-    args: argparse.Namespace,
-    reasons: list[str],
-) -> dict[str, Any]:
-    if len(result.get("attempts") or []) != 1:
-        return result
-    case_dir = output / f"task-{scenario['id']:02d}-{scenario['slug']}" / result["variant"]
-    result["attempts"].append(
-        safe_run_attempt(result["variant"], task_dir, scenario, case_dir / "attempt-2-diagnostic", args)
-    )
-    result.setdefault("retry_triggers", []).append({"attempt": 2, "reasons": reasons})
-    result["selected_attempt"] = choose_better_attempt(result["attempts"])
-    json_dump(case_dir / "case.json", result)
-    return result
+
+
 
 
 def aggregate_bucket(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
     attempts = [attempt for _, attempt in items]
-    strict_items = [attempt for attempt in attempts if strict_pass(attempt)]
-    total = len(items)
-    usage = {
-        key: sum(int((((attempt.get("metrics") or {}).get("provider_usage") or {}).get(key)) or 0) for attempt in attempts)
-        for key in ("input", "output", "cacheRead", "cacheWrite", "totalTokens")
-    }
-    cost = {
-        key: sum(float((((attempt.get("metrics") or {}).get("api_cost") or {}).get(key)) or 0) for attempt in attempts)
-        for key in ("input", "output", "cacheRead", "cacheWrite", "total")
-    }
-    prompt_denominator = usage["input"] + usage["cacheRead"] + usage["cacheWrite"]
-    peak_values = [
-        int((attempt.get("metrics") or {}).get("peak_provider_bound_token_estimate"))
-        for attempt in attempts
-        if (attempt.get("metrics") or {}).get("peak_provider_bound_token_estimate") is not None
-    ]
-    exposed_zero = [
-        bool((attempt.get("metrics") or {}).get("zero_extra_call"))
-        for attempt in attempts
-        if (attempt.get("metrics") or {}).get("zero_extra_call") is not None
-    ]
-    prompt_sample_count = sum(int(((attempt.get("metrics") or {}).get("provider_prompt_sample_count")) or 0) for attempt in attempts)
-    prompt_token_sum = sum(int(((attempt.get("metrics") or {}).get("provider_prompt_token_sum")) or 0) for attempt in attempts)
-    prompt_peaks = [
-        int((attempt.get("metrics") or {}).get("peak_provider_prompt_tokens"))
-        for attempt in attempts
-        if (attempt.get("metrics") or {}).get("peak_provider_prompt_tokens") is not None
-    ]
-    auxiliary_by_kind: dict[str, int | None] = {}
-    for kind in AUXILIARY_KINDS:
-        values = [
-            ((attempt.get("metrics") or {}).get("auxiliary_model_calls_by_kind") or {}).get(kind)
-            for attempt in attempts
-        ]
-        exposed = [int(value) for value in values if value is not None]
-        auxiliary_by_kind[kind] = sum(exposed) if exposed else None
-    return {
-        "runs": total,
+    valid = [attempt for attempt in attempts if attempt.get("capacity_invalid") is not True]
+    strict_items = [attempt for attempt in valid if strict_pass(attempt)]
+    metrics = [attempt.get("metrics") or {} for attempt in attempts]
+    usage = {key: sum_known((item.get("provider_usage") or {}).get(key) for item in metrics) for key in USAGE_KEYS}
+    cost = {key: sum_known((item.get("api_cost") or {}).get(key) for item in metrics) for key in COST_KEYS}
+    cost["total"] = sum_known(attempt_cost(attempt) for attempt in attempts)
+    prompt_denominator = sum_known(usage.get(key) for key in ("input", "cacheRead", "cacheWrite"))
+    peak_values = [item.get("peak_provider_bound_token_estimate") for item in metrics]
+    prompt_peaks = [item.get("peak_provider_prompt_tokens") for item in metrics]
+    zero_values = [item.get("zero_extra_call") for item in metrics]
+    zero_count = sum_known(zero_values) if zero_values else None
+    bucket = {
+        "runs": len(attempts),
+        "valid_runs": len(valid),
+        "capacity_invalid_runs": len(attempts) - len(valid),
         "strict_passes": len(strict_items),
-        "strict_pass_rate": len(strict_items) / total if total else 0.0,
-        "mean_progress": sum(float((attempt.get("judge") or {}).get("progress_level") or 0) for attempt in attempts) / total if total else 0.0,
-        "agent_wall_seconds": sum(float(attempt.get("agent_wall_seconds") or 0) for attempt in attempts),
-        "lifecycle_wall_seconds": sum(float(attempt.get("lifecycle_wall_seconds") or 0) for attempt in attempts),
-        "judge_seconds": sum(float(attempt.get("judge_seconds") or 0) for attempt in attempts),
-        "main_model_calls": sum(int(((attempt.get("metrics") or {}).get("main_model_calls")) or 0) for attempt in attempts),
-        "all_model_calls": sum(int(((attempt.get("metrics") or {}).get("all_model_calls")) or 0) for attempt in attempts),
-        "auxiliary_model_calls_by_kind": auxiliary_by_kind,
-        "zero_extra_call_runs": sum(exposed_zero) if exposed_zero else None,
-        "zero_extra_call_share": sum(exposed_zero) / len(exposed_zero) if exposed_zero else None,
-        "child_sessions": sum(int(((attempt.get("metrics") or {}).get("child_sessions")) or 0) for attempt in attempts),
-        "tool_calls": sum(int(((attempt.get("metrics") or {}).get("tool_calls")) or 0) for attempt in attempts),
-        "recovery_tool_calls": sum(int(((attempt.get("metrics") or {}).get("recovery_tool_calls")) or 0) for attempt in attempts),
-        "tool_result_bytes_shown": sum(int(((attempt.get("metrics") or {}).get("tool_result_bytes_shown")) or 0) for attempt in attempts),
-        "automatic_refinement_applied": sum(int(((attempt.get("metrics") or {}).get("automatic_refinement_applied")) or 0) for attempt in attempts),
-        "automatic_refinement_model_calls": sum(int(((attempt.get("metrics") or {}).get("automatic_refinement_model_calls")) or 0) for attempt in attempts) if any((attempt.get("metrics") or {}).get("automatic_refinement_model_calls") is not None for attempt in attempts) else None,
-        "compaction_requests": sum(int(((attempt.get("metrics") or {}).get("compaction_requests")) or 0) for attempt in attempts),
-        "compaction_completions": sum(int(((attempt.get("metrics") or {}).get("compaction_completions")) or 0) for attempt in attempts),
-        "compaction_failures": sum(int(((attempt.get("metrics") or {}).get("compaction_failures")) or 0) for attempt in attempts),
+        "strict_pass_rate": len(strict_items) / len(valid) if valid else None,
+        "mean_progress": sum(float((attempt.get("judge") or {}).get("progress_level") or 0) for attempt in valid) / len(valid) if valid else None,
+        "auxiliary_model_calls_by_kind": {
+            kind: sum_known((item.get("auxiliary_model_calls_by_kind") or {}).get(kind) for item in metrics)
+            for kind in AUXILIARY_KINDS
+        },
+        "model_calls_by_purpose": {
+            purpose: sum_known((item.get("model_calls_by_purpose") or {}).get(purpose) for item in metrics)
+            for purpose in sorted({purpose for item in metrics for purpose in item.get("model_calls_by_purpose") or {}})
+        },
+        "zero_extra_call_runs": zero_count,
+        "zero_extra_call_share": zero_count / len(zero_values) if zero_values and zero_count is not None else None,
         "provider_usage": usage,
         "api_cost": cost,
+        "usage_complete": all(item.get("usage_complete") is not False for item in metrics) and all(value is not None for value in usage.values()),
+        "cost_complete": cost["total"] is not None,
+        "cost_bases": sorted({item["cost_basis"] for item in metrics if item.get("cost_basis")}),
         "prompt_cache_reuse": usage["cacheRead"] / prompt_denominator if prompt_denominator else None,
-        "peak_provider_bound_token_estimate": max(peak_values) if peak_values else None,
-        "mean_peak_provider_bound_token_estimate": sum(peak_values) / len(peak_values) if peak_values else None,
-        "peak_provider_prompt_tokens": max(prompt_peaks) if prompt_peaks else None,
-        "average_provider_prompt_tokens": prompt_token_sum / prompt_sample_count if prompt_sample_count else None,
-        "provider_prompt_token_sum": prompt_token_sum,
-        "provider_prompt_sample_count": prompt_sample_count,
-        "explicit_compiler_calls": sum(int(((attempt.get("metrics") or {}).get("explicit_compiler_calls")) or 0) for attempt in attempts) if any((attempt.get("metrics") or {}).get("explicit_compiler_calls") is not None for attempt in attempts) else None,
-        "explicit_compiler_cost": sum(float(((attempt.get("metrics") or {}).get("explicit_compiler_cost")) or 0) for attempt in attempts) if any((attempt.get("metrics") or {}).get("explicit_compiler_cost") is not None for attempt in attempts) else None,
-        "automatic_compiler_calls": sum(int(((attempt.get("metrics") or {}).get("automatic_compiler_calls")) or 0) for attempt in attempts) if any((attempt.get("metrics") or {}).get("automatic_compiler_calls") is not None for attempt in attempts) else None,
-        "automatic_compiler_cost": sum(float(((attempt.get("metrics") or {}).get("automatic_compiler_cost")) or 0) for attempt in attempts) if any((attempt.get("metrics") or {}).get("automatic_compiler_cost") is not None for attempt in attempts) else None,
-        "final_response_tokens": sum(int(((attempt.get("metrics") or {}).get("final_response_tokens")) or 0) for attempt in attempts),
-        "archive_writes": sum(int(((attempt.get("metrics") or {}).get("archive_writes")) or 0) for attempt in attempts),
-        "archive_bytes": sum(int(((attempt.get("metrics") or {}).get("archive_bytes")) or 0) for attempt in attempts),
-        "strict_pass_agent_wall_seconds": sum(float(item.get("agent_wall_seconds") or 0) for item in strict_items),
-        "strict_pass_api_cost": sum(float(((item.get("metrics") or {}).get("api_cost") or {}).get("total") or 0) for item in strict_items),
+        "peak_provider_bound_token_estimate": max(peak_values) if peak_values and None not in peak_values else None,
+        "mean_peak_provider_bound_token_estimate": sum(peak_values) / len(peak_values) if peak_values and None not in peak_values else None,
+        "peak_provider_prompt_tokens": max(prompt_peaks) if prompt_peaks and None not in prompt_peaks else None,
+        "strict_pass_agent_wall_seconds": sum_known(item.get("agent_wall_seconds") for item in strict_items),
+        "strict_pass_api_cost": sum_known(attempt_cost(item) for item in strict_items),
     }
+    for key in ("agent_wall_seconds", "lifecycle_wall_seconds", "judge_seconds"):
+        bucket[key] = sum_known(attempt.get(key) for attempt in attempts)
+    for key in (
+        "main_model_calls", "all_model_calls", "child_sessions", "tool_calls", "recovery_tool_calls",
+        "tool_result_bytes_shown", "automatic_refinement_applied", "automatic_refinement_model_calls",
+        "compaction_requests", "compaction_completions", "compaction_failures", "provider_prompt_token_sum",
+        "provider_prompt_sample_count", "explicit_compiler_calls", "explicit_compiler_cost",
+        "automatic_compiler_calls", "automatic_compiler_cost", "final_response_tokens", "archive_writes", "archive_bytes",
+    ):
+        bucket[key] = sum_known(item.get(key) for item in metrics)
+    prompt_sum, prompt_count = bucket["provider_prompt_token_sum"], bucket["provider_prompt_sample_count"]
+    bucket["average_provider_prompt_tokens"] = prompt_sum / prompt_count if prompt_count and prompt_sum is not None else None
+    return bucket
 
 
 def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
-    selected = [(result, selected_attempt(result)) for result in results]
+    primaries = [(result, attempt) for result in results if (attempt := primary_attempt(result)) is not None]
     by_variant: dict[str, Any] = {}
     by_pressure: dict[str, Any] = {}
-    for variant in VARIANTS:
-        items = [(r, a) for r, a in selected if r["variant"] == variant]
-        if items:
+    for variant in sorted({result["variant"] for result in results}):
+        items = [(r, a) for r, a in primaries if r["variant"] == variant]
+        if any(result["variant"] == variant for result in results):
             bucket = aggregate_bucket(items)
             retained = [result for result in results if result["variant"] == variant]
-            primary_items = [(result, result["attempts"][0]) for result in retained if result.get("attempts")]
+            primary_items = items
             all_attempt_items = [
                 (result, attempt)
                 for result in retained
@@ -1282,36 +1296,36 @@ def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             bucket["retained_attempts"] = all_attempts["runs"]
             bucket["cost_per_completed_task"] = (
                 all_attempts["api_cost"]["total"] / bucket["strict_passes"]
-                if bucket["strict_passes"] else None
+                if bucket["strict_passes"] and all_attempts["api_cost"]["total"] is not None else None
             )
             bucket["agent_seconds_per_completed_task"] = (
                 all_attempts["agent_wall_seconds"] / bucket["strict_passes"]
-                if bucket["strict_passes"] else None
+                if bucket["strict_passes"] and all_attempts["agent_wall_seconds"] is not None else None
             )
             by_variant[variant] = bucket
     for pressure in ("N", "L", "M", "H"):
-        pressure_items = [(r, a) for r, a in selected if r["pressure"] == pressure]
+        pressure_items = [(r, a) for r, a in primaries if r["pressure"] == pressure]
         if pressure_items:
             by_pressure[pressure] = {}
-            for variant in VARIANTS:
+            for variant in sorted({result["variant"] for result in results}):
                 selected_pressure = [(r, a) for r, a in pressure_items if r["variant"] == variant]
                 if not selected_pressure:
                     continue
                 bucket = aggregate_bucket(selected_pressure)
                 pressure_results = [r for r in results if r["pressure"] == pressure and r["variant"] == variant]
                 bucket["primary"] = aggregate_bucket([
-                    (r, r["attempts"][0]) for r in pressure_results if r.get("attempts")
+                    (r, attempt) for r in pressure_results if (attempt := primary_attempt(r)) is not None
                 ])
                 bucket["all_attempts"] = aggregate_bucket([
                     (r, attempt) for r in pressure_results for attempt in r.get("attempts") or []
                 ])
                 by_pressure[pressure][variant] = bucket
-    by_key = {(r["task_id"], r["variant"]): a for r, a in selected}
+    by_key = {(r["task_id"], r["variant"]): a for r, a in primaries}
     matched: list[dict[str, Any]] = []
     current_correctness_wins: list[dict[str, Any]] = []
     baseline_failures: list[dict[str, Any]] = []
     regressions: list[dict[str, Any]] = []
-    task_ids = sorted({r["task_id"] for r, _ in selected})
+    task_ids = sorted({result["task_id"] for result in results})
     complete_pairs = 0
     for task_id in task_ids:
         current = by_key.get((task_id, "current"))
@@ -1360,16 +1374,17 @@ def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
             comparison = {
                 "task_id": task_id,
                 "baseline": "vanilla",
-                "agent_wall_delta_current_minus_baseline": float(current.get("agent_wall_seconds") or 0) - float(vanilla.get("agent_wall_seconds") or 0),
-                "api_cost_delta_current_minus_baseline": attempt_cost(current) - attempt_cost(vanilla),
-                "provider_tokens_delta_current_minus_baseline": int((((current.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens")) or 0) - int((((vanilla.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens")) or 0),
+                "agent_wall_delta_current_minus_baseline": difference_known(current.get("agent_wall_seconds"), vanilla.get("agent_wall_seconds")),
+                "api_cost_delta_current_minus_baseline": difference_known(attempt_cost(current), attempt_cost(vanilla)),
+                "provider_tokens_delta_current_minus_baseline": difference_known(((current.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens"), ((vanilla.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens")),
             }
+            comparison["complete"] = all(comparison[key] is not None for key in ("agent_wall_delta_current_minus_baseline", "api_cost_delta_current_minus_baseline"))
             matched.append(comparison)
             for kind, key in (
                 ("speed", "agent_wall_delta_current_minus_baseline"),
                 ("cost", "api_cost_delta_current_minus_baseline"),
             ):
-                if comparison[key] >= 0:
+                if comparison[key] is not None and comparison[key] >= 0:
                     regressions.append({
                         "task_id": task_id,
                         "baseline": "vanilla",
@@ -1380,21 +1395,24 @@ def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         len(task_ids) == 30
         and complete_pairs == 30
         and len(matched) + len(current_correctness_wins) == 30
+        and all(item["complete"] for item in matched)
         and not regressions
     )
     return {
         "schema": "prime-context.python-realworld-summary/v1",
         "generated_at": utc_now(),
-        "selection_policy": "correctness first; one diagnostic retry is retained after a failure or current regression; a strict current pass over a failed vanilla baseline is a current correctness win",
+        "selection_policy": "first valid attempt is the headline, including failures; strict-failure retries are diagnostic only; exact confirmed capacity invalidations do not consume the retry allowance",
         "metric_priority": ["completion_progress_and_success", "agent_wall_seconds", "api_cost"],
         "metric_limitations": [
             "Vanilla does not expose Prime Context auxiliary accounting; unavailable fields remain null rather than estimated.",
             "Actual provider prompt tokens use input + cache-read + cache-write per solver call; tokens are supporting data, while cost is the cost-efficiency gate.",
-            "Task efficiency uses the selected strict attempt; aggregate totals also retain retry time and cost.",
+            "Task correctness and efficiency use only the primary valid attempt. All retained attempts, including failures and capacity invalidations, keep their time and spend.",
+            "Missing usage, cost, or timing remains null/incomplete and cannot establish an efficiency win. Native costs are labelled catalog-rate estimates, not billed invoices.",
         ],
         "by_variant": by_variant,
         "by_pressure": by_pressure,
         "matched_strict_pass_comparisons": matched,
+        "incomplete_comparisons": [item for item in matched if not item["complete"]],
         "current_correctness_wins": current_correctness_wins,
         "baseline_failures": baseline_failures,
         "regressions": regressions,
@@ -1408,104 +1426,106 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
         "# Python Real-World 30 Results", "", f"Generated: {summary['generated_at']}", "",
         f"Publication ready: {'yes' if summary.get('publication_ready') else 'no'}.", "",
         f"Publication protocol blockers: {', '.join(summary.get('publication_blockers') or []) or 'none'}.", "",
-        "Metric priority: completion/progress, then agent elapsed time, then cost.", "",
-        "Selection: correctness first; one diagnostic retry follows a failure or current regression, and all attempts remain in totals.", "",
-        "## Metric limitations", "",
-        *[f"- {item}" for item in summary.get("metric_limitations", [])], "",
+        "Headlines use the first valid attempt, including failures. Strict-failure retries are diagnostic only.",
+        "Confirmed provider-capacity invalidations do not consume the retry allowance. All retained time and spend remain below.",
+        "Unknown metrics are n/a, not zero. Metric priority: completion/progress, then agent time, then cost.", "",
+        "## Metric limitations", "", *[f"- {item}" for item in summary.get("metric_limitations", [])], "",
         "## Variant summary", "",
-        "| Variant | Tasks | Primary strict | Final strict | Progress | Attempts | Total agent s | Model calls | Tool calls | Provider tokens | Cache reuse | Total cost | Cost/completed |",
+        "| Variant | Tasks | Primary strict | Progress | Retained attempts | Capacity invalid | All agent s | Model attempts | Tool calls | Provider tokens | Cache reuse | All cost | Cost/primary completion |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for variant, item in summary["by_variant"].items():
-        all_attempts = item["all_attempts"]
-        reuse = all_attempts["prompt_cache_reuse"]
-        reuse_text = f"{reuse:.3f}" if reuse is not None else "n/a"
-        cost_per = item["cost_per_completed_task"]
-        cost_per_text = f"{cost_per:.6f}" if cost_per is not None else "n/a"
+        total = item["all_attempts"]
         lines.append(
-            f"| {variant} | {item['runs']} | {item['primary']['strict_passes']} | {item['strict_passes']} | "
-            f"{item['mean_progress']:.3f} | {all_attempts['runs']} | {all_attempts['agent_wall_seconds']:.3f} | "
-            f"{all_attempts['all_model_calls']} | {all_attempts['tool_calls']} | {all_attempts['provider_usage']['totalTokens']} | "
-            f"{reuse_text} | {all_attempts['api_cost']['total']:.6f} | {cost_per_text} |"
+            f"| {variant} | {item['runs']} | {item['strict_passes']} | {metric_text(item['mean_progress'])} | "
+            f"{total['runs']} | {total['capacity_invalid_runs']} | {metric_text(total['agent_wall_seconds'])} | "
+            f"{metric_text(total['all_model_calls'], 0)} | {metric_text(total['tool_calls'], 0)} | "
+            f"{metric_text(total['provider_usage']['totalTokens'], 0)} | {metric_text(total['prompt_cache_reuse'])} | "
+            f"{metric_text(total['api_cost']['total'], 6)} | {metric_text(item['cost_per_completed_task'], 6)} |"
         )
     lines.extend(["", "### Explanatory totals", ""])
     for variant, item in summary["by_variant"].items():
         total = item["all_attempts"]
-        auxiliary = total["auxiliary_model_calls_by_kind"]
-        zero = total["zero_extra_call_share"]
+        auxiliary = ", ".join(f"{kind}={metric_text(value, 0)}" for kind, value in total["auxiliary_model_calls_by_kind"].items())
+        purposes = ", ".join(f"{kind}={metric_text(value, 0)}" for kind, value in total["model_calls_by_purpose"].items()) or "n/a"
         lines.append(
-            f"- **{variant}**: auxiliary={auxiliary}; zero-extra-call-share={zero if zero is not None else 'not exposed'}; "
-            f"compactions={total['compaction_completions']}/{total['compaction_requests']} "
-            f"(failures={total['compaction_failures']}); child-sessions={total['child_sessions']}; "
-            f"recovery-calls={total['recovery_tool_calls']}; auto-refinement-model-calls={total['automatic_refinement_model_calls']}; "
-            f"auto-refinements-applied={total['automatic_refinement_applied']}; "
-            f"peak-provider-estimate={total['peak_provider_bound_token_estimate']}; "
-            f"actual-provider-prompt=peak {total['peak_provider_prompt_tokens']}/average {total['average_provider_prompt_tokens']}; "
-            f"compiler=explicit {total['explicit_compiler_calls']} calls/{total['explicit_compiler_cost']} cost, "
-            f"automatic {total['automatic_compiler_calls']} calls/{total['automatic_compiler_cost']} cost; "
-            f"archive={total['archive_writes']} writes/{total['archive_bytes']} bytes; "
-            f"tool-result-visible-bytes={total['tool_result_bytes_shown']}."
+            f"- **{variant}**: auxiliary {auxiliary}; native purposes {purposes}; "
+            f"cost basis={','.join(total['cost_bases']) or 'unavailable'}; "
+            f"usage complete={total['usage_complete']}; cost complete={total['cost_complete']}; "
+            f"zero-extra-call-share={metric_text(total['zero_extra_call_share'])}; "
+            f"compactions={metric_text(total['compaction_completions'], 0)}/{metric_text(total['compaction_requests'], 0)} "
+            f"(failures={metric_text(total['compaction_failures'], 0)}); child sessions={metric_text(total['child_sessions'], 0)}; "
+            f"recovery calls={metric_text(total['recovery_tool_calls'], 0)}; "
+            f"automatic refinement calls={metric_text(total['automatic_refinement_model_calls'], 0)}; "
+            f"refinements applied={metric_text(total['automatic_refinement_applied'], 0)}; "
+            f"provider prompt peak/average={metric_text(total['peak_provider_prompt_tokens'], 0)}/{metric_text(total['average_provider_prompt_tokens'])}; "
+            f"explicit compiler calls/cost={metric_text(total['explicit_compiler_calls'], 0)}/{metric_text(total['explicit_compiler_cost'], 6)}; "
+            f"automatic compiler calls/cost={metric_text(total['automatic_compiler_calls'], 0)}/{metric_text(total['automatic_compiler_cost'], 6)}; "
+            f"archive writes/bytes={metric_text(total['archive_writes'], 0)}/{metric_text(total['archive_bytes'], 0)}; "
+            f"visible tool-result bytes={metric_text(total['tool_result_bytes_shown'], 0)}."
         )
     lines.extend([
         "", "## Pressure classes", "",
-        "| Pressure | Variant | Tasks | Primary strict | Final strict | Attempts | Total agent s | Total cost |",
+        "| Pressure | Variant | Tasks | Primary strict | Retained attempts | Capacity invalid | All agent s | All cost |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ])
     for pressure, variants in summary["by_pressure"].items():
         for variant, item in variants.items():
             total = item["all_attempts"]
             lines.append(
-                f"| {pressure} | {variant} | {item['runs']} | {item['primary']['strict_passes']} | "
-                f"{item['strict_passes']} | {total['runs']} | {total['agent_wall_seconds']:.3f} | {total['api_cost']['total']:.6f} |"
+                f"| {pressure} | {variant} | {item['runs']} | {item['strict_passes']} | {total['runs']} | "
+                f"{total['capacity_invalid_runs']} | {metric_text(total['agent_wall_seconds'])} | {metric_text(total['api_cost']['total'], 6)} |"
             )
     lines.extend([
         "", "## Task results", "",
-        "| Task | Variant | Attempts | Primary | Selected | Strict | Progress | Selected agent s | All-attempt agent s | Model calls | Tool calls | Tokens | Cost |",
-        "|---:|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Task | Variant | Retained attempts | Primary attempt | Primary strict | Progress | Primary agent s | Primary cost | All agent s | All cost |",
+        "|---:|---|---:|---:|---|---:|---:|---:|---:|---:|",
     ])
     for result in sorted(results, key=lambda item: (item["task_id"], item["variant"])):
-        attempt = selected_attempt(result)
+        primary = primary_attempt(result)
         attempts = result.get("attempts") or []
-        all_bucket = aggregate_bucket([(result, item) for item in attempts])
-        progress = int((attempt.get("judge") or {}).get("progress_level") or 0)
+        all_bucket = aggregate_bucket([(result, attempt) for attempt in attempts])
+        index = primary_attempt_index(attempts)
+        score = "unscored" if primary is None else "yes" if strict_pass(primary) else "no"
+        value = primary or {}
         lines.append(
-            f"| {result['task_id']:02d} | {result['variant']} | {len(attempts)} | 1 | {result['selected_attempt'] + 1} | "
-            f"{'yes' if strict_pass(attempt) else 'no'} | {progress} | {float(attempt.get('agent_wall_seconds') or 0):.3f} | "
-            f"{all_bucket['agent_wall_seconds']:.3f} | {all_bucket['all_model_calls']} | {all_bucket['tool_calls']} | "
-            f"{all_bucket['provider_usage']['totalTokens']} | {all_bucket['api_cost']['total']:.6f} |"
+            f"| {result['task_id']:02d} | {result['variant']} | {len(attempts)} | {index + 1 if index is not None else 'n/a'} | "
+            f"{score} | {metric_text((value.get('judge') or {}).get('progress_level'), 0)} | "
+            f"{metric_text(value.get('agent_wall_seconds'))} | {metric_text(attempt_cost(value), 6)} | "
+            f"{metric_text(all_bucket['agent_wall_seconds'])} | {metric_text(all_bucket['api_cost']['total'], 6)} |"
         )
     lines.extend([
         "", "## Current correctness wins", "",
-        "A strict current pass over a failed vanilla baseline is a decisive correctness win; efficiency is not compared for that task.", "",
-        "| Task | Baseline | Current | Vanilla |",
-        "|---:|---|---|---|",
+        "Only primary valid attempts are compared. No efficiency claim is made when the primary baseline fails.", "",
+        "| Task | Baseline | Current | Vanilla |", "|---:|---|---|---|",
     ])
     for item in summary["current_correctness_wins"]:
         lines.append(
-            f"| {item['task_id']:02d} | {item['baseline']} | "
-            f"progress {item['current_progress']}, {item['current_main_checks_passed']}/5, edge={item['current_edge_check_passed']} | "
+            f"| {item['task_id']:02d} | {item['baseline']} | progress {item['current_progress']}, "
+            f"{item['current_main_checks_passed']}/5, edge={item['current_edge_check_passed']} | "
             f"progress {item['baseline_progress']}, {item['baseline_main_checks_passed']}/5, edge={item['baseline_edge_check_passed']} |"
         )
     if not summary["current_correctness_wins"]:
         lines.append("| — | — | — | — |")
     lines.extend([
-        "", "## Matched strict-pass comparisons", "",
-        "Efficiency is compared only where both current and the baseline strictly passed.", "",
-        "| Task | Baseline | Current−baseline agent s | Current−baseline cost | Current−baseline provider tokens |",
-        "|---:|---|---:|---:|---:|",
+        "", "## Matched strict-pass primary comparisons", "",
+        "Unknown time or cost leaves the efficiency comparison incomplete, not a win.", "",
+        "| Task | Baseline | Current−baseline agent s | Current−baseline cost | Current−baseline tokens | Complete |",
+        "|---:|---|---:|---:|---:|---|",
     ])
     for item in summary["matched_strict_pass_comparisons"]:
         lines.append(
-            f"| {item['task_id']:02d} | {item['baseline']} | {item['agent_wall_delta_current_minus_baseline']:.3f} | "
-            f"{item['api_cost_delta_current_minus_baseline']:.6f} | {item['provider_tokens_delta_current_minus_baseline']} |"
+            f"| {item['task_id']:02d} | {item['baseline']} | {metric_text(item['agent_wall_delta_current_minus_baseline'])} | "
+            f"{metric_text(item['api_cost_delta_current_minus_baseline'], 6)} | "
+            f"{metric_text(item['provider_tokens_delta_current_minus_baseline'], 0)} | {'yes' if item['complete'] else 'no'} |"
         )
     if not summary["matched_strict_pass_comparisons"]:
-        lines.append("| — | — | — | — | — |")
+        lines.append("| — | — | — | — | — | — |")
     lines.extend(["", "## Regressions", ""])
-    if summary["regressions"]:
-        lines.extend(f"- Task {item['task_id']:02d} vs {item['baseline']}: {item['kind']} ({item})" for item in summary["regressions"])
-    else:
-        lines.append("None in the selected runs.")
+    lines.extend(
+        [f"- Task {item['task_id']:02d} vs {item['baseline']}: {item['kind']} ({item})" for item in summary["regressions"]]
+        or ["None observed in the primary valid attempts. Unavailable metrics do not establish a win."]
+    )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -1746,52 +1766,12 @@ def main() -> int:
                         "task_slug": scenarios[task_id][1]["slug"],
                         "pressure": scenarios[task_id][1]["pressure"],
                         "primary_attempt": 0,
-                        "selected_attempt": 0,
                         "retry_triggers": [],
                         "attempts": [{"error": f"{type(exc).__name__}: {exc}", "judge": {"status": "error", "progress_level": 0}, "metrics": {}}],
                     }
                 results.append(result)
                 json_dump(args.output / "results.partial.json", results)
-                print(f"finished task {task_id:02d} {variant}: progress {(selected_attempt(result).get('judge') or {}).get('progress_level', 0)}", flush=True)
-        if args.retry_failed and {"vanilla", "current"}.issubset(variants):
-            wave_by_key = {
-                (result["task_id"], result["variant"]): result
-                for result in results
-                if result["task_id"] in group
-            }
-            retry_jobs: list[tuple[int, dict[str, Any], list[str]]] = []
-            for task_id in group:
-                vanilla = wave_by_key.get((task_id, "vanilla"))
-                current = wave_by_key.get((task_id, "current"))
-                if vanilla is None or current is None:
-                    continue
-                reasons = comparison_retry_reasons(vanilla, current)
-                if reasons:
-                    retry_jobs.append((task_id, current, reasons))
-            if retry_jobs:
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(args.max_workers, len(retry_jobs))
-                ) as executor:
-                    retry_futures = {
-                        executor.submit(
-                            retry_case_for_regression,
-                            result,
-                            scenarios[task_id][0],
-                            scenarios[task_id][1],
-                            args.output,
-                            args,
-                            reasons,
-                        ): (task_id, reasons)
-                        for task_id, result, reasons in retry_jobs
-                    }
-                    for future in concurrent.futures.as_completed(retry_futures):
-                        task_id, reasons = retry_futures[future]
-                        future.result()
-                        json_dump(args.output / "results.partial.json", results)
-                        print(
-                            f"retried task {task_id:02d} current after {','.join(reasons)}",
-                            flush=True,
-                        )
+                print(f"finished task {task_id:02d} {variant}: progress {((primary_attempt(result) or {}).get('judge') or {}).get('progress_level', 0)}", flush=True)
     results.sort(key=lambda item: (item["task_id"], item["variant"]))
     summary = comprehensive_summary(results)
     summary["publication_protocol"] = manifest["publication_protocol"]

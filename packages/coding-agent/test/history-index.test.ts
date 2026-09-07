@@ -40,6 +40,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	expect(await index.get("session", "Item", { leafId: "item", through: 2 })).toEqual(events[0]);
 	expect(await index.get("session", "item", { leafId: "Item", through: 2 })).toBeUndefined();
 	expect(await index.get("other", "Item")).toBeUndefined();
+	await expect(index.getSource("session", "Item", 2)).rejects.toThrow("index is unavailable");
 	await expect(index.contextManifest("session", { leafId: "item", through: 2 })).rejects.toThrow(
 		"index is unavailable",
 	);
@@ -63,9 +64,11 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 				type,
 				...(type === "message" ? { message: { role: "user", content: text } } : { request: { text } }),
 			});
-		await owner.appendJson(entry("root", null, "source root"));
+		await owner.appendJson(entry("root", null, "source root"), "retained-import");
 		const first = owner.getSnapshot();
-		await owner.appendJson(entry("sibling", "root", "sibling only"));
+		const siblingJson =
+			'{ "id":"sibling", "parentId":"root", "type":"message", "message":{"role":"user","content":"sibling only"}, "retention":"retained-import", "lexeme":1e+03 }';
+		await owner.appendJson(siblingJson);
 		const firstSync = index.syncSource("canonical", first);
 		const child = Reflect.get(index, "child");
 		const closing = index.close();
@@ -75,6 +78,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
 		expect(await index.get("canonical", "sibling")).toBeUndefined();
 		const indexed = await index.get("canonical", "root");
+		expect(indexed?.retention).toBe("retained-import");
+		expect(await index.getSource("canonical", "root", 1)).toEqual(indexed);
 		expect(indexed?.locator).toEqual({
 			path: journalPath,
 			offset: header.byteLength,
@@ -100,6 +105,16 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"root-request",
 		]);
 		expect(await index.get("canonical", "sibling", { ...scope, through: 5 })).toBeUndefined();
+		const sibling = await index.getSource("canonical", "sibling", 5);
+		expect(sibling).toMatchObject({ id: "sibling", sequence: 2 });
+		expect(sibling?.retention).toBeUndefined();
+		expect((await index.page("canonical", 0, 5, 1)).events).toEqual([indexed]);
+		expect(await index.readSourcePayload("canonical", "sibling", 5)).toMatchObject({
+			text: siblingJson,
+			nextCursor: null,
+		});
+		expect(await index.getSource("canonical", "sibling", 1)).toBeUndefined();
+		expect(await index.readSourcePayload("canonical", "sibling", 1)).toBeUndefined();
 		expect((await index.search("canonical", "sibling", 5, 16, scope)).events).toEqual([]);
 		expect((await index.search("canonical", "absent", 5, 16, { leafId: "sibling" })).coverage).toBe("complete");
 		expect((await index.search("canonical", "absent", 5, 16, scope)).coverage).toBe("partial");
@@ -285,6 +300,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const resumed = await index.taskEvidence("canonical", taskScope, { taskKey, limit: 1, after: limited.nextAfter });
 		expect(resumed.entries[0]).toMatchObject({ truncated: false, projection: { itemId: "Tail" } });
 		const payload = await index.readPayload("canonical", "huge-task", taskScope);
+		expect(await index.readSourcePayload("canonical", "huge-task", taskScope.through)).toEqual(payload);
 		expect(payload?.format).toBe("canonical-json-fragment");
 		expect(payload?.byteOffset).toBe(0);
 		expect(payload!.byteLength).toBeLessThanOrEqual(64 * 1024);
@@ -294,6 +310,12 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			cursor: payload!.nextCursor!,
 			maxBytes: 31,
 		});
+		expect(
+			await index.readSourcePayload("canonical", "huge-task", taskScope.through, {
+				cursor: payload!.nextCursor!,
+				maxBytes: 31,
+			}),
+		).toEqual(continuation);
 		expect(continuation?.byteOffset).toBe(payload!.byteLength);
 		expect(continuation?.text).toBe(
 			Buffer.from(hugeJson)
@@ -803,7 +825,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; DROP TABLE context_node; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; DROP TABLE context_node; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -819,6 +841,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		});
 		await index.syncSource("canonical", taskSnapshot);
 		expect((await index.get("canonical", "root"))?.authority).toBe("unrecorded");
+		expect((await index.getSource("canonical", "root", taskScope.through))?.retention).toBe("retained-import");
 		expect((await index.taskEvidence("canonical", taskScope, { taskKey })).entries).toHaveLength(16);
 		expect((await index.readPayload("canonical", "huge-task", taskScope))?.text).toBe(payload?.text);
 		const before = readFileSync(journalPath);
@@ -1071,6 +1094,9 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.readPayload("edge", "staged", { leafId: "staged", through: 2 })).rejects.toThrow(
 			"requested source prefix",
 		);
+		await expect(index.getSource("edge", "kept", 2)).rejects.toThrow("requested source prefix");
+		await expect(index.readSourcePayload("edge", "kept", 2)).rejects.toThrow("requested source prefix");
+		await expect(index.getSource("edge", "kept", -1)).rejects.toThrow("Invalid history source prefix");
 		await expect(index.syncSource("wrong-session", snapshot)).rejects.toThrow("session identity");
 		await index.syncSource("edge", snapshot);
 		expect(
@@ -1201,6 +1227,9 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(
 			index.readPayload("edge", "staged", { leafId: "staged", through: snapshot.nextSequence - 1 }),
 		).rejects.toThrow("source identity");
+		await expect(index.readSourcePayload("edge", "staged", snapshot.nextSequence - 1)).rejects.toThrow(
+			"source identity",
+		);
 		expect(readFileSync(journalPath)).toEqual(bytes);
 	} finally {
 		await owner.close();

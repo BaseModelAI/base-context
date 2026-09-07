@@ -73,17 +73,25 @@ python3.12 -E -S run.py \
 ```
 
 Each wave contains three tasks in two flavors, for at most six isolated agent
-processes. A non-strict primary receives one retry. When both primaries strictly
-pass but current is not faster or cheaper, current receives one retry. There are
-never more than two attempts for one task/variant. Both are retained, and
-correctness-first selection chooses the published comparison attempt.
+processes. The first valid attempt is the primary and drives every headline,
+including when it fails. A non-strict primary may receive one diagnostic retry
+in either arm. A retry never replaces the primary. Speed or cost regressions do
+not trigger retries.
+
+An exact confirmed provider error, `Selected model is at capacity.`, invalidates
+that run. Native receipts expose this as `capacityConfirmed: true`; legacy RPC
+requires the exact assistant error message. These invalidations do not consume
+the primary or retry allowance. Their attempts and any incurred spend remain in
+the output. At most two **valid** attempts run per task/variant; capacity-invalid
+attempts are counted separately.
 
 The metric gates are ordered as requested: completion/progress, agent elapsed
 time, then cost. Provider tokens remain supporting diagnostic data.
 A comparison is publication-ready when current strictly passes all 30 tasks and,
-for each task, either vanilla fails after its one allowed retry (a current
-correctness win) or both variants strictly pass and current is faster and
-cheaper. Efficiency is not compared on a task that current wins on correctness.
+for each task, either the vanilla primary fails (a current primary correctness
+win) or both primaries strictly pass and current is faster and cheaper. Missing
+time or cost makes the efficiency comparison incomplete, not a win. Efficiency
+is not compared on a task that current wins on primary correctness.
 
 Each output root contains raw RPC events, a message transcript, stderr, service
 logs, full session JSONL files, the final workspace, per-attempt judge output,
@@ -114,14 +122,27 @@ The full local run remains under `results/`. Curated publication evidence under 
 ## Accounting
 
 Each attempt retains RPC events, the transcript, session data, the final
-workspace, judge output, and its result. Summaries report primary, selected, and
-all retained attempts separately. Efficiency comparisons include only pairs
-where both variants reach strict progress level 5.
+workspace, judge output, and its result. Headlines use the first valid primary.
+Diagnostic retries and capacity-invalid runs remain in all-attempt time and
+spend totals. Valid failures are never hidden by a later success.
 
-For `current`, the runner sets `PRIME_CONTEXT_BENCHMARK_METRICS` to an
-attempt-local file. Prime Context writes aggregate observational accounting for
-`semantic-distill`, `task-scout`, `stall-recovery`, and `knowledge-compile`
-calls. The runner combines their factual usage and cost with solver usage.
-Vanilla leaves unavailable auxiliary and refinement fields as `null`; they are
-never inferred. Provider prompt anchors count input, cache-read, and cache-write
-tokens and exclude output tokens.
+Base Context framed journals use canonical `request` entries. Accounting joins
+`attempt_admitted` and `attempt_settled` by physical `attemptId`, across session
+files, and includes failed as well as successful attempts. Assistant aggregate
+usage is not added: child attribution or replay can repeat the same spend.
+Native request-purpose counts replace auxiliary inference. Observational
+compiler totals are never added again to native receipt totals.
+
+Native receipts expose usage, not invoices. When the captured model contract
+has catalog rates and the required usage components are present, the runner
+labels the result `catalog_estimate`. Missing rates, usage components, receipts,
+or observed costs remain `null` with incomplete flags. Aggregates preserve
+unknown values; Markdown prints `n/a`. An unavailable total is never zero.
+
+The existing pinned host adapter also accepts raw assistant session accounting.
+For its `current` arm, `PRIME_CONTEXT_BENCHMARK_METRICS` points to an attempt-local
+observational file for `semantic-distill`, `task-scout`, `stall-recovery`, and
+`knowledge-compile`. Only this non-native path combines auxiliary and solver
+accounting. Missing current auxiliary data leaves the combined amount unknown.
+Vanilla leaves unavailable auxiliary/refinement fields unknown. Provider prompt
+anchors count input, cache-read, and cache-write tokens, excluding output.

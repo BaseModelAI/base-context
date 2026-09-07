@@ -46,7 +46,8 @@ if (
 		schemaVersion !== 6 &&
 		schemaVersion !== 7 &&
 		schemaVersion !== 8 &&
-		schemaVersion !== 9)
+		schemaVersion !== 9 &&
+		schemaVersion !== 10)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -59,7 +60,7 @@ db.exec(`
 	CREATE TABLE IF NOT EXISTS source_event (
 		session TEXT NOT NULL, id TEXT NOT NULL, sequence INTEGER NOT NULL,
 		parent_id TEXT, kind TEXT NOT NULL, authority TEXT NOT NULL,
-		locator TEXT NOT NULL, revision TEXT NOT NULL, text TEXT NOT NULL, text_complete INTEGER NOT NULL,
+		locator TEXT NOT NULL, revision TEXT NOT NULL, text TEXT NOT NULL, text_complete INTEGER NOT NULL, retention TEXT,
 		PRIMARY KEY(session,id), UNIQUE(session,sequence)
 	);
 	CREATE TABLE IF NOT EXISTS coverage(session TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
@@ -122,14 +123,23 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 9) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+	if (schemaVersion !== 10) {
+		if (
+			!db
+				.prepare("PRAGMA table_info(source_event)")
+				.all()
+				.some((column) => column.name === "retention")
+		)
+			db.exec("ALTER TABLE source_event ADD COLUMN retention TEXT");
+		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+	}
 	db.exec(`
  CREATE INDEX IF NOT EXISTS source_incomplete ON source_event(session,sequence) WHERE text_complete=0;
  CREATE INDEX IF NOT EXISTS task_sequence ON task_evidence(session,task_key,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=9");
+	db.exec("PRAGMA user_version=10");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -159,6 +169,7 @@ type Row = {
 	revision: string;
 	text: string;
 	text_complete: number;
+	retention: IndexedSourceEvent["retention"] | null;
 };
 function event(row: Row): IndexedSourceEvent {
 	return {
@@ -169,6 +180,7 @@ function event(row: Row): IndexedSourceEvent {
 		authority: row.authority,
 		locator: JSON.parse(row.locator) as IndexedSourceEvent["locator"],
 		revision: row.revision,
+		...(row.retention === null ? {} : { retention: row.retention }),
 		text: row.text,
 		textComplete: row.text_complete === 1,
 	};
@@ -188,7 +200,9 @@ function transaction(action: () => void): void {
 	}
 }
 function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
-	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?)").run(
+	if (item.retention !== undefined && item.retention !== "retained-import")
+		throw new Error("Unsupported indexed source retention");
+	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
 		sessionId,
 		item.id,
 		item.sequence,
@@ -199,6 +213,7 @@ function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 		item.revision,
 		item.text,
 		item.textComplete ? 1 : 0,
+		item.retention ?? null,
 	);
 	for (const term of terms(item.text)) {
 		insertTerm.run(sessionId, term, item.sequence);
@@ -318,6 +333,7 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			previous,
 			(entry, sequence, locator, revision, parts, retention) => {
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
+				if (retention !== undefined) item.retention = retention;
 				insertEvent(sessionId, item);
 				const depth = insertAncestry(sessionId, item);
 				insertContext(sessionId, item, entry, depth);
@@ -1013,6 +1029,19 @@ function readPayload(request: Extract<HistoryIndexRequest, { action: "read_paylo
 	if (!row) return undefined;
 	return readPayloadRow(request.sessionId, row, snapshot, request.options);
 }
+function selectSourceEvent(request: Extract<HistoryIndexRequest, { action: "get_source" | "read_source_payload" }>) {
+	const { sessionId, eventId, through } = request;
+	if (!Number.isSafeInteger(through) || through < 0) throw new Error("Invalid history source prefix");
+	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Canonical source index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < through)
+		throw new Error("Canonical source index has not reached the requested source prefix");
+	const row = db
+		.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?")
+		.get(sessionId, eventId, through) as Row | undefined;
+	return { row, snapshot };
+}
 function readPayloadRow(
 	sessionId: string,
 	row: SourceRefRow,
@@ -1067,6 +1096,14 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 		case "get": {
 			const row = pointEvent(request.sessionId, request.eventId, request.scope);
 			return row ? event(row) : undefined;
+		}
+		case "get_source": {
+			const { row } = selectSourceEvent(request);
+			return row ? event(row) : undefined;
+		}
+		case "read_source_payload": {
+			const { row, snapshot } = selectSourceEvent(request);
+			return row ? readPayloadRow(request.sessionId, row, snapshot, request.options) : undefined;
 		}
 		case "page":
 		case "search":

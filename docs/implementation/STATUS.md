@@ -340,3 +340,23 @@ These cover local source/control behavior, not provider or kernel execution. The
 project check passes (1015 files, TypeScript, installer and browser smoke); its three
 format-only changes do not alter the tested behavior. The earlier `6559f4a99` package
 probes do not cover this change.
+
+## Explicit captured history reads and reduced eager work
+
+Persistent managers now expose separate captured branch and whole-source read scopes.
+Exact hydration keeps the indexed source reference and retention outside the payload.
+Iteration and detached materialization require entry and source-byte limits and refuse
+incomplete results. Existing inference coordinator views remain branch-scoped. Full
+Manager and Agent history arrays still remain; this is not a complete resident-memory bound.
+
+Clone commands use leaf metadata without constructing a full tree. Initial in-process
+snapshots leave the optional tree for explicit retrieval. SDK startup reuses its branch
+walk. Compaction events use the saved ACK ID, including when summaries repeat. Connection
+state reads use an ACK-derived compaction count instead of scanning all entries.
+
+The benchmark runner now reports primary attempts, retains diagnostic/invalid attempts,
+and does not select performance-triggered replacements. Confirmed capacity invalidations
+do not consume the valid retry allowance. Missing usage and cost remain incomplete;
+native physical receipts are counted once and catalog estimates are not invoices.
+The inherited host/setup constraints still need migration before a model sample can run.
+No model campaign has started.

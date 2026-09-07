@@ -44,6 +44,46 @@ describe("session write isolation", () => {
 		managers.push(explicitImport);
 		expect(explicitImport.getEntryRetention(ownedInfoId)).toBe("retained-import");
 
+		const branchText = `Full inactive branch: ${"x".repeat(9000)}`;
+		const branchA = await session.appendMessage({ role: "user", content: branchText, timestamp: 1 });
+		session.branch(ownedInfoId);
+		const branchB = await session.appendMessage({ role: "user", content: "Current branch", timestamp: 2 });
+		const limits = { maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 };
+		const branchHistory = await session.materializeBranchHistory(limits);
+		const sourceHistory = await session.materializeSourceHistory(limits);
+		expect(branchHistory.scope).toBe("branch");
+		expect(branchHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchB]);
+		expect(sourceHistory.scope).toBe("source");
+		expect(sourceHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchA, branchB]);
+		expect(await session.getHistoryEntry(branchA)).toBeUndefined();
+		const hydrated = await session.readSourceHistory((history) => history.hydrateEntry(branchA, 64 * 1024));
+		expect(hydrated?.entry).toMatchObject({ id: branchA, message: { role: "user", content: branchText } });
+		expect(hydrated?.entry).not.toBe(session.getEntry(branchA));
+		expect(hydrated?.source.retention).toBeUndefined();
+		const iterated = await session.readSourceHistory(async (history) => {
+			const ids: string[] = [];
+			for await (const item of history.iterateEntries(limits)) ids.push(item.entry.id);
+			return ids;
+		});
+		expect(iterated).toEqual([ownedInfoId, branchA, branchB]);
+		await session.readSourceHistory(async (history) => {
+			const maxSourceBytes = Math.max(...sourceHistory.entries.map((item) => item.source.locator.length));
+			const iterator = history.iterateEntries({ ...limits, maxSourceBytes });
+			const first = await iterator.next();
+			if (first.done) throw new Error("Expected the first history entry");
+			first.value.source.locator.length = 0;
+			await expect(iterator.next()).rejects.toThrow("source byte budget exceeded");
+		});
+		await expect(session.materializeSourceHistory({ ...limits, maxEntries: 1 })).rejects.toThrow(
+			"entry budget exceeded",
+		);
+		await expect(session.materializeSourceHistory({ ...limits, maxSourceBytes: 1 })).rejects.toThrow(
+			"source byte budget exceeded",
+		);
+		await expect(session.readSourceHistory((history) => history.hydrateEntry(branchA, 1))).rejects.toThrow(
+			"entry source byte budget exceeded",
+		);
+
 		const submittedText = "  Keep Foo.txt != foo.txt exactly.  ";
 		const longText = `Exact original text: ${"x".repeat(1024 * 1024)}`;
 		const inputOrigin = {
@@ -137,6 +177,18 @@ describe("session write isolation", () => {
 		expect(copied.getEntryRetention("Imported-Goal")).toBe("retained-import");
 		expect(copied.getEntryRetention(newNativeId)).toBeUndefined();
 		expect(copied.getEntry("Imported-User")?.nativeOrigin).toEqual(inputOrigin);
+		const cold = await copied.readSourceHistory((history) =>
+			history.hydrateEntry("Imported-User", limits.maxSourceBytes),
+		);
+		expect(cold?.entry.nativeOrigin).toEqual(inputOrigin);
+		expect(cold?.entry).not.toBe(copied.getEntry("Imported-User"));
+		expect(cold?.source).toMatchObject({ id: "Imported-User", retention: "retained-import" });
+		const retainedHistory = await copied.materializeSourceHistory(limits);
+		expect(retainedHistory.entries.map((item) => item.source.retention)).toEqual([
+			"retained-import",
+			"retained-import",
+			undefined,
+		]);
 		expect(readFileSync(rawPath, "utf8")).toBe(raw);
 
 		const migrated = await SessionManager.open(rawPath, ownedDir);
@@ -156,7 +208,22 @@ describe("session write isolation", () => {
 		await expect(SessionManager.create(dir, join(dir, ".prime", "new"))).rejects.toThrow("cannot write legacy state");
 		const session = await SessionManager.create(dir, join(dir, "owned"));
 		managers.push(session);
-		await session.appendSessionInfo("owned");
+		const ownedId = await session.appendSessionInfo("owned");
+		const originalSource = session.getSessionId();
+		const escaped = await session.readSourceHistory(async (history) => {
+			const lateId = await session.appendSessionInfo("outside captured prefix");
+			await session.pageHistory();
+			expect(await history.get(lateId)).toBeUndefined();
+			await session.newSession();
+			const replacementId = await session.appendSessionInfo("owned replacement");
+			expect(history.source.sessionId).toBe(originalSource);
+			expect(await history.hydrateEntry(ownedId, 64 * 1024)).toMatchObject({
+				entry: { id: ownedId, name: "owned" },
+			});
+			expect(await history.get(replacementId)).toBeUndefined();
+			return history;
+		});
+		await expect(escaped.get(ownedId)).rejects.toThrow("Captured history read has ended");
 		const path = session.getSessionFile()!;
 		rmSync(path);
 		symlinkSync(legacyFile, path);

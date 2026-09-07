@@ -46,7 +46,7 @@ export function createAgentConnectionState(
 		autoCompactionEnabled: session.autoCompactionEnabled,
 		messageCount: session.messages.length,
 		sessionActions: session.getSessionActionSnapshot(),
-		compactionCount: sessionManager.getEntries().filter((entry) => entry.type === "compaction").length,
+		compactionCount: sessionManager.getCompactionCount(),
 		goal: session.goalState,
 		scopedModels: session.scopedModels.map((scoped) => ({
 			model: toConnectionModel(scoped.model),
@@ -64,16 +64,11 @@ export function createAgentConnectionSnapshot(
 	activeSessionId?: string,
 ): AgentConnectionSnapshot {
 	const session = runtime.session;
-	const sessionManager = session.sessionManager;
 	return {
 		state: createAgentConnectionState(runtime, activeSessionId),
 		messages: [...session.messages],
 		...(session.state?.streamingMessage ? { streamingMessage: session.state.streamingMessage } : {}),
 		sessionContext: session.buildSessionContext(),
-		sessionTree: {
-			tree: sessionManager.getTree(),
-			leafId: sessionManager.getLeafId(),
-		},
 		children: session.getRlmChildSnapshots(),
 	};
 }

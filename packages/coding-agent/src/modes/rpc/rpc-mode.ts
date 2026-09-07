@@ -317,7 +317,7 @@ async function runRpcModeWithConnectionInternal(
 				return success(id, command.type, { text: result.selectedText, cancelled: result.cancelled });
 			}
 			case "clone": {
-				const { leafId } = await connection.getSessionTree();
+				const { leafId } = await connection.getState();
 				if (!leafId) return error(id, command.type, "Cannot clone session: no current entry selected");
 				const result = await connection.fork(leafId, { position: "at" });
 				return success(id, command.type, { cancelled: result.cancelled });

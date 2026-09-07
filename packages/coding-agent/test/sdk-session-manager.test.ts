@@ -33,6 +33,9 @@ describe("createAgentSession session manager defaults", () => {
 			cwd,
 			agentDir,
 			model: model!,
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
 		});
 
 		const expectedSessionDir = join(agentDir, "sessions");
@@ -42,7 +45,7 @@ describe("createAgentSession session manager defaults", () => {
 		expect(sessionDir).toBe(expectedSessionDir);
 		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
 
-		session.dispose();
+		await session.disposeAsync();
 	});
 
 	it("keeps an explicit sessionManager override", async () => {
@@ -50,17 +53,26 @@ describe("createAgentSession session manager defaults", () => {
 		expect(model).toBeTruthy();
 
 		const sessionManager = SessionManager.inMemory(cwd);
+		await sessionManager.appendMessage({ role: "user", content: "Existing session", timestamp: 1 });
+		await sessionManager.appendThinkingLevelChange("off");
+		await sessionManager.appendServiceTierChange("default");
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir,
 			model: model!,
 			sessionManager,
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
 		});
 
 		expect(session.sessionManager).toBe(sessionManager);
 		expect(session.sessionManager.isPersisted()).toBe(false);
+		expect(session.thinkingLevel).toBe("off");
+		expect(sessionManager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(1);
+		expect(sessionManager.getEntries().filter((entry) => entry.type === "service_tier_change")).toHaveLength(1);
 
-		session.dispose();
+		await session.disposeAsync();
 	});
 
 	it("derives cwd from an explicit sessionManager when cwd is omitted", async () => {

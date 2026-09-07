@@ -9,3 +9,4 @@
 - Reconstructed detached canonical context through an active revision cache with explicit message and canonical-source-byte limits.
 - Connected persistent native requests to the same captured compiler and receipt source, preserving transient outcomes and exact native retry removals.
 - Qualified controlled legacy/imported history outside unchanged JSON payloads, preserved that qualification through forks, and kept imported task claims and goals from gaining native authority or activation.
+- Added captured branch/whole-source readers and entry/byte-capped detached materialization. Reduced eager tree work and used exact ACK IDs for compaction events.

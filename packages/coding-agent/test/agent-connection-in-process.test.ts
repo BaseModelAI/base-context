@@ -82,6 +82,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 			getSessionDir: () => "/tmp/prime-agent-sessions",
 			getLeafId: () => `${id}-leaf`,
 			getEntries: () => [],
+			getCompactionCount: () => 0,
 			getTree: () => [],
 			buildSessionContext,
 		},
@@ -255,6 +256,8 @@ describe("InProcessAgentConnection", () => {
 	it("builds initial snapshots from the current runtime", async () => {
 		const messages = [userMessage("snapshot context", 1)];
 		const session = createFakeSession("snapshot", messages);
+		const getTree = vi.spyOn(session.session.sessionManager, "getTree");
+		const getEntries = vi.spyOn(session.session.sessionManager, "getEntries");
 		const runtime = new FakeRuntime(session.session);
 		const connection = new InProcessAgentConnection(asRuntime(runtime));
 
@@ -273,11 +276,12 @@ describe("InProcessAgentConnection", () => {
 				thinkingLevel: "medium",
 				model: null,
 			},
-			sessionTree: {
-				tree: [],
-				leafId: "snapshot-leaf",
-			},
 		});
+		expect(snapshot).not.toHaveProperty("sessionTree");
+		expect(getTree).not.toHaveBeenCalled();
+		expect(getEntries).not.toHaveBeenCalled();
+		await expect(connection.getSessionTree()).resolves.toEqual({ tree: [], leafId: "snapshot-leaf" });
+		expect(getTree).toHaveBeenCalledOnce();
 		messages.push(userMessage("later context", 2));
 		expect(snapshot.messages).toEqual([userMessage("snapshot context", 1)]);
 	});

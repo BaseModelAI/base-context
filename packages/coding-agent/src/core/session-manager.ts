@@ -21,7 +21,7 @@ import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import type {
 	ContextManifestOptions,
 	ContextManifestPage,
-	ContextUpdateTarget,
+	HistoryIndex,
 	HistoryIndexPage,
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
@@ -34,8 +34,15 @@ import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js"
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
 import {
+	type BoundHistoryReadSink,
 	type BoundSessionRequestSink,
+	createBranchHistoryReadView,
+	createSessionHistoryReadScope,
+	type HistoryReadQuery,
+	type MaterializedSessionHistory,
 	SessionHistoryIndex,
+	type SessionHistoryReadLimits,
+	type SessionHistoryReadScope,
 	type SessionHistoryReadView,
 } from "./session-history-index.js";
 import {
@@ -305,10 +312,15 @@ export type ReadonlySessionManager = Pick<
 	| "getLeafEntry"
 	| "getEntry"
 	| "getEntryRetention"
+	| "readBranchHistory"
+	| "readSourceHistory"
+	| "materializeBranchHistory"
+	| "materializeSourceHistory"
 	| "getLabel"
 	| "getBranch"
 	| "getHeader"
 	| "getEntries"
+	| "getCompactionCount"
 	| "getTree"
 	| "getSessionName"
 >;
@@ -1138,6 +1150,7 @@ interface SessionWriteState {
 	retired: boolean;
 	closed: boolean;
 	sequence: number;
+	compactionCount: number;
 	sourceVersion: number;
 	pendingIds: Set<string>;
 	failure?: Error;
@@ -1157,6 +1170,7 @@ function newSessionWriteState(): SessionWriteState {
 		retired: false,
 		closed: false,
 		sequence: -1,
+		compactionCount: 0,
 		sourceVersion: CURRENT_SESSION_VERSION,
 		pendingIds: new Set(),
 	};
@@ -1248,6 +1262,7 @@ export class SessionManager {
 			this.sessionFile = sessionFile ? assertProductStatePath(sessionFile) : undefined;
 		}
 		this.writeState.sequence = this.persist ? -1 : 0;
+		this.writeState.compactionCount = 0;
 	}
 
 	private async _openNew(): Promise<void> {
@@ -1341,9 +1356,11 @@ export class SessionManager {
 		this.labelsById = new Map();
 		this.labelTimestampsById = new Map();
 		this.leafId = null;
+		this.writeState.compactionCount = 0;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
+			if (entry.type === "compaction") this.writeState.compactionCount++;
 			if (entry.type !== "request") this.leafId = entry.id;
 			if (entry.type === "label") {
 				if (entry.label) {
@@ -1462,12 +1479,55 @@ export class SessionManager {
 	}
 
 	private async _readHistory<T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T> {
-		const sink = this.bindRequestSink();
+		return this._runHistoryRead(this.bindRequestSink(), read);
+	}
+
+	/** Explicit branch read at one pinned canonical frontier. */
+	readBranchHistory<T>(read: (view: SessionHistoryReadScope) => Promise<T>): Promise<T> {
+		return this._runHistoryRead(
+			this._bindHistorySource((index, source, query) =>
+				createSessionHistoryReadScope(index, source, query, "branch"),
+			),
+			read,
+		);
+	}
+
+	/** Explicit whole-source read, including branches outside the current leaf. */
+	readSourceHistory<T>(read: (view: SessionHistoryReadScope) => Promise<T>): Promise<T> {
+		return this._runHistoryRead(
+			this._bindHistorySource((index, source, query) =>
+				createSessionHistoryReadScope(index, source, query, "source"),
+			),
+			read,
+		);
+	}
+
+	materializeBranchHistory(limits: SessionHistoryReadLimits): Promise<MaterializedSessionHistory> {
+		const captured = { ...limits };
+		return this.readBranchHistory((view) => view.materialize(captured));
+	}
+
+	materializeSourceHistory(limits: SessionHistoryReadLimits): Promise<MaterializedSessionHistory> {
+		const captured = { ...limits };
+		return this.readSourceHistory((view) => view.materialize(captured));
+	}
+
+	private async _runHistoryRead<View, T>(
+		sink: BoundHistoryReadSink<View>,
+		read: (view: View) => Promise<T>,
+	): Promise<T> {
+		const outcome = await sink.readHistory(read).then(
+			(value) => ({ ok: true, value }) as const,
+			(error: unknown) => ({ ok: false, error }) as const,
+		);
 		try {
-			return await sink.readHistory(read);
-		} finally {
 			await sink.release();
+		} catch (error) {
+			if (!outcome.ok) throw new AggregateError([outcome.error, error], "History read and source release failed");
+			throw error;
 		}
+		if (!outcome.ok) throw outcome.error;
+		return outcome.value;
 	}
 
 	private _publishHistory(state: SessionWriteState): void {
@@ -1628,6 +1688,7 @@ export class SessionManager {
 				this._publishHistory(state);
 				entries.push(snapshot);
 				byId.set(snapshot.id, snapshot);
+				if (snapshot.type === "compaction") state.compactionCount++;
 				if (snapshot.type === "label") {
 					if (snapshot.label) {
 						labels.set(snapshot.targetId, snapshot.label);
@@ -1688,6 +1749,12 @@ export class SessionManager {
 
 	/** Capture before waits; the barrier resolves only after this source's prior ACKs. */
 	bindRequestSink(): BoundSessionRequestSink {
+		return this._bindHistorySource(createBranchHistoryReadView);
+	}
+
+	private _bindHistorySource<View>(
+		createView: (index: HistoryIndex, source: SourceSnapshotRef, query: HistoryReadQuery) => View,
+	): BoundHistoryReadSink<View> {
 		this._assertMutable();
 		const state = this.writeState;
 		const sourceFile =
@@ -1720,7 +1787,7 @@ export class SessionManager {
 		void source.catch(() => undefined);
 		return {
 			source,
-			readHistory: async <T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T> => {
+			readHistory: async <T>(read: (view: View) => Promise<T>): Promise<T> => {
 				if (!held) throw new Error("Captured request sink is not retained");
 				// A running read holds its own pin if request disposal happens concurrently.
 				state.pins++;
@@ -1738,33 +1805,12 @@ export class SessionManager {
 						),
 					);
 					const index = await state.history.synchronize(snapshot);
-					const scope = { leafId: boundSource.leafId, through: boundSource.sourceSequence };
 					let active = true;
-					const query = <R>(operation: () => Promise<R>): Promise<R> => {
+					const query: HistoryReadQuery = (operation) => {
 						if (!active) return Promise.reject(new Error("Captured history read has ended"));
 						return operation();
 					};
-					const view: SessionHistoryReadView = Object.freeze({
-						source: boundSource,
-						contextManifest: (options: ContextManifestOptions = {}) =>
-							query(() => index.contextManifest(sessionId, scope, options)),
-						contextUpdates: (target: ContextUpdateTarget) =>
-							query(() => index.contextUpdates(sessionId, scope, target)),
-						readContextUpdatePayload: (
-							id: string,
-							target: ContextUpdateTarget,
-							options: HistoryPayloadReadOptions = {},
-						) => query(() => index.readContextUpdatePayload(sessionId, id, scope, target, options)),
-						get: (id: string) => query(() => index.get(sessionId, id, scope)),
-						page: (after = 0, limit = 64) =>
-							query(() => index.page(sessionId, after, scope.through, limit, scope)),
-						search: (text: string, limit = 16) =>
-							query(() => index.search(sessionId, text, scope.through, limit, scope)),
-						taskEvidence: (options: TaskEvidenceOptions = {}) =>
-							query(() => index.taskEvidence(sessionId, scope, options)),
-						readPayload: (id: string, options: HistoryPayloadReadOptions = {}) =>
-							query(() => index.readPayload(sessionId, id, scope, options)),
-					});
+					const view = createView(index, boundSource, query);
 					try {
 						return await read(view);
 					} finally {
@@ -2271,6 +2317,11 @@ export class SessionManager {
 	getEntryRetention(entryId: string): JournalFrameRetention | undefined {
 		const entry = this.byId.get(entryId);
 		return entry ? entryRetentions.get(entry) : undefined;
+	}
+
+	/** Whole-source count published with acknowledged entries, independent of the current branch. */
+	getCompactionCount(): number {
+		return this.writeState.compactionCount;
 	}
 
 	getEntries(): SessionEntry[] {

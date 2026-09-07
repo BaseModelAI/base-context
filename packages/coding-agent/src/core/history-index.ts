@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
 import type { CanonicalPayloadCursor, CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import type { JournalFrameRetention } from "./journal-frame.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import type { TaskStateProjection, TaskStateSourceRef } from "./task-state.js";
 
@@ -18,6 +19,8 @@ export interface IndexedSourceEvent {
 	authority: "user" | "runtime" | "assistant" | "imported" | "unrecorded";
 	locator: { path: string; offset: number; length: number };
 	revision: string;
+	/** Decoded frame qualifier, never a claim inside the payload. */
+	retention?: JournalFrameRetention;
 	text: string;
 	textComplete: boolean;
 }
@@ -166,6 +169,15 @@ export type HistoryIndexRequest =
 	| { id: number; action: "sync_source"; sessionId: string; snapshot: SessionJournalState }
 	| { id: number; action: "apply"; sessionId: string; events: IndexedSourceEvent[]; committedThrough: number }
 	| { id: number; action: "get"; sessionId: string; eventId: string; scope?: HistoryIndexScope & { through: number } }
+	| { id: number; action: "get_source"; sessionId: string; eventId: string; through: number }
+	| {
+			id: number;
+			action: "read_source_payload";
+			sessionId: string;
+			eventId: string;
+			through: number;
+			options: HistoryPayloadReadOptions;
+	  }
 	| {
 			id: number;
 			action: "page";
@@ -302,6 +314,8 @@ export class HistoryIndex {
 		if (
 			("sessionId" in message && message.sessionId.length > 512) ||
 			((message.action === "get" ||
+				message.action === "get_source" ||
+				message.action === "read_source_payload" ||
 				message.action === "read_payload" ||
 				message.action === "read_context_update_payload") &&
 				message.eventId.length > 512) ||
@@ -362,6 +376,7 @@ export class HistoryIndex {
 				kind: event.kind,
 				authority: event.authority,
 				revision: event.revision,
+				...(event.retention === undefined ? {} : { retention: event.retention }),
 				text: event.text,
 				textComplete: event.textComplete,
 				locator: { path: event.locator.path, offset: event.locator.offset, length: event.locator.length },
@@ -400,6 +415,16 @@ export class HistoryIndex {
 			sessionId,
 			eventId,
 			...(scope ? { scope: { leafId: scope.leafId, through: scope.through } } : {}),
+		})) as IndexedSourceEvent | undefined;
+	}
+	/** Whole-source metadata within a synchronized captured prefix, independent of branch selection. */
+	async getSource(sessionId: string, eventId: string, through: number): Promise<IndexedSourceEvent | undefined> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "get_source",
+			sessionId,
+			eventId,
+			through,
 		})) as IndexedSourceEvent | undefined;
 	}
 	/** Exact ordered page; rejects if 256 candidates cannot establish the page and lookahead. */
@@ -535,6 +560,34 @@ export class HistoryIndex {
 			sessionId,
 			eventId,
 			scope: { leafId: scope.leafId, through: scope.through },
+			options: selection,
+		})) as CanonicalPayloadFragment | undefined;
+	}
+	/** Exact whole-source payload bytes, bounded by the captured prefix and fragment limit. */
+	async readSourcePayload(
+		sessionId: string,
+		eventId: string,
+		through: number,
+		options: HistoryPayloadReadOptions = {},
+	): Promise<CanonicalPayloadFragment | undefined> {
+		const selection: HistoryPayloadReadOptions = {
+			...(options.cursor
+				? {
+						cursor: {
+							frameChecksum: options.cursor.frameChecksum,
+							payloadOffset: options.cursor.payloadOffset,
+							byteOffset: options.cursor.byteOffset,
+						},
+					}
+				: {}),
+			...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+		};
+		return (await this.request({
+			id: this.nextId++,
+			action: "read_source_payload",
+			sessionId,
+			eventId,
+			through,
 			options: selection,
 		})) as CanonicalPayloadFragment | undefined;
 	}
