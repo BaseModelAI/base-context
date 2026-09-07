@@ -78,6 +78,7 @@ export interface HarnessOptions {
 	agentMessageController?: AgentSessionMessageController;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	persistSession?: boolean;
+	sessionManager?: SessionManager;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
 	autonomous?: AgentAutonomousConfig;
@@ -101,7 +102,7 @@ export interface Harness {
 	events: AgentSessionEvent[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 function createTempDir(): string {
@@ -123,9 +124,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.persistSession
-		? SessionManager.create(tempDir, join(tempDir, "sessions"))
-		: SessionManager.inMemory();
+	const sessionManager =
+		options.sessionManager ??
+		(options.persistSession
+			? await SessionManager.create(tempDir, join(tempDir, "sessions"))
+			: SessionManager.inMemory());
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -210,6 +213,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		initialGoal: options.initialGoal,
 	});
 
+	await session.initialize();
 	const events: AgentSessionEvent[] = [];
 	session.subscribe((event) => {
 		events.push(event);
@@ -231,13 +235,14 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},
 		tempDir,
-		cleanup() {
-			session.dispose();
-			fauxProvider.unregister();
-			if (existsSync(tempDir)) {
-				// Spawned fixture processes may still be flushing their final registry
-				// writes; retry briefly instead of failing the suite on ENOTEMPTY.
-				rmSync(tempDir, { recursive: true, force: true, maxRetries: 40, retryDelay: 50 });
+		async cleanup() {
+			try {
+				await session.disposeAsync();
+			} finally {
+				fauxProvider.unregister();
+				if (existsSync(tempDir)) {
+					rmSync(tempDir, { recursive: true, force: true });
+				}
 			}
 		},
 	};

@@ -13,9 +13,9 @@ describe("issue #879 stable daemon process identity across timezone changes", ()
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 		for (const directory of tempDirs.splice(0)) {
 			rmSync(directory, { recursive: true, force: true });

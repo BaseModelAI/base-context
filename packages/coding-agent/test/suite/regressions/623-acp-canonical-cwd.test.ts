@@ -62,12 +62,12 @@ const caseVariantCwd = findExistingCaseVariant(process.cwd());
 const harnesses: Harness[] = [];
 const directories: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	for (const directory of directories.splice(0)) {
 		rmSync(directory, { recursive: true, force: true });
 	}
 	for (const harness of harnesses.splice(0)) {
-		harness.cleanup();
+		await harness.cleanup();
 	}
 });
 

@@ -55,8 +55,8 @@ import type { RlmLedgerMutation } from "./rlm-ledger-mutations.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = PRODUCT.daemonService;
-export const DAEMON_PROTOCOL_VERSION = 9;
-export const DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION = 8;
+export const DAEMON_PROTOCOL_VERSION = 10;
+export const DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: readonly number[] = [8, 9];
 export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
 // Revision 10 publishes persisted RLM spawn depth on all session catalog rows.
@@ -77,8 +77,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 starts the incompatible, product-isolated Base Context command plane.
 // Revision 28 requires native inference ownership for work and exposes optional finalized tool evidence.
-export const DAEMON_SCHEMA_REVISION = 28;
-export const DAEMON_SCHEMA_ID = "protocol-9-schema-28-37e5213f9781";
+// Revision 29 requires canonical session ownership, framed readers, and fenced persistence ACKs.
+export const DAEMON_SCHEMA_REVISION = 29;
+export const DAEMON_SCHEMA_ID = "protocol-10-schema-29-37e5213f9781";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -127,6 +128,7 @@ export type DaemonServerCapability =
 	| "acp_mcp_servers"
 	| "direct_peer_transport"
 	| "native_inference_ownership"
+	| "canonical_session_ownership"
 	| "finalized_tool_exchanges"
 	| "rlm_ledger_mutation";
 
@@ -174,6 +176,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_pause",
 	"acp_mcp_servers",
 	"native_inference_ownership",
+	"canonical_session_ownership",
 	"finalized_tool_exchanges",
 ];
 
@@ -712,6 +715,17 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 	capability: "native_inference_ownership",
 } as const satisfies DaemonCommandCompatibility;
 
+export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
+	minProtocol: 10,
+	minSchemaRevision: 29,
+	capability: "canonical_session_ownership",
+} as const satisfies DaemonCommandCompatibility;
+
+export const NATIVE_WORK_COMPATIBILITIES = [
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+] as const;
+
 // These commands do not hydrate a worker, resume a queue, or drain refinement.
 const LEGACY_INSPECTION_COMMANDS: ReadonlySet<DaemonCommandName> = new Set([
 	"ack_result",
@@ -786,110 +800,110 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
-	list_agent_peers: { ...AGENT_PEER_LIST_COMMAND, minProtocol: 9 },
-	rlm_ledger_mutate: { minProtocol: 9, minSchemaRevision: 28, capability: "rlm_ledger_mutation" },
-	get_direct_worker_transport: { ...DIRECT_PEER_TRANSPORT_COMMAND, minProtocol: 9 },
-	create: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	attach: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	reattach: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	detach: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	complete_owned_session: { ...CLIENT_OWNED_DAEMON_COMMAND, minProtocol: 9 },
-	promote_owned_session: { ...CLIENT_OWNED_DAEMON_COMMAND, minProtocol: 9 },
-	kill: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	rename: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	prompt: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 9 },
-	cancel_prompt_admission: { ...PROMPT_ADMISSION_CANCELLATION_COMMAND, minProtocol: 9 },
-	prompt_and_wait: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 9 },
-	steer: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 9 },
-	follow_up: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 9 },
-	restore_next_turn: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	restore_actions: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	append_custom_message: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	resume_queue: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 9 },
-	send_message: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	agent_messages_status: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	agent_messages_pause: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	agent_messages_resume: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	agent_messages_clear: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	start_side_question: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_side_question: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	execute_bash: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_bash: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	cancel_rlm_child: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	delete_rlm_subagent: { ...DELETE_RLM_SUBAGENT_COMMAND, minProtocol: 9 },
-	wait_for_idle: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	wait_for_headless_completion: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_session_header: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+	list_agent_peers: { ...AGENT_PEER_LIST_COMMAND, minProtocol: 10 },
+	rlm_ledger_mutate: { minProtocol: 10, minSchemaRevision: 28, capability: "rlm_ledger_mutation" },
+	get_direct_worker_transport: { ...DIRECT_PEER_TRANSPORT_COMMAND, minProtocol: 10 },
+	create: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	attach: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	reattach: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	detach: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	complete_owned_session: { ...CLIENT_OWNED_DAEMON_COMMAND, minProtocol: 10 },
+	promote_owned_session: { ...CLIENT_OWNED_DAEMON_COMMAND, minProtocol: 10 },
+	kill: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	rename: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	prompt: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 10 },
+	cancel_prompt_admission: { ...PROMPT_ADMISSION_CANCELLATION_COMMAND, minProtocol: 10 },
+	prompt_and_wait: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 10 },
+	steer: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 10 },
+	follow_up: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 10 },
+	restore_next_turn: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	restore_actions: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	append_custom_message: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	resume_queue: { ...SESSION_INPUT_ADMISSION_COMMAND, minProtocol: 10 },
+	send_message: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	agent_messages_status: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	agent_messages_pause: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	agent_messages_resume: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	agent_messages_clear: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	start_side_question: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_side_question: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	execute_bash: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_bash: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	cancel_rlm_child: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	delete_rlm_subagent: { ...DELETE_RLM_SUBAGENT_COMMAND, minProtocol: 10 },
+	wait_for_idle: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	wait_for_headless_completion: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_session_header: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	get_state: LEGACY_DAEMON_COMMAND,
-	get_connection_state: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+	get_connection_state: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	get_messages: LEGACY_DAEMON_COMMAND,
-	get_rlm_children: { ...AUTHORITATIVE_CHILD_ROSTER_COMMAND, minProtocol: 9 },
-	get_session_stats: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_context_tree: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_commands: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_resource_snapshot: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	replace_acp_mcp_servers: { minProtocol: 9, minSchemaRevision: 22, capability: "acp_mcp_servers" },
-	get_model_catalog: { minProtocol: 9, capability: "model_catalog" },
-	get_available_models: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_queue: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	mutate_queued_message: { minProtocol: 9, minSchemaRevision: 15, capability: "queue_message_mutation" },
-	clear_queue: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_and_clear_queue: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	acquire_session_input_pause: { ...SESSION_INPUT_PAUSE_COMMAND, minProtocol: 9 },
-	release_session_input_pause: { ...SESSION_INPUT_PAUSE_COMMAND, minProtocol: 9 },
-	cron_list: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	heartbeats_list: { minProtocol: 9, capability: "heartbeat_catalog" },
+	get_rlm_children: { ...AUTHORITATIVE_CHILD_ROSTER_COMMAND, minProtocol: 10 },
+	get_session_stats: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_context_tree: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_commands: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_resource_snapshot: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	replace_acp_mcp_servers: { minProtocol: 10, minSchemaRevision: 22, capability: "acp_mcp_servers" },
+	get_model_catalog: { minProtocol: 10, capability: "model_catalog" },
+	get_available_models: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_queue: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	mutate_queued_message: { minProtocol: 10, minSchemaRevision: 15, capability: "queue_message_mutation" },
+	clear_queue: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_and_clear_queue: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	acquire_session_input_pause: { ...SESSION_INPUT_PAUSE_COMMAND, minProtocol: 10 },
+	release_session_input_pause: { ...SESSION_INPUT_PAUSE_COMMAND, minProtocol: 10 },
+	cron_list: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	heartbeats_list: { minProtocol: 10, capability: "heartbeat_catalog" },
 	roster_subscribe: { minProtocol: 8, capability: "agent_roster" },
 	roster_unsubscribe: { minProtocol: 8, capability: "agent_roster" },
-	heartbeat_manage: { minProtocol: 9, capability: "heartbeat_management" },
-	cron_add: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	cron_cancel: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	heartbeat_get: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	heartbeat_set: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	heartbeat_update: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_model: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	cycle_model: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_scoped_models: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_thinking_level: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_service_tier: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	cycle_thinking_level: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_transport: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_steering_mode: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_follow_up_mode: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_auto_compaction: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_auto_retry: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	compact: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	refine: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_compaction: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_branch_summary: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	abort_retry: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	execute_bash_and_wait: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	reload: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	new_session: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	switch_session: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	fork: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	navigate_tree: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	import_jsonl: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	export_html: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	export_jsonl: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_session_name: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_rlm_max_depth_status: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 9 },
-	set_rlm_max_depth: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 9 },
-	rename_saved_session: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	delete_saved_session: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_session_context: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_session_tree: { ...FLAT_SESSION_TREE_COMMAND, minProtocol: 9 },
-	get_user_messages_for_forking: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_last_assistant_text: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_system_prompt: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	get_tool_definition: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	set_session_entry_label: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	extension_ui_response: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	prepare_update_restart: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	retry_worker: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	restart: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
-	shutdown: NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+	heartbeat_manage: { minProtocol: 10, capability: "heartbeat_management" },
+	cron_add: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	cron_cancel: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	heartbeat_get: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	heartbeat_set: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	heartbeat_update: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_model: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	cycle_model: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_scoped_models: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_thinking_level: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_service_tier: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	cycle_thinking_level: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_transport: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_steering_mode: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_follow_up_mode: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_auto_compaction: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_auto_retry: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	compact: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	refine: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_compaction: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_branch_summary: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	abort_retry: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	execute_bash_and_wait: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	reload: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	new_session: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	switch_session: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	fork: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	navigate_tree: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	import_jsonl: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	export_html: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	export_jsonl: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_session_name: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_rlm_max_depth_status: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 10 },
+	set_rlm_max_depth: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 10 },
+	rename_saved_session: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	delete_saved_session: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_session_context: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_session_tree: { ...FLAT_SESSION_TREE_COMMAND, minProtocol: 10 },
+	get_user_messages_for_forking: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_last_assistant_text: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_system_prompt: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_tool_definition: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	set_session_entry_label: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	extension_ui_response: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	prepare_update_restart: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	retry_worker: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	restart: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	shutdown: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 /**
@@ -1018,7 +1032,7 @@ export function isSessionPlaneDaemonCommand(type: string): boolean {
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
 	const requirements: DaemonCommandCompatibility[] = isLegacyDaemonInspection(command)
 		? []
-		: [NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY];
+		: [...NATIVE_WORK_COMPATIBILITIES];
 	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
 		requirements.push(OWNED_SESSION_RECOVERY_CONTEXT);
 	}
@@ -1036,7 +1050,7 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
 	}
 	const commandRequirement = DAEMON_COMMAND_COMPATIBILITY[command.type];
-	return commandRequirement === NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY
+	return commandRequirement === CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY
 		? requirements
 		: [...requirements, commandRequirement];
 }

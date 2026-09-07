@@ -6,6 +6,7 @@ import {
 	assertBuiltInAttemptSupport,
 	type Context,
 	completeSimple,
+	isLocalFauxStream,
 	type Model,
 	type ProviderAttemptObserver,
 	type SimpleStreamOptions,
@@ -33,7 +34,7 @@ export interface InferenceSettlement {
 	readonly operationId: string;
 	readonly attemptIds: readonly string[];
 	/** Reporting is not a guarantee about an opaque adapter's hidden retries. */
-	readonly physicalCoverage: "reported" | "unestablished";
+	readonly physicalCoverage: "reported" | "unestablished" | "local-simulation";
 }
 
 export interface InferenceRun {
@@ -45,9 +46,17 @@ export interface SessionRuntimeServices {
 	readonly requests: InferenceCoordinator;
 }
 
-interface BoundOperation {
+interface SinkUse {
 	readonly sink: BoundRequestSink;
-	readonly metadata: NativeRequestMetadata;
+	activeUsers: number;
+	captures: number;
+	release?: Promise<void>;
+}
+
+interface BoundOperation {
+	readonly binding: SinkUse;
+	readonly owner: Omit<RequestOwnerRef, "sessionId">;
+	readonly metadata: Omit<NativeRequestMetadata, "source" | "owner">;
 }
 
 const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
@@ -103,8 +112,15 @@ export function createNativeInferenceStream(
 /** Routes physical observations to the source writer. It owns no receipt store. */
 export class InferenceCoordinator {
 	private retryTurn = false;
+	private active = new Set<Promise<void>>();
+	private capturedSink?: SinkUse;
+	private captureReserved = false;
+	private finishCapturePending?: () => void;
+	private disposed = false;
+	private disposal?: Promise<void>;
 	private work = {
 		pending: new Set<Promise<void>>(),
+		sinks: new WeakMap<BoundRequestSink, SinkUse>(),
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
@@ -156,33 +172,107 @@ export class InferenceCoordinator {
 		private readonly owner: () => Omit<RequestOwnerRef, "sessionId"> = () => ({}),
 	) {}
 
+	private assertAdmission(): void {
+		if (this.disposed || !this.work.admissionOpen) throw new Error("Inference owner is closing");
+	}
+
+	private sinkUse(sink: BoundRequestSink): SinkUse {
+		let binding = this.work.sinks.get(sink);
+		if (!binding) {
+			binding = { sink, activeUsers: 0, captures: 0 };
+			this.work.sinks.set(sink, binding);
+		}
+		return binding;
+	}
+
+	private releaseCapture(): void {
+		if (this.captureReserved && this.capturedSink) {
+			this.captureReserved = false;
+			this.capturedSink.captures--;
+		}
+	}
+
 	/** Capture an auxiliary operation's subject before asynchronous auth or UI work. */
 	capture(): InferenceCoordinator {
-		const sink = this.bindSink();
-		const owner = { ...this.owner() };
+		this.assertAdmission();
+		const owner = Object.freeze({ ...this.owner() });
+		const binding = this.sinkUse(this.bindSink());
+		binding.sink.retain();
+		binding.release = undefined;
+		binding.captures++;
 		const captured = new InferenceCoordinator(
-			() => sink,
+			() => binding.sink,
 			() => owner,
 		);
 		captured.work = this.work;
+		captured.capturedSink = binding;
+		captured.captureReserved = true;
+		let release!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		this.work.pending.add(pending);
+		captured.finishCapturePending = () => {
+			this.work.pending.delete(pending);
+			captured.finishCapturePending = undefined;
+			release();
+			this.notifyActivity();
+		};
+		this.notifyActivity();
 		return captured;
 	}
 
+	/** Release an unused capture, or join this capture's admitted requests. */
+	dispose(): Promise<void> {
+		this.disposed = true;
+		this.disposal ??= (async () => {
+			this.releaseCapture();
+			try {
+				await Promise.all([...this.active]);
+				if (this.capturedSink) await this.finishSink(this.capturedSink, [], false, []);
+			} finally {
+				this.finishCapturePending?.();
+			}
+		})();
+		return this.disposal;
+	}
+
 	private bindOperation(model: Model<Api>, request: InferenceRequestOptions, operationId: string): BoundOperation {
-		const sink = this.bindSink();
-		return {
-			sink,
-			metadata: {
-				operationId,
-				parentOperationId: request.parentOperationId,
-				semanticEdgeId: request.semanticEdgeId,
-				source: Object.freeze({ ...sink.source }),
-				owner: Object.freeze({ ...this.owner(), sessionId: sink.source.sessionId }),
-				purpose: request.purpose,
-				purposeDetail: request.purposeDetail,
-				modelContract: modelContract(model),
-			},
-		};
+		this.assertAdmission();
+		const owner = Object.freeze({ ...this.owner() });
+		const metadata = Object.freeze({
+			operationId,
+			parentOperationId: request.parentOperationId,
+			semanticEdgeId: request.semanticEdgeId,
+			purpose: request.purpose,
+			purposeDetail: request.purposeDetail,
+			modelContract: modelContract(model),
+		});
+		return { binding: this.sinkUse(this.bindSink()), owner, metadata };
+	}
+
+	private async finishSink(
+		binding: SinkUse,
+		writes: readonly Promise<void>[],
+		activeUser: boolean,
+		failures: unknown[],
+	): Promise<void> {
+		const results = await Promise.allSettled([binding.sink.source, ...writes]);
+		for (const result of results) {
+			if (result.status === "rejected") failures.push(result.reason);
+		}
+		if (activeUser) binding.activeUsers--;
+		try {
+			if (binding.activeUsers === 0 && binding.captures === 0) {
+				binding.release ??= binding.sink.release();
+				await binding.release;
+			}
+		} catch (error) {
+			failures.push(error);
+		}
+		const distinct = [...new Set(failures)];
+		if (distinct.length === 1) throw distinct[0];
+		if (distinct.length > 1) throw new AggregateError(distinct, "Inference request or source cleanup failed");
 	}
 
 	private async execute(
@@ -192,72 +282,104 @@ export class InferenceCoordinator {
 		options: SimpleStreamOptions | undefined,
 		send: StreamFn,
 	): Promise<InferenceRun> {
-		if (send !== streamSimple && !nativeStreamFunctions.has(send)) {
-			throw new Error(
-				"Native inference cannot admit a custom or proxy StreamFn with unestablished physical-attempt coverage. Use the SDK's instrumented built-in API route instead.",
-			);
-		}
-		assertBuiltInAttemptSupport(model.api);
-		if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
-		const attemptIds: string[] = [];
-		const settlementWrites: Promise<void>[] = [];
-		const attempts: ProviderAttemptObserver = {
-			admit: async (descriptor) => {
-				if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
-				const attemptId = randomUUID();
-				await operation.sink.persist({
-					...operation.metadata,
-					type: "attempt_admitted",
-					attemptId,
-					timestamp: Date.now(),
-					descriptor,
-				});
-				attemptIds.push(attemptId);
-				return attemptId;
-			},
-			settle: async (receipt) => {
-				const write = operation.sink.persist({
-					...operation.metadata,
-					type: "attempt_settled",
-					attemptId: receipt.attemptId,
-					timestamp: Date.now(),
-					receipt,
-				});
-				settlementWrites.push(write);
-				await write;
-			},
-		};
-		let release!: () => void;
+		let release!: (completion?: PromiseLike<void>) => void;
 		const pending = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 		this.work.pending.add(pending);
+		this.active.add(pending);
 		this.notifyActivity();
 		const finish = () => {
 			this.work.pending.delete(pending);
-			release();
+			this.active.delete(pending);
 			this.notifyActivity();
 		};
+		const attemptIds: string[] = [];
+		const receiptWrites: Promise<void>[] = [];
+		let activeUser = false;
+		let localSimulation = false;
+		const settle = async (result: Promise<AssistantMessage>): Promise<InferenceSettlement> => {
+			const failures: unknown[] = [];
+			let message: AssistantMessage | undefined;
+			try {
+				message = await result;
+			} catch (error) {
+				failures.push(error);
+			}
+			await this.finishSink(operation.binding, receiptWrites, activeUser, failures);
+			return {
+				message: message!,
+				operationId: operation.metadata.operationId,
+				attemptIds,
+				physicalCoverage: attemptIds.length ? "reported" : localSimulation ? "local-simulation" : "unestablished",
+			};
+		};
 		try {
+			this.assertAdmission();
+			operation.binding.sink.retain();
+			operation.binding.release = undefined;
+			operation.binding.activeUsers++;
+			activeUser = true;
+			this.releaseCapture();
+			this.finishCapturePending?.();
+			const source = Object.freeze({ ...(await operation.binding.sink.source) });
+			const metadata: NativeRequestMetadata = {
+				...operation.metadata,
+				source,
+				owner: Object.freeze({ ...operation.owner, sessionId: source.sessionId }),
+			};
+			if (send !== streamSimple && !nativeStreamFunctions.has(send)) {
+				throw new Error(
+					"Native inference cannot admit a custom or proxy StreamFn with unestablished physical-attempt coverage. Use the SDK's instrumented built-in API route instead.",
+				);
+			}
+			assertBuiltInAttemptSupport(model.api);
+			if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
+			const attempts: ProviderAttemptObserver = {
+				admit: async (descriptor) => {
+					if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
+					const attemptId = randomUUID();
+					const write = operation.binding.sink.persist({
+						...metadata,
+						type: "attempt_admitted",
+						attemptId,
+						timestamp: Date.now(),
+						descriptor,
+					});
+					receiptWrites.push(write);
+					await write;
+					attemptIds.push(attemptId);
+					return attemptId;
+				},
+				settle: async (receipt) => {
+					const write = operation.binding.sink.persist({
+						...metadata,
+						type: "attempt_settled",
+						attemptId: receipt.attemptId,
+						timestamp: Date.now(),
+						receipt,
+					});
+					receiptWrites.push(write);
+					await write;
+				},
+			};
 			const signal = options?.signal
 				? AbortSignal.any([options.signal, this.work.cancellation.signal])
 				: this.work.cancellation.signal;
 			const events = await send(model, context, { ...options, signal, attempts, requireProviderAttempts: true });
-			const settled = events.result().then(async (message): Promise<InferenceSettlement> => {
-				await Promise.all(settlementWrites);
-				return {
-					message,
-					operationId: operation.metadata.operationId,
-					attemptIds,
-					physicalCoverage: attemptIds.length ? "reported" : "unestablished",
-				};
-			});
-			// Both success and failure release ownership only after the receipt writes settle.
-			void settled.then(finish, finish);
+			localSimulation = isLocalFauxStream(events);
+			const settled = settle(events.result());
+			events.result = async () => (await settled).message;
+			// Idle tracking observes rejection; callers still receive it through settled/result().
+			release(settled.then(finish, finish));
 			return { events, settled };
 		} catch (error) {
-			await Promise.allSettled(settlementWrites);
-			finish();
+			try {
+				await settle(Promise.reject(error));
+			} finally {
+				finish();
+				release();
+			}
 			throw error;
 		}
 	}
@@ -325,9 +447,23 @@ export function completeInference(
 	return requests ? requests.complete(model, context, options, request) : completeSimple(model, context, options);
 }
 
+export type DisposableInferenceStream = StreamFn & { dispose(): Promise<void> };
+
 /** Side questions keep the subject's writer, but get their own operation and purpose. */
-export function bindAuxiliaryInferenceStream(streamFn: StreamFn, request: InferenceRequestOptions): StreamFn {
+export function bindAuxiliaryInferenceStream(
+	streamFn: StreamFn,
+	request: InferenceRequestOptions,
+): DisposableInferenceStream {
 	const inner = unwrapSemanticEdgeStreamFn(streamFn) as BoundStreamFn;
 	const binding = inner[REQUEST_STREAM_BINDING];
-	return binding ? binding.coordinator.capture().bindStream(binding.inner, request) : inner;
+	const captured = binding?.coordinator.capture();
+	const stream: StreamFn =
+		captured && binding
+			? captured.bindStream(binding.inner, request)
+			: (model, context, options) => inner(model, context, options);
+	return Object.assign(stream, {
+		dispose: async () => {
+			await captured?.dispose();
+		},
+	});
 }

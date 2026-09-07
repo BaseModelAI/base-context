@@ -30,8 +30,12 @@ describe("ExtensionRunner", () => {
 		modelRegistry = ModelRegistry.create(authStorage);
 	});
 
-	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+	afterEach(async () => {
+		try {
+			await sessionManager.close();
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	const providerModelConfig: ProviderConfig = {
@@ -52,12 +56,12 @@ describe("ExtensionRunner", () => {
 	};
 
 	const extensionActions: ExtensionActions = {
-		sendMessage: () => {},
-		sendUserMessage: () => {},
-		appendEntry: () => {},
-		setSessionName: () => {},
+		sendMessage: async () => {},
+		sendUserMessage: async () => {},
+		appendEntry: async () => {},
+		setSessionName: async () => {},
 		getSessionName: () => undefined,
-		setLabel: () => {},
+		setLabel: async () => {},
 		getActiveTools: () => [],
 		getAllTools: () => [],
 		setActiveTools: () => {},
@@ -65,7 +69,7 @@ describe("ExtensionRunner", () => {
 		getCommands: () => [],
 		setModel: async () => false,
 		getThinkingLevel: () => "off",
-		setThinkingLevel: () => {},
+		setThinkingLevel: async () => {},
 	};
 
 	const extensionContextActions: ExtensionContextActions = {

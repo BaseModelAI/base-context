@@ -166,7 +166,7 @@ describe("ACP mode preserves prime-agent features", () => {
 
 		const done = fixture.updates.filter((u) => u.update?.sessionUpdate === "tool_call_update");
 		expect(done.length).toBeGreaterThan(0);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("keeps autonomous gate state observable and ends the turn only when the loop settles", async () => {
@@ -191,7 +191,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		const autonomous = fixture.metaOf("autonomous");
 		expect(autonomous.length, "autonomous state must reach the client via _meta").toBeGreaterThan(0);
 		expect(autonomous.at(-1)).toMatchObject({ enabled: true });
-		harness.cleanup();
+		await harness.cleanup();
 	}, 60_000);
 
 	it("reports a cancelled prompt turn as the ACP cancelled stop reason", async () => {
@@ -206,7 +206,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		await fixture.agent.notify("session/cancel", { sessionId: fixture.sessionId });
 		const result = await pending;
 		expect(["cancelled", "end_turn"]).toContain(result.stopReason);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("rejects prompts for an unknown session instead of silently starting work", async () => {
@@ -220,7 +220,7 @@ describe("ACP mode preserves prime-agent features", () => {
 				prompt: [{ type: "text", text: "hello" }],
 			}),
 		).rejects.toThrow();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("surfaces heartbeat and schedule changes, which are not session events", async () => {
@@ -250,7 +250,7 @@ describe("ACP mode preserves prime-agent features", () => {
 				.filter((value) => value !== undefined);
 		await waitFor(() => flags().includes(true));
 		expect(flags(), "heartbeat changes must reach the ACP client").toContain(true);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("refuses a concurrent prompt instead of making the running turn uncancellable", async () => {
@@ -279,7 +279,7 @@ describe("ACP mode preserves prime-agent features", () => {
 			prompt: [{ type: "text", text: "three" }],
 		});
 		expect(third.stopReason).toBe("end_turn");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("reports a cwd mismatch in _meta instead of failing or silently disagreeing", async () => {
@@ -302,7 +302,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		expect(created.sessionId).toBeTruthy();
 		const cwdMeta = (created._meta?.[BASE_CONTEXT_META_NAMESPACE] as { cwd?: unknown } | undefined)?.cwd;
 		expect(cwdMeta).toMatchObject({ requested: "/definitely/not/the/agent/cwd" });
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("refuses a second session rather than silently sharing one conversation", async () => {
@@ -313,7 +313,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		// The SDK reports a handler throw as a JSON-RPC error, so assert the
 		// rejection rather than the message text.
 		await expect(fixture.agent.request("session/new", { cwd: harness.tempDir, mcpServers: [] })).rejects.toThrow();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("ignores a cancel addressed to a different session", async () => {
@@ -328,7 +328,7 @@ describe("ACP mode preserves prime-agent features", () => {
 			prompt: [{ type: "text", text: "hello" }],
 		});
 		expect(result.stopReason).toBe("end_turn");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("forwards advertised image and embedded-resource prompt blocks", async () => {
@@ -353,7 +353,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		expect(serialized).toContain("what is this?");
 		expect(serialized).toContain("context line");
 		expect(serialized).toContain("aGVsbG8=");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("surfaces a real compaction to the ACP client", async () => {
@@ -386,7 +386,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		const compaction = fixture.metaOf("compaction");
 		expect(compaction.length, "compaction must reach the ACP client").toBeGreaterThan(0);
 		expect(compaction.at(-1)).toMatchObject({ summary: "compacted for ACP" });
-		harness.cleanup();
+		await harness.cleanup();
 	}, 60_000);
 
 	it("surfaces real goal state transitions to the ACP client", async () => {
@@ -406,7 +406,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		const goals = fixture.metaOf("goal");
 		expect(goals.length, "goal state must reach the ACP client").toBeGreaterThan(0);
 		expect(goals.at(-1)).toMatchObject({ objective: "ship ACP mode" });
-		harness.cleanup();
+		await harness.cleanup();
 	}, 60_000);
 
 	it("surfaces a real /refine outcome to the ACP client", async () => {
@@ -457,10 +457,10 @@ describe("ACP mode preserves prime-agent features", () => {
 			expect(refinements.length, "refinement outcome must reach the ACP client").toBeGreaterThan(0);
 			expect(refinements.at(-1)).toMatchObject({ status: "complete", summary: "refined for ACP" });
 		} finally {
+			await harness.cleanup();
 			if (previousAgentDir === undefined) delete process.env[ENV_AGENT_DIR];
 			else process.env[ENV_AGENT_DIR] = previousAgentDir;
 			rmSync(agentDir, { recursive: true, force: true });
-			harness.cleanup();
 		}
 	}, 60_000);
 
@@ -492,7 +492,7 @@ describe("ACP mode preserves prime-agent features", () => {
 
 		// Closing an unknown session is an error, not a silent no-op.
 		await expect(fixture.agent.request("session/close", { sessionId: "nope" })).rejects.toThrow();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("tears down its session when the client disconnects", async () => {
@@ -531,7 +531,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		await harness.session.prompt("after disconnect");
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(updates.length).toBe(before);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("stops in-flight work when a session is closed mid-turn", async () => {
@@ -558,7 +558,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		if (typeof outcome === "object" && outcome && "stopReason" in outcome) {
 			expect(["cancelled", "end_turn"]).toContain((outcome as { stopReason: string }).stopReason);
 		}
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("rejects prompts and repeat closes after a session is closed", async () => {
@@ -580,7 +580,7 @@ describe("ACP mode preserves prime-agent features", () => {
 			}),
 		).rejects.toThrow();
 		await expect(fixture.agent.request("session/close", { sessionId: fixture.sessionId })).rejects.toThrow();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("streams a turn the client did not initiate", async () => {
@@ -603,7 +603,7 @@ describe("ACP mode preserves prime-agent features", () => {
 			.map((u) => u.update.content.text)
 			.join("");
 		expect(text, "an unsolicited turn must still reach the ACP client").toContain("heartbeat-driven work");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("streams an inbound agent-to-agent message and the turn it triggers", async () => {
@@ -625,7 +625,7 @@ describe("ACP mode preserves prime-agent features", () => {
 
 		expect(fixture.updates.length, "inbound agent messages must produce ACP updates").toBeGreaterThan(0);
 		expect(streamedText()).toContain("acknowledged the sibling");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("fails the prompt turn instead of reporting end_turn when the model errors", async () => {
@@ -641,7 +641,7 @@ describe("ACP mode preserves prime-agent features", () => {
 				prompt: [{ type: "text", text: "say hi" }],
 			}),
 		).rejects.toThrow();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("does not let an earlier failed turn reject a later one", async () => {
@@ -665,7 +665,7 @@ describe("ACP mode preserves prime-agent features", () => {
 			prompt: [{ type: "text", text: "/compact" }],
 		});
 		expect(second.stopReason).toBe("end_turn");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("reports a failure that a mid-turn transcript rebuild moved below the pre-turn message count", async () => {
@@ -714,7 +714,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		// failure, because after the rebuild it sits below that count.
 		expect(rebuiltLength, "the rebuild must shorten the transcript").toBeLessThanOrEqual(priorMessageCount);
 		expect(rebuiltLength - 1, "the failure must land below the pre-turn count").toBeLessThan(priorMessageCount);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("does not mistake a rebuilt copy of an earlier failure for this turn's failure", async () => {
@@ -745,7 +745,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		});
 		expect(handled.stopReason).toBe("end_turn");
 		expect(rebuiltIdentities, "the rebuild must replace the message objects").toBe(true);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("advertises prime-agent capabilities without polluting the ACP object root", async () => {
@@ -769,6 +769,6 @@ describe("ACP mode preserves prime-agent features", () => {
 		expect(Object.keys(init.agentCapabilities ?? {})).not.toContain("subagents");
 		// close is advertised, so a client knows it may release the session slot.
 		expect(init.agentCapabilities?.sessionCapabilities?.close).toBeDefined();
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 });

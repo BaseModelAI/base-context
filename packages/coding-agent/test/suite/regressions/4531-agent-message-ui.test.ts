@@ -70,9 +70,9 @@ describe("ENG-4531 agent message UI", () => {
 		initTheme("dark");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

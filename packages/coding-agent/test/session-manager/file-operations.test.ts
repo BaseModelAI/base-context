@@ -13,6 +13,27 @@ import {
 } from "../../src/core/session-manager.js";
 import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
 
+const managers = new Set<SessionManager>();
+async function createSession(...args: Parameters<typeof SessionManager.create>): Promise<SessionManager> {
+	const manager = await SessionManager.create(...args);
+	managers.add(manager);
+	return manager;
+}
+async function openSession(...args: Parameters<typeof SessionManager.open>): Promise<SessionManager> {
+	const manager = await SessionManager.open(...args);
+	managers.add(manager);
+	return manager;
+}
+async function forkSession(...args: Parameters<typeof SessionManager.forkFrom>): Promise<SessionManager> {
+	const manager = await SessionManager.forkFrom(...args);
+	managers.add(manager);
+	return manager;
+}
+async function closeManagers(): Promise<void> {
+	await Promise.all([...managers].map((manager) => manager.close()));
+	managers.clear();
+}
+
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
@@ -21,34 +42,35 @@ describe("loadEntriesFromFile", () => {
 		mkdirSync(tempDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await closeManagers();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("returns empty array for non-existent file", () => {
+	it("returns empty array for non-existent file", async () => {
 		const entries = loadEntriesFromFile(join(tempDir, "nonexistent.jsonl"));
 		expect(entries).toEqual([]);
 	});
 
-	it("returns empty array for empty file", () => {
+	it("returns empty array for empty file", async () => {
 		const file = join(tempDir, "empty.jsonl");
 		writeFileSync(file, "");
 		expect(loadEntriesFromFile(file)).toEqual([]);
 	});
 
-	it("returns empty array for file without valid session header", () => {
+	it("rejects a file without a valid session header", async () => {
 		const file = join(tempDir, "no-header.jsonl");
 		writeFileSync(file, '{"type":"message","id":"1"}\n');
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => loadEntriesFromFile(file)).toThrow("valid header");
 	});
 
-	it("returns empty array for malformed JSON", () => {
+	it("rejects malformed complete JSON", async () => {
 		const file = join(tempDir, "malformed.jsonl");
 		writeFileSync(file, "not json\n");
-		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(() => loadEntriesFromFile(file)).toThrow();
 	});
 
-	it("loads valid session file", () => {
+	it("loads valid session file", async () => {
 		const file = join(tempDir, "valid.jsonl");
 		writeFileSync(
 			file,
@@ -61,7 +83,7 @@ describe("loadEntriesFromFile", () => {
 		expect(entries[1].type).toBe("message");
 	});
 
-	it("skips malformed lines but keeps valid ones", () => {
+	it("rejects corrupt interior instead of omitting source records", async () => {
 		const file = join(tempDir, "mixed.jsonl");
 		writeFileSync(
 			file,
@@ -69,15 +91,14 @@ describe("loadEntriesFromFile", () => {
 				"not valid json\n" +
 				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}\n',
 		);
-		const entries = loadEntriesFromFile(file);
-		expect(entries).toHaveLength(2);
+		expect(() => loadEntriesFromFile(file)).toThrow();
 	});
 
 	it("yields while parsing a multi-megabyte session below the streaming threshold", async () => {
 		const file = join(tempDir, "buffered.jsonl");
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -86,7 +107,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content: "x".repeat(5 * 1024 * 1024), timestamp: 1 },
 				}),
-			].join("\n"),
+			].join("\n")}\n`,
 		);
 		const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
 		try {
@@ -108,8 +129,10 @@ describe("loadEntriesFromFile", () => {
 				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"héllo 世界","timestamp":1}}',
 		);
 
-		const streamed = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
-		expect(streamed).toEqual(loadEntriesFromFile(file));
+		const before = readFileSync(file);
+		await expect(loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 })).rejects.toThrow();
+		expect(() => loadEntriesFromFile(file)).toThrow();
+		expect(readFileSync(file)).toEqual(before);
 	});
 
 	it("only treats LF bytes as JSONL record boundaries", async () => {
@@ -117,7 +140,7 @@ describe("loadEntriesFromFile", () => {
 		const content = "before\u2028middle\u2029after";
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -126,7 +149,7 @@ describe("loadEntriesFromFile", () => {
 					timestamp: "2025-01-01T00:00:01Z",
 					message: { role: "user", content, timestamp: 1 },
 				}),
-			].join("\n"),
+			].join("\n")}\n`,
 		);
 
 		const streamed = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
@@ -140,7 +163,7 @@ describe("loadEntriesFromFile", () => {
 		const largeContent = "x".repeat(2 * 1024 * 1024);
 		writeFileSync(
 			file,
-			[
+			`${[
 				'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}',
 				JSON.stringify({
 					type: "message",
@@ -150,7 +173,7 @@ describe("loadEntriesFromFile", () => {
 					message: { role: "user", content: largeContent, timestamp: 1 },
 				}),
 				'{"type":"message","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"user","content":"after","timestamp":2}}',
-			].join("\n"),
+			].join("\n")}\n`,
 		);
 
 		const entries = await loadEntriesFromFileAsync(file, { streamThresholdBytes: 0 });
@@ -160,35 +183,37 @@ describe("loadEntriesFromFile", () => {
 });
 
 describe("session tree metadata", () => {
-	it.each(["2.5", "2oops", "9007199254740993"])("rejects invalid BASE_CONTEXT_RLM_DEPTH value %s", (value) => {
+	it.each(["2.5", "2oops", "9007199254740993"])("rejects invalid BASE_CONTEXT_RLM_DEPTH value %s", async (value) => {
 		const tempDir = join(tmpdir(), `invalid-root-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		vi.stubEnv("BASE_CONTEXT_RLM_DEPTH", value);
 		try {
-			expect(() => SessionManager.create(tempDir, tempDir)).toThrow(
+			await expect(createSession(tempDir, tempDir)).rejects.toThrow(
 				"BASE_CONTEXT_RLM_DEPTH must be a non-negative integer",
 			);
 		} finally {
 			vi.unstubAllEnvs();
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("does not persist an unsafe derived depth", () => {
+	it("does not persist an unsafe derived depth", async () => {
 		const tempDir = join(tmpdir(), `max-parent-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
-			const parent = SessionManager.create(tempDir, tempDir);
-			parent.newSession({ rlmDepth: Number.MAX_SAFE_INTEGER });
-			parent.flushNow();
+			const parent = await createSession(tempDir, tempDir);
+			await parent.newSession({ rlmDepth: Number.MAX_SAFE_INTEGER });
+			await parent.flushNow();
 			const parentFile = parent.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
 
-			const child = SessionManager.create(tempDir, tempDir);
-			child.newSession({ parentSession: parentFile });
+			const child = await createSession(tempDir, tempDir);
+			await child.newSession({ parentSession: parentFile });
 
 			expect(child.getHeader()?.rlmDepth).toBeUndefined();
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -197,72 +222,77 @@ describe("session tree metadata", () => {
 		const tempDir = join(tmpdir(), `session-tree-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
-			const parent = SessionManager.create(tempDir, tempDir);
-			parent.newSession({ rlmDepth: 2 });
-			parent.flushNow();
+			const parent = await createSession(tempDir, tempDir);
+			await parent.newSession({ rlmDepth: 2 });
+			await parent.flushNow();
 			const parentFile = parent.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
 
-			const child = SessionManager.create(tempDir, tempDir);
-			child.newSession({ parentSession: parentFile });
-			child.flushNow();
+			const child = await createSession(tempDir, tempDir);
+			await child.newSession({ parentSession: parentFile });
+			await child.flushNow();
 			const childFile = child.getSessionFile();
 			if (!childFile) throw new Error("Missing child session file");
 
-			const header = JSON.parse(readFileSync(childFile, "utf8").split("\n")[0] ?? "{}");
+			const header = loadEntriesFromFile(childFile).find((entry) => entry.type === "session")!;
 			expect(header).toMatchObject({ parentSession: parentFile, rlmDepth: 3 });
 			expect(await readSessionInfo(childFile)).toMatchObject({
 				parentSessionPath: parentFile,
 				rlmDepth: 3,
 			});
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it.each([0, 2])("copies source depth %i across branch and fork reference edges", (depth) => {
+	it.each([0, 2])("copies source depth %i across branch and fork reference edges", async (depth) => {
 		const tempDir = join(tmpdir(), `session-reference-depth-test-${depth}-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
-			const source = SessionManager.create(tempDir, tempDir);
-			source.newSession({ rlmDepth: depth });
-			const leafId = source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
-			source.flushNow();
+			const source = await createSession(tempDir, tempDir);
+			await source.newSession({ rlmDepth: depth });
+			const leafId = await source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+			await source.flushNow();
 			const sourceFile = source.getSessionFile();
 			if (!sourceFile) throw new Error("Missing source session file");
 
-			const forked = SessionManager.forkFrom(sourceFile, tempDir, tempDir);
+			const forked = await forkSession(sourceFile, tempDir, tempDir);
 			expect(forked.getHeader()?.rlmDepth).toBe(depth);
 
-			const branched = SessionManager.open(sourceFile, tempDir);
-			branched.createBranchedSession(leafId);
+			await source.close();
+			const branched = await openSession(sourceFile, tempDir);
+			await branched.createBranchedSession(leafId);
 			expect(branched.getHeader()?.rlmDepth).toBe(depth);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("resolves legacy root depth across branch and fork reference edges", () => {
+	it("resolves legacy root depth across branch and fork reference edges", async () => {
 		const tempDir = join(tmpdir(), `legacy-session-reference-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
-			const source = SessionManager.create(tempDir, tempDir);
-			source.newSession({ rlmDepth: undefined });
-			const leafId = source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
-			source.flushNow();
+			const source = await createSession(tempDir, tempDir);
+			await source.newSession({ rlmDepth: undefined });
+			const leafId = await source.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+			await source.flushNow();
 			const sourceFile = source.getSessionFile();
 			if (!sourceFile) throw new Error("Missing source session file");
 
-			expect(SessionManager.forkFrom(sourceFile, tempDir, tempDir).getHeader()?.rlmDepth).toBe(0);
-			const branched = SessionManager.open(sourceFile, tempDir);
-			branched.createBranchedSession(leafId);
+			expect((await forkSession(sourceFile, tempDir, tempDir)).getHeader()?.rlmDepth).toBe(0);
+			await source.close();
+			const branched = await openSession(sourceFile, tempDir);
+			await branched.createBranchedSession(leafId);
 			expect(branched.getHeader()?.rlmDepth).toBe(0);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("leaves derived child depth unknown when a legacy parent has no depth", () => {
+	it("leaves derived child depth unknown when a legacy parent has no depth", async () => {
 		const tempDir = join(tmpdir(), `legacy-parent-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
@@ -271,33 +301,36 @@ describe("session tree metadata", () => {
 				parentFile,
 				`${JSON.stringify({ type: "session", id: "parent", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
 			);
-			const child = SessionManager.create(tempDir, tempDir);
-			child.newSession({ parentSession: parentFile });
+			const child = await createSession(tempDir, tempDir);
+			await child.newSession({ parentSession: parentFile });
 			expect(child.getHeader()).toMatchObject({ parentSession: parentFile });
 			expect(child.getHeader()?.rlmDepth).toBeUndefined();
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("infers root depth when materializing a legacy fork", () => {
+	it("infers root depth when materializing a legacy fork", async () => {
 		const tempDir = join(tmpdir(), `materialized-legacy-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
 			const parentFile = join(tempDir, "legacy-parent.jsonl");
 			const session = SessionManager.inMemory(tempDir);
-			session.newSession({ parentSession: parentFile, rlmDepth: undefined });
+			managers.add(session);
+			await session.newSession({ parentSession: parentFile, rlmDepth: undefined });
 
-			const sessionFile = session.materializeSessionFile(tempDir);
-			const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n")[0] ?? "{}");
+			const sessionFile = await session.materializeSessionFile(tempDir);
+			const header = loadEntriesFromFile(sessionFile).find((entry) => entry.type === "session")!;
 			expect(header).toMatchObject({ parentSession: parentFile });
 			expect(header.rlmDepth).toBe(0);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("infers and backfills legacy child depth from nested subagent directories on open", async () => {
+	it("infers legacy child depth on open without changing its source", async () => {
 		const tempDir = join(tmpdir(), `legacy-session-tree-test-${Date.now()}-${Math.random()}`);
 		const parentFile = join(tempDir, "parent.jsonl");
 		const childDir = join(tempDir, "session-artifacts", "root", "sub-1234abcd", "sub-deadbeef");
@@ -315,16 +348,17 @@ describe("session tree metadata", () => {
 
 			expect(resolveSessionRlmDepth(header, childFile)).toBe(2);
 			expect((await readSessionInfo(childFile))?.rlmDepth).toBe(2);
-			expect(JSON.parse(readFileSync(childFile, "utf8").split("\n")[0] ?? "{}").rlmDepth).toBeUndefined();
+			expect(loadEntriesFromFile(childFile).find((entry) => entry.type === "session")!.rlmDepth).toBeUndefined();
 
-			expect(SessionManager.open(childFile).getHeader()?.rlmDepth).toBe(2);
-			expect(JSON.parse(readFileSync(childFile, "utf8").split("\n")[0] ?? "{}").rlmDepth).toBe(2);
+			expect((await openSession(childFile)).getHeader()?.rlmDepth).toBe(2);
+			expect(loadEntriesFromFile(childFile).find((entry) => entry.type === "session")!.rlmDepth).toBeUndefined();
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("copies and backfills a readable source depth for a legacy fork", async () => {
+	it("projects a readable source depth for a legacy fork without backfill", async () => {
 		const tempDir = join(tmpdir(), `legacy-fork-source-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
 		try {
@@ -356,11 +390,12 @@ describe("session tree metadata", () => {
 
 			expect(resolveSessionRlmDepth(forkHeader, forkFile)).toBe(2);
 			expect((await readSessionInfo(forkFile))?.rlmDepth).toBe(2);
-			expect(JSON.parse(readFileSync(forkFile, "utf8").split("\n")[0] ?? "{}").rlmDepth).toBeUndefined();
+			expect(loadEntriesFromFile(forkFile).find((entry) => entry.type === "session")!.rlmDepth).toBeUndefined();
 
-			expect(SessionManager.open(forkFile).getHeader()?.rlmDepth).toBe(2);
-			expect(JSON.parse(readFileSync(forkFile, "utf8").split("\n")[0] ?? "{}").rlmDepth).toBe(2);
+			expect((await openSession(forkFile)).getHeader()?.rlmDepth).toBe(2);
+			expect(loadEntriesFromFile(forkFile).find((entry) => entry.type === "session")!.rlmDepth).toBeUndefined();
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -381,18 +416,19 @@ describe("session tree metadata", () => {
 
 			expect(resolveSessionRlmDepth(header, forkFile)).toBe(0);
 			expect((await readSessionInfo(forkFile))?.rlmDepth).toBe(0);
-			expect(SessionManager.open(forkFile).getHeader()?.rlmDepth).toBe(0);
+			expect((await openSession(forkFile)).getHeader()?.rlmDepth).toBe(0);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("does not count a matching segment outside the trailing subagent path", () => {
+	it("does not count a matching segment outside the trailing subagent path", async () => {
 		const sessionFile = join(tmpdir(), "sub-deadbeef", "sessions", "child.jsonl");
 		expect(resolveSessionRlmDepth({ parentSession: "/missing-parent.jsonl" }, sessionFile)).toBe(0);
 	});
 
-	it("prefers the parent header depth over path inference", () => {
+	it("prefers the parent header depth over path inference", async () => {
 		const tempDir = join(tmpdir(), `parent-header-depth-test-${Date.now()}-${Math.random()}`);
 		const parentFile = join(tempDir, "parent.jsonl");
 		const childFile = join(tempDir, "sub-1234abcd", "sub-deadbeef", "child.jsonl");
@@ -412,11 +448,12 @@ describe("session tree metadata", () => {
 
 			expect(resolveSessionRlmDepth({ parentSession: parentFile }, childFile)).toBe(5);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("resolves relative parent paths from each legacy session directory", () => {
+	it("resolves relative parent paths from each legacy session directory", async () => {
 		const tempDir = join(tmpdir(), `relative-parent-depth-test-${Date.now()}-${Math.random()}`);
 		const grandparentFile = join(tempDir, "grandparent.jsonl");
 		const parentFile = join(tempDir, "parent.jsonl");
@@ -449,11 +486,12 @@ describe("session tree metadata", () => {
 
 			expect(resolveSessionRlmDepth({ parentSession: "../parent.jsonl" }, childFile)).toBe(5);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("prefers a valid persisted depth over path inference", () => {
+	it("prefers a valid persisted depth over path inference", async () => {
 		const sessionFile = join(tmpdir(), "sub-1234abcd", "sub-deadbeef", "session.jsonl");
 		expect(resolveSessionRlmDepth({ parentSession: "/parent.jsonl", rlmDepth: 7 }, sessionFile)).toBe(7);
 	});
@@ -467,30 +505,31 @@ describe("findMostRecentSession", () => {
 		mkdirSync(tempDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await closeManagers();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("returns null for empty directory", () => {
+	it("returns null for empty directory", async () => {
 		expect(findMostRecentSession(tempDir)).toBeNull();
 	});
 
-	it("returns null for non-existent directory", () => {
+	it("returns null for non-existent directory", async () => {
 		expect(findMostRecentSession(join(tempDir, "nonexistent"))).toBeNull();
 	});
 
-	it("ignores non-jsonl files", () => {
+	it("ignores non-jsonl files", async () => {
 		writeFileSync(join(tempDir, "file.txt"), "hello");
 		writeFileSync(join(tempDir, "file.json"), "{}");
 		expect(findMostRecentSession(tempDir)).toBeNull();
 	});
 
-	it("ignores jsonl files without valid session header", () => {
+	it("ignores jsonl files without valid session header", async () => {
 		writeFileSync(join(tempDir, "invalid.jsonl"), '{"type":"message"}\n');
 		expect(findMostRecentSession(tempDir)).toBeNull();
 	});
 
-	it("returns single valid session file", () => {
+	it("returns single valid session file", async () => {
 		const file = join(tempDir, "session.jsonl");
 		writeFileSync(file, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
 		expect(findMostRecentSession(tempDir)).toBe(file);
@@ -519,76 +558,46 @@ describe("findMostRecentSession", () => {
 	});
 });
 
-describe("SessionManager.setSessionFile with corrupted files", () => {
+describe("SessionManager source opening", () => {
 	let tempDir: string;
-
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `session-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 	});
-
-	afterEach(() => {
+	afterEach(async () => {
+		await closeManagers();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("truncates and rewrites empty file with valid header", () => {
-		const emptyFile = join(tempDir, "empty.jsonl");
-		writeFileSync(emptyFile, "");
-
-		const sm = SessionManager.open(emptyFile, tempDir);
-
-		expect(sm.getSessionId()).toBeTruthy();
-		expect(sm.getHeader()).toBeTruthy();
-		expect(sm.getHeader()?.type).toBe("session");
-
-		const content = readFileSync(emptyFile, "utf-8");
-		const lines = content.trim().split("\n").filter(Boolean);
-		expect(lines.length).toBe(1);
-		const header = JSON.parse(lines[0]);
-		expect(header.type).toBe("session");
-		expect(header.id).toBe(sm.getSessionId());
+	it("does not replace an existing empty source with an invented header", async () => {
+		const path = join(tempDir, "empty.jsonl");
+		writeFileSync(path, "");
+		await expect(openSession(path, tempDir)).rejects.toThrow("valid header");
+		expect(readFileSync(path, "utf8")).toBe("");
 	});
 
-	it("truncates and rewrites file without valid header", () => {
-		const noHeaderFile = join(tempDir, "no-header.jsonl");
-		writeFileSync(
-			noHeaderFile,
-			'{"type":"message","id":"abc","parentId":"orphaned","timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":"test"}}\n',
-		);
-
-		const sm = SessionManager.open(noHeaderFile, tempDir);
-
-		expect(sm.getSessionId()).toBeTruthy();
-		expect(sm.getHeader()).toBeTruthy();
-		expect(sm.getHeader()?.type).toBe("session");
-
-		const content = readFileSync(noHeaderFile, "utf-8");
-		const lines = content.trim().split("\n").filter(Boolean);
-		expect(lines.length).toBe(1);
-		const header = JSON.parse(lines[0]);
-		expect(header.type).toBe("session");
-		expect(header.id).toBe(sm.getSessionId());
+	it("does not replace a source whose header is missing", async () => {
+		const path = join(tempDir, "no-header.jsonl");
+		const bytes =
+			'{"type":"message","id":"abc","parentId":"orphaned","message":{"role":"user","content":"retained"}}\n';
+		writeFileSync(path, bytes);
+		await expect(openSession(path, tempDir)).rejects.toThrow("valid header");
+		expect(readFileSync(path, "utf8")).toBe(bytes);
 	});
 
-	it("preserves explicit session file path when recovering from corrupted file", () => {
-		const explicitPath = join(tempDir, "my-session.jsonl");
-		writeFileSync(explicitPath, "");
-
-		const sm = SessionManager.open(explicitPath, tempDir);
-
-		expect(sm.getSessionFile()).toBe(explicitPath);
+	it("preserves an explicit path when creating a new source", async () => {
+		const path = join(tempDir, "my-session.jsonl");
+		const manager = await openSession(path, tempDir);
+		expect(manager.getSessionFile()).toBe(path);
+		expect(loadEntriesFromFile(path)[0]).toMatchObject({ type: "session", id: manager.getSessionId() });
 	});
 
-	it("subsequent loads of recovered file work correctly", () => {
-		const corruptedFile = join(tempDir, "corrupted.jsonl");
-		writeFileSync(corruptedFile, "garbage content\n");
-
-		const sm1 = SessionManager.open(corruptedFile, tempDir);
-		const sessionId = sm1.getSessionId();
-
-		const sm2 = SessionManager.open(corruptedFile, tempDir);
-		expect(sm2.getSessionId()).toBe(sessionId);
-		expect(sm2.getHeader()?.type).toBe("session");
+	it("repeated rejected opens do not rewrite corrupt source bytes", async () => {
+		const path = join(tempDir, "corrupted.jsonl");
+		writeFileSync(path, "garbage content\n");
+		await expect(openSession(path, tempDir)).rejects.toThrow();
+		await expect(openSession(path, tempDir)).rejects.toThrow();
+		expect(readFileSync(path, "utf8")).toBe("garbage content\n");
 	});
 });
 
@@ -642,14 +651,31 @@ describe("session info usage totals", () => {
 			];
 			writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
-			const entries = SessionManager.open(file).getEntries();
+			const manager = await openSession(file);
+			const entries = manager.getEntries();
 			const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 
 			const scanned = (await readSessionInfo(file))?.usage;
 			expect(scanned).toMatchObject({ inputTokens: 3220, outputTokens: 528 });
 			expect(scanned?.cost).toBeCloseTo(1.57);
 			expect(resident).toEqual(scanned);
+
+			await manager.migrateLegacy();
+			const parent = manager.getEntry("m3");
+			if (parent?.type !== "message" || parent.message.role !== "assistant")
+				throw new Error("fixture parent missing");
+			const before = structuredClone(parent.message.usage);
+			const first = manager.appendChildUsageAttribution("m3", usage(10, 2, 0.01));
+			const second = manager.appendChildUsageAttribution("m3", usage(20, 3, 0.02));
+			expect(parent.message.usage).toEqual(before); // The queued projection is not yet acknowledged.
+			await Promise.all([first, second]);
+			expect(parent.message.usage.input).toBe(before.input + 30);
+			expect(parent.message.usage.output).toBe(before.output + 5);
+			expect(parent.message.usage.totalTokens).toBe(before.totalTokens);
+			expect(parent.message.usage.cost.total).toBeCloseTo(before.cost.total + 0.03);
+			expect((await readSessionInfo(file))?.usage?.cost).toBeCloseTo(scanned!.cost);
 		} finally {
+			await closeManagers();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

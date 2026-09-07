@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
+const managers: SessionManager[] = [];
 describe("SessionManager flat storage", () => {
 	it("stores sessions directly in the session root and filters current-cwd lists", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-flat-"));
@@ -12,8 +13,8 @@ describe("SessionManager flat storage", () => {
 			const sessionDir = join(tempDir, "sessions");
 			const cwdA = join(tempDir, "project-a");
 			const cwdB = join(tempDir, "project-b");
-			const sessionA = createPersistedSession(cwdA, sessionDir, "a");
-			const sessionB = createPersistedSession(cwdB, sessionDir, "b");
+			const sessionA = await createPersistedSession(cwdA, sessionDir, "a");
+			const sessionB = await createPersistedSession(cwdB, sessionDir, "b");
 
 			const files = readdirSync(sessionDir).filter((file) => file.endsWith(".jsonl"));
 			expect(files).toHaveLength(2);
@@ -30,11 +31,14 @@ describe("SessionManager flat storage", () => {
 				new Set([sessionA.getSessionId(), sessionB.getSessionId()]),
 			);
 
-			const continued = SessionManager.continueRecent(cwdA, sessionDir);
+			await sessionA.close();
+			const continued = await SessionManager.continueRecent(cwdA, sessionDir);
+			managers.push(continued);
 			expect(continued.getSessionId()).toBe(sessionA.getSessionId());
 
 			expect(sessionA.getSessionArtifactDir()).toBe(join(tempDir, "session-artifacts", sessionA.getSessionId()));
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -44,11 +48,12 @@ describe("SessionManager flat storage", () => {
 		try {
 			const sessionDir = join(tempDir, "sessions");
 			const cwd = join(tempDir, "project");
-			const session = SessionManager.create(cwd, sessionDir);
-			session.appendSessionInfo("large history");
-			session.appendSessionState({ status: "active" });
-			session.appendMessage(userMsg("small prompt"));
-			session.appendMessage(assistantMsg("x".repeat(2 * 1024 * 1024)));
+			const session = await SessionManager.create(cwd, sessionDir);
+			managers.push(session);
+			await session.appendSessionInfo("large history");
+			await session.appendSessionState({ status: "active" });
+			await session.appendMessage(userMsg("small prompt"));
+			await session.appendMessage(assistantMsg("x".repeat(2 * 1024 * 1024)));
 
 			const sessions = await SessionManager.listAll(undefined, sessionDir);
 			expect(sessions).toHaveLength(1);
@@ -59,6 +64,7 @@ describe("SessionManager flat storage", () => {
 			expect(sessions[0].firstMessage).toBe("small prompt");
 			expect(sessions[0].allMessagesText).toBe("small prompt");
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -97,6 +103,7 @@ describe("SessionManager flat storage", () => {
 			expect(sessions[0].allMessagesText).toBe("");
 			expect(sessions[0].modified.toISOString()).toBe("2026-01-02T00:00:00.000Z");
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -143,14 +150,16 @@ describe("SessionManager flat storage", () => {
 			expect(sessions[0].allMessagesText).toBe("small prompt");
 			expect(sessions[0].modified.toISOString()).toBe("2026-01-02T00:00:00.000Z");
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 });
 
-function createPersistedSession(cwd: string, sessionDir: string, text: string): SessionManager {
-	const session = SessionManager.create(cwd, sessionDir);
-	session.appendMessage(userMsg(text));
-	session.appendMessage(assistantMsg(text));
+async function createPersistedSession(cwd: string, sessionDir: string, text: string): Promise<SessionManager> {
+	const session = await SessionManager.create(cwd, sessionDir);
+	managers.push(session);
+	await session.appendMessage(userMsg(text));
+	await session.appendMessage(assistantMsg(text));
 	return session;
 }

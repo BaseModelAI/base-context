@@ -108,9 +108,9 @@ const skipReviewer = vi.fn(async () => ({ shouldRefine: true, rationale: "durabl
 describe("AgentSession queue characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -1023,7 +1023,7 @@ describe("AgentSession queue characterization", () => {
 			]);
 
 			const originalRefinement = await original.session.refine({ instructions: "remember this locally" });
-			branched.sessionManager.appendCustomEntry("prime-agent.refinement", originalRefinement);
+			await branched.sessionManager.appendCustomEntry("prime-agent.refinement", originalRefinement);
 			expect(loadHarnessState(originalLocalDir, "local").entries.memory.remember_me.content).toBe(
 				"Original content should be rolled back.",
 			);
@@ -1138,7 +1138,7 @@ describe("AgentSession queue characterization", () => {
 				auditAppendError,
 			);
 
-			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
 			// The outcome survives context rebuilds even when neither session entry could persist.
 			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
@@ -1161,9 +1161,12 @@ describe("AgentSession queue characterization", () => {
 				throw new Error("disk full");
 			});
 
-			await harness.session.refine({ instructions: "outcome persistence failure" });
+			await expect(harness.session.refine({ instructions: "outcome persistence failure" })).rejects.toThrow(
+				"disk full",
+			);
 
-			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
+			const outcome = harness.session.buildSessionContext().messages.find(isRefinementOutcomeMessage);
 			expect(outcome?.details.summary).toBe("no-op");
 			expect(
 				harness.sessionManager
@@ -1289,7 +1292,7 @@ describe("AgentSession queue characterization", () => {
 				{ id: "refine_recorded", scope: "local" },
 			);
 			seeded.harnessStatePath = saveHarnessState(recordedDir, recordedState);
-			harness.sessionManager.appendCustomEntry("prime-agent.refinement", seeded);
+			await harness.sessionManager.appendCustomEntry("prime-agent.refinement", seeded);
 
 			const result = await harness.session.refine({ rollbackId: "refine_recorded" });
 
@@ -1360,7 +1363,7 @@ describe("AgentSession queue characterization", () => {
 				],
 				harnessStatePath: getHarnessStatePath(globalDir),
 			};
-			harness.sessionManager.appendCustomEntry("prime-agent.refinement", legacyRefinement);
+			await harness.sessionManager.appendCustomEntry("prime-agent.refinement", legacyRefinement);
 
 			const result = await harness.session.refine({ rollbackId: "refine_legacy" });
 
@@ -1402,7 +1405,7 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const extensionErrors: string[] = [];
-		harness.session.bindExtensions({ onError: (error) => extensionErrors.push(error.error) });
+		await harness.session.bindExtensions({ onError: (error) => extensionErrors.push(error.error) });
 
 		await expect(harness.session.promptUntilAccepted("/testcmd")).resolves.toBeUndefined();
 		let completed = false;
@@ -2142,15 +2145,14 @@ describe("AgentSession queue characterization", () => {
 
 	it("resolves pre-registered queued and direct agent-message delivery waiters once prompts start", async () => {
 		const blocked = createDeferred();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("turn_start", async () => blocked.promise);
-				},
-			],
-		});
+		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
+		harness.setResponses([
+			async () => {
+				await blocked.promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
 		withStreaming(harness, true);
 		const queuedDelivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_sync");
 		await harness.session.followUp("agent message", undefined, {
@@ -2159,10 +2161,13 @@ describe("AgentSession queue characterization", () => {
 		});
 		withStreaming(harness, false);
 
-		// Queued delivery resolves on message_start, before the gated turn completes.
-		await expect(queuedDelivery).resolves.toBeUndefined();
-		blocked.resolve();
-		await harness.session.waitForIdle();
+		// Queued delivery waits for the message ACK, not the gated response.
+		try {
+			await expect(queuedDelivery).resolves.toBeUndefined();
+		} finally {
+			blocked.resolve();
+			await harness.session.waitForIdle();
+		}
 
 		harness.setResponses([fauxAssistantMessage("direct reply")]);
 		const delivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_direct");
@@ -2254,7 +2259,11 @@ describe("AgentSession queue characterization", () => {
 				.getBranch()
 				.some((entry) => entry.type === "custom" && entry.customType === "session_slash_command"),
 		).toBe(false);
-		const followUpEntryId = harness.sessionManager.appendCustomMessageEntry("post-failure", "still writable", false);
+		const followUpEntryId = await harness.sessionManager.appendCustomMessageEntry(
+			"post-failure",
+			"still writable",
+			false,
+		);
 		expect(harness.sessionManager.getBranch().at(-1)?.id).toBe(followUpEntryId);
 	});
 
@@ -3065,9 +3074,9 @@ describe("AgentSession queue characterization", () => {
 describe("AgentSession scheduler scenarios", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -3137,7 +3146,7 @@ describe("AgentSession scheduler scenarios", () => {
 			{ deliverAs: "steer" },
 		);
 		expect(extensionApi).toBeDefined();
-		extensionApi?.sendUserMessage("extension steer", { deliverAs: "steer" });
+		await extensionApi?.sendUserMessage("extension steer", { deliverAs: "steer" });
 		await harness.session.followUp("f1");
 		await harness.session.prompt("/autonomous status", { streamingBehavior: "followUp" });
 		await harness.session.followUp("f2");

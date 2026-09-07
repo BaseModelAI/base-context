@@ -51,7 +51,7 @@ describe("ENG-4649 subagent model selection", () => {
 				expect(harness.session.getRlmChildSession(childEntry!.rlm_child_id)?.model?.id).toBe("model-319");
 			});
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -67,11 +67,11 @@ describe("ENG-4649 subagent model selection", () => {
 			});
 			await expect(harness.session.findRlmModels("", 8)).resolves.toEqual({ models: [] });
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
-	it("limits ChatGPT discovery and execution to the account model catalog", async () => {
+	it("refuses unvalidated ChatGPT subscription discovery and execution", async () => {
 		const codexProvider = "openai-codex";
 		const harness = await createHarness({
 			provider: codexProvider,
@@ -88,13 +88,8 @@ describe("ENG-4649 subagent model selection", () => {
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			const discovered = await harness.session.findRlmModels("", 20);
-			expect(discovered.models.map((model) => model.selector)).toEqual([`${codexProvider}/parent-model`]);
-			expect(fetchModels).toHaveBeenCalledWith(
-				expect.stringMatching(/\/codex\/models\?client_version=/),
-				expect.objectContaining({
-					headers: expect.objectContaining({ "chatgpt-account-id": "account-1" }),
-				}),
-			);
+			expect(discovered.models).toEqual([]);
+			expect(fetchModels).not.toHaveBeenCalled();
 
 			await expect(
 				harness.session.runRlmChild("reject unsupported account model", {
@@ -106,7 +101,7 @@ describe("ENG-4649 subagent model selection", () => {
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
 		} finally {
 			vi.unstubAllGlobals();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -132,11 +127,11 @@ describe("ENG-4649 subagent model selection", () => {
 			expect(fetchModels).toHaveBeenCalledOnce();
 		} finally {
 			vi.unstubAllGlobals();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
-	it("does not reuse an expired ChatGPT model catalog after a refresh failure", async () => {
+	it("does not enable unvalidated ChatGPT discovery after the cache interval", async () => {
 		const codexProvider = "openai-codex";
 		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
 		const fetchModels = vi
@@ -153,40 +148,34 @@ describe("ENG-4649 subagent model selection", () => {
 		const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
 		try {
 			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
-			await expect(harness.session.findRlmModels("parent", 8)).resolves.toMatchObject({
-				models: [{ selector: `${codexProvider}/parent-model` }],
-			});
+			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });
 
 			now += 300_001;
 			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });
-			expect(fetchModels).toHaveBeenCalledTimes(2);
+			expect(fetchModels).not.toHaveBeenCalled();
 		} finally {
 			dateNow.mockRestore();
 			vi.unstubAllGlobals();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
-	it("does not warn when an unavailable selector is already the parent model", async () => {
-		const codexProvider = "openai-codex";
-		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
-		const fetchModels = vi.fn().mockRejectedValue(new Error("offline"));
-		vi.stubGlobal("fetch", fetchModels);
+	it("does not warn when an unavailable selector is already the authenticated parent model", async () => {
+		const harness = await createHarness({ provider, models: [{ id: "parent-model" }] });
+		const catalog = vi.spyOn(harness.session.modelRegistry, "getExecutableModels").mockResolvedValue([]);
 		try {
-			harness.authStorage.setRuntimeApiKey(codexProvider, openAICodexToken("account-1"));
 			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });
 			harness.setResponses([fauxAssistantMessage("same parent answer")]);
-
 			const result = await harness.session.runRlmChild("keep the parent model", {
-				model: `${codexProvider}/parent-model`,
+				model: `${provider}/parent-model`,
 			});
-			expect(result.model).toBe(`${codexProvider}/parent-model`);
+			expect(result.model).toBe(`${provider}/parent-model`);
 			await vi.waitFor(async () => {
 				expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
 			});
 		} finally {
-			vi.unstubAllGlobals();
-			harness.cleanup();
+			catalog.mockRestore();
+			await harness.cleanup();
 		}
 	});
 
@@ -217,15 +206,16 @@ describe("ENG-4649 subagent model selection", () => {
 				model: `${provider}/child-model`,
 			});
 			await vi.waitFor(() => expect(authPreflight).toHaveBeenCalledOnce());
-			harness.session.dispose();
+			const disposal = harness.session.disposeAsync();
 			releasePreflight();
 
 			await expect(run).rejects.toThrow("Cannot spawn a subagent after its parent was disposed");
+			await disposal;
 			expect(providerCalls).toBe(0);
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
 		} finally {
 			releasePreflight();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -243,7 +233,7 @@ describe("ENG-4649 subagent model selection", () => {
 			);
 			await expect(first).resolves.toMatchObject({ name: "shared-reviewer" });
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -258,7 +248,7 @@ describe("ENG-4649 subagent model selection", () => {
 			persistSession: true,
 		});
 		try {
-			harness.session.setThinkingLevel("high");
+			await harness.session.setThinkingLevel("high");
 			const seenModels: string[] = [];
 			const respond =
 				(text: string) => (_context: unknown, _options: unknown, _state: unknown, model: { id: string }) => {
@@ -296,13 +286,13 @@ describe("ENG-4649 subagent model selection", () => {
 			expect(child?.model?.id).toBe("child-model");
 			expect(result.session_dir).not.toBeNull();
 			const childSessions = await SessionManager.list(harness.tempDir, result.session_dir!);
-			const persisted = SessionManager.open(childSessions[0]!.path, result.session_dir!);
+			const persisted = await SessionManager.openReadOnly(childSessions[0]!.path, result.session_dir!);
 			expect(persisted.buildSessionContext().model).toEqual({
 				provider,
 				modelId: "child-model",
 			});
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -318,7 +308,7 @@ describe("ENG-4649 subagent model selection", () => {
 			],
 		});
 		try {
-			harness.session.setThinkingLevel("high");
+			await harness.session.setThinkingLevel("high");
 			harness.setResponses([fauxAssistantMessage("child answer")]);
 
 			await harness.session.runRlmChild("use explicit effort", {
@@ -331,7 +321,7 @@ describe("ENG-4649 subagent model selection", () => {
 				expect(child?.thinkingLevel).toBe(thinking);
 			});
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -344,7 +334,7 @@ describe("ENG-4649 subagent model selection", () => {
 			],
 		});
 		try {
-			harness.session.setThinkingLevel("high");
+			await harness.session.setThinkingLevel("high");
 			harness.setResponses([fauxAssistantMessage("child answer")]);
 
 			await harness.session.runRlmChild("inherit effort", { model: `${provider}/child-model` });
@@ -354,7 +344,7 @@ describe("ENG-4649 subagent model selection", () => {
 				expect(child?.thinkingLevel).toBe("high");
 			});
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -373,7 +363,7 @@ describe("ENG-4649 subagent model selection", () => {
 				`Requested thinking level "high" is not supported by model "${provider}/child-model"; supported levels: off`,
 			);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -394,7 +384,7 @@ describe("ENG-4649 subagent model selection", () => {
 			await harness.session.runRlmChild("inherit the model");
 			await vi.waitFor(() => expect(seenModel).toBe("parent-model"));
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -416,7 +406,7 @@ describe("ENG-4649 subagent model selection", () => {
 
 			expect(result.model).toBe(`${provider}/child-model`);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -454,7 +444,7 @@ describe("ENG-4649 subagent model selection", () => {
 
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 });

@@ -14,6 +14,7 @@ import { isNativeBedrockProvider } from "../utils/native-bedrock-provider.js";
 import type { BedrockOptions } from "./amazon-bedrock.js";
 import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
+import { isLocalFauxProvider } from "./faux.js";
 import type { GoogleOptions } from "./google.js";
 import type { GoogleVertexOptions } from "./google-vertex.js";
 import type { MistralOptions } from "./mistral.js";
@@ -372,7 +373,8 @@ function registerBuiltIn<TApi extends Api, TOptions extends StreamOptions>(
 }
 
 /** Native admission trusts owned implementations, never an API name or registration claim. */
-export function assertBuiltInAttemptSupport(api: Api): void {
+export function assertBuiltInAttemptSupport(api: Api): "provider" | "local-faux" {
+	if (isLocalFauxProvider(api)) return "local-faux";
 	const known = builtInImplementations.get(api);
 	if (
 		!known ||
@@ -385,6 +387,7 @@ export function assertBuiltInAttemptSupport(api: Api): void {
 			"Native inference cannot admit this custom or proxy adapter: physical-attempt coverage is unestablished. Use an instrumented built-in API route such as openai-responses, openai-completions, or anthropic-messages; custom model IDs and base URLs are supported.",
 		);
 	}
+	return "provider";
 }
 
 export function registerBuiltInApiProviders(): void {

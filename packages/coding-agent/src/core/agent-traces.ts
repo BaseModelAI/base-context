@@ -5,9 +5,9 @@ import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, VERSION } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
-import { readFirstLineSync } from "../utils/file-lines.js";
 import type { AuthStorage } from "./auth-storage.js";
 import { BASE_CONTEXT_TRACES_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "./prime-inference-auth.js";
+import { readSessionJournal, readSessionJournalHeader } from "./session-journal-reader.js";
 import { getSessionArtifactsRoot, type SessionHeader, type SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 
@@ -214,15 +214,19 @@ function isSessionHeader(value: unknown): value is SessionHeader {
 
 function readSessionHeader(sessionFile: string): SessionHeader | undefined {
 	try {
-		const firstLine = readFirstLineSync(sessionFile);
-		if (!firstLine?.trim()) {
-			return undefined;
-		}
-		const parsed = JSON.parse(firstLine) as unknown;
+		const parsed = readSessionJournalHeader(sessionFile);
 		return isSessionHeader(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+async function readSessionTraceBody(sessionFile: string): Promise<string> {
+	const lines: string[] = [];
+	for await (const { json } of readSessionJournal(sessionFile)) {
+		lines.push(`${json}\n`);
+	}
+	return lines.join("");
 }
 
 /** Active-branch git for the indexing headers: walk leaf to root, not the last git_state in
@@ -486,7 +490,7 @@ export async function previewAgentTraceFile(options: AgentTracePreviewOptions): 
 	let body = "";
 	if (fileSize <= MAX_TRACE_BYTES) {
 		try {
-			body = await readFile(options.sessionFile, "utf8");
+			body = await readSessionTraceBody(options.sessionFile);
 		} catch (error) {
 			return { status: "failed", message: describeError(error) };
 		}
@@ -960,7 +964,7 @@ async function performAgentTraceUpload(
 
 	let body: string;
 	try {
-		body = await readFile(options.sessionFile, "utf8");
+		body = await readSessionTraceBody(options.sessionFile);
 	} catch (error) {
 		return { status: "failed", message: describeError(error) };
 	}

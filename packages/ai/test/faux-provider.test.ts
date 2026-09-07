@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	complete,
 	fauxAssistantMessage,
@@ -9,7 +9,7 @@ import {
 	stream,
 	Type,
 } from "../src/index.js";
-import type { AssistantMessageEvent, Context } from "../src/types.js";
+import type { AssistantMessageEvent, Context, ProviderAttemptObserver } from "../src/types.js";
 
 async function collectEvents(streamResult: ReturnType<typeof stream>): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
@@ -31,19 +31,34 @@ describe("faux provider", () => {
 	it("registers a custom provider and estimates usage", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
-		registration.setResponses([fauxAssistantMessage("hello world")]);
+		registration.setResponses([
+			(_context, options) => {
+				expect(options?.attempts).toBeUndefined();
+				return fauxAssistantMessage("hello world");
+			},
+		]);
+		const attempts: ProviderAttemptObserver = {
+			admit: vi.fn(async () => {
+				throw new Error("Simulation must not admit provider I/O");
+			}),
+			settle: vi.fn(async () => {
+				throw new Error("Simulation must not settle provider I/O");
+			}),
+		};
 
 		const context: Context = {
 			systemPrompt: "Be concise.",
 			messages: [{ role: "user", content: "hi there", timestamp: Date.now() }],
 		};
 
-		const response = await complete(registration.getModel(), context);
+		const response = await complete(registration.getModel(), context, { requireProviderAttempts: true, attempts });
 		expect(response.content).toEqual([{ type: "text", text: "hello world" }]);
 		expect(response.usage.input).toBeGreaterThan(0);
 		expect(response.usage.output).toBeGreaterThan(0);
 		expect(response.usage.totalTokens).toBe(response.usage.input + response.usage.output);
 		expect(registration.state.callCount).toBe(1);
+		expect(attempts.admit).not.toHaveBeenCalled();
+		expect(attempts.settle).not.toHaveBeenCalled();
 	});
 
 	it("supports helper blocks for text, thinking, and tool calls", async () => {

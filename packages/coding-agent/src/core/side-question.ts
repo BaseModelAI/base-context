@@ -47,10 +47,12 @@ export function startSideQuestion(
 	onEvent: (event: SideQuestionEvent) => void | Promise<void>,
 	previousTurns: SideQuestionTurn[] = [],
 ): SideQuestionRun {
-	const model = parent.state.model;
-	if (!model) {
+	const selectedModel = parent.state.model;
+	if (!selectedModel) {
 		throw new Error("Select a model before asking a side question");
 	}
+
+	const model = { ...selectedModel, cost: { ...selectedModel.cost } };
 
 	// Each turn re-clones the live main conversation, so follow-ups always see
 	// the newest main-thread context; earlier side turns are replayed after it.
@@ -79,11 +81,16 @@ export function startSideQuestion(
 		} satisfies AssistantMessage,
 	]);
 
+	const initialMessages = [...structuredClone(parent.state.messages), ...previousTurnMessages];
+	const auxiliaryStream = bindAuxiliaryInferenceStream(parent.streamFn, {
+		purpose: "other",
+		purposeDetail: "side-question",
+	});
 	const sideAgent = new Agent({
 		initialState: {
 			model,
 			systemPrompt: parent.state.systemPrompt,
-			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
+			messages: initialMessages,
 			thinkingLevel: "off",
 			serviceTier: parent.state.serviceTier,
 			tools: [],
@@ -91,10 +98,7 @@ export function startSideQuestion(
 		convertToLlm: parent.convertToLlm,
 		transformContext: parent.transformContext,
 		// The side transcript stays separate; inference still belongs to the subject session.
-		streamFn: bindAuxiliaryInferenceStream(parent.streamFn, {
-			purpose: "other",
-			purposeDetail: "side-question",
-		}),
+		streamFn: auxiliaryStream,
 		getApiKey: parent.getApiKey,
 		onPayload: parent.onPayload,
 		onResponse: parent.onResponse,
@@ -112,7 +116,8 @@ export function startSideQuestion(
 	const emit = (status: SideQuestionStatus, errorMessage?: string) =>
 		onEvent({ id, question, answer, status, ...(errorMessage ? { errorMessage } : {}) });
 
-	const unsubscribe = sideAgent.subscribe(async (event) => {
+	let eventQueue: Promise<void> = Promise.resolve();
+	const unsubscribe = sideAgent.subscribe((event) => {
 		if (event.type !== "message_update" && event.type !== "message_end") {
 			return;
 		}
@@ -121,7 +126,9 @@ export function startSideQuestion(
 			return;
 		}
 		answer = nextAnswer;
-		await emit("running");
+		const update = { id, question, answer, status: "running" as const };
+		eventQueue = eventQueue.then(() => onEvent(update));
+		void eventQueue.catch(() => undefined);
 	});
 
 	const prompt = sideQuestionPrompt(question, previousTurns.length === 0);
@@ -134,6 +141,7 @@ export function startSideQuestion(
 			}
 			started = true;
 			await sideAgent.prompt(prompt);
+			await eventQueue;
 			if (abortRequested) {
 				await emit("cancelled");
 				return;
@@ -150,7 +158,14 @@ export function startSideQuestion(
 				emit(abortRequested ? "cancelled" : "error", abortRequested ? undefined : errorMessage),
 			).catch(() => undefined);
 		})
-		.finally(unsubscribe);
+		.finally(async () => {
+			unsubscribe();
+			try {
+				await eventQueue;
+			} finally {
+				await auxiliaryStream.dispose();
+			}
+		});
 
 	return {
 		done,

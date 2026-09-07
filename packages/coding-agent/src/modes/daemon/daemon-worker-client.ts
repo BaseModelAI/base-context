@@ -8,7 +8,7 @@ import {
 	DaemonSocketClosedError,
 } from "./daemon-client.js";
 import {
-	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS,
 	DAEMON_PROTOCOL_NAME,
 	DAEMON_PROTOCOL_VERSION,
 	type DaemonClosingReason,
@@ -19,7 +19,7 @@ import {
 	type DaemonServerCapability,
 	getDaemonCommandCompatibilities,
 	meetsDaemonCommandCompatibility,
-	NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+	NATIVE_WORK_COMPATIBILITIES,
 } from "./daemon-protocol.js";
 import {
 	type DaemonPeerCommand,
@@ -46,7 +46,7 @@ export class DaemonWorkerAuthenticationError extends Error {}
 export class DaemonWorkerCompatibilityError extends Error {
 	constructor(hello: DaemonHello) {
 		super(
-			`Daemon worker ${hello.protocol.name} protocol ${hello.protocol.version} cannot provide native inference ownership. Keep its live owner intact; update or stop it with its own runtime before recovery.`,
+			`Daemon worker ${hello.protocol.name} protocol ${hello.protocol.version} cannot provide canonical session ownership and native inference ownership. Keep its live owner intact; update or stop it with its own runtime before recovery.`,
 		);
 		this.name = "DaemonWorkerCompatibilityError";
 	}
@@ -189,7 +189,7 @@ export class DaemonWorkerClient {
 
 	private async requireNativeOwner(): Promise<void> {
 		const hello = await this.waitForHello();
-		if (!meetsDaemonCommandCompatibility(hello, NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY)) {
+		if (!NATIVE_WORK_COMPATIBILITIES.every((requirement) => meetsDaemonCommandCompatibility(hello, requirement))) {
 			throw new DaemonWorkerCompatibilityError(hello);
 		}
 	}
@@ -296,7 +296,7 @@ export class DaemonWorkerClient {
 					if (
 						parsed.protocol.name !== DAEMON_PROTOCOL_NAME ||
 						(parsed.protocol.version !== DAEMON_PROTOCOL_VERSION &&
-							parsed.protocol.version !== DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION)
+							!DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS.includes(parsed.protocol.version))
 					) {
 						this.compatibilityError = new DaemonWorkerCompatibilityError(parsed);
 						this.rejectAll(this.compatibilityError);

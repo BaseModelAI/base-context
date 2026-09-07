@@ -145,6 +145,9 @@ export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
+	/** Native owner barrier before transform/convert. Rejection stops context construction. */
+	beforeContextBuild?: () => Promise<void>;
+
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 *

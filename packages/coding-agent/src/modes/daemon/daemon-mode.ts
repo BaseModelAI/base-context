@@ -99,6 +99,8 @@ import {
 import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
+	findMostRecentSessionForCwd,
+	getDefaultSessionDir,
 	getSessionArtifactPathForFile,
 	readSessionInfo,
 	resolveSessionRlmDepth,
@@ -139,6 +141,7 @@ import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
 	DAEMON_DEFAULT_CLIENT_CAPABILITIES,
@@ -162,6 +165,7 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
+	isLegacyDaemonInspection,
 	isSessionPlaneDaemonCommand,
 	salvageDaemonCommandId,
 	success,
@@ -487,6 +491,7 @@ export class AgentDaemon {
 		deadline?: ReturnType<typeof setTimeout>;
 		phase: "preparing" | "fencing" | "prepared" | "publishing";
 		manifest?: DaemonUpdateRestartManifest;
+		checkpoint?: Promise<DaemonUpdateRestartManifest>;
 		deferredClientEnv: Array<{
 			client: DaemonSocketClient;
 			state: ActiveSessionState;
@@ -569,6 +574,11 @@ export class AgentDaemon {
 		},
 		undefined,
 		(session) => session.requests.capture(),
+		(state, error) => {
+			this.log(
+				`Session summary failed for ${state.activeSessionId}: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`,
+			);
+		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly rosterReporter: WorkerRosterReporterState = {
@@ -1067,15 +1077,6 @@ export class AgentDaemon {
 		);
 	}
 
-	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
-		const childId = state.runtime.metadata.rlmChildId;
-		const child = state.runtime.session.sessionFile;
-		if (!childId || !child) return;
-		// Awaited: the supervisor answers sibling-name checks from the ledger,
-		// so the rename must be durable before the reservation is released.
-		await this.rlmSpawnLedger().appendRename({ childId, child, name });
-	}
-
 	/**
 	 * Legacy per-parent registry path. Read-only: consumed solely as fallback
 	 * hydration metadata for pre-ledger children without a display file (the
@@ -1505,7 +1506,7 @@ export class AgentDaemon {
 		clientEnv?: Record<string, string>,
 		onStateCreated?: (state: ActiveSessionState) => void,
 		runtimeOpenGuard?: RuntimeOpenGuard,
-		onStateBound?: (state: ActiveSessionState) => void,
+		onStateBound?: (state: ActiveSessionState) => void | Promise<void>,
 		restoreActiveSessionId?: string,
 	): Promise<ActiveSessionState> {
 		const desiredActiveSessionId =
@@ -1553,7 +1554,7 @@ export class AgentDaemon {
 					throw new RuntimeOpenCancelledError();
 				}
 			}
-			onStateBound?.(state);
+			await onStateBound?.(state);
 			this.scheduleRosterFlush();
 		} catch (error) {
 			state.unsubscribe?.();
@@ -1572,7 +1573,7 @@ export class AgentDaemon {
 			// restore it. Closes for kill/completed/replaced flip this back to
 			// sleep; clean shutdowns leave it in place on purpose.
 			try {
-				runtime.session.sessionManager.appendSessionState({ status: "active" });
+				await runtime.session.sessionManager.appendSessionState({ status: "active" });
 			} catch {
 				// Marking is best-effort; the session still works unrestored.
 			}
@@ -1583,12 +1584,12 @@ export class AgentDaemon {
 		return state;
 	}
 
-	private refreshReplacedSessionState(state: ActiveSessionState): void {
+	private async refreshReplacedSessionState(state: ActiveSessionState): Promise<void> {
 		this.acpMcpOwners?.delete(state.activeSessionId);
 		for (const client of state.clients) {
 			this.abortSideQuestionsFor(client, state.activeSessionId);
 		}
-		this.summarizer.forget(state.activeSessionId);
+		await this.summarizer.forget(state.activeSessionId);
 		state.summaryState = undefined;
 		state.runtime.session.setCurrentRecap(undefined);
 		this.summarizer.seed(state);
@@ -1656,10 +1657,17 @@ export class AgentDaemon {
 		const cwd = resolve(config.cwd);
 		const agentDir = config.agentDir;
 		const clientEnv = filterClientEnv(command.env);
-		const cwdOverride = command.config?.cwd ? resolve(command.config.cwd) : undefined;
+		const cwdOverride =
+			!command.sessionPath && command.continueRecent
+				? cwd
+				: command.config?.cwd
+					? resolve(command.config.cwd)
+					: undefined;
 		const sessionPath = command.sessionPath
 			? await resolveDaemonSessionPath(command.sessionPath, cwd, config.sessionDir)
-			: undefined;
+			: command.continueRecent && !command.noSession
+				? (findMostRecentSessionForCwd(config.sessionDir ?? getDefaultSessionDir(cwd), cwd) ?? undefined)
+				: undefined;
 		const sessionKey = sessionPath ? resolve(sessionPath) : undefined;
 		if (sessionKey && this.findPassivationBySessionFile(sessionKey)) {
 			await this.waitForPassivation(sessionKey);
@@ -1778,94 +1786,103 @@ export class AgentDaemon {
 				? await SessionManager.openAsync(sessionPath, config.sessionDir, cwdOverride)
 				: command.noSession
 					? SessionManager.inMemory(cwd)
-					: command.continueRecent
-						? SessionManager.continueRecent(cwd, config.sessionDir)
-						: SessionManager.create(cwd, config.sessionDir);
+					: await SessionManager.create(cwd, config.sessionDir);
 		} catch (error) {
 			sessionLease?.release();
 			releaseOpenReservation();
 			throw error;
 		}
+		const releaseSessionManager = async (): Promise<void> => {
+			try {
+				await sessionManager.close();
+			} finally {
+				sessionLease?.release();
+			}
+		};
 		const createState = async (): Promise<ActiveSessionState> => {
-			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
-				sessionLease?.release();
-				throw new RuntimeOpenCancelledError();
-			}
-			const existing = this.findSessionBySessionFile(sessionManager.getSessionFile());
-			if (existing) {
-				sessionLease?.release();
-				await this.waitForBoundSession(existing);
-				// A live runtime already owns this session file; reuse it instead of
-				// starting a second runtime that would interleave writes to one file.
-				// clientEnv adopts the first offered identity (e.g. a pane opening a
-				// cron-created session) but never overwrites one: extensions captured
-				// the creator's identity at load, and swapping it would only make
-				// pi.exec disagree with those captures.
-				if (command.name) {
-					await this.setStateSessionName(existing, command.name);
+			try {
+				if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+					throw new RuntimeOpenCancelledError();
 				}
-				this.adoptClientEnv(existing, clientEnv);
-				this.rebindCronJobsToState(existing);
-				return existing;
-			}
-			let stateRef: ActiveSessionState | undefined;
-			// Extensions capture client env (e.g. herdr pane identity) synchronously
-			// while the runtime loads them, so it must be in process.env for the
-			// duration; withClientEnv restores it after.
-			const runtime = await withClientEnv(clientEnv, () =>
-				createAgentSessionRuntime(this.options.createRuntime, {
-					cwd: sessionManager.getCwd(),
-					agentDir,
-					sessionManager,
-					sessionConfig: config,
-					runtimeMetadata: command.runtimeMetadata,
-					sessionLease,
-					sessionOptions: {
-						rlmHeartbeatController: {
-							listRlmHeartbeats: (listOptions) => {
-								if (!stateRef) {
-									throw new Error("RLM heartbeat state is not ready for this session yet");
-								}
-								return this.cronStore.listRlmHeartbeats(stateRef.activeSessionId, listOptions);
+				const existing = this.findSessionBySessionFile(sessionManager.getSessionFile());
+				if (existing) {
+					await releaseSessionManager();
+					await this.waitForBoundSession(existing);
+					// A live runtime already owns this session file; reuse it instead of
+					// starting a second runtime that would interleave writes to one file.
+					// clientEnv adopts the first offered identity (e.g. a pane opening a
+					// cron-created session) but never overwrites one: extensions captured
+					// the creator's identity at load, and swapping it would only make
+					// pi.exec disagree with those captures.
+					if (command.name) {
+						await this.setStateSessionName(existing, command.name);
+					}
+					this.adoptClientEnv(existing, clientEnv);
+					this.rebindCronJobsToState(existing);
+					return existing;
+				}
+				let stateRef: ActiveSessionState | undefined;
+				// Extensions capture client env (e.g. herdr pane identity) synchronously
+				// while the runtime loads them, so it must be in process.env for the
+				// duration; withClientEnv restores it after.
+				const runtime = await withClientEnv(clientEnv, () =>
+					createAgentSessionRuntime(this.options.createRuntime, {
+						cwd: sessionManager.getCwd(),
+						agentDir,
+						sessionManager,
+						sessionConfig: config,
+						runtimeMetadata: command.runtimeMetadata,
+						sessionLease,
+						sessionOptions: {
+							rlmHeartbeatController: {
+								listRlmHeartbeats: (listOptions) => {
+									if (!stateRef) {
+										throw new Error("RLM heartbeat state is not ready for this session yet");
+									}
+									return this.cronStore.listRlmHeartbeats(stateRef.activeSessionId, listOptions);
+								},
+								createRlmHeartbeat: (input) => {
+									if (!stateRef) {
+										throw new Error("RLM heartbeat state is not ready for this session yet");
+									}
+									return this.createRlmHeartbeatForState(stateRef, input);
+								},
+								updateRlmHeartbeat: (input) => {
+									if (!stateRef) {
+										throw new Error("RLM heartbeat state is not ready for this session yet");
+									}
+									return this.updateRlmHeartbeatForState(stateRef, input);
+								},
+								deleteRlmHeartbeat: (id) => {
+									if (!stateRef) {
+										throw new Error("RLM heartbeat state is not ready for this session yet");
+									}
+									return this.deleteRlmHeartbeatForState(stateRef, id);
+								},
 							},
-							createRlmHeartbeat: (input) => {
-								if (!stateRef) {
-									throw new Error("RLM heartbeat state is not ready for this session yet");
-								}
-								return this.createRlmHeartbeatForState(stateRef, input);
-							},
-							updateRlmHeartbeat: (input) => {
-								if (!stateRef) {
-									throw new Error("RLM heartbeat state is not ready for this session yet");
-								}
-								return this.updateRlmHeartbeatForState(stateRef, input);
-							},
-							deleteRlmHeartbeat: (id) => {
-								if (!stateRef) {
-									throw new Error("RLM heartbeat state is not ready for this session yet");
-								}
-								return this.deleteRlmHeartbeatForState(stateRef, id);
-							},
+							agentMessageController: this.createAgentMessageController(() => stateRef),
+							agentObserveController: this.createAgentObserveController(() => stateRef),
 						},
-						agentMessageController: this.createAgentMessageController(() => stateRef),
-						agentObserveController: this.createAgentObserveController(() => stateRef),
+					}),
+				);
+				if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
+					await runtime.dispose().catch(() => undefined);
+					throw new RuntimeOpenCancelledError();
+				}
+				const state = await this.addRuntime(
+					runtime,
+					command.name,
+					clientEnv,
+					(state) => {
+						stateRef = state;
 					},
-				}),
-			);
-			if (runtimeOpenGuard && !(await runtimeOpenGuard())) {
-				await runtime.dispose().catch(() => undefined);
-				throw new RuntimeOpenCancelledError();
+					runtimeOpenGuard,
+				);
+				return state;
+			} catch (error) {
+				await releaseSessionManager();
+				throw error;
 			}
-			const state = await this.addRuntime(
-				runtime,
-				command.name,
-				clientEnv,
-				(state) => {
-					stateRef = state;
-				},
-				runtimeOpenGuard,
-			);
-			return state;
 		};
 
 		const sessionFile = sessionManager.getSessionFile();
@@ -1875,8 +1892,11 @@ export class AgentDaemon {
 		}
 		const openedSessionKey = resolve(sessionFile);
 		if (this.openingSessions.has(openedSessionKey)) {
-			sessionLease?.release();
-			releaseOpenReservation();
+			try {
+				await releaseSessionManager();
+			} finally {
+				releaseOpenReservation();
+			}
 			return this.createRuntime({ ...command, sessionPath: sessionFile }, runtimeOpenGuard);
 		}
 		const opening = Promise.resolve().then(createState);
@@ -2588,80 +2608,92 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
-		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
-		sessionManager.newSession({
-			parentSession: options.parentSession.sessionFile,
+		const parentSession = options.parentSession;
+		const parentSource = {
+			cwd: parentSession.sessionManager.getCwd(),
+			sessionFile: parentSession.sessionFile,
+			sessionId: parentSession.sessionId,
+			sessionName: parentSession.sessionName,
+		};
+		const sessionManager = await SessionManager.create(parentSource.cwd, options.sessionDir, {
+			parentSession: parentSource.sessionFile,
 			rlmDepth: options.rlmDepth,
 		});
 		let stateRef: ActiveSessionState | undefined;
-		// Subagents inherit the parent's client env (e.g. herdr pane identity).
-		const runtime = await withClientEnv(parentState.clientEnv, () =>
-			createAgentSessionRuntime(this.options.createRuntime, {
-				cwd: sessionManager.getCwd(),
-				agentDir: parentState.runtime.services.agentDir,
-				sessionManager,
-				sessionStartEvent: { type: "session_start", reason: "startup" },
-				sessionConfig: parentState.runtime.runtimeConfig,
-				sessionOptions: {
-					model: options.model,
-					thinkingLevel: options.thinkingLevel,
-					serviceTier: options.serviceTier,
-					scopedModels: options.scopedModels,
-					initialActiveToolNames: options.activeToolNames,
-					allowedToolNames: options.allowedToolNames,
-					customTools: options.customTools,
-					includeGoals: options.includeGoals,
-					includeCompactSkill: options.includeCompactSkill,
-					agentMessageController: this.createAgentMessageController(() => stateRef),
-					agentObserveController: this.createAgentObserveController(() => stateRef),
-					rlmHeartbeatController: {
-						listRlmHeartbeats: (listOptions) => {
-							if (!stateRef) {
-								throw new Error("RLM heartbeat state is not ready for this session yet");
-							}
-							return this.cronStore.listRlmHeartbeats(stateRef.activeSessionId, listOptions);
+		let runtime: AgentSessionRuntime;
+		try {
+			// Subagents inherit the parent's client env (e.g. herdr pane identity).
+			runtime = await withClientEnv(parentState.clientEnv, () =>
+				createAgentSessionRuntime(this.options.createRuntime, {
+					cwd: sessionManager.getCwd(),
+					agentDir: parentState.runtime.services.agentDir,
+					sessionManager,
+					sessionStartEvent: { type: "session_start", reason: "startup" },
+					sessionConfig: parentState.runtime.runtimeConfig,
+					sessionOptions: {
+						model: options.model,
+						thinkingLevel: options.thinkingLevel,
+						serviceTier: options.serviceTier,
+						scopedModels: options.scopedModels,
+						initialActiveToolNames: options.activeToolNames,
+						allowedToolNames: options.allowedToolNames,
+						customTools: options.customTools,
+						includeGoals: options.includeGoals,
+						includeCompactSkill: options.includeCompactSkill,
+						agentMessageController: this.createAgentMessageController(() => stateRef),
+						agentObserveController: this.createAgentObserveController(() => stateRef),
+						rlmHeartbeatController: {
+							listRlmHeartbeats: (listOptions) => {
+								if (!stateRef) {
+									throw new Error("RLM heartbeat state is not ready for this session yet");
+								}
+								return this.cronStore.listRlmHeartbeats(stateRef.activeSessionId, listOptions);
+							},
+							createRlmHeartbeat: (input) => {
+								if (!stateRef) {
+									throw new Error("RLM heartbeat state is not ready for this session yet");
+								}
+								return this.createRlmHeartbeatForState(stateRef, input);
+							},
+							updateRlmHeartbeat: (input) => {
+								if (!stateRef) {
+									throw new Error("RLM heartbeat state is not ready for this session yet");
+								}
+								return this.updateRlmHeartbeatForState(stateRef, input);
+							},
+							deleteRlmHeartbeat: (id) => {
+								if (!stateRef) {
+									throw new Error("RLM heartbeat state is not ready for this session yet");
+								}
+								return this.deleteRlmHeartbeatForState(stateRef, id);
+							},
 						},
-						createRlmHeartbeat: (input) => {
-							if (!stateRef) {
-								throw new Error("RLM heartbeat state is not ready for this session yet");
-							}
-							return this.createRlmHeartbeatForState(stateRef, input);
-						},
-						updateRlmHeartbeat: (input) => {
-							if (!stateRef) {
-								throw new Error("RLM heartbeat state is not ready for this session yet");
-							}
-							return this.updateRlmHeartbeatForState(stateRef, input);
-						},
-						deleteRlmHeartbeat: (id) => {
-							if (!stateRef) {
-								throw new Error("RLM heartbeat state is not ready for this session yet");
-							}
-							return this.deleteRlmHeartbeatForState(stateRef, id);
-						},
+						rlmDepth: options.rlmDepth,
+						rlmMaxDepth: options.rlmMaxDepth,
+						rlmSessionDir: options.sessionDir,
+						rlmParentNodeId: options.rlmParentNodeId,
+						rlmParentAgent: parentSource.sessionName ?? parentSource.sessionId,
+						semanticParentSessionId: parentSource.sessionId,
+						semanticSpawnedByRequestId: options.spawnedByRequestId,
 					},
-					rlmDepth: options.rlmDepth,
-					rlmMaxDepth: options.rlmMaxDepth,
-					rlmSessionDir: options.sessionDir,
-					rlmParentNodeId: options.rlmParentNodeId,
-					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
-					semanticParentSessionId: options.parentSession.sessionId,
-					semanticSpawnedByRequestId: options.spawnedByRequestId,
-				},
-				runtimeMetadata: {
-					kind: "subagent",
-					createdAt: Date.now(),
-					parentActiveSessionId: parentState.activeSessionId,
-					parentSessionId: options.parentSession.sessionId,
-					parentSessionFile: options.parentSession.sessionFile,
-					rlmChildId: options.id,
-					rlmParentNodeId: options.rlmParentNodeId,
-					prompt: options.prompt,
-					spawnCode: options.spawnCode,
-					sessionDir: options.sessionDir,
-				},
-			}),
-		);
+					runtimeMetadata: {
+						kind: "subagent",
+						createdAt: Date.now(),
+						parentActiveSessionId: parentState.activeSessionId,
+						parentSessionId: parentSource.sessionId,
+						parentSessionFile: parentSource.sessionFile,
+						rlmChildId: options.id,
+						rlmParentNodeId: options.rlmParentNodeId,
+						prompt: options.prompt,
+						spawnCode: options.spawnCode,
+						sessionDir: options.sessionDir,
+					},
+				}),
+			);
+		} catch (error) {
+			await sessionManager.close();
+			throw error;
+		}
 		let state: ActiveSessionState;
 		try {
 			state = await this.addRuntime(
@@ -2672,9 +2704,12 @@ export class AgentDaemon {
 					stateRef = createdState;
 				},
 				() => options.parentSession.getRlmChildRunStatus(options.id) !== "cancelled",
-				() => {
+				async () => {
 					if (runtime.session.sessionName !== options.sessionName) {
-						runtime.session.setSessionName(options.sessionName);
+						await runtime.session.setSessionName(options.sessionName);
+					}
+					if (options.parentSession.getRlmChildRunStatus(options.id) === "cancelled") {
+						throw new RuntimeOpenCancelledError();
 					}
 					if (runtime.session.sessionFile) {
 						this.recordRlmSubagentState(parentState, {
@@ -3004,10 +3039,12 @@ export class AgentDaemon {
 		const hydrationEnv = parentState.clientEnv ?? clientEnv;
 		let stateRef: ActiveSessionState | undefined;
 		let runtime: AgentSessionRuntime | undefined;
+		let sessionManager: SessionManager | undefined;
 		let sessionLease: SessionLease | undefined;
 		try {
 			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
-			const sessionManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
+			const openedManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
+			sessionManager = openedManager;
 			const modelRegistry = parentState.runtime.services.modelRegistry;
 			let rehydratedModel: Model<Api> | undefined;
 			if (entry.model) {
@@ -3018,9 +3055,9 @@ export class AgentDaemon {
 			}
 			runtime = await withClientEnv(hydrationEnv, () =>
 				createAgentSessionRuntime(this.options.createRuntime, {
-					cwd: sessionManager.getCwd(),
+					cwd: openedManager.getCwd(),
 					agentDir: parentState.runtime.services.agentDir,
-					sessionManager,
+					sessionManager: openedManager,
 					sessionStartEvent: { type: "session_start", reason: "startup" },
 					sessionConfig: parentState.runtime.runtimeConfig,
 					sessionLease,
@@ -3061,7 +3098,7 @@ export class AgentDaemon {
 						rlmDepth:
 							entry.rlmDepth ??
 							(existsSync(entry.sessionFile)
-								? resolveSessionRlmDepth(sessionManager.getHeader() ?? {}, entry.sessionFile)
+								? resolveSessionRlmDepth(openedManager.getHeader() ?? {}, entry.sessionFile)
 								: 1),
 						rlmMaxDepth: entry.rlmMaxDepth,
 						rlmParentNodeId: entry.rlmParentNodeId ?? entry.childId,
@@ -3096,7 +3133,7 @@ export class AgentDaemon {
 			);
 			// The session transcript is authoritative for mutable metadata such as a
 			// later user-assigned name; the registry value is only the spawn snapshot.
-			if (!parentState.runtime.session.registerRlmChildSession(entry.childId, runtime.session)) {
+			if (!(await parentState.runtime.session.registerRlmChildSession(entry.childId, runtime.session))) {
 				await this.closeSession(state, "replaced");
 				throw new RuntimeOpenCancelledError();
 			}
@@ -3121,7 +3158,11 @@ export class AgentDaemon {
 			} else {
 				await runtime?.dispose().catch(() => undefined);
 			}
-			sessionLease?.release();
+			try {
+				await sessionManager?.close();
+			} finally {
+				sessionLease?.release();
+			}
 			throw error;
 		}
 	}
@@ -3397,12 +3438,22 @@ export class AgentDaemon {
 	 */
 	private parseCommandAndRegisterPromptAdmission(client: DaemonSocketClient, line: string): unknown {
 		const wireValue = JSON.parse(line) as unknown;
-		if (isDaemonCommandEnvelope(wireValue) && wireValue.clientId) client.id = wireValue.clientId;
-		const parsed = (isDaemonCommandEnvelope(wireValue) ? { ...wireValue.command, id: wireValue.id } : wireValue) as {
+		const envelope = isDaemonCommandEnvelope(wireValue) ? wireValue : undefined;
+		const parsed = (envelope ? { ...envelope.command, id: envelope.id } : wireValue) as {
 			type?: unknown;
 			activeSessionId?: unknown;
 			admissionId?: unknown;
 		};
+		if (
+			!this.options.worker &&
+			(!envelope || envelope.protocol.version < CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol) &&
+			!isLegacyDaemonInspection(parsed as DaemonCommand)
+		) {
+			throw new Error(
+				"Native daemon commands require protocol 10 canonical session ownership; only passive inspection is available",
+			);
+		}
+		if (envelope?.clientId) client.id = envelope.clientId;
 		if (parsed.type === "prompt" || parsed.type === "prompt_and_wait") {
 			if (parsed.admissionId !== undefined) {
 				if (typeof parsed.activeSessionId !== "string" || typeof parsed.admissionId !== "string") {
@@ -3843,8 +3894,11 @@ export class AgentDaemon {
 					if (transaction?.phase === "publishing") {
 						throw new Error("Daemon update checkpoint is already committing");
 					}
-					if (transaction) this.cancelPreparedUpdateRestart(transaction.id);
-					this.peerAdmissionsFenced = false;
+					if (transaction) {
+						this.cancelPreparedUpdateRestart(transaction.id);
+						await transaction.checkpoint?.catch(() => undefined);
+					}
+					if (!this.updateRestart) this.peerAdmissionsFenced = false;
 					this.writeWorkerSuccess(client, command);
 					return;
 				}
@@ -4153,7 +4207,12 @@ export class AgentDaemon {
 								undefined,
 								true,
 							);
-							SessionManager.open(command.sessionPath).appendSessionInfo(name);
+							const manager = await SessionManager.open(command.sessionPath);
+							try {
+								await manager.appendSessionInfo(name);
+							} finally {
+								await manager.close();
+							}
 							await this.rlmSpawnLedger().appendRenameByChildPath(command.sessionPath, name);
 						},
 					);
@@ -4886,19 +4945,19 @@ export class AgentDaemon {
 
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.setThinkingLevel(command.level);
+				await state.runtime.session.setThinkingLevel(command.level);
 				return success(command.id, "set_thinking_level");
 			}
 
 			case "set_service_tier": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.setServiceTier(command.serviceTier);
+				await state.runtime.session.setServiceTier(command.serviceTier);
 				return success(command.id, "set_service_tier");
 			}
 
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				const level = state.runtime.session.cycleThinkingLevel();
+				const level = await state.runtime.session.cycleThinkingLevel();
 				return success(command.id, "cycle_thinking_level", level ? { level } : null);
 			}
 
@@ -5026,7 +5085,7 @@ export class AgentDaemon {
 
 			case "export_jsonl": {
 				const state = this.getSessionState(command.activeSessionId);
-				const path = state.runtime.session.exportToJsonl(command.outputPath);
+				const path = await state.runtime.session.exportToJsonl(command.outputPath);
 				return success(command.id, "export_jsonl", { path });
 			}
 
@@ -5098,7 +5157,7 @@ export class AgentDaemon {
 
 			case "set_session_entry_label": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.sessionManager.appendLabelChange(command.entryId, command.label);
+				await state.runtime.session.sessionManager.appendLabelChange(command.entryId, command.label);
 				return success(command.id, "set_session_entry_label");
 			}
 
@@ -5733,8 +5792,14 @@ export class AgentDaemon {
 	}
 
 	private async applyStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
-		state.runtime.session.setSessionName(name);
-		await this.appendRlmLedgerRenameForState(state, name);
+		const session = state.runtime.session;
+		const childId = state.runtime.metadata.rlmChildId;
+		const child = session.sessionFile;
+		await session.setSessionName(name);
+		if (childId && child) {
+			// Keep the acknowledged rename tied to its original source until the reservation releases.
+			await this.rlmSpawnLedger().appendRename({ childId, child, name });
+		}
 	}
 
 	private async setStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
@@ -6149,7 +6214,9 @@ export class AgentDaemon {
 		return !this.hasScheduledJobsForSession(state.activeSessionId);
 	}
 
-	private createUpdateRestartSession(state: ActiveSessionState): DaemonUpdateRestartSession | undefined {
+	private async createUpdateRestartSession(
+		state: ActiveSessionState,
+	): Promise<DaemonUpdateRestartSession | undefined> {
 		const session = state.runtime.session;
 		const queue = {
 			actions: session.getSessionActionRecoverySnapshot(),
@@ -6173,7 +6240,7 @@ export class AgentDaemon {
 		const sessionFile =
 			session.sessionFile ??
 			(hasQueuedMessages || shouldResume
-				? session.sessionManager.materializeSessionFile(
+				? await session.sessionManager.materializeSessionFile(
 						state.runtime.runtimeConfig?.sessionDir ?? this.options.defaultSessionConfig.sessionDir,
 					)
 				: undefined);
@@ -6202,11 +6269,14 @@ export class AgentDaemon {
 		};
 	}
 
-	private appendUpdateRestartMarker(state: ActiveSessionState, restartSession: DaemonUpdateRestartSession): void {
+	private async appendUpdateRestartMarker(
+		state: ActiveSessionState,
+		restartSession: DaemonUpdateRestartSession,
+	): Promise<void> {
 		if (!restartSession.shouldResume) {
 			return;
 		}
-		state.runtime.session.sessionManager.appendCustomMessageEntry(
+		await state.runtime.session.sessionManager.appendCustomMessageEntry(
 			"prime-agent.update_restart",
 			UPDATE_RESTART_MARKER,
 			false,
@@ -6278,7 +6348,14 @@ export class AgentDaemon {
 			transaction.phase = "fencing";
 			await this.mutationDrain.waitForDrain(0, transaction.abort.signal, "Update restart preparation cancelled");
 			this.assertUpdateRestartNotCancelled(transaction);
-			const manifest = await this.prepareUpdateRestartCheckpoint(transaction);
+			const checkpoint = this.prepareUpdateRestartCheckpoint(transaction);
+			transaction.checkpoint = checkpoint;
+			let manifest: DaemonUpdateRestartManifest;
+			try {
+				manifest = await checkpoint;
+			} finally {
+				transaction.checkpoint = undefined;
+			}
 			this.assertUpdateRestartNotCancelled(transaction);
 			transaction.manifest = manifest;
 			transaction.phase = "prepared";
@@ -6305,18 +6382,21 @@ export class AgentDaemon {
 			const addedSession = [...this.sessions.keys()].find((activeSessionId) => !snapshottedIds.has(activeSessionId));
 			if (addedSession) throw new Error(`Session ${addedSession} became resident during update preparation`);
 
-			const restartSessions = states
-				.filter((state) => this.sessions.get(state.activeSessionId) === state)
-				.map((state) => this.createUpdateRestartSession(state))
-				.filter((session): session is DaemonUpdateRestartSession => session !== undefined)
-				.sort((left, right) => {
-					const leftState = this.sessions.get(left.activeSessionId);
-					const rightState = this.sessions.get(right.activeSessionId);
-					return (
-						(leftState ? this.getUpdateRestartSessionDepth(leftState) : 0) -
-						(rightState ? this.getUpdateRestartSessionDepth(rightState) : 0)
-					);
-				});
+			const restartSessions: DaemonUpdateRestartSession[] = [];
+			for (const state of states) {
+				this.assertUpdateRestartNotCancelled(transaction);
+				if (this.sessions.get(state.activeSessionId) !== state) continue;
+				const restartSession = await this.createUpdateRestartSession(state);
+				if (restartSession) restartSessions.push(restartSession);
+			}
+			restartSessions.sort((left, right) => {
+				const leftState = this.sessions.get(left.activeSessionId);
+				const rightState = this.sessions.get(right.activeSessionId);
+				return (
+					(leftState ? this.getUpdateRestartSessionDepth(leftState) : 0) -
+					(rightState ? this.getUpdateRestartSessionDepth(rightState) : 0)
+				);
+			});
 			this.assertUpdateRestartNotCancelled(transaction);
 			const includedActiveSessionIds = new Set(restartSessions.map((session) => session.activeSessionId));
 			const discardedActiveSessionIds = states
@@ -6347,7 +6427,7 @@ export class AgentDaemon {
 		const restartByActiveSessionId = new Map(manifest.sessions.map((session) => [session.activeSessionId, session]));
 		for (const state of this.sessions.values()) {
 			const restartSession = restartByActiveSessionId.get(state.activeSessionId);
-			if (restartSession) this.appendUpdateRestartMarker(state, restartSession);
+			if (restartSession) await this.appendUpdateRestartMarker(state, restartSession);
 		}
 		const closeStates = [...this.sessions.values()].sort(
 			(left, right) => this.getUpdateRestartSessionDepth(right) - this.getUpdateRestartSessionDepth(left),
@@ -6367,7 +6447,8 @@ export class AgentDaemon {
 		if (transaction.deadline) clearTimeout(transaction.deadline);
 		transaction.deadline = undefined;
 		transaction.abort.abort();
-		if (transaction.phase === "publishing") return;
+		// Preparation owns this promise and repeats cancellation after its source writes settle.
+		if (transaction.phase === "publishing" || transaction.checkpoint) return;
 		this.updateRestart = undefined;
 		for (const deferred of transaction.deferredClientEnv) {
 			if (
@@ -6469,10 +6550,10 @@ export class AgentDaemon {
 				closeError = error;
 				closeFailed = true;
 			}
-			const reasonUpgrade = (existingClose.reasonUpgrade ?? Promise.resolve()).then(() => {
+			const reasonUpgrade = (existingClose.reasonUpgrade ?? Promise.resolve()).then(async () => {
 				if (!this.isStrongerCloseReason(requestedReason, existingClose.reason)) return;
 				try {
-					this.applyReasonUpgrade(state, existingClose.descendants, existingClose.reason, requestedReason);
+					await this.applyReasonUpgrade(state, existingClose.descendants, existingClose.reason, requestedReason);
 				} finally {
 					existingClose.reason = requestedReason;
 				}
@@ -6514,15 +6595,20 @@ export class AgentDaemon {
 		return this.closeReasonStrength(candidate) > this.closeReasonStrength(current);
 	}
 
-	private applyReasonUpgrade(
+	private async applyReasonUpgrade(
 		state: ActiveSessionState,
 		descendants: ReadonlySet<ActiveSessionState>,
 		from: DaemonSessionClosedReason,
 		to: DaemonSessionClosedReason,
-	): void {
+	): Promise<void> {
 		let persistError: unknown;
 		let persistenceFailed = false;
-		for (const target of [state, ...descendants]) {
+		const targets = [state, ...descendants].map((target) => ({
+			target,
+			sessionFile: target.runtime.session.sessionFile,
+			sessionId: target.runtime.session.sessionId,
+		}));
+		for (const { target, sessionFile, sessionId } of targets) {
 			try {
 				if (to === "killed") this.cancelScheduledJobsForSession(target);
 			} catch (error) {
@@ -6530,7 +6616,19 @@ export class AgentDaemon {
 				persistenceFailed = true;
 			}
 			try {
-				if (this.closeKeepsResumeEntry(from)) this.archiveSession(target);
+				if (this.closeKeepsResumeEntry(from)) {
+					if (!sessionFile) continue;
+					// The joined close already disposed the old manager. Acquire a new owner, never reuse it.
+					const manager = await SessionManager.open(sessionFile);
+					try {
+						if (manager.getSessionId() !== sessionId) {
+							throw new Error(`Session changed before archive: ${sessionFile}`);
+						}
+						await manager.appendSessionState({ status: "archived" });
+					} finally {
+						await manager.close();
+					}
+				}
 			} catch (error) {
 				if (!persistenceFailed) persistError = error;
 				persistenceFailed = true;
@@ -6543,8 +6641,8 @@ export class AgentDaemon {
 		return reason === "shutdown" || reason === "update";
 	}
 
-	private archiveSession(state: ActiveSessionState): void {
-		state.runtime.session.sessionManager.appendSessionState({ status: "archived" });
+	private async archiveSession(state: ActiveSessionState): Promise<void> {
+		await state.runtime.session.sessionManager.appendSessionState({ status: "archived" });
 	}
 
 	private async abortBashForClose(state: ActiveSessionState): Promise<void> {
@@ -6572,9 +6670,8 @@ export class AgentDaemon {
 		} else if (reason !== "shutdown" && reason !== "update") {
 			this.cancelSubagentRlmHeartbeats(state);
 		}
-		// Abort in-flight status work before any await/dispose so it can't write
-		// agent_status to a session being torn down.
-		this.summarizer.forget(state.activeSessionId);
+		// Drain admitted status writes before the session owner closes.
+		await this.summarizer.forget(state.activeSessionId);
 		const cascadeError = cascadeChildren
 			? await this.closeChildSessions(state, reason, waitForAbort, descendants, disposal)
 			: undefined;
@@ -6587,7 +6684,7 @@ export class AgentDaemon {
 		// Clean shutdown leaves the session un-archived so it stays in the resume list.
 		if (!keepsResumeEntry && !isEmptyDraftSession) {
 			try {
-				this.archiveSession(state);
+				await this.archiveSession(state);
 			} catch (error) {
 				persistError = error;
 			}
@@ -7400,7 +7497,7 @@ export class AgentDaemon {
 			this.write(client, { type: "daemon_closing", reason: closingReason });
 		}
 
-		this.summarizer.stop();
+		await this.summarizer.stop();
 		for (const cleanup of this.signalCleanupHandlers) {
 			cleanup();
 		}

@@ -21,7 +21,7 @@ import {
 export interface ActiveSessionBindingCallbacks {
 	broadcast: (state: ActiveSessionState, message: DaemonOutbound) => void;
 	createConnectionState?: (state: ActiveSessionState) => AgentConnectionState;
-	sessionReplaced?: (state: ActiveSessionState) => void;
+	sessionReplaced?: (state: ActiveSessionState) => void | Promise<void>;
 	shutdown: () => void;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 }
@@ -69,7 +69,7 @@ export async function bindActiveSessionState(
 
 	state.runtime.setRebindSession(async () => {
 		await bindActiveSessionState(state, callbacks);
-		callbacks.sessionReplaced?.(state);
+		await callbacks.sessionReplaced?.(state);
 		callbacks.broadcast(state, {
 			type: "session_replaced",
 			activeSessionId: state.activeSessionId,

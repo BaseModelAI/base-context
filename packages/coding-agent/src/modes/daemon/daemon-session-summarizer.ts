@@ -154,10 +154,13 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	if (messages.length === 0) {
 		return undefined;
 	}
-	const model = resolveSummaryModel(registry);
-	if (!model) {
+	const selectedModel = resolveSummaryModel(registry);
+	if (!selectedModel) {
 		return undefined;
 	}
+	const model = { ...selectedModel, cost: { ...selectedModel.cost } };
+	const subject = buildStatusContext(messages, isWorking);
+	const timestamp = Date.now();
 	const auth = await registry.getApiKeyAndHeaders(model);
 	if (!auth.ok || !auth.apiKey) {
 		return undefined;
@@ -171,8 +174,8 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 				messages: [
 					{
 						role: "user" as const,
-						content: [{ type: "text" as const, text: buildStatusContext(messages, isWorking) }],
-						timestamp: Date.now(),
+						content: [{ type: "text" as const, text: subject }],
+						timestamp,
 					},
 				],
 			},
@@ -208,6 +211,9 @@ export class DaemonSessionSummarizer {
 	private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	// Controller per in-flight summary so a closing session can abort its write.
 	private readonly inFlight = new Map<string, AbortController>();
+	private readonly tasks = new Map<string, Promise<void>>();
+	private readonly forgotten = new Set<string>();
+	private stopped = false;
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
 
@@ -219,21 +225,25 @@ export class DaemonSessionSummarizer {
 			params: GenerateAgentStatusParams,
 		) => Promise<AgentStatusResult | undefined> = generateAgentStatus,
 		private readonly getRequests?: (session: ActiveSessionState["runtime"]["session"]) => InferenceCoordinator,
+		private readonly onError: (state: ActiveSessionState, error: unknown) => void = (_state, error) =>
+			console.error(error),
 	) {}
 
 	start(): void {
 		if (this.interval) {
 			return;
 		}
+		this.stopped = false;
 		this.interval = setInterval(() => {
 			for (const state of this.listSessions()) {
-				void this.summarize(state);
+				this.summarize(state);
 			}
 		}, SWEEP_INTERVAL_MS);
 		this.interval.unref?.();
 	}
 
-	stop(): void {
+	async stop(): Promise<void> {
+		this.stopped = true;
 		if (this.interval) {
 			clearInterval(this.interval);
 			this.interval = undefined;
@@ -246,10 +256,12 @@ export class DaemonSessionSummarizer {
 			controller.abort();
 		}
 		this.rerunRequested.clear();
+		await Promise.all(this.tasks.values());
 	}
 
-	/** Drop any pending work for a session that is closing. */
-	forget(activeSessionId: string): void {
+	/** Cancel new work and drain any admitted status write before closing. */
+	async forget(activeSessionId: string): Promise<void> {
+		this.forgotten.add(activeSessionId);
 		const timer = this.debounceTimers.get(activeSessionId);
 		if (timer) {
 			clearTimeout(timer);
@@ -257,10 +269,12 @@ export class DaemonSessionSummarizer {
 		}
 		this.inFlight.get(activeSessionId)?.abort();
 		this.rerunRequested.delete(activeSessionId);
+		await this.tasks.get(activeSessionId);
 	}
 
 	/** Seed in-memory status from the persisted entry when a session is added. */
 	seed(state: ActiveSessionState): void {
+		this.forgotten.delete(state.activeSessionId);
 		if (state.summaryState) {
 			return;
 		}
@@ -273,25 +287,43 @@ export class DaemonSessionSummarizer {
 	/** Called when a session finishes a turn; debounce until the agent settles. */
 	notifyActivity(state: ActiveSessionState): void {
 		const id = state.activeSessionId;
+		if (this.stopped || this.forgotten.has(id)) return;
 		const existing = this.debounceTimers.get(id);
 		if (existing) {
 			clearTimeout(existing);
 		}
 		const timer = setTimeout(() => {
 			this.debounceTimers.delete(id);
-			void this.summarize(state);
+			this.summarize(state);
 		}, SETTLE_DEBOUNCE_MS);
 		timer.unref?.();
 		this.debounceTimers.set(id, timer);
 	}
 
-	private async summarize(state: ActiveSessionState): Promise<void> {
+	private summarize(state: ActiveSessionState): Promise<void> {
 		const id = state.activeSessionId;
-		if (this.inFlight.has(id)) {
-			this.rerunRequested.add(id); // run once more after the current pass
-			return;
+		if (this.stopped || this.forgotten.has(id)) return Promise.resolve();
+		const existing = this.tasks.get(id);
+		if (existing) {
+			this.rerunRequested.add(id);
+			return existing;
 		}
+		const task = this.runSummary(state)
+			.catch((error) => this.onError(state, error))
+			.finally(() => {
+				this.tasks.delete(id);
+				if (this.rerunRequested.delete(id)) this.notifyActivity(state);
+			});
+		this.tasks.set(id, task);
+		return task;
+	}
+
+	private async runSummary(state: ActiveSessionState): Promise<void> {
+		const id = state.activeSessionId;
 		const session = state.runtime.session;
+		const sessionManager = session.sessionManager;
+		const sessionId = sessionManager.getSessionId();
+		const sessionFile = sessionManager.getSessionFile();
 		const messages = session.messages;
 		if (messages.length === 0) {
 			return;
@@ -315,15 +347,29 @@ export class DaemonSessionSummarizer {
 		const contextMessages = streaming ? [...messages, streaming] : messages;
 
 		const controller = new AbortController();
+		const isCurrent = () =>
+			!controller.signal.aborted &&
+			state.runtime.session === session &&
+			session.sessionManager === sessionManager &&
+			sessionManager.getSessionId() === sessionId &&
+			sessionManager.getSessionFile() === sessionFile &&
+			isSessionWorking(state) === isWorking &&
+			session.messages.length === messageCount;
 		this.inFlight.set(id, controller);
+		let requests: InferenceCoordinator | undefined;
+		let status: AgentStatus | undefined;
+		let changed = false;
 		try {
+			requests = this.getRequests?.(session);
 			const generated = await this.generate({
 				registry: session.modelRegistry,
 				messages: contextMessages,
 				isWorking,
 				signal: controller.signal,
-				requests: this.getRequests?.(session),
+				requests,
 			});
+			// An unused capture otherwise counts this idle subject as working.
+			await requests?.dispose();
 			// A failed classification on an idle session would spin at "working"
 			// forever (the activity axis holds unjudged idle sessions there), so
 			// settle it to needs_input.
@@ -337,47 +383,39 @@ export class DaemonSessionSummarizer {
 			}
 			// Discard if the session closed, was swapped, or moved to a new turn
 			// during the async call — never write a verdict for stale state.
-			if (
-				controller.signal.aborted ||
-				state.runtime.session !== session ||
-				isSessionWorking(state) !== isWorking ||
-				session.messages.length !== messageCount
-			) {
+			if (!isCurrent()) {
 				return;
 			}
 			// A working refresh carries no verdict; keep the prior one at the same
 			// message count so a still-valid needs_input isn't dropped.
 			const taskState =
 				result.taskState ?? (previous?.basedOnMessageCount === messageCount ? previous?.taskState : undefined);
-			const status: AgentStatus = {
+			status = {
 				summary: result.summary,
 				taskState,
 				basedOnMessageCount: messageCount,
 			};
 			// An idle settle refreshes the verdict's currency, which drives the roster's
 			// activity axis: it must publish even when the verdict text is unchanged.
-			const changed =
+			changed =
 				previous?.summary !== status.summary ||
 				previous?.taskState !== status.taskState ||
 				(!isWorking && previous?.basedOnMessageCount !== status.basedOnMessageCount);
-			state.summaryState = status;
 			// Persist only settled idle verdicts, never mid-stream.
 			if (!isWorking) {
-				try {
-					session.sessionManager.appendAgentStatus(status);
-				} catch {
-					// best-effort; in-memory status still shows
-				}
-			}
-			if (changed) {
-				this.onStatusChanged?.(state);
+				await sessionManager.appendAgentStatus(status);
+				if (!isCurrent()) return;
 			}
 		} finally {
-			this.inFlight.delete(id);
-			// Re-debounce a request that arrived mid-pass instead of dropping it.
-			if (this.rerunRequested.delete(id)) {
-				this.notifyActivity(state);
+			try {
+				await requests?.dispose();
+			} finally {
+				this.inFlight.delete(id);
 			}
+		}
+		if (status && isCurrent()) {
+			state.summaryState = status;
+			if (changed) this.onStatusChanged?.(state);
 		}
 	}
 }

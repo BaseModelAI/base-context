@@ -45,9 +45,9 @@ function provider500Message(): AssistantMessage {
 describe("issue #4491 provider stale after repeated 401", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

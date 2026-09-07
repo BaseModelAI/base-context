@@ -17,12 +17,15 @@ describe("agents view open with a missing session cwd", () => {
 		const worktree = join(root, "worktree");
 		const sessionDir = join(root, "sessions");
 		const agentDir = join(root, "agent");
+		const managers: SessionManager[] = [];
 		try {
 			mkdirSync(launchCwd, { recursive: true });
-			const session = SessionManager.create(worktree, sessionDir);
-			session.appendMessage(userMsg("do the thing"));
-			session.appendMessage(assistantMsg("done"));
+			const session = await SessionManager.create(worktree, sessionDir);
+			managers.push(session);
+			await session.appendMessage(userMsg("do the thing"));
+			await session.appendMessage(assistantMsg("done"));
 			const sessionFile = session.getSessionFile()!;
+			await session.close();
 
 			rmSync(worktree, { recursive: true, force: true });
 
@@ -31,6 +34,7 @@ describe("agents view open with a missing session cwd", () => {
 			};
 
 			const stripped = await SessionManager.openAsync(sessionFile, sessionDir);
+			managers.push(stripped);
 			const suppliedLease = new SessionLease(sessionFile, join(root, "missing-cwd-lease"), "lease-token");
 			const releaseLease = vi.spyOn(suppliedLease, "release");
 			await expect(
@@ -62,7 +66,9 @@ describe("agents view open with a missing session cwd", () => {
 			expect(notice).toContain(worktree);
 
 			const resumeConfig = createAgentsViewResumeConfig({ cwd: launchCwd, agentDir }, overrideCwd);
+			await stripped.close();
 			const overridden = await SessionManager.openAsync(sessionFile, sessionDir, resumeConfig.cwd);
+			managers.push(overridden);
 			expect(overridden.getCwd()).toBe(launchCwd);
 
 			let factoryCwd: string | undefined;
@@ -79,6 +85,7 @@ describe("agents view open with a missing session cwd", () => {
 			).rejects.toThrow("stop after the cwd guard");
 			expect(factoryCwd).toBe(launchCwd);
 		} finally {
+			await Promise.all(managers.map((manager) => manager.close()));
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

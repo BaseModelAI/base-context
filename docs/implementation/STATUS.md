@@ -21,8 +21,8 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 |---|---|
 | W0 controls, source audit, baseline build | In progress; S retrieved; npm ci, native check and all four package compilations passed |
 | W1 product/state/runtime/package isolation | Linux native isolation gate passed: own packages/state, same-home coexistence, upgrade/uninstall and installed session-write guards |
-| W2 native semantic ports | Native tool/request ownership and protocol9 compatibility tested; typed turn transitions and integrated artifacts pending |
-| W3 source durability, effects, complete receipts | Partial: request sinks and checked writes; framed RLM family journals and isolated writer actor implemented; daemon integration and canonical session fencing remain open |
+| W2 native semantic ports | Native tool/request/context ownership and protocol10 compatibility implemented; typed turn transitions and integrated artifacts pending |
+| W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks and scoped integration tests pass, artifact build pending |
 | W4 durable task truth and SQLite evidence index | Derived metadata index passes Node22.8 and Bun-to-Node probes; canonical feed, task truth and compiler integration pending |
 | W5 bounded hot history and process memory | Not implemented |
 | W6 compiler, batch recovery, evidence-local work | Not implemented |
@@ -30,7 +30,7 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W8 atomic checkpoints and continuation | Not implemented |
 | W9 Astra policy and route-scoped advanced features | Inherited catalog only; no certification claim |
 | W10 owned scheduler | Not implemented; preserve conservative child default |
-| W11 non-destructive migration and recovery | Not implemented; W1 diagnostic doctor is available |
+| W11 non-destructive migration and recovery | Explicit journal migration/recovery and diagnostic doctor available; full archive/checkpoint migration remains open |
 | W12 benchmark, installed artifacts and publication | Corpus unchanged; local package probes underway; runner port and release certification pending |
 | W13 maintenance and upstream intake | Not implemented |
 
@@ -116,7 +116,7 @@ Anthropic requests. It was stopped and is not counted as offline validation. Exa
 physical-attempt usage and cost were not captured and remain unknown. Its existing
 output is retained locally; no historical receipt is fabricated.
 
-## Current native execution and storage work
+## Native execution and storage checkpoint (`70b0ae86b`)
 
 - Native tool intent and finalized evidence share an execution ID. The session stores
   inputs once and finalized results once. Persistence runs before caller hooks and
@@ -162,3 +162,41 @@ Whole-history arrays, typed transitions, task truth, compiler and the remaining 
 work are not complete. The inherited release workflow also needs its W12/W13 source-owned
 migration before any release trigger is used. See `product-isolation.md` for model-visible
 identity differences.
+
+
+## Canonical session integration after `70b0ae86b`
+
+This source checkpoint connects canonical storage. Index/compiler work and release
+certification remain open; a clean-commit artifact build is next.
+
+- SessionManager writes through an external Node actor with the canonical journal's
+  SQLite lifetime lock. Append acknowledgement follows complete writes and fsync.
+  File device/inode checks reject substituted files, including equal-size replacements.
+- Persistent factories and mutations are asynchronous. Entries, labels, usage, source
+  paths and durable input status publish only after acknowledgement. Unknown append
+  outcomes block the source; explicit recovery does not replay tools or inference.
+- Request sinks capture and retain the original source before asynchronous work.
+  Forks use distinct owners. Asynchronous disposal drains accepted work and preserves
+  persistence errors. Saved-session removal uses the same canonical lock and syncs
+  the source directory before its terminal acknowledgement.
+- Readers accept framed histories and explicit read-only legacy views. Migration
+  retains legacy bytes. Startup no longer relocates retained sessions automatically.
+  Exports drain the captured source and create their destination without overwriting.
+- Protocol10/schema29 requires canonical session ownership for active work. Older
+  Base8/9 connections permit only proven passive operations. Unknown or incompatible
+  live workers remain fenced from cleanup.
+- Registered source-owned faux streams support local native simulations. Synthetic
+  usage is a projection, not billing. They do not generate physical provider receipts.
+  Native CLI faux fixtures now pass with shared AI module instances; arbitrary streams remain refused.
+- Existing async fixtures use no provider access or fake ownership. The full repository
+  check passes: 1003 files, TypeScript, installer and browser smoke. The 115 recursion cases
+  passed in two disjoint commands: 114 cases and one genuine owned-runtime case.
+  This is not a single combined run or installed-product certification.
+- Runtime asset copying now excludes Python caches, and binary packaging includes
+  the canonical session worker. A current source build and package probe are pending.
+
+Whole-history arrays, canonical index feed, task truth and the native compiler remain
+unfinished. Existing test cases passed across scoped and corrective runs, not one
+combined suite. The real-peer forced-cleanup fixture passes without weakening live-peer
+verification. No publication, release trigger or model campaign is authorized by these
+local results.

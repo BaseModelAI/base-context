@@ -1,5 +1,10 @@
 import { expect, it } from "vitest";
-import { decodeJournalFrame, encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
+import {
+	decodeJournalFrame,
+	encodeJournalFrame,
+	encodeJournalFrameJson,
+	INITIAL_JOURNAL_CURSOR,
+} from "../src/core/journal-frame.js";
 
 it("encodes bounded UTF8 frames with one payload and a verified sequence", () => {
 	const payload = { type: "message", text: 'żółć\n"' };
@@ -17,6 +22,7 @@ it("encodes bounded UTF8 frames with one payload and a verified sequence", () =>
 });
 
 it("rejects corrupt, missing, duplicated, reordered, incomplete and oversized frames", () => {
+	expect(() => encodeJournalFrameJson('{\n"text":"original"}', INITIAL_JOURNAL_CURSOR)).toThrow("one JSON line");
 	const first = encodeJournalFrame({ text: "original" }, INITIAL_JOURNAL_CURSOR);
 	const second = encodeJournalFrame({ text: "next" }, first.next);
 	expect(() =>

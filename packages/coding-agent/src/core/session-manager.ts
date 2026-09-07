@@ -9,29 +9,14 @@ import type {
 	Usage,
 } from "@ponythewhite/base-context-ai";
 import { randomUUID } from "crypto";
-import {
-	appendFileSync,
-	chmodSync,
-	chownSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "fs";
-import { readdir, readFile, stat } from "fs/promises";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
-import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
-import { appendJournalRecord, syncJournalDirectory, syncJournalFile } from "./journal-io.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -40,6 +25,11 @@ import {
 	createCustomMessage,
 } from "./messages.js";
 import type { BoundRequestSink, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import {
+	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
+	SessionJournalOwner,
+} from "./session-journal-owner.js";
+import { readSessionJournal, readSessionJournalHeader, SessionJournalDecoder } from "./session-journal-reader.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -53,7 +43,6 @@ export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
 const SESSION_LIST_PARSE_MAX_LINE_CHARS = 1024 * 1024;
 const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
-const SESSION_STREAMING_LOAD_THRESHOLD_BYTES = 128 * 1024 * 1024;
 const SESSION_ASYNC_PARSE_YIELD_BYTES = 4 * 1024 * 1024;
 
 // Entry types that can represent user intent (vs. daemon bookkeeping like
@@ -80,16 +69,6 @@ function realpathIfPresent(path: string): string {
 		return realpathSync(path);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
-		throw error;
-	}
-}
-
-function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: number } | undefined {
-	try {
-		const { mode, uid, gid } = statSync(path);
-		return { mode: mode & 0o777, uid, gid };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
 }
@@ -417,21 +396,7 @@ export function migrateSessionEntries(entries: FileEntry[]): void {
 }
 
 export function parseSessionEntries(content: string): FileEntry[] {
-	const entries: FileEntry[] = [];
-	const lines = content.trim().split("\n");
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// Skip malformed lines.
-		}
-	}
-
-	applyChildUsageAttributions(entries);
-	return entries;
+	return finalizeLoadedEntries(parseEntriesFromBuffer(Buffer.from(content)));
 }
 
 function applyChildUsageAttributions(entries: FileEntry[]): void {
@@ -595,50 +560,25 @@ export function buildSessionContext(
 }
 
 export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefaultAgentDir()): string {
-	const sessionDir = getSessionsDir(agentDir);
-	if (!existsSync(sessionDir)) {
-		mkdirSync(sessionDir, { recursive: true });
-	}
-	return sessionDir;
+	return getSessionsDir(agentDir);
 }
 
-// Decode per line off a Buffer: toString("utf8") on a whole large file is far slower
-// (one giant UTF-16 string). Splitting on 0x0a is UTF-8-safe.
-function appendEntryFromBuffer(entries: FileEntry[], buffer: Buffer, start = 0, end = buffer.length): void {
-	if (end <= start) return;
-	try {
-		entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
-	} catch {
-		// Skip malformed or blank lines.
-	}
+function sessionFileEntry(value: unknown): FileEntry {
+	if (!value || typeof value !== "object" || !("type" in value) || typeof value.type !== "string")
+		throw new Error("Invalid session journal entry");
+	return value as FileEntry;
 }
 
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
+	const decoder = new SessionJournalDecoder();
 	const entries: FileEntry[] = [];
 	let start = 0;
 	while (start < buffer.length) {
-		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = buffer.length;
-		appendEntryFromBuffer(entries, buffer, start, end);
+		const end = buffer.indexOf(0x0a, start);
+		if (end === -1) break; // Only exclusive recovery may change an incomplete tail.
+		const record = decoder.decode(buffer.subarray(start, end + 1));
+		if (record) entries.push(sessionFileEntry(record.entry));
 		start = end + 1;
-	}
-	return entries;
-}
-
-async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]> {
-	const entries: FileEntry[] = [];
-	let start = 0;
-	let bytesSinceYield = 0;
-	while (start < buffer.length) {
-		let end = buffer.indexOf(0x0a, start);
-		if (end === -1) end = buffer.length;
-		appendEntryFromBuffer(entries, buffer, start, end);
-		bytesSinceYield += end - start + 1;
-		start = end + 1;
-		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
-			bytesSinceYield = 0;
-			await new Promise<void>((resolve) => setImmediate(resolve));
-		}
 	}
 	return entries;
 }
@@ -646,9 +586,8 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
 	if (entries.length === 0) return entries;
 	const header = entries[0];
-	if (header.type !== "session" || typeof (header as any).id !== "string") {
-		return [];
-	}
+	if (header.type !== "session" || typeof header.id !== "string")
+		throw new Error("Session source has no valid header");
 	applyChildUsageAttributions(entries);
 	return entries;
 }
@@ -658,24 +597,16 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
 }
 
-// Async loader for the daemon: reads off the event loop and yields while parsing so a
-// large load doesn't freeze other sessions. Large files stream to avoid retaining both
-// the full input Buffer and the parsed entry graph at the same time.
 export async function loadEntriesFromFileAsync(
 	filePath: string,
-	options: { streamThresholdBytes?: number } = {},
+	_options: { streamThresholdBytes?: number } = {},
 ): Promise<FileEntry[]> {
 	if (!existsSync(filePath)) return [];
-	const streamThresholdBytes = options.streamThresholdBytes ?? SESSION_STREAMING_LOAD_THRESHOLD_BYTES;
-	if ((await stat(filePath)).size < streamThresholdBytes) {
-		return finalizeLoadedEntries(await parseEntriesFromBufferAsync(await readFile(filePath)));
-	}
-
 	const entries: FileEntry[] = [];
 	let bytesSinceYield = 0;
-	for await (const line of readLinesAsBuffers(filePath)) {
-		appendEntryFromBuffer(entries, line);
-		bytesSinceYield += line.length + 1;
+	for await (const record of readSessionJournal(filePath)) {
+		entries.push(sessionFileEntry(record.entry));
+		bytesSinceYield += Buffer.byteLength(record.json);
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 			bytesSinceYield = 0;
 			await new Promise<void>((resolve) => setImmediate(resolve));
@@ -685,11 +616,7 @@ export async function loadEntriesFromFileAsync(
 }
 
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
-	const firstLine = readFirstLineSync(filePath);
-	if (!firstLine) {
-		return undefined;
-	}
-	return JSON.parse(firstLine) as Partial<SessionHeader>;
+	return readSessionJournalHeader(filePath) as Partial<SessionHeader> | undefined;
 }
 
 function isValidRlmDepth(value: unknown): value is number {
@@ -778,11 +705,30 @@ function isValidSessionFile(filePath: string): boolean {
 	}
 }
 
+function sessionCatalogDirectories(sessionDir: string): string[] {
+	const directories = [sessionDir];
+	if (existsSync(sessionDir)) {
+		for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {
+			if (entry.isDirectory() && /^--.+--$/.test(entry.name)) directories.push(join(sessionDir, entry.name));
+		}
+	}
+	// Older default installations also stored direct JSONLs beside the sessions directory.
+	if (resolve(sessionDir) === resolve(getSessionsDir())) directories.push(getDefaultAgentDir());
+	return directories;
+}
+
+function sessionCatalogFiles(sessionDir: string): string[] {
+	const paths: string[] = [];
+	for (const directory of sessionCatalogDirectories(sessionDir)) {
+		if (!existsSync(directory)) continue;
+		for (const entry of readdirSync(directory)) if (entry.endsWith(".jsonl")) paths.push(join(directory, entry));
+	}
+	return paths;
+}
+
 export function findMostRecentSession(sessionDir: string): string | null {
 	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
+		const files = sessionCatalogFiles(sessionDir)
 			.filter(isValidSessionFile)
 			.map((path) => ({ path, mtime: statSync(path).mtime }))
 			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
@@ -812,9 +758,7 @@ function sessionHeaderMatchesCwd(header: Partial<SessionHeader> | undefined, cwd
 
 export function findMostRecentSessionForCwd(sessionDir: string, cwd: string): string | null {
 	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
+		const files = sessionCatalogFiles(sessionDir)
 			.map((path) => {
 				try {
 					const header = readSessionHeader(path);
@@ -1023,9 +967,8 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		const attributedChildUsages: Usage[] = [];
 		const summarizationUsages: Usage[] = [];
 
-		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
-			const line = lineBuffer.toString("utf8");
-			if (!line.trim()) continue;
+		for await (const record of readSessionJournal(filePath)) {
+			const line = record.json;
 
 			// Large tool-result entries can be many MB. They do not carry the
 			// session-list metadata we need, and parsing them during every refresh
@@ -1044,13 +987,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				continue;
 			}
 
-			const trimmed = line.trim();
-			let entry: FileEntry;
-			try {
-				entry = JSON.parse(trimmed) as FileEntry;
-			} catch {
-				continue;
-			}
+			const entry = sessionFileEntry(record.entry);
 
 			if (entry.type === "session_info") {
 				const infoEntry = entry as SessionInfoEntry;
@@ -1159,18 +1096,18 @@ async function listSessionsFromDir(
 	progressTotal?: number,
 ): Promise<SessionInfo[]> {
 	const sessions: SessionInfo[] = [];
-	if (!existsSync(dir)) {
-		return sessions;
-	}
-
 	try {
-		const dirEntries = await readdir(dir);
-		const files = dirEntries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
+		const files = sessionCatalogFiles(dir);
 		const total = progressTotal ?? files.length;
 
 		const present = new Set(files);
 		for (const key of sessionInfoCache.keys()) {
-			if (dirname(key) === dir && !present.has(key)) {
+			const directory = dirname(key);
+			const inScope =
+				directory === dir ||
+				(dirname(directory) === dir && /^--.+--$/.test(basename(directory))) ||
+				(resolve(dir) === resolve(getSessionsDir()) && directory === getDefaultAgentDir());
+			if (inScope && !present.has(key)) {
 				sessionInfoCache.delete(key);
 			}
 		}
@@ -1192,13 +1129,50 @@ async function listSessionsFromDir(
 	return sessions;
 }
 
+interface SessionWriteState {
+	owner?: SessionJournalOwner;
+	tail: Promise<void>;
+	pending: number;
+	bytes: number;
+	reservedLeaf: string | null;
+	leafId: string | null;
+	pins: number;
+	retired: boolean;
+	closed: boolean;
+	sequence: number;
+	sourceVersion: number;
+	pendingIds: Set<string>;
+	failure?: Error;
+	closing?: Promise<void>;
+	unpinned?: Promise<void>;
+	onUnpinned?: () => void;
+}
+
+function newSessionWriteState(): SessionWriteState {
+	return {
+		tail: Promise.resolve(),
+		pending: 0,
+		bytes: 0,
+		reservedLeaf: null,
+		leafId: null,
+		pins: 0,
+		retired: false,
+		closed: false,
+		sequence: -1,
+		sourceVersion: CURRENT_SESSION_VERSION,
+		pendingIds: new Set(),
+	};
+}
+
+const MAX_SESSION_PENDING_OPERATIONS = 32;
+const MAX_SESSION_PENDING_BYTES = 64 * 1024 * 1024;
+
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
-	private flushed: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -1206,81 +1180,23 @@ export class SessionManager {
 	private leafId: string | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
 	private finalizedToolMessages = new WeakMap<AgentMessage, string>();
-	private writeState: { failure?: Error } = {};
+	private pendingToolExchanges = new Map<string, Promise<string>>();
+	private writeState = newSessionWriteState();
+	private retiredSources = new Set<SessionWriteState>();
+	private switching = false;
+	private closing?: Promise<void>;
 
-	private constructor(
-		cwd: string,
-		sessionDir: string,
-		sessionFile: string | undefined,
-		persist: boolean,
-		preloadedEntries?: FileEntry[],
-	) {
+	private readOnly = false;
+
+	private constructor(cwd: string, sessionDir: string, persist: boolean, options?: NewSessionOptions) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
 		this.persist = persist;
 		if (persist) assertProductStatePath(sessionDir);
-		if (persist && sessionDir && !existsSync(sessionDir)) {
-			mkdirSync(sessionDir, { recursive: true });
-		}
-
-		if (sessionFile) {
-			this.setSessionFile(sessionFile, preloadedEntries);
-		} else {
-			this.newSession();
-		}
+		this._stageNewSession(options);
 	}
 
-	/**
-	 * Switch to a different session file (used for resume and branching).
-	 * preloadedEntries must be loadEntriesFromFile(sessionFile) for the same path; it
-	 * lets the async daemon path skip the synchronous re-read.
-	 */
-	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
-		const target = this.persist ? assertProductStatePath(sessionFile) : resolve(sessionFile);
-		if (this.writeState.failure && target === this.sessionFile) throw this.writeState.failure;
-		if (this.fileEntries.length > 0 && !this.writeState.failure) this.flushNow();
-		this.writeState = {};
-		this.finalizedToolMessages = new WeakMap();
-		this.sessionFile = target;
-		if (existsSync(this.sessionFile)) {
-			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
-
-			// If file was empty or corrupted (no valid header), truncate and start fresh
-			// to avoid appending messages without a session header (which breaks the session)
-			if (this.fileEntries.length === 0) {
-				const explicitPath = this.sessionFile;
-				this.newSession();
-				this.sessionFile = explicitPath;
-				this._rewriteFile();
-				this.flushed = true;
-				return;
-			}
-
-			const header = this.fileEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-			this.sessionId = header?.id ?? createSessionId();
-
-			let shouldRewrite = migrateToCurrentVersion(this.fileEntries);
-			if (header?.parentSession && !isValidRlmDepth(header.rlmDepth)) {
-				header.rlmDepth = resolveSessionRlmDepth(header, this.sessionFile);
-				shouldRewrite = true;
-			}
-			if (shouldRewrite) {
-				this._rewriteFile();
-			}
-
-			this._buildIndex();
-			this.flushed = true;
-		} else {
-			const explicitPath = this.sessionFile;
-			this.fileEntries = [];
-			this.newSession();
-			this.sessionFile = explicitPath; // preserve explicit path from --resume selector
-		}
-	}
-
-	newSession(options?: NewSessionOptions): string | undefined {
-		if (this.fileEntries.length > 0 && !this.writeState.failure) this.flushNow();
-		this.writeState = {};
+	private _stageNewSession(options?: NewSessionOptions): void {
 		this.finalizedToolMessages = new WeakMap();
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
@@ -1329,12 +1245,94 @@ export class SessionManager {
 		this.labelsById = new Map();
 		this.labelTimestampsById = new Map();
 		this.leafId = null;
-		this.flushed = false;
 
 		if (this.persist) {
 			this.sessionFile = sessionFile ? assertProductStatePath(sessionFile) : undefined;
 		}
-		return this.sessionFile;
+		this.writeState.sequence = this.persist ? -1 : 0;
+	}
+
+	private async _openNew(): Promise<void> {
+		if (!this.persist || !this.sessionFile) return;
+		const state = this.writeState;
+		const owner = await SessionJournalOwner.open({
+			journalPath: assertProductStatePath(this.sessionFile),
+			create: true,
+		});
+		state.owner = owner;
+		this.sessionFile = owner.journalPath;
+		try {
+			for (const entry of this.fileEntries) {
+				const ack = await owner.appendJson(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES));
+				state.sequence = ack.sequence;
+			}
+		} catch (error) {
+			await owner.close().catch(() => undefined);
+			state.closed = true;
+			throw error;
+		}
+	}
+
+	private async _adopt(next: SessionManager): Promise<void> {
+		const previous = this.writeState;
+		try {
+			await this._retire(previous);
+		} catch (error) {
+			await next.close().catch(() => undefined);
+			throw error;
+		}
+		this.sessionId = next.sessionId;
+		this.sessionFile = next.sessionFile;
+		this.sessionDir = next.sessionDir;
+		this.persist = next.persist;
+		this.fileEntries = next.fileEntries;
+		this.byId = next.byId;
+		this.labelsById = next.labelsById;
+		this.labelTimestampsById = next.labelTimestampsById;
+		this.leafId = next.leafId;
+		this.finalizedToolMessages = next.finalizedToolMessages;
+		this.writeState = next.writeState;
+	}
+
+	private _assertMutable(): void {
+		if (this.readOnly) throw new Error("Session view is read-only");
+		if (this.persist && this.sessionFile) {
+			assertProductStatePath(this.sessionFile);
+			if (this.writeState.owner && realpathIfPresent(this.sessionFile) !== this.writeState.owner.journalPath)
+				throw new Error("Session source target changed outside its owner");
+		}
+		if (this.switching || this.closing) throw new Error("Session source is switching or closing");
+	}
+
+	async setSessionFile(sessionFile: string): Promise<void> {
+		this._assertMutable();
+		const target = assertProductStatePath(sessionFile);
+		if (realpathIfPresent(target) === this.sessionFile) {
+			await this.flushNow();
+			return;
+		}
+		this.switching = true;
+		try {
+			await this.flushNow();
+			const next = await SessionManager.open(target, this.sessionDir, this.cwd);
+			await this._adopt(next);
+		} finally {
+			this.switching = false;
+		}
+	}
+
+	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
+		this._assertMutable();
+		this.switching = true;
+		try {
+			await this.flushNow();
+			const next = new SessionManager(this.cwd, this.sessionDir, this.persist, options);
+			await next._openNew();
+			await this._adopt(next);
+			return this.sessionFile;
+		} finally {
+			this.switching = false;
+		}
 	}
 
 	private _buildIndex(): void {
@@ -1356,33 +1354,8 @@ export class SessionManager {
 				}
 			}
 		}
-	}
-
-	private _rewriteFile(): void {
-		if (this.writeState.failure) throw this.writeState.failure;
-		if (!this.persist || !this.sessionFile) return;
-		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		const targetPath = realpathIfPresent(assertProductStatePath(this.sessionFile));
-		const directory = dirname(targetPath);
-		mkdirSync(directory, { recursive: true });
-		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
-		try {
-			const metadata = statMetadataIfPresent(targetPath);
-			writeFileSync(tempPath, content, metadata === undefined ? undefined : { mode: metadata.mode });
-			if (metadata !== undefined) {
-				chownSync(tempPath, metadata.uid, metadata.gid);
-				chmodSync(tempPath, metadata.mode);
-			}
-			syncJournalFile(tempPath);
-			renameSync(tempPath, targetPath);
-			syncJournalDirectory(directory);
-		} catch (error) {
-			this.writeState.failure = new Error("Source journal requires repair after a failed rewrite", { cause: error });
-			throw error;
-		} finally {
-			rmSync(tempPath, { force: true });
-		}
-		this._notifyPersistListeners();
+		this.writeState.leafId = this.leafId;
+		this.writeState.reservedLeaf = this.leafId;
 	}
 
 	private _notifyPersistListeners(): void {
@@ -1425,167 +1398,300 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
-	materializeSessionFile(sessionDir?: string): string {
-		if (this.sessionFile) {
-			return this.sessionFile;
+	async materializeSessionFile(sessionDir?: string): Promise<string> {
+		this._assertMutable();
+		if (this.sessionFile) return this.sessionFile;
+		this.switching = true;
+		try {
+			await this.flushNow();
+			const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
+			const header = this.getHeader();
+			const next = new SessionManager(this.cwd, dir, true, {
+				parentSession: header?.parentSession,
+				rlmDepth: resolveSessionRlmDepth(header ?? {}, dir),
+			});
+			next.fileEntries.push(...this.getEntries());
+			next._buildIndex();
+			await next._openNew();
+			await this._adopt(next);
+			return this.sessionFile!;
+		} finally {
+			this.switching = false;
 		}
-		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
-		assertProductStatePath(dir);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-		const previousHeader = this.getHeader();
-		const target = createUniqueSessionFileTarget(dir);
-		this.sessionDir = dir;
-		this.sessionId = target.sessionId;
-		this.sessionFile = target.sessionFile;
-		this.persist = true;
-		const timestamp = new Date().toISOString();
-		const git = captureGitContext(this.cwd) ?? undefined;
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionId,
-			timestamp,
-			cwd: this.cwd,
-			parentSession: previousHeader?.parentSession,
-			rlmDepth: resolveSessionRlmDepth(previousHeader ?? {}, target.sessionFile),
-			git,
-		};
-		this.fileEntries = [header, ...this.getEntries()];
-		this._rewriteFile();
-		this.flushed = true;
-		return this.sessionFile;
 	}
 
 	getSessionArtifactDir(): string | undefined {
-		return this.persist ? assertProductStatePath(getSessionArtifactPath(this.sessionDir, this.sessionId)) : undefined;
+		return this.persist && this.sessionFile
+			? assertProductStatePath(getSessionArtifactPathForFile(this.sessionFile, this.sessionId))
+			: undefined;
 	}
 
-	/**
-	 * Force-write all in-memory entries to the session file immediately.
-	 * This bypasses the no-assistant guard in {@link _persist} so that
-	 * pre-model entries (session header, goal state, settings changes)
-	 * are durable on disk before the first assistant response.
-	 * No-op for in-memory (non-persisted) sessions.
-	 */
-	flushNow(): void {
-		if (this.writeState.failure) throw this.writeState.failure;
-		if (!this.persist || !this.sessionFile) return;
-		if (this.flushed && existsSync(this.sessionFile)) return;
-		this._rewriteFile();
-		this.flushed = true;
+	/** Wait for all previously admitted writes and the writer's durability barrier. */
+	async flushNow(): Promise<void> {
+		const state = this.writeState;
+		await this._enqueue(state, 0, async () => {
+			await state.owner?.flush();
+		});
 	}
 
-	_persist(entry: SessionEntry): void {
-		if (this.writeState.failure) throw this.writeState.failure;
-		if (!this.persist || !this.sessionFile) return;
-		assertProductStatePath(this.sessionFile);
+	async migrateLegacy(): Promise<void> {
+		this._assertMutable();
+		const state = this.writeState;
+		await this._enqueue(state, 0, async () => {
+			if (!state.owner) throw new Error("An owned persistent source is required for migration");
+			if (state.sourceVersion !== CURRENT_SESSION_VERSION)
+				throw new Error("Legacy session payload requires an explicit retained import before writing");
+			await state.owner.migrateLegacy();
+			state.sequence = state.owner.nextSequence - 1;
+		});
+	}
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		const shouldPersistWithoutAssistant = entry.type === "session_state" || entry.type === "session_info";
-		if (!hasAssistant && !shouldPersistWithoutAssistant) {
-			this.flushed = false;
-			return;
-		}
-
-		if (!this.flushed || !existsSync(this.sessionFile)) {
-			this._rewriteFile();
-			this.flushed = true;
-		} else {
+	/** Re-open and replay after explicit exclusive repair; never re-execute an effect. */
+	async recover(): Promise<void> {
+		this._assertMutable();
+		const previous = this.writeState;
+		if (!this.persist || !this.sessionFile || this.readOnly)
+			throw new Error("An owned persistent source is required for recovery");
+		if (previous.pins > 0 || previous.pending > 0)
+			throw new Error("Drain captured requests and source writes before recovery");
+		this.switching = true;
+		try {
+			await previous.tail;
+			await previous.owner?.close();
+			previous.closed = true;
+			const owner = await SessionJournalOwner.open({ journalPath: this.sessionFile });
 			try {
-				appendJournalRecord(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				await owner.recover();
+				const entries = await loadEntriesFromFileAsync(this.sessionFile);
+				const header = entries[0];
+				if (!header || header.type !== "session" || header.id !== this.sessionId)
+					throw new Error("Recovered source identity does not match this session");
+				const state = newSessionWriteState();
+				state.owner = owner;
+				state.sequence = owner.nextSequence - 1;
+				state.sourceVersion = header.version ?? 1;
+				migrateToCurrentVersion(entries);
+				this.fileEntries = entries;
+				this.writeState = state;
+				this.finalizedToolMessages = new WeakMap();
+				this._buildIndex();
 			} catch (error) {
-				this.writeState.failure = new Error("Source journal requires repair after a failed append", {
-					cause: error,
-				});
+				await owner.close().catch(() => undefined);
 				throw error;
 			}
-			this._notifyPersistListeners();
+		} finally {
+			this.switching = false;
 		}
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
-		if (this.writeState.failure) throw this.writeState.failure;
-		this.fileEntries.push(entry);
-		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._persist(entry);
-	}
-
-	private _flushSourceBoundary(): void {
-		try {
-			this.flushNow();
-			if (this.persist && this.sessionFile) syncJournalFile(this.sessionFile);
-		} catch (error) {
-			this.writeState.failure = new Error("Source journal requires repair after a failed persistence boundary", {
-				cause: error,
-			});
-			throw this.writeState.failure;
-		}
-	}
-
-	/** Captures one source target. Late request facts do not move the conversation leaf. */
-	bindRequestSink(): BoundRequestSink {
-		this._flushSourceBoundary();
-		const sourceFile = this.sessionFile ? realpathIfPresent(resolve(this.sessionFile)) : undefined;
-		const source: SourceSnapshotRef = Object.freeze({
-			sessionId: this.sessionId,
-			...(sourceFile ? { sessionFile: sourceFile } : {}),
-			leafId: this.leafId,
-			sourceSequence: this.fileEntries.length - 1,
-			persistent: this.persist,
+	private _enqueue<T>(state: SessionWriteState, bytes: number, action: () => Promise<T>): Promise<T> {
+		if (state.closed) return Promise.reject(new Error("Session source owner is closed"));
+		if (state.failure) return Promise.reject(state.failure);
+		if (state.pending >= MAX_SESSION_PENDING_OPERATIONS || state.bytes + bytes > MAX_SESSION_PENDING_BYTES)
+			return Promise.reject(new Error("Session source queue limit exceeded"));
+		state.pending++;
+		state.bytes += bytes;
+		const result = state.tail.then(async () => {
+			if (state.failure) throw state.failure;
+			return action();
 		});
+		state.tail = result
+			.then(
+				() => undefined,
+				() => undefined,
+			)
+			.finally(() => {
+				state.pending--;
+				state.bytes -= bytes;
+			});
+		return result;
+	}
+
+	private async _appendEntry(
+		entry: SessionEntry,
+		explicitParent = false,
+		prepare?: (snapshot: SessionEntry) => void,
+	): Promise<void> {
+		this._assertMutable();
+		const state = this.writeState;
+		if (state.failure) throw state.failure;
+		if (state.owner?.format === "legacy") throw new Error("Session journal requires explicit legacy migration");
+		if (this.byId.has(entry.id) || state.pendingIds.has(entry.id))
+			throw new Error(`Duplicate session entry: ${entry.id}`);
+		if (!explicitParent) entry.parentId = state.pending ? state.reservedLeaf : this.leafId;
+		let json = stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES);
+		const snapshot = JSON.parse(json) as SessionEntry;
+		// Queued usage projection only changes a fixed set of numeric fields.
+		const admittedBytes = Buffer.byteLength(json) + (prepare ? 16 * 1024 : 0);
 		const entries = this.fileEntries;
 		const byId = this.byId;
-		const writeState = this.writeState;
+		const labels = this.labelsById;
+		const labelTimes = this.labelTimestampsById;
+		if (state.pending >= MAX_SESSION_PENDING_OPERATIONS || state.bytes + admittedBytes > MAX_SESSION_PENDING_BYTES)
+			throw new Error("Session source queue limit exceeded");
+		state.reservedLeaf = snapshot.id;
+		state.pendingIds.add(snapshot.id);
+		try {
+			await this._enqueue(state, admittedBytes, async () => {
+				try {
+					if (prepare) {
+						prepare(snapshot);
+						json = stringifyBoundedJson(snapshot, admittedBytes);
+					}
+					if (state.owner) {
+						const ack = await state.owner.appendJson(json);
+						state.sequence = ack.sequence;
+					} else {
+						state.sequence++;
+					}
+				} catch (error) {
+					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
+					throw error;
+				}
+				entries.push(snapshot);
+				byId.set(snapshot.id, snapshot);
+				if (snapshot.type === "label") {
+					if (snapshot.label) {
+						labels.set(snapshot.targetId, snapshot.label);
+						labelTimes.set(snapshot.targetId, snapshot.timestamp);
+					} else {
+						labels.delete(snapshot.targetId);
+						labelTimes.delete(snapshot.targetId);
+					}
+				}
+				if (snapshot.type === "child_usage_attributed") {
+					const target = byId.get(snapshot.targetId);
+					if (target?.type === "message" && target.message.role === "assistant")
+						target.message.usage = cloneUsage(snapshot.aggregateUsage);
+				}
+				state.leafId = snapshot.id;
+				if (this.writeState === state) {
+					this.leafId = snapshot.id;
+					this._notifyPersistListeners();
+				}
+			});
+		} finally {
+			state.pendingIds.delete(snapshot.id);
+		}
+	}
+
+	private async _closeRetired(state: SessionWriteState): Promise<void> {
+		if (!state.retired || state.pins > 0) return;
+		state.closing ??= (async () => {
+			await state.tail;
+			await state.owner?.close();
+			state.closed = true;
+			this.retiredSources.delete(state);
+		})();
+		await state.closing;
+	}
+
+	private async _retire(state: SessionWriteState): Promise<void> {
+		state.retired = true;
+		this.retiredSources.add(state);
+		await this._closeRetired(state);
+	}
+
+	close(): Promise<void> {
+		this.closing ??= (async () => {
+			await this._retire(this.writeState);
+			for (const state of [...this.retiredSources]) {
+				if (state.pins > 0) {
+					state.unpinned ??= new Promise<void>((resolve) => {
+						state.onUnpinned = resolve;
+					});
+					await state.unpinned;
+				}
+				await this._closeRetired(state);
+			}
+		})();
+		return this.closing;
+	}
+
+	/** Capture before waits; the barrier resolves only after this source's prior ACKs. */
+	bindRequestSink(): BoundRequestSink {
+		this._assertMutable();
+		const state = this.writeState;
+		const sourceFile =
+			state.owner?.journalPath ?? (this.sessionFile ? realpathIfPresent(resolve(this.sessionFile)) : undefined);
+		const sessionId = this.sessionId;
+		const persistent = this.persist;
+		const entries = this.fileEntries;
+		const byId = this.byId;
+		let held = false;
+		const retain = () => {
+			if (held) return;
+			if (state.closed || state.closing) throw new Error("Captured session source owner is closed");
+			held = true;
+			state.pins++;
+		};
+		retain();
+		const source = this._enqueue(state, 0, async (): Promise<SourceSnapshotRef> => {
+			await state.owner?.flush();
+			return Object.freeze({
+				sessionId,
+				...(sourceFile ? { sessionFile: sourceFile } : {}),
+				leafId: state.leafId,
+				sourceSequence: state.sequence,
+				persistent,
+			});
+		});
+		// A captured auxiliary operation can await UI work before consuming its barrier.
+		void source.catch(() => undefined);
 		return {
 			source,
+			retain,
+			release: async () => {
+				if (!held) return;
+				held = false;
+				state.pins--;
+				if (state.pins === 0) {
+					state.onUnpinned?.();
+					state.onUnpinned = undefined;
+					state.unpinned = undefined;
+				}
+				await this._closeRetired(state);
+			},
 			persist: async (event: NativeRequestEvent) => {
-				if (writeState.failure) throw writeState.failure;
-				const serialized = stringifyBoundedJson(event, 1024 * 1024);
-				const request = JSON.parse(serialized) as NativeRequestEvent;
-				if (!isDeepStrictEqual(request.source, source))
+				if (!held) throw new Error("Captured request sink is not retained");
+				if (state.owner) assertProductStatePath(state.owner.journalPath);
+				if (state.owner?.format === "legacy") throw new Error("Session journal requires explicit legacy migration");
+				const snapshot = await source;
+				const request = JSON.parse(stringifyBoundedJson(event, 1024 * 1024)) as NativeRequestEvent;
+				if (!isDeepStrictEqual(request.source, snapshot))
 					throw new Error("Request event does not match its bound source");
 				const id = `${request.attemptId}:${request.type}`;
-				const existing = byId.get(id);
-				if (existing) {
-					if (existing.type !== "request" || !isDeepStrictEqual(existing.request, request))
-						throw new Error(`Conflicting request event: ${id}`);
-					return;
-				}
 				const entry: RequestJournalEntry = {
 					type: "request",
 					id,
-					parentId: source.leafId,
+					parentId: snapshot.leafId,
 					timestamp: new Date(request.timestamp).toISOString(),
 					request,
 				};
-				const entryJson = stringifyBoundedJson(entry, 1024 * 1024 - 1);
-				const isCurrent =
-					this.fileEntries === entries &&
-					this.byId === byId &&
-					(!sourceFile ||
-						(this.sessionFile !== undefined && realpathIfPresent(resolve(this.sessionFile)) === sourceFile));
-				try {
-					if (source.persistent && source.sessionFile) {
-						if (isCurrent) this.flushNow();
-						appendJournalRecord(source.sessionFile, `${entryJson}\n`);
+				const json = stringifyBoundedJson(entry, 1024 * 1024 - 1);
+				await this._enqueue(state, Buffer.byteLength(json), async () => {
+					const existing = byId.get(id);
+					if (existing) {
+						if (existing.type !== "request" || !isDeepStrictEqual(existing.request, request))
+							throw new Error(`Conflicting request event: ${id}`);
+						return;
 					}
-				} catch (error) {
-					writeState.failure = new Error("Source journal requires repair after a failed request append", {
-						cause: error,
-					});
-					throw writeState.failure;
-				}
-				entries.push(entry);
-				byId.set(entry.id, entry);
-				if (isCurrent && source.persistent) this._notifyPersistListeners();
+					try {
+						if (state.owner) state.sequence = (await state.owner.appendJson(json)).sequence;
+						else state.sequence++;
+					} catch (error) {
+						state.failure = new Error("Session request append failed; outcome may be unknown", { cause: error });
+						throw error;
+					}
+					entries.push(entry);
+					byId.set(id, entry);
+					if (this.writeState === state) this._notifyPersistListeners();
+				});
 			},
 		};
 	}
 
-	appendToolInvocation(invocation: ToolInvocation): string {
+	async appendToolInvocation(invocation: ToolInvocation): Promise<string> {
 		const id = `${invocation.executionId}:intent`;
 		if (this.byId.has(id)) throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
 		const entry: ToolIntentEntry = {
@@ -1595,12 +1701,21 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			invocation: structuredClone(invocation),
 		};
-		this._appendEntry(entry);
-		this._flushSourceBoundary();
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendToolExchange(exchange: FinalizedToolExchange): string {
+	appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
+		const pending = this.pendingToolExchanges.get(exchange.executionId);
+		if (pending) return pending;
+		const result = this._appendToolExchange(exchange).finally(() => {
+			this.pendingToolExchanges.delete(exchange.executionId);
+		});
+		this.pendingToolExchanges.set(exchange.executionId, result);
+		return result;
+	}
+
+	private async _appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
 		const existing = this.byId.get(exchange.executionId);
 		if (existing?.type === "message" && existing.execution?.executionId === exchange.executionId) {
 			this.finalizedToolMessages.set(exchange.result, existing.id);
@@ -1620,9 +1735,9 @@ export class SessionManager {
 			message: structuredClone(result),
 			execution: structuredClone(execution),
 		};
-		this._appendEntry(entry);
-		this._flushSourceBoundary();
-		this.finalizedToolMessages.set(result, entry.id);
+		const finalized = this.finalizedToolMessages;
+		await this._appendEntry(entry);
+		finalized.set(result, entry.id);
 		return entry.id;
 	}
 
@@ -1644,7 +1759,7 @@ export class SessionManager {
 		return { ...entry.execution, result: entry.message };
 	}
 
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	async appendMessage(message: Message | CustomMessage | BashExecutionMessage): Promise<string> {
 		const finalized = this.finalizedToolMessages.get(message);
 		if (finalized) return finalized;
 		const entry: SessionMessageEntry = {
@@ -1654,11 +1769,11 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendThinkingLevelChange(thinkingLevel: string): string {
+	async appendThinkingLevelChange(thinkingLevel: string): Promise<string> {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			id: generateId(this.byId),
@@ -1666,11 +1781,11 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			thinkingLevel,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendServiceTierChange(serviceTier: ServiceTier): string {
+	async appendServiceTierChange(serviceTier: ServiceTier): Promise<string> {
 		const entry: ServiceTierChangeEntry = {
 			type: "service_tier_change",
 			id: generateId(this.byId),
@@ -1678,11 +1793,11 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			serviceTier,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendModelChange(provider: string, modelId: string): string {
+	async appendModelChange(provider: string, modelId: string): Promise<string> {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			id: generateId(this.byId),
@@ -1691,11 +1806,11 @@ export class SessionManager {
 			provider,
 			modelId,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendCompaction<T = unknown>(
+	async appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
 		tokensBefore: number,
@@ -1703,7 +1818,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		customInstructions?: string,
 		usage?: Usage,
-	): string {
+	): Promise<string> {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: generateId(this.byId),
@@ -1717,11 +1832,11 @@ export class SessionManager {
 			customInstructions,
 			usage,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendCustomEntry(customType: string, data?: unknown): string {
+	async appendCustomEntry(customType: string, data?: unknown): Promise<string> {
 		const entry: CustomEntry = {
 			type: "custom",
 			customType,
@@ -1730,26 +1845,26 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendCustomEntryWithRollback(customType: string, data?: unknown): string {
-		return this._appendEntryWithRollback(() => this.appendCustomEntry(customType, data));
+	async appendCustomEntryWithRollback(customType: string, data?: unknown): Promise<string> {
+		return this.appendCustomEntry(customType, data);
 	}
 
-	appendChildUsageAttribution(
+	async appendChildUsageAttribution(
 		targetId: string,
 		childUsage: Usage,
-		aggregateUsage: Usage,
+		aggregateUsage?: Usage,
 		origin?: ChildUsageAttributionEntry["origin"],
-	): string {
+	): Promise<string> {
 		const target = this.byId.get(targetId);
 		if (target?.type !== "message" || target.message.role !== "assistant") {
 			throw new Error(`Assistant message entry ${targetId} not found`);
 		}
 
-		target.message.usage = cloneUsage(aggregateUsage);
+		const targetMessage = target.message;
 		const entry: ChildUsageAttributionEntry = {
 			type: "child_usage_attributed",
 			id: generateId(this.byId),
@@ -1757,14 +1872,28 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			targetId,
 			childUsage: cloneUsage(childUsage),
-			aggregateUsage: cloneUsage(aggregateUsage),
+			aggregateUsage: cloneUsage(aggregateUsage ?? targetMessage.usage),
 			...(origin ? { origin } : {}),
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(
+			entry,
+			false,
+			aggregateUsage === undefined
+				? (snapshot) => {
+						if (snapshot.type !== "child_usage_attributed") throw new Error("Expected child usage projection");
+						const total = cloneUsage(targetMessage.usage);
+						const contextTokens =
+							total.totalTokens || total.input + total.output + total.cacheRead + total.cacheWrite;
+						addAssistantUsage(total, snapshot.childUsage);
+						total.totalTokens = contextTokens;
+						snapshot.aggregateUsage = total;
+					}
+				: undefined,
+		);
 		return entry.id;
 	}
 
-	appendSessionInfo(name: string): string {
+	async appendSessionInfo(name: string): Promise<string> {
 		const entry: SessionInfoEntry = {
 			type: "session_info",
 			id: generateId(this.byId),
@@ -1772,11 +1901,11 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			name: name.trim(),
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendSessionState(state: SessionState): string {
+	async appendSessionState(state: SessionState): Promise<string> {
 		const entry: SessionStateEntry = {
 			type: "session_state",
 			id: generateId(this.byId),
@@ -1784,7 +1913,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			state: { status: state.status },
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
@@ -1839,7 +1968,7 @@ export class SessionManager {
 		return contentEntries.length > start;
 	}
 
-	appendAgentStatus(status: AgentStatus): string {
+	async appendAgentStatus(status: AgentStatus): Promise<string> {
 		const entry: AgentStatusEntry = {
 			type: "agent_status",
 			id: generateId(this.byId),
@@ -1851,11 +1980,11 @@ export class SessionManager {
 				basedOnMessageCount: status.basedOnMessageCount,
 			},
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	appendGitState(git: GitContext): string {
+	async appendGitState(git: GitContext): Promise<string> {
 		const entry: GitStateEntry = {
 			type: "git_state",
 			id: generateId(this.byId),
@@ -1863,11 +1992,11 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			git,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
-	recordGitStateIfChanged(): string | undefined {
+	async recordGitStateIfChanged(): Promise<string | undefined> {
 		if (!this.persist) return undefined;
 		const git = captureGitContext(this.cwd);
 		if (!git) return undefined;
@@ -1899,12 +2028,12 @@ export class SessionManager {
 		return undefined;
 	}
 
-	appendCustomMessageEntry<T = unknown>(
+	async appendCustomMessageEntry<T = unknown>(
 		customType: string,
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
-	): string {
+	): Promise<string> {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
 			customType,
@@ -1915,7 +2044,7 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry);
 		return entry.id;
 	}
 
@@ -1923,36 +2052,13 @@ export class SessionManager {
 	 * Append a custom message, undoing the append if persistence fails so a
 	 * best-effort record never leaves an unsaved leaf for later entries.
 	 */
-	appendCustomMessageEntryWithRollback<T = unknown>(
+	async appendCustomMessageEntryWithRollback<T = unknown>(
 		customType: string,
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
-	): string {
-		return this._appendEntryWithRollback(() => this.appendCustomMessageEntry(customType, content, display, details));
-	}
-
-	private _appendEntryWithRollback(append: () => string): string {
-		const previousLeafId = this.leafId;
-		try {
-			const entryId = append();
-			this.flushNow();
-			return entryId;
-		} catch (error) {
-			// The append indexes the entry before persisting it; undo exactly that.
-			if (this.leafId !== null && this.leafId !== previousLeafId) {
-				this.byId.delete(this.leafId);
-				this.fileEntries.pop();
-				this.leafId = previousLeafId;
-				// Do not rewrite a potentially damaged shared journal from this view.
-				// Tail repair must first establish exclusive writer ownership.
-				this.flushed = false;
-				this.writeState.failure ??= new Error("Source journal requires repair after a failed append", {
-					cause: error,
-				});
-			}
-			throw error;
-		}
+	): Promise<string> {
+		return this.appendCustomMessageEntry(customType, content, display, details);
 	}
 
 	getLeafId(): string | null {
@@ -1981,7 +2087,7 @@ export class SessionManager {
 		return this.labelsById.get(id);
 	}
 
-	appendLabelChange(targetId: string, label: string | undefined): string {
+	async appendLabelChange(targetId: string, label: string | undefined): Promise<string> {
 		if (!this.byId.has(targetId)) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
@@ -1993,14 +2099,8 @@ export class SessionManager {
 			targetId,
 			label,
 		};
-		this._appendEntry(entry);
-		if (label) {
-			this.labelsById.set(targetId, label);
-			this.labelTimestampsById.set(targetId, entry.timestamp);
-		} else {
-			this.labelsById.delete(targetId);
-			this.labelTimestampsById.delete(targetId);
-		}
+		await this._appendEntry(entry);
+
 		return entry.id;
 	}
 
@@ -2097,24 +2197,29 @@ export class SessionManager {
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
+		if (this.writeState.pending > 0) throw new Error("Drain session writes before changing the branch");
 		this.leafId = branchFromId;
+		this.writeState.leafId = branchFromId;
+		this.writeState.reservedLeaf = branchFromId;
 	}
 
 	resetLeaf(): void {
+		if (this.writeState.pending > 0) throw new Error("Drain session writes before changing the branch");
 		this.leafId = null;
+		this.writeState.leafId = null;
+		this.writeState.reservedLeaf = null;
 	}
 
-	branchWithSummary(
+	async branchWithSummary(
 		branchFromId: string | null,
 		summary: string,
 		details?: unknown,
 		fromHook?: boolean,
 		usage?: Usage,
-	): string {
+	): Promise<string> {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
-		this.leafId = branchFromId;
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.byId),
@@ -2126,217 +2231,177 @@ export class SessionManager {
 			fromHook,
 			usage,
 		};
-		this._appendEntry(entry);
+		await this._appendEntry(entry, true);
 		return entry.id;
 	}
 
-	createBranchedSession(leafId: string): string | undefined {
-		this.flushNow();
-		const previousSessionFile = this.sessionFile;
-		const path = this.getBranch(leafId);
-		if (path.length === 0) {
-			throw new Error(`Entry ${leafId} not found`);
-		}
-
-		const pathWithoutLabels = path.filter((e) => e.type !== "label");
-
-		const target = this.persist
-			? createUniqueSessionFileTarget(this.getSessionDir())
-			: { sessionId: createSessionId(), sessionFile: undefined };
-		const newSessionId = target.sessionId;
-		const timestamp = new Date().toISOString();
-		const newSessionFile = target.sessionFile;
-
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: newSessionId,
-			timestamp,
-			cwd: this.cwd,
-			parentSession: this.persist ? previousSessionFile : undefined,
-			rlmDepth: resolveSessionRlmDepth(this.getHeader() ?? {}, previousSessionFile ?? newSessionFile ?? ""),
-			git: this.persist ? (captureGitContext(this.cwd) ?? undefined) : undefined,
-		};
-
-		const pathEntryIds = new Set(pathWithoutLabels.map((e) => e.id));
-		const labelsToWrite: Array<{ targetId: string; label: string; timestamp: string }> = [];
-		for (const [targetId, label] of this.labelsById) {
-			if (pathEntryIds.has(targetId)) {
-				labelsToWrite.push({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! });
-			}
-		}
-
-		if (this.persist) {
-			const lastEntryId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
-			let parentId = lastEntryId;
-			const labelEntries: LabelEntry[] = [];
-			for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
-				const labelEntry: LabelEntry = {
-					type: "label",
-					id: generateId(new Set(pathEntryIds)),
-					parentId,
-					timestamp: labelTimestamp,
-					targetId,
-					label,
-				};
-				pathEntryIds.add(labelEntry.id);
-				labelEntries.push(labelEntry);
-				parentId = labelEntry.id;
-			}
-
-			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-			this.sessionId = newSessionId;
-			this.sessionFile = newSessionFile;
-			this._buildIndex();
-
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
-				this._rewriteFile();
-				this.flushed = true;
-			} else {
-				this.flushed = false;
-			}
-
-			return newSessionFile;
-		}
-
-		const labelEntries: LabelEntry[] = [];
-		let parentId = pathWithoutLabels[pathWithoutLabels.length - 1]?.id || null;
-		for (const { targetId, label, timestamp: labelTimestamp } of labelsToWrite) {
-			const labelEntry: LabelEntry = {
+	async forkBranch(
+		leafId: string | null,
+		options: { persist?: boolean; sessionDir?: string; rlmDepth?: number } = {},
+	): Promise<SessionManager> {
+		const sourceFile = this.sessionFile;
+		const sourceHeader = this.getHeader();
+		const persistent = options.persist ?? this.persist;
+		const cwd = this.cwd;
+		const sessionDir = options.sessionDir ?? this.sessionDir;
+		const rlmDepth = options.rlmDepth ?? resolveSessionRlmDepth(sourceHeader ?? {}, sourceFile ?? "");
+		const path =
+			leafId === null
+				? []
+				: this.getBranch(leafId).map(
+						(entry) => JSON.parse(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
+					);
+		if (leafId !== null && path.length === 0) throw new Error(`Entry ${leafId} not found`);
+		const labels = new Map(this.labelsById);
+		const labelTimes = new Map(this.labelTimestampsById);
+		await this.flushNow();
+		const next = new SessionManager(cwd, sessionDir, persistent, { parentSession: sourceFile, rlmDepth });
+		const copied = path.filter((entry) => entry.type !== "label");
+		next.fileEntries.push(...copied);
+		const ids = new Set(copied.map((entry) => entry.id));
+		let parentId = copied[copied.length - 1]?.id ?? null;
+		for (const [targetId, label] of labels) {
+			if (!ids.has(targetId)) continue;
+			const entry: LabelEntry = {
 				type: "label",
-				id: generateId(new Set([...pathEntryIds, ...labelEntries.map((e) => e.id)])),
+				id: generateId(ids),
 				parentId,
-				timestamp: labelTimestamp,
+				timestamp: labelTimes.get(targetId)!,
 				targetId,
 				label,
 			};
-			labelEntries.push(labelEntry);
-			parentId = labelEntry.id;
+			ids.add(entry.id);
+			next.fileEntries.push(entry);
+			parentId = entry.id;
 		}
-		this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
-		this.sessionId = newSessionId;
-		this._buildIndex();
-		return undefined;
+		next._buildIndex();
+		if (persistent) await next._openNew();
+		else next.writeState.sequence = next.fileEntries.length - 1;
+		return next;
 	}
 
-	static create(cwd: string, sessionDir?: string): SessionManager {
-		const dir = sessionDir ?? getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true);
+	async createBranchedSession(leafId: string): Promise<string | undefined> {
+		this._assertMutable();
+		const next = await this.forkBranch(leafId);
+		this._assertMutable();
+		this.switching = true;
+		try {
+			await this.flushNow();
+			await this._adopt(next);
+			return this.sessionFile;
+		} finally {
+			this.switching = false;
+		}
 	}
 
-	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-		// Only the header's cwd is needed to construct the manager; the constructor
-		// (setSessionFile) performs the full parse. Read just the first line here
-		// instead of parsing the entire file a second time — that double parse is a
-		// needless O(n) cost on open and is noticeable for long sessions.
-		let cwd = cwdOverride;
-		if (cwd === undefined) {
-			let header: Partial<SessionHeader> | undefined;
-			try {
-				header = readSessionHeader(path);
-			} catch {
-				header = undefined;
-			}
-			// readSessionHeader only inspects the first physical line. If that isn't a
-			// valid session header (e.g. a leading blank/whitespace or malformed line),
-			// fall back to the full loader, which trims and skips such lines exactly
-			// like setSessionFile does — so this.cwd stays consistent with the header
-			// the session is actually loaded with. This slow path is rare.
-			if (header?.type !== "session" || typeof header.id !== "string") {
-				header = loadEntriesFromFile(path).find((e) => e.type === "session") as SessionHeader | undefined;
-			}
-			cwd = header?.cwd;
+	static async create(cwd: string, sessionDir?: string, options?: NewSessionOptions): Promise<SessionManager> {
+		const manager = new SessionManager(cwd, sessionDir ?? getDefaultSessionDir(cwd), true, options);
+		await manager._openNew();
+		return manager;
+	}
+
+	static async open(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
+		const target = assertProductStatePath(path);
+		if (!existsSync(target)) {
+			const manager = new SessionManager(cwdOverride ?? process.cwd(), sessionDir ?? dirname(target), true);
+			manager.sessionFile = target;
+			await manager._openNew();
+			return manager;
 		}
-		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true);
+		const owner = await SessionJournalOwner.open({ journalPath: target });
+		try {
+			const entries = await loadEntriesFromFileAsync(owner.journalPath);
+			const header = entries[0];
+			if (!header || header.type !== "session" || typeof header.id !== "string")
+				throw new Error(`Session source has no valid header: ${target}`);
+			const sourceVersion = header.version ?? 1;
+			if (sourceVersion > CURRENT_SESSION_VERSION) throw new Error(`Unsupported session version: ${sourceVersion}`);
+			migrateToCurrentVersion(entries);
+			if (header.parentSession && !isValidRlmDepth(header.rlmDepth))
+				header.rlmDepth = resolveSessionRlmDepth(header, owner.journalPath);
+			const manager = new SessionManager(
+				cwdOverride ?? header.cwd ?? process.cwd(),
+				sessionDir ?? dirname(owner.journalPath),
+				false,
+			);
+			manager.writeState.sourceVersion = sourceVersion;
+			manager.persist = true;
+			manager.sessionId = header.id;
+			manager.sessionFile = owner.journalPath;
+			manager.fileEntries = entries;
+			manager.writeState.owner = owner;
+			manager.writeState.sequence = owner.nextSequence - 1;
+			manager._buildIndex();
+			return manager;
+		} catch (error) {
+			await owner.close().catch(() => undefined);
+			throw error;
+		}
 	}
 
 	static async openAsync(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
-		if (!existsSync(path)) {
-			return SessionManager.open(path, sessionDir, cwdOverride);
-		}
-		const entries = await loadEntriesFromFileAsync(path);
-		if (entries.length === 0) {
-			return SessionManager.open(path, sessionDir, cwdOverride);
-		}
-		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
-		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
+		return SessionManager.open(path, sessionDir, cwdOverride);
 	}
 
-	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
+	static async openReadOnly(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
+		const target = realpathIfPresent(resolve(path));
+		const entries = await loadEntriesFromFileAsync(target);
+		const header = entries[0];
+		if (!header || header.type !== "session" || typeof header.id !== "string")
+			throw new Error(`Session source has no valid header: ${target}`);
+		const sourceVersion = header.version ?? 1;
+		if (sourceVersion > CURRENT_SESSION_VERSION) throw new Error(`Unsupported session version: ${sourceVersion}`);
+		migrateToCurrentVersion(entries);
+		if (header.parentSession && !isValidRlmDepth(header.rlmDepth))
+			header.rlmDepth = resolveSessionRlmDepth(header, target);
+		const manager = new SessionManager(
+			cwdOverride ?? header.cwd ?? process.cwd(),
+			sessionDir ?? dirname(target),
+			false,
+		);
+		manager.writeState.sourceVersion = sourceVersion;
+		manager.persist = true;
+		manager.readOnly = true;
+		manager.sessionId = header.id;
+		manager.sessionFile = target;
+		manager.fileEntries = entries;
+		manager.writeState.sequence = entries.length - 1;
+		manager._buildIndex();
+		return manager;
+	}
+
+	static async continueRecent(cwd: string, sessionDir?: string): Promise<SessionManager> {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
 		const mostRecent = findMostRecentSessionForCwd(dir, cwd);
-		if (mostRecent) {
-			return new SessionManager(cwd, dir, mostRecent, true);
-		}
-		return new SessionManager(cwd, dir, undefined, true);
+		return mostRecent ? SessionManager.open(mostRecent, dir, cwd) : SessionManager.create(cwd, dir);
 	}
 
-	static inMemory(cwd: string = process.cwd(), sessionDir = ""): SessionManager {
-		return new SessionManager(cwd, sessionDir, undefined, false);
+	static inMemory(cwd: string = process.cwd(), sessionDir = "", options?: NewSessionOptions): SessionManager {
+		return new SessionManager(cwd, sessionDir, false, options);
 	}
 
-	static forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string): SessionManager {
-		const sourceEntries = loadEntriesFromFile(sourcePath);
-		if (sourceEntries.length === 0) {
-			throw new Error(`Cannot fork: source session file is empty or invalid: ${sourcePath}`);
-		}
-
-		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
-		if (!sourceHeader) {
+	static async forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string): Promise<SessionManager> {
+		const sourceEntries = await loadEntriesFromFileAsync(sourcePath);
+		const sourceHeader = sourceEntries[0];
+		if (!sourceHeader || sourceHeader.type !== "session")
 			throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
-		}
 		migrateToCurrentVersion(sourceEntries);
-
-		const dir = sessionDir ?? getDefaultSessionDir(targetCwd);
-		assertProductStatePath(dir);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-
-		const target = createUniqueSessionFileTarget(dir);
-		const newSessionId = target.sessionId;
-		const timestamp = new Date().toISOString();
-		const newSessionFile = target.sessionFile;
-
-		const newHeader: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: newSessionId,
-			timestamp,
-			cwd: targetCwd,
+		const manager = new SessionManager(targetCwd, sessionDir ?? getDefaultSessionDir(targetCwd), true, {
 			parentSession: sourcePath,
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
-			git: captureGitContext(targetCwd) ?? undefined,
-		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
-
-		// Drop the source's git_state entries (re-linking children): they describe the source repo,
-		// so the fork would otherwise report the source's git instead of its own target context.
-		const droppedParent = new Map<string, string | null>();
-		for (const entry of sourceEntries) {
-			if (entry.type === "git_state") droppedParent.set(entry.id, entry.parentId);
-		}
-		const liveParent = (parentId: string | null): string | null => {
-			let pid = parentId;
-			while (pid !== null && droppedParent.has(pid)) pid = droppedParent.get(pid) ?? null;
-			return pid;
-		};
+		});
+		// Git facts describe the source workspace; preserve other entry IDs and relink their parents.
+		const dropped = new Map<string, string | null>();
+		for (const entry of sourceEntries) if (entry.type === "git_state") dropped.set(entry.id, entry.parentId);
 		for (const entry of sourceEntries) {
 			if (entry.type === "session" || entry.type === "git_state") continue;
-			const parentId = liveParent(entry.parentId);
-			const out = parentId === entry.parentId ? entry : { ...entry, parentId };
-			appendFileSync(newSessionFile, `${JSON.stringify(out)}\n`);
+			let parentId = entry.parentId;
+			while (parentId !== null && dropped.has(parentId)) parentId = dropped.get(parentId) ?? null;
+			manager.fileEntries.push(parentId === entry.parentId ? entry : { ...entry, parentId });
 		}
-
-		return new SessionManager(targetCwd, dir, newSessionFile, true);
+		manager._buildIndex();
+		await manager._openNew();
+		return manager;
 	}
 
 	static async list(cwd: string, sessionDir?: string, callbacks?: SessionListCallbacks): Promise<SessionInfo[]> {

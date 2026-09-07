@@ -1,4 +1,5 @@
 - Added optional physical-attempt admission and settlement callbacks to built-in inference transports, including SDK retries and Codex WebSocket fallback/continuation.
-- Receipts retain observed usage and timing without fabricating missing token counts or coupling provider outcomes to output commitment. Custom and proxy adapters require their own physical hooks; an outer stream wrapper does not establish complete accounting.
+- Preserved observed usage and timing without fabricating missing token counts or coupling provider outcomes to output commitment. Custom and proxy adapters require their own physical hooks; an outer stream wrapper does not establish complete accounting.
 - Retained exact provider capacity confirmation through hidden SDK retries without inferring it from HTTP status or storing error bodies.
 - Added a required-attempts dispatch constraint that checks known built-in handler identity, including the supplied Bedrock module, while keeping generic SDK registration extensible.
+- Added native local-simulation support for source-owned faux providers without treating synthetic usage as physical billing.

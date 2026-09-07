@@ -136,7 +136,7 @@ describe("AgentSessionRuntime characterization", () => {
 				options?.sessionManager ??
 				(options?.inMemory
 					? SessionManager.inMemory(tempDir)
-					: SessionManager.create(tempDir, join(tempDir, "sessions"))),
+					: await SessionManager.create(tempDir, join(tempDir, "sessions"))),
 			sessionConfig: options?.sessionConfig,
 			sessionOptions: options?.sessionOptions,
 		});
@@ -207,8 +207,8 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("uses effective runtime depth for a parented new session from a legacy header", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-legacy-new-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		sessionManager.newSession({ rlmDepth: undefined });
+		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
+		await sessionManager.newSession({ rlmDepth: undefined });
 		const parentSession = sessionManager.getSessionFile();
 		if (!parentSession) throw new Error("Missing parent session file");
 		const { runtime } = await createRuntimeForTest(() => {}, {
@@ -228,9 +228,9 @@ describe("AgentSessionRuntime characterization", () => {
 			const tempDir = join(tmpdir(), `pi-runtime-legacy-fork-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 			const sessionManager = inMemory
 				? SessionManager.inMemory(tempDir)
-				: SessionManager.create(tempDir, join(tempDir, "sessions"));
-			sessionManager.newSession({ rlmDepth: undefined });
-			const firstEntry = sessionManager.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+				: await SessionManager.create(tempDir, join(tempDir, "sessions"));
+			await sessionManager.newSession({ rlmDepth: undefined });
+			const firstEntry = await sessionManager.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
 			const { runtime } = await createRuntimeForTest(() => {}, {
 				cwd: tempDir,
 				sessionManager,
@@ -398,7 +398,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("plumbs the parent agent identity into runtime-created child prompts", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
-		runtime.session.setSessionName("parent-worker");
+		await runtime.session.setSessionName("parent-worker");
 		const childRuntime = await runtime.createRlmSubagentRuntime({
 			parentSession: runtime.session,
 			id: "parent-agent-child",
@@ -474,6 +474,7 @@ describe("AgentSessionRuntime characterization", () => {
 				noPromptTemplates: true,
 				noThemes: true,
 				telemetryDisabled: true,
+				noTools: true,
 			},
 			[
 				(pi: ExtensionAPI) => {
@@ -501,7 +502,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const created = await factory({
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir, childSessionDir),
+			sessionManager: await SessionManager.create(tempDir, childSessionDir),
 			sessionStartEvent: { type: "session_start", reason: "startup" },
 			sessionOptions: {
 				model: faux.getModel(),
@@ -515,7 +516,7 @@ describe("AgentSessionRuntime characterization", () => {
 				semanticSpawnedByRequestId: spawnedByRequestId,
 			},
 		});
-		cleanups.push(() => created.session.dispose());
+		cleanups.push(() => created.session.disposeAsync());
 		await created.session.bindExtensions({});
 
 		const ledgerPath = join(childSessionDir, SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -662,8 +663,14 @@ describe("AgentSessionRuntime characterization", () => {
 		events.length = 0;
 		const otherDir = join(tmpdir(), `pi-runtime-other-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(otherDir, { recursive: true });
-		const otherSession = SessionManager.create(otherDir, join(otherDir, "sessions"));
-		otherSession.appendMessage({ role: "user", content: [{ type: "text", text: "other" }], timestamp: Date.now() });
+		cleanups.push(() => rmSync(otherDir, { recursive: true, force: true }));
+		const otherSession = await SessionManager.create(otherDir, join(otherDir, "sessions"));
+		cleanups.push(() => otherSession.close());
+		await otherSession.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "other" }],
+			timestamp: Date.now(),
+		});
 		const otherSessionFile = otherSession.getSessionFile();
 		cancelReason = "resume";
 		const resumeResult = await runtime.switchSession(otherSessionFile!);
@@ -847,6 +854,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const secondDir = join(tmpdir(), `pi-runtime-cwd-b-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(firstDir, { recursive: true });
 		mkdirSync(secondDir, { recursive: true });
+		cleanups.push(() => rmSync(secondDir, { recursive: true, force: true }));
 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, { cwd: firstDir });
 		const otherAuthStorage = AuthStorage.inMemory();
 		otherAuthStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -900,7 +908,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherRuntime = await createAgentSessionRuntime(createOtherRuntime, {
 			cwd: secondDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(secondDir, join(secondDir, "sessions")),
+			sessionManager: await SessionManager.create(secondDir, join(secondDir, "sessions")),
 		});
 		cleanups.push(async () => {
 			await otherRuntime.dispose();
@@ -974,13 +982,13 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherRuntime = await createAgentSessionRuntime(createOtherRuntime, {
 			cwd: otherDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(otherDir, join(otherDir, "sessions")),
+			sessionManager: await SessionManager.create(otherDir, join(otherDir, "sessions")),
 		});
 		cleanups.push(async () => {
 			await otherRuntime.dispose();
 		});
 		await otherRuntime.session.setModel(faux.getModel("faux-2")!);
-		otherRuntime.session.setThinkingLevel("off");
+		await otherRuntime.session.setThinkingLevel("off");
 		await otherRuntime.session.prompt("hello");
 		const targetSessionFile = otherRuntime.session.sessionFile!;
 		await otherRuntime.dispose();

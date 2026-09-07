@@ -1,3 +1,9 @@
 - Added native tool intent and finalized execution evidence to session history without duplicate results, with assistant source order restored for parallel tools.
 - Added bounded framed family journals and explicit legacy migration that retains the original source.
 - Added a dedicated Node journal writer with SQLite-backed lifetime ownership and bounded mutation admission.
+- Added framed canonical session histories with exclusive ownership and explicit legacy migration.
+- Changed session factories, mutations and cleanup to await durable writes and report persistence failures before publishing success.
+- Kept late request receipts with their captured source across session switches.
+- Prevented saved-session deletion while its canonical source is owned.
+- Preserved retained legacy paths at startup and refused overwriting session exports.
+- Fixed extension imports to share native AI registrations while preserving extension reloads.

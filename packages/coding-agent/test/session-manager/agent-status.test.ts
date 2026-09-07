@@ -6,17 +6,22 @@ import { buildSessionContext, loadEntriesFromFile, SessionManager } from "../../
 import { assistantMsg, userMsg } from "../utilities.js";
 
 describe("SessionManager agent status", () => {
-	it("persists the latest agent status append-only and reads it back", () => {
+	it("persists the latest agent status append-only and reads it back", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "agent-status-"));
+		let session: SessionManager | undefined;
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			session = await SessionManager.create(cwd, sessionDir);
 
-			session.appendMessage(userMsg("add a login endpoint"));
-			session.appendMessage(assistantMsg("done"));
-			session.appendAgentStatus({ summary: "Working", taskState: undefined, basedOnMessageCount: 2 });
-			session.appendAgentStatus({ summary: "Added login endpoint", taskState: "completed", basedOnMessageCount: 2 });
+			await session.appendMessage(userMsg("add a login endpoint"));
+			await session.appendMessage(assistantMsg("done"));
+			await session.appendAgentStatus({ summary: "Working", taskState: undefined, basedOnMessageCount: 2 });
+			await session.appendAgentStatus({
+				summary: "Added login endpoint",
+				taskState: "completed",
+				basedOnMessageCount: 2,
+			});
 
 			// Latest entry wins.
 			expect(session.getLatestAgentStatus()).toEqual({
@@ -31,43 +36,51 @@ describe("SessionManager agent status", () => {
 			expect(entries.filter((entry) => entry.type === "agent_status")).toHaveLength(2);
 			expect(entries.filter((entry) => entry.type === "message")).toHaveLength(2);
 		} finally {
+			await session?.close();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("reads the status on the active branch, not a sibling branch's later entry", () => {
+	it("reads the status on the active branch, not a sibling branch's later entry", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "agent-status-branch-"));
+		let session: SessionManager | undefined;
 		try {
-			const session = SessionManager.create(join(tempDir, "p"), join(tempDir, "s"));
-			const m1 = session.appendMessage(userMsg("first"));
-			const m2 = session.appendMessage(assistantMsg("reply"));
+			session = await SessionManager.create(join(tempDir, "p"), join(tempDir, "s"));
+			const m1 = await session.appendMessage(userMsg("first"));
+			const m2 = await session.appendMessage(assistantMsg("reply"));
 
 			// Branch A off m1, leave a status on it.
 			session.branch(m1);
-			const branchAStatus = session.appendAgentStatus({ summary: "branch A", basedOnMessageCount: 1 });
+			const branchAStatus = await session.appendAgentStatus({ summary: "branch A", basedOnMessageCount: 1 });
 
 			// Branch B off m2 with a status appended later in the file.
 			session.branch(m2);
-			session.appendAgentStatus({ summary: "branch B", basedOnMessageCount: 1 });
+			await session.appendAgentStatus({ summary: "branch B", basedOnMessageCount: 1 });
 
 			// Re-activate branch A; its status must win despite B being later in the file.
 			session.branch(branchAStatus);
 			expect(session.getLatestAgentStatus()?.summary).toBe("branch A");
 		} finally {
+			await session?.close();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("is ignored by context building so it never reaches the model", () => {
+	it("is ignored by context building so it never reaches the model", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "agent-status-context-"));
+		let session: SessionManager | undefined;
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			session = await SessionManager.create(cwd, sessionDir);
 
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi"));
-			session.appendAgentStatus({ summary: "Greeted the user", taskState: "completed", basedOnMessageCount: 2 });
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi"));
+			await session.appendAgentStatus({
+				summary: "Greeted the user",
+				taskState: "completed",
+				basedOnMessageCount: 2,
+			});
 
 			const context = buildSessionContext(session.getEntries(), session.getLeafId());
 			expect(context.messages).toHaveLength(2);
@@ -75,6 +88,7 @@ describe("SessionManager agent status", () => {
 				true,
 			);
 		} finally {
+			await session?.close();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

@@ -262,7 +262,14 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	try {
+		writeFileSync(outputPath, html, { encoding: "utf-8", flag: "wx" });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+			throw new Error(`Export file already exists: ${outputPath}. Choose a new filename.`, { cause: error });
+		}
+		throw error;
+	}
 	return outputPath;
 }
 
@@ -277,7 +284,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw new Error(`File not found: ${inputPath}`);
 	}
 
-	const sm = SessionManager.open(inputPath);
+	const sm = await SessionManager.openReadOnly(inputPath);
 
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
@@ -295,6 +302,13 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	try {
+		writeFileSync(outputPath, html, { encoding: "utf-8", flag: "wx" });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+			throw new Error(`Export file already exists: ${outputPath}. Choose a new filename.`, { cause: error });
+		}
+		throw error;
+	}
 	return outputPath;
 }

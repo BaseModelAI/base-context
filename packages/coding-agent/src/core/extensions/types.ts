@@ -1067,7 +1067,7 @@ export interface ExtensionAPI {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-	): void;
+	): Promise<void>;
 
 	/**
 	 * Send a user message to the agent. Always triggers a turn.
@@ -1076,18 +1076,18 @@ export interface ExtensionAPI {
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
-	): void;
+	): Promise<void>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
-	appendEntry<T = unknown>(customType: string, data?: T): void;
+	appendEntry<T = unknown>(customType: string, data?: T): Promise<void>;
 	/** Set the session display name (shown in session selector). */
-	setSessionName(name: string): void | Promise<void>;
+	setSessionName(name: string): Promise<void>;
 
 	/** Get the current session name, if set. */
 	getSessionName(): string | undefined;
 
 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
-	setLabel(entryId: string, label: string | undefined): void;
+	setLabel(entryId: string, label: string | undefined): Promise<void>;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1110,7 +1110,7 @@ export interface ExtensionAPI {
 	getThinkingLevel(): ThinkingLevel;
 
 	/** Set thinking level (clamped to model capabilities). */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel): Promise<void>;
 	/**
 	 * Register or override a model provider.
 	 *
@@ -1271,16 +1271,16 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-) => void;
+) => Promise<void>;
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
-) => void;
+) => Promise<void>;
 
-export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => Promise<void>;
 
-export type SetSessionNameHandler = (name: string) => void | Promise<void>;
+export type SetSessionNameHandler = (name: string) => Promise<void>;
 
 export type GetSessionNameHandler = () => string | undefined;
 
@@ -1303,9 +1303,9 @@ export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+export type SetThinkingLevelHandler = (level: ThinkingLevel) => Promise<void>;
 
-export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
+export type SetLabelHandler = (entryId: string, label: string | undefined) => Promise<void>;
 
 /**
  * Shared state created by loader, used during registration and runtime.

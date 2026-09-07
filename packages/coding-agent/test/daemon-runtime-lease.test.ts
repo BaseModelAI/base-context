@@ -20,13 +20,15 @@ describe("daemon runtime session leases", () => {
 
 	it("releases an acquired lease when the runtime open guard cancels", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-daemon-runtime-lease-"));
+		let sessionManager: SessionManager | undefined;
 		try {
 			vi.stubEnv(SESSION_LEASES_ENABLED_ENV, "1");
 			vi.stubEnv(SESSION_LEASE_OWNER_ID_ENV, "daemon-test");
 			const sessionDir = join(root, "sessions");
-			const sessionManager = SessionManager.create(root, sessionDir);
-			sessionManager.appendMessage(userMsg("persist session"));
+			sessionManager = await SessionManager.create(root, sessionDir);
+			await sessionManager.appendMessage(userMsg("persist session"));
 			const sessionPath = sessionManager.getSessionFile()!;
+			await sessionManager.close();
 			const daemon = new AgentDaemon(join(root, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: root, cwd: root, sessionDir },
 				createRuntime: async () => {
@@ -47,6 +49,7 @@ describe("daemon runtime session leases", () => {
 			expect(reopened).toBeDefined();
 			reopened?.release();
 		} finally {
+			await sessionManager?.close();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

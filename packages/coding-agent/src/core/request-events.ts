@@ -67,6 +67,8 @@ export type NativeRequestEvent = NativeRequestMetadata &
 
 /** The session writer remains the only authoritative request history. */
 export interface BoundRequestSink {
-	readonly source: SourceSnapshotRef;
+	readonly source: Promise<SourceSnapshotRef>;
+	retain(): void;
+	release(): Promise<void>;
 	persist(event: NativeRequestEvent): Promise<void>;
 }

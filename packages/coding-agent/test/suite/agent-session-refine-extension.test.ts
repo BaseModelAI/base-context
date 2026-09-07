@@ -7,9 +7,9 @@ import { createHarness, type Harness } from "./harness.js";
 describe("AgentSession session_before_refine extension hook", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

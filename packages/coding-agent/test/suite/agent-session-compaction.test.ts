@@ -12,6 +12,7 @@ import {
 	type Usage,
 } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -28,7 +29,7 @@ type SessionWithCompactionInternals = {
 		reason: "overflow" | "threshold" | "requested",
 		outcome: "skipped" | "cancelled" | "failed",
 		message: string,
-	) => void;
+	) => Promise<void>;
 };
 
 function createUsage(totalTokens: number) {
@@ -76,11 +77,11 @@ describe("AgentSession compaction characterization", () => {
 		vi.useRealTimers();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -519,7 +520,7 @@ describe("AgentSession compaction characterization", () => {
 	it("throws when compacting without a model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.session.agent.state.model = undefined as unknown as Model<any>;
+		harness.session.agent.state.model = undefined as unknown as Model<string>;
 
 		await expect(harness.session.compact()).rejects.toThrow("No model selected");
 	});
@@ -764,21 +765,21 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: staleTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: staleTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(staleAssistant);
+		await harness.sessionManager.appendMessage(staleAssistant);
 		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			staleAssistant.usage.totalTokens,
 			undefined,
 			false,
 		);
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "after compaction" }],
 			timestamp: Date.now(),
@@ -944,7 +945,7 @@ describe("AgentSession compaction characterization", () => {
 		const oldMessages: AgentMessage[] = [oldUser, oldAssistant];
 		const messages: AgentMessage[] = [currentUser, successfulAssistant, toolResult];
 		for (const message of [oldUser, oldAssistant, currentUser, successfulAssistant]) {
-			harness.sessionManager.appendMessage(message);
+			await harness.sessionManager.appendMessage(message);
 		}
 		harness.session.agent.state.messages = [...oldMessages, ...messages];
 
@@ -1240,7 +1241,7 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now() - 1000,
 		} satisfies Parameters<typeof harness.sessionManager.appendMessage>[0];
 		for (const message of [oldUser, oldAssistant, currentUser, successfulAssistant]) {
-			harness.sessionManager.appendMessage(message);
+			await harness.sessionManager.appendMessage(message);
 		}
 		harness.session.agent.state.messages = [oldUser, oldAssistant, currentUser, successfulAssistant, toolResult];
 
@@ -1418,14 +1419,14 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: preCompactionTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: preCompactionTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(keptAssistant);
+		await harness.sessionManager.appendMessage(keptAssistant);
 		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			keptAssistant.usage.totalTokens,
@@ -1477,7 +1478,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(disabledSpy).not.toHaveBeenCalled();
 	});
 
-	it("rolls back failed outcome persistence without breaking the persisted branch", async () => {
+	it("keeps failed outcome persistence out of the branch until explicit recovery", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("persisted response")]);
@@ -1487,14 +1488,14 @@ describe("AgentSession compaction characterization", () => {
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		const persistedLeafId = harness.sessionManager.getLeafId();
 		const persistedEntries = harness.sessionManager.getEntries();
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
+		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockImplementationOnce(async () => {
 			appendFileSync(sessionFile, '{"type":"custom_message"');
-			throw new Error("disk full");
+			throw new Error("injected append acknowledgement failure");
 		});
 
-		expect(() =>
+		await expect(
 			internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed"),
-		).not.toThrow();
+		).resolves.toBeUndefined();
 		// The live outcome message discloses that it was not saved.
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "custom",
@@ -1502,13 +1503,16 @@ describe("AgentSession compaction characterization", () => {
 			content: expect.stringContaining("could not be saved to session history"),
 			details: { reason: "requested", outcome: "failed" },
 		});
-		// In-memory state is fully rolled back: no outcome entry, same leaf and entries.
+		// No unacknowledged outcome is published: same leaf and entries.
 		expect(harness.sessionManager.getLeafId()).toBe(persistedLeafId);
 		expect(harness.sessionManager.getEntries()).toEqual(persistedEntries);
 
-		// The next append attaches to the persisted leaf and rewrites a coherent file.
-		const nextId = harness.sessionManager.appendCustomEntry("after_failed_outcome");
-		const reloaded = SessionManager.open(sessionFile);
+		await expect(harness.sessionManager.appendCustomEntry("blocked_before_recovery")).rejects.toThrow(
+			"outcome may be unknown",
+		);
+		await harness.sessionManager.recover();
+		const nextId = await harness.sessionManager.appendCustomEntry("after_failed_outcome");
+		const reloaded = await SessionManager.openReadOnly(sessionFile);
 		expect(reloaded.getEntry(nextId)?.parentId).toBe(persistedLeafId);
 		expect(reloaded.getBranch().map((entry) => entry.id)).toEqual(
 			harness.sessionManager.getBranch().map((entry) => entry.id),
@@ -1562,10 +1566,11 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("two");
 
 		const internals = harness.session as unknown as SessionWithCompactionInternals;
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
-			throw new Error("disk full");
-		});
-		internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockRejectedValueOnce(
+			new Error("injected append acknowledgement failure"),
+		);
+		await internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		await harness.sessionManager.recover();
 
 		// Compaction reloads agent.state.messages from the session file; the
 		// memory-only disclosure must survive.

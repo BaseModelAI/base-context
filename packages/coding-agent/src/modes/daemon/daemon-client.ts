@@ -5,7 +5,7 @@ import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
-	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS,
 	DAEMON_PROTOCOL_NAME,
 	DAEMON_PROTOCOL_VERSION,
 	type DaemonClosingReason,
@@ -21,7 +21,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
 	meetsDaemonCommandCompatibility,
-	NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY,
+	NATIVE_WORK_COMPATIBILITIES,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
 
@@ -96,8 +96,8 @@ export class DaemonCapabilityUnavailableError extends Error {
 		readonly afterReconnect = false,
 	) {
 		super(
-			capability === "native_inference_ownership"
-				? `The running Base Context daemon cannot provide native inference ownership for ${command}. Command not sent. Start an updated Base Context daemon; use the old runtime's own controls for legacy cleanup. Only passive inspection is available on this connection.`
+			capability === "native_inference_ownership" || capability === "canonical_session_ownership"
+				? `The running Base Context daemon cannot provide ${capability === "canonical_session_ownership" ? "canonical session ownership" : "native inference ownership"} for ${command}. Command not sent. Start an updated Base Context daemon; use the old runtime's own controls for legacy cleanup. Only passive inspection is available on this connection.`
 				: capability
 					? `The running Base Context daemon does not support ${capability}.`
 					: `The running Base Context daemon does not support ${command}.`,
@@ -374,10 +374,11 @@ export class DaemonClient {
 
 	async requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30000): Promise<DaemonResponse> {
 		const hello = await this.waitForHello();
-		if (!meetsDaemonCommandCompatibility(hello, NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY)) {
-			throw new DaemonCapabilityUnavailableError(command.type, "native_inference_ownership");
-		}
-		return this.requestWire(command, timeoutMs, {}, undefined, [NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY]);
+		const missing = NATIVE_WORK_COMPATIBILITIES.find(
+			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
+		);
+		if (missing) throw new DaemonCapabilityUnavailableError(command.type, missing.capability);
+		return this.requestWire(command, timeoutMs, {}, undefined, NATIVE_WORK_COMPATIBILITIES);
 	}
 
 	private async requestWire(
@@ -473,7 +474,7 @@ export class DaemonClient {
 			if (
 				message.protocol.name !== DAEMON_PROTOCOL_NAME ||
 				(message.protocol.version !== DAEMON_PROTOCOL_VERSION &&
-					message.protocol.version !== DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION)
+					!DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS.includes(message.protocol.version))
 			) {
 				const error = new DaemonProtocolMismatchError(message.protocol.name, message.protocol.version);
 				this.handshakeError = error;
@@ -508,7 +509,7 @@ export class DaemonClient {
 						);
 						continue;
 					}
-					// Passive reads may survive a Base9 -> Base8 inspection downgrade; keep command identity, negotiate the envelope.
+					// Only passive reads survive a downgrade to Base8/Base9; retain identity and negotiate the envelope.
 					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
 					if (wire.type === "command" && wire.protocol.version !== message.protocol.version) {
 						wire.protocol.version = message.protocol.version;

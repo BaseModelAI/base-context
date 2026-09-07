@@ -5,9 +5,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("regression #3686: session name changes emit an event", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -15,7 +15,7 @@ describe("regression #3686: session name changes emit an event", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		harness.session.setSessionName("hello world");
+		await harness.session.setSessionName("hello world");
 
 		expect(harness.sessionManager.getSessionName()).toBe("hello world");
 		expect(harness.eventsOfType("session_info_changed").map((event) => event.name)).toEqual(["hello world"]);
@@ -32,7 +32,7 @@ describe("regression #3686: session name changes emit an event", () => {
 		});
 		harnesses.push(harness);
 
-		api?.setSessionName("from extension");
+		await api?.setSessionName("from extension");
 
 		expect(harness.sessionManager.getSessionName()).toBe("from extension");
 		expect(harness.eventsOfType("session_info_changed").map((event) => event.name)).toEqual(["from extension"]);

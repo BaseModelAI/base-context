@@ -104,9 +104,9 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		initTheme("dark");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

@@ -16,6 +16,7 @@ import {
 	verifyHelloSupervisorPid,
 } from "../src/cli/daemon-ps.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
+import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir } from "../src/modes/daemon/daemon-socket.js";
 
 describe("worker socket classification", () => {
@@ -161,10 +162,12 @@ describe("planReap", () => {
 			[
 				makeDaemon({ socketPath: "/tmp/idle.sock", status: "current", sessionCount: 0, pid: 5 }),
 				makeDaemon({ socketPath: "/tmp/orphan.sock", status: "orphan-file" }),
+				makeDaemon({ socketPath: "/tmp/old8.sock", status: "stale", protocolVersion: 8, sessionCount: 0, pid: 8 }),
+				makeDaemon({ socketPath: "/tmp/old9.sock", status: "stale", protocolVersion: 9, sessionCount: 0, pid: 9 }),
 			],
 			false,
 		);
-		expect(plan.map((action) => action.kind)).toEqual(["shutdown", "remove-file"]);
+		expect(plan.map((action) => action.kind)).toEqual(["shutdown", "remove-file", "skip", "skip"]);
 	});
 
 	it("removes a stale default socket file but never stops a live default daemon", () => {
@@ -179,7 +182,7 @@ describe("planReap", () => {
 		expect(plan[1]!.kind).toBe("skip");
 	});
 
-	it("only kills unreachable daemons with --force", () => {
+	it("requires --force to select unreachable candidates for a fresh compatibility probe", () => {
 		const daemon = makeDaemon({ socketPath: "/tmp/hung.sock", status: "unreachable", pid: 7 });
 		const skipped = planReap([daemon], false)[0]!;
 		expect(skipped.kind).toBe("skip");
@@ -202,7 +205,7 @@ describe("planReap", () => {
 });
 
 describe("planShutdownAll", () => {
-	it("targets every service when forced", () => {
+	it("plans forced cleanup candidates subject to live compatibility checks", () => {
 		const plan = planShutdownAll(
 			[
 				makeDaemon({
@@ -221,15 +224,19 @@ describe("planShutdownAll", () => {
 		expect(plan.map((action) => action.kind)).toEqual(["shutdown", "shutdown", "kill", "remove-file"]);
 	});
 
-	it("never skips a service when forced", () => {
+	it("preserves known incompatible services even when forced", () => {
 		const plan = planShutdownAll(
 			[
-				makeDaemon({ socketPath: "/tmp/a.sock", status: "stale", pid: 9 }),
-				makeDaemon({ socketPath: "/tmp/b.sock", status: "unreachable", pid: 10 }),
+				makeDaemon({ socketPath: "/tmp/old8.sock", status: "stale", protocolVersion: 8, pid: 8 }),
+				makeDaemon({ socketPath: "/tmp/old9.sock", status: "stale", protocolVersion: 9, pid: 9 }),
+				makeDaemon({ socketPath: "/tmp/unknown.sock", status: "unreachable", pid: 10 }),
 			],
 			true,
 		);
-		expect(plan.some((action) => action.kind === "skip")).toBe(false);
+		expect(plan.map((action) => action.kind)).toEqual(["skip", "skip", "kill"]);
+		for (const action of plan.slice(0, 2)) {
+			expect(action.kind === "skip" ? action.reason : "").toContain("canonical session ownership");
+		}
 	});
 
 	it("removes the socket file for an unreachable daemon with no pid", () => {
@@ -264,6 +271,7 @@ describe("planShutdownConfirmation", () => {
 function makeDaemon(options: Partial<DaemonInfo> & { socketPath: string; status: DaemonInfo["status"] }): DaemonInfo {
 	return {
 		isDefault: false,
+		...(options.status === "current" ? { protocolVersion: DAEMON_PROTOCOL_VERSION, schemaId: DAEMON_SCHEMA_ID } : {}),
 		...options,
 	};
 }

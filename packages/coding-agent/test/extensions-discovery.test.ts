@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
 
@@ -251,13 +252,30 @@ describe("extensions discovery", () => {
 	});
 
 	it("loads extensions and registers commands", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode);
+		const faux = registerFauxProvider({ models: [{ id: "discovery" }] });
+		try {
+			const extensionPath = path.join(extensionsDir, "with-command.ts");
+			const registryCheck = `
+				import { getApiProvider } from "@ponythewhite/base-context-ai";
+				if (!getApiProvider(${JSON.stringify(faux.api)})) throw new Error("Native AI registry is not shared");
+			`;
+			fs.writeFileSync(extensionPath, registryCheck + extensionCode);
 
-		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].commands.has("test")).toBe(true);
+			expect(result.errors).toHaveLength(0);
+			expect(result.extensions).toHaveLength(1);
+			expect(result.extensions[0].commands.has("test")).toBe(true);
+
+			fs.writeFileSync(extensionPath, registryCheck + extensionCode.replace('"test"', '"reloaded"'));
+			const reloaded = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(reloaded.errors).toHaveLength(0);
+			expect(reloaded.extensions).toHaveLength(1);
+			expect(reloaded.extensions[0].commands.has("reloaded")).toBe(true);
+			expect(reloaded.extensions[0].commands.has("test")).toBe(false);
+		} finally {
+			faux.unregister();
+		}
 	});
 
 	it("loads extensions and registers tools", async () => {

@@ -34,7 +34,7 @@ afterEach(async () => {
 	}
 	children.clear();
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		await harnesses.pop()?.cleanup();
 	}
 	for (const socketPath of daemonSockets) {
 		const client = new DaemonClient(socketPath);

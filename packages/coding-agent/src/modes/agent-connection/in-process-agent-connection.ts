@@ -325,7 +325,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void> {
-		this.session.sessionManager.appendLabelChange(entryId, label);
+		await this.session.sessionManager.appendLabelChange(entryId, label);
 	}
 
 	async respondToExtensionUiRequest(_requestId: string, _response: AgentConnectionExtensionUiResponse): Promise<void> {
@@ -468,11 +468,11 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		this.session.setThinkingLevel(level);
+		await this.session.setThinkingLevel(level);
 	}
 
 	async setServiceTier(serviceTier: ServiceTier): Promise<void> {
-		this.session.setServiceTier(serviceTier);
+		await this.session.setServiceTier(serviceTier);
 	}
 
 	async cycleThinkingLevel(): Promise<ThinkingLevel | undefined> {
@@ -568,7 +568,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		if (!trimmedName) {
 			throw new Error("Session name cannot be empty");
 		}
-		this.session.setSessionName(trimmedName);
+		await this.session.setSessionName(trimmedName);
 	}
 
 	async getRlmMaxDepthStatus() {
@@ -586,10 +586,15 @@ export class InProcessAgentConnection implements AgentConnection {
 		}
 		const currentSessionFile = this.session.sessionFile;
 		if (currentSessionFile && resolve(currentSessionFile) === resolve(sessionPath)) {
-			this.session.setSessionName(trimmedName);
+			await this.session.setSessionName(trimmedName);
 			return;
 		}
-		SessionManager.open(sessionPath).appendSessionInfo(trimmedName);
+		const manager = await SessionManager.open(sessionPath);
+		try {
+			await manager.appendSessionInfo(trimmedName);
+		} finally {
+			await manager.close();
+		}
 	}
 
 	async deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult> {

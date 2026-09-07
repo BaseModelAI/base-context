@@ -64,9 +64,9 @@ describe("ENG-4658 onboarding transitions", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

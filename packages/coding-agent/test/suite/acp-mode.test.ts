@@ -211,7 +211,7 @@ describe("ACP mode end to end", () => {
 			clientCapabilities: {},
 		});
 		expect(init.protocolVersion).toBe(acp.PROTOCOL_VERSION);
-		expect(init.agentInfo?.name).toBe("prime-agent");
+		expect(init.agentInfo?.name).toBe("base-context");
 		expect(init._meta).toHaveProperty(BASE_CONTEXT_META_NAMESPACE);
 
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
@@ -229,7 +229,7 @@ describe("ACP mode end to end", () => {
 			.join("");
 		expect(text).toContain("Hello from prime-agent");
 
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("queues a follow-up prompt behind injected work instead of rejecting it", async () => {
@@ -282,7 +282,7 @@ describe("ACP mode end to end", () => {
 			.map((update) => update.update.content.text)
 			.join("");
 		expect(text).toContain("turn two done");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 5_000);
 
 	it("reports the prompt stop reason from its terminal autonomous status", async () => {
@@ -316,7 +316,7 @@ describe("ACP mode end to end", () => {
 		expect(harness.session.getAutonomousStatus().turnsUsed).toBeGreaterThanOrEqual(
 			harness.session.getAutonomousStatus().limits.maxTurns,
 		);
-		harness.cleanup();
+		await harness.cleanup();
 	}, 5_000);
 
 	it("holds the prompt response open for causally admitted work", async () => {
@@ -351,7 +351,7 @@ describe("ACP mode end to end", () => {
 		expect(harness.session.isStreaming).toBe(true);
 		releaseInjected();
 		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
-		harness.cleanup();
+		await harness.cleanup();
 	}, 5_000);
 
 	it("cancels a prompt that is still queued behind busy work", async () => {
@@ -391,7 +391,7 @@ describe("ACP mode end to end", () => {
 			.map((message) => JSON.stringify(message.content))
 			.join("|");
 		expect(assistantText).not.toContain("queued turn done");
-		harness.cleanup();
+		await harness.cleanup();
 	}, 5_000);
 
 	it("emits score-safe quiescence metadata with outstanding work and budget", async () => {
@@ -428,7 +428,7 @@ describe("ACP mode end to end", () => {
 			outstandingSubagents: 0,
 			remainingAutonomousContinuations: 0,
 		});
-		harness.cleanup();
+		await harness.cleanup();
 	}, 30_000);
 
 	it("treats unused autonomous capacity as terminal lifecycle telemetry", async () => {

@@ -198,6 +198,14 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	private contextOwner?: () => Promise<void>;
+
+	/** Native persistence remains ahead of replaceable context callbacks. */
+	bindContextOwner(owner: () => Promise<void>): void {
+		if (this.contextOwner) throw new Error("Agent context owner is already bound");
+		this.contextOwner = owner;
+	}
+
 	private configuredStreamFn!: StreamFn;
 	private effectiveStreamFn!: StreamFn;
 	private streamOwner?: (streamFn: StreamFn) => StreamFn;
@@ -524,6 +532,9 @@ export class Agent {
 			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
+			beforeContextBuild: async () => {
+				await this.contextOwner?.();
+			},
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getSystemPrompt: () => this._state.systemPrompt,

@@ -16,6 +16,7 @@ import {
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
+import { DAEMON_PROTOCOL_INFO, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	type DaemonWorkerDescriptor,
@@ -29,6 +30,17 @@ const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 const blockingProcessPath = resolve(__dirname, "fixtures/blocking-process.mjs");
 const tempDirs: string[] = [];
 const children = new Set<ChildProcess>();
+const fixtureSessions = new Set<SessionManager>();
+
+function trackSession(manager: SessionManager): SessionManager {
+	fixtureSessions.add(manager);
+	return manager;
+}
+
+async function closeFixtureSessions(): Promise<void> {
+	await Promise.all([...fixtureSessions].map((manager) => manager.close()));
+	fixtureSessions.clear();
+}
 const workerPids = new Set<number>();
 const daemonSockets = new Set<string>();
 const childDiagnostics = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
@@ -73,6 +85,7 @@ afterEach(async () => {
 	}
 	await Promise.all([...workerPids].map((pid) => waitForProcessGone(pid).catch(() => undefined)));
 	workerPids.clear();
+	await closeFixtureSessions();
 	for (const directory of tempDirs.splice(0)) {
 		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}
@@ -84,13 +97,15 @@ function tempDir(): string {
 	return directory;
 }
 
-function spawnSupervisor(
+async function spawnSupervisor(
 	agentDir: string,
 	socketPath: string,
 	cwd: string,
 	extraArgs: readonly string[] = [],
 	extraEnv: NodeJS.ProcessEnv = {},
-): ChildProcess {
+): Promise<ChildProcess> {
+	// Transfer the real source owner before a native worker opens the fixture.
+	await closeFixtureSessions();
 	daemonSockets.add(socketPath);
 	const child = spawn(
 		process.execPath,
@@ -305,7 +320,7 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(root, "daemon.sock");
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, `${root}//daemon.sock`, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, `${root}//daemon.sock`, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const response = await client.request({ type: "list" });
 
@@ -324,7 +339,7 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-depth-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, [], { BASE_CONTEXT_RLM_DEPTH: "1" });
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir, [], { BASE_CONTEXT_RLM_DEPTH: "1" });
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -351,9 +366,9 @@ describe("daemon supervisor resident workers", () => {
 		const projectDir = join(directory, "project");
 		const sessionDir = join(agentDir, "sessions");
 		mkdirSync(projectDir, { recursive: true });
-		const manager = SessionManager.create(projectDir, sessionDir);
-		manager.appendMessage({ role: "user", content: "pre-roster fixture", timestamp: 1 });
-		manager.flushNow();
+		const manager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await manager.appendMessage({ role: "user", content: "pre-roster fixture", timestamp: 1 });
+		await manager.flushNow();
 		const sessionPath = manager.getSessionFile();
 		const sessionId = manager.getSessionId();
 		if (!sessionPath) throw new Error("Fixture session did not persist");
@@ -363,14 +378,24 @@ describe("daemon supervisor resident workers", () => {
 		children.add(legacyProcess);
 		if (!legacyProcess.pid) throw new Error("Missing legacy process pid");
 
-		// A fake worker socket that authenticates without advertising the roster capability.
+		// A current-compatible worker that authenticates without advertising the roster capability.
 		const workerSocketPath = join(directory, "legacy-worker.sock");
 		const fakeWorker = createServer((socket) => {
 			const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
 			socket.write(
 				encodePrivateFrame<DaemonWorkerFrameHeader>(
 					{ kind: "outbound", outboundType: "daemon_hello" },
-					Buffer.from(`${JSON.stringify({ type: "daemon_hello" })}\n`),
+					Buffer.from(
+						`${JSON.stringify({
+							type: "daemon_hello",
+							socketPath: workerSocketPath,
+							clientId: "pre-roster-fixture-client",
+							protocol: DAEMON_PROTOCOL_INFO,
+							schemaRevision: DAEMON_SCHEMA_REVISION,
+							schemaId: DAEMON_SCHEMA_ID,
+							serverCapabilities: ["canonical_session_ownership", "native_inference_ownership"],
+						})}\n`,
+					),
 				),
 			);
 			socket.on("data", (chunk: Buffer) => {
@@ -446,7 +471,7 @@ describe("daemon supervisor resident workers", () => {
 			fakeWorker.close();
 			rmSync(workerSocketPath, { force: true });
 		});
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir, ["--no-tools", "--no-extensions"]);
 		const client = await connectEventually(socketPath, supervisor);
 		let restarted: SessionSummary | undefined;
 		const deadline = Date.now() + 30_000;
@@ -480,26 +505,27 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-passive-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const parentManager = SessionManager.create(projectDir, sessionDir);
-		parentManager.appendMessage({ role: "user", content: "parent fixture", timestamp: 1 });
-		parentManager.flushNow();
+		const parentManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await parentManager.appendMessage({ role: "user", content: "parent fixture", timestamp: 1 });
+		await parentManager.flushNow();
 		const parentSessionFile = parentManager.getSessionFile();
 		const parentArtifactDir = parentManager.getSessionArtifactDir();
 		if (!parentSessionFile || !parentArtifactDir) throw new Error("Missing parent fixture paths");
 
-		const makeChild = (childId: string, sessionName: string, timestamp: number) => {
+		const makeChild = async (childId: string, sessionName: string, timestamp: number) => {
 			const childSessionDir = join(parentArtifactDir, childId);
-			const manager = SessionManager.create(projectDir, childSessionDir);
-			manager.newSession({ parentSession: parentSessionFile });
-			manager.appendSessionInfo(sessionName);
-			manager.appendMessage({ role: "user", content: `completed ${childId} fixture`, timestamp });
-			manager.flushNow();
+			const manager = trackSession(
+				await SessionManager.create(projectDir, childSessionDir, { parentSession: parentSessionFile }),
+			);
+			await manager.appendSessionInfo(sessionName);
+			await manager.appendMessage({ role: "user", content: `completed ${childId} fixture`, timestamp });
+			await manager.flushNow();
 			const sessionFile = manager.getSessionFile();
 			if (!sessionFile) throw new Error("Missing child fixture path");
 			return { childId, sessionName, childSessionDir, manager, sessionFile };
 		};
-		const child = makeChild("passive-child", "passive-child-worker", 2);
-		const createChild = makeChild("passive-create-child", "passive-create-worker", 3);
+		const child = await makeChild("passive-child", "passive-child-worker", 2);
+		const createChild = await makeChild("passive-create-child", "passive-create-worker", 3);
 		writeFileSync(
 			join(parentArtifactDir, "rlm-subagents.jsonl"),
 			`${[child, createChild]
@@ -524,7 +550,7 @@ describe("daemon supervisor resident workers", () => {
 `,
 		);
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -592,14 +618,14 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-owned-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "owned worker fixture", timestamp: 1 });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "owned worker fixture", timestamp: 1 });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const launchEnvSentinel = `owned-env-${randomUUID()}`;
 		const created = await client.request({
@@ -691,7 +717,7 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-owned-adopt-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -743,7 +769,7 @@ describe("daemon supervisor resident workers", () => {
 		);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const createRoot = async (name: string) => {
 			const response = await client.request({
@@ -792,10 +818,10 @@ describe("daemon supervisor resident workers", () => {
 			`prime-supervisor-archived-cron-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
 		);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "do not revive me", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
-		sessionManager.appendSessionState({ status: "archived" });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "do not revive me", timestamp: 1 });
+		await sessionManager.appendSessionState({ status: "active" });
+		await sessionManager.appendSessionState({ status: "archived" });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
@@ -811,7 +837,7 @@ describe("daemon supervisor resident workers", () => {
 			now: new Date(Date.now() - 20_000),
 		});
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const migratedStore = AgentCronJobStore.forSessionArtifacts();
 		migratedStore.registerSessionArtifact(sessionManager.getSessionId(), sessionManager.getSessionArtifactDir()!);
@@ -844,9 +870,9 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-orphan-cron-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "old scheduled work", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "old scheduled work", timestamp: 1 });
+		await sessionManager.appendSessionState({ status: "active" });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
@@ -862,7 +888,7 @@ describe("daemon supervisor resident workers", () => {
 			now: new Date(Date.now() - 20_000),
 		});
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const migratedStore = AgentCronJobStore.forSessionArtifacts();
 		migratedStore.registerSessionArtifact(sessionManager.getSessionId(), sessionManager.getSessionArtifactDir()!);
@@ -893,7 +919,11 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-restart-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir, ["--session-dir", sessionDir, "--no-tools"]);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir, [
+			"--session-dir",
+			sessionDir,
+			"--no-tools",
+		]);
 		const client = await connectEventually(socketPath, supervisor);
 		const restarted = await client.request({ type: "restart" });
 		expect(restarted.success).toBe(true);
@@ -920,7 +950,7 @@ describe("daemon supervisor resident workers", () => {
 		const socketPath = join(tmpdir(), `prime-supervisor-spawn-error-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const failed = await client.request({
 			type: "create",
@@ -945,15 +975,15 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-shutdown-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "stop with daemon", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "stop with daemon", timestamp: 1 });
+		await sessionManager.appendSessionState({ status: "active" });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -994,7 +1024,7 @@ describe("daemon supervisor resident workers", () => {
 		expect((await readSessionInfo(sessionFile))?.state).toEqual({ status: "archived" });
 		expect(cronStore.list().find((job) => job.id === heartbeat.id)).toMatchObject({ status: "cancelled" });
 
-		const replacement = spawnSupervisor(agentDir, socketPath, projectDir);
+		const replacement = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const replacementClient = await connectEventually(socketPath, replacement);
 		const listed = await replacementClient.request({ type: "list" });
 		expect(listed.success).toBe(true);
@@ -1021,14 +1051,14 @@ describe("daemon supervisor resident workers", () => {
 			`prime-supervisor-stop-finalize-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
 		);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "finalize me", timestamp: 1 });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "finalize me", timestamp: 1 });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -1082,14 +1112,14 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-resume-heal-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "resume me", timestamp: 1 });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "resume me", timestamp: 1 });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",
@@ -1163,15 +1193,15 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-stop-race-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "stop me", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "stop me", timestamp: 1 });
+		await sessionManager.appendSessionState({ status: "active" });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const firstSupervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const firstSupervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, firstSupervisor);
 		const firstSupervisorPid = client.hello?.supervisorPid;
 		if (!firstSupervisorPid) {
@@ -1215,7 +1245,7 @@ describe("daemon supervisor resident workers", () => {
 		client.close();
 		await expect(killResult).resolves.toBeInstanceOf(Error);
 
-		const replacementSupervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const replacementSupervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const replacementClient = await connectEventually(socketPath, replacementSupervisor);
 		const listed = await replacementClient.request({ type: "list" });
 		expect(listed.success).toBe(true);
@@ -1243,17 +1273,19 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-smoke-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionFiles = Array.from({ length: 2 }, (_, index) => {
-			const manager = SessionManager.create(projectDir, sessionDir);
-			manager.appendMessage({ role: "user", content: `smoke root ${index}`, timestamp: index + 1 });
-			const sessionFile = manager.getSessionFile();
-			if (!sessionFile) {
-				throw new Error("Fixture session did not persist");
-			}
-			return sessionFile;
-		});
+		const sessionFiles = await Promise.all(
+			Array.from({ length: 2 }, async (_, index) => {
+				const manager = trackSession(await SessionManager.create(projectDir, sessionDir));
+				await manager.appendMessage({ role: "user", content: `smoke root ${index}`, timestamp: index + 1 });
+				const sessionFile = manager.getSessionFile();
+				if (!sessionFile) {
+					throw new Error("Fixture session did not persist");
+				}
+				return sessionFile;
+			}),
+		);
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await Promise.all(
 			sessionFiles.map((sessionPath) =>
@@ -1317,17 +1349,19 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-many-roots-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionFiles = Array.from({ length: PROCESS_STRESS_WORKERS }, (_, index) => {
-			const manager = SessionManager.create(projectDir, sessionDir);
-			manager.appendMessage({ role: "user", content: `root ${index}`, timestamp: index + 1 });
-			const sessionFile = manager.getSessionFile();
-			if (!sessionFile) {
-				throw new Error("Fixture session did not persist");
-			}
-			return sessionFile;
-		});
+		const sessionFiles = await Promise.all(
+			Array.from({ length: PROCESS_STRESS_WORKERS }, async (_, index) => {
+				const manager = trackSession(await SessionManager.create(projectDir, sessionDir));
+				await manager.appendMessage({ role: "user", content: `root ${index}`, timestamp: index + 1 });
+				const sessionFile = manager.getSessionFile();
+				if (!sessionFile) {
+					throw new Error("Fixture session did not persist");
+				}
+				return sessionFile;
+			}),
+		);
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const externalLease = acquireSessionLease(sessionFiles[0], agentDir, {
 			[SESSION_LEASES_ENABLED_ENV]: "1",
@@ -1451,10 +1485,10 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-supervisor-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
 		const largePrompt = `large:${"x".repeat(600 * 1024)}`;
-		sessionManager.appendMessage({ role: "user", content: largePrompt, timestamp: 1 });
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({ role: "user", content: largePrompt, timestamp: 1 });
+		await sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "done" }],
 			api: "openai-responses",
@@ -1476,7 +1510,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const firstSupervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const firstSupervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, firstSupervisor);
 		const created = await client.request({
 			type: "create",
@@ -1653,16 +1687,16 @@ describe("daemon supervisor resident workers", () => {
 		const sessionDir = join(agentDir, "sessions");
 		const socketPath = join(tmpdir(), `prime-worker-cron-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
 		mkdirSync(projectDir, { recursive: true });
-		const sessionManager = SessionManager.create(projectDir, sessionDir);
-		sessionManager.appendMessage({ role: "user", content: "scheduled work", timestamp: 1 });
-		sessionManager.appendSessionState({ status: "active" });
+		const sessionManager = trackSession(await SessionManager.create(projectDir, sessionDir));
+		await sessionManager.appendMessage({ role: "user", content: "scheduled work", timestamp: 1 });
+		await sessionManager.appendSessionState({ status: "active" });
 		const sessionFile = sessionManager.getSessionFile();
 		const artifactDir = sessionManager.getSessionArtifactDir();
 		if (!sessionFile || !artifactDir) {
 			throw new Error("Fixture session did not persist");
 		}
 
-		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
 		const client = await connectEventually(socketPath, supervisor);
 		const created = await client.request({
 			type: "create",

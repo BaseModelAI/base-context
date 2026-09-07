@@ -65,23 +65,27 @@ function createUserMessage(text: string) {
  * model change, the spawn prompt as the first user message, and assistant
  * usage. Returns the assistant entry id for attribution.
  */
-function writeChildSession(
+async function writeChildSession(
 	dir: string,
 	prompt: string,
 	assistantUsage: Usage,
-): { assistantEntryId: string; sessionManager: SessionManager } {
+): Promise<{ assistantEntryId: string; sessionManager: SessionManager }> {
 	mkdirSync(dir, { recursive: true });
-	const sessionManager = SessionManager.create(process.cwd(), dir);
-	sessionManager.newSession();
-	sessionManager.appendModelChange(model.provider, model.id);
-	sessionManager.appendMessage(createUserMessage(prompt));
-	const assistantEntryId = sessionManager.appendMessage(createAssistantMessage("done", cloneUsage(assistantUsage)));
+	const sessionManager = await SessionManager.create(process.cwd(), dir);
+	managers.push(sessionManager);
+	await sessionManager.appendModelChange(model.provider, model.id);
+	await sessionManager.appendMessage(createUserMessage(prompt));
+	const assistantEntryId = await sessionManager.appendMessage(
+		createAssistantMessage("done", cloneUsage(assistantUsage)),
+	);
 	return { assistantEntryId, sessionManager };
 }
 
 const resolveContextWindow = () => 200000;
 
 let tempDirs: string[] = [];
+let managers: SessionManager[] = [];
+let sessions: AgentSession[] = [];
 
 function makeTempDir(): string {
 	const dir = mkdtempSync(join(tmpdir(), "context-tree-test-"));
@@ -89,7 +93,11 @@ function makeTempDir(): string {
 	return dir;
 }
 
-afterEach(() => {
+afterEach(async () => {
+	await Promise.all(sessions.map((session) => session.disposeAsync()));
+	await Promise.all(managers.map((manager) => manager.close()));
+	sessions = [];
+	managers = [];
 	for (const dir of tempDirs) {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -97,27 +105,27 @@ afterEach(() => {
 });
 
 describe("loadContextTreeChildrenFromDisk", () => {
-	it("returns no nodes for a missing or empty rlm session dir", () => {
+	it("returns no nodes for a missing or empty rlm session dir", async () => {
 		expect(loadContextTreeChildrenFromDisk(undefined, resolveContextWindow)).toEqual([]);
 		expect(loadContextTreeChildrenFromDisk(join(makeTempDir(), "missing"), resolveContextWindow)).toEqual([]);
 		expect(loadContextTreeChildrenFromDisk(makeTempDir(), resolveContextWindow)).toEqual([]);
 	});
 
-	it("builds nodes recursively and separates own usage from attributed child usage", () => {
+	it("builds nodes recursively and separates own usage from attributed child usage", async () => {
 		const rlmDir = makeTempDir();
 		const childDir = join(rlmDir, "sub-aaaa1111");
 		const grandchildDir = join(childDir, "sub-bbbb2222");
 
 		const childUsage = createUsage(1000, 200, 0.1);
 		const grandchildUsage = createUsage(400, 50, 0.04);
-		const child = writeChildSession(childDir, "summarize the auth module", childUsage);
-		writeChildSession(grandchildDir, "read the oauth callbacks", grandchildUsage);
+		const child = await writeChildSession(childDir, "summarize the auth module", childUsage);
+		await writeChildSession(grandchildDir, "read the oauth callbacks", grandchildUsage);
 
 		// The child folds the grandchild's usage into its assistant message,
 		// exactly like _attributeRlmChildUsageToParent does.
 		const aggregate = cloneUsage(childUsage);
 		addAssistantUsage(aggregate, grandchildUsage);
-		child.sessionManager.appendChildUsageAttribution(child.assistantEntryId, grandchildUsage, aggregate);
+		await child.sessionManager.appendChildUsageAttribution(child.assistantEntryId, grandchildUsage, aggregate);
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes).toHaveLength(1);
@@ -146,9 +154,9 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(childNode.ownUsage.input + grandchildNode.ownUsage.input).toBe(childNode.totalUsage.input);
 	});
 
-	it("reports context usage from the last assistant message and the model context window", () => {
+	it("reports context usage from the last assistant message and the model context window", async () => {
 		const rlmDir = makeTempDir();
-		writeChildSession(join(rlmDir, "sub-ctx00001"), "check context", createUsage(1500, 500, 0.02));
+		await writeChildSession(join(rlmDir, "sub-ctx00001"), "check context", createUsage(1500, 500, 0.02));
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes[0].contextUsage).toEqual({
@@ -162,24 +170,24 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(unresolved[0].contextUsage).toBeUndefined();
 	});
 
-	it("reports unknown context usage after a trailing compaction", () => {
+	it("reports unknown context usage after a trailing compaction", async () => {
 		const rlmDir = makeTempDir();
-		const child = writeChildSession(join(rlmDir, "sub-comp0001"), "compact me", createUsage(1500, 500, 0.02));
-		child.sessionManager.appendCompaction("summary", child.assistantEntryId, 2000);
+		const child = await writeChildSession(join(rlmDir, "sub-comp0001"), "compact me", createUsage(1500, 500, 0.02));
+		await child.sessionManager.appendCompaction("summary", child.assistantEntryId, 2000);
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes[0].contextUsage).toEqual({ tokens: null, contextWindow: 200000, percent: null });
 	});
 
-	it("derives error and cancelled status from the last assistant stop reason", () => {
+	it("derives error and cancelled status from the last assistant stop reason", async () => {
 		const rlmDir = makeTempDir();
-		const errored = writeChildSession(join(rlmDir, "sub-err00001"), "fail", createUsage(100, 10, 0.01));
-		errored.sessionManager.appendMessage({
+		const errored = await writeChildSession(join(rlmDir, "sub-err00001"), "fail", createUsage(100, 10, 0.01));
+		await errored.sessionManager.appendMessage({
 			...createAssistantMessage("boom", createUsage(50, 5, 0.01)),
 			stopReason: "error",
 		});
-		const aborted = writeChildSession(join(rlmDir, "sub-abr00001"), "stop", createUsage(100, 10, 0.01));
-		aborted.sessionManager.appendMessage({
+		const aborted = await writeChildSession(join(rlmDir, "sub-abr00001"), "stop", createUsage(100, 10, 0.01));
+		await aborted.sessionManager.appendMessage({
 			...createAssistantMessage("", createUsage(50, 5, 0.01)),
 			stopReason: "aborted",
 		});
@@ -190,7 +198,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(byId.get("sub-abr00001")?.status).toBe("cancelled");
 	});
 
-	it("sums only the current branch, excluding abandoned forked paths", () => {
+	it("sums only the current branch, excluding abandoned forked paths", async () => {
 		const rlmDir = makeTempDir();
 		const childDir = join(rlmDir, "sub-fork0001");
 		mkdirSync(childDir, { recursive: true });
@@ -234,7 +242,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(nodes[0].contextUsage?.tokens).toBe(1100);
 	});
 
-	it("subtracts attributions targeting branch assistants even when the attribution entry is off-branch", () => {
+	it("subtracts attributions targeting branch assistants even when the attribution entry is off-branch", async () => {
 		const rlmDir = makeTempDir();
 		const childDir = join(rlmDir, "sub-attr0001");
 		mkdirSync(childDir, { recursive: true });
@@ -285,10 +293,12 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(nodes[0].ownUsage.input).toBe(1000);
 	});
 
-	it("includes trailing messages after the last assistant in context usage", () => {
+	it("includes trailing messages after the last assistant in context usage", async () => {
 		const rlmDir = makeTempDir();
-		const child = writeChildSession(join(rlmDir, "sub-trail001"), "trailing", createUsage(1500, 500, 0.02));
-		child.sessionManager.appendMessage(createUserMessage("a trailing user message that has not reached the model"));
+		const child = await writeChildSession(join(rlmDir, "sub-trail001"), "trailing", createUsage(1500, 500, 0.02));
+		await child.sessionManager.appendMessage(
+			createUserMessage("a trailing user message that has not reached the model"),
+		);
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		const tokens = nodes[0].contextUsage?.tokens;
@@ -296,10 +306,10 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(tokens).toBeGreaterThan(2000);
 	});
 
-	it("skips children that are already represented live", () => {
+	it("skips children that are already represented live", async () => {
 		const rlmDir = makeTempDir();
-		writeChildSession(join(rlmDir, "sub-live0001"), "live child", createUsage(100, 10, 0.01));
-		writeChildSession(join(rlmDir, "sub-done0001"), "done child", createUsage(200, 20, 0.02));
+		await writeChildSession(join(rlmDir, "sub-live0001"), "live child", createUsage(100, 10, 0.01));
+		await writeChildSession(join(rlmDir, "sub-done0001"), "done child", createUsage(200, 20, 0.02));
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, new Set(["sub-live0001"]));
 		expect(nodes.map((node) => node.id)).toEqual(["sub-done0001"]);
@@ -307,7 +317,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 });
 
 describe("AgentSession.getContextTree", () => {
-	function createSession() {
+	async function createSession() {
 		const settingsManager = SettingsManager.inMemory();
 		const sessionManager = SessionManager.inMemory();
 		const authStorage = AuthStorage.inMemory();
@@ -328,6 +338,8 @@ describe("AgentSession.getContextTree", () => {
 			modelRegistry: ModelRegistry.inMemory(authStorage),
 			resourceLoader: createTestResourceLoader(),
 		});
+		sessions.push(session);
+		await session.initialize();
 		return { session, sessionManager };
 	}
 
@@ -335,16 +347,16 @@ describe("AgentSession.getContextTree", () => {
 		session.agent.state.messages = sessionManager.buildSessionContext().messages;
 	}
 
-	it("returns a root node whose own usage excludes attributed child usage", () => {
-		const { session, sessionManager } = createSession();
-		sessionManager.appendMessage(createUserMessage("do the thing"));
-		const assistantEntryId = sessionManager.appendMessage(
+	it("returns a root node whose own usage excludes attributed child usage", async () => {
+		const { session, sessionManager } = await createSession();
+		await sessionManager.appendMessage(createUserMessage("do the thing"));
+		const assistantEntryId = await sessionManager.appendMessage(
 			createAssistantMessage("on it", createUsage(3000, 600, 0.3)),
 		);
 
 		const childUsage = createUsage(500, 100, 0.05);
 		const aggregate = createUsage(3500, 700, 0.35);
-		sessionManager.appendChildUsageAttribution(assistantEntryId, childUsage, aggregate);
+		await sessionManager.appendChildUsageAttribution(assistantEntryId, childUsage, aggregate);
 		syncAgentMessages(session, sessionManager);
 
 		const tree = session.getContextTree();
@@ -359,16 +371,16 @@ describe("AgentSession.getContextTree", () => {
 		expect(tree.children).toEqual([]);
 	});
 
-	it("keeps pre-compaction spend in the totals after compaction", () => {
+	it("keeps pre-compaction spend in the totals after compaction", async () => {
 		// Intentional: /context reports cumulative session spend. Compaction
 		// shrinks the model-facing context, but tokens already paid for must not
 		// vanish from the totals (the old /usage undercounted here).
-		const { session, sessionManager } = createSession();
-		sessionManager.appendMessage(createUserMessage("expensive early work"));
-		sessionManager.appendMessage(createAssistantMessage("done", createUsage(5000, 1000, 0.5)));
-		const keptId = sessionManager.appendMessage(createUserMessage("later work"));
-		sessionManager.appendCompaction("summary of early work", keptId, 6000);
-		sessionManager.appendMessage(createAssistantMessage("after compaction", createUsage(200, 50, 0.02)));
+		const { session, sessionManager } = await createSession();
+		await sessionManager.appendMessage(createUserMessage("expensive early work"));
+		await sessionManager.appendMessage(createAssistantMessage("done", createUsage(5000, 1000, 0.5)));
+		const keptId = await sessionManager.appendMessage(createUserMessage("later work"));
+		await sessionManager.appendCompaction("summary of early work", keptId, 6000);
+		await sessionManager.appendMessage(createAssistantMessage("after compaction", createUsage(200, 50, 0.02)));
 		syncAgentMessages(session, sessionManager);
 
 		const tree = session.getContextTree();

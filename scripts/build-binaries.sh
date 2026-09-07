@@ -96,6 +96,7 @@ mkdir -p binaries/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64}
 # The external Node writer needs a self-contained payload in native archives.
 mkdir -p binaries/worker-bundles
 bun build ./dist/core/rlm-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/rlm-journal-owner-worker.js
+bun build ./dist/core/session-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/session-journal-owner-worker.js
 
 # Determine which platforms to build
 if [[ -n "$PLATFORM" ]]; then
@@ -129,6 +130,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp dist/build-info.json binaries/$platform/dist/
     cp dist/core/history-index-worker.js binaries/$platform/dist/core/
     cp binaries/worker-bundles/rlm-journal-owner-worker.js binaries/$platform/dist/core/
+    cp binaries/worker-bundles/session-journal-owner-worker.js binaries/$platform/dist/core/
     cp -r dist/base-context-runtime binaries/$platform/dist/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme

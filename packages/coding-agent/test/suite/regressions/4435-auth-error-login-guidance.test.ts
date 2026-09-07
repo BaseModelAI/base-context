@@ -6,9 +6,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("issue #4435 auth error login guidance", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

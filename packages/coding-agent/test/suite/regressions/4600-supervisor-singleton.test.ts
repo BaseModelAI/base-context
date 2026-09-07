@@ -105,7 +105,7 @@ afterEach(async () => {
 	cleanupRegistryDirs.clear();
 	cleanupSupervisorSockets.clear();
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		await harnesses.pop()?.cleanup();
 	}
 });
 

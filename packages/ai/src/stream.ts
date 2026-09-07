@@ -14,15 +14,16 @@ import type {
 export { getEnvApiKey } from "./env-api-keys.js";
 
 function resolveApiProvider(api: Api, options?: StreamOptions) {
+	let localSimulation = false;
 	if (options?.requireProviderAttempts) {
-		if (!options.attempts) throw new Error("Native inference requires physical-attempt admission and settlement");
-		assertBuiltInAttemptSupport(api);
+		localSimulation = assertBuiltInAttemptSupport(api) === "local-faux";
+		if (!localSimulation && !options.attempts) {
+			throw new Error("Native inference requires physical-attempt admission and settlement");
+		}
 	}
 	const provider = getApiProvider(api);
-	if (!provider) {
-		throw new Error(`No API provider registered for api: ${api}`);
-	}
-	return provider;
+	if (!provider) throw new Error(`No API provider registered for api: ${api}`);
+	return { stream: provider.stream, streamSimple: provider.streamSimple, localSimulation };
 }
 
 export function stream<TApi extends Api>(
@@ -31,7 +32,8 @@ export function stream<TApi extends Api>(
 	options?: ProviderStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api, options as StreamOptions);
-	return provider.stream(model, context, options as StreamOptions);
+	const dispatchOptions = provider.localSimulation ? { ...options, attempts: undefined } : options;
+	return provider.stream(model, context, dispatchOptions as StreamOptions);
 }
 
 export async function complete<TApi extends Api>(
@@ -49,7 +51,8 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api, options);
-	return provider.streamSimple(model, context, options);
+	const dispatchOptions = provider.localSimulation ? { ...options, attempts: undefined } : options;
+	return provider.streamSimple(model, context, dispatchOptions);
 }
 
 export async function completeSimple<TApi extends Api>(

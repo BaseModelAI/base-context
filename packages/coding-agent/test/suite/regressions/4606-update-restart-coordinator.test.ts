@@ -264,7 +264,7 @@ afterEach(async () => {
 	}
 	supervisors.clear();
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		await harnesses.pop()?.cleanup();
 	}
 });
 

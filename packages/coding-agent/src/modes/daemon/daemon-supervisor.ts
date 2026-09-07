@@ -83,6 +83,7 @@ import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	collectDaemonClientEnv,
 	createDaemonEventMeta,
 	DAEMON_COMMAND_COMPATIBILITY,
@@ -105,6 +106,7 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isLegacyDaemonInspection,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -1720,6 +1722,14 @@ export class DaemonSupervisor {
 			throw new Error(`Daemon commands require protocol ${DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION} or newer`);
 		}
 		const command = { ...envelope.command, id: envelope.id } as DaemonCommand;
+		if (
+			envelope.protocol.version < CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol &&
+			!isLegacyDaemonInspection(command)
+		) {
+			throw new Error(
+				"Native daemon commands require protocol 10 canonical session ownership; only passive inspection is available",
+			);
+		}
 		let admission: SupervisorPromptAdmission | undefined;
 		if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 			if (typeof command.activeSessionId !== "string" || typeof command.admissionId !== "string") {
@@ -6393,6 +6403,7 @@ export class DaemonSupervisor {
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
 	): Promise<void> {
+		if (worker.compatibilityError) throw worker.compatibilityError;
 		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
 			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
@@ -6424,6 +6435,7 @@ export class DaemonSupervisor {
 		const entryPid = worker.descriptor.pid;
 		const entryStartId = worker.descriptor.processStartId;
 		const assertStopStillApplies = () => {
+			if (worker.compatibilityError) throw worker.compatibilityError;
 			if (directChild) {
 				return;
 			}
@@ -6478,6 +6490,7 @@ export class DaemonSupervisor {
 			} else {
 				await worker.client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
 			}
+			assertStopStillApplies();
 			worker.client.close();
 			worker.client = undefined;
 		} else if (directChild) {
@@ -6511,6 +6524,7 @@ export class DaemonSupervisor {
 		}
 		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
+			assertStopStillApplies();
 			if (directChild) {
 				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
@@ -6772,6 +6786,7 @@ export class DaemonSupervisor {
 	}
 
 	private persistWorkerStopTombstone(worker: ResidentWorker, archiveSession = false): void {
+		if (worker.compatibilityError) throw worker.compatibilityError;
 		worker.intentionalStop = true;
 		worker.descriptor.stopRequestedAt ??= new Date().toISOString();
 		worker.descriptor.archiveOnStop ||= archiveSession;
@@ -6999,6 +7014,10 @@ export class DaemonSupervisor {
 					try {
 						await this.stopWorker(worker, true, forceWorkers, true);
 					} catch (error) {
+						if (error instanceof DaemonWorkerCompatibilityError) {
+							this.log(`Keeping live incompatible worker ${worker.descriptor.workerId}: ${error.message}`);
+							return;
+						}
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;
 						}
@@ -7013,6 +7032,7 @@ export class DaemonSupervisor {
 			}
 		} else {
 			for (const worker of this.workers.values()) {
+				if (worker.compatibilityError) continue;
 				worker.intentionalStop = true;
 				worker.client?.close();
 				worker.client = undefined;

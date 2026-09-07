@@ -7,9 +7,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("ENG-4527 worker heartbeat scheduling", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

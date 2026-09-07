@@ -2,17 +2,18 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
-	linkSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { formatProductDiagnostics, type ProductDiagnostics } from "../../../src/cli/product-doctor.js";
 import { APP_NAME, ENV_AGENT_DIR } from "../../../src/config.js";
 import { getProcessStartId } from "../../../src/core/session-lease.js";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
@@ -94,6 +95,7 @@ const fixturePath = resolve(__dirname, "../../fixtures/eng-4600-supervisor-fixtu
 const fauxExtensionPath = resolve(__dirname, "../../fixtures/eng-4600-faux-extension.ts");
 const cliPath = resolve(__dirname, "../../../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/cli.mjs");
+const tsxLoaderPath = resolve(__dirname, "../../../../../node_modules/tsx/dist/loader.mjs");
 const tsconfigPath = resolve(__dirname, "../../../../../tsconfig.json");
 const supervisorRegistryDirEnv = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const handles = new Set<ProcessHandle>();
@@ -114,7 +116,7 @@ afterEach(async () => {
 	fixtureProcesses.clear();
 	fixtureRegistryDirs.clear();
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		await harnesses.pop()?.cleanup();
 	}
 	for (const path of socketTempDirs) {
 		rmSync(path, { recursive: true, force: true, maxRetries: 50, retryDelay: 50 });
@@ -126,7 +128,7 @@ async function createPaths(): Promise<TestPaths> {
 	const harness = await createHarness();
 	harnesses.push(harness);
 	const executablePath = join(harness.tempDir, APP_NAME);
-	linkSync(process.execPath, executablePath);
+	symlinkSync(process.execPath, executablePath);
 	const socketTmpDir = `/tmp/eng-4603-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 	mkdirSync(socketTmpDir, { recursive: true, mode: 0o700 });
 	socketTempDirs.add(socketTmpDir);
@@ -145,9 +147,10 @@ async function createPaths(): Promise<TestPaths> {
 	};
 }
 
-function spawnSupervisor(paths: TestPaths): ProcessHandle {
+function spawnSupervisor(paths: TestPaths, options: { direct?: boolean } = {}): ProcessHandle {
+	const args = options.direct ? ["--import", tsxLoaderPath, fixturePath] : [tsxPath, fixturePath];
 	return trackProcess(
-		spawn(paths.executablePath, [tsxPath, fixturePath], {
+		spawn(paths.executablePath, args, {
 			cwd: paths.agentDir,
 			env: {
 				...process.env,
@@ -1028,7 +1031,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 	it("shutdown --force removes hidden supervisors and workers through the public CLI", async () => {
 		if (process.platform === "win32") return;
 		const paths = await createPaths();
-		const predecessor = spawnSupervisor(paths);
+		const predecessor = spawnSupervisor(paths, { direct: true });
 		await waitForType(predecessor, "booted");
 		predecessor.child.send({ type: "go" });
 		await waitForType(predecessor, "ready", 60_000);
@@ -1039,9 +1042,12 @@ describe("ENG-4603 worker recovery convergence", () => {
 		const predecessorStartId = getProcessStartId(predecessor.child.pid!);
 		const workerStartId = getProcessStartId(workerPid);
 		registerFixtureProcess(workerPid, workerStartId, "worker");
-		predecessor.child.send({ type: "release_runtime" });
+		predecessor.child.send({ type: "release_runtime", preserveSocket: true });
 		await waitForType(predecessor, "runtime_released");
-		const successor = spawnSupervisor(paths);
+		const successor = spawnSupervisor(
+			{ ...paths, socketPath: join(paths.agentDir, "successor.sock") },
+			{ direct: true },
+		);
 		await waitForType(successor, "booted");
 		successor.child.send({ type: "go" });
 		await waitForType(successor, "ready", 60_000);
@@ -1066,7 +1072,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(listenersBeforeShutdown).toContain(`p${successor.child.pid}`);
 
 		const shutdown = await runCli(paths, ["shutdown", "--force", "--json"], 60_000, lsofEnvironment);
-		expect(shutdown.code).toBe(0);
+		expect(shutdown.code, JSON.stringify(shutdown)).toBe(0);
 		const shutdownResult = JSON.parse(shutdown.stdout) as { stopped: unknown[]; failed: unknown[] };
 		const survivingIdentities = [
 			{ pid: predecessor.child.pid!, processStartId: predecessorStartId },
@@ -1085,6 +1091,7 @@ describe("ENG-4603 worker recovery convergence", () => {
 		expect(exactProcessIsAlive(successor.child.pid!, successorStartId)).toBe(false);
 		expect(exactProcessIsAlive(workerPid, workerStartId)).toBe(false);
 
+		let doctorReport: ProductDiagnostics | undefined;
 		const contracts = [
 			{ args: ["status", "--json"], json: [] },
 			{ args: ["doctor", "--fix", "--json"], json: { reaped: [], skipped: [] } },
@@ -1095,12 +1102,19 @@ describe("ENG-4603 worker recovery convergence", () => {
 			if (result.code !== 0) {
 				throw new Error(`${contract.args.join(" ")} exited ${result.code}: ${result.stderr}`);
 			}
-			expect(JSON.parse(result.stdout)).toEqual(contract.json);
+			const parsed = JSON.parse(result.stdout);
+			if (contract.args[0] === "doctor") {
+				doctorReport = parsed;
+				expect({ reaped: parsed.reaped, skipped: parsed.skipped }).toEqual(contract.json);
+			} else {
+				expect(parsed).toEqual(contract.json);
+			}
 		}
 		for (const args of [["status"], ["doctor", "--fix"], ["shutdown", "--force"]]) {
 			const result = await runCli(paths, args, 60_000, lsofEnvironment);
 			expect(result.code).toBe(0);
-			expect(result.stdout).toBe("No background services found.\n");
+			const reportPrefix = args[0] === "doctor" ? `${formatProductDiagnostics(doctorReport!)}\n` : "";
+			expect(result.stdout).toBe(`${reportPrefix}No background services found.\n`);
 		}
 	}, 150_000);
 });

@@ -1,11 +1,15 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent, type StreamFn } from "@ponythewhite/base-context-agent";
 import * as ai from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
-import { bindAuxiliaryInferenceStream, InferenceCoordinator } from "../src/core/inference-coordinator.js";
+import {
+	bindAuxiliaryInferenceStream,
+	createNativeInferenceStream,
+	InferenceCoordinator,
+} from "../src/core/inference-coordinator.js";
 import type {
 	BoundRequestSink,
 	NativeRequestEvent,
@@ -13,7 +17,8 @@ import type {
 	SourceSnapshotRef,
 } from "../src/core/request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../src/core/semantic-edges.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { readSessionJournal } from "../src/core/session-journal-reader.js";
+import { type SessionEntry, type SessionHeader, SessionManager } from "../src/core/session-manager.js";
 
 const model: ai.Model<"openai-responses"> = {
 	api: "openai-responses",
@@ -52,7 +57,7 @@ const source = (sessionId: string): SourceSnapshotRef => ({
 	persistent: false,
 });
 
-function fakeTransport(sent: () => void, gate?: Promise<void>): typeof ai.streamSimple {
+function fakeTransport(sent: () => void | Promise<void>, gate?: Promise<void>): typeof ai.streamSimple {
 	return (_model, _context, options) => {
 		const events = ai.createAssistantMessageEventStream();
 		void (async () => {
@@ -65,7 +70,7 @@ function fakeTransport(sent: () => void, gate?: Promise<void>): typeof ai.stream
 				kind: "initial",
 			};
 			const attemptId = await options!.attempts!.admit(descriptor);
-			sent();
+			await sent();
 			await gate;
 			await options!.attempts!.settle({
 				...descriptor,
@@ -89,9 +94,14 @@ function fakeTransport(sent: () => void, gate?: Promise<void>): typeof ai.stream
 }
 
 const fixtureDirs: string[] = [];
-afterEach(() => {
+const managers: SessionManager[] = [];
+afterEach(async () => {
 	vi.restoreAllMocks();
-	for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	try {
+		await Promise.all(managers.splice(0).map((manager) => manager.close()));
+	} finally {
+		for (const dir of fixtureDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 describe("native inference coordination", () => {
@@ -99,17 +109,23 @@ describe("native inference coordination", () => {
 		const facts: NativeRequestEvent[] = [];
 		const dir = mkdtempSync(join(tmpdir(), "base-context-inference-"));
 		fixtureDirs.push(dir);
-		const manager = SessionManager.create(dir, dir);
-		manager.appendMessage(context.messages[0]!);
+		const manager = await SessionManager.create(dir, dir);
+		managers.push(manager);
+		await manager.appendMessage(context.messages[0]!);
 		const realSink = manager.bindRequestSink();
 		const initialLeaf = manager.getLeafId();
-		const diskRecords = () =>
-			readFileSync(realSink.source.sessionFile!, "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
+		const sourceSnapshot = await realSink.source;
+		const diskRecords = async () => {
+			const records: Array<SessionEntry | SessionHeader> = [];
+			for await (const record of readSessionJournal(sourceSnapshot.sessionFile!)) {
+				records.push(record.entry as SessionEntry | SessionHeader);
+			}
+			return records;
+		};
 		const sink: BoundRequestSink = {
 			source: realSink.source,
+			retain: () => realSink.retain(),
+			release: () => realSink.release(),
 			async persist(event) {
 				await Promise.resolve();
 				await realSink.persist(event);
@@ -119,9 +135,9 @@ describe("native inference coordination", () => {
 		const requests = new InferenceCoordinator(() => sink);
 		let sends = 0;
 		vi.spyOn(ai, "streamSimple").mockImplementation(
-			fakeTransport(() => {
+			fakeTransport(async () => {
 				expect(facts.at(-1)?.type).toBe("attempt_admitted");
-				expect(diskRecords().at(-1)?.request.type).toBe("attempt_admitted");
+				expect((await diskRecords()).at(-1)).toMatchObject({ request: { type: "attempt_admitted" } });
 				sends++;
 			}),
 		);
@@ -141,9 +157,10 @@ describe("native inference coordination", () => {
 			owner: { sessionId: manager.getSessionId() },
 			modelContract: { profile: { status: "unvalidated" }, pricing: { status: "unvalidated" } },
 		});
-		expect(realSink.source.persistent).toBe(true);
+		expect(sourceSnapshot.persistent).toBe(true);
 		expect(initialLeaf).toBeTypeOf("string");
-		expect(diskRecords().filter((entry) => entry.type === "request")).toHaveLength(purposes.length * 2);
+		expect((await diskRecords()).filter((entry) => entry.type === "request")).toHaveLength(purposes.length * 2);
+		await requests.dispose();
 		expect(manager.getLeafId()).toBe(initialLeaf);
 		expect(JSON.stringify(facts)).not.toContain("not-receipt");
 	});
@@ -162,7 +179,9 @@ describe("native inference coordination", () => {
 		const requests = new InferenceCoordinator(() => {
 			const captured = current;
 			return {
-				source: captured,
+				source: Promise.resolve(captured),
+				retain: () => {},
+				release: async () => {},
 				async persist(event) {
 					expect(event.source).toEqual(captured);
 					facts.push(event);
@@ -184,7 +203,9 @@ describe("native inference coordination", () => {
 		expect(facts[0].attemptId).not.toBe(facts[2].attemptId);
 		const child = new InferenceCoordinator(
 			() => ({
-				source: source("child"),
+				source: Promise.resolve(source("child")),
+				retain: () => {},
+				release: async () => {},
 				async persist(event) {
 					facts.push(event);
 				},
@@ -206,6 +227,7 @@ describe("native inference coordination", () => {
 		});
 		current = source("selected-again");
 		await (await side(model, context)).result();
+		await side.dispose();
 		expect(facts.at(-1)).toMatchObject({
 			purposeDetail: "side-question",
 			source: { sessionId: "selected-later" },
@@ -234,8 +256,11 @@ describe("native inference coordination", () => {
 		const writing = new Promise<void>((resolve) => {
 			notifyWrite = resolve;
 		});
+		const releaseSink = vi.fn(async () => {});
 		const requests = new InferenceCoordinator(() => ({
-			source: source("subject"),
+			source: Promise.resolve(source("subject")),
+			retain: () => {},
+			release: releaseSink,
 			async persist(event) {
 				if (event.type === "attempt_settled" && event.purposeDetail === "late-sibling") {
 					notifyWrite();
@@ -248,43 +273,56 @@ describe("native inference coordination", () => {
 		vi.spyOn(ai, "streamSimple").mockImplementation((...args) =>
 			fakeTransport(() => {}, ++sends === 2 ? providerGate : undefined)(...args),
 		);
-		const first = requests
-			.capture()
-			.complete(model, context, undefined, { purpose: "summary" })
-			.then(() => {
-				throw new Error("aggregate rejected");
-			});
-		const captured = requests.capture();
+		const group = requests.capture();
+		expect(requests.pendingCount).toBe(1); // Unused capture owns the pre-auth wait.
+		const firstCapture = group.capture();
+		const first = firstCapture.complete(model, context, undefined, { purpose: "summary" }).then(() => {
+			throw new Error("aggregate rejected");
+		});
+		const captured = group.capture();
 		const sibling = captured.complete(model, context, undefined, {
 			purpose: "summary",
 			purposeDetail: "late-sibling",
 		});
-		await expect(Promise.all([first, sibling])).rejects.toThrow("aggregate rejected");
-		expect(requests.pendingCount).toBe(1);
-		let idle = false;
-		const drained = requests.waitForIdle().then(() => {
-			idle = true;
-		});
-		releaseProvider();
-		await writing;
-		expect(idle).toBe(false);
-		expect(requests.hasPending).toBe(true);
-		requests.stopAdmission();
-		expect(vi.mocked(ai.streamSimple).mock.calls[1]?.[2]?.signal?.aborted).toBe(true);
-		await expect(captured.complete(model, context, undefined, { purpose: "summary" })).rejects.toThrow(
-			"Inference owner is closing",
-		);
-		expect(sends).toBe(2);
-		releaseWrite();
-		await sibling;
-		await drained;
-		expect(requests.hasPending).toBe(false);
-		expect(facts.filter((event) => event.type === "attempt_settled")).toHaveLength(2);
+		try {
+			await expect(Promise.all([first, sibling])).rejects.toThrow("aggregate rejected");
+			await firstCapture.dispose();
+			await group.dispose();
+			expect(requests.pendingCount).toBe(1);
+			let idle = false;
+			const drained = requests.waitForIdle().then(() => {
+				idle = true;
+			});
+			releaseProvider();
+			await writing;
+			expect(idle).toBe(false);
+			expect(requests.hasPending).toBe(true);
+			expect(releaseSink).not.toHaveBeenCalled();
+			requests.stopAdmission();
+			expect(vi.mocked(ai.streamSimple).mock.calls[1]?.[2]?.signal?.aborted).toBe(true);
+			await expect(captured.complete(model, context, undefined, { purpose: "summary" })).rejects.toThrow(
+				"Inference owner is closing",
+			);
+			expect(sends).toBe(2);
+			releaseWrite();
+			await sibling;
+			await drained;
+			expect(requests.hasPending).toBe(false);
+			expect(facts.filter((event) => event.type === "attempt_settled")).toHaveLength(2);
+			expect(releaseSink).toHaveBeenCalledTimes(1);
+		} finally {
+			releaseProvider();
+			releaseWrite();
+			await Promise.allSettled([first, sibling]);
+			await Promise.all([firstCapture.dispose(), captured.dispose(), group.dispose(), requests.dispose()]);
+		}
 	});
 	it("gates custom registrations and later stream assignments before any native send", async () => {
 		const facts: NativeRequestEvent[] = [];
 		const requests = new InferenceCoordinator(() => ({
-			source: source("subject"),
+			source: Promise.resolve(source("subject")),
+			retain: () => {},
+			release: async () => {},
 			async persist(event) {
 				facts.push(event);
 			},
@@ -339,5 +377,33 @@ describe("native inference coordination", () => {
 			ai.setBedrockProviderModule(realBedrock);
 		}
 		expect(() => ai.assertBuiltInAttemptSupport("bedrock-converse-stream")).not.toThrow();
+		const faux = ai.registerFauxProvider();
+		try {
+			faux.setResponses([
+				(_context, options) => {
+					expect(options?.attempts).toBeUndefined();
+					return ai.fauxAssistantMessage("local simulation");
+				},
+			]);
+			const local = await requests.start(faux.getModel(), context, undefined, { purpose: "main" });
+			expect(await local.settled).toMatchObject({ physicalCoverage: "local-simulation", attemptIds: [] });
+			expect(facts).toEqual([]);
+			const registration = ai.getApiProvider(faux.api)!;
+			const nativeDispatch = createNativeInferenceStream(async (_model, _context, options) => {
+				// Accounting stays available until the real post-auth dispatcher chooses its implementation.
+				expect(options?.attempts).toBeDefined();
+				await Promise.resolve();
+				registration.streamSimple = opaque;
+				return options ?? {};
+			});
+			await expect(
+				requests.bindStream(nativeDispatch, { purpose: "main" })(faux.getModel(), context),
+			).rejects.toThrow("instrumented built-in API route");
+			expect(opaque).toHaveBeenCalledTimes(1);
+			expect(facts).toEqual([]);
+		} finally {
+			faux.unregister();
+			await requests.dispose();
+		}
 	});
 });

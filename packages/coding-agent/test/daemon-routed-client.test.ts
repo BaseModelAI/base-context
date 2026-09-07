@@ -20,7 +20,12 @@ const HELLO = {
 	protocol: DAEMON_PROTOCOL_INFO,
 	schemaRevision: DAEMON_SCHEMA_REVISION,
 	clientId: "client-1",
-	serverCapabilities: ["session_input_admission", "direct_peer_transport", "native_inference_ownership"],
+	serverCapabilities: [
+		"session_input_admission",
+		"direct_peer_transport",
+		"native_inference_ownership",
+		"canonical_session_ownership",
+	],
 } as const;
 
 function makeFakeEndpoint(hello: unknown = HELLO) {
@@ -47,7 +52,10 @@ function makeFakeEndpoint(hello: unknown = HELLO) {
 describe("DaemonRoutedClient routing", () => {
 	it("routes only session-plane commands the worker's own hello serves to the direct socket", async () => {
 		const supervisor = makeFakeEndpoint();
-		const direct = makeFakeEndpoint({ ...HELLO, serverCapabilities: ["native_inference_ownership"] });
+		const direct = makeFakeEndpoint({
+			...HELLO,
+			serverCapabilities: ["native_inference_ownership", "canonical_session_ownership"],
+		});
 		const routed = new DaemonRoutedClient(supervisor.client as never, direct.client as unknown as DaemonWorkerClient);
 
 		await routed.request({ type: "abort", activeSessionId: "active-1" });
@@ -152,41 +160,58 @@ describe("DaemonWorkerClient direct decoding", () => {
 		expect(closes).toHaveLength(1);
 		expect(closes[0]?.name).toBe("DaemonSocketClosedError");
 	});
-	it("rejects old-worker execution on direct and supervisor fallback egress while retaining passive reads", async () => {
-		const { client: worker, internals } = makeDirectClient();
-		const send = vi.fn(async (header: { requestId: string; commandType: string }) => {
+	it.each([8, 9, 10])(
+		"rejects protocol%s workers without canonical ownership on direct and fallback egress while retaining passive reads",
+		async (version) => {
+			const { client: worker, internals } = makeDirectClient();
+			const send = vi.fn(async (header: { requestId: string; commandType: string }) => {
+				internals.handleFrame({
+					header: { kind: "outbound", outboundType: "response", requestId: header.requestId },
+					payload: Buffer.from(
+						JSON.stringify({
+							type: "response",
+							id: header.requestId,
+							command: header.commandType,
+							success: true,
+						}),
+					),
+				});
+			});
+			const channel = { send, close() {} };
+			Object.assign(internals, { channel });
 			internals.handleFrame({
-				header: { kind: "outbound", outboundType: "response", requestId: header.requestId },
+				header: { kind: "outbound", outboundType: "daemon_hello" },
 				payload: Buffer.from(
-					JSON.stringify({ type: "response", id: header.requestId, command: header.commandType, success: true }),
+					JSON.stringify({
+						...HELLO,
+						protocol: { name: "base-context.daemon", version },
+						schemaRevision: version === 10 ? DAEMON_SCHEMA_REVISION : version === 9 ? 28 : 27,
+						serverCapabilities: [
+							"session_input_admission",
+							...(version >= 9 ? ["native_inference_ownership" as const] : []),
+						],
+					}),
 				),
 			});
-		});
-		const channel = { send, close() {} };
-		Object.assign(internals, { channel });
-		internals.handleFrame({
-			header: { kind: "outbound", outboundType: "daemon_hello" },
-			payload: Buffer.from(
-				JSON.stringify({ ...HELLO, protocol: { name: "base-context.daemon", version: 8 }, schemaRevision: 27 }),
-			),
-		});
-		const supervisor = makeFakeEndpoint();
-		supervisor.client.request = (command) => worker.request(command as Parameters<DaemonWorkerClient["request"]>[0]);
-		const routed = new DaemonRoutedClient(supervisor.client as never, worker);
-		const prompt = { type: "prompt", activeSessionId: "active", message: "hello" } as const;
-		await expect(worker.request(prompt)).rejects.toThrow("Command not sent");
-		await expect(worker.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toMatchObject({
-			name: "DaemonWorkerCompatibilityError",
-		});
-		await expect(routed.request(prompt)).rejects.toThrow("Command not sent");
-		expect(send).not.toHaveBeenCalled();
-		await expect(routed.request({ type: "get_state", activeSessionId: "active" })).resolves.toMatchObject({
-			success: true,
-		});
-		expect(send).toHaveBeenCalledOnce();
-		routed.fallbackToSupervisor();
-		await expect(routed.request(prompt)).rejects.toThrow("Command not sent");
-		expect(send).toHaveBeenCalledOnce();
-		routed.close();
-	});
+			const supervisor = makeFakeEndpoint();
+			supervisor.client.request = (command) =>
+				worker.request(command as Parameters<DaemonWorkerClient["request"]>[0]);
+			const routed = new DaemonRoutedClient(supervisor.client as never, worker);
+			const prompt = { type: "prompt", activeSessionId: "active", message: "hello" } as const;
+			await expect(worker.request(prompt)).rejects.toThrow("Command not sent");
+			await expect(worker.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toMatchObject({
+				name: "DaemonWorkerCompatibilityError",
+			});
+			await expect(routed.request(prompt)).rejects.toThrow("Command not sent");
+			expect(send).not.toHaveBeenCalled();
+			await expect(routed.request({ type: "get_state", activeSessionId: "active" })).resolves.toMatchObject({
+				success: true,
+			});
+			expect(send).toHaveBeenCalledOnce();
+			routed.fallbackToSupervisor();
+			await expect(routed.request(prompt)).rejects.toThrow("Command not sent");
+			expect(send).toHaveBeenCalledOnce();
+			routed.close();
+		},
+	);
 });

@@ -45,7 +45,10 @@ describe("createAgentSessionFromServices", () => {
 		});
 
 		expect(services.diagnostics).toContainEqual(
-			expect.objectContaining({ type: "info", message: expect.stringContaining("pseudonymous usage") }),
+			expect.objectContaining({
+				type: "info",
+				message: expect.stringContaining("Base Context analytics are opt-in"),
+			}),
 		);
 		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
 	});
@@ -66,19 +69,19 @@ describe("createAgentSessionFromServices", () => {
 		});
 
 		expect(services.diagnostics).not.toContainEqual(
-			expect.objectContaining({ message: expect.stringContaining("pseudonymous usage") }),
+			expect.objectContaining({ message: expect.stringContaining("Base Context analytics are opt-in") }),
 		);
 		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
 
 		const { session } = await createAgentSessionFromServices({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 			telemetryDisabled: true,
 		});
 		try {
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
 		} finally {
-			session.dispose();
+			await session.disposeAsync();
 		}
 	});
 
@@ -94,15 +97,15 @@ describe("createAgentSessionFromServices", () => {
 			settingsManager: SettingsManager.inMemory({ telemetry: { noticeShown: true } }),
 			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
 		});
-		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		sessionManager.newSession({ rlmDepth: 1 });
+		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
+		await sessionManager.newSession({ rlmDepth: 1 });
 
 		const { session } = await createAgentSessionFromServices({ services, sessionManager });
 		try {
 			expect(session.rlmDepth).toBe(1);
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
 		} finally {
-			session.dispose();
+			await session.disposeAsync();
 		}
 	});
 
@@ -145,7 +148,7 @@ describe("createAgentSessionFromServices", () => {
 		});
 		const { session } = await createAgentSessionFromServices({
 			services,
-			sessionManager: SessionManager.create(projectDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(projectDir, join(tempDir, "sessions")),
 		});
 
 		try {
@@ -217,7 +220,7 @@ describe("createAgentSessionFromServices", () => {
 			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
 			expect(session.systemPrompt).not.toContain("new-secret");
 		} finally {
-			session.dispose();
+			await session.disposeAsync();
 		}
 	});
 
@@ -287,7 +290,7 @@ describe("createAgentSessionFromServices", () => {
 
 		const { session } = await createAgentSessionFromServices({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 			model: faux.getModel(),
 			agentMessageController,
 		});
@@ -304,7 +307,7 @@ describe("createAgentSessionFromServices", () => {
 				)._createKernelHostHandlers(),
 			).not.toHaveProperty("agent_message.send");
 		} finally {
-			session.dispose();
+			await session.disposeAsync();
 		}
 	});
 
@@ -345,13 +348,13 @@ describe("createAgentSessionFromServices", () => {
 
 		const withoutControllers = await createSession({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions-without")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions-without")),
 		});
 		try {
 			expect(visibleSkillNames(withoutControllers)).not.toContain(AGENT_MESSAGE_SKILL_NAME);
 			expect(visibleSkillNames(withoutControllers)).not.toContain(AGENT_OBSERVE_SKILL_NAME);
 		} finally {
-			withoutControllers.dispose();
+			await withoutControllers.disposeAsync();
 		}
 
 		const agentObserveController: AgentObserveController = {
@@ -381,14 +384,14 @@ describe("createAgentSessionFromServices", () => {
 		};
 		const withControllers = await createSession({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions-with")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions-with")),
 			agentObserveController,
 		});
 		try {
 			expect(visibleSkillNames(withControllers)).toContain(AGENT_OBSERVE_SKILL_NAME);
 			expect(visibleSkillNames(withControllers)).not.toContain(AGENT_MESSAGE_SKILL_NAME);
 		} finally {
-			withControllers.dispose();
+			await withControllers.disposeAsync();
 		}
 
 		const agentMessageController: AgentSessionMessageController = {
@@ -402,14 +405,14 @@ describe("createAgentSessionFromServices", () => {
 		};
 		const withMessageController = await createSession({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions-with-message")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions-with-message")),
 			agentMessageController,
 		});
 		try {
 			expect(visibleSkillNames(withMessageController)).toContain(AGENT_MESSAGE_SKILL_NAME);
 			expect(kernelHostHandlers(withMessageController)).toHaveProperty("agent_message.send");
 		} finally {
-			withMessageController.dispose();
+			await withMessageController.disposeAsync();
 		}
 	});
 });

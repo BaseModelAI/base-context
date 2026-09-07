@@ -17,6 +17,7 @@ import {
 } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { BASE_CONTEXT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
+import { readSessionJournal } from "../src/core/session-journal-reader.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
@@ -68,12 +69,37 @@ function createFetchRecorder(calls: FetchCall[]): typeof fetch {
 	};
 }
 
-function writeSession(cwd: string, sessionDir: string, id: string, parentSession?: string): SessionManager {
-	const sessionManager = SessionManager.create(cwd, sessionDir);
-	sessionManager.newSession({ id, parentSession });
-	sessionManager.appendMessage(createUserMessage(`user ${id}`));
-	sessionManager.appendMessage(createAssistantMessage(`assistant ${id}`));
+const ownedSessionManagers: SessionManager[] = [];
+
+async function createSession(
+	cwd: string,
+	sessionDir: string,
+	id?: string,
+	parentSession?: string,
+): Promise<SessionManager> {
+	const sessionManager = await SessionManager.create(cwd, sessionDir, { id, parentSession });
+	ownedSessionManagers.push(sessionManager);
 	return sessionManager;
+}
+
+async function writeSession(
+	cwd: string,
+	sessionDir: string,
+	id: string,
+	parentSession?: string,
+): Promise<SessionManager> {
+	const sessionManager = await createSession(cwd, sessionDir, id, parentSession);
+	await sessionManager.appendMessage(createUserMessage(`user ${id}`));
+	await sessionManager.appendMessage(createAssistantMessage(`assistant ${id}`));
+	return sessionManager;
+}
+
+async function readTraceBody(sessionFile: string): Promise<string> {
+	const lines: string[] = [];
+	for await (const { json } of readSessionJournal(sessionFile)) {
+		lines.push(`${json}\n`);
+	}
+	return lines.join("");
 }
 
 /** Mirrors the outbox on-disk format: one JSON entry per session file, named by path hash. */
@@ -149,9 +175,11 @@ describe("agent trace upload", () => {
 		delete process.env.PRIME_API_BASE_URL;
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		if (vi.isFakeTimers()) vi.clearAllTimers();
 		vi.restoreAllMocks();
 		vi.useRealTimers();
+		await Promise.all(ownedSessionManagers.splice(0).map((sessionManager) => sessionManager.close()));
 		if (originalAgentDir === undefined) {
 			delete process.env[ENV_AGENT_DIR];
 		} else {
@@ -183,7 +211,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("does not upload when trace sharing is disabled", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "disabled-session");
 		const calls: FetchCall[] = [];
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
@@ -201,7 +229,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("allows an explicit one-shot upload without enabling automatic sharing", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "one-shot-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "one-shot-session");
 		const calls: FetchCall[] = [];
 		const result = await uploadAgentTraceFile({
 			sessionFile: sessionManager.getSessionFile(),
@@ -220,7 +248,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("stops before reading the session body when trace sharing is disabled after upload starts", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-read-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-read-session");
 		const settingsManager = SettingsManager.inMemory({ agentTraces: { enabled: true } });
 		const enabledSpy = vi.spyOn(settingsManager, "getAgentTracesEnabled");
 		enabledSpy.mockReturnValueOnce(true).mockReturnValue(false);
@@ -243,7 +271,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("rechecks trace sharing before sending the upload request", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-fetch-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "disabled-before-fetch-session");
 		const settingsManager = SettingsManager.inMemory({ agentTraces: { enabled: true } });
 		const enabledSpy = vi.spyOn(settingsManager, "getAgentTracesEnabled");
 		enabledSpy.mockReturnValueOnce(true).mockReturnValueOnce(true).mockReturnValue(false);
@@ -265,12 +293,12 @@ describe("agent trace upload", () => {
 		expect(enabledSpy).toHaveBeenCalledTimes(3);
 	});
 
-	it("uploads raw session JSONL with trace headers", async () => {
+	it("uploads decoded session payload JSONL with trace headers", async () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "parent-session");
-		const child = writeSession(cwd, sessionDir, "child-session", parent.getSessionFile());
+		const parent = await writeSession(cwd, sessionDir, "parent-session");
+		const child = await writeSession(cwd, sessionDir, "child-session", parent.getSessionFile());
 		const childSessionFile = child.getSessionFile();
 		expect(childSessionFile).toBeDefined();
 
@@ -297,7 +325,9 @@ describe("agent trace upload", () => {
 		const call = calls[0];
 		expect(call.url).toBe("https://api.example.test/api/v1/agent-traces/sessions/child-session");
 		expect(call.init.method).toBe("PUT");
-		expect(call.init.body).toBe(readFileSync(childSessionFile!, "utf8"));
+		const body = await readTraceBody(childSessionFile!);
+		expect(call.init.body).toBe(body);
+		expect(Buffer.byteLength(body)).toBeLessThan((await stat(childSessionFile!)).size);
 
 		const headers = new Headers(call.init.headers);
 		expect(headers.get("authorization")).toBe("Bearer trace-key");
@@ -310,7 +340,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("requires an explicit export endpoint and still permits local preview", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "prod-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "prod-session");
 		const configPath = join(tempDir, "prime-config.json");
 		writeFileSync(configPath, JSON.stringify({ base_url: "https://dev-api.example/api/v1" }));
 		process.env.PRIME_API_BASE_URL = "https://wrong-api.example";
@@ -333,11 +363,16 @@ describe("agent trace upload", () => {
 		});
 		expect(calls).toHaveLength(0);
 		const preview = await previewAgentTraceFile({ sessionFile: sessionManager.getSessionFile() });
-		expect(preview).toMatchObject({ status: "ready", uploadable: false, endpoint: undefined });
+		expect(preview).toMatchObject({
+			status: "ready",
+			uploadable: false,
+			endpoint: undefined,
+			contentPreview: (await readTraceBody(sessionManager.getSessionFile() as string)).trimEnd(),
+		});
 	});
 
 	it("uses BASE_CONTEXT_TRACES_BASE_URL for trace API overrides", async () => {
-		const sessionManager = writeSession(tempDir, join(tempDir, "sessions"), "override-session");
+		const sessionManager = await writeSession(tempDir, join(tempDir, "sessions"), "override-session");
 		process.env.BASE_CONTEXT_TRACES_BASE_URL = "https://trace-api.example/api/v1";
 
 		const calls: FetchCall[] = [];
@@ -359,13 +394,13 @@ describe("agent trace upload", () => {
 	it("does not catch up an inherited outbox when trace upload is installed", async () => {
 		vi.useFakeTimers();
 		const sessionDir = join(tempDir, "sessions");
-		const missed = writeSession(tempDir, sessionDir, "missed-session");
+		const missed = await writeSession(tempDir, sessionDir, "missed-session");
 		const inheritedOutbox = join(tempDir, "agent-traces-outbox");
 		mkdirSync(inheritedOutbox);
 		const entryPath = join(inheritedOutbox, "pending.json");
 		const entry = JSON.stringify({ sessionFile: missed.getSessionFile() });
 		writeFileSync(entryPath, entry);
-		const live = SessionManager.create(tempDir, sessionDir);
+		const live = await createSession(tempDir, sessionDir);
 		const calls: FetchCall[] = [];
 		const options = {
 			authStorage: AuthStorage.inMemory({
@@ -383,13 +418,12 @@ describe("agent trace upload", () => {
 		expect(readFileSync(entryPath, "utf8")).toBe(entry);
 	});
 
-	it("schedules upload only after the session file is persisted", async () => {
+	it("schedules upload only after each entry is persisted", async () => {
 		vi.useFakeTimers();
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "listener-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "listener-session");
 
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
@@ -401,10 +435,13 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
+		const userPersist = sessionManager.appendMessage(createUserMessage("hello"));
 		expect(vi.getTimerCount()).toBe(0);
+		await userPersist;
+		expect(vi.getTimerCount()).toBe(1);
 
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
+		expect(vi.getTimerCount()).toBe(1);
 		await advanceTimersUntil(() => calls.length === 1);
 		expect(calls[0].url).toBe("https://api.example.test/api/v1/agent-traces/sessions/listener-session");
 	});
@@ -414,8 +451,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "concurrent-upload-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "concurrent-upload-session");
 
 		let releaseFetch: () => void = () => {};
 		const fetchReleased = new Promise<void>((resolve) => {
@@ -442,26 +478,30 @@ describe("agent trace upload", () => {
 			fetchFn,
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => calls.length === 1);
 
 		// New content lands while the first upload is still in flight.
-		sessionManager.appendMessage(createUserMessage("more"));
-		sessionManager.appendMessage(createAssistantMessage("content"));
+		await sessionManager.appendMessage(createUserMessage("more"));
+		await sessionManager.appendMessage(createAssistantMessage("content"));
 		await advanceTimersUntil(() => vi.getTimerCount() > 0);
 		await vi.advanceTimersToNextTimerAsync();
 		expect(calls).toHaveLength(1);
 
 		releaseFetch();
 		await advanceTimersUntil(() => calls.length === 2);
-		const finalBody = readFileSync(sessionManager.getSessionFile() as string, "utf8");
+		const sessionFile = sessionManager.getSessionFile() as string;
+		const finalBody = await readTraceBody(sessionFile);
+		const finalStats = await stat(sessionFile);
 		expect(calls[1].init.body).toBe(finalBody);
 		// Drain the follow-up upload's completion so its chain cannot leak into later fake-timer tests.
-		await advanceTimersUntil(
-			() =>
-				readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)?.size === Buffer.byteLength(finalBody),
-		);
+		await advanceTimersUntil(() => readOutboxEntry(tempDir, sessionFile)?.size === finalStats.size);
+		expect(readOutboxEntry(tempDir, sessionFile)).toEqual({
+			sessionFile,
+			size: finalStats.size,
+			mtimeMs: finalStats.mtimeMs,
+		});
 	});
 
 	it("schedules automatic uploads at most once per minute and only after new entries persist", async () => {
@@ -470,8 +510,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "throttled-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "throttled-session");
 
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
@@ -483,18 +522,18 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(1_000);
 		await advanceTimersUntil(() => calls.length === 1);
 
 		setTimeoutSpy.mockClear();
-		sessionManager.appendMessage(createUserMessage("next"));
+		await sessionManager.appendMessage(createUserMessage("next"));
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(60_000);
 	});
 
 	it("surfaces the underlying fetch cause and logs the failure", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "failing-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "failing-session");
 		const sessionFile = session.getSessionFile();
 
 		const failingFetch: typeof fetch = async () => {
@@ -526,7 +565,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("retries once on a transient connection failure, then succeeds", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "retry-session");
 		const calls: FetchCall[] = [];
 		let attempts = 0;
 		const flakyFetch: typeof fetch = async (input, init) => {
@@ -558,7 +597,7 @@ describe("agent trace upload", () => {
 	it("uses bounded exponential backoff with jitter for transient failures", async () => {
 		const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-session");
 		let attempts = 0;
 		const failingFetch: typeof fetch = async () => {
 			attempts += 1;
@@ -586,7 +625,7 @@ describe("agent trace upload", () => {
 
 	it("retries request timeouts within the retry bound", async () => {
 		vi.useFakeTimers();
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "timeout-retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "timeout-retry-session");
 		let markFirstAttemptStarted: () => void = () => {};
 		const firstAttemptStarted = new Promise<void>((resolve) => {
 			markFirstAttemptStarted = resolve;
@@ -624,7 +663,7 @@ describe("agent trace upload", () => {
 
 	it("retries transient HTTP responses but not permanent HTTP responses", async () => {
 		const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "http-retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "http-retry-session");
 		let attempts = 0;
 		const fetchFn: typeof fetch = async () => {
 			attempts += 1;
@@ -651,7 +690,7 @@ describe("agent trace upload", () => {
 
 	it("returns a rate-limited upload immediately instead of sleeping in-request", async () => {
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "rate-limit-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "rate-limit-session");
 		let attempts = 0;
 		const fetchFn: typeof fetch = async () => {
 			attempts += 1;
@@ -679,8 +718,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "rate-limit-reschedule-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "rate-limit-reschedule-session");
 
 		let attempts = 0;
 		const calls: FetchCall[] = [];
@@ -701,8 +739,8 @@ describe("agent trace upload", () => {
 			fetchFn,
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => attempts === 1);
 		// The rate-limited cycle re-arms itself; the retry succeeds without any caller waiting.
 		await advanceTimersUntil(() => calls.length === 1);
@@ -712,7 +750,7 @@ describe("agent trace upload", () => {
 	it.each([503])("honors Retry-After when retrying HTTP %i", async (status) => {
 		vi.useFakeTimers();
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), `retry-after-session-${status}`);
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), `retry-after-session-${status}`);
 		let markFirstAttemptStarted: () => void = () => {};
 		const firstAttemptStarted = new Promise<void>((resolve) => {
 			markFirstAttemptStarted = resolve;
@@ -749,7 +787,7 @@ describe("agent trace upload", () => {
 	it("caps Retry-After at the platform rate-limit window", async () => {
 		vi.useFakeTimers();
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-after-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "bounded-retry-after-session");
 		let markFirstAttemptStarted: () => void = () => {};
 		const firstAttemptStarted = new Promise<void>((resolve) => {
 			markFirstAttemptStarted = resolve;
@@ -785,7 +823,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("surfaces the cancellation reason when aborted during the retry backoff", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "aborted-retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "aborted-retry-session");
 		const controller = new AbortController();
 		const abortReason = new Error("upload cancelled");
 		let attempts = 0;
@@ -819,7 +857,7 @@ describe("agent trace upload", () => {
 	it("does not back off when an HTTP response cleanup aborts the upload", async () => {
 		vi.useFakeTimers();
 		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "aborted-http-retry-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "aborted-http-retry-session");
 		const controller = new AbortController();
 		const abortReason = new Error("upload cancelled during cleanup");
 		let attempts = 0;
@@ -857,7 +895,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("does not retry a permanent DNS failure", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "dns-failure-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "dns-failure-session");
 		let attempts = 0;
 		const dnsFailFetch: typeof fetch = async () => {
 			attempts += 1;
@@ -885,7 +923,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("does not retry on an HTTP error response", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "http-error-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "http-error-session");
 		let attempts = 0;
 		const erroringFetch: typeof fetch = async () => {
 			attempts += 1;
@@ -917,8 +955,8 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "preview-parent");
-		const child = writeSession(cwd, sessionDir, "preview-child", parent.getSessionFile());
+		const parent = await writeSession(cwd, sessionDir, "preview-parent");
+		const child = await writeSession(cwd, sessionDir, "preview-child", parent.getSessionFile());
 
 		const result = await previewAgentTraceFile({
 			sessionFile: child.getSessionFile(),
@@ -946,11 +984,11 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const parent = writeSession(cwd, sessionDir, "all-parent");
+		const parent = await writeSession(cwd, sessionDir, "all-parent");
 		const childDir = join(tempDir, "session-artifacts", "all-parent", "sub-12345678");
-		const child = writeSession(cwd, childDir, "all-child", parent.getSessionFile());
+		const child = await writeSession(cwd, childDir, "all-child", parent.getSessionFile());
 		const grandchildDir = join(childDir, "sub-87654321");
-		const grandchild = writeSession(cwd, grandchildDir, "all-grandchild", child.getSessionFile());
+		const grandchild = await writeSession(cwd, grandchildDir, "all-grandchild", child.getSessionFile());
 		writeFileSync(join(childDir, "not-a-session.jsonl"), '{"type":"diagnostic"}\n');
 
 		const discovered = await findAgentTraceFiles(sessionDir);
@@ -1004,7 +1042,7 @@ describe("agent trace upload", () => {
 	it("paces batch request starts within the platform rate limit", async () => {
 		const sessionDir = join(tempDir, "sessions");
 		for (let index = 0; index < 6; index += 1) {
-			writeSession(tempDir, sessionDir, `rate-limited-all-${index}`);
+			await writeSession(tempDir, sessionDir, `rate-limited-all-${index}`);
 		}
 
 		vi.useFakeTimers();
@@ -1046,9 +1084,9 @@ describe("agent trace upload", () => {
 
 	it("stops scheduling batch uploads after cancellation", async () => {
 		const sessionDir = join(tempDir, "sessions");
-		writeSession(tempDir, sessionDir, "abort-all-a");
-		writeSession(tempDir, sessionDir, "abort-all-b");
-		writeSession(tempDir, sessionDir, "abort-all-c");
+		await writeSession(tempDir, sessionDir, "abort-all-a");
+		await writeSession(tempDir, sessionDir, "abort-all-b");
+		await writeSession(tempDir, sessionDir, "abort-all-c");
 		const controller = new AbortController();
 		const calls: FetchCall[] = [];
 
@@ -1078,9 +1116,9 @@ describe("agent trace upload", () => {
 
 	it("counts in-flight batch cancellations as skipped", async () => {
 		const sessionDir = join(tempDir, "sessions");
-		writeSession(tempDir, sessionDir, "abort-in-flight-a");
-		writeSession(tempDir, sessionDir, "abort-in-flight-b");
-		writeSession(tempDir, sessionDir, "abort-in-flight-c");
+		await writeSession(tempDir, sessionDir, "abort-in-flight-a");
+		await writeSession(tempDir, sessionDir, "abort-in-flight-b");
+		await writeSession(tempDir, sessionDir, "abort-in-flight-c");
 		const controller = new AbortController();
 		const abortReason = new Error("cancel in-flight batch");
 		vi.useFakeTimers();
@@ -1129,8 +1167,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "unflushed-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "unflushed-session");
 
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
@@ -1142,12 +1179,12 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		const sessionFile = sessionManager.getSessionFile();
 		expect(sessionFile).toBeDefined();
 
-		// Synchronously durable: the intent marker is on disk the moment the persist returns.
+		// The intent marker is on disk when the persist ACK resolves.
 		expect(readOutboxEntry(tempDir, sessionFile as string)).toEqual({ sessionFile });
 		expect(calls).toHaveLength(0);
 	});
@@ -1156,7 +1193,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const missed = writeSession(cwd, sessionDir, "crash-lost-session");
+		const missed = await writeSession(cwd, sessionDir, "crash-lost-session");
 		const missedFile = missed.getSessionFile() as string;
 		writeOutboxEntry(tempDir, missedFile);
 
@@ -1174,7 +1211,7 @@ describe("agent trace upload", () => {
 		const first = await catchUpAgentTraceUploads(options);
 		expect(first.results.map(({ result }) => result.status)).toEqual(["uploaded"]);
 		expect(calls).toHaveLength(1);
-		expect(calls[0].init.body).toBe(readFileSync(missedFile, "utf8"));
+		expect(calls[0].init.body).toBe(await readTraceBody(missedFile));
 		const stats = await stat(missedFile);
 		expect(readOutboxEntry(tempDir, missedFile)).toEqual({
 			sessionFile: missedFile,
@@ -1194,7 +1231,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const kept = writeSession(cwd, sessionDir, "kept-session");
+		const kept = await writeSession(cwd, sessionDir, "kept-session");
 		const keptFile = kept.getSessionFile() as string;
 		const keptStats = await stat(keptFile);
 		const keptSignature = { size: keptStats.size, mtimeMs: keptStats.mtimeMs };
@@ -1224,8 +1261,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "ledger-intent-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "ledger-intent-session");
 		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
 
 		const calls: FetchCall[] = [];
@@ -1238,10 +1274,10 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 			semanticEdgesLedgerPath: ledgerPath,
 		});
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 
-		// Synchronously durable, tagged with its own delivery kind, before any wire call.
+		// Durable at the persist ACK, tagged with its own delivery kind, before any wire call.
 		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
 		expect(calls).toHaveLength(0);
 
@@ -1256,7 +1292,7 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 			semanticEdgesLedgerPath: movedLedgerPath,
 		});
-		sessionManager.appendMessage(createAssistantMessage("after re-install"));
+		await sessionManager.appendMessage(createAssistantMessage("after re-install"));
 		expect(readOutboxEntry(tempDir, movedLedgerPath)).toEqual({
 			sessionFile: movedLedgerPath,
 			kind: "semantic-edges",
@@ -1269,8 +1305,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "opted-out-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "opted-out-session");
 		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
 
 		installAgentTraceUpload(sessionManager, {
@@ -1282,8 +1317,8 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder([]),
 			semanticEdgesLedgerPath: ledgerPath,
 		});
-		sessionManager.appendMessage(createUserMessage("private"));
-		sessionManager.appendMessage(createAssistantMessage("also private"));
+		await sessionManager.appendMessage(createUserMessage("private"));
+		await sessionManager.appendMessage(createAssistantMessage("also private"));
 
 		// Neither kind leaves a durable entry: enabling sharing later must not
 		// retroactively collect sessions recorded while sharing was off.
@@ -1296,8 +1331,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "pruned-ledger-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "pruned-ledger-session");
 		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
 
 		installAgentTraceUpload(sessionManager, {
@@ -1309,13 +1343,13 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder([]),
 			semanticEdgesLedgerPath: ledgerPath,
 		});
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
 
 		// A concurrent catch-up pruned the entry (missing ledger file at scan time).
 		rmSync(outboxEntryPath(tempDir, ledgerPath));
-		sessionManager.appendMessage(createUserMessage("still here"));
+		await sessionManager.appendMessage(createUserMessage("still here"));
 		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
 	});
 
@@ -1366,8 +1400,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "unref-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "unref-session");
 
 		const calls: FetchCall[] = [];
 		installAgentTraceUpload(sessionManager, {
@@ -1379,10 +1412,14 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		const timer = setTimeoutSpy.mock.results.at(-1)?.value as NodeJS.Timeout;
-		expect(timer.hasRef()).toBe(false);
+		try {
+			expect(timer.hasRef()).toBe(false);
+		} finally {
+			clearTimeout(timer);
+		}
 	});
 
 	it("honors an advertised Retry-After on the next scheduled cycle without blocking", async () => {
@@ -1391,8 +1428,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "retry-after-reschedule-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "retry-after-reschedule-session");
 
 		let attempts = 0;
 		const calls: FetchCall[] = [];
@@ -1413,14 +1449,14 @@ describe("agent trace upload", () => {
 			fetchFn,
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => attempts === 1);
 		await advanceTimersUntil(() => vi.getTimerCount() > 0);
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(300_000);
 
 		// A fresh persist must not re-arm inside the advertised window.
-		sessionManager.appendMessage(createUserMessage("more"));
+		await sessionManager.appendMessage(createUserMessage("more"));
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBeGreaterThanOrEqual(299_000);
 
 		await advanceTimersUntil(() => calls.length === 1);
@@ -1432,8 +1468,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "marker-retry-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "marker-retry-session");
 		const blocker = join(tempDir, "trace-export-outbox");
 		writeFileSync(blocker, "not a directory");
 
@@ -1447,13 +1482,13 @@ describe("agent trace upload", () => {
 			fetchFn: createFetchRecorder(calls),
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		const sessionFile = sessionManager.getSessionFile() as string;
 		expect(readOutboxEntry(tempDir, sessionFile)).toBeUndefined();
 
 		rmSync(blocker);
-		sessionManager.appendMessage(createUserMessage("again"));
+		await sessionManager.appendMessage(createUserMessage("again"));
 		expect(readOutboxEntry(tempDir, sessionFile)).toEqual({ sessionFile });
 	});
 
@@ -1463,8 +1498,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, sessionDir);
-		sessionManager.newSession({ id: "absurd-retry-after-session" });
+		const sessionManager = await createSession(cwd, sessionDir, "absurd-retry-after-session");
 
 		let attempts = 0;
 		const fetchFn: typeof fetch = async () => {
@@ -1482,15 +1516,15 @@ describe("agent trace upload", () => {
 			fetchFn,
 		});
 
-		sessionManager.appendMessage(createUserMessage("hello"));
-		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await sessionManager.appendMessage(createUserMessage("hello"));
+		await sessionManager.appendMessage(createAssistantMessage("hi"));
 		await advanceTimersUntil(() => attempts === 1);
 		await advanceTimersUntil(() => vi.getTimerCount() > 0);
 		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(2_147_483_647);
 	});
 
 	it("returns a retryable failure when the upload cursor cannot be persisted", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
 		writeFileSync(join(tempDir, "trace-export-outbox"), "not a directory");
 
 		const calls: FetchCall[] = [];
@@ -1516,7 +1550,7 @@ describe("agent trace upload", () => {
 		const cwd = join(tempDir, "project");
 		const sessionDir = join(tempDir, "sessions");
 		mkdirSync(cwd, { recursive: true });
-		const kept = writeSession(cwd, sessionDir, "kept-cursor-session");
+		const kept = await writeSession(cwd, sessionDir, "kept-cursor-session");
 		const keptFile = kept.getSessionFile() as string;
 		const keptStats = await stat(keptFile);
 		writeOutboxEntry(tempDir, keptFile, { size: keptStats.size, mtimeMs: keptStats.mtimeMs });
@@ -1542,7 +1576,7 @@ describe("agent trace upload", () => {
 	});
 
 	it("never reuses inference or CLI credentials for trace export", async () => {
-		const session = writeSession(tempDir, join(tempDir, "sessions"), "credential-order-session");
+		const session = await writeSession(tempDir, join(tempDir, "sessions"), "credential-order-session");
 		const calls: FetchCall[] = [];
 		const configPath = join(tempDir, "prime-config.json");
 		writeFileSync(configPath, JSON.stringify({ api_key: "cli-fallback-key" }));

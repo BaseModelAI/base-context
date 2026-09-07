@@ -94,7 +94,7 @@ describe("ACP MCP servers", () => {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);
 			await modeDone;
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	}, 30_000);
 
@@ -140,7 +140,7 @@ describe("ACP MCP servers", () => {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);
 			await modeDone;
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	}, 30_000);
 

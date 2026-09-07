@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { VERSION } from "../src/config.js";
+import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
@@ -13,17 +15,38 @@ import {
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { acquireDaemonSupervisorOwnership } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerRosterOutbound } from "../src/modes/daemon/daemon-worker-protocol.js";
-import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 import * as childProcessModule from "../src/utils/child-process.js";
 
 type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
 
 const tempDirs: string[] = [];
+const cleanup: Array<() => Promise<void>> = [];
 
-afterEach(() => {
+afterEach(async () => {
+	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+async function makeRlmLedger(directory: string, sessionsDir = join(directory, "sessions")) {
+	const owner = await RlmJournalOwner.open({
+		agentDir: directory,
+		sessionsDir,
+		journalPath: rlmLedgerPath(directory, sessionsDir),
+	});
+	const ledger = new RlmSpawnLedger(directory, sessionsDir, undefined, undefined, {
+		mode: "remote",
+		mutate: (mutation) => owner.mutate(mutation),
+	});
+	cleanup.push(async () => {
+		ledger.stopAdmission();
+		await ledger.flush();
+		await owner.close();
+	});
+	return { owner, ledger };
+}
 
 // --- Worker-side roster reporter (daemon-mode) ---
 
@@ -347,6 +370,8 @@ describe("worker roster reporter", () => {
 				throw new Error("unexpected runtime creation");
 			},
 		} as never);
+		const { ledger } = await makeRlmLedger(directory);
+		Object.assign(daemon, { rlmSpawnLedgerInstance: ledger });
 		const internals = daemon as unknown as {
 			pendingRlmSpawnAppends: Map<string, Promise<void>>;
 			recordRlmSubagentState(parentState: ActiveSessionState, input: object): boolean;
@@ -365,6 +390,7 @@ describe("worker roster reporter", () => {
 		spawn(makeState({ activeSessionId: "parent-b", sessionFile: join(directory, "b.jsonl") }), "b");
 
 		expect(internals.pendingRlmSpawnAppends.size).toBe(2);
+		await Promise.all(internals.pendingRlmSpawnAppends.values());
 	});
 
 	it("publishes a removal when an archived top-level close leaves the worker's list", async () => {
@@ -581,10 +607,16 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 }
 
 /** Real supervisor over a temp agent dir for offline (no-worker) command routes. */
-function makeOfflineSupervisor(prefix: string, overrides: Record<string, unknown> = {}) {
+async function makeOfflineSupervisor(
+	prefix: string,
+	overrides: Record<string, unknown> = {},
+	seedLedger?: (directory: string, sessionsDir: string) => void,
+) {
 	const directory = mkdtempSync(join(tmpdir(), prefix));
 	tempDirs.push(directory);
 	const sessionsDir = join(directory, "sessions");
+	seedLedger?.(directory, sessionsDir);
+	const { owner } = await makeRlmLedger(directory, sessionsDir);
 	const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
 		defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
 		descriptorDir: join(directory, "workers"),
@@ -592,8 +624,26 @@ function makeOfflineSupervisor(prefix: string, overrides: Record<string, unknown
 		handleCommand(client: object, command: object): Promise<unknown>;
 		rlmSpawnLedger(): RlmSpawnLedger;
 	};
-	Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) }, ...overrides });
-	return { directory, sessionsDir, supervisor };
+	const ownership = await acquireDaemonSupervisorOwnership({
+		socketPath: join(directory, "daemon.sock"),
+		descriptorDir: join(directory, "workers"),
+		agentDir: directory,
+		journalPath: owner.ledgerPath,
+		generation: (supervisor as unknown as { generation: string }).generation,
+		appVersion: VERSION,
+		registryDir: join(directory, "registry"),
+	});
+	Object.assign(supervisor, {
+		ownership,
+		rlmJournalOwner: owner,
+		catalog: { list: vi.fn(async () => []) },
+		...overrides,
+	});
+	cleanup.push(async () => {
+		await (supervisor as unknown as { closeRlmJournalOwner(): Promise<void> }).closeRlmJournalOwner();
+		await ownership.release();
+	});
+	return { directory, sessionsDir, supervisor, owner };
 }
 
 function offlineClient() {
@@ -679,7 +729,7 @@ describe("supervisor roster ledger", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-snapshot-reseed-"));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
-		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const { ledger } = await makeRlmLedger(directory, sessionsDir);
 		const parentPath = join(sessionsDir, "root.jsonl");
 		const passivatedPath = join(directory, "artifacts", "passivated-child.jsonl");
 		const deletedPath = join(directory, "artifacts", "deleted-child.jsonl");
@@ -856,7 +906,7 @@ describe("supervisor roster ledger", () => {
 		const directory = realpathSync(mkdtempSync(join(tmpdir(), "prime-roster-seed-")));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
-		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const { ledger } = await makeRlmLedger(directory, sessionsDir);
 		const liveChildPath = join(directory, "artifacts", "live-child.jsonl");
 		const deletedChildPath = join(directory, "artifacts", "deleted-child.jsonl");
 		const foreignChildPath = join(directory, "artifacts", "foreign-child.jsonl");
@@ -1051,26 +1101,33 @@ describe("supervisor roster ledger", () => {
 	});
 
 	it("removes the roster row on offline deletes, tombstones subagents, and never reseeds them", async () => {
-		const { directory, sessionsDir, supervisor } = makeOfflineSupervisor("prime-roster-offline-delete-", {
-			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
-		});
+		const { directory, sessionsDir, supervisor, owner } = await makeOfflineSupervisor(
+			"prime-roster-offline-delete-",
+			{ catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) } },
+			(directory, sessionsDir) => {
+				// Retain a pre-owner history with duplicate child paths. Both edges must tombstone.
+				const at = new Date().toISOString();
+				const records = [
+					{ v: 1, op: "meta", at, sessionsDir },
+					...["child-1", "child-dup"].map((childId) => ({
+						v: 1,
+						op: "spawn",
+						at,
+						childId,
+						parent: join(sessionsDir, "root.jsonl"),
+						child: join(directory, "artifacts", "child.jsonl"),
+						depth: 1,
+						name: childId === "child-1" ? "child" : "dup",
+					})),
+				];
+				const path = rlmLedgerPath(directory, sessionsDir);
+				mkdirSync(dirname(path), { recursive: true });
+				writeFileSync(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+			},
+		);
+		await owner.migrateLegacy();
 		const parentPath = join(sessionsDir, "root.jsonl");
 		const childPath = join(directory, "artifacts", "child.jsonl");
-		await supervisor
-			.rlmSpawnLedger()
-			.appendSpawn({ childId: "child-1", parent: parentPath, child: childPath, depth: 1, name: "child" });
-		// A raced cross-process duplicate (appendSpawn's uniqueness check is per-process TOCTOU)
-		// must tombstone with the original, not stay live.
-		(supervisor.rlmSpawnLedger() as unknown as { appendRecord(record: object): void }).appendRecord({
-			v: 1,
-			op: "spawn",
-			at: new Date().toISOString(),
-			childId: "child-dup",
-			parent: parentPath,
-			child: childPath,
-			depth: 1,
-			name: "dup",
-		});
 		const childEntry = workerRosterEntryFromSummary(
 			summary({
 				id: "child-1",
@@ -1098,7 +1155,7 @@ describe("supervisor roster ledger", () => {
 
 		// An offline rename updates the row in place.
 		{
-			const { directory, supervisor } = makeOfflineSupervisor("prime-roster-offline-rename-");
+			const { directory, supervisor } = await makeOfflineSupervisor("prime-roster-offline-rename-");
 			const sessionPath = join(directory, "saved.jsonl");
 			Object.assign(supervisor, {
 				catalog: { rename: vi.fn(async () => {}), list: vi.fn(async () => []) },
@@ -1132,7 +1189,7 @@ describe("supervisor roster ledger", () => {
 
 		// A delete that fails on disk keeps the row.
 		{
-			const { directory, supervisor } = makeOfflineSupervisor("prime-roster-failed-delete-", {
+			const { directory, supervisor } = await makeOfflineSupervisor("prime-roster-failed-delete-", {
 				catalog: { delete: vi.fn(async () => ({ ok: false, error: "busy file" })), list: vi.fn(async () => []) },
 			});
 			const sessionPath = join(directory, "saved.jsonl");
@@ -1175,11 +1232,11 @@ describe("saved-session delete paths", () => {
 				return true;
 			},
 		);
-		const supervisor = makeSupervisor([reachableRoster, unreachable, failed], {
+		const { supervisor } = await makeOfflineSupervisor("prime-roster-owner-route-", {
+			workers: new Map([reachableRoster, unreachable, failed].map((worker) => [worker.descriptor.workerId, worker])),
 			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
 			mutationDrain: { begin: vi.fn(), end: vi.fn() },
 			reclaimStaleWorkerRegistration,
-			rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }),
 		});
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
@@ -1287,7 +1344,7 @@ describe("saved-session delete paths", () => {
 	});
 
 	it("keeps a row rewritten during the delete's own await", async () => {
-		const { directory, supervisor } = makeOfflineSupervisor("prime-roster-delete-race-");
+		const { directory, supervisor } = await makeOfflineSupervisor("prime-roster-delete-race-");
 		const sessionPath = join(directory, "saved.jsonl");
 		const stale = supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
@@ -1315,7 +1372,7 @@ describe("saved-session delete paths", () => {
 
 	it("aborts a saved-child delete when the tombstone append fails", async () => {
 		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
-		const { directory, sessionsDir, supervisor } = makeOfflineSupervisor("prime-roster-tombstone-fail-", {
+		const { directory, sessionsDir, supervisor } = await makeOfflineSupervisor("prime-roster-tombstone-fail-", {
 			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
 		});
 		const childPath = join(directory, "artifacts", "child.jsonl");
@@ -1324,7 +1381,7 @@ describe("saved-session delete paths", () => {
 				edges: vi.fn(async () => [
 					{ childId: "child-1", child: childPath, parent: join(sessionsDir, "root.jsonl"), depth: 1, name: "c" },
 				]),
-				appendDelete: vi.fn(async () => {
+				appendDeleteByChildPath: vi.fn(async () => {
 					throw new Error("ledger unwritable");
 				}),
 			}),
@@ -1691,9 +1748,13 @@ describe("worker delete tombstone durability", () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-toplevel-delete-"));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
-		const manager = SessionManager.create(directory, sessionsDir);
-		manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		manager.flushNow();
+		const manager = await SessionManager.create(directory, sessionsDir);
+		try {
+			await manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+			await manager.flushNow();
+		} finally {
+			await manager.close();
+		}
 		const sessionPath = manager.getSessionFile();
 		if (!sessionPath) throw new Error("Fixture session did not persist");
 		const daemon = makeDeleteDaemon(directory, async () => {
@@ -1731,6 +1792,8 @@ describe("worker delete tombstone durability", () => {
 			handleCommand(client: object, command: object): Promise<unknown>;
 			rosterReporter: { removedAgentIds: Map<string, string | undefined> };
 		};
+		const { ledger: withEdgeLedger } = await makeRlmLedger(withEdge.directory);
+		Object.assign(daemonWithEdge, { rlmSpawnLedgerInstance: withEdgeLedger });
 		await daemonWithEdge.rlmSpawnLedger().appendSpawn({
 			childId: "sub-9",
 			parent: join(withEdge.directory, "sessions", "root.jsonl"),
@@ -1770,6 +1833,8 @@ describe("worker delete tombstone durability", () => {
 				throw new Error("unexpected runtime creation");
 			},
 		} as never) as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+		const { ledger: withoutEdgeLedger } = await makeRlmLedger(withoutEdge.directory);
+		Object.assign(daemonWithoutEdge, { rlmSpawnLedgerInstance: withoutEdgeLedger });
 		await daemonWithoutEdge.handleCommand(
 			{ id: "client", attachedActiveSessionIds: new Set<string>() },
 			{ type: "delete_saved_session", sessionPath: withoutEdge.garbled },

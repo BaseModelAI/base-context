@@ -44,9 +44,9 @@ async function waitForPidFile(path: string, timeoutMs = 2000): Promise<number> {
 describe("AgentSession autonomous mode", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

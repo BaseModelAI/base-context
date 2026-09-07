@@ -35,9 +35,9 @@ describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 		while (tempDirs.length > 0) {
 			const tempDir = tempDirs.pop();
@@ -1092,7 +1092,7 @@ stale post-hook extension instructions`,
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
-			recordBashResult(command: string, result: BashResult): void;
+			recordBashResult(command: string, result: BashResult): Promise<void>;
 			_flushPendingBashMessages(): void;
 		};
 		const contextRoles: string[][] = [];
@@ -1107,7 +1107,7 @@ stale post-hook extension instructions`,
 		]);
 
 		const busyPrompt = harness.session.agent.prompt("busy");
-		sessionInternals.recordBashResult("echo hi", {
+		await sessionInternals.recordBashResult("echo hi", {
 			output: "hi",
 			exitCode: 0,
 			cancelled: false,
@@ -1168,29 +1168,33 @@ stale post-hook extension instructions`,
 		const accepted = harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false });
 		const acceptedRejection = expect(accepted).rejects.toThrow("cleared before delivery");
 		const deliveryRejection = expect(delivery).rejects.toThrow("cleared before delivery");
-		await admitted;
-
-		expect(harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId))).toEqual({
-			steering: [],
-			followUp: [agentPrompt],
-		});
-		releaseAdmission();
-		await Promise.all([acceptedRejection, deliveryRejection]);
-		await harness.session.agent.waitForIdle();
-
 		let sawRestoredNextTurn = false;
-		harness.setResponses([
-			(context) => {
-				sawRestoredNextTurn = context.messages.some(
-					(message) => message.role === "user" && getMessageText(message) === "carry this",
-				);
-				return fauxAssistantMessage("newer response");
-			},
-		]);
-		holdAgentStart = false;
-		await harness.session.prompt("newer prompt");
-		releaseEventQueue();
-		await harness.session.waitForIdle();
+		let newerPrompt: Promise<void> | undefined;
+		try {
+			await admitted;
+			expect(harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId))).toEqual({
+				steering: [],
+				followUp: [agentPrompt],
+			});
+			releaseAdmission();
+			await harness.session.agent.waitForIdle();
+
+			harness.setResponses([
+				(context) => {
+					sawRestoredNextTurn = context.messages.some(
+						(message) => message.role === "user" && getMessageText(message) === "carry this",
+					);
+					return fauxAssistantMessage("newer response");
+				},
+			]);
+			holdAgentStart = false;
+			newerPrompt = harness.session.prompt("newer prompt");
+		} finally {
+			releaseAdmission();
+			releaseEventQueue();
+			await Promise.all([acceptedRejection, deliveryRejection, newerPrompt]);
+			await harness.session.waitForIdle();
+		}
 
 		expect(sawRestoredNextTurn).toBe(true);
 		expect(getUserTexts(harness)).toEqual(["newer prompt"]);
@@ -1314,7 +1318,7 @@ stale post-hook extension instructions`,
 
 		await expect(
 			harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false }),
-		).resolves.toBeUndefined();
+		).rejects.toThrow("Session input dispatch settled without durable delivery");
 		unsubscribe();
 		await harness.session.waitForIdle();
 
@@ -1888,14 +1892,17 @@ stale post-hook extension instructions`,
 		const checkpoint = harness.session.waitForSessionInputCheckpoint(controller.signal);
 		controller.abort();
 
-		await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
-		expect(queueDrained).toBe(false);
-		expect(flushNow).not.toHaveBeenCalled();
-		extensionGate.resolve();
-		await prompt;
-		await eventQueue;
+		try {
+			await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
+			expect(queueDrained).toBe(false);
+			expect(flushNow).not.toHaveBeenCalled();
+		} finally {
+			extensionGate.resolve();
+			await prompt;
+			await eventQueue;
+		}
 		expect(queueDrained).toBe(true);
-		expect(flushNow).not.toHaveBeenCalled();
+		expect(flushNow).toHaveBeenCalledTimes(1);
 	});
 
 	it("propagates a snapshotted event queue rejection without flushing", async () => {
@@ -1908,6 +1915,8 @@ stale post-hook extension instructions`,
 
 		await expect(harness.session.waitForSessionInputCheckpoint()).rejects.toThrow("event queue failed");
 		expect(flushNow).not.toHaveBeenCalled();
+		await expect(harness.cleanup()).rejects.toThrow("event queue failed");
+		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
 	it("releases the injected action checkpoint when dispatch fails", async () => {
@@ -1964,7 +1973,7 @@ stale post-hook extension instructions`,
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
 		const surfacedErrors: string[] = [];
-		harness.session.bindExtensions({ onError: (error) => surfacedErrors.push(error.error) });
+		await harness.session.bindExtensions({ onError: (error) => surfacedErrors.push(error.error) });
 
 		await expect(harness.session.prompt("hi")).rejects.toThrow(
 			`No API key found for ${harness.getModel().provider}.`,

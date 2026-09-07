@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
-import type { GoalHostResponse } from "../../src/core/goals.js";
+import { GOAL_STATE_CUSTOM_TYPE, type GoalHostResponse } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
@@ -83,7 +83,7 @@ function createFauxIpythonTool(sessionRef: { current?: AgentSession }): AgentToo
 				const spaceIndex = code.indexOf(" ");
 				const type = spaceIndex < 0 ? code : code.slice(0, spaceIndex);
 				const payload = spaceIndex < 0 ? {} : JSON.parse(code.slice(spaceIndex + 1));
-				text = JSON.stringify(session.handleGoalHostRequest(type, payload));
+				text = JSON.stringify(await session.handleGoalHostRequest(type, payload));
 			}
 			return {
 				content: [{ type: "text", text }],
@@ -147,9 +147,9 @@ function createWaitingTool(): {
 describe("AgentSession goals", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -239,13 +239,13 @@ describe("AgentSession goals", () => {
 	it("returns the goal snapshot and completion report over the host bridge", async () => {
 		const harness = await createGoalHarness();
 
-		expect(harness.session.handleGoalHostRequest("goal.get")).toEqual({
+		expect(await harness.session.handleGoalHostRequest("goal.get")).toEqual({
 			goal: null,
 			remaining_tokens: null,
 			completion_budget_report: null,
 		});
 
-		const created = harness.session.handleGoalHostRequest("goal.create", {
+		const created = await harness.session.handleGoalHostRequest("goal.create", {
 			objective: "write a benchmark note",
 			token_budget: 50,
 		});
@@ -257,7 +257,7 @@ describe("AgentSession goals", () => {
 		});
 		expect(created.remaining_tokens).toBe(50);
 
-		const completed = harness.session.handleGoalHostRequest("goal.complete");
+		const completed = await harness.session.handleGoalHostRequest("goal.complete");
 		expect(completed.goal).toMatchObject({ status: "complete" });
 		expect(completed.completion_budget_report).toContain("tokens used: 0 of 50");
 	});
@@ -265,18 +265,18 @@ describe("AgentSession goals", () => {
 	it("rejects malformed and unknown goal host requests", async () => {
 		const harness = await createGoalHarness();
 
-		expect(() => harness.session.handleGoalHostRequest("goal.create", {})).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.create", {})).rejects.toThrow(
 			"goal.create objective must be a string",
 		);
-		expect(() => harness.session.handleGoalHostRequest("goal.nonsense")).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.nonsense")).rejects.toThrow(
 			'unknown goal request type "goal.nonsense"',
 		);
-		expect(() => harness.session.handleGoalHostRequest("goal.complete")).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.complete")).rejects.toThrow(
 			"cannot complete goal because this thread has no goal",
 		);
 
-		harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
-		expect(() => harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" })).toThrow(
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
+		await expect(harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" })).rejects.toThrow(
 			"already has an active goal",
 		);
 	});
@@ -284,10 +284,10 @@ describe("AgentSession goals", () => {
 	it("lets the model create a fresh goal after the previous one completed", async () => {
 		const harness = await createGoalHarness();
 
-		const first = harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
-		harness.session.handleGoalHostRequest("goal.complete");
+		const first = await harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
+		await harness.session.handleGoalHostRequest("goal.complete");
 
-		const second = harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" });
+		const second = await harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" });
 		expect(second.goal).toMatchObject({ objective: "second goal", status: "active", tokens_used: 0 });
 		expect(second.goal?.goal_id).not.toBe(first.goal?.goal_id);
 		expect(harness.session.goalState).toMatchObject({
@@ -311,7 +311,7 @@ describe("AgentSession goals", () => {
 		await promptPromise;
 
 		expect(harness.session.goalState.status).toBe("paused");
-		expect(() => harness.session.handleGoalHostRequest("goal.create", { objective: "replacement" })).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.create", { objective: "replacement" })).rejects.toThrow(
 			"a paused goal exists; ask the user to resume it with /goal resume or clear it with /goal clear",
 		);
 	});
@@ -335,7 +335,7 @@ describe("AgentSession goals", () => {
 
 	it("adds ipython to the live continuation context when inactive at run start", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		harness.session.setActiveToolsByName([]);
 		harness.setResponses([
 			fauxAssistantMessage("Still working."),
@@ -365,7 +365,7 @@ describe("AgentSession goals", () => {
 
 	it("keeps ipython active on active-goal runtime rebuild", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 
 		await harness.session.reload();
 
@@ -374,7 +374,7 @@ describe("AgentSession goals", () => {
 
 	it("does not reject continuation when goal error update listeners throw", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		harness.session.subscribe((event) => {
 			if (event.type === "goal_update") {
 				throw new Error("listener failed");
@@ -626,7 +626,7 @@ describe("AgentSession goals", () => {
 			vi.setSystemTime(new Date("2026-01-01T00:00:05Z"));
 
 			expect(harness.session.goalState.timeUsedSeconds).toBe(5);
-			const response: GoalHostResponse = harness.session.handleGoalHostRequest("goal.get");
+			const response: GoalHostResponse = await harness.session.handleGoalHostRequest("goal.get");
 			expect(response.goal?.time_used_seconds).toBe(5);
 
 			await harness.session.prompt("/goal pause");
@@ -796,7 +796,7 @@ describe("AgentSession goals", () => {
 
 	it("does not continue when a terminal error reaches the continuation hook", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		const errorMessage = fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid_api_key" });
 
 		const continuationMessages = await harness.session.agent.getContinuationMessages?.({
@@ -876,10 +876,12 @@ describe("AgentSession goals", () => {
 
 describe("initial goal seeding from config", () => {
 	const harnesses: Harness[] = [];
+	const restartedSessions: AgentSession[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(restartedSessions.splice(0).map((session) => session.disposeAsync()));
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -898,7 +900,6 @@ describe("initial goal seeding from config", () => {
 		});
 
 		// Goal is persisted before first prompt
-		const { GOAL_STATE_CUSTOM_TYPE } = await import("../../src/core/goals.js");
 		const branch = harness.sessionManager.getBranch();
 		const goalEntry = branch.find((e) => e.type === "custom" && e.customType === GOAL_STATE_CUSTOM_TYPE);
 		expect(goalEntry).toBeDefined();
@@ -943,10 +944,11 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.active).toBe(false);
 	});
 
-	function createRestartSession(harness: Harness): AgentSession {
+	async function createRestartSession(harness: Harness): Promise<AgentSession> {
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		expect(existsSync(sessionFile)).toBe(true);
-		const newSessionManager = SessionManager.open(sessionFile);
+		await harness.session.disposeAsync();
+		const newSessionManager = await SessionManager.open(sessionFile);
 
 		// Assert the reopened branch contains a thread_goal_state custom entry
 		// before constructing the new AgentSession. This proves the goal was
@@ -972,7 +974,7 @@ describe("initial goal seeding from config", () => {
 			},
 		});
 
-		return new AgentSession({
+		const restarted = new AgentSession({
 			agent: newAgent,
 			sessionManager: newSessionManager,
 			settingsManager: newSettings,
@@ -982,6 +984,9 @@ describe("initial goal seeding from config", () => {
 			rlmDepth: 0,
 			initialGoal: { objective: "Should not reseed" },
 		});
+		restartedSessions.push(restarted);
+		await restarted.initialize();
+		return restarted;
 	}
 
 	it("does not reseed after goal is cleared (idempotent restart)", async () => {
@@ -999,12 +1004,12 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.status).toBe("idle");
 
 		// Simulate restart: reopen the same session file
-		const newSession = createRestartSession(harness);
+		const newSession = await createRestartSession(harness);
 
 		// Goal should remain idle (cleared), not reseeded
 		expect(newSession.goalState.status).toBe("idle");
 		expect(newSession.goalState.objective).toBeUndefined();
-		newSession.dispose();
+		await newSession.disposeAsync();
 	});
 
 	it("does not reseed after goal is completed (idempotent restart)", async () => {
@@ -1017,16 +1022,16 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.status).toBe("active");
 
 		// Complete the goal via host request
-		harness.session.handleGoalHostRequest("goal.complete");
+		await harness.session.handleGoalHostRequest("goal.complete");
 		expect(harness.session.goalState.status).toBe("complete");
 
 		// Simulate restart on the same session file
-		const newSession = createRestartSession(harness);
+		const newSession = await createRestartSession(harness);
 
 		// Goal should remain complete, not reseeded
 		expect(newSession.goalState.status).toBe("complete");
 		expect(newSession.goalState.objective).toBe("Complete me");
-		newSession.dispose();
+		await newSession.disposeAsync();
 	});
 
 	it("does not reseed when branch has messages (idempotent restart after use)", async () => {
@@ -1040,12 +1045,12 @@ describe("initial goal seeding from config", () => {
 
 		// Append user and assistant messages directly via sessionManager
 		// to avoid triggering autonomous goal continuation loop.
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "do something" }],
 			timestamp: Date.now(),
 		});
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "done" }],
 			api: "openai-completions",
@@ -1064,11 +1069,11 @@ describe("initial goal seeding from config", () => {
 		});
 
 		// Simulate restart on the same session file
-		const newSession = createRestartSession(harness);
+		const newSession = await createRestartSession(harness);
 
 		// Goal should be the persisted active goal, not the new initialGoal
 		expect(newSession.goalState.status).toBe("active");
 		expect(newSession.goalState.objective).toBe("Initial goal");
-		newSession.dispose();
+		await newSession.disposeAsync();
 	});
 });

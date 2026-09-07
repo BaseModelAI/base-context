@@ -13,17 +13,17 @@ function getEntryTypes(harness: Harness): string[] {
 describe("AgentSession bash and persistence characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
-	it("records bash results immediately while idle", async () => {
+	it("records bash results after persistence while idle", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		harness.session.recordBashResult("echo hi", {
+		await harness.session.recordBashResult("echo hi", {
 			output: "hi",
 			exitCode: 0,
 			cancelled: false,
@@ -72,7 +72,7 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		const firstPrompt = harness.session.prompt("start");
 		await sawToolStart;
-		harness.session.recordBashResult("echo hi", {
+		await harness.session.recordBashResult("echo hi", {
 			output: "hi",
 			exitCode: 0,
 			cancelled: false,
@@ -163,6 +163,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom_message",
 			"message",
 			"message",
+			"tool_intent",
 			"message",
 			"message",
 		]);
@@ -185,7 +186,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			}
 		});
 
-		harness.session.recordBashResult("echo hi", {
+		await harness.session.recordBashResult("echo hi", {
 			output: "hi",
 			exitCode: 0,
 			cancelled: false,
@@ -466,7 +467,7 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		const turn = harness.session.prompt("start");
 		await toolStarted;
-		harness.session.recordBashResult("echo flushed", {
+		await harness.session.recordBashResult("echo flushed", {
 			output: "flushed output",
 			exitCode: 0,
 			cancelled: false,

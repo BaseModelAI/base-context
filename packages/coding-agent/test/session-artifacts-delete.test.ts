@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { deleteSessionArtifacts, deleteSessionFile } from "../src/core/session-file-actions.js";
+import { SessionJournalOwner } from "../src/core/session-journal-owner.js";
 
 let root = "";
 
@@ -29,6 +30,15 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 		writeFileSync(join(artifactDir, "kernel-state.json"), "{}");
 		writeFileSync(join(artifactDir, "scheduled-jobs.json"), '{"jobs":[],"dispatches":[]}\n');
 
+		const original = readFileSync(sessionPath);
+		const owner = await SessionJournalOwner.open({ journalPath: sessionPath });
+		try {
+			await expect(deleteSessionFile(sessionPath)).rejects.toThrow(/database (?:is )?locked/i);
+			expect(readFileSync(sessionPath)).toEqual(original);
+			expect(existsSync(artifactDir)).toBe(true);
+		} finally {
+			await owner.close();
+		}
 		const result = await deleteSessionFile(sessionPath);
 
 		expect(result.ok).toBe(true);
@@ -78,7 +88,7 @@ describe("deleteSessionFile removes the session artifact directory", () => {
 		const sessionsDir = join(root, "sessions");
 		mkdirSync(sessionsDir, { recursive: true });
 		const sessionPath = join(sessionsDir, "no-artifacts.jsonl");
-		writeFileSync(sessionPath, "{}\n");
+		writeFileSync(sessionPath, "unreadable journal\n");
 
 		const result = await deleteSessionFile(sessionPath);
 		expect(result.ok).toBe(true);

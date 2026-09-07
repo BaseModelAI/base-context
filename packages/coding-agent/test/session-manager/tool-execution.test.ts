@@ -9,10 +9,15 @@ import type { FinalizedToolExchange } from "../../../agent/src/types.js";
 import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 
 let dir: string;
+let managers: SessionManager[];
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "base-context-tool-history-"));
+	managers = [];
 });
-afterEach(() => rmSync(dir, { recursive: true, force: true }));
+afterEach(async () => {
+	await Promise.all(managers.map((manager) => manager.close()));
+	rmSync(dir, { recursive: true, force: true });
+});
 
 const model: Model<"openai-responses"> = {
 	id: "fixture",
@@ -28,7 +33,8 @@ const model: Model<"openai-responses"> = {
 };
 
 it("records intent before effects and one exact result, with source-ordered replay", async () => {
-	const manager = SessionManager.create(dir, join(dir, "sessions"));
+	const manager = await SessionManager.create(dir, join(dir, "sessions"));
+	managers.push(manager);
 	const path = manager.getSessionFile()!;
 	const exchanges: FinalizedToolExchange[] = [];
 	let releaseFirst = () => {};
@@ -52,6 +58,7 @@ it("records intent before effects and one exact result, with source-ordered repl
 		stopReason: "toolUse",
 		timestamp: 1,
 	};
+	let eventWrites = Promise.resolve();
 	const agent = new Agent({
 		initialState: {
 			model,
@@ -77,11 +84,12 @@ it("records intent before effects and one exact result, with source-ordered repl
 			stream.push({ type: "done", reason: "toolUse", message: response });
 			return stream;
 		},
-		onToolInvocationStarting: (invocation) => {
-			manager.appendToolInvocation(invocation);
+		onToolInvocationStarting: async (invocation) => {
+			await eventWrites;
+			await manager.appendToolInvocation(invocation);
 		},
-		onToolExchangeFinalized: (exchange) => {
-			manager.appendToolExchange(exchange);
+		onToolExchangeFinalized: async (exchange) => {
+			await manager.appendToolExchange(exchange);
 			exchanges.push(exchange);
 			if (exchange.toolCallId === "second") releaseFirst();
 		},
@@ -93,14 +101,25 @@ it("records intent before effects and one exact result, with source-ordered repl
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				manager.appendMessage(event.message);
+				const message = event.message;
+				eventWrites = eventWrites.then(async () => {
+					await manager.appendMessage(message);
+				});
 			}
 		}
 	});
+	agent.bindContextOwner(async () => {
+		await eventWrites;
+		await manager.flushNow();
+	});
 	await agent.prompt("Run both calls");
+	await eventWrites;
+	await manager.flushNow();
 	expect(agent.state.errorMessage).toBeUndefined();
 	expect(exchanges.map((exchange) => exchange.toolCallId)).toEqual(["second", "first"]);
-	const restored = SessionManager.open(path);
+	await manager.close();
+	const restored = await SessionManager.open(path);
+	managers.push(restored);
 	const resultEntries = restored
 		.getEntries()
 		.filter((entry) => entry.type === "message" && entry.message.role === "toolResult");
@@ -118,13 +137,14 @@ it("records intent before effects and one exact result, with source-ordered repl
 	).toEqual(["first", "second"]);
 	const before = readFileSync(path, "utf8");
 	const duplicate = structuredClone(exchanges[0]);
-	restored.appendToolExchange(duplicate);
-	restored.appendMessage(duplicate.result);
+	await restored.appendToolExchange(duplicate);
+	await restored.appendMessage(duplicate.result);
 	expect(readFileSync(path, "utf8")).toBe(before);
 });
 
-it("retains a not-started result without inventing an invocation", () => {
-	const manager = SessionManager.create(dir, join(dir, "sessions"));
+it("retains a not-started result without inventing an invocation", async () => {
+	const manager = await SessionManager.create(dir, join(dir, "sessions"));
+	managers.push(manager);
 	const exchange: FinalizedToolExchange = {
 		executionId: "blocked-execution",
 		sourceOrder: 0,
@@ -143,8 +163,13 @@ it("retains a not-started result without inventing an invocation", () => {
 			timestamp: 1,
 		},
 	};
-	manager.appendToolExchange(exchange);
-	const restored = SessionManager.open(manager.getSessionFile()!);
+	const first = manager.appendToolExchange(exchange);
+	const duplicate = manager.appendToolExchange(structuredClone(exchange));
+	expect(await duplicate).toBe(await first);
+	expect(manager.getEntries()).toHaveLength(1);
+	await manager.close();
+	const restored = await SessionManager.open(manager.getSessionFile()!);
+	managers.push(restored);
 	expect(restored.getEntries().some((entry) => entry.type === "tool_intent")).toBe(false);
 	expect(restored.getToolExchange(exchange.executionId)).toEqual(exchange);
 	expect(restored.getToolExchange(exchange.executionId)).not.toHaveProperty("executedInput");

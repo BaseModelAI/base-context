@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, getApiProvider, registerFauxProvider } from "../../../ai/src/index.js";
+import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import type { ExtensionAPI } from "../../src/index.js";
 
 export default function registerRpcEofFauxProvider(pi: ExtensionAPI): void {
@@ -12,15 +12,10 @@ export default function registerRpcEofFauxProvider(pi: ExtensionAPI): void {
 			return fauxAssistantMessage("rpc eof response");
 		},
 	]);
-	const apiProvider = getApiProvider(faux.api);
-	if (!apiProvider) {
-		throw new Error("Faux API provider was not registered");
-	}
 	pi.registerProvider(faux.getModel().provider, {
 		api: faux.api,
 		apiKey: "faux-key",
 		baseUrl: faux.getModel().baseUrl,
-		streamSimple: apiProvider.streamSimple,
 		models: faux.models,
 	});
 }

@@ -11,7 +11,11 @@ import { parseSessionSlashCommand } from "../../../src/core/slash-commands.js";
 import type { BashOperations } from "../../../src/core/tools/bash.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
-import type { DaemonUpdateRestartManifest } from "../../../src/modes/daemon/daemon-protocol.js";
+import {
+	createDaemonCommandEnvelope,
+	type DaemonCommand,
+	type DaemonUpdateRestartManifest,
+} from "../../../src/modes/daemon/daemon-protocol.js";
 import { MutationDrainLatch } from "../../../src/modes/daemon/mutation-drain-latch.js";
 import { prepareDaemonUpdateRestart } from "../../../src/package-manager-cli.js";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.js";
@@ -116,6 +120,10 @@ function createWriteClient(writes: string[], options: { id?: string; attached?: 
 	} as DaemonSocketClient;
 }
 
+function serializeCommand(command: DaemonCommand & { id: string }): string {
+	return JSON.stringify(createDaemonCommandEnvelope(command, command.id));
+}
+
 function hasArchivedState(harness: Harness): boolean {
 	return harness.sessionManager
 		.getEntries()
@@ -145,9 +153,9 @@ function createCustomMessage(content: string): CustomMessage {
 describe("issue #4257 update restart resume", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -505,10 +513,10 @@ describe("issue #4257 update restart resume", () => {
 				await internals.handleWorkerCommand(owner, { id: "prepare", type: "worker_prepare_update" });
 				await internals.handleLine(
 					owner,
-					JSON.stringify({ id: "abort", type: "abort", activeSessionId: "missing" }),
+					serializeCommand({ id: "abort", type: "abort", activeSessionId: "missing" }),
 				);
 				expect(writes.at(-1)).toContain("Daemon is preparing an update restart");
-				await internals.handleLine(owner, JSON.stringify({ id: "late-list", type: "list" }));
+				await internals.handleLine(owner, serializeCommand({ id: "late-list", type: "list" }));
 				expect(JSON.parse(writes.at(-1) ?? "{}")).toMatchObject({ id: "late-list", success: true });
 				await internals.handleWorkerCommand(owner, { id: "cancel", type: "worker_cancel_update" });
 			},
@@ -535,7 +543,7 @@ describe("issue #4257 update restart resume", () => {
 	it("captures a restart manifest and aborts running bash without archiving the session", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
-		harness.session.recordBashResult("echo before", {
+		await harness.session.recordBashResult("echo before", {
 			output: "before",
 			exitCode: 0,
 			cancelled: false,
@@ -642,7 +650,7 @@ describe("issue #4257 update restart resume", () => {
 	it("keeps active goal abort state until update restart abort settles", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the update-safe task" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the update-safe task" });
 		let releaseIdle: (() => void) | undefined;
 		const idlePromise = new Promise<void>((resolve) => {
 			releaseIdle = resolve;
@@ -651,17 +659,21 @@ describe("issue #4257 update restart resume", () => {
 		const agentAbortSpy = vi.spyOn(harness.session.agent, "abort");
 		const internals = harness.session as unknown as { _goalAbortInProgress: boolean };
 
-		harness.session.abortForUpdateRestart();
+		try {
+			harness.session.abortForUpdateRestart();
 
-		expect(agentAbortSpy).toHaveBeenCalledOnce();
-		expect(internals._goalAbortInProgress).toBe(true);
+			expect(agentAbortSpy).toHaveBeenCalledOnce();
+			expect(internals._goalAbortInProgress).toBe(true);
 
-		releaseIdle?.();
-		await waitForCondition(() => !internals._goalAbortInProgress);
+			releaseIdle?.();
+			await waitForCondition(() => !internals._goalAbortInProgress);
 
-		expect(internals._goalAbortInProgress).toBe(false);
-		waitForIdleSpy.mockRestore();
-		agentAbortSpy.mockRestore();
+			expect(internals._goalAbortInProgress).toBe(false);
+		} finally {
+			releaseIdle?.();
+			waitForIdleSpy.mockRestore();
+			agentAbortSpy.mockRestore();
+		}
 	});
 
 	it("rolls back a preselected prompt when update restart pauses the pump", async () => {
@@ -717,7 +729,7 @@ describe("issue #4257 update restart resume", () => {
 		const writes: string[] = [];
 		const client = createWriteClient(writes);
 
-		await internals.handleLine(client, JSON.stringify({ id: "late-create", type: "create" }));
+		await internals.handleLine(client, serializeCommand({ id: "late-create", type: "create" }));
 
 		expect(createRuntime).not.toHaveBeenCalled();
 		expect(JSON.parse(writes.join("").trim())).toMatchObject({
@@ -761,7 +773,7 @@ describe("issue #4257 update restart resume", () => {
 		await parentHarness.session.restoreFollowUpMessage("/autonomous on", undefined, {
 			customMessage: commandMessage,
 		});
-		childHarness.session.recordBashResult("echo child", {
+		await childHarness.session.recordBashResult("echo child", {
 			output: "child",
 			exitCode: 0,
 			cancelled: false,
@@ -1012,7 +1024,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "restore-1",
 				type: "restore_next_turn",
 				activeSessionId: "active-1",
@@ -1049,7 +1061,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "prompt-1",
 				type: "prompt",
 				activeSessionId: "active-1",
@@ -1100,7 +1112,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "steer-1",
 				type: "steer",
 				activeSessionId: "active-1",
@@ -1114,7 +1126,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "follow-up-1",
 				type: "follow_up",
 				activeSessionId: "active-1",
@@ -1126,7 +1138,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "follow-up-2",
 				type: "follow_up",
 				activeSessionId: "active-1",
@@ -1189,7 +1201,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "steer-1",
 				type: "steer",
 				activeSessionId: "active-1",
@@ -1199,7 +1211,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "steer-2",
 				type: "steer",
 				activeSessionId: "active-1",
@@ -1209,7 +1221,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "follow-up-1",
 				type: "follow_up",
 				activeSessionId: "active-1",
@@ -1219,7 +1231,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "resume-1",
 				type: "resume_queue",
 				activeSessionId: "active-1",
@@ -1227,7 +1239,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		await harness.session.agent.waitForIdle();
+		await harness.session.waitForSessionInputIdle();
 
 		const responses = writes
 			.join("")
@@ -1260,7 +1272,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "steer-1",
 				type: "steer",
 				activeSessionId: "active-1",
@@ -1270,7 +1282,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "follow-up-1",
 				type: "follow_up",
 				activeSessionId: "active-1",
@@ -1280,7 +1292,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "prompt-1",
 				type: "prompt",
 				activeSessionId: "active-1",
@@ -1324,7 +1336,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "follow-up-1",
 				type: "follow_up",
 				activeSessionId: "active-1",
@@ -1334,7 +1346,7 @@ describe("issue #4257 update restart resume", () => {
 		);
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "resume-1",
 				type: "resume_queue",
 				activeSessionId: "active-1",
@@ -1370,7 +1382,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "attach-1",
 				type: "attach",
 				activeSessionId: state.activeSessionId,
@@ -1400,7 +1412,7 @@ describe("issue #4257 update restart resume", () => {
 
 		await internals.handleLine(
 			client,
-			JSON.stringify({
+			serializeCommand({
 				id: "resume-1",
 				type: "resume_queue",
 				activeSessionId: "active-1",

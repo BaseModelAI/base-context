@@ -71,7 +71,7 @@ function createFauxIpythonTool(sessionRef: { current?: AgentSession }) {
 				const spaceIndex = code.indexOf(" ");
 				const type = spaceIndex < 0 ? code : code.slice(0, spaceIndex);
 				const payload = spaceIndex < 0 ? {} : JSON.parse(code.slice(spaceIndex + 1));
-				text = JSON.stringify(session.handleGoalHostRequest(type, payload));
+				text = JSON.stringify(await session.handleGoalHostRequest(type, payload));
 			}
 			return { content: [{ type: "text" as const, text }], details: {} };
 		},
@@ -81,10 +81,10 @@ function createFauxIpythonTool(sessionRef: { current?: AgentSession }) {
 describe("compaction continuation", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
 	function midToolLoopContext(harness: Harness): ShouldStopAfterTurnContext {
@@ -329,7 +329,7 @@ describe("compaction continuation", () => {
 		});
 		harnesses.push(harness);
 		sessionRef.current = harness.session;
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
 		const internals = harness.session as unknown as SessionInternals;
 		const context = midToolLoopContext(harness);
 
@@ -352,7 +352,7 @@ describe("compaction continuation", () => {
 		});
 		harnesses.push(harness);
 		sessionRef.current = harness.session;
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
 		const internals = harness.session as unknown as SessionInternals;
 		const context = midToolLoopContext(harness);
 
@@ -387,7 +387,7 @@ describe("compaction continuation", () => {
 		});
 		harnesses.push(harness);
 		sessionRef.current = harness.session;
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
 		const internals = harness.session as unknown as SessionInternals;
 		const context = midToolLoopContext(harness);
 
@@ -395,7 +395,7 @@ describe("compaction continuation", () => {
 		expect(harness.session.goalState.continuationsUsed).toBe(1);
 
 		// Completing the goal clears the queued continuation but leaves the marker stale.
-		harness.session.handleGoalHostRequest("goal.complete");
+		await harness.session.handleGoalHostRequest("goal.complete");
 		expect(harness.session.queuedActionCount).toBe(0);
 
 		const shouldStop = await internals._shouldStopAfterTurn(context);

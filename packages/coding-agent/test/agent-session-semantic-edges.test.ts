@@ -2,14 +2,13 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { Agent, type StreamFn } from "@ponythewhite/base-context-agent";
+import { Agent } from "@ponythewhite/base-context-agent";
 import {
-	type AssistantMessage,
 	type Context,
-	createAssistantMessageEventStream,
+	type FauxProviderRegistration,
+	type FauxResponseFactory,
 	fauxAssistantMessage,
-	getModel,
-	type Usage,
+	registerFauxProvider,
 } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
@@ -30,33 +29,6 @@ import { type Settings, SettingsManager } from "../src/core/settings-manager.js"
 import { startSideQuestion } from "../src/core/side-question.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
-
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
-
-function usage(): Usage {
-	return {
-		input: 7,
-		output: 3,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 10,
-		cost: { input: 7, output: 3, cacheRead: 0, cacheWrite: 0, total: 10 },
-	};
-}
-
-function assistantMessage(text: string, options: { errorMessage?: string } = {}): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: usage(),
-		stopReason: options.errorMessage ? "error" : "stop",
-		errorMessage: options.errorMessage,
-		timestamp: Date.now(),
-	};
-}
 
 function lastUserText(context: Context): string {
 	for (let i = context.messages.length - 1; i >= 0; i--) {
@@ -81,26 +53,37 @@ async function waitForAsync(condition: () => Promise<boolean>): Promise<void> {
 describe("AgentSession semantic edges", () => {
 	let tempDir: string;
 	let sessions: AgentSession[];
+	let sessionManagers: Set<SessionManager>;
 	let harnesses: Harness[];
+	let fauxProviders: FauxProviderRegistration[];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-semantic-session-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		sessions = [];
+		sessionManagers = new Set();
 		harnesses = [];
+		fauxProviders = [];
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const session of sessions) {
-			session.dispose();
+			await session.disposeAsync();
 		}
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
+		await Promise.all([...sessionManagers].map((manager) => manager.close()));
+		for (const faux of fauxProviders) faux.unregister();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function createSession(
+	function trackSessionManager(manager: SessionManager): SessionManager {
+		sessionManagers.add(manager);
+		return manager;
+	}
+
+	async function createSession(
 		options: {
 			responses?: ScriptedResponse[];
 			settings?: Partial<Settings>;
@@ -110,41 +93,54 @@ describe("AgentSession semantic edges", () => {
 			subagentRuntimeHost?: SubagentRuntimeHost;
 			hangMarker?: string;
 			onChildCallStarted?: () => void;
+			onRequest?: (headers: Record<string, string> | undefined) => void;
 		} = {},
 	) {
 		const capturedHeaders: Array<Record<string, string> | undefined> = [];
 		const responses = options.responses;
-		const streamFn: StreamFn = (_model, context, streamOptions) => {
+		const faux = registerFauxProvider({ provider: `semantic-faux-${fauxProviders.length}` });
+		fauxProviders.push(faux);
+		const model = faux.getModel();
+		const respond: FauxResponseFactory = async (context, streamOptions) => {
 			capturedHeaders.push(streamOptions?.headers);
-			const stream = createAssistantMessageEventStream();
+			options.onRequest?.(streamOptions?.headers);
+			faux.appendResponses([respond]);
 			if (options.hangMarker && lastUserText(context).includes(options.hangMarker)) {
 				options.onChildCallStarted?.();
-				return stream;
+				await new Promise<void>((resolve) => {
+					if (streamOptions?.signal?.aborted) resolve();
+					else streamOptions?.signal?.addEventListener("abort", () => resolve(), { once: true });
+				});
+				return fauxAssistantMessage("", { stopReason: "aborted" });
 			}
 			const next = responses?.shift() ?? { text: "ok" };
-			queueMicrotask(() => {
-				const message = assistantMessage(next.text, { errorMessage: next.errorMessage });
-				if (next.errorMessage) {
-					stream.push({ type: "error", reason: "error", error: message });
-				} else {
-					stream.push({ type: "done", reason: "stop", message });
-				}
+			return fauxAssistantMessage(next.text, {
+				stopReason: next.errorMessage ? "error" : "stop",
+				errorMessage: next.errorMessage,
 			});
-			return stream;
 		};
+		faux.setResponses([respond]);
 
-		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const sessionManager = options.sessionManager ?? SessionManager.create(tempDir, join(tempDir, "sessions"));
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models,
+		});
+		const sessionManager = trackSessionManager(
+			options.sessionManager ?? (await SessionManager.create(tempDir, join(tempDir, "sessions"))),
+		);
 		const settingsManager = options.settings
 			? SettingsManager.inMemory(options.settings)
 			: SettingsManager.create(tempDir, tempDir);
 
 		const agent = new Agent({
 			convertToLlm,
-			getApiKey: () => "test-key",
+			getApiKey: () => "faux-key",
 			initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
-			streamFn,
 		});
 
 		const session = new AgentSession({
@@ -152,7 +148,7 @@ describe("AgentSession semantic edges", () => {
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
-			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
+			modelRegistry,
 			resourceLoader: createTestResourceLoader(
 				options.extensionsResult ? { extensionsResult: options.extensionsResult } : undefined,
 			),
@@ -160,6 +156,7 @@ describe("AgentSession semantic edges", () => {
 			subagentRuntimeHost: options.subagentRuntimeHost,
 		});
 		sessions.push(session);
+		await session.initialize();
 		return { session, sessionManager, capturedHeaders };
 	}
 
@@ -180,7 +177,7 @@ describe("AgentSession semantic edges", () => {
 	}
 
 	it("sends one ledger-backed request ID per turn on both wire headers", async () => {
-		const { session, capturedHeaders } = createSession();
+		const { session, capturedHeaders } = await createSession();
 
 		await session.prompt("first");
 		await session.prompt("second");
@@ -206,36 +203,14 @@ describe("AgentSession semantic edges", () => {
 
 	it("writes the request event before the provider call is made", async () => {
 		const observed: Array<{ wireId: string | undefined; ledgerIds: string[] }> = [];
-		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const streamFn: StreamFn = (_model, _context, streamOptions) => {
-			const ledgerPath = join(sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
-			observed.push({
-				wireId: streamOptions?.headers?.[MODEL_REQUEST_ID_HEADER],
-				ledgerIds: startedRequestIds(readSemanticEdgeLedger(ledgerPath)),
-			});
-			const stream = createAssistantMessageEventStream();
-			queueMicrotask(() => {
-				stream.push({ type: "done", reason: "stop", message: assistantMessage("ok") });
-			});
-			return stream;
-		};
-		const agent = new Agent({
-			convertToLlm,
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
-			streamFn,
+		const { session } = await createSession({
+			onRequest: (headers) => {
+				observed.push({
+					wireId: headers?.[MODEL_REQUEST_ID_HEADER],
+					ledgerIds: startedRequestIds(ledgerFor(session)),
+				});
+			},
 		});
-		const session = new AgentSession({
-			agent,
-			sessionManager,
-			settingsManager: SettingsManager.create(tempDir, tempDir),
-			cwd: tempDir,
-			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
-			resourceLoader: createTestResourceLoader(),
-		});
-		sessions.push(session);
 
 		await session.prompt("prove ordering");
 
@@ -245,7 +220,7 @@ describe("AgentSession semantic edges", () => {
 	});
 
 	it("reuses the same request ID across auto-retry attempts of one call", async () => {
-		const { session, capturedHeaders } = createSession({
+		const { session, capturedHeaders } = await createSession({
 			responses: [{ text: "", errorMessage: "overloaded_error" }, { text: "recovered" }],
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
@@ -282,7 +257,7 @@ describe("AgentSession semantic edges", () => {
 			],
 			tempDir,
 		);
-		const { session, capturedHeaders } = createSession({
+		const { session, capturedHeaders } = await createSession({
 			responses: [{ text: "", errorMessage: "overloaded_error" }, { text: "recovered" }],
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 			extensionsResult,
@@ -296,7 +271,7 @@ describe("AgentSession semantic edges", () => {
 	});
 
 	it("excludes side questions from the ledger and the continuation chain", async () => {
-		const { session, capturedHeaders } = createSession();
+		const { session, capturedHeaders } = await createSession();
 
 		await session.prompt("first");
 		const events: string[] = [];
@@ -325,7 +300,7 @@ describe("AgentSession semantic edges", () => {
 	}
 
 	it("records spawned-child ancestry from the latest turn and returns it on success", async () => {
-		const { session: root, capturedHeaders } = createSession();
+		const { session: root, capturedHeaders } = await createSession();
 
 		await root.prompt("parent turn one");
 		await root.prompt("parent turn two");
@@ -362,6 +337,7 @@ describe("AgentSession semantic edges", () => {
 		]);
 
 		// The next committed parent request carries both the call and return edges.
+		await root.waitForRlmQuiescence();
 		await root.prompt("after the child");
 		const edges = deriveSemanticEdges([ledgerFor(root), childEvents]).edges;
 		expect(edges).toContainEqual({
@@ -375,7 +351,7 @@ describe("AgentSession semantic edges", () => {
 	});
 
 	it("records no spawn attribution for a child spawned outside an active run", async () => {
-		const { session: root } = createSession();
+		const { session: root } = await createSession();
 		await root.prompt("completed turn");
 		expect(root.semanticEdges.lastTurnRequestId).toBeDefined();
 
@@ -393,15 +369,15 @@ describe("AgentSession semantic edges", () => {
 	});
 
 	it("restores spawn attribution from the ledger after a resume", async () => {
-		const { session: first } = createSession();
+		const { session: first } = await createSession();
 		await first.prompt("turn before resume");
 		const requestBeforeResume = startedRequestIds(ledgerFor(first))[0];
 		const sessionFile = first.sessionFile;
 		if (!sessionFile) throw new Error("Missing session file");
-		first.dispose();
+		await first.disposeAsync();
 
-		const resumedManager = SessionManager.open(sessionFile, join(tempDir, "sessions"));
-		const { session: resumed } = createSession({ sessionManager: resumedManager });
+		const resumedManager = trackSessionManager(await SessionManager.open(sessionFile, join(tempDir, "sessions")));
+		const { session: resumed } = await createSession({ sessionManager: resumedManager });
 		const spawned = await spawnDuringRun(resumed, () => resumed.runRlmChild("child after resume"));
 		await waitForAsync(async () => (await resumed.listRlmSubagents()).subagents[0]?.status === "completed");
 
@@ -415,7 +391,7 @@ describe("AgentSession semantic edges", () => {
 	});
 
 	it("snapshots spawn ancestry at the spawn entry point, before preflight awaits", async () => {
-		const { session: root } = createSession();
+		const { session: root } = await createSession();
 		await root.prompt("turn one");
 		const firstId = startedRequestIds(ledgerFor(root))[0];
 
@@ -437,11 +413,11 @@ describe("AgentSession semantic edges", () => {
 		const state: { child?: AgentSession } = {};
 		const host: SubagentRuntimeHost = {
 			createRlmSubagentRuntime: async (hostOptions) => {
-				const childManager = SessionManager.create(tempDir, hostOptions.sessionDir);
-				const created = createSession({
+				const childManager = trackSessionManager(await SessionManager.create(tempDir, hostOptions.sessionDir));
+				const { session: created } = await createSession({
 					sessionManager: childManager,
 					rlmSessionDir: hostOptions.sessionDir,
-				}).session;
+				});
 				if (options.commitBeforeFailure) {
 					await created.prompt("child work before the failure");
 				}
@@ -459,7 +435,7 @@ describe("AgentSession semantic edges", () => {
 
 	it("claims a failed child's return with its last committed request", async () => {
 		const { host, state } = failingChildHost({ commitBeforeFailure: true });
-		const { session: root } = createSession({ subagentRuntimeHost: host });
+		const { session: root } = await createSession({ subagentRuntimeHost: host });
 
 		await root.prompt("parent turn");
 		await root.runRlmChild("doomed child");
@@ -479,6 +455,7 @@ describe("AgentSession semantic edges", () => {
 		]);
 
 		// The error outcome the parent consumes links the child's last commit forward.
+		await root.waitForRlmQuiescence();
 		await root.prompt("after the failure");
 		const edges = deriveSemanticEdges([ledgerFor(root)]).edges;
 		const returns = edges.filter((edge) => edge.type === "subagent_return");
@@ -488,7 +465,7 @@ describe("AgentSession semantic edges", () => {
 
 	it("never claims a return for a failed child with no committed request", async () => {
 		const { host, state } = failingChildHost({ commitBeforeFailure: false });
-		const { session: root } = createSession({ subagentRuntimeHost: host });
+		const { session: root } = await createSession({ subagentRuntimeHost: host });
 
 		await root.prompt("parent turn");
 		await root.runRlmChild("doomed child");
@@ -502,7 +479,7 @@ describe("AgentSession semantic edges", () => {
 
 	it("never claims a return for a cancelled child run", async () => {
 		let childStarted = false;
-		const { session: root } = createSession({
+		const { session: root } = await createSession({
 			hangMarker: "hang-task",
 			onChildCallStarted: () => {
 				childStarted = true;
@@ -526,11 +503,11 @@ describe("AgentSession semantic edges", () => {
 		const state: { child?: AgentSession } = {};
 		const host: SubagentRuntimeHost = {
 			createRlmSubagentRuntime: async (hostOptions) => {
-				const childManager = SessionManager.create(tempDir, hostOptions.sessionDir);
-				const created = createSession({
+				const childManager = trackSessionManager(await SessionManager.create(tempDir, hostOptions.sessionDir));
+				const { session: created } = await createSession({
 					sessionManager: childManager,
 					rlmSessionDir: hostOptions.sessionDir,
-				}).session;
+				});
 				await created.prompt("child work before the cancellation");
 				vi.spyOn(created, "promptAndWait").mockImplementation(
 					() =>
@@ -546,7 +523,7 @@ describe("AgentSession semantic edges", () => {
 				await session?.disposeAsync();
 			},
 		};
-		const { session: root } = createSession({ subagentRuntimeHost: host });
+		const { session: root } = await createSession({ subagentRuntimeHost: host });
 
 		await root.prompt("parent turn");
 		const spawned = await root.runRlmChild("cancel me later");
@@ -585,31 +562,11 @@ describe("AgentSession semantic edges", () => {
 			tempDir,
 		);
 
-		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const agent = new Agent({
-			convertToLlm,
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
-			streamFn: () => {
-				const stream = createAssistantMessageEventStream();
-				queueMicrotask(() => {
-					stream.push({ type: "done", reason: "stop", message: assistantMessage("answer") });
-				});
-				return stream;
-			},
+		return createSession({
+			extensionsResult,
+			settings: { compaction: { keepRecentTokens: 1 } },
+			responses: [{ text: "answer" }, { text: "answer" }, { text: "answer" }],
 		});
-		const session = new AgentSession({
-			agent,
-			sessionManager,
-			settingsManager: SettingsManager.inMemory({ compaction: { keepRecentTokens: 1 } }),
-			cwd: tempDir,
-			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
-			resourceLoader: createTestResourceLoader({ extensionsResult }),
-		});
-		sessions.push(session);
-		return { session, sessionManager };
 	}
 
 	it("records extension compactions without a summary request or compaction edge", async () => {
@@ -665,9 +622,7 @@ describe("AgentSession semantic edges", () => {
 		await session.prompt("one");
 		await session.prompt("two");
 
-		vi.spyOn(sessionManager, "appendCompaction").mockImplementationOnce(() => {
-			throw new Error("append failed");
-		});
+		vi.spyOn(sessionManager, "appendCompaction").mockRejectedValueOnce(new Error("append failed"));
 
 		await expect(session.compact()).rejects.toThrow("append failed");
 
@@ -678,7 +633,7 @@ describe("AgentSession semantic edges", () => {
 	it("keeps prompting and settling children when the session ledger becomes unwritable", async () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			const { session: root, capturedHeaders } = createSession();
+			const { session: root, capturedHeaders } = await createSession();
 			await root.prompt("first");
 			expect(capturedHeaders[0]?.[MODEL_REQUEST_ID_HEADER]).toBeDefined();
 

@@ -17,9 +17,9 @@ type AgentDaemonCronInternals = {
 describe("ENG-4657 update heartbeat recovery", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

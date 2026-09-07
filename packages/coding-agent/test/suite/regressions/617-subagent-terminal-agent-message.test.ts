@@ -20,9 +20,9 @@ describe("#617 subagent terminal agent messages", () => {
 	let parent: Harness | undefined;
 	let child: Harness | undefined;
 
-	afterEach(() => {
-		child?.cleanup();
-		parent?.cleanup();
+	afterEach(async () => {
+		await child?.cleanup();
+		await parent?.cleanup();
 		child = undefined;
 		parent = undefined;
 	});

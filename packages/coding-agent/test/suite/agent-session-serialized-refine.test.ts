@@ -110,10 +110,13 @@ function mockSerializedRefine(harness: Harness) {
 describe("Serialized auto-refine checkpoint", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -299,10 +302,13 @@ describe("Serialized auto-refine checkpoint", () => {
 describe("Serialized agent-callable refine", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -411,6 +417,8 @@ describe("Serialized agent-callable refine", () => {
 		// by background planning, NOT left for fire-and-forget at agent_end.
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 		expect(internals._serializedPlanInFlight).toBeDefined();
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
 	it("pending agent-callable refine drained before disposal", async () => {
@@ -438,10 +446,13 @@ describe("Serialized agent-callable refine", () => {
 describe("Serialized autonomous continuation", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -489,10 +500,13 @@ describe("Serialized autonomous continuation", () => {
 describe("Serialized background planning during tools", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -655,10 +669,13 @@ describe("Serialized background planning during tools", () => {
 describe("PR #503 model persistence regression", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -709,10 +726,13 @@ describe("PR #503 model persistence regression", () => {
 describe("Serialized refine review-fix regressions", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1588,7 +1608,7 @@ describe("Serialized refine review-fix regressions", () => {
 			new Error("unexpected compact review failure"),
 		);
 
-		await expect(internals._drainPendingRefinementForDisposal()).resolves.toBeUndefined();
+		await expect(internals._drainPendingRefinementForDisposal()).rejects.toThrow("unexpected compact review failure");
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
@@ -1620,10 +1640,13 @@ describe("Serialized refine review-fix regressions", () => {
 describe("Serialized refine event-ordering integration", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1687,10 +1710,13 @@ describe("Serialized refine event-ordering integration", () => {
 describe("P0 concurrency regressions", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 

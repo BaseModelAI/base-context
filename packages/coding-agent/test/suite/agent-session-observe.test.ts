@@ -84,7 +84,7 @@ describe("AgentSession agent observe host requests", () => {
 			expect(controller.getAgent).toHaveBeenCalledWith("beta");
 			expect(controller.recentMessages).toHaveBeenCalledWith({ target: "beta", limit: 3, maxChars: 120 });
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -104,7 +104,7 @@ describe("AgentSession agent observe host requests", () => {
 				"unknown agent observe request",
 			);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -115,7 +115,7 @@ describe("AgentSession agent observe host requests", () => {
 				"agent observation is not available",
 			);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 });

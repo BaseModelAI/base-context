@@ -68,7 +68,7 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import { findMostRecentSessionForCwd, getDefaultSessionDir, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
@@ -438,9 +438,9 @@ function validateForkFlags(parsed: Args): void {
 	}
 }
 
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
+async function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): Promise<SessionManager> {
 	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
+		return await SessionManager.forkFrom(sourcePath, cwd, sessionDir);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -456,6 +456,7 @@ export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
+	options: { readOnlyExisting?: boolean } = {},
 ): Promise<SessionManager> {
 	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
 
@@ -481,7 +482,9 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
+				return options.readOnlyExisting
+					? SessionManager.openReadOnly(resolved.path, sessionDir, explicitCwdOverride)
+					: SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -496,6 +499,10 @@ export async function createSessionManager(
 	}
 
 	if (parsed.continue) {
+		if (options.readOnlyExisting) {
+			const recent = findMostRecentSessionForCwd(sessionDir ?? getDefaultSessionDir(cwd), cwd);
+			return recent ? SessionManager.openReadOnly(recent, sessionDir, cwd) : SessionManager.create(cwd, sessionDir);
+		}
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
@@ -768,9 +775,14 @@ export function createDefaultRuntimeFactory(
 			// Only seed initial goal for top-level sessions (rlmDepth 0).
 			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
 		});
-		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
+		try {
+			const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
+			if (created.session.model && cliThinkingOverride) {
+				await created.session.setThinkingLevel(created.session.thinkingLevel);
+			}
+		} catch (error) {
+			await created.session.disposeAsync().catch(() => undefined);
+			throw error;
 		}
 
 		return {
@@ -977,11 +989,14 @@ async function findActiveDaemonSessionSummary(
 	}
 }
 
-function createSessionManagerForActiveDaemonSummary(summary: SessionSummary, fallbackCwd: string): SessionManager {
+async function createSessionManagerForActiveDaemonSummary(
+	summary: SessionSummary,
+	fallbackCwd: string,
+): Promise<SessionManager> {
 	const cwd = summary.cwd || fallbackCwd;
 	if (summary.sessionFile) {
 		try {
-			return SessionManager.open(summary.sessionFile, undefined, cwd);
+			return await SessionManager.openReadOnly(summary.sessionFile, undefined, cwd);
 		} catch {
 			return SessionManager.inMemory(cwd);
 		}
@@ -1273,9 +1288,9 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	let sessionManager: SessionManager;
 	if (activeDaemonSessionSummary) {
-		sessionManager = createSessionManagerForActiveDaemonSummary(activeDaemonSessionSummary, cwd);
+		sessionManager = await createSessionManagerForActiveDaemonSummary(activeDaemonSessionSummary, cwd);
 	} else if (
-		useDaemonInteractive &&
+		(useDaemonInteractive || (appMode === "daemon" && parsed.listModels === undefined)) &&
 		shouldUseEphemeralSessionManagerForDaemonInteractive({
 			resume: parsed.resume,
 			continue: parsed.continue,
@@ -1285,7 +1300,9 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager = SessionManager.inMemory(cwd);
 	} else {
 		try {
-			sessionManager = await createSessionManager(parsed, cwd, sessionDir);
+			sessionManager = await createSessionManager(parsed, cwd, sessionDir, {
+				readOnlyExisting: useDaemonClient || (appMode === "daemon" && parsed.listModels === undefined),
+			});
 		} catch (error) {
 			if (!(error instanceof SessionSelectorError)) {
 				throw error;
@@ -1306,7 +1323,10 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+			await sessionManager.close();
+			sessionManager = useDaemonClient
+				? await SessionManager.openReadOnly(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd)
+				: await SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
@@ -1331,6 +1351,10 @@ export async function main(args: string[], options?: MainOptions) {
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);
 	const runtimeDefaultSessionConfig = appMode === "daemon" ? daemonDefaultSessionConfig : defaultSessionConfig;
+	// Daemon clients keep only local views; release the CLI writer before a worker opens this source.
+	if (useDaemonClient || (appMode === "daemon" && parsed.listModels === undefined)) {
+		await sessionManager.close();
+	}
 	const createRuntime = createDefaultRuntimeFactory(runtimeDefaultSessionConfig, options?.extensionFactories);
 	time("createRuntime");
 	// Daemon mode never uses the bootstrap runtime, so skip the heavy
@@ -1415,7 +1439,7 @@ export async function main(args: string[], options?: MainOptions) {
 				uiServices: daemonUiServices,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(daemonSocketPath),
 				createUiServicesForSession: async (summary) => {
-					const attachedSessionManager = createSessionManagerForActiveDaemonSummary(
+					const attachedSessionManager = await createSessionManagerForActiveDaemonSummary(
 						summary,
 						sessionManager.getCwd(),
 					);

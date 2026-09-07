@@ -484,6 +484,9 @@ async function streamAssistantResponse(
 
 	try {
 		throwIfAborted(signal);
+		// Do not race source persistence against cancellation; drain it before leaving this build.
+		await config.beforeContextBuild?.();
+		throwIfAborted(signal);
 		let messages = context.messages;
 		if (config.transformContext) {
 			messages = await maybePromiseWithAbort(config.transformContext(messages, signal), signal);

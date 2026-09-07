@@ -13,11 +13,11 @@ import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 
 describe("issue #2753 reload stale resource settings", () => {
-	const cleanups: Array<() => void> = [];
+	const cleanups: Array<() => Promise<void>> = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (cleanups.length > 0) {
-			cleanups.pop()?.();
+			await cleanups.pop()?.();
 		}
 	});
 
@@ -77,11 +77,11 @@ describe("issue #2753 reload stale resource settings", () => {
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir,
-			sessionManager: SessionManager.create(tempDir),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 		});
 
-		cleanups.push(() => {
-			runtime.session.dispose();
+		cleanups.push(async () => {
+			await runtime.dispose();
 			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });

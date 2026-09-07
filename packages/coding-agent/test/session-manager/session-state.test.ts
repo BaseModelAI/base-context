@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -6,17 +6,42 @@ import { loadEntriesFromFile, SessionManager, type SessionStateEntry } from "../
 import { inactiveLifecycleForSession } from "../../src/modes/daemon/daemon-session-list.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
+const managers: SessionManager[] = [];
+async function createSession(cwd: string, dir: string): Promise<SessionManager> {
+	const manager = await SessionManager.create(cwd, dir);
+	managers.push(manager);
+	return manager;
+}
+async function openSession(path: string, dir: string): Promise<SessionManager> {
+	const manager = await SessionManager.open(path, dir);
+	managers.push(manager);
+	return manager;
+}
+// Offline fixture conversion: old state spellings live in a wholly legacy JSONL source.
+function appendLegacyState(path: string, status: string): void {
+	const entries = loadEntriesFromFile(path);
+	const previous = entries[entries.length - 1];
+	const entry = {
+		type: "session_state",
+		id: `legacy-${entries.length}`,
+		parentId: previous.type === "session" ? null : previous.id,
+		timestamp: new Date().toISOString(),
+		state: { status },
+	};
+	writeFileSync(path, `${[...entries, entry].map((value) => JSON.stringify(value)).join("\n")}\n`);
+}
+
 describe("SessionManager session state", () => {
 	it("persists lifecycle state and exposes it through list", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-state-"));
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi"));
-			session.appendSessionState({ status: "crash" });
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi"));
+			await session.appendSessionState({ status: "crash" });
 
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
@@ -36,6 +61,7 @@ describe("SessionManager session state", () => {
 				state: { status: "crash" },
 			});
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -45,10 +71,10 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendSessionInfo("empty");
-			session.appendSessionState({ status: "archived" });
+			await session.appendSessionInfo("empty");
+			await session.appendSessionState({ status: "archived" });
 
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
@@ -63,6 +89,7 @@ describe("SessionManager session state", () => {
 				state: { status: "archived" },
 			});
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -72,17 +99,19 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
-			session.appendSessionState({ status: "active" });
+			const session = await createSession(cwd, sessionDir);
+			await session.appendSessionState({ status: "active" });
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
 
-			SessionManager.open(sessionFile!, sessionDir).appendSessionInfo("Renamed draft");
+			await session.close();
+			await (await openSession(sessionFile!, sessionDir)).appendSessionInfo("Renamed draft");
 
 			await expect(SessionManager.list(cwd, sessionDir)).resolves.toEqual([
 				expect.objectContaining({ id: session.getSessionId(), name: "Renamed draft" }),
 			]);
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -92,15 +121,16 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi"));
+			const session = await createSession(cwd, sessionDir);
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi"));
 			const sessionFile = session.getSessionFile()!;
 
-			const reopened = SessionManager.open(sessionFile, sessionDir);
+			await session.close();
+			const reopened = await openSession(sessionFile, sessionDir);
 			expect(reopened.getSessionState()).toBeUndefined();
 			if (reopened.getSessionState()?.status !== "archived") {
-				reopened.appendSessionState({ status: "archived" });
+				await reopened.appendSessionState({ status: "archived" });
 			}
 
 			const sessions = await SessionManager.list(cwd, sessionDir);
@@ -108,6 +138,7 @@ describe("SessionManager session state", () => {
 			expect(sessions[0]!.state).toEqual({ status: "archived" });
 			expect(inactiveLifecycleForSession(sessions[0]!)).toBe("archived");
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -119,24 +150,27 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi")); // forces a flush to disk
+			const session = await createSession(cwd, sessionDir);
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi")); // forces a flush to disk
 			const sessionFile = session.getSessionFile()!;
+			await session.close();
 			rmSync(sessionFile);
 			expect(existsSync(sessionFile)).toBe(false);
 
 			// Without the guard, the open+append recreates a fresh stub on disk.
-			SessionManager.open(sessionFile, sessionDir).appendSessionState({ status: "archived" });
+			await (await openSession(sessionFile, sessionDir)).appendSessionState({ status: "archived" });
 			expect(existsSync(sessionFile)).toBe(true);
 
 			// The guard the caller uses skips a missing file, leaving nothing behind.
+			await managers[managers.length - 1].close();
 			rmSync(sessionFile);
 			if (existsSync(sessionFile)) {
-				SessionManager.open(sessionFile, sessionDir).appendSessionState({ status: "archived" });
+				await (await openSession(sessionFile, sessionDir)).appendSessionState({ status: "archived" });
 			}
 			expect(existsSync(sessionFile)).toBe(false);
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -146,18 +180,19 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendMessage(userMsg("hide me"));
+			await session.appendMessage(userMsg("hide me"));
 			// Flush a header + state entry, then append the legacy raw "sleep"/"hidden"
 			// entries older daemons wrote; both must normalize to "archived" on read.
-			session.appendSessionState({ status: "active" });
+			await session.appendSessionState({ status: "active" });
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
-			appendFileSync(sessionFile!, `${JSON.stringify({ type: "session_state", state: { status: "sleep" } })}\n`);
-			appendFileSync(sessionFile!, `${JSON.stringify({ type: "session_state", state: { status: "hidden" } })}\n`);
+			await session.close();
+			appendLegacyState(sessionFile!, "sleep");
+			appendLegacyState(sessionFile!, "hidden");
 
-			expect(SessionManager.open(sessionFile!, sessionDir).getSessionState()).toEqual({ status: "archived" });
+			expect((await openSession(sessionFile!, sessionDir)).getSessionState()).toEqual({ status: "archived" });
 
 			const sessions = await SessionManager.list(cwd, sessionDir);
 			expect(sessions).toHaveLength(1);
@@ -166,6 +201,7 @@ describe("SessionManager session state", () => {
 				state: { status: "archived" },
 			});
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -175,19 +211,21 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendMessage(userMsg("hi"));
-			session.appendSessionState({ status: "active" });
+			await session.appendMessage(userMsg("hi"));
+			await session.appendSessionState({ status: "active" });
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
-			appendFileSync(sessionFile!, `${JSON.stringify({ type: "session_state", state: { status: "bogus" } })}\n`);
+			await session.close();
+			appendLegacyState(sessionFile!, "bogus");
 
-			expect(SessionManager.open(sessionFile!, sessionDir).getSessionState()).toEqual({ status: "active" });
+			expect((await openSession(sessionFile!, sessionDir)).getSessionState()).toEqual({ status: "active" });
 
 			const sessions = await SessionManager.list(cwd, sessionDir);
 			expect(sessions[0]).toMatchObject({ id: session.getSessionId(), state: { status: "active" } });
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -197,11 +235,11 @@ describe("SessionManager session state", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendSessionState({ status: "archived" });
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi"));
+			await session.appendSessionState({ status: "archived" });
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi"));
 
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
@@ -210,52 +248,53 @@ describe("SessionManager session state", () => {
 			expect(entries.filter((entry) => entry.type === "session_state")).toHaveLength(1);
 			expect(entries.filter((entry) => entry.type === "message")).toHaveLength(2);
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("recreates the session directory when lifecycle state is the first persisted entry", () => {
+	it("creates the source directory before acknowledging its first lifecycle state", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-state-missing-dir-"));
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
 
-			rmSync(sessionDir, { recursive: true, force: true });
-			session.appendSessionState({ status: "archived" });
+			expect(existsSync(sessionDir)).toBe(true);
+			await session.appendSessionState({ status: "archived" });
 
 			expect(existsSync(sessionFile!)).toBe(true);
 			const entries = loadEntriesFromFile(sessionFile!);
 			expect(entries[0]).toMatchObject({ type: "session", id: session.getSessionId() });
 			expect(entries.filter((entry) => entry.type === "session_state")).toHaveLength(1);
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("rewrites the full session if the session file disappears after flushing", () => {
+	it("rejects a disappeared source instead of rewriting history from the current view", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-state-missing-file-"));
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const session = SessionManager.create(cwd, sessionDir);
+			const session = await createSession(cwd, sessionDir);
 
-			session.appendMessage(userMsg("hello"));
-			session.appendMessage(assistantMsg("hi"));
+			await session.appendMessage(userMsg("hello"));
+			await session.appendMessage(assistantMsg("hi"));
 			const sessionFile = session.getSessionFile();
 			expect(sessionFile).toBeDefined();
 			expect(existsSync(sessionFile!)).toBe(true);
 
 			rmSync(sessionFile!, { force: true });
-			session.appendSessionState({ status: "archived" });
-
-			const entries = loadEntriesFromFile(sessionFile!);
-			expect(entries[0]).toMatchObject({ type: "session", id: session.getSessionId() });
-			expect(entries.filter((entry) => entry.type === "message")).toHaveLength(2);
-			expect(entries.filter((entry) => entry.type === "session_state")).toHaveLength(1);
+			await expect(session.appendSessionState({ status: "archived" })).rejects.toThrow();
+			expect(existsSync(sessionFile!)).toBe(false);
+			expect(session.getEntries().filter((entry) => entry.type === "message")).toHaveLength(2);
+			expect(session.getSessionState()).toBeUndefined();
 		} finally {
+			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

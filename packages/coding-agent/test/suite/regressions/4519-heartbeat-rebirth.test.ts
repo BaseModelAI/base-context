@@ -60,17 +60,17 @@ async function waitForCondition(predicate: () => boolean): Promise<void> {
 describe("ENG-4519 heartbeat rebirth", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
 	it("cancels legacy jobs instead of reopening an archived session", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
-		harness.sessionManager.appendSessionState({ status: "active" });
-		harness.sessionManager.appendSessionState({ status: "archived" });
+		await harness.sessionManager.appendSessionState({ status: "active" });
+		await harness.sessionManager.appendSessionState({ status: "archived" });
 		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async () => {
 			throw new Error("archived sessions must not be reopened");
 		});
@@ -132,14 +132,17 @@ describe("ENG-4519 heartbeat rebirth", () => {
 	it("stops opening a runtime when its heartbeat is cancelled in flight", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
-		harness.sessionManager.appendSessionState({ status: "active" });
+		await harness.sessionManager.appendSessionState({ status: "active" });
+		await harness.session.disposeAsync();
 		let releaseRuntime: () => void = () => {};
 		const runtimeGate = new Promise<void>((resolve) => {
 			releaseRuntime = resolve;
 		});
-		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir }) => {
+		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir, sessionManager }) => {
 			await runtimeGate;
-			return runtimeResult(harness, cwd, agentDir);
+			const restored = await createHarness({ sessionManager });
+			harnesses.push(restored);
+			return runtimeResult(restored, cwd, agentDir);
 		});
 		const daemon = createDaemon(harness, createRuntime);
 		const internals = daemon as unknown as AgentDaemonCronInternals;
@@ -151,23 +154,32 @@ describe("ENG-4519 heartbeat rebirth", () => {
 		});
 
 		const run = internals.runCronJob(heartbeat);
-		await waitForCondition(() => createRuntime.mock.calls.length > 0);
-		expect(createRuntime).toHaveBeenCalledOnce();
-		internals.cronStore.cancel(heartbeat.id);
-		releaseRuntime();
+		try {
+			await waitForCondition(() => createRuntime.mock.calls.length > 0);
+			expect(createRuntime).toHaveBeenCalledOnce();
+			internals.cronStore.cancel(heartbeat.id);
+			releaseRuntime();
 
-		await expect(run).resolves.toBe("skipped");
-		expect(internals.sessions.size).toBe(0);
+			await expect(run).resolves.toBe("skipped");
+			expect(internals.sessions.size).toBe(0);
+		} finally {
+			releaseRuntime();
+			await run;
+		}
 	});
 
 	it("still restores and prompts a session explicitly persisted as active", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
-		harness.sessionManager.appendSessionState({ status: "active" });
-		const promptHeartbeat = vi.spyOn(harness.session, "promptHeartbeat").mockResolvedValue();
-		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir }) =>
-			runtimeResult(harness, cwd, agentDir),
-		);
+		await harness.sessionManager.appendSessionState({ status: "active" });
+		await harness.session.disposeAsync();
+		const promptHeartbeat = vi.fn<Harness["session"]["promptHeartbeat"]>().mockResolvedValue();
+		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir, sessionManager }) => {
+			const restored = await createHarness({ sessionManager });
+			harnesses.push(restored);
+			vi.spyOn(restored.session, "promptHeartbeat").mockImplementation(promptHeartbeat);
+			return runtimeResult(restored, cwd, agentDir);
+		});
 		const daemon = createDaemon(harness, createRuntime);
 		const internals = daemon as unknown as AgentDaemonCronInternals;
 		const heartbeat = createDueHeartbeat(internals.cronStore, {

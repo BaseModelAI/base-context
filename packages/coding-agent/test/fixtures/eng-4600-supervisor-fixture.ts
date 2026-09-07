@@ -6,7 +6,10 @@ import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "../../src/modes
 import { DaemonSupervisor } from "../../src/modes/daemon/daemon-supervisor.js";
 import { acquireDaemonSupervisorOwnership } from "../../src/modes/daemon/daemon-supervisor-ownership.js";
 
-type ControlMessage = { type: "go" | "probe" | "release" | "release_runtime" | "shutdown" | "cleanup" };
+type ControlMessage = {
+	type: "go" | "probe" | "release" | "release_runtime" | "shutdown" | "cleanup";
+	preserveSocket?: boolean;
+};
 
 function requiredEnvironment(name: string): string {
 	const value = process.env[name];
@@ -78,7 +81,7 @@ async function runSupervisor(): Promise<never> {
 			) {
 				return;
 			}
-			void releaseSupervisorRuntime(supervisor);
+			void releaseSupervisorRuntime(supervisor, (message as ControlMessage).preserveSocket === true);
 		});
 		return await new Promise<never>(() => {});
 	} catch (error) {
@@ -87,10 +90,14 @@ async function runSupervisor(): Promise<never> {
 	}
 }
 
-async function releaseSupervisorRuntime(supervisor: DaemonSupervisor): Promise<void> {
+async function releaseSupervisorRuntime(supervisor: DaemonSupervisor, preserveSocket = false): Promise<void> {
 	const ownership = Reflect.get(supervisor, "ownership") as { release: () => Promise<void> } | undefined;
 	await ownership?.release();
 	Reflect.set(supervisor, "ownership", undefined);
+	if (preserveSocket) {
+		send({ type: "runtime_released" });
+		return;
+	}
 	const cleanupSocket = Reflect.get(supervisor, "cleanupSocket");
 	if (typeof cleanupSocket === "function") {
 		Reflect.apply(cleanupSocket, supervisor, []);

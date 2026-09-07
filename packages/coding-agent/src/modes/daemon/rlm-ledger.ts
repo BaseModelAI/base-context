@@ -6,9 +6,9 @@ import { stringifyBoundedJson } from "../../core/bounded-json.js";
 import { EventLog } from "../../core/event-log.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../../core/journal-frame.js";
 import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "../../core/journal-io.js";
+import { readSessionJournalHeader } from "../../core/session-journal-reader.js";
 import { canonicalSessionPath } from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
-import { readFirstLineSync } from "../../utils/file-lines.js";
 import {
 	RLM_LEDGER_MAX_MUTATION_BYTES,
 	RLM_LEDGER_MAX_PENDING_BYTES,
@@ -154,19 +154,16 @@ export async function readLegacyRlmSubagentRegistry(
 export function createRlmLedgerRegistrySeedSource(): RlmLedgerSeedSource {
 	return {
 		readRegistryForSessionFile: async (sessionFile) => {
-			let headerId: string | undefined;
+			let header: { type?: unknown; id?: unknown } | undefined;
 			try {
-				const firstLine = readFirstLineSync(sessionFile);
-				if (firstLine) {
-					const header = JSON.parse(firstLine) as { id?: unknown };
-					if (typeof header.id === "string") headerId = header.id;
-				}
-			} catch {
-				return [];
+				header = readSessionJournalHeader(sessionFile) as typeof header;
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+				throw error;
 			}
-			if (!headerId) return [];
+			if (header?.type !== "session" || typeof header.id !== "string" || !header.id) return [];
 			return readLegacyRlmSubagentRegistry(
-				join(getSessionArtifactPathForFile(sessionFile, headerId), "rlm-subagents.jsonl"),
+				join(getSessionArtifactPathForFile(sessionFile, header.id), "rlm-subagents.jsonl"),
 			);
 		},
 	};

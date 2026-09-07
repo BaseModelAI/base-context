@@ -13,9 +13,11 @@ import { createHarness, type Harness } from "../harness.js";
 
 describe("ENG-4722 invalid resume selectors", () => {
 	let harness: Harness | undefined;
+	const managers: SessionManager[] = [];
 
-	afterEach(() => {
-		harness?.cleanup();
+	afterEach(async () => {
+		await Promise.all(managers.splice(0).map((manager) => manager.close()));
+		await harness?.cleanup();
 		harness = undefined;
 	});
 
@@ -48,8 +50,8 @@ describe("ENG-4722 invalid resume selectors", () => {
 	it("rejects an ambiguous saved session prefix", async () => {
 		harness = await createHarness();
 		const sessionDir = join(harness.tempDir, "sessions");
-		createSavedSession(harness.tempDir, sessionDir, "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-		createSavedSession(harness.tempDir, sessionDir, "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+		await createSavedSession(harness.tempDir, sessionDir, "11111111-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+		await createSavedSession(harness.tempDir, sessionDir, "11111111-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 		const parsed = parseArgs(["--resume", "11111111", "do not submit this"]);
 
 		await expect(createSessionManager(parsed, harness.tempDir, sessionDir)).rejects.toMatchObject({
@@ -63,10 +65,11 @@ describe("ENG-4722 invalid resume selectors", () => {
 		harness = await createHarness();
 		const sessionDir = join(harness.tempDir, "sessions");
 		const sessionId = "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa";
-		createSavedSession(harness.tempDir, sessionDir, sessionId);
+		await createSavedSession(harness.tempDir, sessionDir, sessionId);
 		const parsed = parseArgs(["--resume", "aaaaaaaaaaaa"]);
 
 		const sessionManager = await createSessionManager(parsed, harness.tempDir, sessionDir);
+		managers.push(sessionManager);
 
 		expect(sessionManager.getSessionId()).toBe(sessionId);
 	});
@@ -74,19 +77,23 @@ describe("ENG-4722 invalid resume selectors", () => {
 	it("prefers an exact normalized ID over prefix and suffix matches", async () => {
 		harness = await createHarness();
 		const sessionDir = join(harness.tempDir, "sessions");
-		createSavedSession(harness.tempDir, sessionDir, "abcd");
-		createSavedSession(harness.tempDir, sessionDir, "abcd1");
-		createSavedSession(harness.tempDir, sessionDir, "1abcd");
+		await createSavedSession(harness.tempDir, sessionDir, "abcd");
+		await createSavedSession(harness.tempDir, sessionDir, "abcd1");
+		await createSavedSession(harness.tempDir, sessionDir, "1abcd");
 		const parsed = parseArgs(["--resume", "AB-CD"]);
 
 		const sessionManager = await createSessionManager(parsed, harness.tempDir, sessionDir);
+		managers.push(sessionManager);
 
 		expect(sessionManager.getSessionId()).toBe("abcd");
 	});
 });
 
-function createSavedSession(cwd: string, sessionDir: string, sessionId: string): void {
-	const session = SessionManager.create(cwd, sessionDir);
-	session.newSession({ id: sessionId });
-	session.appendSessionState({ status: "archived" });
+async function createSavedSession(cwd: string, sessionDir: string, sessionId: string): Promise<void> {
+	const session = await SessionManager.create(cwd, sessionDir, { id: sessionId });
+	try {
+		await session.appendSessionState({ status: "archived" });
+	} finally {
+		await session.close();
+	}
 }

@@ -45,6 +45,7 @@ export function encodeJournalFrameJson(
 	if (Buffer.byteLength(prefix) + Buffer.byteLength(json) + suffixBytes > maxBytes) {
 		throw new Error("Journal frame byte limit exceeded");
 	}
+	if (json.includes("\n")) throw new Error("Journal payload must be one JSON line");
 	JSON.parse(json);
 	const body = `${prefix}${json}}`;
 	const checksum = createHash("sha256").update(body).digest("hex");

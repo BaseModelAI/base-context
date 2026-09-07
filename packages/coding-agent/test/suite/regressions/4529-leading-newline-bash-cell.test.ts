@@ -27,8 +27,8 @@ describe("ENG-4529 leading newline before %%bash", () => {
 		initTheme("dark");
 	});
 
-	afterEach(() => {
-		harness?.cleanup();
+	afterEach(async () => {
+		await harness?.cleanup();
 		harness = undefined;
 	});
 

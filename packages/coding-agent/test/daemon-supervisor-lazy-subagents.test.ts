@@ -16,6 +16,7 @@ import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface SupervisorInternals {
+	catalog: DaemonCatalogClient;
 	workers: Map<string, WorkerFixture>;
 	start(): Promise<void>;
 	cleanupSupervisorResources(): Promise<void>;
@@ -55,8 +56,10 @@ interface WorkerFixture {
 }
 
 const tempDirs: string[] = [];
+const fixtureManagers: SessionManager[] = [];
 
-afterEach(() => {
+afterEach(async () => {
+	await Promise.all(fixtureManagers.splice(0).map((manager) => manager.close()));
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -150,14 +153,17 @@ describe("daemon supervisor passive subagent topology", () => {
 	it("rejects a forked root name that collides with another saved root", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-forked-root-name-"));
 		tempDirs.push(directory);
-		const sourceManager = SessionManager.create(directory, join(directory, "sessions"));
-		sourceManager.newSession({ rlmDepth: 0 });
-		sourceManager.flushNow();
+		const sourceManager = await SessionManager.create(directory, join(directory, "sessions"), { rlmDepth: 0 });
+		fixtureManagers.push(sourceManager);
+		await sourceManager.flushNow();
 		const sourcePath = sourceManager.getSessionFile();
 		if (!sourcePath) throw new Error("Missing source session path");
-		const forkedManager = SessionManager.forkFrom(sourcePath, directory, join(directory, "sessions"));
+		await sourceManager.close();
+		const forkedManager = await SessionManager.forkFrom(sourcePath, directory, join(directory, "sessions"));
+		fixtureManagers.push(forkedManager);
 		const forkedPath = forkedManager.getSessionFile();
 		if (!forkedPath) throw new Error("Missing forked session path");
+		await forkedManager.close();
 		const forkedInfo = await readSessionInfo(forkedPath);
 		if (!forkedInfo) throw new Error("Missing forked session info");
 		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
@@ -681,30 +687,31 @@ describe("daemon supervisor passive subagent topology", () => {
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
-		Object.assign(supervisor, {
-			rlmLedgerSiblings: vi.fn(async () => saved),
-			rlmSpawnLedger: vi.fn(() => ({ appendRenameByChildPath: vi.fn(async () => {}) })),
-			catalog: {
-				rename,
-			},
-		});
+		Object.assign(supervisor, { rlmLedgerSiblings: vi.fn(async () => saved) });
+		vi.spyOn(supervisor.catalog, "start").mockResolvedValue();
+		vi.spyOn(supervisor.catalog, "rename").mockImplementation(rename);
 		const client = {};
 
-		const first = supervisor.handleCommand(client, {
-			type: "rename_saved_session",
-			sessionPath: firstPath,
-			name: "shared",
-		});
-		await vi.waitFor(() => expect(rename).toHaveBeenCalledOnce());
-		await expect(
-			supervisor.handleCommand(client, {
+		try {
+			await supervisor.start();
+			const first = supervisor.handleCommand(client, {
 				type: "rename_saved_session",
-				sessionPath: secondPath,
+				sessionPath: firstPath,
 				name: "shared",
-			}),
-		).rejects.toThrow("an agent of that name already exists at depth 1 under this parent");
-		releaseRename();
-		await expect(first).resolves.toMatchObject({ success: true });
+			});
+			await vi.waitFor(() => expect(rename).toHaveBeenCalledOnce());
+			await expect(
+				supervisor.handleCommand(client, {
+					type: "rename_saved_session",
+					sessionPath: secondPath,
+					name: "shared",
+				}),
+			).rejects.toThrow("an agent of that name already exists at depth 1 under this parent");
+			releaseRename();
+			await expect(first).resolves.toMatchObject({ success: true });
+		} finally {
+			await supervisor.cleanupSupervisorResources();
+		}
 	});
 
 	it("reserves named child creates by parent scope until worker launch completes", async () => {

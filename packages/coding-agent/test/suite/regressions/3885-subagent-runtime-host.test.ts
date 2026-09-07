@@ -117,7 +117,7 @@ describe("ENG-3885 subagent runtime host", () => {
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 		});
 		await runtime.session.bindExtensions({});
 
@@ -220,14 +220,14 @@ describe("ENG-3885 subagent runtime host", () => {
 		});
 		const { session } = await createAgentSessionFromServices({
 			services,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 			model: faux.getModel("faux-child"),
 			thinkingLevel: "off",
 		});
 		await session.bindExtensions({});
 
 		cleanups.push(async () => {
-			session.dispose();
+			await session.disposeAsync();
 			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
@@ -238,10 +238,9 @@ describe("ENG-3885 subagent runtime host", () => {
 
 		const result = await session.runRlmChild("inspect inline child persistence");
 		expect(result.session_dir).not.toBeNull();
-		const childSessions = await SessionManager.list(tempDir, result.session_dir!);
-		expect(childSessions).toHaveLength(1);
-		const childSessionFile = childSessions[0]!.path;
-		const childSession = SessionManager.open(childSessionFile, result.session_dir!);
+		await vi.waitFor(() => expect(session.getRlmChildSession(result.rlm_child_id)?.sessionFile).toBeTruthy());
+		const childSessionFile = session.getRlmChildSession(result.rlm_child_id)!.sessionFile!;
+		const childSession = await SessionManager.openReadOnly(childSessionFile, result.session_dir!);
 		const childContext = childSession.buildSessionContext();
 
 		expect(childContext.model).toEqual({

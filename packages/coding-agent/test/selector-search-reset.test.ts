@@ -32,9 +32,9 @@ describe("searchable selector navigation", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

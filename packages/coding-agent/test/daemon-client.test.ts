@@ -108,7 +108,7 @@ function emitHello(
 			clientId: "client-1",
 			serverCapabilities:
 				version === DAEMON_PROTOCOL_VERSION
-					? [...serverCapabilities, "native_inference_ownership"]
+					? [...serverCapabilities, "native_inference_ownership", "canonical_session_ownership"]
 					: serverCapabilities,
 		})}\n`,
 	);
@@ -307,7 +307,7 @@ describe("DaemonClient", () => {
 
 		await expect(
 			client.request({ type: "prompt", activeSessionId: "active-1", message: "hello", admissionId: "a-1" }),
-		).rejects.toThrow("cannot provide native inference ownership");
+		).rejects.toThrow("cannot provide canonical session ownership");
 		expect(socket.writes).toEqual([]);
 		client.close();
 	});
@@ -800,7 +800,11 @@ describe("DaemonClient", () => {
 				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				schemaRevision: DAEMON_SCHEMA_REVISION,
-				serverCapabilities: ["session_input_admission", "native_inference_ownership"],
+				serverCapabilities: [
+					"session_input_admission",
+					"native_inference_ownership",
+					"canonical_session_ownership",
+				],
 			})}\n`,
 		);
 		expect(secondSocket.writes).toEqual([firstWireData]);
@@ -934,53 +938,71 @@ describe("DaemonClient", () => {
 		await expect(response).resolves.toMatchObject({ id: firstEnvelope.id, success: true });
 		client.close();
 	});
-	it("keeps passive Base8 inspection but never sends work, hydration, or graceful cleanup", async () => {
-		const client = new DaemonClient("/tmp/base-legacy.sock");
-		const connected = client.connect();
-		const socket = netMock.sockets[0]!;
-		socket.emit("connect");
-		await connected;
-		emitHello(socket, 8, ["session_input_admission", "client_owned_sessions", "agent_roster"], 27);
-		const refused: DaemonCommand[] = [
-			{ type: "create" },
-			{ type: "attach", activeSessionId: "active" },
-			{ type: "prompt", activeSessionId: "active", message: "hello" },
-			{ type: "start_side_question", activeSessionId: "active", sideQuestionId: "s", question: "hello" },
-			{ type: "compact", activeSessionId: "active" },
-			{ type: "refine", activeSessionId: "active" },
-			{ type: "resume_queue", activeSessionId: "active" },
-			{ type: "wait_for_idle", activeSessionId: "active" },
-			{ type: "wait_for_headless_completion", activeSessionId: "active" },
-			{ type: "send_message", targetActiveSessionId: "active", message: "hello" },
-			{ type: "cron_add", activeSessionId: "active", schedule: "* * * * *", prompt: "hello" },
-			{ type: "detach", activeSessionId: "active" },
-			{ type: "kill", activeSessionId: "active" },
-			{ type: "complete_owned_session", activeSessionId: "active" },
-			{ type: "shutdown", force: true },
-			{ type: "list_saved_sessions", activeSessionId: "active", scope: "current" },
-		];
-		for (const command of refused) await expect(client.request(command)).rejects.toThrow("Command not sent");
-		await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toThrow("Command not sent");
-		expect(socket.writes).toEqual([]);
-		for (const command of [
-			{ type: "list" },
-			{ type: "get_state", activeSessionId: "active" },
-			{ type: "get_messages", activeSessionId: "active" },
-			{ type: "list_saved_sessions", cwd: "/tmp", scope: "current" },
-		] satisfies DaemonCommand[]) {
-			const response = client.request(command);
-			const envelope = JSON.parse(socket.writes.at(-1)!);
-			expect(envelope.protocol.version).toBe(8);
-			socket.emit(
-				"data",
-				`${JSON.stringify({ id: envelope.id, type: "response", command: command.type, success: true })}\n`,
+	it.each([8, 9])(
+		"keeps passive Base%s inspection but never sends work, hydration, or graceful cleanup",
+		async (version) => {
+			const client = new DaemonClient("/tmp/base-legacy.sock");
+			const connected = client.connect();
+			const socket = netMock.sockets[0]!;
+			socket.emit("connect");
+			await connected;
+			emitHello(
+				socket,
+				version,
+				[
+					"session_input_admission",
+					"client_owned_sessions",
+					"agent_roster",
+					...(version === 9 ? ["native_inference_ownership" as const] : []),
+				],
+				version === 8 ? 27 : 28,
 			);
-			await expect(response).resolves.toMatchObject({ success: true });
-		}
-		client.close();
-	});
+			const refused: DaemonCommand[] = [
+				{ type: "create" },
+				{ type: "attach", activeSessionId: "active", recoveryConfig: { cwd: "/tmp" } },
+				{ type: "retry_worker", activeSessionId: "active" },
+				{ type: "import_jsonl", activeSessionId: "active", inputPath: "/tmp/import.jsonl" },
+				{ type: "export_jsonl", activeSessionId: "active" },
+				{ type: "prompt", activeSessionId: "active", message: "hello" },
+				{ type: "start_side_question", activeSessionId: "active", sideQuestionId: "s", question: "hello" },
+				{ type: "compact", activeSessionId: "active" },
+				{ type: "refine", activeSessionId: "active" },
+				{ type: "resume_queue", activeSessionId: "active" },
+				{ type: "wait_for_idle", activeSessionId: "active" },
+				{ type: "wait_for_headless_completion", activeSessionId: "active" },
+				{ type: "send_message", targetActiveSessionId: "active", message: "hello" },
+				{ type: "cron_add", activeSessionId: "active", schedule: "* * * * *", prompt: "hello" },
+				{ type: "detach", activeSessionId: "active" },
+				{ type: "kill", activeSessionId: "active" },
+				{ type: "complete_owned_session", activeSessionId: "active" },
+				{ type: "shutdown", force: true },
+				{ type: "list_saved_sessions", activeSessionId: "active", scope: "current" },
+			];
+			for (const command of refused) await expect(client.request(command)).rejects.toThrow("Command not sent");
+			await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toThrow(
+				"Command not sent",
+			);
+			expect(socket.writes).toEqual([]);
+			for (const command of [
+				{ type: "list" },
+				{ type: "get_state", activeSessionId: "active" },
+				{ type: "get_messages", activeSessionId: "active" },
+				{ type: "list_saved_sessions", cwd: "/tmp", scope: "current" },
+			] satisfies DaemonCommand[]) {
+				const response = client.request(command);
+				const envelope = JSON.parse(socket.writes.at(-1)!);
+				expect(envelope.protocol.version).toBe(version);
+				socket.emit(
+					"data",
+					`${JSON.stringify({ id: envelope.id, type: "response", command: command.type, success: true })}\n`,
+				);
+				await expect(response).resolves.toMatchObject({ success: true });
+			}
+			client.close();
+		},
+	);
 
-	it("does not replay native work after a protocol9 to Base8 downgrade", async () => {
+	it.each([8, 9])("does not replay native work after a protocol10 to Base%s downgrade", async (version) => {
 		const client = new DaemonClient("/tmp/base-reconnect.sock");
 		client.enableRequestRecovery();
 		const connected = client.connect();
@@ -990,7 +1012,7 @@ describe("DaemonClient", () => {
 		emitHello(first);
 		const work = client.request({ type: "prompt", activeSessionId: "active", message: "hello" });
 		const rejected = expect(work).rejects.toMatchObject({
-			capability: "native_inference_ownership",
+			capability: "canonical_session_ownership",
 			afterReconnect: true,
 		});
 		const read = client.request({ type: "list" });
@@ -1000,18 +1022,48 @@ describe("DaemonClient", () => {
 		const second = netMock.sockets[1]!;
 		second.emit("connect");
 		await reconnected;
-		emitHello(second, 8, ["session_input_admission"], 27);
+		emitHello(
+			second,
+			version,
+			["session_input_admission", ...(version === 9 ? ["native_inference_ownership" as const] : [])],
+			version === 8 ? 27 : 28,
+		);
 		await rejected;
 		expect(second.writes).toHaveLength(1);
 		expect(JSON.parse(second.writes[0]!)).toEqual({
 			...JSON.parse(readWire),
-			protocol: { name: "base-context.daemon", version: 8 },
+			protocol: { name: "base-context.daemon", version },
 		});
 		const { id } = JSON.parse(readWire);
 		second.emit("data", `${JSON.stringify({ id, type: "response", command: "list", success: true })}\n`);
 		await read;
 		client.close();
 	});
+
+	it.each(["canonical_session_ownership", "native_inference_ownership"] as const)(
+		"rejects a current daemon missing %s before native egress",
+		async (missing) => {
+			const client = new DaemonClient("/tmp/base-owner-gate.sock");
+			const connected = client.connect();
+			const socket = netMock.sockets[0]!;
+			socket.emit("connect");
+			await connected;
+			emitHello(socket);
+			socket.emit(
+				"data",
+				`${JSON.stringify({
+					...client.hello,
+					serverCapabilities: client.hello!.serverCapabilities.filter((capability) => capability !== missing),
+				})}\n`,
+			);
+			await expect(client.request({ type: "create" })).rejects.toMatchObject({ capability: missing });
+			await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toMatchObject({
+				capability: missing,
+			});
+			expect(socket.writes).toEqual([]);
+			client.close();
+		},
+	);
 });
 
 async function captureRejection(promise: Promise<void>): Promise<Error> {

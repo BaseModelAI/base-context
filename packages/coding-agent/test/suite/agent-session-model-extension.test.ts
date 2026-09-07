@@ -42,9 +42,9 @@ function createHeartbeat(): AgentCronJob {
 describe("AgentSession model and extension characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -521,7 +521,7 @@ describe("AgentSession model and extension characterization", () => {
 			model: Model<string>;
 			thinkingLevel?: ThinkingLevel;
 		}>);
-		harness.session.setThinkingLevel("high");
+		await harness.session.setThinkingLevel("high");
 
 		await harness.session.cycleModel();
 		expect(harness.session.model?.id).toBe("faux-2");
@@ -536,9 +536,9 @@ describe("AgentSession model and extension characterization", () => {
 		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: false }] });
 		harnesses.push(harness);
 
-		harness.session.setThinkingLevel("high");
+		await harness.session.setThinkingLevel("high");
 		expect(harness.session.thinkingLevel).toBe("off");
-		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
+		expect(await harness.session.cycleThinkingLevel()).toBeUndefined();
 	});
 
 	it("throws when setModel is called without configured auth", async () => {

@@ -20,8 +20,16 @@ describe("SessionManager git state", () => {
 	let repoDir: string;
 	let sessionDir: string;
 	let firstSha: string;
+	let managers: SessionManager[];
+
+	async function createSession(): Promise<SessionManager> {
+		const manager = await SessionManager.create(repoDir, sessionDir);
+		managers.push(manager);
+		return manager;
+	}
 
 	beforeEach(() => {
+		managers = [];
 		repoDir = mkdtempSync(join(tmpdir(), "sm-git-repo-"));
 		sessionDir = mkdtempSync(join(tmpdir(), "sm-git-sessions-"));
 		git(repoDir, "init", "-q", "-b", "main");
@@ -31,13 +39,14 @@ describe("SessionManager git state", () => {
 		firstSha = commit(repoDir, "init");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(managers.map((manager) => manager.close()));
 		rmSync(repoDir, { recursive: true, force: true });
 		rmSync(sessionDir, { recursive: true, force: true });
 	});
 
-	it("captures git context in the session header", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
+	it("captures git context in the session header", async () => {
+		const sm = await createSession();
 		expect(sm.getHeader()?.git).toEqual({
 			branch: "main",
 			commit: firstSha,
@@ -45,43 +54,43 @@ describe("SessionManager git state", () => {
 		});
 	});
 
-	it("does not record a git_state entry when nothing changed", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
-		expect(sm.recordGitStateIfChanged()).toBeUndefined();
+	it("does not record a git_state entry when nothing changed", async () => {
+		const sm = await createSession();
+		expect(await sm.recordGitStateIfChanged()).toBeUndefined();
 		expect(sm.getEntries().some((e) => e.type === "git_state")).toBe(false);
 	});
 
-	it("records a git_state entry when the commit changes", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
+	it("records a git_state entry when the commit changes", async () => {
+		const sm = await createSession();
 		const secondSha = commit(repoDir, "second");
 
-		const id = sm.recordGitStateIfChanged();
+		const id = await sm.recordGitStateIfChanged();
 		expect(id).toBeDefined();
 
 		const entry = sm.getEntries().find((e) => e.type === "git_state");
 		expect(entry).toMatchObject({ type: "git_state", git: { commit: secondSha } });
 
-		expect(sm.recordGitStateIfChanged()).toBeUndefined();
+		expect(await sm.recordGitStateIfChanged()).toBeUndefined();
 	});
 
-	it("re-records git state on a branch that lacks it on its active path", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
-		const msgId = sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 });
+	it("re-records git state on a branch that lacks it on its active path", async () => {
+		const sm = await createSession();
+		const msgId = await sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 });
 		commit(repoDir, "second");
 
-		expect(sm.recordGitStateIfChanged()).toBeDefined();
+		expect(await sm.recordGitStateIfChanged()).toBeDefined();
 
 		// Navigate to before that entry: this branch's nearest git context is the header (firstSha),
 		// so even though the file already holds a git_state for the live commit, a new one must be
 		// appended on this path rather than deduped away.
 		sm.branch(msgId);
-		expect(sm.recordGitStateIfChanged()).toBeDefined();
+		expect(await sm.recordGitStateIfChanged()).toBeDefined();
 	});
 
-	it("captures git context in a forked session header", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
-		const msgId = sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 });
-		sm.createBranchedSession(msgId);
+	it("captures git context in a forked session header", async () => {
+		const sm = await createSession();
+		const msgId = await sm.appendMessage({ role: "user", content: [{ type: "text", text: "hi" }], timestamp: 1 });
+		await sm.createBranchedSession(msgId);
 		expect(sm.getHeader()?.git).toEqual({
 			branch: "main",
 			commit: firstSha,
@@ -89,7 +98,7 @@ describe("SessionManager git state", () => {
 		});
 	});
 
-	it("captures target git context when forking and drops the source's git_state", () => {
+	it("captures target git context when forking and drops the source's git_state", async () => {
 		const sourcePath = join(sessionDir, "source.jsonl");
 		writeFileSync(
 			sourcePath,
@@ -126,7 +135,8 @@ describe("SessionManager git state", () => {
 			].join("\n")}\n`,
 		);
 
-		const forked = SessionManager.forkFrom(sourcePath, repoDir, sessionDir);
+		const forked = await SessionManager.forkFrom(sourcePath, repoDir, sessionDir);
+		managers.push(forked);
 
 		expect(forked.getHeader()?.git).toEqual({
 			branch: "main",
@@ -139,10 +149,10 @@ describe("SessionManager git state", () => {
 		expect(entries.find((e) => e.id === "m2")?.parentId).toBe("m1");
 	});
 
-	it("keeps git_state entries out of the LLM context", () => {
-		const sm = SessionManager.create(repoDir, sessionDir);
+	it("keeps git_state entries out of the LLM context", async () => {
+		const sm = await createSession();
 		commit(repoDir, "second");
-		sm.recordGitStateIfChanged();
+		await sm.recordGitStateIfChanged();
 		expect(sm.buildSessionContext().messages).toHaveLength(0);
 	});
 });

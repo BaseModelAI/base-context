@@ -33,8 +33,10 @@ type SerializedInternals = {
 
 describe("Daemon-backed serializedRefine propagation", () => {
 	const tempDirs: string[] = [];
+	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(harnesses.splice(0).map((harness) => harness.cleanup()));
 		for (const dir of tempDirs.splice(0)) {
 			rmSync(dir, { recursive: true, force: true });
 		}
@@ -50,9 +52,10 @@ describe("Daemon-backed serializedRefine propagation", () => {
 		const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
 			capturedConfig = options.sessionConfig;
 			const harness = await createHarness({
-				persistSession: true,
+				sessionManager: options.sessionManager,
 				serializedRefine: options.sessionConfig?.serializedRefine ?? false,
 			});
+			harnesses.push(harness);
 			return {
 				session: harness.session,
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as never,
@@ -70,9 +73,9 @@ describe("Daemon-backed serializedRefine propagation", () => {
 			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 		};
 
-		const sessionManager = SessionManager.create(tempDir, sessionDir);
-		sessionManager.newSession();
+		const sessionManager = await SessionManager.create(tempDir, sessionDir);
 		const sessionFile = sessionManager.getSessionFile()!;
+		await sessionManager.close();
 
 		const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
 
@@ -83,7 +86,7 @@ describe("Daemon-backed serializedRefine propagation", () => {
 		const sessionInternals = state.runtime.session as unknown as SerializedInternals;
 		expect(sessionInternals._serializedRefine).toBe(true);
 
-		state.runtime.session.dispose();
+		await state.runtime.session.disposeAsync();
 	});
 
 	it("serializedRefine=false in defaultSessionConfig produces _serializedRefine=false session", async () => {
@@ -93,9 +96,10 @@ describe("Daemon-backed serializedRefine propagation", () => {
 
 		const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
 			const harness = await createHarness({
-				persistSession: true,
+				sessionManager: options.sessionManager,
 				serializedRefine: options.sessionConfig?.serializedRefine ?? false,
 			});
+			harnesses.push(harness);
 			return {
 				session: harness.session,
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as never,
@@ -113,16 +117,16 @@ describe("Daemon-backed serializedRefine propagation", () => {
 			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 		};
 
-		const sessionManager = SessionManager.create(tempDir, sessionDir);
-		sessionManager.newSession();
+		const sessionManager = await SessionManager.create(tempDir, sessionDir);
 		const sessionFile = sessionManager.getSessionFile()!;
+		await sessionManager.close();
 
 		const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
 
 		const sessionInternals = state.runtime.session as unknown as SerializedInternals;
 		expect(sessionInternals._serializedRefine).toBe(false);
 
-		state.runtime.session.dispose();
+		await state.runtime.session.disposeAsync();
 	});
 
 	it("daemon session with serializedRefine=true crosses threshold and applies refine", async () => {
@@ -140,7 +144,7 @@ describe("Daemon-backed serializedRefine propagation", () => {
 
 		const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
 			const harness = await createHarness({
-				persistSession: true,
+				sessionManager: options.sessionManager,
 				serializedRefine: options.sessionConfig?.serializedRefine ?? false,
 				settings: { autoRefine: { enabled: true, turnInterval: 2, cooldownMs: 0 } },
 				autoRefineReviewer: reviewer,
@@ -157,6 +161,7 @@ describe("Daemon-backed serializedRefine propagation", () => {
 				appliedEdits: [],
 				harnessStatePath: "/tmp/harness_state.json",
 			});
+			harnesses.push(harness);
 			return {
 				session,
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as never,
@@ -174,9 +179,9 @@ describe("Daemon-backed serializedRefine propagation", () => {
 			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 		};
 
-		const sessionManager = SessionManager.create(tempDir, sessionDir);
-		sessionManager.newSession();
+		const sessionManager = await SessionManager.create(tempDir, sessionDir);
 		const sessionFile = sessionManager.getSessionFile()!;
+		await sessionManager.close();
 
 		const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
 		const session = state.runtime.session;
@@ -198,6 +203,6 @@ describe("Daemon-backed serializedRefine propagation", () => {
 		expect(reviewer).toHaveBeenCalledTimes(1);
 
 		// Cleanup
-		harness.cleanup();
+		await harness.cleanup();
 	});
 });

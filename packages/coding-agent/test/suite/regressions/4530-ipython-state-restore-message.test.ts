@@ -1,4 +1,4 @@
-import type { AgentTool } from "@ponythewhite/base-context-agent";
+import type { AgentEvent, AgentTool } from "@ponythewhite/base-context-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -34,9 +34,9 @@ describe("ENG-4530 IPython state restore message", () => {
 		initTheme("dark");
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -125,7 +125,7 @@ describe("ENG-4530 IPython state restore message", () => {
 	});
 
 	it("retries only undelivered input after partial scheduler delivery", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		await harness.session.sendCustomMessage(
 			{
@@ -139,9 +139,15 @@ describe("ENG-4530 IPython state restore message", () => {
 		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
 		await harness.session.prompt("queued prompt", { streamingBehavior: "followUp" });
 		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = false;
+		const eventHost = harness.session as unknown as {
+			_handleAgentEvent(event: AgentEvent): void;
+			_agentEventQueue: Promise<void>;
+		};
 		vi.spyOn(harness.session.agent, "prompt").mockImplementationOnce(async (messages) => {
 			const batch = Array.isArray(messages) ? messages : [messages];
 			harness.session.agent.state.messages.push(batch[0]);
+			eventHost._handleAgentEvent({ type: "message_end", message: batch[0] });
+			await eventHost._agentEventQueue;
 			harness.session.acquireQueuedWorkPause();
 			throw new Error("partial delivery failed");
 		});

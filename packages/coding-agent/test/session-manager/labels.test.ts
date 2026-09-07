@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { type LabelEntry, SessionManager } from "../../src/core/session-manager.js";
 
 describe("SessionManager labels", () => {
-	it("sets and gets labels", () => {
+	it("sets and gets labels", async () => {
 		const session = SessionManager.inMemory();
 
-		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
 		expect(session.getLabel(msgId)).toBeUndefined();
 
-		const labelId = session.appendLabelChange(msgId, "checkpoint");
+		const labelId = await session.appendLabelChange(msgId, "checkpoint");
 		expect(session.getLabel(msgId)).toBe("checkpoint");
 
 		const entries = session.getEntries();
@@ -20,26 +20,26 @@ describe("SessionManager labels", () => {
 		expect(labelEntry.label).toBe("checkpoint");
 	});
 
-	it("clears labels with undefined", () => {
+	it("clears labels with undefined", async () => {
 		const session = SessionManager.inMemory();
 
-		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
-		session.appendLabelChange(msgId, "checkpoint");
+		await session.appendLabelChange(msgId, "checkpoint");
 		expect(session.getLabel(msgId)).toBe("checkpoint");
 
-		session.appendLabelChange(msgId, undefined);
+		await session.appendLabelChange(msgId, undefined);
 		expect(session.getLabel(msgId)).toBeUndefined();
 	});
 
-	it("last label wins", () => {
+	it("last label wins", async () => {
 		const session = SessionManager.inMemory();
 
-		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
-		session.appendLabelChange(msgId, "first");
-		session.appendLabelChange(msgId, "second");
-		const lastLabelId = session.appendLabelChange(msgId, "third");
+		await session.appendLabelChange(msgId, "first");
+		await session.appendLabelChange(msgId, "second");
+		const lastLabelId = await session.appendLabelChange(msgId, "third");
 
 		expect(session.getLabel(msgId)).toBe("third");
 
@@ -50,11 +50,11 @@ describe("SessionManager labels", () => {
 		expect(msgNode?.labelTimestamp).toBe(lastLabelEntry.timestamp);
 	});
 
-	it("labels are included in tree nodes", () => {
+	it("labels are included in tree nodes", async () => {
 		const session = SessionManager.inMemory();
 
-		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		const msg2Id = session.appendMessage({
+		const msg1Id = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msg2Id = await session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
 			api: "anthropic-messages",
@@ -72,8 +72,8 @@ describe("SessionManager labels", () => {
 			timestamp: 2,
 		});
 
-		const msg1LabelId = session.appendLabelChange(msg1Id, "start");
-		const msg2LabelId = session.appendLabelChange(msg2Id, "response");
+		const msg1LabelId = await session.appendLabelChange(msg1Id, "start");
+		const msg2LabelId = await session.appendLabelChange(msg2Id, "response");
 
 		const entries = session.getEntries();
 		const msg1LabelEntry = entries.find((e) => e.id === msg1LabelId) as LabelEntry;
@@ -89,11 +89,11 @@ describe("SessionManager labels", () => {
 		expect(msg2Node?.labelTimestamp).toBe(msg2LabelEntry.timestamp);
 	});
 
-	it("labels are preserved in createBranchedSession", () => {
+	it("labels are preserved in createBranchedSession", async () => {
 		const session = SessionManager.inMemory();
 
-		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		const msg2Id = session.appendMessage({
+		const msg1Id = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msg2Id = await session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
 			api: "anthropic-messages",
@@ -111,13 +111,13 @@ describe("SessionManager labels", () => {
 			timestamp: 2,
 		});
 
-		const msg1LabelId = session.appendLabelChange(msg1Id, "important");
-		const msg2LabelId = session.appendLabelChange(msg2Id, "also-important");
+		const msg1LabelId = await session.appendLabelChange(msg1Id, "important");
+		const msg2LabelId = await session.appendLabelChange(msg2Id, "also-important");
 		const originalEntries = session.getEntries();
 		const msg1LabelEntry = originalEntries.find((e) => e.id === msg1LabelId) as LabelEntry;
 		const msg2LabelEntry = originalEntries.find((e) => e.id === msg2LabelId) as LabelEntry;
 
-		session.createBranchedSession(msg2Id);
+		await session.createBranchedSession(msg2Id);
 
 		expect(session.getLabel(msg1Id)).toBe("important");
 		expect(session.getLabel(msg2Id)).toBe("also-important");
@@ -133,11 +133,11 @@ describe("SessionManager labels", () => {
 		expect(msg2Node?.labelTimestamp).toBe(msg2LabelEntry.timestamp);
 	});
 
-	it("labels not on path are not preserved in createBranchedSession", () => {
+	it("labels not on path are not preserved in createBranchedSession", async () => {
 		const session = SessionManager.inMemory();
 
-		const msg1Id = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		const msg2Id = session.appendMessage({
+		const msg1Id = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msg2Id = await session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
 			api: "anthropic-messages",
@@ -154,33 +154,33 @@ describe("SessionManager labels", () => {
 			stopReason: "stop",
 			timestamp: 2,
 		});
-		const msg3Id = session.appendMessage({ role: "user", content: "followup", timestamp: 3 });
+		const msg3Id = await session.appendMessage({ role: "user", content: "followup", timestamp: 3 });
 
-		session.appendLabelChange(msg1Id, "first");
-		session.appendLabelChange(msg2Id, "second");
-		session.appendLabelChange(msg3Id, "third");
+		await session.appendLabelChange(msg1Id, "first");
+		await session.appendLabelChange(msg2Id, "second");
+		await session.appendLabelChange(msg3Id, "third");
 
-		session.createBranchedSession(msg2Id);
+		await session.createBranchedSession(msg2Id);
 
 		expect(session.getLabel(msg1Id)).toBe("first");
 		expect(session.getLabel(msg2Id)).toBe("second");
 		expect(session.getLabel(msg3Id)).toBeUndefined();
 	});
 
-	it("labels are not included in buildSessionContext", () => {
+	it("labels are not included in buildSessionContext", async () => {
 		const session = SessionManager.inMemory();
 
-		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		session.appendLabelChange(msgId, "checkpoint");
+		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		await session.appendLabelChange(msgId, "checkpoint");
 
 		const ctx = session.buildSessionContext();
 		expect(ctx.messages).toHaveLength(1);
 		expect(ctx.messages[0].role).toBe("user");
 	});
 
-	it("throws when labeling non-existent entry", () => {
+	it("throws when labeling non-existent entry", async () => {
 		const session = SessionManager.inMemory();
 
-		expect(() => session.appendLabelChange("non-existent", "label")).toThrow("Entry non-existent not found");
+		await expect(session.appendLabelChange("non-existent", "label")).rejects.toThrow("Entry non-existent not found");
 	});
 });

@@ -67,10 +67,10 @@ describe("ConfigurationMenuComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		initTheme("dark");
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

@@ -27,8 +27,8 @@ describe("ENG-4583 latest tool expand hint", () => {
 		initTheme("dark");
 	});
 
-	afterEach(() => {
-		harness?.cleanup();
+	afterEach(async () => {
+		await harness?.cleanup();
 		harness = undefined;
 	});
 

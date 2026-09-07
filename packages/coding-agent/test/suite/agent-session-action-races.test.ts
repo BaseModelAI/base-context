@@ -50,8 +50,8 @@ function createContextMessage(content: string): CustomMessage {
 describe("AgentSession action commit-fence races", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
 	it.each([

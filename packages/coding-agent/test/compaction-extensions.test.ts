@@ -1,12 +1,16 @@
 /**
- * Tests for compaction extension events (before_compact / compact).
+ * Local integration tests for compaction extension events (before_compact / compact).
  */
 
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@ponythewhite/base-context-agent";
-import { getModel } from "@ponythewhite/base-context-ai";
+import {
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
+	registerFauxProvider,
+} from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -21,13 +25,11 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
-import { createIpythonTool } from "../src/index.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
-
-describe.skipIf(!API_KEY)("Compaction extensions", () => {
+describe("Compaction extensions (local simulation)", () => {
 	let session: AgentSession;
+	let faux: FauxProviderRegistration | undefined;
 	let tempDir: string;
 	let capturedEvents: SessionEvent[];
 
@@ -38,11 +40,12 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 	});
 
 	afterEach(async () => {
-		if (session) {
-			session.dispose();
-		}
-		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+		try {
+			if (session) await session.disposeAsync();
+		} finally {
+			faux?.unregister();
+			faux = undefined;
+			if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true });
 		}
 	});
 
@@ -85,21 +88,29 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		};
 	}
 
-	function createSession(extensions: Extension[]) {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+	async function createSession(extensions: Extension[]) {
+		faux = registerFauxProvider();
+		const local = faux;
+		// Two turns and split compaction can consume four local responses.
+		local.setResponses(Array.from({ length: 4 }, () => fauxAssistantMessage("Local reply and compaction summary.")));
+		const model = local.getModel();
 		const agent = new Agent({
-			getApiKey: () => API_KEY,
+			getApiKey: () => "faux-key",
 			initialState: {
 				model,
 				systemPrompt: "You are a helpful assistant. Be concise.",
-				tools: [createIpythonTool(process.cwd())],
+				tools: [],
 			},
 		});
 
-		const sessionManager = SessionManager.create(tempDir);
-		const settingsManager = SettingsManager.create(tempDir, tempDir);
-		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		const modelRegistry = ModelRegistry.create(authStorage);
+		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
+		const settingsManager = SettingsManager.inMemory({
+			compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 1 },
+			autoRefine: { enabled: false },
+		});
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
 
 		const runtime = createExtensionRuntime();
 		const resourceLoader = {
@@ -112,22 +123,27 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
+			agentDir: tempDir,
 			modelRegistry,
 			resourceLoader,
+			initialActiveToolNames: [],
+			allowedToolNames: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
 		});
-
+		await session.initialize();
 		return session;
 	}
 
 	it("should emit before_compact and compact events", async () => {
 		const extension = createExtension();
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.prompt("What is 3+3? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.compact();
 
@@ -157,10 +173,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 	it("should allow extensions to cancel compaction", async () => {
 		const extension = createExtension(() => ({ cancel: true }));
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await expect(session.compact()).rejects.toThrow("Compaction cancelled");
 
@@ -183,13 +199,13 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			}
 			return undefined;
 		});
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.prompt("What is 3+3? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		const result = await session.compact();
 
@@ -207,10 +223,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 	it("should include entries in compact event after compaction is saved", async () => {
 		const extension = createExtension();
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.compact();
 
@@ -258,10 +274,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			shortcuts: new Map(),
 		};
 
-		createSession([throwingExtension]);
+		await createSession([throwingExtension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		const result = await session.compact();
 
@@ -338,10 +354,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			shortcuts: new Map(),
 		};
 
-		createSession([extension1, extension2]);
+		await createSession([extension1, extension2]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.compact();
 
@@ -355,13 +371,13 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			capturedBeforeEvent = event;
 			return undefined;
 		});
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.prompt("What is 3+3? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		await session.compact();
 
@@ -402,10 +418,10 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			}
 			return undefined;
 		});
-		createSession([extension]);
+		await createSession([extension]);
 
 		await session.prompt("What is 2+2? Reply with just the number.");
-		await session.agent.waitForIdle();
+		await session.waitForIdle();
 
 		const result = await session.compact();
 

@@ -131,12 +131,25 @@ export function isDaemonCatalogProcess(environment: NodeJS.ProcessEnv = process.
 }
 
 export async function runDaemonCatalogProcess(): Promise<never> {
+	// Shutdown shares this queue, so admitted writes close their owner before process exit.
+	let requests = Promise.resolve();
+	let shuttingDown = false;
 	process.on("disconnect", () => process.exit(0));
 	process.on("message", (value: unknown) => {
 		if (!isCatalogRequest(value)) {
 			return;
 		}
-		void handleCatalogRequest(value);
+		if (shuttingDown) {
+			sendCatalogMessage({
+				type: "response",
+				id: value.id,
+				success: false,
+				error: "Daemon catalog is shutting down",
+			});
+			return;
+		}
+		if (value.command === "shutdown") shuttingDown = true;
+		requests = requests.then(() => handleCatalogRequest(value));
 	});
 	sendCatalogMessage({ type: "ready" });
 	return new Promise(() => {});
@@ -192,10 +205,16 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				}
 				throw new Error(`No session found matching '${request.selector}'`);
 			}
-			case "rename":
-				SessionManager.open(request.sessionPath).appendSessionInfo(request.name.trim());
+			case "rename": {
+				const manager = await SessionManager.open(request.sessionPath);
+				try {
+					await manager.appendSessionInfo(request.name.trim());
+				} finally {
+					await manager.close();
+				}
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				return;
+			}
 			case "delete":
 				sendCatalogMessage({
 					type: "response",
@@ -215,29 +234,42 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 					});
 					return;
 				}
+				let archived = true;
 				if (session.state?.status !== "archived") {
-					SessionManager.open(request.sessionPath).appendSessionState({ status: "archived" });
+					const manager = await SessionManager.open(request.sessionPath);
+					try {
+						archived = manager.getSessionId() === request.sessionId;
+						if (archived) await manager.appendSessionState({ status: "archived" });
+					} finally {
+						await manager.close();
+					}
 				}
 				sendCatalogMessage({
 					type: "response",
 					id: request.id,
 					success: true,
-					data: { archived: true },
+					data: { archived },
 				});
 				return;
 			}
-			case "mark_interrupted":
-				SessionManager.open(request.sessionPath).appendCustomMessageEntry(
-					"prime-agent.worker_recovery",
-					"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
-					false,
-					{
-						activeSessionId: request.activeSessionId,
-						operations: request.operations,
-					},
-				);
+			case "mark_interrupted": {
+				const manager = await SessionManager.open(request.sessionPath);
+				try {
+					await manager.appendCustomMessageEntry(
+						"prime-agent.worker_recovery",
+						"<prime_agent_worker_interrupted>\nThe isolated session worker stopped during in-flight work. The saved transcript was recovered, but uncertain model, tool, bash, or child-agent work was not replayed. Inspect external side effects before continuing.\n</prime_agent_worker_interrupted>",
+						false,
+						{
+							activeSessionId: request.activeSessionId,
+							operations: request.operations,
+						},
+					);
+				} finally {
+					await manager.close();
+				}
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				return;
+			}
 			case "shutdown":
 				sendCatalogMessage({ type: "response", id: request.id, success: true });
 				setImmediate(() => process.exit(0));

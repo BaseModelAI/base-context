@@ -21,6 +21,8 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 
 vi.mock("../../agent/src/agent-loop.js", () => ({
 	runAgentLoop: async (_messages: AgentMessage[], _context: AgentContext, config: AgentLoopConfig) => {
+		expect(config.beforeContextBuild).toBeTypeOf("function");
+		await config.beforeContextBuild!();
 		const intent = invocation(`bound-execution-${++executionSerial}`);
 		await config.onToolInvocationStarting?.(intent);
 		await config.onToolExchangeFinalized?.(exchange(intent));
@@ -35,10 +37,13 @@ beforeEach(() => {
 	executionSerial = 0;
 	dir = mkdtempSync(join(tmpdir(), "base-context-execution-binding-"));
 });
-afterEach(() => {
-	session?.dispose();
-	session = undefined;
-	rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+	try {
+		await session?.disposeAsync();
+	} finally {
+		session = undefined;
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 async function createSession(
@@ -98,7 +103,7 @@ function exchange(intent: ToolInvocation): FinalizedToolExchange {
 }
 
 it("binds direct AgentSession construction and persists before caller hooks", async () => {
-	const manager = SessionManager.create(dir, join(dir, "sessions"));
+	const manager = await SessionManager.create(dir, join(dir, "sessions"));
 	const calls: string[] = [];
 	const owner = await createSession(manager, {
 		onToolInvocationStarting: (intent) => {
@@ -110,7 +115,10 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 			calls.push("caller-final");
 		},
 	});
+	const initialize = vi.spyOn(owner, "initialize");
 	await owner.agent.prompt("Exercise native loop binding without a provider");
+	expect(initialize).toHaveBeenCalled();
+	expect(() => owner.agent.bindContextOwner(async () => {})).toThrow("Agent context owner is already bound");
 	owner.agent.onToolInvocationStarting = (intent) => {
 		expect(manager.getEntry(`${intent.executionId}:intent`)?.type).toBe("tool_intent");
 		calls.push("replacement-intent");
@@ -125,13 +133,17 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 });
 
 it("follows the session owner after a source-history switch", async () => {
-	const manager = SessionManager.create(dir, join(dir, "sessions"));
+	const manager = await SessionManager.create(dir, join(dir, "sessions"));
 	const owner = await createSession(manager);
-	manager.appendSessionInfo("previous");
+	await manager.appendSessionInfo("previous");
 	const previousPath = manager.getSessionFile()!;
 	const before = readFileSync(previousPath, "utf8");
-	manager.newSession();
+	await manager.newSession();
 	await owner.agent.prompt("Exercise new history without a provider");
 	expect(readFileSync(previousPath, "utf8")).toBe(before);
-	expect(readFileSync(manager.getSessionFile()!, "utf8")).toContain("bound-execution");
+	const currentPath = manager.getSessionFile()!;
+	expect(readFileSync(currentPath, "utf8")).toContain("bound-execution");
+	await owner.disposeAsync();
+	const reopened = await SessionManager.open(currentPath);
+	await reopened.close();
 });
