@@ -1,4 +1,5 @@
 import type { Api, Provider, ProviderAttemptInfo, ProviderAttemptReceipt } from "@ponythewhite/base-context-ai";
+import type { SessionHistoryReadView } from "./session-history-index.js";
 
 /** A writer-bound source. It does not move when the UI selects another session or leaf. */
 export interface SourceSnapshotRef {
@@ -68,6 +69,8 @@ export type NativeRequestEvent = NativeRequestMetadata &
 /** The session writer remains the only authoritative request history. */
 export interface BoundRequestSink {
 	readonly source: Promise<SourceSnapshotRef>;
+	/** Native canonical readers use exactly this sink's captured frontier. */
+	readHistory?<T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T>;
 	retain(): void;
 	release(): Promise<void>;
 	persist(event: NativeRequestEvent): Promise<void>;

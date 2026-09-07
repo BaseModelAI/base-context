@@ -19,7 +19,6 @@ import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/g
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import type {
-	HistoryIndex,
 	HistoryIndexPage,
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
@@ -33,9 +32,13 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
-import type { BoundRequestSink, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
-import { SessionHistoryIndex } from "./session-history-index.js";
+import {
+	type BoundSessionRequestSink,
+	SessionHistoryIndex,
+	type SessionHistoryReadView,
+} from "./session-history-index.js";
 import {
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
 	SessionJournalOwner,
@@ -1442,7 +1445,7 @@ export class SessionManager {
 
 	/** Exact source metadata within the captured current branch, not a scan of message arrays. */
 	getHistoryEntry(id: string): Promise<IndexedSourceEvent | undefined> {
-		return this._readHistory((index, sessionId, scope) => index.get(sessionId, id, scope));
+		return this._readHistory((view) => view.get(id));
 	}
 
 	/** Exact canonical JSON bytes as bounded UTF8 fragments, within the captured branch. */
@@ -1451,57 +1454,29 @@ export class SessionManager {
 		options: HistoryPayloadReadOptions = {},
 	): Promise<CanonicalPayloadFragment | undefined> {
 		const captured = { ...options, ...(options.cursor ? { cursor: { ...options.cursor } } : {}) };
-		return this._readHistory((index, sessionId, scope) => index.readPayload(sessionId, id, scope, captured));
+		return this._readHistory((view) => view.readPayload(id, captured));
 	}
 
 	pageHistory(after = 0, limit = 64): Promise<HistoryIndexPage> {
-		return this._readHistory((index, sessionId, scope) => index.page(sessionId, after, scope.through, limit, scope));
+		return this._readHistory((view) => view.page(after, limit));
 	}
 
 	searchHistory(query: string, limit = 16): Promise<HistoryIndexPage> {
-		return this._readHistory((index, sessionId, scope) =>
-			index.search(sessionId, query, scope.through, limit, scope),
-		);
+		return this._readHistory((view) => view.search(query, limit));
 	}
 
 	/** Structured descriptive evidence; selective output is not an exhaustive requirements list. */
 	taskEvidence(options: TaskEvidenceOptions = {}): Promise<TaskEvidencePage> {
 		const captured = { ...options, ...(options.after ? { after: { ...options.after } } : {}) };
-		return this._readHistory((index, sessionId, scope) => index.taskEvidence(sessionId, scope, captured));
+		return this._readHistory((view) => view.taskEvidence(captured));
 	}
 
-	private async _readHistory<T>(
-		read: (index: HistoryIndex, sessionId: string, scope: { leafId: string | null; through: number }) => Promise<T>,
-	): Promise<T> {
-		this._assertMutable();
-		const state = this.writeState;
-		const sessionId = this.sessionId;
-		const owner = state.owner;
-		if (!owner || owner.format !== "framed" || state.sourceVersion !== CURRENT_SESSION_VERSION)
-			throw new Error(
-				"Indexed history requires an owned canonical session; import or migrate legacy history explicitly",
-			);
-		state.pins++;
+	private async _readHistory<T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T> {
+		const sink = this.bindRequestSink();
 		try {
-			const captured = await this._enqueue(state, 0, async () => {
-				await owner.flush();
-				state.history ??= new SessionHistoryIndex(
-					sessionId,
-					join(
-						assertProductStatePath(getSessionArtifactPathForFile(owner.journalPath, sessionId)),
-						"history.sqlite",
-					),
-				);
-				return {
-					history: state.history,
-					snapshot: owner.getSnapshot(),
-					scope: { leafId: state.leafId, through: state.sequence },
-				};
-			});
-			const index = await captured.history.synchronize(captured.snapshot);
-			return await read(index, sessionId, captured.scope);
+			return await sink.readHistory(read);
 		} finally {
-			await this._releaseSourcePin(state);
+			await sink.release();
 		}
 	}
 
@@ -1721,7 +1696,7 @@ export class SessionManager {
 	}
 
 	/** Capture before waits; the barrier resolves only after this source's prior ACKs. */
-	bindRequestSink(): BoundRequestSink {
+	bindRequestSink(): BoundSessionRequestSink {
 		this._assertMutable();
 		const state = this.writeState;
 		const sourceFile =
@@ -1738,20 +1713,67 @@ export class SessionManager {
 			state.pins++;
 		};
 		retain();
-		const source = this._enqueue(state, 0, async (): Promise<SourceSnapshotRef> => {
+		const captured = this._enqueue(state, 0, async () => {
 			await state.owner?.flush();
-			return Object.freeze({
+			const source: SourceSnapshotRef = Object.freeze({
 				sessionId,
 				...(sourceFile ? { sessionFile: sourceFile } : {}),
 				leafId: state.leafId,
 				sourceSequence: state.sequence,
 				persistent,
 			});
+			return { source, snapshot: state.owner?.getSnapshot() };
 		});
+		const source = captured.then((value) => value.source);
 		// A captured auxiliary operation can await UI work before consuming its barrier.
 		void source.catch(() => undefined);
 		return {
 			source,
+			readHistory: async <T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T> => {
+				if (!held) throw new Error("Captured request sink is not retained");
+				// A running read holds its own pin if request disposal happens concurrently.
+				state.pins++;
+				try {
+					const { source: boundSource, snapshot } = await captured;
+					if (!snapshot || snapshot.format !== "framed" || state.sourceVersion !== CURRENT_SESSION_VERSION)
+						throw new Error(
+							"Indexed history requires an owned canonical session; import or migrate legacy history explicitly",
+						);
+					state.history ??= new SessionHistoryIndex(
+						sessionId,
+						join(
+							assertProductStatePath(getSessionArtifactPathForFile(snapshot.journalPath, sessionId)),
+							"history.sqlite",
+						),
+					);
+					const index = await state.history.synchronize(snapshot);
+					const scope = { leafId: boundSource.leafId, through: boundSource.sourceSequence };
+					let active = true;
+					const query = <R>(operation: () => Promise<R>): Promise<R> => {
+						if (!active) return Promise.reject(new Error("Captured history read has ended"));
+						return operation();
+					};
+					const view: SessionHistoryReadView = Object.freeze({
+						source: boundSource,
+						get: (id: string) => query(() => index.get(sessionId, id, scope)),
+						page: (after = 0, limit = 64) =>
+							query(() => index.page(sessionId, after, scope.through, limit, scope)),
+						search: (text: string, limit = 16) =>
+							query(() => index.search(sessionId, text, scope.through, limit, scope)),
+						taskEvidence: (options: TaskEvidenceOptions = {}) =>
+							query(() => index.taskEvidence(sessionId, scope, options)),
+						readPayload: (id: string, options: HistoryPayloadReadOptions = {}) =>
+							query(() => index.readPayload(sessionId, id, scope, options)),
+					});
+					try {
+						return await read(view);
+					} finally {
+						active = false;
+					}
+				} finally {
+					await this._releaseSourcePin(state);
+				}
+			},
 			retain,
 			release: async () => {
 				if (!held) return;

@@ -37,6 +37,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	await index.apply("session", events, 2);
 	await index.apply("session", events, 2);
 	expect(await index.get("session", "Item")).toEqual(events[0]);
+	expect(await index.get("session", "Item", { leafId: "item", through: 2 })).toEqual(events[0]);
+	expect(await index.get("session", "item", { leafId: "Item", through: 2 })).toBeUndefined();
 	expect(await index.get("other", "Item")).toBeUndefined();
 	expect((await index.page("session", 0, 2, 1)).events).toEqual([events[0]]);
 	expect((await index.search("session", "parser", 2)).events).toEqual([events[0]]);
@@ -252,13 +254,50 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"cursor mismatch",
 		);
 
+		let chainLeaf = taskScope.leafId;
+		for (let number = 0; number < 130; number++) {
+			const id = `chain-${number}`;
+			await owner.appendJson(entry(id, chainLeaf, "chain node"));
+			chainLeaf = id;
+		}
+		const chainSnapshot = owner.getSnapshot();
+		const chainScope = { leafId: chainLeaf, through: chainSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", chainSnapshot);
+		expect((await index.get("canonical", "root", chainScope))?.id).toBe("root");
+		expect(await index.get("canonical", "sibling", chainScope)).toBeUndefined();
+		expect((await index.get("canonical", "root-request", chainScope))?.id).toBe("root-request");
+		expect(await index.get("canonical", "sibling-request", chainScope)).toBeUndefined();
+		expect((await index.readPayload("canonical", "huge-task", chainScope))?.text).toBe(payload?.text);
+		expect(await index.readPayload("canonical", "sibling", chainScope)).toBeUndefined();
+		expect((await index.readPayload("canonical", "root-request", chainScope))?.text).toContain('"root-request"');
+		expect(await index.readPayload("canonical", "ROOT", chainScope)).toBeUndefined();
+		expect(await index.get("canonical", "root-request", { leafId: "root", through: 1 })).toBeUndefined();
+		expect(await index.readPayload("canonical", "root-request", { leafId: "root", through: 1 })).toBeUndefined();
+		expect((await index.get("canonical", "root-request", { ...chainScope, leafId: "root-request" }))?.id).toBe(
+			"root-request",
+		);
+		await expect(index.get("canonical", "absent", { ...chainScope, leafId: "ROOT" })).rejects.toThrow("branch leaf");
+		await expect(index.readPayload("canonical", "absent", { ...chainScope, leafId: "ROOT" })).rejects.toThrow(
+			"branch leaf",
+		);
+		await expect(index.get("canonical", "root", { leafId: chainLeaf, through: taskScope.through })).rejects.toThrow(
+			"branch leaf",
+		);
+		await index.apply("canonical", [], chainScope.through);
+		expect((await index.get("canonical", "root"))?.id).toBe("root");
+		await expect(index.get("canonical", "root", chainScope)).rejects.toThrow("parent lookup budget");
+		expect((await index.get("canonical", "chain-128", chainScope))?.id).toBe("chain-128");
+		await expect(index.readPayload("canonical", "root", chainScope)).rejects.toThrow("index is unavailable");
+		await index.syncSource("canonical", chainSnapshot);
+		expect((await index.get("canonical", "root", chainScope))?.id).toBe("root");
+
 		await index.close();
 		execFileSync(process.execPath, [
 			"--experimental-sqlite",
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=3;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=5;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -346,6 +385,26 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 			).entries,
 		).toHaveLength(1);
 		expect(readFileSync(journalPath)).toEqual(bytes);
+		await owner.appendJson(JSON.stringify({ type: "message", id: "orphan", parentId: "late" }));
+		const unresolved = owner.getSnapshot();
+		const orphanScope = { leafId: "orphan", through: unresolved.nextSequence - 1 };
+		await index.syncSource("edge", unresolved);
+		expect((await index.get("edge", "orphan", orphanScope))?.parentId).toBe("late");
+		expect(await index.get("edge", "absent", orphanScope)).toBeUndefined();
+		await expect(index.get("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
+		await expect(index.readPayload("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
+		await owner.appendJson(JSON.stringify({ type: "message", id: "late", parentId: "kept" }));
+		await owner.appendJson(JSON.stringify({ type: "message", id: "cycle-a", parentId: "cycle-b" }));
+		await owner.appendJson(JSON.stringify({ type: "message", id: "cycle-b", parentId: "cycle-a" }));
+		const linked = owner.getSnapshot();
+		const linkedScope = { ...orphanScope, through: linked.nextSequence - 1 };
+		await index.syncSource("edge", linked);
+		expect((await index.get("edge", "kept", linkedScope))?.id).toBe("kept");
+		expect((await index.readPayload("edge", "kept", linkedScope))?.text).toContain('"kept"');
+		await expect(index.get("edge", "kept", orphanScope)).rejects.toThrow("missing parent");
+		await expect(index.get("edge", "kept", { ...linkedScope, leafId: "cycle-a" })).rejects.toThrow("cycle");
+		expect((await index.get("edge", "cycle-a", { ...linkedScope, leafId: "cycle-a" }))?.id).toBe("cycle-a");
+		expect(await index.get("edge", "orphan", { ...linkedScope, leafId: "kept" })).toBeUndefined();
 		await owner.close();
 		writeFileSync(`${journalPath}.replacement`, bytes);
 		renameSync(`${journalPath}.replacement`, journalPath);

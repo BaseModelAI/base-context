@@ -1,5 +1,28 @@
-import { HistoryIndex } from "./history-index.js";
+import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import {
+	HistoryIndex,
+	type HistoryIndexPage,
+	type HistoryPayloadReadOptions,
+	type IndexedSourceEvent,
+	type TaskEvidenceOptions,
+	type TaskEvidencePage,
+} from "./history-index.js";
+import type { BoundRequestSink, SourceSnapshotRef } from "./request-events.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
+
+/** One source/branch frontier shared by every operation in a captured request. */
+export interface SessionHistoryReadView {
+	readonly source: SourceSnapshotRef;
+	get(id: string): Promise<IndexedSourceEvent | undefined>;
+	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
+	search(query: string, limit?: number): Promise<HistoryIndexPage>;
+	taskEvidence(options?: TaskEvidenceOptions): Promise<TaskEvidencePage>;
+	readPayload(id: string, options?: HistoryPayloadReadOptions): Promise<CanonicalPayloadFragment | undefined>;
+}
+
+export interface BoundSessionRequestSink extends BoundRequestSink {
+	readHistory<T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T>;
+}
 
 /** A derived, coalescing feed. Canonical source ACKs do not depend on index availability. */
 export class SessionHistoryIndex {

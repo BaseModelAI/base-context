@@ -24,8 +24,8 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W2 native semantic ports | Native tool/request/context ownership and protocol10 compatibility implemented; typed turn transitions and integrated artifacts pending |
 | W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks, scoped integration tests and clean packaged-worker probes pass; index feed work is active |
 | W4 durable task truth and SQLite evidence index | Canonical indexing, branch-scoped queries, native input/goal provenance and bounded payload recovery pass focused tests; authoritative item reduction, import trust and compiler integration remain open |
-| W5 bounded hot history and process memory | Not implemented |
-| W6 compiler, batch recovery, evidence-local work | Not implemented |
+| W5 bounded hot history and process memory | Captured read lifetimes and bounded exact branch membership implemented; whole-history resident stores and paged-query work remain open |
+| W6 compiler, batch recovery, evidence-local work | Owned projection boundary implemented; native compiler selection and activation remain open |
 | W7 Sol control and generic deployment | S frozen; no parity or live validation claim |
 | W8 atomic checkpoints and continuation | Not implemented |
 | W9 Astra policy and route-scoped advanced features | Inherited catalog only; no certification claim |
@@ -206,7 +206,7 @@ verification. No publication, release trigger or model campaign is authorized by
 local results.
 
 
-## Source index and task evidence (work in progress)
+## Canonical source index checkpoint (`c83ba6219`)
 
 - A lazy external index consumes ACKed source prefixes. It stores exact frame locators,
   verifies the target prefix before publishing coverage, and reads only new suffixes
@@ -233,6 +233,30 @@ local results.
   separate commands. These are scoped component/source results, not one combined
   test invocation, a live provider run, or full-history memory certification.
 
-The source checkpoint passes `npm run check` (1011 files), TypeScript, and the
-installer/browser smoke checks. This does not certify a packaged artifact or release.
-Whole-history arrays and the native context compiler are still unfinished.
+The checkpoint is committed and pushed. Normal hooks pass `npm run check` (1011 files,
+no fixes), TypeScript, and installer/browser smoke. The clean source build passes.
+Private packages identify `c83ba62193b2fd5c324d0d68f031bd2bceb58c53` with `sourceDirty:false`
+and contain no Python caches. Node22.8 and both tiny Bun host layouts pass incremental
+source indexing, task attribution, branch exclusion and exact bounded payload recovery.
+The first two tiny-host starts lacked fixture package metadata; only those starts were
+retried after copying the actual packaged metadata. No source rebuild or publication ran.
+These probes do not certify full binaries, npm's Node floor, Windows or network filesystems.
+Whole-history arrays, bounded query work and the native context compiler remain unfinished.
+
+
+## Captured reads and projection boundary (work in progress)
+
+- History reads and request receipts share one source barrier, physical snapshot and
+  branch frontier. A capture remains tied to that source after a session switch.
+  Running reads participate in request activity and disposal joins them.
+- Exact scoped lookup and payload recovery use derived depth/ancestor jumps. Unresolved
+  source links remain intact; fallback stops after 128 parent lookups and reports
+  missing links, cycles or an exhausted traversal budget explicitly.
+- The immutable agent context owner can return a detached message projection and an
+  opaque per-request stream context. The latter goes only to the native stream owner,
+  not provider arguments or options. Terminal handling joins projection cleanup and
+  preserves both primary and cleanup errors. Effective stream identity is preserved.
+
+The native compiler is not enabled by this boundary alone. Agent lifecycle arrays,
+Manager loading/storage, and paged search/task ancestry work remain unbounded by this
+slice. Current checks are scoped source cases, not the declared large-history campaign.

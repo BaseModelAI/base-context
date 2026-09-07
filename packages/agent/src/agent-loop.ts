@@ -14,6 +14,7 @@ import {
 } from "@ponythewhite/base-context-ai";
 import type {
 	AgentContext,
+	AgentContextBuildResult,
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
@@ -468,134 +469,158 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
-	const finishAbortedMessage = async () => {
-		const finalMessage = createAbortedAssistantMessage(config, partialMessage);
-		if (addedPartial) {
-			context.messages[context.messages.length - 1] = finalMessage;
-		} else {
-			context.messages.push(finalMessage);
-			await emit({ type: "message_start", message: { ...finalMessage } });
-		}
-		await emit({ type: "message_end", message: finalMessage });
-		return finalMessage;
-	};
-
-	try {
-		throwIfAborted(signal);
-		// Do not race source persistence against cancellation; drain it before leaving this build.
-		await config.beforeContextBuild?.();
-		throwIfAborted(signal);
-		let messages = context.messages;
-		if (config.transformContext) {
-			messages = await maybePromiseWithAbort(config.transformContext(messages, signal), signal);
-		}
-
-		const llmMessages = await maybePromiseWithAbort(config.convertToLlm(messages), signal);
-
-		const streamFunction = streamFn || streamSimple;
-
-		const resolvedApiKey =
-			(config.getApiKey
-				? await maybePromiseWithAbort(config.getApiKey(config.model.provider), signal)
-				: undefined) || config.apiKey;
-
-		const llmContext: Context = {
-			systemPrompt: config.getSystemPrompt?.() ?? context.systemPrompt,
-			messages: llmMessages,
-			tools: context.tools,
-		};
-
-		const response = await maybePromiseWithAbort(
-			streamFunction(config.model, llmContext, {
-				...config,
-				apiKey: resolvedApiKey,
-				signal,
-			}),
-			signal,
-		);
-		const iterator = response[Symbol.asyncIterator]();
-		const closeIterator = () => {
-			void Promise.resolve(iterator.return?.()).catch(() => undefined);
-		};
-		while (true) {
-			const next = await raceWithAbort<IteratorResult<AssistantMessageEvent>>(
-				iterator.next(),
-				signal,
-				closeIterator,
-			);
-			if (next.done) {
-				break;
+	const build: { projection: AgentContextBuildResult } = { projection: undefined };
+	const runResponse = async (): Promise<AssistantMessage> => {
+		let partialMessage: AssistantMessage | null = null;
+		let addedPartial = false;
+		const finishAbortedMessage = async () => {
+			const finalMessage = createAbortedAssistantMessage(config, partialMessage);
+			if (addedPartial) {
+				context.messages[context.messages.length - 1] = finalMessage;
+			} else {
+				context.messages.push(finalMessage);
+				await emit({ type: "message_start", message: { ...finalMessage } });
 			}
-			const event = next.value;
-			switch (event.type) {
-				case "start":
-					partialMessage = event.partial;
-					context.messages.push(partialMessage);
-					addedPartial = true;
-					await emit({ type: "message_start", message: { ...partialMessage } });
-					break;
+			await emit({ type: "message_end", message: finalMessage });
+			return finalMessage;
+		};
 
-				case "text_start":
-				case "text_delta":
-				case "text_end":
-				case "thinking_start":
-				case "thinking_delta":
-				case "thinking_end":
-				case "toolcall_start":
-				case "toolcall_delta":
-				case "toolcall_end":
-					if (partialMessage) {
+		try {
+			throwIfAborted(signal);
+			// Do not race source persistence against cancellation; drain it before leaving this build.
+			const projection = await config.beforeContextBuild?.();
+			build.projection = projection;
+			throwIfAborted(signal);
+			let messages = projection ? projection.messages.slice() : context.messages;
+			if (config.transformContext) {
+				messages = await maybePromiseWithAbort(config.transformContext(messages, signal), signal);
+			}
+
+			const llmMessages = await maybePromiseWithAbort(config.convertToLlm(messages), signal);
+
+			const streamFunction = streamFn || streamSimple;
+
+			const resolvedApiKey =
+				(config.getApiKey
+					? await maybePromiseWithAbort(config.getApiKey(config.model.provider), signal)
+					: undefined) || config.apiKey;
+
+			const llmContext: Context = {
+				systemPrompt: config.getSystemPrompt?.() ?? context.systemPrompt,
+				messages: llmMessages,
+				tools: context.tools,
+			};
+
+			const { beforeContextBuild: _beforeContextBuild, ownedStreamFn, ...streamOptions } = config;
+			const options = { ...streamOptions, apiKey: resolvedApiKey, signal };
+			const response = await maybePromiseWithAbort(
+				ownedStreamFn
+					? ownedStreamFn(config.model, llmContext, options, projection ? projection.streamContext : undefined)
+					: streamFunction(config.model, llmContext, options),
+				signal,
+			);
+			const iterator = response[Symbol.asyncIterator]();
+			const closeIterator = () => {
+				void Promise.resolve(iterator.return?.()).catch(() => undefined);
+			};
+			while (true) {
+				const next = await raceWithAbort<IteratorResult<AssistantMessageEvent>>(
+					iterator.next(),
+					signal,
+					closeIterator,
+				);
+				if (next.done) {
+					break;
+				}
+				const event = next.value;
+				switch (event.type) {
+					case "start":
 						partialMessage = event.partial;
-						context.messages[context.messages.length - 1] = partialMessage;
-						await emit({
-							type: "message_update",
-							assistantMessageEvent: event,
-							message: { ...partialMessage },
-						});
-					}
-					break;
+						context.messages.push(partialMessage);
+						addedPartial = true;
+						await emit({ type: "message_start", message: { ...partialMessage } });
+						break;
 
-				case "done":
-				case "error": {
-					let finalMessage = getTerminalMessage(event);
-					try {
-						finalMessage = await maybePromiseWithAbort(response.result(), signal);
-					} catch (error) {
-						if (!signal?.aborted || !isAbortError(error)) {
-							throw error;
+					case "text_start":
+					case "text_delta":
+					case "text_end":
+					case "thinking_start":
+					case "thinking_delta":
+					case "thinking_end":
+					case "toolcall_start":
+					case "toolcall_delta":
+					case "toolcall_end":
+						if (partialMessage) {
+							partialMessage = event.partial;
+							context.messages[context.messages.length - 1] = partialMessage;
+							await emit({
+								type: "message_update",
+								assistantMessageEvent: event,
+								message: { ...partialMessage },
+							});
 						}
+						break;
+
+					case "done":
+					case "error": {
+						let finalMessage = getTerminalMessage(event);
+						try {
+							finalMessage = await maybePromiseWithAbort(response.result(), signal);
+						} catch (error) {
+							if (!signal?.aborted || !isAbortError(error)) {
+								throw error;
+							}
+						}
+						if (addedPartial) {
+							context.messages[context.messages.length - 1] = finalMessage;
+						} else {
+							context.messages.push(finalMessage);
+						}
+						if (!addedPartial) {
+							await emit({ type: "message_start", message: { ...finalMessage } });
+						}
+						await emit({ type: "message_end", message: finalMessage });
+						return finalMessage;
 					}
-					if (addedPartial) {
-						context.messages[context.messages.length - 1] = finalMessage;
-					} else {
-						context.messages.push(finalMessage);
-					}
-					if (!addedPartial) {
-						await emit({ type: "message_start", message: { ...finalMessage } });
-					}
-					await emit({ type: "message_end", message: finalMessage });
-					return finalMessage;
 				}
 			}
-		}
 
-		const finalMessage = await maybePromiseWithAbort(response.result(), signal);
-		if (addedPartial) {
-			context.messages[context.messages.length - 1] = finalMessage;
-		} else {
-			context.messages.push(finalMessage);
-			await emit({ type: "message_start", message: { ...finalMessage } });
+			const finalMessage = await maybePromiseWithAbort(response.result(), signal);
+			if (addedPartial) {
+				context.messages[context.messages.length - 1] = finalMessage;
+			} else {
+				context.messages.push(finalMessage);
+				await emit({ type: "message_start", message: { ...finalMessage } });
+			}
+			await emit({ type: "message_end", message: finalMessage });
+			return finalMessage;
+		} catch (error) {
+			if (signal?.aborted && isAbortError(error)) {
+				return await finishAbortedMessage();
+			}
+			throw error;
 		}
-		await emit({ type: "message_end", message: finalMessage });
-		return finalMessage;
+	};
+
+	let outcome: { message: AssistantMessage } | { error: unknown };
+	try {
+		outcome = { message: await runResponse() };
 	} catch (error) {
-		if (signal?.aborted && isAbortError(error)) {
-			return finishAbortedMessage();
+		outcome = { error };
+	}
+	try {
+		if (build.projection) await build.projection.release?.();
+	} catch (error) {
+		if ("error" in outcome) {
+			throw new AggregateError(
+				[outcome.error, error],
+				`Agent inference and context cleanup failed: ${String(outcome.error)}`,
+			);
 		}
 		throw error;
 	}
+	if ("error" in outcome) throw outcome.error;
+	return outcome.message;
 }
 
 async function executeToolCalls(

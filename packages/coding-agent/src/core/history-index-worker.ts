@@ -22,7 +22,12 @@ const schemaVersion = Number(db.prepare("PRAGMA user_version").get()?.user_versi
 const hasTables = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get();
 if (
 	(applicationId !== 0x42435458 && (applicationId !== 0 || hasTables)) ||
-	(schemaVersion !== 0 && schemaVersion !== 2 && schemaVersion !== 3 && schemaVersion !== 4 && schemaVersion !== 5)
+	(schemaVersion !== 0 &&
+		schemaVersion !== 2 &&
+		schemaVersion !== 3 &&
+		schemaVersion !== 4 &&
+		schemaVersion !== 5 &&
+		schemaVersion !== 6)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -53,7 +58,11 @@ db.exec(`
 `);
 
 const TASK_PAGE_BYTES = 1024 * 1024 - 1024;
+const MAX_JUMP_LEVELS = 53;
+const MAX_PARENT_LOOKUPS = 128;
 const DERIVED_TABLES = [
+	"source_ancestry",
+	"source_jump",
 	"source_term",
 	"term_count",
 	"task_import_loss",
@@ -75,10 +84,17 @@ transaction(() => {
  );
  CREATE TABLE IF NOT EXISTS task_import_loss (
   session TEXT NOT NULL, sequence INTEGER NOT NULL, task_key TEXT, PRIMARY KEY(session,sequence)
+ );
+ CREATE TABLE IF NOT EXISTS source_ancestry (
+  session TEXT NOT NULL, id TEXT NOT NULL, depth INTEGER, PRIMARY KEY(session,id)
+ );
+ CREATE TABLE IF NOT EXISTS source_jump (
+  session TEXT NOT NULL, id TEXT NOT NULL, level INTEGER NOT NULL, ancestor_id TEXT NOT NULL,
+  PRIMARY KEY(session,id,level)
  );`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 5) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
-	db.exec("PRAGMA user_version=5");
+	if (schemaVersion !== 6) for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+	db.exec("PRAGMA user_version=6");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -154,6 +170,23 @@ function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 		countTerm.run(sessionId, term);
 	}
 }
+const sourceParent = db.prepare(
+	"SELECT a.depth FROM source_event e JOIN source_ancestry a ON a.session=e.session AND a.id=e.id WHERE e.session=? AND e.id=? AND e.sequence<?",
+);
+const insertDepth = db.prepare("INSERT INTO source_ancestry VALUES (?,?,?)");
+const insertJump = db.prepare("INSERT INTO source_jump VALUES (?,?,?,?)");
+const ancestorJump = db.prepare("SELECT ancestor_id FROM source_jump WHERE session=? AND id=? AND level=?");
+function insertAncestry(sessionId: string, item: IndexedSourceEvent): void {
+	const parent = item.parentId === null ? undefined : sourceParent.get(sessionId, item.parentId, item.sequence);
+	const depth = item.parentId === null ? 0 : parent?.depth == null ? null : Number(parent.depth) + 1;
+	insertDepth.run(sessionId, item.id, depth);
+	if (depth === null || depth === 0) return;
+	let ancestorId = item.parentId!;
+	for (let level = 0; level < MAX_JUMP_LEVELS && 2 ** level <= depth; level++) {
+		if (level > 0) ancestorId = String(ancestorJump.get(sessionId, ancestorId, level - 1)!.ancestor_id);
+		insertJump.run(sessionId, item.id, level, ancestorId);
+	}
+}
 function clearSession(sessionId: string): void {
 	for (const table of DERIVED_TABLES) db.prepare(`DELETE FROM ${table} WHERE session=?`).run(sessionId);
 }
@@ -183,7 +216,9 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			snapshot,
 			previous,
 			(entry, sequence, locator, revision, parts) => {
-				insertEvent(sessionId, projectSessionSourceEvent(entry, sequence, locator, revision));
+				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
+				insertEvent(sessionId, item);
+				insertAncestry(sessionId, item);
 				db.prepare("INSERT INTO source_payload VALUES (?,?,?)").run(sessionId, sequence, JSON.stringify(parts));
 				const imported = getTaskStateImportCoverage({ sessionId, sequence, entry, locator, revision });
 				if (imported)
@@ -237,6 +272,8 @@ function apply(sessionId: string, events: IndexedSourceEvent[], committedThrough
 		throw new Error("Invalid bounded index batch");
 	transaction(() => {
 		db.prepare("DELETE FROM source_cursor WHERE session=?").run(sessionId);
+		db.prepare("DELETE FROM source_ancestry WHERE session=?").run(sessionId);
+		db.prepare("DELETE FROM source_jump WHERE session=?").run(sessionId);
 		const current = db.prepare("SELECT sequence FROM coverage WHERE session=?").get(sessionId)?.sequence ?? 0;
 		if (committedThrough < Number(current)) throw new Error("Index coverage cannot move backwards");
 		let expected = Number(current) + 1;
@@ -264,21 +301,84 @@ function apply(sessionId: string, events: IndexedSourceEvent[], committedThrough
 		);
 	});
 }
-function branchQuery(sessionId: string, through: number, scope?: { leafId: string | null }) {
-	if (!scope) return { prefix: "", condition: "", values: [] as (string | number | null)[] };
+type BranchNode = Pick<Row, "id" | "parent_id"> & { depth: number | null };
+const branchNode = db.prepare(
+	"SELECT e.id,e.parent_id,a.depth FROM source_event e LEFT JOIN source_ancestry a ON a.session=e.session AND a.id=e.id WHERE e.session=? AND e.id=? AND e.sequence<=?",
+);
+function validateBranchScope(
+	sessionId: string,
+	through: number,
+	scope: { leafId: string | null },
+): BranchNode | undefined {
 	if (
 		!(scope.leafId === null || (typeof scope.leafId === "string" && scope.leafId.length <= 512)) ||
 		!Number.isSafeInteger(through) ||
 		through < 0
 	)
 		throw new Error("Invalid history branch scope");
-	if (
-		scope.leafId !== null &&
-		!db
-			.prepare("SELECT 1 FROM source_event WHERE session=? AND id=? AND sequence<=?")
-			.get(sessionId, scope.leafId, through)
-	)
-		throw new Error("History branch leaf is outside the indexed prefix");
+	const leaf =
+		scope.leafId === null ? undefined : (branchNode.get(sessionId, scope.leafId, through) as BranchNode | undefined);
+	if (scope.leafId !== null && !leaf) throw new Error("History branch leaf is outside the indexed prefix");
+	return leaf;
+}
+function resolvedAncestor(sessionId: string, leaf: BranchNode, target: BranchNode): boolean {
+	let difference = leaf.depth! - target.depth!;
+	if (difference < 0) return false;
+	let ancestorId = leaf.id;
+	for (let level = 0; difference > 0 && level < MAX_JUMP_LEVELS; level++) {
+		if (difference % 2 === 1) {
+			const jump = ancestorJump.get(sessionId, ancestorId, level);
+			if (!jump) throw new Error("History branch ancestry metadata is incomplete");
+			ancestorId = String(jump.ancestor_id);
+		}
+		difference = Math.floor(difference / 2);
+	}
+	return ancestorId === target.id;
+}
+function pointEvent(
+	sessionId: string,
+	eventId: string,
+	scope?: { leafId: string | null; through: number },
+): Row | undefined {
+	if (!scope)
+		return db.prepare("SELECT * FROM source_event WHERE session=? AND id=?").get(sessionId, eventId) as
+			| Row
+			| undefined;
+	const leaf = validateBranchScope(sessionId, scope.through, scope);
+	const row = db
+		.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?")
+		.get(sessionId, eventId, scope.through) as Row | undefined;
+	if (!row || !leaf) return undefined;
+	const targets = row.kind === "request" && row.parent_id !== null ? [row.id, row.parent_id] : [row.id];
+	if (targets.includes(leaf.id)) return row;
+	if (leaf.depth !== null) {
+		let unknown = false;
+		for (const id of targets) {
+			const target = branchNode.get(sessionId, id, scope.through) as BranchNode | undefined;
+			if (target?.depth == null) unknown = true;
+			else if (resolvedAncestor(sessionId, leaf, target)) return row;
+		}
+		if (!unknown) return undefined;
+	}
+	// Arbitrary SDK/legacy links stay intact; unknown ancestry is never reported as absence.
+	const visited = new Set<string>();
+	let current = leaf;
+	let lookups = 0;
+	for (;;) {
+		if (targets.includes(current.id)) return row;
+		visited.add(current.id);
+		if (current.parent_id === null) return undefined;
+		if (visited.has(current.parent_id)) throw new Error("History branch ancestry contains a cycle");
+		if (lookups === MAX_PARENT_LOOKUPS) throw new Error("History branch ancestry parent lookup budget exceeded");
+		lookups++;
+		const parent = branchNode.get(sessionId, current.parent_id, scope.through) as BranchNode | undefined;
+		if (!parent) throw new Error("History branch ancestry has a missing parent in the indexed prefix");
+		current = parent;
+	}
+}
+function branchQuery(sessionId: string, through: number, scope?: { leafId: string | null }) {
+	if (!scope) return { prefix: "", condition: "", values: [] as (string | number | null)[] };
+	validateBranchScope(sessionId, through, scope);
 	return {
 		prefix: `WITH RECURSIVE branch(id,parent_id) AS (
    SELECT id,parent_id FROM source_event WHERE session=? AND id=? AND sequence<=?
@@ -473,12 +573,7 @@ function readPayload(request: Extract<HistoryIndexRequest, { action: "read_paylo
 	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
 	if (snapshot.format !== "framed" || snapshot.indexedThrough < request.scope.through)
 		throw new Error("Canonical payload index has not reached the requested source prefix");
-	const branch = branchQuery(request.sessionId, request.scope.through, request.scope);
-	const row = db
-		.prepare(
-			`${branch.prefix}SELECT e.* FROM source_event e WHERE e.session=? AND e.id=? AND e.sequence<=?${branch.condition}`,
-		)
-		.get(...branch.values, request.sessionId, request.eventId, request.scope.through) as Row | undefined;
+	const row = pointEvent(request.sessionId, request.eventId, request.scope);
 	if (!row) return undefined;
 	const savedParts = db
 		.prepare("SELECT parts FROM source_payload WHERE session=? AND sequence=?")
@@ -520,18 +615,7 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 			apply(request.sessionId, request.events, request.committedThrough);
 			return;
 		case "get": {
-			const branch = branchQuery(request.sessionId, request.scope?.through ?? 0, request.scope);
-			const through = request.scope ? " AND e.sequence<=?" : "";
-			const row = db
-				.prepare(
-					`${branch.prefix}SELECT e.* FROM source_event e WHERE e.session=? AND e.id=?${through}${branch.condition}`,
-				)
-				.get(
-					...branch.values,
-					request.sessionId,
-					request.eventId,
-					...(request.scope ? [request.scope.through] : []),
-				) as Row | undefined;
+			const row = pointEvent(request.sessionId, request.eventId, request.scope);
 			return row ? event(row) : undefined;
 		}
 		case "page":

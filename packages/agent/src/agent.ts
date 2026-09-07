@@ -14,9 +14,11 @@ import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
 	AgentContext,
+	AgentContextBuildResult,
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentOwnedStreamFn,
 	AgentState,
 	AgentTool,
 	BeforeToolCallContext,
@@ -198,31 +200,34 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	private contextOwner?: () => Promise<void>;
+	private contextOwner?: () => Promise<AgentContextBuildResult>;
 
 	/** Native persistence remains ahead of replaceable context callbacks. */
-	bindContextOwner(owner: () => Promise<void>): void {
+	bindContextOwner(owner: () => Promise<AgentContextBuildResult>): void {
 		if (this.contextOwner) throw new Error("Agent context owner is already bound");
 		this.contextOwner = owner;
 	}
 
 	private configuredStreamFn!: StreamFn;
 	private effectiveStreamFn!: StreamFn;
-	private streamOwner?: (streamFn: StreamFn) => StreamFn;
+	private ownedStreamFn?: AgentOwnedStreamFn;
+	private streamOwner?: (streamFn: StreamFn) => AgentOwnedStreamFn;
 
 	get streamFn(): StreamFn {
 		return this.effectiveStreamFn;
 	}
 	set streamFn(streamFn: StreamFn) {
 		this.configuredStreamFn = streamFn;
-		this.effectiveStreamFn = this.streamOwner ? this.streamOwner(streamFn) : streamFn;
+		const ownedStreamFn = this.streamOwner?.(streamFn);
+		this.ownedStreamFn = ownedStreamFn;
+		this.effectiveStreamFn = ownedStreamFn ?? streamFn;
 	}
 
 	/** A native owner remains in the path when an embedding changes its configured stream. */
-	bindStreamOwner(owner: (streamFn: StreamFn) => StreamFn): void {
+	bindStreamOwner(owner: (streamFn: StreamFn) => AgentOwnedStreamFn): void {
 		if (this.streamOwner) throw new Error("Agent stream owner is already bound");
 		this.streamOwner = owner;
-		this.effectiveStreamFn = owner(this.configuredStreamFn);
+		this.streamFn = this.configuredStreamFn;
 	}
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -532,9 +537,8 @@ export class Agent {
 			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
-			beforeContextBuild: async () => {
-				await this.contextOwner?.();
-			},
+			beforeContextBuild: async () => this.contextOwner?.(),
+			ownedStreamFn: this.ownedStreamFn,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getSystemPrompt: () => this._state.systemPrompt,

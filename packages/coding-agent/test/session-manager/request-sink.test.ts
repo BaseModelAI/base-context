@@ -2,18 +2,22 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import type { BoundRequestSink, NativeRequestEvent } from "../../src/core/request-events.js";
 import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 
 let dir: string;
 let managers: SessionManager[];
 let sinks: BoundRequestSink[];
+let captures: InferenceCoordinator[];
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "base-context-request-sink-"));
 	managers = [];
 	sinks = [];
+	captures = [];
 });
 afterEach(async () => {
+	await Promise.all(captures.map((capture) => capture.dispose()));
 	await Promise.all(sinks.map((sink) => sink.release()));
 	await Promise.all(managers.map((manager) => manager.close()));
 	rmSync(dir, { recursive: true, force: true });
@@ -73,6 +77,9 @@ it("retains late settlement in the captured history without changing either conv
 	const leaf = manager.getLeafId();
 	const sink = manager.bindRequestSink();
 	sinks.push(sink);
+	const requests = new InferenceCoordinator(() => sink);
+	const capture = requests.capture();
+	captures.push(capture);
 	const path = manager.getSessionFile()!;
 	const original = await admitted(sink);
 	const event = { ...original, modelContract: { ...original.modelContract, model: 'fixture\u0000é"\n' } };
@@ -88,6 +95,19 @@ it("retains late settlement in the captured history without changing either conv
 	await sink.persist(settled(event));
 	expect(readFileSync(currentPath)).toEqual(currentBytes);
 	expect(manager.getLeafId()).toBe(currentLeaf);
+	let disposal: Promise<void> | undefined;
+	const readPage = await capture.readHistory(async (view) => {
+		expect(view.source).toEqual(original.source);
+		expect(requests.pendingCount).toBe(2); // capture plus this admitted read
+		disposal = capture.dispose(); // joins this read; it does not cancel accepted recovery
+		expect((await view.get(leaf!))?.locator.path).toBe(path);
+		expect(await view.get(currentLeaf!)).toBeUndefined();
+		expect((await view.readPayload(leaf!))?.text).toContain("original request");
+		return view.page();
+	});
+	await disposal;
+	expect(readPage.events.map((entry) => entry.id)).toEqual([leaf]);
+	expect(requests.hasPending).toBe(false);
 	await sink.release();
 	const restored = await SessionManager.open(path);
 	managers.push(restored);
@@ -103,6 +123,7 @@ it("preserves ephemeral mode and blocks later appends after a failed journal wri
 	sinks.push(inMemorySink);
 	await inMemorySink.persist(await admitted(inMemorySink));
 	expect((await inMemorySink.source).persistent).toBe(false);
+	await expect(inMemorySink.readHistory(async () => undefined)).rejects.toThrow("owned canonical session");
 	expect(memory.getSessionFile()).toBeUndefined();
 	expect(memory.hasUserContent()).toBe(true);
 	const manager = await SessionManager.create(dir, join(dir, "sessions"));
@@ -126,4 +147,5 @@ it("preserves ephemeral mode and blocks later appends after a failed journal wri
 	await manager.appendSessionInfo("recovered");
 	expect(manager.getSessionName()).toBe("recovered");
 	expect(() => sink.retain()).toThrow("owner is closed");
+	await expect(sink.readHistory(async () => undefined)).rejects.toThrow("not retained");
 });

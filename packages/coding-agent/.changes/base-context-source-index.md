@@ -2,3 +2,5 @@
 - Preserved exact imported task identities, explicit relations and incomplete-history coverage instead of treating missing items as retired.
 - Recorded original native input and per-call goal provenance on existing session entries without granting transformed previews user authority.
 - Added bounded canonical JSON fragment recovery with UTF8 byte cursors and at most one 64KiB source-part read per call.
+- Shared one captured source frontier between request receipts and history reads, with active reads included in request drain and disposal.
+- Replaced full ancestry scans for exact indexed lookups and payload reads with ancestor jumps; unresolved links use bounded traversal and explicit errors.

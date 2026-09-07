@@ -1,0 +1,3 @@
+- Allowed an immutable context owner to return a detached per-request message projection without changing lifecycle or tool context.
+- Kept opaque request context on the native owned-stream path, separate from configured provider arguments and options.
+- Joined projection cleanup after terminal handling and preserved both inference and cleanup failures.

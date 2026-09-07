@@ -209,27 +209,34 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const controller = new AbortController();
 		const providerError = new Error("provider parse failed");
+		const cleanupError = new Error("context cleanup failed");
+		const release = vi.fn(async () => {
+			throw cleanupError;
+		});
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			beforeContextBuild: async () => ({ messages: [], release }),
 		};
 		const events: AgentEvent[] = [];
 
-		await expect(
-			runAgentLoop(
-				[createUserMessage("Hello")],
-				context,
-				config,
-				(event) => {
-					events.push(event);
-				},
-				controller.signal,
-				() =>
-					new ThrowingResultStream(() => {
-						controller.abort();
-					}, providerError),
-			),
-		).rejects.toThrow("provider parse failed");
+		const run = runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			config,
+			(event) => {
+				events.push(event);
+			},
+			controller.signal,
+			() =>
+				new ThrowingResultStream(() => {
+					controller.abort();
+				}, providerError),
+		);
+		await expect(run).rejects.toThrow("provider parse failed");
+		await expect(run).rejects.toBeInstanceOf(AggregateError);
+		await expect(run).rejects.toMatchObject({ errors: [providerError, cleanupError] });
+		expect(release).toHaveBeenCalledOnce();
 		expect(
 			events.some(
 				(event) =>

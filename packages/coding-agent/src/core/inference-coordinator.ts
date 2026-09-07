@@ -20,6 +20,7 @@ import type {
 	ResolvedModelContract,
 } from "./request-events.js";
 import { hashTurnBody, MODEL_REQUEST_ID_HEADER, unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
+import type { SessionHistoryReadView } from "./session-history-index.js";
 
 export interface InferenceRequestOptions {
 	readonly purpose: RequestPurpose;
@@ -220,6 +221,28 @@ export class InferenceCoordinator {
 		};
 		this.notifyActivity();
 		return captured;
+	}
+
+	/** Read through an explicit capture, never by recapturing the mutable current session. */
+	async readHistory<T>(read: (view: SessionHistoryReadView) => Promise<T>): Promise<T> {
+		this.assertAdmission();
+		const sink = this.capturedSink?.sink;
+		if (!sink?.readHistory) throw new Error("Captured canonical history is unavailable");
+		let finish!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		this.work.pending.add(pending);
+		this.active.add(pending);
+		this.notifyActivity();
+		try {
+			return await sink.readHistory(read);
+		} finally {
+			this.active.delete(pending);
+			this.work.pending.delete(pending);
+			finish();
+			this.notifyActivity();
+		}
 	}
 
 	/** Release an unused capture, or join this capture's admitted requests. */

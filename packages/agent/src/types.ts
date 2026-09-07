@@ -26,6 +26,17 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
 
+export interface AgentContextProjection {
+	messages: AgentMessage[];
+	streamContext?: unknown;
+	release?: () => Promise<void>;
+}
+
+// biome-ignore lint/suspicious/noConfusingVoidType: this return contract accepts existing Promise<void> context barriers.
+export type AgentContextBuildResult = void | AgentContextProjection;
+
+export type AgentOwnedStreamFn = (...args: [...Parameters<StreamFn>, streamContext?: unknown]) => ReturnType<StreamFn>;
+
 /**
  * Configuration for how tool calls from a single assistant message are executed.
  *
@@ -146,7 +157,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
 	/** Native owner barrier before transform/convert. Rejection stops context construction. */
-	beforeContextBuild?: () => Promise<void>;
+	beforeContextBuild?: () => Promise<AgentContextBuildResult>;
+
+	/** Copied native owner callback; excluded from configured/provider stream options. */
+	ownedStreamFn?: AgentOwnedStreamFn;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.

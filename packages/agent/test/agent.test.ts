@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	Agent,
 	type AgentContext,
+	type AgentContextProjection,
 	type AgentLoopConfig,
 	type AgentMessage,
 	type AgentTool,
@@ -689,9 +690,30 @@ describe("Agent", () => {
 
 	it("forwards sessionId to streamFn options", async () => {
 		let receivedSessionId: string | undefined;
+		const projections: AgentContextProjection[] = [
+			{
+				messages: [{ role: "user", content: "compiled hello", timestamp: 0 }],
+				streamContext: {},
+				release: vi.fn(async () => {}),
+			},
+			{ messages: [], streamContext: {}, release: vi.fn(async () => {}) },
+		];
+		let buildIndex = 0;
+		let activeProjection = projections[0];
+		const receivedMessages: AgentMessage[][] = [];
 		const agent = new Agent({
 			sessionId: "session-abc",
-			streamFn: (_model, _context, options) => {
+			transformContext: async (messages) => {
+				expect(messages).not.toBe(activeProjection.messages);
+				return messages;
+			},
+			streamFn: (...args) => {
+				expect(args).toHaveLength(3);
+				const [_model, context, options] = args;
+				expect(options).not.toHaveProperty("beforeContextBuild");
+				expect(options).not.toHaveProperty("ownedStreamFn");
+				expect(options).not.toHaveProperty("streamContext");
+				receivedMessages.push(context.messages);
 				receivedSessionId = options?.sessionId;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -700,6 +722,16 @@ describe("Agent", () => {
 				});
 				return stream;
 			},
+		});
+		agent.bindContextOwner(async () => {
+			activeProjection = projections[buildIndex++];
+			return activeProjection;
+		});
+		agent.bindStreamOwner((configuredStream) => (...args) => {
+			expect(args).toHaveLength(4);
+			const [model, context, options, streamContext] = args;
+			expect(streamContext).toBe(activeProjection.streamContext);
+			return configuredStream(model, context, options);
 		});
 
 		await agent.prompt("hello");
@@ -710,6 +742,11 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
+		expect(receivedMessages).toEqual([projections[0].messages, []]);
+		expect(buildIndex).toBe(2);
+		for (const projection of projections) expect(projection.release).toHaveBeenCalledOnce();
+		expect(agent.state.messages).not.toContain(projections[0].messages[0]);
+		expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
 	});
 
 	it("forwards the service tier to streamFn options", async () => {
