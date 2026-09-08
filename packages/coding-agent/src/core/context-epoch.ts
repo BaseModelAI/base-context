@@ -1,4 +1,4 @@
-import type { ProviderRequestRepresentation, RequestTokenAssessment } from "@ponythewhite/base-context-ai";
+import type { ProviderRequestRepresentation, RequestTokenAssessment, Usage } from "@ponythewhite/base-context-ai";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { ContextRef } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
@@ -7,7 +7,17 @@ import type { CompiledTaskFrame } from "./task-frame.js";
 export const CONTEXT_EPOCH_DETAIL = "baseContextEpoch";
 /** Internal admission, not a field accepted by ordinary appendCompaction callers. */
 export const appendContextEpoch = Symbol("appendContextEpoch");
-export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/1";
+export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/2";
+export type ContextReplayContract = "complete-context" | "message-groups";
+
+/** An ordinary summary and its retained source recipes share the existing compaction ACK. */
+export interface ContextEpochSummary {
+	readonly summary: string;
+	readonly details?: Record<string, unknown>;
+	readonly fromHook?: boolean;
+	readonly customInstructions?: string;
+	readonly usage?: Usage;
+}
 
 /** A frozen read recipe, not a second copy of an archived message body. */
 export interface EpochViewReference {
@@ -19,10 +29,14 @@ export interface EpochViewReference {
 }
 
 export interface ContextEpochCheckpoint {
-	readonly version: 1;
-	readonly renderer: typeof CONTEXT_EPOCH_RENDERER;
+	readonly version: 1 | 2;
+	readonly renderer: "native-canonical-epoch/1" | typeof CONTEXT_EPOCH_RENDERER;
 	readonly source: SourceSnapshotRef;
-	readonly representation: string;
+	/** Null only for an ordinary summary, which is not a measured provider request. */
+	readonly representation: string | null;
+	readonly includeSummary?: true;
+	/** Granted by an actual accepted adapter projection, never a caller profile name. */
+	readonly replayContract?: ContextReplayContract;
 	readonly views: readonly EpochViewReference[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
 	readonly taskFrame?: CompiledTaskFrame;
@@ -41,9 +55,11 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!value ||
 		typeof value !== "object" ||
 		!("version" in value) ||
-		value.version !== 1 ||
 		!("renderer" in value) ||
-		value.renderer !== CONTEXT_EPOCH_RENDERER ||
+		!(
+			(value.version === 1 && value.renderer === "native-canonical-epoch/1") ||
+			(value.version === 2 && value.renderer === CONTEXT_EPOCH_RENDERER)
+		) ||
 		!("source" in value) ||
 		!value.source ||
 		!("views" in value) ||
@@ -51,7 +67,18 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!("literalTailId" in value) ||
 		typeof value.literalTailId !== "string" ||
 		!("representation" in value) ||
-		typeof value.representation !== "string"
+		!(
+			typeof value.representation === "string" ||
+			(value.version === 2 &&
+				value.representation === null &&
+				"includeSummary" in value &&
+				value.includeSummary === true)
+		) ||
+		("includeSummary" in value &&
+			(value.version !== 2 || value.includeSummary !== true || value.representation !== null)) ||
+		("replayContract" in value &&
+			value.replayContract !== "complete-context" &&
+			value.replayContract !== "message-groups")
 	)
 		throw new Error("Invalid committed context epoch");
 	return snapshotContextEpoch(value as ContextEpochCheckpoint, maxBytes);

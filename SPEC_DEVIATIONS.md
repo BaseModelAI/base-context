@@ -386,6 +386,28 @@ run all 30 tasks at low effort, then medium effort, with the same existing sessi
 subscription and exact `gpt-5.6-sol` / `gpt-6-astra`. No live benchmark, model/auth/readiness
 probe or publication was performed for this milestone.
 
+## Current prerequisite implementation — W30
+
+The current source extends the five-feature paths with actual official Responses/Codex tool
+mapping, conservative replay permission, full-logical cached accounting, ordinary-summary
+recovery retention, and explicit destination epoch rebuilding. One compaction owner still
+commits recipes and summaries. Imports rebuild lowered TaskFrames and drop copied replay
+permission. Copied original usage is preserved; rebuild controls omit duplicated usage.
+Schema33/protocol11 is the new source boundary.
+
+Fourteen existing focused cases have passing outcomes across separate compiler2/services2/
+selector2/native-Python2/compaction4/RPC2 scopes; type checking passed. The service path retains
+genuine recovery through eviction, ordinary summary and same-journal reopening. The compiler
+cases exercise real destination rebuilding and native fake-fetch continuation from copied
+summaries. Earlier failed diagnostics and repeated invocations remain recorded. This section
+does not replace the W29 receipts or retroactively change the W26 audit.
+
+Remaining prerequisite blockers include opaque continuation after prefix-breaking summaries
+or rebuilds, complete resource/representation boundaries, and supported deployment profiles.
+Covered cached-prefix units cannot be evicted using stale token credit. No portable public-data
+renderer is implemented. The benchmark arm now forwards a declared enforced configured-limit
+profile; that wiring and its syntax check do not open the no-live-benchmark gate.
+
 ## Completed D/S setup handoff — setup only
 
 The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.

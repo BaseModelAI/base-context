@@ -382,7 +382,19 @@ export class InferenceCoordinator {
 			// Capture the opted-in budgeted invocation before source/auth waits. Callbacks and signals stay live handles.
 			if (this.work.budget || (this.requestViewBoundary && operation.metadata.purpose === "main")) {
 				model = structuredClone(model);
-				context = structuredClone(context);
+				// Agent tool objects also carry live executors. Snapshot only the native Tool definition.
+				context = structuredClone({
+					...context,
+					...(context.tools
+						? {
+								tools: context.tools.map(({ name, description, parameters }) => ({
+									name,
+									description,
+									parameters,
+								})),
+							}
+						: {}),
+				});
 				options = options
 					? {
 							...options,

@@ -31,6 +31,7 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import type { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import type { ProviderRequestProjection } from "../utils/request-token-budget.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -119,10 +120,110 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
+	/** Internal native projection capture during this conversion, never a second conversion. */
+	onProjection?: (projection: ProviderRequestProjection) => void;
 }
 
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+}
+
+function captureResponsesProjection<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	transformed: Context["messages"],
+	input: ResponseInput,
+	messageIndices: readonly (number | null)[],
+): ProviderRequestProjection | undefined {
+	if (
+		!(
+			(model.provider === "openai" && model.api === "openai-responses") ||
+			(model.provider === "openai-codex" && model.api === "openai-codex-responses")
+		)
+	)
+		return;
+	// No speculative conversion: these are the messages and items from the one normal converter pass.
+	if (
+		transformed.length !== context.messages.length ||
+		transformed.some((message, index) => JSON.stringify(message) !== JSON.stringify(context.messages[index]))
+	)
+		return;
+	const items = context.messages.map((): ResponseInput => []);
+	for (const [index, sourceIndex] of messageIndices.entries()) {
+		if (sourceIndex !== null) items[sourceIndex].push(input[index]);
+	}
+	let replayContract: "complete-context" | "message-groups" = "message-groups";
+	const optionalMessageIndices: number[] = [];
+	const generatedMessageIndices: number[] = [];
+	const pending = new Map<string, { wireId: string; seen: boolean }>();
+	const closeCalls = () => {
+		const complete = [...pending.values()].every((call) => call.seen);
+		pending.clear();
+		return complete;
+	};
+	for (const [index, message] of context.messages.entries()) {
+		const rendered = items[index];
+		if (!rendered.length) return;
+		if (message.role === "assistant" || message.role === "user") {
+			if (!closeCalls()) return;
+		}
+		if (message.role === "assistant") {
+			if (
+				message.api !== model.api ||
+				message.provider !== model.provider ||
+				message.model !== model.id ||
+				rendered.length !== message.content.length
+			)
+				return;
+			for (const [blockIndex, block] of message.content.entries()) {
+				const item = rendered[blockIndex];
+				if (block.type === "text") {
+					if (!matchesResponsesTextSignature(block.textSignature, item)) return;
+					if (block.textSignature === undefined && !generatedMessageIndices.includes(index))
+						generatedMessageIndices.push(index);
+				} else if (block.type === "thinking") {
+					if (!block.thinkingSignature || item.type !== "reasoning") return;
+					// Existing whole-message groups suffice only when the reasoning's following item stays in this unit.
+					if (
+						!message.content
+							.slice(blockIndex + 1)
+							.some((next) => next.type === "text" || next.type === "toolCall")
+					)
+						replayContract = "complete-context";
+				} else if (block.type === "toolCall") {
+					const [callId, itemId] = block.id.split("|");
+					if (
+						item.type !== "function_call" ||
+						item.call_id !== callId ||
+						item.id !== itemId ||
+						pending.has(block.id) ||
+						[...pending.values()].some((call) => call.wireId === callId)
+					)
+						return;
+					pending.set(block.id, { wireId: callId, seen: false });
+					if (block.thoughtSignature !== undefined) replayContract = "complete-context";
+				}
+			}
+			if (message.stopReason === "stop" && message.content.length === 1 && message.content[0].type === "text")
+				optionalMessageIndices.push(index);
+		} else if (message.role === "toolResult") {
+			const call = pending.get(message.toolCallId);
+			const item = rendered[0];
+			if (!call || rendered.length !== 1 || item.type !== "function_call_output" || item.call_id !== call.wireId)
+				return;
+			call.seen = true;
+		} else if (rendered.length !== 1) return;
+	}
+	if (!closeCalls()) return;
+	// These IDs depend on the whole preceding layout, not just tool-message dependencies.
+	if (generatedMessageIndices.length) replayContract = "complete-context";
+	return {
+		kind: "openai-responses-replay-v1",
+		replayContract,
+		messageIndices,
+		optionalMessageIndices,
+		generatedMessageIndices,
+	};
 }
 
 export function convertResponsesMessages<TApi extends Api>(
@@ -169,8 +270,12 @@ export function convertResponsesMessages<TApi extends Api>(
 		});
 	}
 
+	const messageIndices: Array<number | null> | undefined = options?.onProjection
+		? messages.map(() => null)
+		: undefined;
 	let msgIndex = 0;
-	for (const msg of transformedMessages) {
+	for (const [sourceIndex, msg] of transformedMessages.entries()) {
+		const firstItem = messages.length;
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				messages.push({
@@ -293,9 +398,15 @@ export function convertResponsesMessages<TApi extends Api>(
 				output,
 			});
 		}
+		if (messageIndices) {
+			for (let index = firstItem; index < messages.length; index++) messageIndices.push(sourceIndex);
+		}
 		msgIndex++;
 	}
-
+	if (messageIndices) {
+		const projection = captureResponsesProjection(model, context, transformedMessages, messages, messageIndices);
+		if (projection) options!.onProjection!(projection);
+	}
 	return messages;
 }
 

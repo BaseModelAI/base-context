@@ -101,13 +101,115 @@ function fakeTransport(sent: () => void | Promise<void>, gate?: Promise<void>): 
 	};
 }
 
+const replayTools = [
+	{
+		name: "fixture_lookup",
+		label: "Fixture lookup",
+		description: "Local replay fixture",
+		parameters: ai.Type.Object({ value: ai.Type.String() }),
+		execute: async () => ({ content: [{ type: "text" as const, text: "tool result retained" }], details: {} }),
+	},
+];
+
+const { compat: _responsesCompat, ...sharedFixtureModel } = model;
+const codexModel: ai.Model<"openai-codex-responses"> = {
+	...sharedFixtureModel,
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api",
+	reasoning: true,
+};
+
+function codexFixtureKey(): string {
+	const payload = Buffer.from(
+		JSON.stringify({
+			"https://api.openai.com/auth": { chatgpt_account_id: "native-fixture-account" },
+		}),
+	).toString("base64");
+	return `fixture.${payload}.fixture`;
+}
+
+async function appendReplayToolHistory(
+	manager: SessionManager,
+	requestModel: ai.Model<"openai-responses" | "openai-codex-responses"> = model,
+) {
+	const callId = await manager.appendMessage({
+		...output(),
+		api: requestModel.api,
+		provider: requestModel.provider,
+		model: requestModel.id,
+		stopReason: "toolUse",
+		content: [
+			{ type: "toolCall", id: "call_history|fc_history", name: "fixture_lookup", arguments: { value: "kept" } },
+		],
+	});
+	const resultId = await manager.appendMessage({
+		role: "toolResult",
+		toolCallId: "call_history|fc_history",
+		toolName: "fixture_lookup",
+		content: [{ type: "text", text: "tool result retained" }],
+		isError: false,
+		timestamp: 3,
+	});
+	return { callId, resultId };
+}
+
+// The same local WebSocket interface used by the existing Codex cached-stream fixture.
+function installNativeCodexSocket(reply: (body: Record<string, unknown>) => unknown[]) {
+	const previous = globalThis.WebSocket;
+	const sent: Record<string, unknown>[] = [];
+	class FixtureWebSocket {
+		static OPEN = 1;
+		readyState = FixtureWebSocket.OPEN;
+		private listeners = new Map<string, Set<(event: unknown) => void>>();
+		constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+			queueMicrotask(() => this.dispatch("open", {}));
+		}
+		addEventListener(type: string, listener: (event: unknown) => void) {
+			const listeners = this.listeners.get(type) ?? new Set();
+			listeners.add(listener);
+			this.listeners.set(type, listeners);
+		}
+		removeEventListener(type: string, listener: (event: unknown) => void) {
+			this.listeners.get(type)?.delete(listener);
+		}
+		send(data: string) {
+			const body = JSON.parse(data) as Record<string, unknown>;
+			sent.push(body);
+			const events = reply(body);
+			queueMicrotask(() => {
+				for (const event of events) this.dispatch("message", { data: JSON.stringify(event) });
+			});
+		}
+		close() {
+			this.readyState = 3;
+		}
+		private dispatch(type: string, event: unknown) {
+			for (const listener of this.listeners.get(type) ?? []) listener(event);
+		}
+	}
+	globalThis.WebSocket = FixtureWebSocket as unknown as typeof WebSocket;
+	return {
+		sent,
+		restore: () => {
+			globalThis.WebSocket = previous;
+		},
+	};
+}
+
 function createBudgetAgent(
 	manager: SessionManager,
 	contextTokens: number | undefined,
 	releaseError?: Error,
 	commitView?: RequestViewCommit,
 	validateView?: RequestViewValidate,
+	native?: {
+		model: ai.Model<"openai-responses" | "openai-codex-responses">;
+		apiKey: string;
+		tools?: typeof replayTools;
+	},
 ) {
+	const requestModel = native?.model ?? model;
 	const facts: NativeRequestEvent[] = [];
 	const requests = new InferenceCoordinator(
 		() => {
@@ -135,11 +237,14 @@ function createBudgetAgent(
 						{
 							id: "offline-native-responses",
 							revision: "1",
-							api: model.api,
-							provider: model.provider,
-							url: `${model.baseUrl}/responses`,
-							model: model.id,
-							authMode: "api-key",
+							api: requestModel.api,
+							provider: requestModel.provider,
+							url:
+								requestModel.api === "openai-codex-responses"
+									? `${requestModel.baseUrl}/codex/responses`
+									: `${requestModel.baseUrl}/responses`,
+							model: requestModel.id,
+							authMode: requestModel.api === "openai-codex-responses" ? "fixture-subscription" : "api-key",
 							templateRevision: "offline-responses-1",
 							replayFamily: "responses",
 							contextTokens,
@@ -150,8 +255,8 @@ function createBudgetAgent(
 				},
 	);
 	const agent = new Agent({
-		initialState: { model },
-		getApiKey: () => "not-receipt-key",
+		initialState: { model: requestModel, ...(native?.tools ? { tools: native.tools } : {}) },
+		getApiKey: () => native?.apiKey ?? "not-receipt-key",
 		convertToLlm: commitView ? convertToLlm : undefined,
 	});
 	let viewMessages: AgentMessage[] | undefined;
@@ -212,16 +317,24 @@ function createBudgetAgent(
 	};
 }
 
-async function appendSelectionHistory(manager: SessionManager) {
+async function appendSelectionHistory(
+	manager: SessionManager,
+	requestModel: ai.Model<"openai-responses" | "openai-codex-responses"> = model,
+) {
+	const assistant = { ...output(), api: requestModel.api, provider: requestModel.provider, model: requestModel.id };
 	await manager.appendMessage({ role: "user", content: "old question", timestamp: 1 });
 	const olderText = "older answer for selection ".repeat(1024);
-	const olderId = await manager.appendMessage({ ...output(), content: [{ type: "text", text: olderText }] });
+	const olderId = await manager.appendMessage({
+		...assistant,
+		content: [{ type: "text", text: olderText, textSignature: "msg_history_old" }],
+	});
 	await manager.appendMessage({ role: "user", content: "recent question", timestamp: 2 });
 	const latestId = await manager.appendMessage({
-		...output(),
+		...assistant,
 		content: [{ type: "text", text: "keep recent answer", textSignature: "msg_history_recent" }],
 	});
-	return { olderText, olderId, latestId };
+	const tool = await appendReplayToolHistory(manager, requestModel);
+	return { olderText, olderId, latestId, ...tool };
 }
 
 const fixtureDirs: string[] = [];
@@ -407,7 +520,11 @@ describe("native inference coordination", () => {
 			announce(candidate);
 			await accepted;
 		});
-		const selecting = createBudgetAgent(selectionManager, 8192, undefined, commitView);
+		const selecting = createBudgetAgent(selectionManager, 8192, undefined, commitView, undefined, {
+			model,
+			apiKey: "not-receipt-key",
+			tools: replayTools,
+		});
 		const payloadHook = vi.fn((payload: unknown) => ({
 			...(payload as Record<string, unknown>),
 			metadata: { view_fixture: "single-pass" },
@@ -471,6 +588,12 @@ describe("native inference coordination", () => {
 			expect(candidate.selectedUnitIds).toContain(
 				fullUnits.find((unit) => unit.exactSources.includes(signedReplyId))!.id,
 			);
+			expect(candidate.projection.replayContract).toBe("message-groups");
+			for (const entryId of [history.callId, history.resultId]) {
+				expect(candidate.selectedUnitIds).toContain(
+					fullUnits.find((unit) => unit.exactSources.includes(entryId))!.id,
+				);
+			}
 			for (const unit of fullUnits.filter((unit) => unit.kind === "task-frame"))
 				expect(candidate.selectedUnitIds).toContain(unit.id);
 			expect(candidate.selectedUnitIds.every((id) => fullUnits.some((unit) => unit.id === id))).toBe(true);
@@ -486,6 +609,17 @@ describe("native inference coordination", () => {
 			expect(sentBody).toContain("keep recent answer");
 			expect(sentBody).toContain("Keep required task continuity");
 			expect(JSON.parse(sentBody!).metadata).toEqual({ view_fixture: "single-pass" });
+			expect(JSON.parse(sentBody!).tools[0].name).toBe("fixture_lookup");
+			expect(JSON.parse(sentBody!).input).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ type: "function_call", id: "fc_history", call_id: "call_history" }),
+					expect.objectContaining({
+						type: "function_call_output",
+						call_id: "call_history",
+						output: "tool result retained",
+					}),
+				]),
+			);
 			expect(JSON.parse(sentBody!).input).toContainEqual(
 				expect.objectContaining({
 					type: "message",
@@ -503,6 +637,201 @@ describe("native inference coordination", () => {
 		} finally {
 			accept();
 			await selecting.requests.dispose();
+		}
+
+		// Official Codex WS: actual full-view offers, a real parsed opaque reply, then exact ACK-backed delta reuse.
+		const codexDir = mkdtempSync(join(tmpdir(), "base-context-native-codex-view-"));
+		fixtureDirs.push(codexDir);
+		const codexManager = await SessionManager.create(codexDir, codexDir);
+		managers.push(codexManager);
+		await appendReplayToolHistory(codexManager, codexModel);
+		const codexOffers: RequestViewCandidate[] = [];
+		const codex = createBudgetAgent(
+			codexManager,
+			8192,
+			undefined,
+			async (candidate) => {
+				codexOffers.push(candidate);
+				expect(candidate.selectedUnitIds).toEqual(
+					getCanonicalViewUnits(codex.viewMessages)!.map((unit) => unit.id),
+				);
+			},
+			undefined,
+			{ model: codexModel, apiKey: codexFixtureKey(), tools: replayTools },
+		);
+		const codexSession = codexManager.getSessionId();
+		codex.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
+			...options,
+			transport: "websocket-cached",
+			sessionId: codexSession,
+		}));
+		const codexPayload = vi.fn();
+		codex.agent.onPayload = codexPayload;
+		let codexReplies = 0;
+		const socket = installNativeCodexSocket(() => {
+			expect(codex.facts.at(-1)).toMatchObject({ type: "attempt_admitted" });
+			const turn = ++codexReplies;
+			expect(codexOffers).toHaveLength(turn);
+			const text = {
+				type: "message",
+				id: `msg_codex_${turn}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: `Codex reply ${turn}`, annotations: [] }],
+			};
+			const reasoning = {
+				type: "reasoning",
+				id: "rs_codex_1",
+				encrypted_content: "fixture-opaque-reasoning",
+				summary: [],
+			};
+			return [
+				...(turn === 1
+					? [
+							{ type: "response.output_item.added", item: reasoning },
+							{ type: "response.output_item.done", item: reasoning },
+						]
+					: []),
+				{ type: "response.output_item.added", item: { ...text, content: [] } },
+				{ type: "response.output_item.done", item: text },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_codex_${turn}`,
+						model: codexModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 5,
+							output_tokens: 3,
+							total_tokens: 8,
+							input_tokens_details: { cached_tokens: 2 },
+							output_tokens_details: { reasoning_tokens: 1 },
+						},
+					},
+				},
+			];
+		});
+		try {
+			await codex.agent.prompt("Codex first input");
+			const firstCodexReply = await codex.events.result();
+			expect(firstCodexReply.content[0]).toMatchObject({ type: "thinking" });
+			expect(firstCodexReply.content[1]).toMatchObject({
+				textSignature: JSON.stringify({ v: 1, id: "msg_codex_1" }),
+			});
+			await codex.agent.prompt("Codex next input");
+			expect(codexPayload).toHaveBeenCalledTimes(2);
+			expect(socket.sent).toHaveLength(2);
+			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
+			expect(codexOffers[0].request.api).toBe("openai-codex-responses");
+			expect(codexOffers[1].projection.replayContract).toBe("message-groups");
+			expect(codexOffers[1].request.retainedPrefix).toMatchObject({ inputTokens: 5, outputTokens: 3 });
+			expect(codexOffers[1].assessment.retainedInputTokens).toBe(8);
+			const logical = JSON.parse(codexOffers[1].request.body!);
+			expect(logical.previous_response_id).toBeUndefined();
+			expect(logical.input).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ type: "function_call", call_id: "call_history" }),
+					expect.objectContaining({ type: "function_call_output", call_id: "call_history" }),
+					expect.objectContaining({ type: "reasoning", encrypted_content: "fixture-opaque-reasoning" }),
+					expect.objectContaining({ type: "message", id: "msg_codex_1" }),
+				]),
+			);
+			expect(socket.sent[1]).toMatchObject({
+				type: "response.create",
+				previous_response_id: "resp_codex_1",
+				input: [{ role: "user", content: [{ type: "input_text", text: "Codex next input" }] }],
+			});
+			expect(codex.facts.map((fact) => fact.type)).toEqual([
+				"attempt_admitted",
+				"attempt_settled",
+				"attempt_admitted",
+				"attempt_settled",
+			]);
+			expect(codex.facts[2]).toMatchObject({ descriptor: { requestBudget: codexOffers[1].assessment } });
+			expect(codex.facts[3]).toMatchObject({
+				receipt: {
+					transport: "websocket",
+					kind: "transport-continuation",
+					usageCompleteness: "complete",
+					usage: { inputTotal: 5, output: 3 },
+				},
+			});
+		} finally {
+			await codex.requests.dispose();
+			ai.cleanupSessionResources(codexSession);
+			socket.restore();
+		}
+
+		// Official Codex SSE also omits only the proven older literal, preserving the complete tool exchange.
+		const codexSubsetDir = mkdtempSync(join(tmpdir(), "base-context-native-codex-subset-"));
+		fixtureDirs.push(codexSubsetDir);
+		const codexSubsetManager = await SessionManager.create(codexSubsetDir, codexSubsetDir);
+		managers.push(codexSubsetManager);
+		const codexHistory = await appendSelectionHistory(codexSubsetManager, codexModel);
+		const codexCandidates: RequestViewCandidate[] = [];
+		const codexSubset = createBudgetAgent(
+			codexSubsetManager,
+			8192,
+			undefined,
+			async (candidate) => {
+				codexCandidates.push(candidate);
+			},
+			undefined,
+			{ model: codexModel, apiKey: codexFixtureKey(), tools: replayTools },
+		);
+		codexSubset.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
+			...options,
+			transport: "sse",
+		}));
+		const codexSubsetPayload = vi.fn();
+		codexSubset.agent.onPayload = codexSubsetPayload;
+		offlineFetch.mockImplementation(async (_input, init) => {
+			expect(String(init?.body)).toBe(codexCandidates[0].request.body);
+			expect(codexSubset.facts.at(-1)).toMatchObject({ type: "attempt_admitted" });
+			const item = {
+				type: "message",
+				id: "msg_codex_subset",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Codex selected", annotations: [] }],
+			};
+			return new Response(
+				[
+					{ type: "response.output_item.added", item: { ...item, content: [] } },
+					{ type: "response.output_item.done", item },
+					{
+						type: "response.completed",
+						response: { id: "resp_codex_subset", model: codexModel.id, status: "completed" },
+					},
+				]
+					.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+					.join(""),
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		});
+		try {
+			await codexSubset.agent.prompt("Codex subset current input");
+			expect(codexSubsetPayload).toHaveBeenCalledTimes(1);
+			expect(codexCandidates[0].originalAssessment.status).toBe("over-budget");
+			expect(codexCandidates[0].assessment.status).toBe("within-estimate");
+			const codexUnits = getCanonicalViewUnits(codexSubset.viewMessages)!;
+			expect(codexCandidates[0].selectedUnitIds).not.toContain(
+				codexUnits.find((unit) => unit.exactSources.includes(codexHistory.olderId))!.id,
+			);
+			for (const entryId of [codexHistory.callId, codexHistory.resultId]) {
+				expect(codexCandidates[0].selectedUnitIds).toContain(
+					codexUnits.find((unit) => unit.exactSources.includes(entryId))!.id,
+				);
+			}
+			expect(codexSubset.facts.map((fact) => fact.type)).toEqual(["attempt_admitted", "attempt_settled"]);
+			expect(await codexSubset.events.result()).toMatchObject({
+				content: [{ type: "text", text: "Codex selected" }],
+			});
+		} finally {
+			await codexSubset.requests.dispose();
 		}
 	});
 
@@ -981,6 +1310,96 @@ describe("native inference coordination", () => {
 			expect(guarded.agent.state.messages.filter((message) => message.role === "assistant")).toEqual([]);
 		} finally {
 			await guarded.requests.dispose();
+		}
+
+		// A local Codex preparation rejection is not a WS transport failure and cannot retry through SSE.
+		const codexEdgeDir = mkdtempSync(join(tmpdir(), "base-context-native-codex-refusal-"));
+		fixtureDirs.push(codexEdgeDir);
+		const codexEdgeManager = await SessionManager.create(codexEdgeDir, codexEdgeDir);
+		managers.push(codexEdgeManager);
+		await appendReplayToolHistory(codexEdgeManager, codexModel);
+		const codexSentinel = new Error("native Codex checkpoint refused");
+		const rejectCodex = vi.fn(async (_candidate: RequestViewCandidate) => {
+			throw codexSentinel;
+		});
+		const codexEdge = createBudgetAgent(codexEdgeManager, 8192, undefined, rejectCodex, undefined, {
+			model: codexModel,
+			apiKey: codexFixtureKey(),
+			tools: replayTools,
+		});
+		const codexEdgeSession = codexEdgeManager.getSessionId();
+		codexEdge.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
+			...options,
+			transport: "websocket-cached",
+			sessionId: codexEdgeSession,
+		}));
+		const codexEdgePayload = vi.fn();
+		codexEdge.agent.onPayload = codexEdgePayload;
+		const refusedSocket = installNativeCodexSocket(() => {
+			throw new Error("Refused Codex request reached send");
+		});
+		try {
+			await expect(codexEdge.agent.prompt("Codex rejected full view")).rejects.toBe(codexSentinel);
+			await expect(codexEdge.events.result()).rejects.toBe(codexSentinel);
+			expect(ai.isLocalRequestPreparationError(codexSentinel)).toBe(true);
+			expect(rejectCodex).toHaveBeenCalledTimes(1);
+			expect(codexEdge.facts).toEqual([]);
+			expect(refusedSocket.sent).toEqual([]);
+			expect(offlineFetch).not.toHaveBeenCalled();
+
+			// No owned response/receipt prefix exists. Opaque reasoning stays unknown, not byte-estimated.
+			await codexEdgeManager.appendMessage({
+				...output(),
+				api: codexModel.api,
+				provider: codexModel.provider,
+				model: codexModel.id,
+				content: [
+					{
+						type: "thinking",
+						thinking: "",
+						thinkingSignature: JSON.stringify({
+							type: "reasoning",
+							id: "rs_uncached",
+							encrypted_content: "unobserved-opaque",
+							summary: [],
+						}),
+					},
+					{ type: "text", text: "retained final item", textSignature: "msg_uncached" },
+				],
+			});
+			const opaqueRefusal = await codexEdge.agent.prompt("Codex opaque current input").then(
+				() => {
+					throw new Error("Expected an actual unknown-token refusal");
+				},
+				(error: unknown) => error,
+			);
+			expect(opaqueRefusal).toBeInstanceOf(ai.RequestTokenBudgetError);
+			await expect(codexEdge.events.result()).rejects.toBe(opaqueRefusal);
+			expect((opaqueRefusal as ai.RequestTokenBudgetError).assessment).toMatchObject({
+				status: "unknown",
+				estimatedInputTokens: null,
+				retainedInputTokens: 0,
+			});
+			expect(rejectCodex).toHaveBeenCalledTimes(1);
+			expect(codexEdgePayload).toHaveBeenCalledTimes(2);
+			expect(codexEdge.inputAcks).toHaveLength(2);
+			expect(codexEdge.facts).toEqual([]);
+			expect(refusedSocket.sent).toEqual([]);
+			expect(offlineFetch).not.toHaveBeenCalled();
+			expect(codexEdge.agent.state.messages.filter((message) => message.role === "assistant")).toEqual(
+				codexEdge.viewMessages.filter((message) => message.role === "assistant"),
+			);
+			expect(
+				codexEdge.lifecycle.filter(
+					(event) =>
+						(event.type === "message_start" || event.type === "message_end") &&
+						event.message.role === "assistant",
+				),
+			).toEqual([]);
+		} finally {
+			await codexEdge.requests.dispose();
+			ai.cleanupSessionResources(codexEdgeSession);
+			refusedSocket.restore();
 		}
 	});
 });

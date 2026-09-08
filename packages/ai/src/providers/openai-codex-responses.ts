@@ -40,8 +40,12 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
-import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
-import { RequestTokenBudgetError } from "../utils/request-token-budget.js";
+import { isLocalRequestPreparationError, ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import {
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	RequestTokenBudgetError,
+} from "../utils/request-token-budget.js";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
@@ -149,7 +153,18 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			const accountId = extractAccountId(apiKey);
-			let body = buildRequestBody(model, context, options);
+			let projection: ProviderRequestProjection | undefined;
+			let body = buildRequestBody(
+				model,
+				context,
+				options,
+				options?.attempts?.prepareRequest
+					? (value) => {
+							projection = value;
+						}
+					: undefined,
+			);
+			const originalInput = projection ? JSON.stringify(body.input) : undefined;
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
@@ -168,8 +183,26 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				apiKey,
 				websocketRequestId,
 			);
-			const bodyJson = JSON.stringify(body);
+			let bodyJson = JSON.stringify(body);
 			if (attempts.hasRequestBudget) body = JSON.parse(bodyJson) as RequestBody;
+			if (body.model !== model.id || JSON.stringify(body.input) !== originalInput) projection = undefined;
+			let prepared = false;
+			const prepareBody = async (url: string, retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"]) => {
+				const selected = await attempts.prepareRequest(
+					{
+						url,
+						body: bodyJson,
+						...(retainedPrefix ? { retainedPrefix } : {}),
+					},
+					prepared ? undefined : projection,
+				);
+				if (selected !== undefined) {
+					bodyJson = selected;
+					body = JSON.parse(selected) as RequestBody;
+				}
+				prepared = true;
+				return body;
+			};
 			const transport = options?.transport || "auto";
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
 			let websocketFallback = websocketDisabledForSession;
@@ -192,6 +225,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						},
 						attempts,
 						options,
+						projection ? prepareBody : undefined,
 					);
 
 					if (options?.signal?.aborted) {
@@ -232,7 +266,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 
 				const budgetUrl = attempts.hasRequestBudget ? resolveCodexUrl(model.baseUrl) : undefined;
-				if (budgetUrl !== undefined) await attempts.measureRequest({ url: budgetUrl, body: bodyJson });
+				if (budgetUrl !== undefined) await prepareBody(budgetUrl);
 				await attempts.begin("http", {
 					kind:
 						attempt > 0
@@ -341,9 +375,11 @@ function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
+	onProjection?: (projection: ProviderRequestProjection) => void,
 ): RequestBody {
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
+		onProjection,
 	});
 
 	const body: RequestBody = {
@@ -484,7 +520,10 @@ class CodexProtocolError extends Error {
 
 function isCodexNonTransportError(error: unknown): boolean {
 	return (
-		error instanceof CodexApiError || error instanceof CodexProtocolError || error instanceof RequestTokenBudgetError
+		error instanceof CodexApiError ||
+		error instanceof CodexProtocolError ||
+		error instanceof RequestTokenBudgetError ||
+		isLocalRequestPreparationError(error)
 	);
 }
 
@@ -1151,13 +1190,17 @@ async function processWebSocketStream(
 	onStart: () => void,
 	attempts: ProviderAttemptTracker,
 	options?: OpenAICodexResponsesOptions,
+	prepareBody?: (
+		url: string,
+		retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"],
+	) => Promise<RequestBody>,
 ): Promise<void> {
 	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
 	let keepConnection = true;
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
+	let fullBody = body;
 	try {
 		if (attempts.hasRequestBudget) {
 			const continuation = useCachedContext ? entry?.continuation : undefined;
@@ -1176,11 +1219,24 @@ async function processWebSocketStream(
 							...(observation.responseModel === undefined ? {} : { responseModel: observation.responseModel }),
 						}
 					: undefined;
-			await attempts.measureRequest({
-				url: entry?.url ?? url,
-				body: JSON.stringify(fullBody),
-				...(retainedPrefix ? { retainedPrefix } : {}),
-			});
+			if (prepareBody) {
+				fullBody = await prepareBody(entry?.url ?? url, retainedPrefix);
+				// A checkpoint wait cannot turn a lost exact owned prefix into token credit.
+				if (
+					retainedPrefix &&
+					(entry?.continuation !== continuation ||
+						continuation?.contextTokenObservation?.value !== observation ||
+						getCachedWebSocketInputDelta(fullBody, continuation!) === undefined)
+				) {
+					await attempts.measureRequest({ url: entry?.url ?? url, body: JSON.stringify(fullBody) });
+				}
+			} else {
+				await attempts.measureRequest({
+					url: entry?.url ?? url,
+					body: JSON.stringify(fullBody),
+					...(retainedPrefix ? { retainedPrefix } : {}),
+				});
+			}
 		}
 		const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
 		const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
@@ -1241,7 +1297,7 @@ async function processWebSocketStream(
 			};
 		}
 	} catch (error) {
-		if (!(error instanceof RequestTokenBudgetError)) {
+		if (!(error instanceof RequestTokenBudgetError) && !isLocalRequestPreparationError(error)) {
 			if (entry) entry.continuation = undefined;
 			keepConnection = false;
 		}

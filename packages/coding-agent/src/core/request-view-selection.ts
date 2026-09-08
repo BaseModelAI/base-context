@@ -60,7 +60,7 @@ export function matchesRequestView(
 	return rendered.length === boundary.units.length && JSON.stringify(rendered) === JSON.stringify(context.messages);
 }
 
-/** Only the serializer's narrow text projection authorizes this historical-literal choice. */
+/** Only the actual serializer's established replay contract authorizes historical-literal omission. */
 export async function selectRequestView(
 	boundary: CapturedRequestViewBoundary,
 	request: ProviderRequestRepresentation,
@@ -71,16 +71,25 @@ export async function selectRequestView(
 	const full = budget.measure(request);
 	if (
 		full.limitSource !== "explicit-profile" ||
-		request.api !== "openai-responses" ||
-		projection.kind !== "openai-responses-text-v1"
+		(request.api !== "openai-responses" && request.api !== "openai-codex-responses")
 	)
 		return;
 	const payload = JSON.parse(request.body!) as Record<string, unknown>;
 	const input = payload.input;
 	if (!Array.isArray(input) || input.length !== projection.messageIndices.length) return;
 
-	// Generic/opaque projections never reach this policy. Intrinsic TaskFrame dependencies remain intact.
-	const units = bindMessageReplayUnits(boundary.messages, boundary.units, boundary.limits, "message-groups");
+	// Absence is complete-context; a profile or tool-shaped message is never group authority.
+	const replayContract = projection.replayContract ?? "complete-context";
+	if (
+		projection.kind === "openai-responses-text-v1" &&
+		boundary.messages.some(
+			(message) =>
+				message.role === "toolResult" ||
+				(message.role === "assistant" && (message.content.length !== 1 || message.content[0].type !== "text")),
+		)
+	)
+		return;
+	const units = bindMessageReplayUnits(boundary.messages, boundary.units, boundary.limits, replayContract);
 	const offer = async (
 		selectedUnitIds: readonly string[],
 		candidateRequest: ProviderRequestRepresentation,
@@ -93,8 +102,19 @@ export async function selectRequestView(
 				selectedUnitIds: Object.freeze([...selectedUnitIds]),
 				request: Object.freeze({ ...candidateRequest }),
 				projection: Object.freeze({
-					kind: candidateProjection.kind,
+					...candidateProjection,
+					replayContract,
 					messageIndices: Object.freeze([...candidateProjection.messageIndices]),
+					...(candidateProjection.optionalMessageIndices
+						? {
+								optionalMessageIndices: Object.freeze([...candidateProjection.optionalMessageIndices]),
+							}
+						: {}),
+					...(candidateProjection.generatedMessageIndices
+						? {
+								generatedMessageIndices: Object.freeze([...candidateProjection.generatedMessageIndices]),
+							}
+						: {}),
 				}),
 				assessment,
 				originalAssessment: full,
@@ -114,14 +134,19 @@ export async function selectRequestView(
 		);
 		return request.body;
 	}
-	if (!allowShrink || full.status !== "over-budget") return;
+	if (!allowShrink || full.status !== "over-budget" || replayContract !== "message-groups") return;
 	let latestAssistant = -1;
 	for (const [index, message] of boundary.messages.entries())
 		if (message.role === "assistant") latestAssistant = index;
+	const retained = new Set(projection.messageIndices.slice(0, request.retainedPrefix?.inputItems ?? 0));
+	const projectedOptional =
+		projection.kind === "openai-responses-replay-v1" ? new Set(projection.optionalMessageIndices ?? []) : undefined;
 	const optional = units.filter((unit, index) => {
 		const message = boundary.messages[index];
 		return (
 			index !== latestAssistant &&
+			!retained.has(index) &&
+			(!projectedOptional || projectedOptional.has(index)) &&
 			unit.kind === "literal" &&
 			unit.authority === "assistant-public" &&
 			message.role === "assistant" &&
@@ -131,14 +156,15 @@ export async function selectRequestView(
 		);
 	});
 	const generatedPositions = new Map<string, number>();
-	for (const [index, message] of boundary.messages.entries()) {
-		if (
+	const generated =
+		projection.generatedMessageIndices ??
+		boundary.messages.flatMap((message, index) =>
 			message.role === "assistant" &&
-			message.content[0].type === "text" &&
-			message.content[0].textSignature === undefined
-		)
-			generatedPositions.set(units[index].id, index);
-	}
+			message.content.some((block) => block.type === "text" && block.textSignature === undefined)
+				? [index]
+				: [],
+		);
+	for (const index of generated) generatedPositions.set(units[index].id, index);
 	// All user inputs, the latest assistant, fixed/TaskFrame/recovery units and errors stay selected.
 	const selected = new Set(units.map((unit) => unit.id));
 	for (const unit of optional) {
@@ -160,7 +186,24 @@ export async function selectRequestView(
 		await offer(
 			closed.map((item) => item.id),
 			candidateRequest,
-			{ kind: projection.kind, messageIndices: projection.messageIndices.filter((_, index) => keepItem(index)) },
+			{
+				...projection,
+				messageIndices: projection.messageIndices.filter((_, index) => keepItem(index)),
+				...(projection.optionalMessageIndices
+					? {
+							optionalMessageIndices: projection.optionalMessageIndices.filter((index) =>
+								closedIds.has(units[index].id),
+							),
+						}
+					: {}),
+				...(projection.generatedMessageIndices
+					? {
+							generatedMessageIndices: projection.generatedMessageIndices.filter((index) =>
+								closedIds.has(units[index].id),
+							),
+						}
+					: {}),
+			},
 			assessment,
 		);
 		return body;

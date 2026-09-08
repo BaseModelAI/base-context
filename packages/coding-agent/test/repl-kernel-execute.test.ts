@@ -281,6 +281,12 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 				revision: finalized!.source.revision,
 				text: cell.content[1].type === "text" ? cell.content[1].text : "",
 			});
+			// The faux route grants no native replay projection: refuse before summarizing away recovery.
+			const compactionsBefore = (await sessionManager.readEntries()).filter((entry) => entry.type === "compaction");
+			await expect(session.compact()).rejects.toThrow("Recovery compaction requires an accepted replay contract");
+			expect((await sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+				compactionsBefore,
+			);
 			// Retained tool data keeps descriptive provenance, not native recovery admission.
 			const retained = await SessionManager.importRetainedFrom(
 				sessionManager.getSessionFile()!,

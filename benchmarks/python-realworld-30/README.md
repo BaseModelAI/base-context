@@ -4,6 +4,11 @@ This directory implements `prime-context-python-realworld-30-benchmark-spec.md`.
 It replaces the Docker synthetic corpus with 30 deterministic Python 3.12 tasks.
 Candidate solutions and all fixture code use only the Python standard library.
 
+The current Base Context campaign gate remains closed until the five benchmark
+prerequisites work. No early samples or model/auth/readiness probes are admitted.
+After that gate, run all 30 isolated tasks at low effort, then at medium effort,
+using the same existing session ChatGPT subscription and the exact Sol/Astra models.
+
 ## Layout
 
 - `tasks.json` indexes the 30 scenarios.
@@ -74,6 +79,14 @@ uses `@earendil-works/pi-coding-agent@0.9.3`; `current` uses the clean candidate
 published `dist/index.js`, with the existing runtime and JSONL RPC mode. The
 native candidate must include the instance-scoped host-subscription authorization;
 older frozen candidates refuse this route.
+
+The native arm passes an enforced request-token policy through that same service/SDK
+path. The profile uses the selected local model configuration's combined context limit
+and output ceiling, with a one-token-per-UTF8-byte estimate plus a 1024-token margin.
+These are declared benchmark settings, not deployment or tokenizer certification.
+Only actual native projections grant narrower replay groups. Opaque accounting without
+owned exact-prefix coverage remains unknown/refused. The H/control configuration is
+unchanged. This wiring does not open the campaign gate or perform a provider probe.
 
 Inference uses only the existing host OpenAI subscription through
 `openai-codex` / `openai-codex-responses`. API-key files, credential copies,

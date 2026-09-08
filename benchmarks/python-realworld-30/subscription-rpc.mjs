@@ -32,6 +32,19 @@ export async function runSubscriptionRpc(host, options) {
     const result = await host.createAgentSessionFromServices({
       services, sessionManager, sessionStartEvent, model, thinkingLevel,
       tools: variant === "current" ? ["bash", "prime_context"] : ["bash"],
+      // Declared benchmark policy, not deployment/tokenizer certification. Opaque accounting may still refuse.
+      ...(variant === "current" ? { requestTokenBudget: {
+        mode: "enforce",
+        profiles: [{
+          id: "benchmark-native-codex", revision: "1",
+          api: model.api, provider: model.provider,
+          url: "https://chatgpt.com/backend-api/codex/responses", model: model.id,
+          authMode: "existing-openai-codex-subscription",
+          templateRevision: "base-context-codex-responses/1", replayFamily: "responses-replay-v1",
+          contextTokens: model.contextWindow, outputCeilingTokens: model.maxTokens,
+          estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 1024 },
+        }],
+      } } : {}),
       prewarmIpythonKernel: false, telemetryDisabled: true,
     });
     return { ...result, services, diagnostics: services.diagnostics };

@@ -25,12 +25,7 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import {
-	convertResponsesMessages,
-	convertResponsesTools,
-	matchesResponsesTextSignature,
-	processResponsesStream,
-} from "./openai-responses-shared.js";
+import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -69,38 +64,6 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 }
 
-function textRequestProjection(
-	model: Model<"openai-responses">,
-	context: Context,
-	input: ResponseCreateParamsStreaming["input"],
-): ProviderRequestProjection | undefined {
-	if (model.provider !== "openai" || !Array.isArray(input)) return;
-	const messageIndices: Array<number | null> = context.systemPrompt ? [null] : [];
-	for (const [index, message] of context.messages.entries()) {
-		if (message.role === "user") {
-			if (
-				typeof message.content !== "string" &&
-				(!message.content.length || message.content.some((part) => part.type !== "text"))
-			)
-				return;
-		} else if (message.role === "assistant") {
-			if (
-				message.api !== model.api ||
-				message.provider !== model.provider ||
-				message.model !== model.id ||
-				message.stopReason !== "stop" ||
-				message.content.length !== 1 ||
-				message.content[0].type !== "text"
-			)
-				return;
-			if (!matchesResponsesTextSignature(message.content[0].textSignature, input[messageIndices.length])) return;
-		} else return;
-		messageIndices.push(index);
-	}
-	if (input.length !== messageIndices.length) return;
-	return { kind: "openai-responses-text-v1", messageIndices };
-}
-
 export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	model: Model<"openai-responses">,
 	context: Context,
@@ -137,10 +100,17 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}
-			let params = buildParams(model, context, options);
-			const projection = options?.attempts?.prepareRequest
-				? textRequestProjection(model, context, params.input)
-				: undefined;
+			let projection: ProviderRequestProjection | undefined;
+			let params = buildParams(
+				model,
+				context,
+				options,
+				options?.attempts?.prepareRequest
+					? (value) => {
+							projection = value;
+						}
+					: undefined,
+			);
 			const originalInput = projection ? JSON.stringify(params.input) : undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -276,8 +246,13 @@ function createClient(
 	});
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	options?: OpenAIResponsesOptions,
+	onProjection?: (projection: ProviderRequestProjection) => void,
+) {
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { onProjection });
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);

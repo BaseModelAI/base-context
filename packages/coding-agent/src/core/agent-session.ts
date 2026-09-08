@@ -100,10 +100,12 @@ import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import {
 	CanonicalContextCompiler,
+	canonicalRecoveryBoundary,
 	getCanonicalEpochContext,
 	getCanonicalMessageSource,
 	getCanonicalViewUnits,
 	prepareCanonicalEpoch,
+	prepareRecoveryCompaction,
 } from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -1424,7 +1426,12 @@ export class AgentSession {
 								candidate.assessment,
 								limits.maxSourceBytes,
 							);
-							const selection = JSON.stringify([representation, candidate.selectedUnitIds]);
+							const replayContract =
+								"replayContract" in candidate.projection &&
+								candidate.projection.replayContract === "message-groups"
+									? "message-groups"
+									: "complete-context";
+							const selection = JSON.stringify([representation, replayContract, candidate.selectedUnitIds]);
 							if (accepted !== undefined) {
 								if (accepted !== selection)
 									throw new Error("Captured epoch request selection changed after acceptance");
@@ -1432,6 +1439,7 @@ export class AgentSession {
 							}
 							if (
 								committed?.representation === representation &&
+								committed.replayContract === replayContract &&
 								committed.taskFrame?.material === epochContext.taskFrame?.material &&
 								candidate.selectedUnitIds.length === messages.length
 							) {
@@ -1444,6 +1452,7 @@ export class AgentSession {
 								candidate.selectedUnitIds,
 								representation,
 								limits.maxSourceBytes,
+								replayContract,
 							);
 							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
 								throw new Error("Context epoch candidate does not match its captured source");
@@ -3573,7 +3582,7 @@ export class AgentSession {
 					if (sessionId !== this.sessionId || sessionFile !== this.sessionFile)
 						throw new Error("Session source changed during compact request");
 					preparation = this.isStreaming
-						? await this._prepareCapturedCompaction(branch, settings, captured)
+						? (await this._prepareCapturedCompaction(branch, settings, captured, compaction)).preparation
 						: undefined;
 				} catch (error) {
 					try {
@@ -8324,39 +8333,37 @@ export class AgentSession {
 		}
 	}
 
-	/** Ordinary summaries must consume selected epoch views, not an empty checkpoint summary and its tail alone. */
+	/** A private compiled context keeps extension summary edits separate from retained source recipes. */
 	private async _prepareCapturedCompaction(
 		pathEntries: SessionEntry[],
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
 		requests: InferenceCoordinator,
-	) {
-		let latest: SessionEntry | undefined;
-		for (let index = pathEntries.length - 1; index >= 0; index--) {
-			if (pathEntries[index].type === "compaction") {
-				latest = pathEntries[index];
-				break;
-			}
-		}
-		if (
-			latest?.type !== "compaction" ||
-			!latest.details ||
-			typeof latest.details !== "object" ||
-			!(CONTEXT_EPOCH_DETAIL in latest.details)
-		)
-			return prepareCompaction(pathEntries, settings);
+		compaction: BoundCompactionSink,
+	): Promise<{
+		preparation: CompactionPreparation | undefined;
+		messages?: readonly AgentMessage[];
+		maxSourceBytes: number;
+	}> {
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		if (!(await compaction.source).persistent)
+			return { preparation: prepareCompaction(pathEntries, settings), maxSourceBytes: limits.maxSourceBytes };
 		return requests.readHistory(async (view) => {
-			const messages = await new CanonicalContextCompiler().compile(
-				view,
-				this.settingsManager.getCanonicalContextLimits(),
-			);
-			const epoch = getCanonicalEpochContext(messages);
-			if (!epoch?.checkpoint) throw new Error("Compaction epoch view is unavailable");
-			return prepareViewCompaction(
-				messages,
-				epoch.references.map((ref) => ref?.ref.entryId),
-				pathEntries,
-				settings,
-			);
+			const messages = await new CanonicalContextCompiler().compile(view, limits);
+			const context = getCanonicalEpochContext(messages)!;
+			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
+				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
+			const boundary = canonicalRecoveryBoundary(messages);
+			const preparation =
+				context.checkpoint || boundary
+					? prepareViewCompaction(
+							messages,
+							context.references.map((ref) => ref?.ref.entryId),
+							pathEntries,
+							settings,
+							boundary,
+						)
+					: prepareCompaction(pathEntries, settings);
+			return { preparation, messages, maxSourceBytes: limits.maxSourceBytes };
 		});
 	}
 
@@ -8392,7 +8399,8 @@ export class AgentSession {
 			settings,
 		} = options;
 
-		const preparation = await this._prepareCapturedCompaction(pathEntries, settings, requests);
+		const prepared = await this._prepareCapturedCompaction(pathEntries, settings, requests, compaction);
+		const preparation = prepared.preparation;
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			if (lastEntry?.type === "compaction") {
@@ -8493,15 +8501,35 @@ export class AgentSession {
 			const result: CompactionResult = JSON.parse(
 				JSON.stringify({ summary, firstKeptEntryId, tokensBefore, details }),
 			);
-			savedCompactionId = await compaction.appendCompaction(
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				result.details,
-				fromExtension,
-				customInstructions,
-				usage,
-			);
+			const recovery = prepared.messages
+				? prepareRecoveryCompaction(prepared.messages, firstKeptEntryId, prepared.maxSourceBytes)
+				: undefined;
+			if (recovery) {
+				if (
+					result.details !== undefined &&
+					(!result.details || typeof result.details !== "object" || Array.isArray(result.details))
+				)
+					throw new Error("Recovery compaction details require an object");
+				const recoveryDetails = { ...result.details, [CONTEXT_EPOCH_DETAIL]: recovery };
+				result.details = recoveryDetails;
+				savedCompactionId = await compaction[appendContextEpoch](recovery, tokensBefore, {
+					summary,
+					details: recoveryDetails,
+					fromHook: fromExtension,
+					customInstructions,
+					usage,
+				});
+			} else {
+				savedCompactionId = await compaction.appendCompaction(
+					summary,
+					firstKeptEntryId,
+					tokensBefore,
+					result.details,
+					fromExtension,
+					customInstructions,
+					usage,
+				);
+			}
 			// Only the canonical append ACK commits summary slices and advances the semantic epoch.
 			committed = { entryId: savedCompactionId, result };
 			compactionSettled = true;

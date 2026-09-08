@@ -7,9 +7,12 @@ import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "..
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
+import { readContextEpoch } from "../src/core/context-epoch.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { emptyUsage } from "../src/core/usage.js";
 
 describe("createAgentSessionFromServices", () => {
 	const cleanupPaths: string[] = [];
@@ -131,7 +134,7 @@ describe("createAgentSessionFromServices", () => {
 			baseUrl: "https://example.invalid/v1",
 			reasoning: false,
 			input: ["text"],
-			contextWindow: 500_000,
+			contextWindow: 300_000,
 			maxTokens: 16,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		};
@@ -152,7 +155,17 @@ describe("createAgentSessionFromServices", () => {
 				},
 			],
 		});
-		const epochManager = await SessionManager.create(epochDir, join(epochDir, "sessions"));
+		let epochManager = await SessionManager.create(epochDir, join(epochDir, "sessions"));
+		await epochManager.appendMessage({
+			role: "assistant",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			content: [{ type: "text", text: "OPTIONAL_PRIOR_LITERAL ".repeat(4000), textSignature: "msg_optional_prior" }],
+			stopReason: "stop",
+			usage: emptyUsage(),
+			timestamp: 1,
+		});
 		const epochsAtSend: string[] = [];
 		const bodies: string[] = [];
 		const summaryBodies: string[] = [];
@@ -161,20 +174,46 @@ describe("createAgentSessionFromServices", () => {
 			const epochs = await epochManager.readBranchHistory(async (history) => {
 				const ids: string[] = [];
 				for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 }))
-					if (item.source.qualification === "native-context-epoch") ids.push(item.source.id);
+					if (
+						item.source.qualification === "native-context-epoch" &&
+						item.entry.type === "compaction" &&
+						readContextEpoch(item.entry.details, 2 * 1024 * 1024)?.representation
+					)
+						ids.push(item.source.id);
 				return ids;
 			});
-			expect(epochs).toHaveLength(summarizing ? 2 : bodies.length + 1);
-			if (!summarizing) epochsAtSend.push(epochs.at(-1)!);
+			expect(epochs.length).toBeGreaterThan(0);
+			if (summarizing) expect(epochs.at(-1)).toBe(epochsAtSend.at(-1));
+			else epochsAtSend.push(epochs.at(-1)!);
 			expect(typeof init?.body).toBe("string");
 			(summarizing ? summaryBodies : bodies).push(init!.body as string);
-			const item = {
-				type: "message",
-				id: `msg_epoch_${bodies.length + summaryBodies.length}`,
-				role: "assistant",
-				status: "completed",
-				content: [{ type: "output_text", text: "OK", annotations: [] }],
-			};
+			const firstInput =
+				bodies.length === 1
+					? (await epochManager.readBranch()).find(
+							(entry) => entry.type === "message" && entry.message.role === "user",
+						)
+					: undefined;
+			const item = firstInput
+				? {
+						type: "function_call",
+						id: "fc_epoch_recovery",
+						call_id: "call_epoch_recovery",
+						name: "prime_context",
+						status: "completed",
+						arguments: JSON.stringify({
+							action: "recover",
+							ref: firstInput.id,
+							field: "/nativeOrigin/submitted/text",
+							need: "Preserve Foo.txt.",
+						}),
+					}
+				: {
+						type: "message",
+						id: `msg_epoch_${bodies.length + summaryBodies.length}`,
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "OK", annotations: [] }],
+					};
 			const sse = [
 				{
 					type: "response.output_item.added",
@@ -201,57 +240,99 @@ describe("createAgentSessionFromServices", () => {
 				.join("");
 			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
 		});
+		const epochOptions: Omit<Parameters<typeof createAgentSessionFromServices>[0], "sessionManager"> = {
+			services: epochServices,
+			model,
+			tools: ["prime_context"],
+			includeGoals: false,
+			includeCompactSkill: false,
+			prewarmIpythonKernel: false,
+			telemetryDisabled: true,
+			requestTokenBudget: {
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-epoch",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://example.invalid/v1/responses",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "responses-text-v1",
+						replayFamily: "responses-text-v1",
+						contextTokens: 300_000,
+						outputCeilingTokens: 16,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
+					},
+				],
+			},
+		};
 		let epochSession: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
 		try {
 			({ session: epochSession } = await createAgentSessionFromServices({
-				services: epochServices,
+				...epochOptions,
 				sessionManager: epochManager,
-				model,
-				tools: [],
-				noTools: "all",
-				includeGoals: false,
-				includeCompactSkill: false,
-				prewarmIpythonKernel: false,
-				telemetryDisabled: true,
-				requestTokenBudget: {
-					mode: "enforce",
-					profiles: [
-						{
-							id: "offline-epoch",
-							revision: "1",
-							api: model.api,
-							provider: model.provider,
-							url: "https://example.invalid/v1/responses",
-							model: model.id,
-							authMode: "fixture-api-key",
-							templateRevision: "responses-text-v1",
-							replayFamily: "responses-text-v1",
-							contextTokens: 500_000,
-							outputCeilingTokens: 16,
-							estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
-						},
-					],
-				},
 			}));
 			await epochSession.prompt("Preserve Foo.txt.");
-			await epochSession.prompt("Also preserve Bar.txt.");
-			expect(new Set(epochsAtSend).size).toBe(2);
-			expect(bodies).toHaveLength(2);
+			await epochSession.prompt(`Also preserve Bar.txt.\n${"New required context. ".repeat(12000)}`);
+			expect(epochsAtSend).toHaveLength(3);
+			// A same-task tool continuation may reuse its ACK; eviction must commit a new boundary.
+			expect(epochsAtSend[2]).not.toBe(epochsAtSend[1]);
+			expect(bodies).toHaveLength(3);
+			expect(bodies[0]).toContain("OPTIONAL_PRIOR_LITERAL");
+			expect(bodies[1]).toContain("OPTIONAL_PRIOR_LITERAL");
+			expect(bodies[2]).not.toContain("OPTIONAL_PRIOR_LITERAL");
 			const firstBody = JSON.parse(bodies[0]);
 			const secondBody = JSON.parse(bodies[1]);
-			// The original task frame and input remain literal prefix items after the next ACK.
+			// The acknowledged prefix stays literal during the same-task tool continuation.
 			expect(secondBody.input.slice(0, firstBody.input.length)).toEqual(firstBody.input);
 			// An ordinary summary consumes selected historical views, then the next main request commits a new epoch.
 			summarizing = true;
-			await epochSession.compact();
+			const originalRecovery = epochSession.messages.find(
+				(message) => message.role === "toolResult" && message.toolName === "prime_context",
+			);
+			expect(originalRecovery).toBeDefined();
+			if (originalRecovery?.role !== "toolResult" || originalRecovery.content[0]?.type !== "text")
+				throw new Error("Expected native selected recovery data");
+			expect(originalRecovery.isError).toBe(false);
+			expect(JSON.parse(originalRecovery.content[0].text).results[0].records[0]).toMatchObject({
+				text: "Preserve Foo.txt.",
+			});
+			const summary = await epochSession.compact();
 			summarizing = false;
+			const afterSummary = await epochManager.readBranchHistory((history) =>
+				new CanonicalContextCompiler().compile(
+					history.branchContext,
+					epochSession!.settingsManager.getCanonicalContextLimits(),
+				),
+			);
+			expect(afterSummary.filter((message) => message.role === "compactionSummary")).toHaveLength(1);
+			expect(afterSummary).toContainEqual(originalRecovery);
+			expect(getCanonicalViewUnits(afterSummary)?.filter((unit) => unit.kind === "recovery")).toHaveLength(1);
+			expect(
+				afterSummary.some((message) => message.role === "compactionSummary" && message.summary === summary.summary),
+			).toBe(true);
+			const epochFile = epochManager.getSessionFile()!;
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.open(epochFile);
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				sessionManager: epochManager,
+			}));
 			expect(summaryBodies).toHaveLength(1);
 			expect(summaryBodies[0]).toContain("Preserve Foo.txt.");
+			expect(summaryBodies[0]).not.toContain("OPTIONAL_PRIOR_LITERAL");
 			await epochSession.prompt("Continue with both files.");
-			expect(new Set(epochsAtSend).size).toBe(3);
-			expect(bodies).toHaveLength(3);
-			expect(bodies[2]).toContain("Foo.txt.");
-			expect(bodies[2]).toContain("Bar.txt.");
+			expect(epochsAtSend).toHaveLength(4);
+			expect(epochsAtSend[3]).not.toBe(epochsAtSend[2]);
+			expect(bodies).toHaveLength(4);
+			expect(bodies[3]).toContain("Foo.txt.");
+			expect(bodies[3]).toContain("Bar.txt.");
+			expect(bodies[3]).toContain("call_epoch_recovery");
+			expect(bodies[3]).not.toContain("OPTIONAL_PRIOR_LITERAL");
+			expect(epochSession.messages).toContainEqual(originalRecovery);
 		} finally {
 			try {
 				await epochSession?.disposeAsync({ kernelSnapshot: false });

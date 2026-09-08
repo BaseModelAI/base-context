@@ -44,11 +44,17 @@ export interface ContextTokenObservation {
 	readonly value?: RetainedContextTokens;
 }
 
-/** Explicit one-to-one mapping supplied only by the supported serializer, before any selection. */
+/** Source/item mapping captured during the actual supported serializer pass. */
 export interface ProviderRequestProjection {
-	readonly kind: "openai-responses-text-v1";
+	readonly kind: "openai-responses-text-v1" | "openai-responses-replay-v1";
+	/** Absent means complete-context. Only the native renderer establishes message-group replay. */
+	readonly replayContract?: "complete-context" | "message-groups";
 	/** A null item is fixed request context (for example the system prompt). */
 	readonly messageIndices: readonly (number | null)[];
+	/** Only these whole plain assistant messages may be considered for omission. */
+	readonly optionalMessageIndices?: readonly number[];
+	/** Retained generated item IDs require these original logical message positions. */
+	readonly generatedMessageIndices?: readonly number[];
 }
 
 /** Actual serialized request. No model text, schema, replay unit or prefix is modified. */

@@ -530,7 +530,11 @@ A full `baseToolsOverride` or a same-name custom replacement does not grant acce
 to the owned recovery service. Recovery qualification follows the actual selected
 executor entering the authorized reader, including the active Python cell. Public
 markers do not qualify, and retained imports lose native recovery admission.
-Recovery retention across ordinary summaries remains incomplete.
+Ordinary summaries retain genuine recovery with its complete replay group when an accepted
+native projection establishes that group. Unproved recovery compaction refuses before the
+summarizer call. Summary plus retained recipes use one canonical ACK. The summary is not a
+measured provider request; the next managed-epoch send still needs an accepted native projection.
+Opaque groups may become unknown/refused when the summary breaks cached-prefix coverage.
 
 #### Tools with Custom cwd
 
@@ -684,8 +688,9 @@ the generic Agent converter intentionally drops custom roles and is not silently
 
 Compiled ViewUnit metadata records source/update revisions and replay/delta dependencies.
 The compiler materializes dependency-closed units or refuses. Conservative whole-context
-replay remains the default. Explicit request budgets and narrow native text selection are
-available below; complete Codex/tool replay and the epoch/recovery pipeline remain open.
+replay remains the default. Explicit request budgets and supported native Responses/Codex
+selection are available below. Permission for narrower groups comes from the actual converter,
+not profile names or tool-shaped JSON. Unsupported layouts remain intact or refuse.
 
 
 ### Explicit request-token budget profiles
@@ -709,9 +714,10 @@ estimate parameters. `contextTokens` means the combined input/output allowance; 
 substitute an input-only limit without checking its semantics. Auth mode is descriptive
 configuration, not authorization or proof of the live login. Normal auth rules still apply.
 
-`observe` preserves control thresholds. In the native main-session plain-text Responses
-path, `enforce` can remove historical assistant literals after complete dependency closure.
-Users, the latest assistant, TaskFrames, fixed views and recovery remain mandatory. Selection
+`observe` preserves control thresholds. In supported native main-session Responses/Codex
+paths, `enforce` can remove historical assistant literals after complete dependency closure.
+Users, the latest assistant, TaskFrames, summaries and recovery remain mandatory. Views stay
+fixed inside an epoch; historical assistants can become optional at the next ACKed boundary. Selection
 runs after one payload hook and waits for a canonical epoch ACK before sending. Unknown
 layouts and over-budget mandatory sets refuse. Without this option, the budget gate is
 absent; an existing committed epoch still requires its matching explicit profile. Direct Responses, Completions and Codex paths assess
@@ -721,8 +727,8 @@ Reasoning is included in output for these adapters and is not reserved twice.
 
 The counter is a configured conservative UTF8-based estimate, not bytes/4, an exact tokenizer
 or a proven future bound. Ordinary complete physical usage can add observed error samples
-only after its existing settlement ACK. Cold/config-changed state stays unknown until an
-observation; observed errors are not calibrated confidence. Counter/profile data stays in
+only after its existing settlement ACK. Calibration remains unproven in cold/config-changed
+state; observed errors are not calibrated confidence. Counter/profile data stays in
 descriptors/receipts, outside the prompt and stable KV prefix. No warming request is made.
 
 Media, opaque replay and external retained-state references remain unknown. Only the owned
@@ -733,15 +739,20 @@ healthy replay state or falling back to a different transport. Native Coordinato
 propagate without inventing an assistant or physical-attempt receipt; the generic direct
 AI stream still follows its existing error-result contract.
 
-The native text path persists source recipes and frozen TaskFrames, not a second wire-body
-store. Same-journal reopen reconstructs the selected views. Known Responses V1/legacy reply
-identities are supported; retained generated item IDs may not shift. A captured evaluator
+The native path persists source recipes and frozen TaskFrames, not a second wire-body
+store. Same-journal reopen reconstructs selected views. Explicit fork/import activation rebuilds
+recipes and TaskFrames from the destination before adoption. Retained imports keep lowered
+authority and lose copied replay permission. Original copied summary usage is not charged again
+by the rebuild control. Known Responses V1/legacy reply identities are supported; layouts with
+unsigned generated IDs keep complete-context replay. A captured evaluator
 covers selection and actual admission across the ACK wait. Final-body incompatibility and
 local checkpoint failures propagate without synthetic assistant output.
 
-This is not Codex/tool-bearing/opaque selection, provider cache-hit proof or deployment
-certification. Cross-file/fork/import epoch rebuilds, complete resource/replay boundaries
-and recovery retention across ordinary summaries remain open.
+Codex prepares the full logical body before its existing cached-delta path. Prefix-covered
+units remain mandatory; omitted prefixes cannot retain their old token credit. Summary or
+source rebuild can break that coverage, leaving retained opaque content unknown/refused.
+Literal whole-group retention is not portable opaque continuation. Complete resource/replay
+boundaries and deployment certification remain open. This is not provider cache-hit proof.
 
 
 ## Extensions

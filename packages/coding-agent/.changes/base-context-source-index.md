@@ -45,4 +45,10 @@
 - Select plain-text Responses views at the final request boundary and commit source-backed epochs before sending.
 - Reconstruct frozen views and TaskFrames on same-journal reopen; prepare ordinary summaries from the selected views.
 - Qualify recovery from actual native execution and preserve original local checkpoint failures without synthetic replies.
-- Require ownership/RPC schema32 for qualified recovery and epochs; Codex/tool selection and complete recovery retention remain open.
+- Add ownership/RPC schema32 support for qualified recovery and source-backed epochs.
+- Capture actual official Responses/Codex tool replay mappings and assess the full logical body before cached deltas.
+- Keep frozen views stable inside an epoch while allowing historical assistant eviction at the next acknowledged boundary.
+- Retain genuine recovery and closed replay groups in the same ordinary-summary ACK; refuse unproved recovery compaction.
+- Rebuild copied/forked/imported epoch recipes and lowered TaskFrames on the destination before adoption, without duplicating summary usage.
+- Snapshot native tool definitions rather than cloning live Agent executors during request preparation.
+- Require ownership/RPC schema33; prefix-lost opaque continuation and complete resource boundaries remain open.

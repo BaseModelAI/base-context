@@ -18,7 +18,19 @@ import { assertProductStatePath } from "../runtime-paths.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
-import { appendContextEpoch, CONTEXT_EPOCH_DETAIL, type ContextEpochCheckpoint } from "./context-epoch.js";
+import {
+	appendContextEpoch,
+	CONTEXT_EPOCH_DETAIL,
+	type ContextEpochCheckpoint,
+	type ContextEpochSummary,
+} from "./context-epoch.js";
+import {
+	type CapturedEpochCopy,
+	type CopiedEpochEntry,
+	captureEpochCopyEntry,
+	readCopiedEpochSource,
+	rebuildCopiedContextEpoch,
+} from "./context-epoch-copy.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "./goals.js";
 import type {
 	ContextManifestOptions,
@@ -67,7 +79,12 @@ import {
 	SessionJournalOwner,
 	type SessionJournalState,
 } from "./session-journal-owner.js";
-import { readSessionJournal, readSessionJournalHeader, SessionJournalDecoder } from "./session-journal-reader.js";
+import {
+	readCapturedSessionJournal,
+	readSessionJournal,
+	readSessionJournalHeader,
+	SessionJournalDecoder,
+} from "./session-journal-reader.js";
 import { readTaskStateFromHistory, type TaskStateView } from "./task-state-reader.js";
 import { type TaskStateReadLimits, taskStateReadLimits } from "./task-state-reducer.js";
 import {
@@ -126,8 +143,14 @@ export interface SessionHeader {
 
 /** One captured branch for summary input, physical requests, and the queued compaction commit. */
 export interface BoundCompactionSink extends BoundSessionRequestSink {
+	/** Internal explicit-copy read on this same held source, never a provider-view capability. */
+	[readCopiedEpochSource]<T>(read: (history: SessionHistoryReadScope) => Promise<T>): Promise<T>;
 	readBranch(): Promise<SessionEntry[]>;
-	[appendContextEpoch](checkpoint: ContextEpochCheckpoint, tokensBefore: number): Promise<string>;
+	[appendContextEpoch](
+		checkpoint: ContextEpochCheckpoint,
+		tokensBefore: number,
+		summary?: ContextEpochSummary,
+	): Promise<string>;
 	appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
@@ -237,6 +260,8 @@ export interface ChildUsageAttributionEntry extends SessionEntryBase {
 
 interface CapturedForkInput {
 	source?: SourceSnapshotRef;
+	epochCopy?: CapturedEpochCopy;
+	leafId?: string | null;
 	selectedEntry?: SessionEntry;
 	path: SessionEntry[];
 	labels: {
@@ -1462,7 +1487,11 @@ export class SessionManager {
 		try {
 			await this._retire(previous);
 		} catch (error) {
-			await next.close().catch(() => undefined);
+			try {
+				await next.close();
+			} catch (cleanup) {
+				throw new AggregateError([error, cleanup], "Session adoption and destination close failed");
+			}
 			throw error;
 		}
 		this.sessionId = next.sessionId;
@@ -2384,6 +2413,7 @@ export class SessionManager {
 		return {
 			...sink,
 			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
+			[readCopiedEpochSource]: (read) => sink.readHistory(read),
 			readBranch: async () => {
 				if (indexed)
 					return sink.readHistory(
@@ -2401,17 +2431,20 @@ export class SessionManager {
 				);
 			},
 			appendCompaction: appendCaptured,
-			[appendContextEpoch]: (checkpoint, tokensBefore) =>
-				appendCaptured(
-					"",
+			[appendContextEpoch]: (checkpoint, tokensBefore, summary) => {
+				if (Boolean(summary) !== Boolean(checkpoint.includeSummary))
+					throw new Error("Context epoch summary does not match its rendering plan");
+				return appendCaptured(
+					summary?.summary ?? "",
 					checkpoint.literalTailId,
 					tokensBefore,
-					{ [CONTEXT_EPOCH_DETAIL]: checkpoint },
-					false,
-					undefined,
-					undefined,
+					{ ...summary?.details, [CONTEXT_EPOCH_DETAIL]: checkpoint },
+					summary?.fromHook ?? false,
+					summary?.customInstructions,
+					summary?.usage,
 					"native-context-epoch",
-				),
+				);
+			},
 		};
 	}
 
@@ -3759,8 +3792,13 @@ export class SessionManager {
 			rlmDepth: options.rlmDepth ?? resolveSessionRlmDepth(header ?? {}, sourceFile ?? ""),
 			limits,
 		};
-		const finish = async (entries: SessionEntry[], history?: SessionHistoryReadScope): Promise<CapturedForkInput> => {
-			const byId = new Map(entries.map((entry) => [entry.id, entry]));
+		const finish = async (
+			entries: SessionEntry[],
+			history?: SessionHistoryReadScope,
+			epochCopy?: CapturedEpochCopy,
+		): Promise<CapturedForkInput> => {
+			const byId = new Map<string, SessionEntry>();
+			for (const entry of entries) if (!byId.has(entry.id)) byId.set(entry.id, entry);
 			const selectedEntry = "entryId" in target ? byId.get(target.entryId) : undefined;
 			let leafId: string | null;
 			if ("entryId" in target) {
@@ -3796,8 +3834,35 @@ export class SessionManager {
 				}
 				path.reverse();
 			}
-			const copied = path.filter((entry) => entry.type !== "label");
+			let copied: SessionEntry[] = path.filter((entry) => entry.type !== "label");
 			const ids = new Set(copied.map((entry) => entry.id));
+			if (epochCopy) {
+				// Preserve source-backed display updates and original invocation relations, not baked replacement bodies.
+				const toolCalls = new Set(
+					copied.flatMap((entry) =>
+						entry.type === "message" && entry.message.role === "toolResult" ? [entry.message.toolCallId] : [],
+					),
+				);
+				for (const entry of copied) {
+					if (entry.type === "message" && entry.execution && "invocationId" in entry.execution)
+						ids.add(entry.execution.invocationId);
+				}
+				for (const entry of entries) {
+					if (entry.type === "child_usage_attributed" && ids.has(entry.targetId)) ids.add(entry.id);
+					if (entry.type === "custom" && entry.customType === IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
+						const sent = parsePersistedIpythonSentAgentMessage(entry.data);
+						if (sent && toolCalls.has(sent.toolCallId)) ids.add(entry.id);
+					}
+				}
+				// Related records keep their actual parent relations, including necessary off-branch ancestors.
+				for (const id of ids) {
+					const entry = byId.get(id);
+					if (!entry) throw new Error("Fork related source is unavailable");
+					if (entry.parentId !== null) ids.add(entry.parentId);
+				}
+				const order = new Map(epochCopy.entries.map((entry) => [entry.id, entry.sequence]));
+				copied = [...ids].map((id) => byId.get(id)!).sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+			}
 			const activeLabels = new Map<string, CapturedForkInput["labels"][number]>();
 			for (const entry of entries) {
 				if (entry.type !== "label") continue;
@@ -3814,6 +3879,7 @@ export class SessionManager {
 			return {
 				...settings,
 				source: history?.source,
+				...(epochCopy ? { epochCopy, leafId } : {}),
 				selectedEntry: selectedEntry
 					? withEntryRetention(
 							JSON.parse(stringifyBoundedJson(selectedEntry, limits.maxSourceBytes)) as SessionEntry,
@@ -3847,9 +3913,42 @@ export class SessionManager {
 			const entries = materialized.entries.map(({ entry, source }) =>
 				withEntryRetention(entry, source.retention, source.qualification),
 			);
-			applyChildUsageAttributions(entries);
-			return finish(entries, history);
+			const sourceEntries = materialized.entries.map(({ entry, source }) => captureEpochCopyEntry(entry, source));
+			const hasEpoch = sourceEntries.some(
+				(entry) => entry.kind === "compaction" && entry.qualification === "native-context-epoch",
+			);
+			if (!hasEpoch) applyChildUsageAttributions(entries);
+			return finish(
+				entries,
+				history,
+				hasEpoch
+					? {
+							sessionId: history.source.sessionId,
+							sessionFile: history.source.sessionFile,
+							through: history.source.sourceSequence,
+							entries: sourceEntries,
+							retained: false,
+						}
+					: undefined,
+			);
 		});
+	}
+
+	private async _rebuildCopiedEpoch(copied: CapturedEpochCopy, limits: SessionHistoryReadLimits): Promise<void> {
+		if (
+			!copied.entries.some((entry) => entry.kind === "compaction" && entry.qualification === "native-context-epoch")
+		)
+			return;
+		if (!this.supportsCapturedHistoryReads())
+			throw new Error("Copied context epochs require an owned persistent source");
+		const sink = this.bindCompactionSink(limits);
+		await this._runHistoryRead(
+			{ ...sink, readHistory: (read) => sink[readCopiedEpochSource](read) },
+			async (history: SessionHistoryReadScope) => {
+				const rebuilt = await rebuildCopiedContextEpoch(history, copied, limits);
+				if (rebuilt) await sink[appendContextEpoch](rebuilt.checkpoint, rebuilt.tokensBefore, rebuilt.summary);
+			},
+		);
 	}
 
 	private static async _createCapturedFork(input: CapturedForkInput): Promise<SessionManager> {
@@ -3884,6 +3983,19 @@ export class SessionManager {
 		next._buildIndex();
 		if (input.persist) await next._openNew();
 		else next.writeState.sequence = next.fileEntries.length - 1;
+		if (input.epochCopy) {
+			try {
+				await next.branchTo(input.leafId ?? null);
+				await next._rebuildCopiedEpoch(input.epochCopy, input.limits);
+			} catch (error) {
+				try {
+					await next.close();
+				} catch (cleanup) {
+					throw new AggregateError([error, cleanup], "Fork activation and destination close failed");
+				}
+				throw error;
+			}
+		}
 		return next;
 	}
 
@@ -3921,7 +4033,16 @@ export class SessionManager {
 		this._assertMutable();
 		this.switching = true;
 		try {
-			await this.flushNow();
+			try {
+				await this.flushNow();
+			} catch (error) {
+				try {
+					await next.close();
+				} catch (cleanup) {
+					throw new AggregateError([error, cleanup], "Branch adoption preparation and destination close failed");
+				}
+				throw error;
+			}
 			await this._adopt(next);
 			return this.sessionFile;
 		} finally {
@@ -4069,6 +4190,9 @@ export class SessionManager {
 		let entriesRead = 0;
 		let sourceBytes = 0;
 		let sourceHeader: SessionHeader | undefined;
+		const capturedPath = realpathIfPresent(resolve(sourcePath));
+		const capturedEntries: CopiedEpochEntry[] = [];
+		let through = 0;
 		let legacyEntries: FileEntry[] | undefined;
 		// This becomes the target's resident array; current-version copies do not retain a second source array.
 		const targetEntries: FileEntry[] = [];
@@ -4082,11 +4206,11 @@ export class SessionManager {
 				);
 		};
 		if (existsSync(sourcePath)) {
-			let bytesSinceYield = 0;
-			for await (const record of readSessionJournal(sourcePath)) {
+			await readCapturedSessionJournal(capturedPath, (record) => {
 				sourceBytes += Buffer.byteLength(record.json);
 				if (sourceBytes > maxSourceBytes) throw new Error("Copied history JSON byte budget exceeded");
 				const entry = sessionFileEntry(record.entry, record.retention, record.qualification);
+				if (record.source) through = record.source.sequence;
 				if (!sourceHeader) {
 					if (entry.type !== "session" || typeof entry.id !== "string")
 						throw new Error("Session source has no valid header");
@@ -4094,22 +4218,32 @@ export class SessionManager {
 					if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
 				} else {
 					if (++entriesRead > maxEntries) throw new Error("Copied history entry budget exceeded");
+					if (entry.type !== "session" && record.source)
+						capturedEntries.push(
+							captureEpochCopyEntry(entry, {
+								...record.source,
+								id: entry.id,
+								parentId: entry.parentId,
+								kind: entry.type,
+								retention: record.retention,
+								qualification: record.qualification,
+							}),
+						);
 					if (legacyEntries) legacyEntries.push(entry);
 					else keep(entry);
 				}
-				bytesSinceYield += Buffer.byteLength(record.json);
-				if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
-					bytesSinceYield = 0;
-					await new Promise<void>((resolve) => setImmediate(resolve));
-				}
-			}
+			});
 		}
 		if (!sourceHeader) throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
 		if (legacyEntries) {
 			finalizeLoadedEntries(legacyEntries);
 			migrateToCurrentVersion(legacyEntries);
 			for (const entry of legacyEntries) keep(entry);
-		} else applyChildUsageAttributions(targetEntries);
+		} else if (
+			!capturedEntries.some((entry) => entry.kind === "compaction" && entry.qualification === "native-context-epoch")
+		) {
+			applyChildUsageAttributions(targetEntries);
+		}
 		const manager = new SessionManager(targetCwd, sessionDir ?? getDefaultSessionDir(targetCwd), true, {
 			parentSession: sourcePath,
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
@@ -4135,6 +4269,25 @@ export class SessionManager {
 		manager.fileEntries = targetEntries;
 		manager._buildIndex();
 		await manager._openNew();
+		try {
+			await manager._rebuildCopiedEpoch(
+				{
+					sessionId: sourceHeader.id,
+					sessionFile: capturedPath,
+					through,
+					entries: capturedEntries,
+					retained: retention === "retained-import",
+				},
+				limits,
+			);
+		} catch (error) {
+			try {
+				await manager.close();
+			} catch (cleanup) {
+				throw new AggregateError([error, cleanup], "Copied context activation and destination close failed");
+			}
+			throw error;
+		}
 		return manager;
 	}
 

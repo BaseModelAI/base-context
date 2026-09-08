@@ -599,6 +599,7 @@ export function prepareViewCompaction(
 	entryIds: readonly (string | undefined)[],
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	maxCutEntryId?: string,
 ): CompactionPreparation | undefined {
 	if (messages.length !== entryIds.length) throw new Error("Compaction views do not match their source anchors");
 	const cuts = messages.flatMap((message, index) =>
@@ -614,6 +615,12 @@ export function prepareViewCompaction(
 			cut = cuts.find((candidate) => candidate >= index) ?? cut;
 			break;
 		}
+	}
+	if (maxCutEntryId !== undefined) {
+		const maximum = entryIds.indexOf(maxCutEntryId);
+		const lastAllowed = cuts.filter((candidate) => candidate <= maximum).at(-1);
+		if (lastAllowed === undefined) throw new Error("Compaction recovery boundary is unavailable");
+		cut = Math.min(cut, lastAllowed);
 	}
 	let turnStart = -1;
 	if (messages[cut].role !== "user") {
@@ -651,8 +658,8 @@ export function prepareViewCompaction(
 	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
 	return {
 		firstKeptEntryId: entryIds[cut]!,
-		messagesToSummarize,
-		turnPrefixMessages,
+		messagesToSummarize: structuredClone(messagesToSummarize),
+		turnPrefixMessages: structuredClone(turnPrefixMessages),
 		isSplitTurn,
 		tokensBefore: estimateContextTokens([...messages]).tokens,
 		previousSummary,

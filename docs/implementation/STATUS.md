@@ -22,15 +22,37 @@ qualification follows the real selected executor and authorized reader, not publ
 Retained copies do not retain native recovery admission. Ownership/RPC schema32 fences older
 readers; protocol11 and existing cleanup policy remain unchanged.
 
-Fourteen distinct focused cases passed across separate compiler2, services2, selector2,
-native/Python2, compaction4 and RPC2 scopes. Repeated cases are not new cases. Transport was
-fake-fetch/local faux; Python and canonical storage were real. Initial runtime/type/fixture
-failures remain recorded. The required full source check passes for this checkpoint.
+W29's focused checks, full source check, build and push are settled. The W30 results below
+come from later invocations on the current source; repeats are not additional cases.
 
-This is not Codex, tool-bearing or opaque replay support. Recovery retention across ordinary
-summaries, explicit cross-file/fork/import epoch rebuilds, full representation/resource
-boundaries and supported deployment profiles remain open. No provider cache-hit, live token
-accuracy, pricing, installed runtime or whole-harness certification is claimed.
+W30 extends those working paths:
+
+- Official Responses/Codex conversion captures its actual one-to-many tool/message mapping.
+  Only established replay groups allow selection; generated unsigned-ID layouts stay complete.
+  Codex assesses the full logical body before constructing a cached delta.
+- A previously pinned historical assistant can become optional at the next ACKed boundary.
+  Ordinary summaries retain genuine recovery and its complete replay group in the same ACK.
+  These summary controls are unmeasured, not fabricated provider assessments.
+- Explicit copy/fork/import activation rebuilds source recipes and TaskFrames on the destination
+  before adoption. Imports lose copied replay permission and retain lowered task authority.
+  Original summary usage stays on the copied record; the rebuild control does not duplicate it.
+- Ownership/RPC schema33 fences these readers. Protocol11 remains unchanged.
+
+Fourteen distinct existing focused cases have passing W30 outcomes across separate compiler2,
+services2, selector2, native/Python2, compaction4 and RPC2 scopes. Type checking passed. The
+service path covers genuine recovery, budget-driven eviction, ordinary-summary retention,
+same-file reopen and the next native request. The compiler cases also exercise real copy/fork/
+import activation, lowered TaskFrames, native fake-fetch continuation from copied summaries,
+and known-ACK cleanup failure. Python and canonical storage are real; transports are local fakes.
+Earlier failures and repeats remain recorded: live tool executor cloning, an unnecessary
+per-send epoch-count assumption, an absent lowered TaskFrame fixture, and three type diagnostics.
+These results do not certify installed packages, provider behavior or a whole-process memory bound.
+
+Cached-prefix units remain mandatory. Summary/rebuild can destroy their exact prefix coverage;
+retained opaque reasoning then remains unknown/refused. Literal replay-group retention is not
+portable opaque continuation. Full resource/representation boundaries and supported deployment
+profiles remain open. No provider cache-hit, live token accuracy, pricing, installed runtime
+or whole-harness certification is claimed.
 
 No live benchmark or readiness probe is allowed before all five features work.
 After that gate, the latest user order is all 30 isolated tasks at low effort,

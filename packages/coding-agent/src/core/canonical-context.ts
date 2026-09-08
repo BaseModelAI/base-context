@@ -3,6 +3,7 @@ import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
 	type ContextEpochCheckpoint,
+	type ContextReplayContract,
 	type EpochViewReference,
 	readContextEpoch,
 	snapshotContextEpoch,
@@ -94,6 +95,7 @@ export function prepareCanonicalEpoch(
 	selectedUnitIds: readonly string[],
 	representation: string,
 	maxBytes: number,
+	replayContract: ContextReplayContract = "complete-context",
 ): { checkpoint: ContextEpochCheckpoint; messages: AgentMessage[] } {
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
@@ -121,10 +123,11 @@ export function prepareCanonicalEpoch(
 	return {
 		checkpoint: snapshotContextEpoch(
 			{
-				version: 1,
+				version: 2,
 				renderer: CONTEXT_EPOCH_RENDERER,
 				source: context.source,
 				representation,
+				replayContract,
 				views,
 				taskFrame: context.taskFrame,
 				literalTailId: tail.ref.entryId,
@@ -133,6 +136,59 @@ export function prepareCanonicalEpoch(
 		),
 		messages: chosen,
 	};
+}
+
+/** Use only a replay contract granted to these recovery results by an actual accepted request. */
+export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): string | undefined {
+	const context = compiledEpochContexts.get(messages);
+	const units = getCanonicalViewUnits(messages);
+	if (!context || !units) throw new Error("Recovery compaction requires captured canonical views");
+	const recoveries = units.flatMap((unit, index) => (unit.kind === "recovery" ? [context.references[index]] : []));
+	if (!recoveries.length) return;
+	const checkpoint = context.checkpoint;
+	if (
+		!checkpoint?.representation ||
+		checkpoint.replayContract !== "message-groups" ||
+		recoveries.some((reference) => !reference || reference.ref.sequence > checkpoint.source.sourceSequence)
+	)
+		throw new Error("Recovery compaction requires an accepted replay contract for its selected results");
+	return checkpoint.literalTailId;
+}
+
+/** Retain exact recovery bodies and their closed replay groups in the same ordinary-summary record. */
+export function prepareRecoveryCompaction(
+	messages: readonly AgentMessage[],
+	firstKeptEntryId: string,
+	maxBytes: number,
+): ContextEpochCheckpoint | undefined {
+	const boundary = canonicalRecoveryBoundary(messages);
+	if (!boundary) return;
+	const context = compiledEpochContexts.get(messages)!;
+	const selection = getCanonicalViewSelectionSource(messages)!;
+	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
+	const lastProved = context.references.findIndex((reference) => reference?.ref.entryId === boundary);
+	if (cut < 0 || lastProved < 0 || cut > lastProved)
+		throw new Error("Recovery compaction must retain its unmeasured literal tail");
+	const units = bindMessageReplayUnits(messages, selection.units, selection.limits, "message-groups");
+	const roots = units.filter((unit) => unit.kind === "recovery").map((unit) => unit.id);
+	const closed = new Set(closeViewSelection(units, roots, selection.limits).map((unit) => unit.id));
+	const views = context.references.flatMap((reference, index) =>
+		reference && index < cut && closed.has(units[index].id) ? [reference] : [],
+	);
+	if (!views.length) return;
+	return snapshotContextEpoch(
+		{
+			version: 2,
+			renderer: CONTEXT_EPOCH_RENDERER,
+			source: context.source,
+			representation: null,
+			includeSummary: true,
+			replayContract: "message-groups",
+			views,
+			literalTailId: firstKeptEntryId,
+		},
+		maxBytes,
+	);
 }
 
 interface CachedEntry {
@@ -313,7 +369,7 @@ export class CanonicalContextCompiler {
 		let taskFrame = compileTaskFrame(tasks, frameLimits, referenceFrame);
 		const messageCount =
 			first.activeMessageCount +
-			(checkpoint?.views.length ?? (first.summaryRef ? 1 : 0)) +
+			(checkpoint ? checkpoint.views.length + (checkpoint.includeSummary ? 1 : 0) : first.summaryRef ? 1 : 0) +
 			(taskFrame?.messages.length ?? 0);
 		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
 
@@ -361,7 +417,8 @@ export class CanonicalContextCompiler {
 			});
 			sourceOrder.set(ref.entryId, -1);
 		};
-		if (first.summaryRef && !checkpoint) await addSummary(first.summaryRef, view, first.retainedMessageCount);
+		if (first.summaryRef && (!checkpoint || checkpoint.includeSummary))
+			await addSummary(first.summaryRef, view, first.retainedMessageCount);
 		const addLiteral = async (ref: ContextRef, readView: SessionHistoryReadView, pinned?: EpochViewReference) => {
 			const original = sessionEntryMessage(await hydrate(ref, undefined, readView));
 			if (!original) throw new Error("Canonical context reference is not a visible context entry");
@@ -536,9 +593,18 @@ export class CanonicalContextCompiler {
 		);
 		const messagesByUnit = new Map(units.map((unit, index) => [unit.id, messages[index]]));
 		const closedMessages = closedUnits.map((unit) => messagesByUnit.get(unit.id)!);
+		// A frozen literal is immutable inside this epoch, not permanently mandatory at its next ACK boundary.
+		const selectionUnits = sourceUnits.map((unit, index): ViewUnit => {
+			const message = messages[index];
+			if (unit.kind !== "fixed-view" || message.role !== "assistant") return unit;
+			return {
+				...unit,
+				kind: message.content.some((part) => part.type === "toolCall") ? "replay-group" : "literal",
+			};
+		});
 		compiledViewUnits.set(closedMessages, {
 			units: closedUnits,
-			selection: { source: { ...view.source }, units: sourceUnits, limits: unitLimits },
+			selection: { source: { ...view.source }, units: selectionUnits, limits: unitLimits },
 		});
 		compiledEpochContexts.set(closedMessages, {
 			source: { ...view.source },

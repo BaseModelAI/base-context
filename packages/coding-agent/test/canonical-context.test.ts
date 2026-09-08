@@ -2,8 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
-import type { AssistantMessage } from "@ponythewhite/base-context-ai";
+import { type AssistantMessage, type Model, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { expect, it, vi } from "vitest";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import {
 	CanonicalContextCompiler,
 	getCanonicalEpochContext,
@@ -12,18 +14,58 @@ import {
 	prepareCanonicalEpoch,
 } from "../src/core/canonical-context.js";
 import { prepareViewCompaction } from "../src/core/compaction/index.js";
-import { appendContextEpoch } from "../src/core/context-epoch.js";
+import { appendContextEpoch, readContextEpoch } from "../src/core/context-epoch.js";
 import { HistoryIndex } from "../src/core/history-index.js";
 import { InferenceCoordinator } from "../src/core/inference-coordinator.js";
 import { type CustomMessage, convertToLlm } from "../src/core/messages.js";
+import { createAgentSession } from "../src/core/sdk.js";
 import {
 	appendSentAgentMessageToToolResult,
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
 } from "../src/core/session-context-updates.js";
 import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
 import { buildSessionContext, SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import { compileTaskFrame, taskFrameLimits } from "../src/core/task-frame.js";
 import { TASK_STATE_CUSTOM_TYPE, TASK_STATE_SCHEMA } from "../src/core/task-state.js";
 import { closeViewSelection } from "../src/core/view-units.js";
+
+async function createCopySession(manager: SessionManager, model: Model<string>) {
+	return createAgentSession({
+		cwd: manager.getCwd(),
+		agentDir: join(manager.getSessionDir(), "agent"),
+		sessionManager: manager,
+		model,
+		authStorage: AuthStorage.inMemory({ [model.provider]: { type: "api_key", key: "local-faux-copy" } }),
+		settingsManager: SettingsManager.inMemory({
+			canonicalContext: { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 },
+			compaction: { enabled: false },
+		}),
+		tools: [],
+		includeGoals: false,
+		prewarmIpythonKernel: false,
+	});
+}
+
+function copiedVisibleMessages(messages: readonly AgentMessage[]) {
+	// Rebuilt checkpoint timestamps are new. Selected literal bodies and summary options are not.
+	return convertToLlm(
+		messages.map((message) => (message.role === "compactionSummary" ? { ...message, timestamp: 0 } : message)),
+	);
+}
+
+async function compileCopyContext(manager: SessionManager) {
+	const requests = new InferenceCoordinator(() => manager.bindRequestSink());
+	const captured = requests.capture();
+	try {
+		return await captured.readHistory((history) =>
+			new CanonicalContextCompiler().compile(history, { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 }),
+		);
+	} finally {
+		await captured.dispose();
+		await requests.dispose();
+	}
+}
 
 it("reconstructs the whole retained context across pages and caches immutable source entries", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "base-context-compile-"));
@@ -414,6 +456,316 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			expect(preparation?.messagesToSummarize.filter(isTaskFrame).map(frameText)).toEqual(
 				secondFrames.map(frameText),
 			);
+
+			// Explicit copies rebuild recipes; a copied fixture profile is not a provider certificate.
+			const opaqueCopy = await SessionManager.forkFrom(sessionFile, dir, join(dir, "opaque-copy"));
+			const faux = registerFauxProvider({ api: "faux-copy-epoch", provider: "faux-copy-epoch", tokensPerSecond: 0 });
+			try {
+				const opaqueContext = await compileCopyContext(opaqueCopy);
+				expect(convertToLlm(opaqueContext.filter((message) => !isTaskFrame(message)))).toEqual(
+					convertToLlm(prepared.messages.filter((message) => !isTaskFrame(message))),
+				);
+				expect(getCanonicalEpochContext(opaqueContext)!.checkpoint!.representation).toBe(
+					"fixture-native-template/1",
+				);
+				const { session: refused } = await createCopySession(opaqueCopy, {
+					...faux.getModel(),
+					api: "openai-responses",
+					provider: "openai",
+					id: "offline-copy-profile",
+					baseUrl: "https://example.invalid/v1",
+				});
+				const fetch = vi
+					.spyOn(globalThis, "fetch")
+					.mockRejectedValue(new Error("Copied profile must refuse before send"));
+				try {
+					const refusal = await refused.agent.continue().then(
+						() => undefined,
+						(error: unknown) => error,
+					);
+					expect(refusal ?? refused.agent.state.errorMessage).toBeTruthy();
+					expect(faux.state.callCount).toBe(0);
+					expect(fetch).not.toHaveBeenCalled();
+				} finally {
+					try {
+						await refused.disposeAsync({ kernelSnapshot: false });
+					} finally {
+						fetch.mockRestore();
+					}
+				}
+
+				// An ordinary summary carries source recipes, not a measured request representation.
+				const summarySink = reopened.bindCompactionSink();
+				const summaryCapture = resumedRequests.capture(summarySink);
+				const summary = {
+					summary: "Keep the selected file context.",
+					details: { fixtureSummary: "copied verbatim" },
+					fromHook: true,
+					customInstructions: "Preserve case-sensitive file names.",
+					usage: aggregate,
+				};
+				try {
+					const input = await summaryCapture.readHistory((history) =>
+						new CanonicalContextCompiler().compile(history, frameLimits),
+					);
+					const recipe = prepareCanonicalEpoch(
+						input,
+						getCanonicalViewUnits(input)!.map((unit) => unit.id),
+						"fixture-native-template/1",
+						frameLimits.maxSourceBytes,
+					).checkpoint;
+					await summarySink[appendContextEpoch](
+						{ ...recipe, representation: null, includeSummary: true },
+						100,
+						summary,
+					);
+				} finally {
+					await summaryCapture.dispose();
+				}
+				const selected = await compileCopyContext(reopened);
+				const summaryEntryId = reopened.getLeafId()!;
+				const { usage: summaryUsage, ...summaryOptions } = summary;
+				const copiedEntries = await reopened.readEntries();
+				for (const retained of [false, true]) {
+					const destination = retained
+						? await SessionManager.importRetainedFrom(sessionFile, dir, join(dir, "retained-copy"))
+						: await SessionManager.forkFrom(sessionFile, dir, join(dir, "native-copy"));
+					try {
+						// The copied records retain IDs, parent relations, and literal bodies, including side metadata.
+						expect((await destination.readEntries()).slice(0, copiedEntries.length)).toEqual(copiedEntries);
+						const copied = await compileCopyContext(destination);
+						expect(copiedVisibleMessages(copied.filter((message) => !isTaskFrame(message)))).toEqual(
+							copiedVisibleMessages(selected.filter((message) => !isTaskFrame(message))),
+						);
+						const copiedEpoch = getCanonicalEpochContext(copied)!.checkpoint!;
+						expect(copiedEpoch.source).toMatchObject({
+							sessionId: destination.getSessionId(),
+							sessionFile: destination.getSessionFile(),
+							persistent: true,
+						});
+						expect(copiedEpoch.source.sessionId).not.toBe(reopened.getSessionId());
+						expect(copiedEpoch).toMatchObject({ representation: null, includeSummary: true });
+						expect(copiedEpoch.replayContract).toBe(retained ? undefined : "complete-context");
+						for (const reference of copiedEpoch.views) {
+							expect(reference.source.sessionId).toBe(destination.getSessionId());
+							expect(reference.source.sessionFile).toBe(destination.getSessionFile());
+							expect(reference.ref.locator.path).toBe(destination.getSessionFile());
+						}
+						const copiedControl = await destination.readEntry(destination.getLeafId()!);
+						if (copiedControl?.type !== "compaction") throw new Error("Expected a destination epoch control");
+						expect(copiedControl).toMatchObject({ ...summaryOptions, tokensBefore: 100 });
+						expect(copiedControl.usage).toBeUndefined();
+						expect(await destination.readEntry(summaryEntryId)).toMatchObject({
+							...summary,
+							usage: summaryUsage,
+						});
+						const origins = await destination.readBranchHistory(async (history) => ({
+							goal: await history.get(goalEntryId),
+							input: await history.get(laterInputId),
+							proposal: await history.get(proposalEntryId),
+							epoch: await history.get(destination.getLeafId()!),
+						}));
+						expect(origins.epoch).toMatchObject({ qualification: "native-context-epoch" });
+						expect(origins.epoch!.retention).not.toBe("retained-import");
+						expect(origins.proposal!.qualification).toBeUndefined();
+						expect(origins.proposal!.retention).toBe(retained ? "retained-import" : undefined);
+						for (const origin of [origins.goal, origins.input]) {
+							expect(origin).toMatchObject({ qualification: "native-admission" });
+							expect(origin!.retention).toBe(retained ? "retained-import" : undefined);
+						}
+						const tasks = await destination.readTaskState();
+						expect(copiedEpoch.taskFrame?.material).toBe(compileTaskFrame(tasks, taskFrameLimits())?.material);
+						// Lowering can leave no eligible task rows, so the destination reducer may omit the frame.
+						if (copiedEpoch.taskFrame) {
+							expect(
+								copiedEpoch.taskFrame.origins.every(
+									(origin) => origin.sessionId === destination.getSessionId(),
+								),
+							).toBe(true);
+							expect(
+								copiedEpoch.taskFrame.rows.every((row) => row.source.sessionId === destination.getSessionId()),
+							).toBe(true);
+						}
+						if (retained) {
+							expect(tasks.items.some((item) => item.event.authority === "user")).toBe(false);
+							expect(copied.filter(isTaskFrame).map(frameText)).not.toEqual(secondFrames.map(frameText));
+						} else {
+							expect(
+								tasks.items.find((item) => item.event.source.entryId === laterInputId)?.event.authority,
+							).toBe("user");
+						}
+						// A null summary is still managed: the real native projection must ACK before send.
+						const nativeModel: Model<"openai-responses"> = {
+							id: assistant.model,
+							name: "Copied source model",
+							api: "openai-responses",
+							provider: assistant.provider,
+							baseUrl: "https://example.invalid/v1",
+							reasoning: false,
+							input: ["text"],
+							contextWindow: 300_000,
+							maxTokens: 16,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						};
+						const services = await createAgentSessionServices({
+							cwd: destination.getCwd(),
+							agentDir: join(destination.getSessionDir(), "native-agent"),
+							authStorage: AuthStorage.inMemory(),
+							telemetryDisabled: true,
+							settingsManager: SettingsManager.inMemory({
+								canonicalContext: { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 },
+								compaction: { enabled: false },
+								autoRefine: { enabled: false },
+								retry: { enabled: false },
+							}),
+							resourceLoaderOptions: { noExtensions: true, noPromptTemplates: true, noThemes: true },
+						});
+						services.modelRegistry.registerProvider(nativeModel.provider, {
+							baseUrl: nativeModel.baseUrl,
+							apiKey: "offline-copy-key",
+							api: nativeModel.api,
+							models: [
+								{
+									id: nativeModel.id,
+									name: nativeModel.name,
+									api: nativeModel.api,
+									reasoning: nativeModel.reasoning,
+									input: nativeModel.input,
+									contextWindow: nativeModel.contextWindow,
+									maxTokens: nativeModel.maxTokens,
+									cost: nativeModel.cost,
+								},
+							],
+						});
+						let nativeSession: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
+						let sentBody: string | undefined;
+						const nativeFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+							// This runs at the genuine native transport boundary, after the destination's canonical ACK.
+							await destination.readBranchHistory(async (history) => {
+								const manifest = await history.branchContext.contextManifest({ limit: 1 });
+								if (manifest.selection !== "known" || !manifest.summaryRef)
+									throw new Error("Expected measured destination epoch");
+								const finalized = await history.hydrateEntry(manifest.summaryRef.entryId, 2 * 1024 * 1024);
+								if (finalized?.entry.type !== "compaction")
+									throw new Error("Expected canonical epoch before native send");
+								expect(finalized.source).toMatchObject({ qualification: "native-context-epoch" });
+								expect(finalized.source.retention).toBeUndefined();
+								const measured = readContextEpoch(finalized.entry.details, 2 * 1024 * 1024);
+								if (finalized.source.id === copiedControl.id) {
+									// An unchanged full view may reuse its prior ACK; copying still supplies no profile claim.
+									expect(measured).toEqual(copiedEpoch);
+								} else {
+									expect(typeof measured?.representation).toBe("string");
+									expect(measured?.representation).not.toBe("");
+								}
+								expect(measured?.source).toMatchObject({
+									sessionId: destination.getSessionId(),
+									sessionFile: destination.getSessionFile(),
+									persistent: true,
+								});
+								expect(measured!.source.sourceSequence).toBeLessThan(finalized.source.sequence);
+								for (const reference of measured!.views) {
+									expect(reference.source.sessionFile).toBe(destination.getSessionFile());
+									expect(reference.ref.locator.path).toBe(destination.getSessionFile());
+								}
+							});
+							if (typeof init?.body !== "string") throw new Error("Expected exact native Responses body");
+							sentBody = init.body;
+							expect(JSON.parse(sentBody).model).toBe(assistant.model);
+							for (const message of convertToLlm(copied)) {
+								const text =
+									typeof message.content === "string"
+										? [message.content]
+										: message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+								for (const part of text) expect(sentBody).toContain(JSON.stringify(part).slice(1, -1));
+							}
+							const item = {
+								type: "message",
+								id: "msg_copy_reply",
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text: "Copied context OK.", annotations: [] }],
+							};
+							const sse = [
+								{
+									type: "response.output_item.added",
+									output_index: 0,
+									item: { ...item, status: "in_progress", content: [] },
+								},
+								{ type: "response.output_item.done", output_index: 0, item },
+								{
+									type: "response.completed",
+									response: {
+										id: "resp_copy_reply",
+										model: nativeModel.id,
+										status: "completed",
+										usage: {
+											input_tokens: 10,
+											output_tokens: 1,
+											total_tokens: 11,
+											input_tokens_details: { cached_tokens: 0 },
+										},
+									},
+								},
+							]
+								.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+								.join("");
+							return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+						});
+						try {
+							({ session: nativeSession } = await createAgentSessionFromServices({
+								services,
+								sessionManager: destination,
+								model: nativeModel,
+								tools: [],
+								noTools: "all",
+								includeGoals: false,
+								includeCompactSkill: false,
+								prewarmIpythonKernel: false,
+								telemetryDisabled: true,
+								requestTokenBudget: {
+									mode: "enforce",
+									profiles: [
+										{
+											id: "offline-copy-epoch",
+											revision: "1",
+											api: nativeModel.api,
+											provider: nativeModel.provider,
+											url: "https://example.invalid/v1/responses",
+											model: nativeModel.id,
+											authMode: "fixture-api-key",
+											templateRevision: "responses-text-v1",
+											replayFamily: "responses-text-v1",
+											contextTokens: 300_000,
+											outputCeilingTokens: 16,
+											estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
+										},
+									],
+								},
+							}));
+							await nativeSession.agent.continue();
+							expect(nativeFetch).toHaveBeenCalledOnce();
+							expect(sentBody).toBeDefined();
+							expect(nativeSession.agent.state.errorMessage).toBeUndefined();
+							expect(nativeSession.messages.at(-1)).toMatchObject({
+								role: "assistant",
+								content: [expect.objectContaining({ type: "text", text: "Copied context OK." })],
+							});
+						} finally {
+							try {
+								await nativeSession?.disposeAsync({ kernelSnapshot: false });
+							} finally {
+								nativeFetch.mockRestore();
+							}
+						}
+					} finally {
+						await destination.close();
+					}
+				}
+			} finally {
+				faux.unregister();
+				await opaqueCopy.close();
+			}
 		} finally {
 			try {
 				await resumed.dispose();
@@ -534,6 +886,113 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 			"source or branch changed",
 		);
 		expect(manager.getLeafId()).toBe(newer);
+
+		// A real destination ACK must precede adoption, including when its completion fails afterward.
+		await capture.dispose();
+		capture = undefined;
+		await manager.branchTo(secondEntryId);
+		const sourceSink = manager.bindCompactionSink();
+		capture = requests.capture(sourceSink);
+		const sourceInput = await capture.readHistory((history) =>
+			new CanonicalContextCompiler().compile(history, epochLimits),
+		);
+		const sourceRecipe = prepareCanonicalEpoch(
+			sourceInput,
+			getCanonicalViewUnits(sourceInput)!.map((unit) => unit.id),
+			"fixture-native-template/1",
+			epochLimits.maxSourceBytes,
+		).checkpoint;
+		const sourceLeaf = await sourceSink[appendContextEpoch](
+			{ ...sourceRecipe, representation: null, includeSummary: true },
+			10,
+			{ summary: "Retain the two exact inputs." },
+		);
+		await capture.dispose();
+		capture = undefined;
+		expect(requests.hasPending).toBe(false);
+		const sourceFile = manager.getSessionFile()!;
+		const sourceEntries = await manager.readEntries();
+		const primary = new Error("fixture failed after destination epoch ACK");
+		const cleanup = new Error("fixture destination capture release failed");
+		let destination: SessionManager | undefined;
+		let destinationEpoch: string | undefined;
+		let acknowledge!: () => void;
+		const acknowledged = new Promise<void>((resolve) => {
+			acknowledge = resolve;
+		});
+		let releaseAck!: () => void;
+		const ackGate = new Promise<void>((resolve) => {
+			releaseAck = resolve;
+		});
+		let released = false;
+		const bindCompactionSink = SessionManager.prototype.bindCompactionSink;
+		const binding = vi.spyOn(SessionManager.prototype, "bindCompactionSink").mockImplementation(function (
+			this: SessionManager,
+			limits,
+		) {
+			const sink = bindCompactionSink.call(this, limits);
+			if (this === manager) return sink;
+			destination = this;
+			const append = sink[appendContextEpoch];
+			sink[appendContextEpoch] = async (...args) => {
+				destinationEpoch = await append(...args);
+				acknowledge();
+				await ackGate;
+				throw primary;
+			};
+			const release = sink.release;
+			sink.release = async () => {
+				await release();
+				released = true;
+				throw cleanup;
+			};
+			return sink;
+		});
+		const adopting = manager.createBranchedSession(sourceLeaf);
+		const failed = adopting.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		try {
+			await Promise.race([
+				acknowledged,
+				adopting.then(() => {
+					throw new Error("Expected a destination epoch ACK");
+				}),
+			]);
+			expect(manager.getSessionFile()).toBe(sourceFile);
+			expect(manager.getLeafId()).toBe(sourceLeaf);
+			expect(destination!.getSessionFile()).not.toBe(sourceFile);
+			expect(destination!.getLeafId()).toBe(destinationEpoch);
+			releaseAck();
+			const error = await failed;
+			expect(error).toBeInstanceOf(AggregateError);
+			expect((error as AggregateError).errors).toEqual([primary, cleanup]);
+			expect(released).toBe(true);
+			expect(manager.getSessionFile()).toBe(sourceFile);
+			expect(manager.getLeafId()).toBe(sourceLeaf);
+			expect(await manager.readEntries()).toEqual(sourceEntries);
+			expect(requests.hasPending).toBe(false);
+			const inspected = await SessionManager.open(destination!.getSessionFile()!, dir);
+			try {
+				expect(await inspected.readEntry(secondEntryId)).toEqual(await manager.readEntry(secondEntryId));
+				expect(await inspected.readEntry(sourceLeaf)).toEqual(await manager.readEntry(sourceLeaf));
+				expect(await inspected.readEntry(destinationEpoch!)).toMatchObject({
+					type: "compaction",
+					summary: "Retain the two exact inputs.",
+				});
+				expect(copiedVisibleMessages(await compileCopyContext(inspected))).toEqual(
+					copiedVisibleMessages(await compileCopyContext(manager)),
+				);
+			} finally {
+				await inspected.close();
+			}
+		} finally {
+			releaseAck();
+			await failed;
+			binding.mockRestore();
+			await destination?.close();
+		}
 	} finally {
 		try {
 			await capture?.dispose();
