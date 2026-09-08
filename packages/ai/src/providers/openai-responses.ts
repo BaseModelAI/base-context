@@ -112,6 +112,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 					: undefined,
 			);
 			const originalInput = projection ? JSON.stringify(params.input) : undefined;
+			// The native builder is stateless. A hook cannot import external state into that permission.
+			const nativeWindow =
+				projection?.replayContract === "message-groups"
+					? JSON.stringify({ ...params, input: undefined })
+					: undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -120,10 +125,20 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			if (attempts.hasRequestBudget) {
 				const body = JSON.stringify(params);
 				const serialized = JSON.parse(body) as ResponseCreateParamsStreaming;
-				const selected = await attempts.prepareRequest(
-					{ url: `${client.baseURL.replace(/\/$/, "")}/responses`, body },
-					projection && JSON.stringify(serialized.input) === originalInput ? projection : undefined,
-				);
+				const requestUrl = `${client.baseURL.replace(/\/$/, "")}/responses`;
+				let requestProjection =
+					projection && JSON.stringify(serialized.input) === originalInput ? projection : undefined;
+				if (
+					requestProjection &&
+					nativeWindow !== undefined &&
+					model.provider === "openai" &&
+					requestUrl === "https://api.openai.com/v1/responses" &&
+					(options?.transport === undefined || options.transport === "sse" || options.transport === "auto") &&
+					JSON.stringify({ ...serialized, input: undefined }) === nativeWindow
+				) {
+					requestProjection = { ...requestProjection, publicWindow: true };
+				}
+				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection);
 				params = JSON.parse(selected!) as ResponseCreateParamsStreaming;
 			}
 			const requestOptions = {

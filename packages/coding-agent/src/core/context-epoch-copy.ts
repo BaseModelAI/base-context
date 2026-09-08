@@ -190,6 +190,7 @@ export async function rebuildCopiedContextEpoch(
 			ref,
 			sourceRevision,
 			...(pinned.retainedMessageCount === undefined ? {} : { retainedMessageCount: pinned.retainedMessageCount }),
+			...(pinned.rendering === undefined ? {} : { rendering: pinned.rendering }),
 		});
 	}
 	if (!(await view.get(checkpoint.literalTailId))) throw new Error("Copied epoch literal tail is unavailable");
@@ -199,7 +200,13 @@ export async function rebuildCopiedContextEpoch(
 		maxViewBytes: limits.maxSourceBytes,
 	});
 	const taskFrame = compileTaskFrame(tasks, taskFrameLimits({ maxBytes: Math.min(16_384, limits.maxSourceBytes) }));
-	const { replayContract, ...unchanged } = checkpoint;
+	const { replayContract, publicWindow: _publicWindow, continuation, ...unchanged } = checkpoint;
+	const rebuiltContinuation = continuation
+		? {
+				kind: continuation.kind,
+				publicTailThrough: (await prefix(continuation.publicTailThrough)).source,
+			}
+		: undefined;
 	const lowered =
 		copied.retained || origin.retention === "retained-import" || hydrated.source.retention === "retained-import";
 	const rebuilt = snapshotContextEpoch(
@@ -208,6 +215,8 @@ export async function rebuildCopiedContextEpoch(
 			source: view.source,
 			views,
 			taskFrame,
+			resourceRevision: undefined, // Explicit copies must capture their destination owner anew.
+			...(rebuiltContinuation ? { continuation: rebuiltContinuation } : {}),
 			...(!lowered && replayContract !== undefined ? { replayContract } : {}),
 		},
 		limits.maxSourceBytes,

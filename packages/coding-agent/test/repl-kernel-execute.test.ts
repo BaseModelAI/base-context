@@ -6,6 +6,7 @@ import {
 	type Context,
 	fauxAssistantMessage,
 	type Message,
+	type Model,
 	registerFauxProvider,
 	type ToolCall,
 } from "@ponythewhite/base-context-ai";
@@ -14,11 +15,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
+import { readContextEpoch } from "../src/core/context-epoch.js";
 import { defineTool } from "../src/core/extensions/types.js";
 import * as kernelBootstrap from "../src/core/kernel/bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
+	type CapturedKernelLifecycle,
 	DIFF_DISPLAY_MIME,
 	type HostRequestHandlers,
 	ReplKernelManager,
@@ -28,6 +31,7 @@ import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createBashToolDefinition } from "../src/core/tools/bash.js";
+import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 function resolveReplPython(): string | null {
@@ -46,6 +50,217 @@ function resolveReplPython(): string | null {
 
 const python = resolveReplPython();
 const describeIf = python ? describe : describe.skip;
+
+// Real SDK/kernel ownership and native Responses dispatch; only discovery and HTTP are local fixtures.
+async function createNativeLifecycleFixture(cwd: string, name: string) {
+	const interpreter = vi.spyOn(kernelBootstrap, "ensureKernelPython").mockResolvedValue(python as string);
+	const ensure = vi.spyOn(IpythonKernelProvisioner.prototype, "ensure");
+	const compile = CanonicalContextCompiler.prototype.compile;
+	const compiled = vi.spyOn(CanonicalContextCompiler.prototype, "compile");
+	const model: Model<"openai-responses"> = {
+		id: "offline-kernel-lifecycle",
+		name: "Offline kernel lifecycle",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://example.invalid/v1",
+		reasoning: false,
+		input: ["text"],
+		contextWindow: 300_000,
+		maxTokens: 16,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	};
+	const authStorage = AuthStorage.inMemory();
+	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	modelRegistry.registerProvider(model.provider, {
+		baseUrl: model.baseUrl,
+		apiKey: "offline-kernel-key",
+		api: model.api,
+		models: [
+			{
+				id: model.id,
+				name: model.name,
+				api: model.api,
+				reasoning: model.reasoning,
+				input: model.input,
+				contextWindow: model.contextWindow,
+				maxTokens: model.maxTokens,
+				cost: model.cost,
+			},
+		],
+	});
+	let sessionManager = await SessionManager.create(cwd, join(cwd, name));
+	let session: AgentSession | undefined;
+	const calls: ToolCall[] = [];
+	const bodies: string[] = [];
+	const observations: Array<{
+		snapshot: CapturedKernelLifecycle["snapshot"];
+		revision: string;
+		epochId: string;
+	}> = [];
+	const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+		expect(typeof init?.body).toBe("string");
+		bodies.push(init!.body as string);
+		const captured = compiled.mock.calls.at(-1)?.[4];
+		if (!captured) throw new Error("Expected owned lifecycle capture before native send");
+		const { snapshot } = captured;
+		expect(captured.isCurrent()).toBe(true);
+		const revision = JSON.stringify({
+			source: snapshot.source,
+			owner: snapshot.owner,
+			generation: snapshot.generation,
+			state: snapshot.state,
+		});
+		const resourceText = `<current_kernel_resource>\n${revision}\nObserved owned lifecycle only; not a health probe. Namespace contents, restoration, and survival are not asserted. Older kernel notes are historical.\n</current_kernel_resource>`;
+		const input: Array<{ content?: string | Array<{ text?: string }> }> = JSON.parse(init!.body as string).input;
+		const resourceTexts = input.flatMap((item) => {
+			const texts =
+				typeof item.content === "string" ? [item.content] : (item.content ?? []).map((part) => part.text);
+			return texts.filter((text) => text?.includes("<current_kernel_resource>"));
+		});
+		expect(resourceTexts).toEqual([resourceText]); // a resumed checkpoint cannot render its saved marker as current
+		const compilation = compiled.mock.results.at(-1);
+		if (compilation?.type !== "return") throw new Error("Expected owned canonical compilation before native send");
+		const messages = await compilation.value;
+		expect(
+			messages.filter((message) => message.role === "custom" && message.customType === "native_resource_view"),
+		).toEqual([expect.objectContaining({ content: resourceText })]);
+		expect(getCanonicalViewUnits(messages)?.filter((unit) => unit.kind === "resource-view")).toHaveLength(1);
+		const acknowledged = await sessionManager.readBranchHistory(async (history) => {
+			let latest: { id: string; resourceRevision?: string } | undefined;
+			for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 })) {
+				if (item.source.qualification !== "native-context-epoch" || item.entry.type !== "compaction") continue;
+				const epoch = readContextEpoch(item.entry.details, 2 * 1024 * 1024);
+				if (epoch?.representation) latest = { id: item.source.id, resourceRevision: epoch.resourceRevision };
+			}
+			return latest;
+		});
+		expect(acknowledged).toMatchObject({ resourceRevision: revision });
+		const previous = observations.at(-1);
+		if (previous && previous.revision !== revision) expect(acknowledged!.id).not.toBe(previous.epochId);
+		observations.push({ snapshot: structuredClone(snapshot), revision, epochId: acknowledged!.id });
+		const call = calls.shift();
+		const item = call
+			? {
+					type: "function_call",
+					id: `fc_${call.id}`,
+					call_id: call.id,
+					name: call.name,
+					status: "completed",
+					arguments: JSON.stringify(call.arguments),
+				}
+			: {
+					type: "message",
+					id: `msg_lifecycle_${bodies.length}`,
+					role: "assistant",
+					status: "completed",
+					content: [{ type: "output_text", text: "OK", annotations: [] }],
+				};
+		const sse = [
+			{ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } },
+			{ type: "response.output_item.done", output_index: 0, item },
+			{
+				type: "response.completed",
+				response: {
+					id: `resp_lifecycle_${bodies.length}`,
+					model: model.id,
+					status: "completed",
+					usage: {
+						input_tokens: 10,
+						output_tokens: 1,
+						total_tokens: 11,
+						input_tokens_details: { cached_tokens: 0 },
+					},
+				},
+			},
+		]
+			.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+			.join("");
+		return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+	});
+	const options: Omit<NonNullable<Parameters<typeof createAgentSession>[0]>, "sessionManager"> = {
+		cwd,
+		agentDir: cwd,
+		model,
+		authStorage,
+		modelRegistry,
+		tools: ["ipython"],
+		settingsManager: SettingsManager.inMemory({
+			compaction: { enabled: false, reserveTokens: 16, keepRecentTokens: 4 },
+			autoRefine: { enabled: false },
+			retry: { enabled: false },
+		}),
+		resourceLoader: createTestResourceLoader(),
+		includeGoals: false,
+		includeCompactSkill: false,
+		prewarmIpythonKernel: false,
+		telemetryDisabled: true,
+		requestTokenBudget: {
+			mode: "enforce",
+			profiles: [
+				{
+					id: "offline-kernel-lifecycle",
+					revision: "1",
+					api: model.api,
+					provider: model.provider,
+					url: "https://example.invalid/v1/responses",
+					model: model.id,
+					authMode: "fixture-api-key",
+					templateRevision: "responses-text-v1",
+					replayFamily: "responses-text-v1",
+					contextTokens: 300_000,
+					outputCeilingTokens: 16,
+					estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
+				},
+			],
+		},
+	};
+	async function dispose() {
+		try {
+			await session?.disposeAsync({ kernelSnapshot: false });
+		} finally {
+			try {
+				await sessionManager.close();
+			} finally {
+				fetch.mockRestore();
+				compiled.mockRestore();
+				ensure.mockRestore();
+				interpreter.mockRestore();
+			}
+		}
+	}
+	try {
+		({ session } = await createAgentSession({ ...options, sessionManager }));
+	} catch (error) {
+		await dispose();
+		throw error;
+	}
+	return {
+		get session() {
+			return session!;
+		},
+		bodies,
+		observations,
+		calls,
+		compile,
+		compiled,
+		async manager() {
+			const result = ensure.mock.results.at(-1);
+			if (result?.type !== "return") throw new Error("Expected real owned kernel startup");
+			const manager = await result.value;
+			if (!(manager instanceof ReplKernelManager)) throw new Error("Expected the SDK-owned real REPL manager");
+			return manager;
+		},
+		async reopen() {
+			const path = sessionManager.getSessionFile()!;
+			await session!.disposeAsync({ kernelSnapshot: false });
+			await sessionManager.close();
+			ensure.mockClear();
+			sessionManager = await SessionManager.open(path);
+			({ session } = await createAgentSession({ ...options, sessionManager }));
+		},
+		dispose,
+	};
+}
 
 describeIf("ReplKernelManager execute (real runtime)", () => {
 	let dir = "";
@@ -219,6 +434,7 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 				compiled.mock.results.filter((item) => item.type === "return").map((item) => item.value),
 			);
 			const nativeUnits = compilations.flatMap((messages) => getCanonicalViewUnits(messages) ?? []);
+			expect(nativeUnits.some((unit) => unit.kind === "resource-view")).toBe(false); // ordinary no-budget baseline
 			const finalized = await sessionManager.readBranchHistory(async (history) => {
 				for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 1024 * 1024 })) {
 					if (item.entry.type !== "message" || item.entry.message.role !== "toolResult") continue;
@@ -346,6 +562,89 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 					interpreter.mockRestore();
 				}
 			}
+		}
+
+		const lifecycle = await createNativeLifecycleFixture(dir, "native-lifecycle-happy");
+		try {
+			lifecycle.calls.push({
+				type: "toolCall",
+				id: "call_lifecycle_start",
+				name: "ipython",
+				arguments: { code: "print('lifecycle-ready')" },
+			});
+			await lifecycle.session.prompt("Start the owned Python kernel.");
+			const owned = await lifecycle.manager();
+			const started = owned.captureLifecycleState();
+			expect(owned.isRunning).toBe(true);
+			expect(started.snapshot).toMatchObject({
+				source: "repl-manager",
+				owner: expect.any(String),
+				generation: expect.any(Number),
+				state: "running",
+			});
+			expect(lifecycle.observations[0].snapshot).toMatchObject({
+				source: "ipython-provisioner",
+				owner: expect.any(String),
+				generation: null,
+				state: "unobserved",
+			});
+			expect(lifecycle.observations[1].snapshot).toEqual(started.snapshot);
+
+			await lifecycle.session.prompt("Observe the same owned kernel again.");
+			expect(lifecycle.observations[2].snapshot).toEqual(lifecycle.observations[1].snapshot);
+			expect(lifecycle.observations[2].revision).toBe(lifecycle.observations[1].revision);
+
+			await owned.restart();
+			const restarted = owned.captureLifecycleState();
+			expect(owned.isRunning).toBe(true);
+			expect(started.isCurrent()).toBe(false);
+			expect(restarted.snapshot).toMatchObject({
+				source: "repl-manager",
+				owner: started.snapshot.owner,
+				state: "running",
+			});
+			expect(restarted.snapshot.generation).not.toBe(started.snapshot.generation);
+			await lifecycle.session.prompt("Observe the restarted owned kernel.");
+			expect(lifecycle.observations[3].snapshot).toEqual(restarted.snapshot);
+
+			await owned.shutdown({ snapshot: false, drainHostRequests: true });
+			const stopped = owned.captureLifecycleState();
+			expect(owned.isRunning).toBe(false);
+			expect(restarted.isCurrent()).toBe(false);
+			expect(stopped.snapshot).toMatchObject({
+				source: "repl-manager",
+				owner: started.snapshot.owner,
+				state: "shutdown",
+			});
+			expect(stopped.snapshot.generation).not.toBe(restarted.snapshot.generation);
+			await lifecycle.session.prompt("Observe the stopped owned kernel.");
+			expect(lifecycle.observations[4].snapshot).toEqual(stopped.snapshot);
+
+			await lifecycle.reopen();
+			lifecycle.calls.push({
+				type: "toolCall",
+				id: "call_lifecycle_reopen",
+				name: "ipython",
+				arguments: { code: "print('new-owner-ready')" },
+			});
+			await lifecycle.session.prompt("Start this session's owned Python kernel.");
+			const reopened = await lifecycle.manager();
+			const fresh = reopened.captureLifecycleState();
+			expect(reopened).not.toBe(owned);
+			expect(reopened.isRunning).toBe(true);
+			// Equal reset counters cannot equate distinct owned manager instances.
+			expect(fresh.snapshot.generation).toBe(started.snapshot.generation);
+			expect(fresh.snapshot.owner).not.toBe(started.snapshot.owner);
+			expect(lifecycle.observations[5].snapshot).toMatchObject({
+				source: "ipython-provisioner",
+				generation: null,
+				state: "unobserved",
+			});
+			expect(lifecycle.observations[5].snapshot.owner).not.toBe(lifecycle.observations[0].snapshot.owner);
+			expect(lifecycle.observations[6].snapshot).toEqual(fresh.snapshot);
+			expect(lifecycle.bodies).toHaveLength(7);
+		} finally {
+			await lifecycle.dispose();
 		}
 	}, 30_000);
 
@@ -622,6 +921,38 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		} finally {
 			compiled.mockRestore();
 			interpreter.mockRestore();
+		}
+
+		const lifecycle = await createNativeLifecycleFixture(dir, "native-lifecycle-stale");
+		try {
+			lifecycle.calls.push({
+				type: "toolCall",
+				id: "call_lifecycle_stale_start",
+				name: "ipython",
+				arguments: { code: "print('stale-capture-ready')" },
+			});
+			await lifecycle.session.prompt("Start the owned Python kernel.");
+			const owned = await lifecycle.manager();
+			expect(owned.isRunning).toBe(true);
+			const sendsBefore = lifecycle.bodies.length;
+			const assistantsBefore = lifecycle.session.messages.filter((message) => message.role === "assistant");
+			const held = owned.captureLifecycleState();
+			lifecycle.compiled.mockImplementationOnce(async function (this: CanonicalContextCompiler, ...args) {
+				expect(args[4]).toMatchObject({ enabled: true, snapshot: held.snapshot });
+				const messages = await lifecycle.compile.apply(this, args);
+				// Actual teardown/start supersedes the capture held across this compile await.
+				await owned.restart();
+				expect(args[4]!.isCurrent()).toBe(false);
+				return messages;
+			});
+			await expect(lifecycle.session.prompt("Do not send the superseded kernel snapshot.")).rejects.toThrow(
+				"Captured kernel resource changed before request",
+			);
+			expect(held.isCurrent()).toBe(false);
+			expect(lifecycle.bodies).toHaveLength(sendsBefore);
+			expect(lifecycle.session.messages.filter((message) => message.role === "assistant")).toEqual(assistantsBefore);
+		} finally {
+			await lifecycle.dispose();
 		}
 	}, 30_000);
 

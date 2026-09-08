@@ -5,6 +5,7 @@ import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@ponyt
 import * as ai from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
+import { ProviderAttemptTracker } from "../../ai/src/utils/provider-attempts.js";
 import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
 import {
 	bindAuxiliaryInferenceStream,
@@ -589,6 +590,8 @@ describe("native inference coordination", () => {
 				fullUnits.find((unit) => unit.exactSources.includes(signedReplyId))!.id,
 			);
 			expect(candidate.projection.replayContract).toBe("message-groups");
+			// This hook added a non-native field: selection still works, but fresh-window permission is absent.
+			expect(candidate.projection.publicWindow).toBeUndefined();
 			for (const entryId of [history.callId, history.resultId]) {
 				expect(candidate.selectedUnitIds).toContain(
 					fullUnits.find((unit) => unit.exactSources.includes(entryId))!.id,
@@ -640,6 +643,7 @@ describe("native inference coordination", () => {
 		}
 
 		// Official Codex WS: actual full-view offers, a real parsed opaque reply, then exact ACK-backed delta reuse.
+		const publicCodexModel = { ...codexModel, baseUrl: "https://chatgpt.com/backend-api" };
 		const codexDir = mkdtempSync(join(tmpdir(), "base-context-native-codex-view-"));
 		fixtureDirs.push(codexDir);
 		const codexManager = await SessionManager.create(codexDir, codexDir);
@@ -657,7 +661,7 @@ describe("native inference coordination", () => {
 				);
 			},
 			undefined,
-			{ model: codexModel, apiKey: codexFixtureKey(), tools: replayTools },
+			{ model: publicCodexModel, apiKey: codexFixtureKey(), tools: replayTools },
 		);
 		const codexSession = codexManager.getSessionId();
 		codex.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
@@ -724,6 +728,8 @@ describe("native inference coordination", () => {
 			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
 			expect(codexOffers[0].request.api).toBe("openai-codex-responses");
 			expect(codexOffers[1].projection.replayContract).toBe("message-groups");
+			expect(codexOffers[0].projection.publicWindow).toBe(true);
+			expect(codexOffers[1].projection.publicWindow).toBe(true);
 			expect(codexOffers[1].request.retainedPrefix).toMatchObject({ inputTokens: 5, outputTokens: 3 });
 			expect(codexOffers[1].assessment.retainedInputTokens).toBe(8);
 			const logical = JSON.parse(codexOffers[1].request.body!);
@@ -756,6 +762,42 @@ describe("native inference coordination", () => {
 					usage: { inputTotal: 5, output: 3 },
 				},
 			});
+
+			// This public canonical fixture tests transport reset, not Root's summary renderer or epoch permission check.
+			const publicReply = firstCodexReply.content.find((block) => block.type === "text");
+			const tokensBefore = codexOffers[1].originalAssessment.estimatedInputTokens;
+			if (!publicReply || publicReply.type !== "text" || tokensBefore === null) {
+				throw new Error("Expected actual public reply and measured full context");
+			}
+			const publicTail = await codexManager.appendMessage({
+				role: "user",
+				content: `Public retained reply: ${publicReply.text}`,
+				timestamp: Date.now(),
+			});
+			await codexManager.appendCompaction(
+				"Public completed tool history: tool result retained",
+				publicTail,
+				tokensBefore,
+			);
+			await codex.agent.prompt("Fresh public window input");
+			expect(codexPayload).toHaveBeenCalledTimes(3);
+			expect(codexOffers).toHaveLength(3);
+			expect(codexOffers[2].projection.publicWindow).toBe(true);
+			expect(codexOffers[2].request.retainedPrefix).toBeUndefined();
+			expect(codexOffers[2].assessment.retainedInputTokens).toBe(0);
+			const fresh = JSON.parse(codexOffers[2].request.body!);
+			expect(socket.sent).toHaveLength(3);
+			expect(socket.sent[2]).toEqual({ type: "response.create", ...fresh });
+			expect(fresh.previous_response_id).toBeUndefined();
+			expect(fresh.conversation).toBeUndefined();
+			expect(fresh.input.length).toBeGreaterThan(1);
+			expect(codexOffers[2].request.body).toContain("Public retained reply: Codex reply 1");
+			expect(codexOffers[2].request.body).toContain("Fresh public window input");
+			expect(codexOffers[2].request.body).not.toContain("fixture-opaque-reasoning");
+			expect(codexOffers[2].request.body).not.toContain("rs_codex_1");
+			expect(codex.facts[4]).toMatchObject({ type: "attempt_admitted", descriptor: { kind: "initial" } });
+			expect(codex.facts[5]).toMatchObject({ type: "attempt_settled", receipt: { kind: "initial" } });
+			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
 		} finally {
 			await codex.requests.dispose();
 			ai.cleanupSessionResources(codexSession);
@@ -777,7 +819,7 @@ describe("native inference coordination", () => {
 				codexCandidates.push(candidate);
 			},
 			undefined,
-			{ model: codexModel, apiKey: codexFixtureKey(), tools: replayTools },
+			{ model: publicCodexModel, apiKey: codexFixtureKey(), tools: replayTools },
 		);
 		codexSubset.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
 			...options,
@@ -817,6 +859,7 @@ describe("native inference coordination", () => {
 			expect(codexSubsetPayload).toHaveBeenCalledTimes(1);
 			expect(codexCandidates[0].originalAssessment.status).toBe("over-budget");
 			expect(codexCandidates[0].assessment.status).toBe("within-estimate");
+			expect(codexCandidates[0].projection.publicWindow).toBe(true);
 			const codexUnits = getCanonicalViewUnits(codexSubset.viewMessages)!;
 			expect(codexCandidates[0].selectedUnitIds).not.toContain(
 				codexUnits.find((unit) => unit.exactSources.includes(codexHistory.olderId))!.id,
@@ -1254,12 +1297,16 @@ describe("native inference coordination", () => {
 			expect(candidate.originalAssessment.status).toBe("within-estimate");
 			expect(candidate.assessment).toBe(candidate.originalAssessment);
 			expect(candidate.request.body).toContain("msg_legacy");
+			expect(candidate.projection.publicWindow).toBe(true);
 			expect(candidate.selectedUnitIds).toEqual(
 				getCanonicalViewUnits(rejected.viewMessages)!.map((unit) => unit.id),
 			);
 			throw checkpointFailure;
 		});
-		const rejected = createBudgetAgent(rejectedManager, 8192, undefined, rejectView);
+		const rejected = createBudgetAgent(rejectedManager, 8192, undefined, rejectView, undefined, {
+			model: { ...model, baseUrl: "https://api.openai.com/v1" },
+			apiKey: "not-receipt-key",
+		});
 		try {
 			expect(ai.isLocalRequestPreparationError(checkpointFailure)).toBe(false);
 			await expect(rejected.agent.prompt("attempt full-view checkpoint")).rejects.toBe(checkpointFailure);
@@ -1319,7 +1366,10 @@ describe("native inference coordination", () => {
 		managers.push(codexEdgeManager);
 		await appendReplayToolHistory(codexEdgeManager, codexModel);
 		const codexSentinel = new Error("native Codex checkpoint refused");
-		const rejectCodex = vi.fn(async (_candidate: RequestViewCandidate) => {
+		const rejectCodex = vi.fn(async (candidate: RequestViewCandidate) => {
+			// This route is official. Permission does not bypass a local checkpoint refusal.
+			expect(candidate.projection.replayContract).toBe("message-groups");
+			expect(candidate.projection.publicWindow).toBe(true);
 			throw codexSentinel;
 		});
 		const codexEdge = createBudgetAgent(codexEdgeManager, 8192, undefined, rejectCodex, undefined, {
@@ -1396,6 +1446,34 @@ describe("native inference coordination", () => {
 						event.message.role === "assistant",
 				),
 			).toEqual([]);
+
+			// Observe the real adapter projection: explicit external state never grants a fresh public window.
+			const preparation = vi.spyOn(ProviderAttemptTracker.prototype, "prepareRequest");
+			codexEdgePayload.mockImplementationOnce((payload: unknown) => ({
+				...(payload as Record<string, unknown>),
+				previous_response_id: "resp_external",
+				conversation: "conversation_external",
+			}));
+			try {
+				await expect(codexEdge.agent.prompt("Explicit state is not a public window")).rejects.toMatchObject({
+					name: "RequestTokenBudgetError",
+					assessment: { status: "unknown" },
+				});
+				await expect(codexEdge.events.result()).rejects.toBeInstanceOf(ai.RequestTokenBudgetError);
+				expect(preparation).toHaveBeenCalledTimes(1);
+				const [stateRequest, stateProjection] = preparation.mock.calls[0];
+				expect(stateProjection?.replayContract).toBe("message-groups");
+				expect(stateProjection?.publicWindow).toBeUndefined();
+				expect(JSON.parse(stateRequest.body!)).toMatchObject({
+					previous_response_id: "resp_external",
+					conversation: "conversation_external",
+				});
+				expect(codexEdge.facts).toEqual([]);
+				expect(refusedSocket.sent).toEqual([]);
+				expect(offlineFetch).not.toHaveBeenCalled();
+			} finally {
+				preparation.mockRestore();
+			}
 		} finally {
 			await codexEdge.requests.dispose();
 			ai.cleanupSessionResources(codexEdgeSession);

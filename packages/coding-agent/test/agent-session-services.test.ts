@@ -7,8 +7,13 @@ import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "..
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
+import {
+	CanonicalContextCompiler,
+	getCanonicalEpochContext,
+	getCanonicalViewUnits,
+} from "../src/core/canonical-context.js";
 import { readContextEpoch } from "../src/core/context-epoch.js";
+import { PUBLIC_CONTEXT_RENDERER } from "../src/core/public-context.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
@@ -131,7 +136,7 @@ describe("createAgentSessionFromServices", () => {
 			name: "Offline epoch services",
 			api: "openai-responses",
 			provider: "openai",
-			baseUrl: "https://example.invalid/v1",
+			baseUrl: "https://api.openai.com/v1",
 			reasoning: false,
 			input: ["text"],
 			contextWindow: 300_000,
@@ -214,13 +219,26 @@ describe("createAgentSessionFromServices", () => {
 						status: "completed",
 						content: [{ type: "output_text", text: "OK", annotations: [] }],
 					};
+			const opaqueTail = !summarizing && bodies.length === 3;
+			const reasoning = {
+				type: "reasoning",
+				id: "rs_opaque_tail",
+				summary: [],
+				encrypted_content: "OPAQUE_TAIL_CANONICAL_ONLY",
+			};
 			const sse = [
+				...(opaqueTail
+					? [
+							{ type: "response.output_item.added", output_index: 0, item: reasoning },
+							{ type: "response.output_item.done", output_index: 0, item: reasoning },
+						]
+					: []),
 				{
 					type: "response.output_item.added",
-					output_index: 0,
+					output_index: opaqueTail ? 1 : 0,
 					item: { ...item, status: "in_progress", content: [] },
 				},
-				{ type: "response.output_item.done", output_index: 0, item },
+				{ type: "response.output_item.done", output_index: opaqueTail ? 1 : 0, item },
 				{
 					type: "response.completed",
 					response: {
@@ -256,7 +274,7 @@ describe("createAgentSessionFromServices", () => {
 						revision: "1",
 						api: model.api,
 						provider: model.provider,
-						url: "https://example.invalid/v1/responses",
+						url: "https://api.openai.com/v1/responses",
 						model: model.id,
 						authMode: "fixture-api-key",
 						templateRevision: "responses-text-v1",
@@ -308,7 +326,40 @@ describe("createAgentSessionFromServices", () => {
 				),
 			);
 			expect(afterSummary.filter((message) => message.role === "compactionSummary")).toHaveLength(1);
-			expect(afterSummary).toContainEqual(originalRecovery);
+			const publicRecovery = afterSummary.find(
+				(message) =>
+					message.role === "custom" &&
+					message.customType === PUBLIC_CONTEXT_RENDERER &&
+					typeof message.content === "string" &&
+					message.content.includes("call_epoch_recovery") &&
+					message.content.includes('"role":"toolResult"'),
+			);
+			expect(publicRecovery?.role).toBe("custom");
+			if (publicRecovery?.role !== "custom" || typeof publicRecovery.content !== "string")
+				throw new Error("Expected public recovery evidence");
+			const publicData = JSON.parse(publicRecovery.content.slice(publicRecovery.content.indexOf("\n") + 1));
+			expect(publicData).toMatchObject({
+				role: originalRecovery.role,
+				toolCallId: originalRecovery.toolCallId,
+				toolName: originalRecovery.toolName,
+				isError: originalRecovery.isError,
+				content: originalRecovery.content,
+			});
+			expect(getCanonicalEpochContext(afterSummary)?.checkpoint?.continuation?.kind).toBe("harness-summary");
+			expect(JSON.stringify(afterSummary)).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+			const archived = await epochManager.readBranch();
+			expect(
+				archived.some(
+					(entry) =>
+						entry.type === "message" && JSON.stringify(entry.message).includes("OPAQUE_TAIL_CANONICAL_ONLY"),
+				),
+			).toBe(true);
+			expect(
+				archived.some(
+					(entry) =>
+						entry.type === "message" && JSON.stringify(entry.message) === JSON.stringify(originalRecovery),
+				),
+			).toBe(true);
 			expect(getCanonicalViewUnits(afterSummary)?.filter((unit) => unit.kind === "recovery")).toHaveLength(1);
 			expect(
 				afterSummary.some((message) => message.role === "compactionSummary" && message.summary === summary.summary),
@@ -332,7 +383,77 @@ describe("createAgentSessionFromServices", () => {
 			expect(bodies[3]).toContain("Bar.txt.");
 			expect(bodies[3]).toContain("call_epoch_recovery");
 			expect(bodies[3]).not.toContain("OPTIONAL_PRIOR_LITERAL");
-			expect(epochSession.messages).toContainEqual(originalRecovery);
+			expect(epochSession.messages).toContainEqual(publicRecovery);
+			expect(bodies[3]).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+			const publicBody = JSON.parse(bodies[3]);
+			expect(
+				publicBody.input.some(
+					(item: { type?: string }) =>
+						item.type === "function_call" || item.type === "function_call_output" || item.type === "reasoning",
+				),
+			).toBe(false);
+			expect(
+				publicBody.input.some(
+					(item: { role?: string; content?: unknown }) =>
+						item.role === "user" && JSON.stringify(item.content).includes("Also preserve Bar.txt."),
+				),
+			).toBe(true);
+			// Native fork and retained import must rebuild the public cutoff and recipes in the destination.
+			const sourceManager = epochManager;
+			for (const retained of [false, true]) {
+				const destination = retained
+					? await SessionManager.importRetainedFrom(
+							sourceManager.getSessionFile()!,
+							epochDir,
+							join(epochDir, "public-import"),
+						)
+					: await sourceManager.forkBranch(sourceManager.getLeafId(), {
+							sessionDir: join(epochDir, "public-fork"),
+						});
+				let copiedSession: typeof epochSession | undefined;
+				try {
+					epochManager = destination;
+					const copied = await destination.readBranchHistory((history) =>
+						new CanonicalContextCompiler().compile(
+							history.branchContext,
+							epochSession!.settingsManager.getCanonicalContextLimits(),
+						),
+					);
+					const checkpoint = getCanonicalEpochContext(copied)!.checkpoint!;
+					expect(checkpoint.publicWindow).toBeUndefined();
+					expect(checkpoint.continuation?.publicTailThrough).toMatchObject({
+						sessionId: destination.getSessionId(),
+						sessionFile: destination.getSessionFile(),
+						persistent: true,
+					});
+					for (const view of checkpoint.views) {
+						expect(view.source.sessionId).toBe(destination.getSessionId());
+						expect(view.ref.locator.path).toBe(destination.getSessionFile());
+					}
+					expect(copied).toContainEqual(publicRecovery);
+					expect(getCanonicalViewUnits(copied)?.filter((unit) => unit.kind === "recovery")).toHaveLength(
+						retained ? 0 : 1,
+					);
+					expect(JSON.stringify(await destination.readBranch())).toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+					({ session: copiedSession } = await createAgentSessionFromServices({
+						...epochOptions,
+						sessionManager: destination,
+					}));
+					await copiedSession.prompt("Continue from the public checkpoint.");
+					expect(bodies.at(-1)).toContain("call_epoch_recovery");
+					expect(bodies.at(-1)).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+					expect(bodies.at(-1)).not.toContain("OPTIONAL_PRIOR_LITERAL");
+				} finally {
+					epochManager = sourceManager;
+					try {
+						await copiedSession?.disposeAsync({ kernelSnapshot: false });
+					} finally {
+						await destination.close();
+					}
+				}
+			}
+			expect(bodies).toHaveLength(6);
+			expect(summaryBodies).toHaveLength(1);
 		} finally {
 			try {
 				await epochSession?.disposeAsync({ kernelSnapshot: false });

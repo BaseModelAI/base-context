@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AgentTool, AgentToolResult } from "@ponythewhite/base-context-agent";
 import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
+import { v4 as uuid } from "uuid";
 import { PRODUCT } from "../../product-identity.js";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
 import { resolveKernelBashShell } from "../../utils/shell.js";
@@ -10,6 +11,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
+	type CapturedKernelLifecycle,
 	type ExecuteOptions,
 	type ExecuteResult,
 	type HostRequestHandlers,
@@ -25,6 +27,9 @@ import { nativeRecoveryMetadata, stringifyNativeRecoveryResponse } from "../sele
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { admitNativeRecoveryToolResult, nativeRecoveryToolResult } from "./prime-context.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+
+// Bound before tool/extension callbacks; replacement reader methods cannot publish lifecycle facts.
+const captureOwnedReplState = ReplKernelManager.prototype.captureLifecycleState;
 
 const RLM_BOOTSTRAP_HEADER_CODE = `
 import asyncio
@@ -314,6 +319,7 @@ export interface IpythonToolOptions {
  * attach mid-flight (a tool call racing a background prewarm()).
  */
 export class IpythonKernelProvisioner {
+	private readonly lifecycleOwner = uuid();
 	private managerPromise?: Promise<KernelClient>;
 	private startedManager?: KernelClient;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
@@ -331,6 +337,29 @@ export class IpythonKernelProvisioner {
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
 		return this.startedManager;
+	}
+
+	captureKernelState(): CapturedKernelLifecycle {
+		const manager = this.startedManager;
+		const pending = this.managerPromise;
+		const disposed = this.disposeController.signal.aborted;
+		const captured = manager instanceof ReplKernelManager ? captureOwnedReplState.call(manager) : undefined;
+		const state = disposed ? "disposed" : pending && !manager ? "provisioning" : "unobserved";
+		return Object.freeze({
+			snapshot:
+				captured?.snapshot ??
+				Object.freeze({
+					source: "ipython-provisioner" as const,
+					owner: this.lifecycleOwner,
+					generation: null,
+					state,
+				}),
+			isCurrent: () =>
+				this.startedManager === manager &&
+				this.managerPromise === pending &&
+				this.disposeController.signal.aborted === disposed &&
+				(captured?.isCurrent() ?? true),
+		});
 	}
 
 	/** Result of reviving a prior session's namespace on the last kernel start, if any. */

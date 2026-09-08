@@ -2,12 +2,13 @@ import type { ProviderRequestRepresentation, RequestTokenAssessment, Usage } fro
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { ContextRef } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
+import { MAX_RESOURCE_REVISION_BYTES } from "./resource-view.js";
 import type { CompiledTaskFrame } from "./task-frame.js";
 
 export const CONTEXT_EPOCH_DETAIL = "baseContextEpoch";
 /** Internal admission, not a field accepted by ordinary appendCompaction callers. */
 export const appendContextEpoch = Symbol("appendContextEpoch");
-export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/2";
+export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/3";
 export type ContextReplayContract = "complete-context" | "message-groups";
 
 /** An ordinary summary and its retained source recipes share the existing compaction ACK. */
@@ -26,20 +27,27 @@ export interface EpochViewReference {
 	readonly sourceRevision: string;
 	/** Present only for an existing rendered compaction summary. */
 	readonly retainedMessageCount?: number;
+	readonly rendering?: "public-history/1";
 }
 
 export interface ContextEpochCheckpoint {
-	readonly version: 1 | 2;
-	readonly renderer: "native-canonical-epoch/1" | typeof CONTEXT_EPOCH_RENDERER;
+	readonly version: 1 | 2 | 3;
+	readonly renderer: "native-canonical-epoch/1" | "native-canonical-epoch/2" | typeof CONTEXT_EPOCH_RENDERER;
 	readonly source: SourceSnapshotRef;
 	/** Null only for an ordinary summary, which is not a measured provider request. */
 	readonly representation: string | null;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
 	readonly replayContract?: ContextReplayContract;
+	/** Actual adapter permission to leave completed native groups for a fresh public window. */
+	readonly publicWindow?: true;
+	/** Frozen summary transition. Later native messages are not silently converted. */
+	readonly continuation?: { readonly kind: "harness-summary"; readonly publicTailThrough: SourceSnapshotRef };
 	readonly views: readonly EpochViewReference[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
 	readonly taskFrame?: CompiledTaskFrame;
+	/** Accepted-state comparison only; saved metadata never establishes current resource liveness. */
+	readonly resourceRevision?: string;
 	readonly literalTailId: string;
 }
 
@@ -58,7 +66,8 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!("renderer" in value) ||
 		!(
 			(value.version === 1 && value.renderer === "native-canonical-epoch/1") ||
-			(value.version === 2 && value.renderer === CONTEXT_EPOCH_RENDERER)
+			(value.version === 2 && value.renderer === "native-canonical-epoch/2") ||
+			(value.version === 3 && value.renderer === CONTEXT_EPOCH_RENDERER)
 		) ||
 		!("source" in value) ||
 		!value.source ||
@@ -69,16 +78,30 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!("representation" in value) ||
 		!(
 			typeof value.representation === "string" ||
-			(value.version === 2 &&
+			((value.version === 2 || value.version === 3) &&
 				value.representation === null &&
 				"includeSummary" in value &&
 				value.includeSummary === true)
 		) ||
 		("includeSummary" in value &&
-			(value.version !== 2 || value.includeSummary !== true || value.representation !== null)) ||
+			((value.version !== 2 && value.version !== 3) ||
+				value.includeSummary !== true ||
+				value.representation !== null)) ||
 		("replayContract" in value &&
 			value.replayContract !== "complete-context" &&
-			value.replayContract !== "message-groups")
+			value.replayContract !== "message-groups") ||
+		("resourceRevision" in value &&
+			(typeof value.resourceRevision !== "string" ||
+				Buffer.byteLength(value.resourceRevision, "utf8") > MAX_RESOURCE_REVISION_BYTES)) ||
+		("publicWindow" in value && (value.version !== 3 || value.publicWindow !== true)) ||
+		("continuation" in value &&
+			(value.version !== 3 ||
+				!value.continuation ||
+				typeof value.continuation !== "object" ||
+				!("kind" in value.continuation) ||
+				value.continuation.kind !== "harness-summary" ||
+				!("publicTailThrough" in value.continuation) ||
+				!value.continuation.publicTailThrough))
 	)
 		throw new Error("Invalid committed context epoch");
 	return snapshotContextEpoch(value as ContextEpochCheckpoint, maxBytes);

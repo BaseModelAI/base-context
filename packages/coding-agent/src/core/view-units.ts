@@ -5,7 +5,7 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 export interface ViewUnit {
 	readonly id: string;
 	readonly sourceRevision: string;
-	readonly kind: "literal" | "fixed-view" | "recovery" | "task-frame" | "replay-group";
+	readonly kind: "literal" | "fixed-view" | "recovery" | "task-frame" | "resource-view" | "replay-group";
 	readonly exactSources: readonly string[];
 	readonly requiredVisibleDependencies: readonly string[];
 	readonly authority: "instruction" | "user" | "assistant-public" | "tool-data" | "unrecorded";

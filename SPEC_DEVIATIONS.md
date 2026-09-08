@@ -408,6 +408,38 @@ Covered cached-prefix units cannot be evicted using stale token credit. No porta
 renderer is implemented. The benchmark arm now forwards a declared enforced configured-limit
 profile; that wiring and its syntax check do not open the no-live-benchmark gate.
 
+## Current prerequisite implementation — W31
+
+W31 adds explicit adapter-permitted public summary windows and owned kernel resource views.
+The actual official request must have a supported stateless descriptor, closed groups and an
+exact allowed route. Public fallback is a deliberate summary transition before its existing ACK,
+not text inserted into opaque fields. V3 recipes preserve canonical originals, user roles and
+exact public evidence, including the old retained tail. Reopen/native fork/import rebuilds
+source references and cutoff metadata; destination permission is not copied. The next native
+send still requires actual final-body budget/projection and epoch acceptance.
+
+Kernel instance identity plus the actual lifecycle counter/state supplies bounded current
+provider data. An unchanged capture stays stable; changed state needs an ACK and a stale held
+capture refuses before send. Saved/imported revision markers never establish current liveness.
+Original concrete readers are bound before callbacks. Managed compaction no longer probes the
+namespace or announces survival. No-budget/no-epoch behavior stays unchanged. Schema34/protocol11
+is the source boundary. No new resource/body/journal store or model call was added.
+
+Fourteen existing cases pass across separate compiler2/services2/selector2/native-Python2/
+compaction4/RPC2 scopes; types pass. Service evidence covers actual opaque tail/public summary,
+reopen and native fork/import continuation (six main fake responses plus one summary). Native
+Python covers real startup/stability/restart/shutdown/new-owner and stale no-send. The separate
+Codex adapter phase covers full public dispatch after prefix loss without old pointer/opaque/
+credit. Initial selector fixture and two typing diagnostics, and affected repeats, remain
+recorded. This is not an extra set of W29/W30 runs or live provider certification.
+
+The gate remains closed. Unaccepted recovery groups, unsupported media/routes/native modes
+and opaque requests without a permitted transition still refuse. Automatic handling of every
+prefix-loss/unknown-budget state is not implemented by this explicit-summary milestone. Finish
+that source continuation path before opening the five-feature benchmark gate; do not substitute
+unauthorized readiness/auth/model probes for implementation. Broader job/artifact/scheduler
+freshness, full portable/native modes and deployment certification remain separate backlog.
+
 ## Completed D/S setup handoff — setup only
 
 The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.

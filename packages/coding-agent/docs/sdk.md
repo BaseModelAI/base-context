@@ -749,10 +749,32 @@ covers selection and actual admission across the ACK wait. Final-body incompatib
 local checkpoint failures propagate without synthetic assistant output.
 
 Codex prepares the full logical body before its existing cached-delta path. Prefix-covered
-units remain mandatory; omitted prefixes cannot retain their old token credit. Summary or
-source rebuild can break that coverage, leaving retained opaque content unknown/refused.
-Literal whole-group retention is not portable opaque continuation. Complete resource/replay
-boundaries and deployment certification remain open. This is not provider cache-hit proof.
+units remain mandatory; omitted prefixes cannot retain their old token credit. Unknown opaque
+content still refuses when no permitted transition or exact owned prefix is available.
+
+An explicit ordinary-summary boundary can use an adapter-accepted fresh public window. The
+v3 epoch recipe keeps canonical originals but renders old assistant/tool text and arguments
+as descriptive public data, including the captured retained tail. Original user messages keep
+their role. This is not replacement text for native signatures or encrypted fields, and it
+does not preserve hidden reasoning. Open groups and unsupported media refuse before the summary
+model call. The existing summary ACK commits the source-backed rendering plan; the next native
+request must still pass its actual final-body budget, projection and epoch boundary.
+
+Forks and imports rebuild public source recipes and the exact tail cutoff on the destination.
+They do not inherit permission for a new native-to-public transition. No new body store or
+extra summary call is used.
+
+Managed native context also includes a bounded, synchronous observation of the owned kernel
+lifecycle. Manager instance identity and generation distinguish a restart from a new owner whose
+counter resets. This view does not probe the kernel or certify variables, restoration or health.
+An unchanged snapshot renders identically. A changed snapshot needs an ACKed boundary; a held
+snapshot that becomes stale refuses before dispatch. Saved/copied resource markers are only
+acceptance metadata. Reopen and destination sessions capture their current owner again.
+Managed summaries skip the old namespace probe and survival message. The ordinary no-budget,
+no-epoch path stays unchanged.
+
+Ownership/RPC schema34 fences these v3 readers. This is not live deployment, tokenizer,
+provider cache-hit, whole-process memory or hidden-state continuity certification.
 
 
 ## Extensions

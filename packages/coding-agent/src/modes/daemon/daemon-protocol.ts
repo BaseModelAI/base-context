@@ -82,8 +82,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 31 requires canonical producer qualification for native task-origin authority.
 // Revision 32 requires qualified native recovery and source-backed context-epoch checkpoints.
 // Revision 33 retains recovery views in ordinary summary ACKs under adapter-proved replay contracts.
-export const DAEMON_SCHEMA_REVISION = 33;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-33-37e5213f9781";
+// Revision 34 requires explicit public summary rendering and live resource acceptance on managed epochs.
+export const DAEMON_SCHEMA_REVISION = 34;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-34-public-resource";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -721,7 +722,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 33,
+	minSchemaRevision: 34,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

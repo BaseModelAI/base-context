@@ -165,6 +165,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					: undefined,
 			);
 			const originalInput = projection ? JSON.stringify(body.input) : undefined;
+			const nativeWindow =
+				projection?.replayContract === "message-groups" ? JSON.stringify({ ...body, input: undefined }) : undefined;
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
@@ -186,15 +188,35 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			let bodyJson = JSON.stringify(body);
 			if (attempts.hasRequestBudget) body = JSON.parse(bodyJson) as RequestBody;
 			if (body.model !== model.id || JSON.stringify(body.input) !== originalInput) projection = undefined;
+			const publicWindow =
+				projection !== undefined &&
+				nativeWindow !== undefined &&
+				model.provider === "openai-codex" &&
+				(options?.transport === undefined ||
+					options.transport === "sse" ||
+					options.transport === "auto" ||
+					options.transport === "websocket" ||
+					options.transport === "websocket-cached") &&
+				JSON.stringify({ ...body, input: undefined }) === nativeWindow;
 			let prepared = false;
 			const prepareBody = async (url: string, retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"]) => {
+				let requestProjection = prepared ? undefined : projection;
+				if (
+					requestProjection &&
+					publicWindow &&
+					(url === "https://chatgpt.com/backend-api/codex/responses" ||
+						url === "wss://chatgpt.com/backend-api/codex/responses")
+				) {
+					// Use the actual reused connection URL. Prefix loss sends full context without old credit.
+					requestProjection = { ...requestProjection, publicWindow: true };
+				}
 				const selected = await attempts.prepareRequest(
 					{
 						url,
 						body: bodyJson,
 						...(retainedPrefix ? { retainedPrefix } : {}),
 					},
-					prepared ? undefined : projection,
+					requestProjection,
 				);
 				if (selected !== undefined) {
 					bodyJson = selected;

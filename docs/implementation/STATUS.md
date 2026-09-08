@@ -48,11 +48,44 @@ Earlier failures and repeats remain recorded: live tool executor cloning, an unn
 per-send epoch-count assumption, an absent lowered TaskFrame fixture, and three type diagnostics.
 These results do not certify installed packages, provider behavior or a whole-process memory bound.
 
-Cached-prefix units remain mandatory. Summary/rebuild can destroy their exact prefix coverage;
-retained opaque reasoning then remains unknown/refused. Literal replay-group retention is not
-portable opaque continuation. Full resource/representation boundaries and supported deployment
-profiles remain open. No provider cache-hit, live token accuracy, pricing, installed runtime
-or whole-harness certification is claimed.
+W31 adds two working paths under the same owner:
+
+- An actual official Responses/Codex projection can grant a fresh public window only for its
+  unchanged stateless request descriptor and closed groups. Exact actual routes are checked;
+  external continuation/conversation state and unsupported routes do not inherit permission.
+- At an explicit ordinary-summary boundary, v3 recipes render retained assistant/tool public
+  data, including the captured old tail. Canonical opaque originals stay unchanged. No public
+  text is substituted into signatures or encrypted fields. User roles remain intact. The next
+  native request still needs its actual final-body budget/projection and epoch acceptance.
+- Native fork/import rebuilds the public cutoff and references on the destination, without
+  copying permission or charging original summary usage again.
+- Managed context captures actual owned kernel instance/generation/state once. Its bounded
+  tool-data view is stable when unchanged. Changed state requires a new ACK; a stale held
+  capture refuses before send without a synthesized assistant. Saved/imported markers are
+  not current liveness. Native readers are bound before replacement callbacks. Managed
+  summaries skip the old namespace probe/survival message. Generic no-budget/no-epoch output
+  remains unchanged. Ownership/RPC schema34 fences these v3 readers; protocol11 is unchanged.
+
+Fourteen distinct existing W31 cases pass across separate compiler2/services2/selector2/
+native-Python2/compaction4/RPC2 invocations, and type checking passes. The service path includes
+actual parsed opaque tail -> public summary -> reopen -> native fork/import -> native send,
+with six main fake responses and one summary. The kernel path uses real Python startup,
+stability, restart, shutdown and a new owner after reopen, plus stale-capture refusal. The
+Codex adapter path separately checks fresh full dispatch after prefix loss with no old pointer,
+opaque data or token credit. It does not stand in for the service renderer path.
+
+The first selector edge had a wrong official-route fixture expectation. Type checking found
+an inferred rendering-string union and a missing fake fixture key. Those diagnostics are
+retained; only selector2/types were repeated after correction. No production counter or
+permission was weakened. W29 and W30 receipts remain settled and were not rerun.
+
+Cached-prefix units still cannot use stale token credit. Unaccepted recovery groups, unsupported
+media/routes/native modes and opaque input without a permitted transition remain explicit
+refusals. This milestone adds explicit public summary transitions, not an automatic response to
+every prefix-loss or unknown-budget state. That continuation boundary remains in the five-feature
+backlog. Configured profiles and offline paths do not certify deployment limits or login state;
+no live pre-probe is required to implement the remaining source path. No provider cache-hit,
+live token accuracy, pricing, installed runtime or whole-harness certification is claimed.
 
 No live benchmark or readiness probe is allowed before all five features work.
 After that gate, the latest user order is all 30 isolated tasks at low effort,

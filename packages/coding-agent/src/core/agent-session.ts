@@ -236,6 +236,7 @@ import {
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import { assertResourceCurrent, type OwnedResourceCapture } from "./resource-view.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -335,6 +336,9 @@ import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
+
+// The native owner reads its actual provisioner, not a replaceable public reader method.
+const captureOwnedKernelState = IpythonKernelProvisioner.prototype.captureKernelState;
 
 export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
@@ -1081,6 +1085,7 @@ export class AgentSession {
 	readonly requests: InferenceCoordinator;
 	readonly runtimeServices: SessionRuntimeServices;
 	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private readonly _contextEpochsEnabled: boolean;
 	private readonly _contextUsageReader = new ContextUsageReader();
 	private _compactionBoundaryCache?: {
 		sessionId: string;
@@ -1354,7 +1359,8 @@ export class AgentSession {
 			};
 		});
 		this.agent.bindInitializationOwner(() => this.initialize());
-		const contextEpochsEnabled = config.requestTokenBudget !== undefined;
+		this._contextEpochsEnabled = config.requestTokenBudget !== undefined;
+		const contextEpochsEnabled = this._contextEpochsEnabled;
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
 			await this._goalResumeOperation;
@@ -1381,6 +1387,7 @@ export class AgentSession {
 			const controls = this._contextOmissions;
 			const omitted = new Set(controls?.ids);
 			const epochManager = this.sessionManager;
+			const resource = this._captureKernelResource();
 			const compaction = epochManager.bindCompactionSink({
 				maxEntries: limits.maxMessages,
 				maxSourceBytes: limits.maxSourceBytes,
@@ -1390,7 +1397,13 @@ export class AgentSession {
 				const messages = await captured.readHistory(async (view) => {
 					const sameSource =
 						controls?.sessionId === view.source.sessionId && controls?.sessionFile === view.source.sessionFile;
-					const result = await this._contextCompiler.compile(view, limits, sameSource ? omitted : undefined);
+					const result = await this._contextCompiler.compile(
+						view,
+						limits,
+						sameSource ? omitted : undefined,
+						{},
+						resource,
+					);
 					if (sameSource && this._contextOmissions === controls) {
 						// Only prune this captured set. A newer control or source switch must survive this read.
 						for (const id of omitted) if (!this._contextCompiler.hasActiveEntry(id)) controls.ids.delete(id);
@@ -1401,6 +1414,11 @@ export class AgentSession {
 				this._mergeUnpersistedOutcomes(messages, outcomes);
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 				const epochContext = getCanonicalEpochContext(messages);
+				if (
+					epochContext?.resourceRevision !== undefined &&
+					getCanonicalViewUnits(messages)?.length !== messages.length
+				)
+					throw new Error("Current resource view requires tracked canonical context");
 				if (epochContext?.checkpoint && getCanonicalViewUnits(messages)?.length !== messages.length)
 					throw new Error("Committed context epoch cannot admit untracked transient messages");
 				if (
@@ -1421,6 +1439,7 @@ export class AgentSession {
 					captured.bindRequestViewBoundary(
 						messages,
 						async (candidate) => {
+							assertResourceCurrent(resource);
 							const representation = contextEpochRepresentation(
 								candidate.request,
 								candidate.assessment,
@@ -1431,7 +1450,14 @@ export class AgentSession {
 								candidate.projection.replayContract === "message-groups"
 									? "message-groups"
 									: "complete-context";
-							const selection = JSON.stringify([representation, replayContract, candidate.selectedUnitIds]);
+							const publicWindow =
+								"publicWindow" in candidate.projection && candidate.projection.publicWindow === true;
+							const selection = JSON.stringify([
+								representation,
+								replayContract,
+								publicWindow,
+								candidate.selectedUnitIds,
+							]);
 							if (accepted !== undefined) {
 								if (accepted !== selection)
 									throw new Error("Captured epoch request selection changed after acceptance");
@@ -1440,7 +1466,9 @@ export class AgentSession {
 							if (
 								committed?.representation === representation &&
 								committed.replayContract === replayContract &&
+								(committed.publicWindow === true) === publicWindow &&
 								committed.taskFrame?.material === epochContext.taskFrame?.material &&
+								committed.resourceRevision === epochContext.resourceRevision &&
 								candidate.selectedUnitIds.length === messages.length
 							) {
 								accepted = selection;
@@ -1453,6 +1481,7 @@ export class AgentSession {
 								representation,
 								limits.maxSourceBytes,
 								replayContract,
+								publicWindow,
 							);
 							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
 								throw new Error("Context epoch candidate does not match its captured source");
@@ -1467,6 +1496,7 @@ export class AgentSession {
 							const entryId = await compaction[appendContextEpoch](prepared.checkpoint, tokensBefore);
 							acknowledged = { entryId, result };
 							try {
+								assertResourceCurrent(resource);
 								if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
 									throw new Error("Context epoch source changed before adoption");
 								this.agent.state.messages = prepared.messages;
@@ -1479,6 +1509,7 @@ export class AgentSession {
 						},
 						(request, assessment) => {
 							try {
+								assertResourceCurrent(resource);
 								if (!committed) return;
 								if (acceptedBody === undefined || request.body !== acceptedBody)
 									throw new Error("Committed context epoch requires a compatible final provider projection");
@@ -1487,6 +1518,8 @@ export class AgentSession {
 									committed.representation
 								)
 									throw new Error("Context epoch representation changed without a committed boundary");
+								if (committed.resourceRevision !== epochContext.resourceRevision)
+									throw new Error("Context epoch resource revision requires a committed boundary");
 								if (committed.taskFrame?.material !== epochContext.taskFrame?.material)
 									throw new Error("Context epoch task revision requires a committed boundary");
 							} catch (cause) {
@@ -8119,6 +8152,23 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
+	private _captureKernelResource(): OwnedResourceCapture {
+		const provisioner = this._ipythonKernelProvisioner;
+		const captured = provisioner ? captureOwnedKernelState.call(provisioner) : undefined;
+		return Object.freeze({
+			enabled: this._contextEpochsEnabled,
+			snapshot:
+				captured?.snapshot ??
+				Object.freeze({
+					source: "unobserved" as const,
+					owner: null,
+					generation: null,
+					state: "unobserved" as const,
+				}),
+			isCurrent: () => this._ipythonKernelProvisioner === provisioner && (captured?.isCurrent() ?? true),
+		});
+	}
+
 	private async _syncKernelStateAfterCompaction(): Promise<void> {
 		const provisioner = this._ipythonKernelProvisioner;
 		if (!provisioner?.hasRunningKernel) return;
@@ -8342,13 +8392,15 @@ export class AgentSession {
 	): Promise<{
 		preparation: CompactionPreparation | undefined;
 		messages?: readonly AgentMessage[];
+		resource?: OwnedResourceCapture;
 		maxSourceBytes: number;
 	}> {
 		const limits = this.settingsManager.getCanonicalContextLimits();
+		const resource = this._captureKernelResource();
 		if (!(await compaction.source).persistent)
 			return { preparation: prepareCompaction(pathEntries, settings), maxSourceBytes: limits.maxSourceBytes };
 		return requests.readHistory(async (view) => {
-			const messages = await new CanonicalContextCompiler().compile(view, limits);
+			const messages = await new CanonicalContextCompiler().compile(view, limits, undefined, {}, resource);
 			const context = getCanonicalEpochContext(messages)!;
 			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
 				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
@@ -8363,7 +8415,14 @@ export class AgentSession {
 							boundary,
 						)
 					: prepareCompaction(pathEntries, settings);
-			return { preparation, messages, maxSourceBytes: limits.maxSourceBytes };
+			// Refuse unsupported public data or open groups before starting the summary model call.
+			if (preparation) prepareRecoveryCompaction(messages, preparation.firstKeptEntryId, limits.maxSourceBytes);
+			return {
+				preparation,
+				messages,
+				resource: context.resourceRevision !== undefined ? resource : undefined,
+				maxSourceBytes: limits.maxSourceBytes,
+			};
 		});
 	}
 
@@ -8400,6 +8459,7 @@ export class AgentSession {
 		} = options;
 
 		const prepared = await this._prepareCapturedCompaction(pathEntries, settings, requests, compaction);
+		if (prepared.resource) assertResourceCurrent(prepared.resource);
 		const preparation = prepared.preparation;
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
@@ -8504,6 +8564,7 @@ export class AgentSession {
 			const recovery = prepared.messages
 				? prepareRecoveryCompaction(prepared.messages, firstKeptEntryId, prepared.maxSourceBytes)
 				: undefined;
+			if (prepared.resource) assertResourceCurrent(prepared.resource);
 			if (recovery) {
 				if (
 					result.details !== undefined &&
@@ -8537,6 +8598,7 @@ export class AgentSession {
 				semanticEdges.finishRequest(requestId);
 			}
 			semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
+			if (prepared.resource) assertResourceCurrent(prepared.resource);
 		} catch (error) {
 			compactionSettled = true;
 			if (committed) throw new CompactionCommittedError(committed.entryId, committed.result, error);
@@ -8564,7 +8626,7 @@ export class AgentSession {
 					fromExtension,
 				});
 			}
-			await this._syncKernelStateAfterCompaction();
+			if (!prepared.resource) await this._syncKernelStateAfterCompaction();
 			await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
 		} catch (error) {
 			throw new CompactionCommittedError(committed!.entryId, committed!.result, error);

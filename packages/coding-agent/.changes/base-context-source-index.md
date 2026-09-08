@@ -51,4 +51,9 @@
 - Retain genuine recovery and closed replay groups in the same ordinary-summary ACK; refuse unproved recovery compaction.
 - Rebuild copied/forked/imported epoch recipes and lowered TaskFrames on the destination before adoption, without duplicating summary usage.
 - Snapshot native tool definitions rather than cloning live Agent executors during request preparation.
-- Require ownership/RPC schema33; prefix-lost opaque continuation and complete resource boundaries remain open.
+- Require ownership/RPC schema33 for recovery-summary and destination epoch readers.
+- Add explicit adapter-permitted public summary windows with v3 source recipes, whole closed groups, and a frozen retained-tail cutoff; keep canonical opaque originals unchanged.
+- Rebuild public rendering recipes on native forks and retained imports without copying transition permission or summary usage.
+- Capture owned kernel instance/generation/state in bounded native provider context, require new epoch acceptance on change, and refuse stale held snapshots without probing or claiming variable survival.
+- Drop copied resource acceptance and resnapshot on native destination/reopen paths; keep the ordinary no-budget/no-epoch baseline unchanged.
+- Require ownership/RPC schema34 for public-window and resource-aware managed epoch readers.

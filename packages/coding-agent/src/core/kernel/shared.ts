@@ -293,6 +293,20 @@ export interface KernelShutdownOptions {
 	drainHostRequests?: boolean;
 }
 
+/** A bounded owned lifecycle observation, not a namespace, restore, or live-health assertion. */
+export interface KernelLifecycleState {
+	readonly source: "repl-manager" | "ipython-provisioner" | "unobserved";
+	readonly owner: string | null;
+	readonly generation: number | null;
+	readonly state: "idle" | "starting" | "running" | "shutdown" | "provisioning" | "disposed" | "unobserved";
+}
+
+export interface CapturedKernelLifecycle {
+	readonly snapshot: Readonly<KernelLifecycleState>;
+	/** Checks the original observation; it never probes or substitutes a newer snapshot. */
+	isCurrent(): boolean;
+}
+
 /** Public surface every kernel client exposes to the provisioner and session layer. */
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;

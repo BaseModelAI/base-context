@@ -20,6 +20,7 @@ import { ensureKernelPython } from "./bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
+	type CapturedKernelLifecycle,
 	createDeferred,
 	createKernelStartupAbortError,
 	DEFAULT_MAX_OUTPUT_CHARS,
@@ -193,6 +194,8 @@ export class ReplKernelManager {
 	private pendingBackgroundOutput = "";
 	private pendingBackgroundOutputTruncated = false;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	/** A newly constructed manager is a different owner even when its counter restarts at zero. */
+	private readonly lifecycleOwner = uuid();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
@@ -235,6 +238,15 @@ export class ReplKernelManager {
 
 	get ownerSessionId(): string | undefined {
 		return this.options.sessionId;
+	}
+
+	captureLifecycleState(): CapturedKernelLifecycle {
+		const generation = this.startGeneration;
+		const state = this.state;
+		return Object.freeze({
+			snapshot: Object.freeze({ source: "repl-manager" as const, owner: this.lifecycleOwner, generation, state }),
+			isCurrent: () => this.startGeneration === generation && this.state === state,
+		});
 	}
 
 	private appendKernelDiagnostic(message: string): void {

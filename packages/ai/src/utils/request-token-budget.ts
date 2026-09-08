@@ -49,6 +49,8 @@ export interface ProviderRequestProjection {
 	readonly kind: "openai-responses-text-v1" | "openai-responses-replay-v1";
 	/** Absent means complete-context. Only the native renderer establishes message-group replay. */
 	readonly replayContract?: "complete-context" | "message-groups";
+	/** Actual native request can begin a fresh stateless public window after its closed replay group. */
+	readonly publicWindow?: true;
 	/** A null item is fixed request context (for example the system prompt). */
 	readonly messageIndices: readonly (number | null)[];
 	/** Only these whole plain assistant messages may be considered for omission. */

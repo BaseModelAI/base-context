@@ -16,7 +16,9 @@ import type {
 	ContextUpdateTarget,
 } from "./history-index.js";
 import { createCompactionSummaryMessage } from "./messages.js";
+import { PUBLIC_CONTEXT_RENDERER, renderPublicHistory } from "./public-context.js";
 import type { SourceSnapshotRef } from "./request-events.js";
+import { type OwnedResourceCapture, renderResourceView } from "./resource-view.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import {
 	appendSentAgentMessageToToolResult,
@@ -80,6 +82,7 @@ interface CompiledEpochContext {
 	readonly source: SourceSnapshotRef;
 	readonly checkpoint?: ContextEpochCheckpoint;
 	readonly taskFrame?: CompiledTaskFrame;
+	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
 }
 const compiledEpochContexts = new WeakMap<readonly AgentMessage[], CompiledEpochContext>();
@@ -96,6 +99,7 @@ export function prepareCanonicalEpoch(
 	representation: string,
 	maxBytes: number,
 	replayContract: ContextReplayContract = "complete-context",
+	publicWindow = false,
 ): { checkpoint: ContextEpochCheckpoint; messages: AgentMessage[] } {
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
@@ -109,6 +113,7 @@ export function prepareCanonicalEpoch(
 	for (const [index, unit] of units.entries()) {
 		if (!selected.has(unit.id)) {
 			if (unit.kind === "task-frame") throw new Error("Context epoch cannot omit its task frame");
+			if (unit.kind === "resource-view") throw new Error("Context epoch cannot omit its current resource view");
 			continue;
 		}
 		chosen.push(messages[index]);
@@ -123,13 +128,16 @@ export function prepareCanonicalEpoch(
 	return {
 		checkpoint: snapshotContextEpoch(
 			{
-				version: 2,
+				version: 3,
 				renderer: CONTEXT_EPOCH_RENDERER,
 				source: context.source,
 				representation,
 				replayContract,
+				...(publicWindow ? { publicWindow: true as const } : {}),
+				...(context.checkpoint?.continuation ? { continuation: context.checkpoint.continuation } : {}),
 				views,
 				taskFrame: context.taskFrame,
+				resourceRevision: context.resourceRevision,
 				literalTailId: tail.ref.entryId,
 			},
 			maxBytes,
@@ -155,36 +163,71 @@ export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): st
 	return checkpoint.literalTailId;
 }
 
-/** Retain exact recovery bodies and their closed replay groups in the same ordinary-summary record. */
+/** Retain exact recovery evidence. An accepted public-window transition replaces whole old protocol groups. */
 export function prepareRecoveryCompaction(
 	messages: readonly AgentMessage[],
 	firstKeptEntryId: string,
 	maxBytes: number,
 ): ContextEpochCheckpoint | undefined {
 	const boundary = canonicalRecoveryBoundary(messages);
-	if (!boundary) return;
-	const context = compiledEpochContexts.get(messages)!;
+	const context = compiledEpochContexts.get(messages);
+	const publicWindow =
+		context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
+	if (!boundary && !publicWindow) return;
+	if (!context) throw new Error("Recovery compaction requires captured canonical views");
 	const selection = getCanonicalViewSelectionSource(messages)!;
 	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
-	const lastProved = context.references.findIndex((reference) => reference?.ref.entryId === boundary);
+	const lastProved = boundary
+		? context.references.findIndex((reference) => reference?.ref.entryId === boundary)
+		: messages.length - 1;
 	if (cut < 0 || lastProved < 0 || cut > lastProved)
 		throw new Error("Recovery compaction must retain its unmeasured literal tail");
 	const units = bindMessageReplayUnits(messages, selection.units, selection.limits, "message-groups");
+	// A mode transition cannot strand any outstanding native call, including one in the retained tail.
+	closeViewSelection(
+		units,
+		units.map((unit) => unit.id),
+		selection.limits,
+	);
 	const roots = units.filter((unit) => unit.kind === "recovery").map((unit) => unit.id);
 	const closed = new Set(closeViewSelection(units, roots, selection.limits).map((unit) => unit.id));
-	const views = context.references.flatMap((reference, index) =>
-		reference && index < cut && closed.has(units[index].id) ? [reference] : [],
-	);
-	if (!views.length) return;
+	let renderedBytes = 0;
+	const views = context.references.flatMap((reference, index): EpochViewReference[] => {
+		if (!reference || (index < cut && !closed.has(units[index].id))) return [];
+		const message = messages[index];
+		const rendered = publicWindow ? renderPublicHistory(message, reference.ref.entryId, maxBytes) : message;
+		if (publicWindow) {
+			renderedBytes += Buffer.byteLength(JSON.stringify(rendered), "utf8");
+			if (renderedBytes > maxBytes) throw new Error("Public summary view byte budget exceeded");
+		}
+		return index < cut
+			? [
+					{
+						...reference,
+						...(rendered !== message ? { rendering: PUBLIC_CONTEXT_RENDERER } : {}),
+					},
+				]
+			: [];
+	});
+	if (!views.length && !publicWindow) return;
 	return snapshotContextEpoch(
 		{
-			version: 2,
+			version: 3,
 			renderer: CONTEXT_EPOCH_RENDERER,
 			source: context.source,
 			representation: null,
 			includeSummary: true,
 			replayContract: "message-groups",
+			...(publicWindow
+				? {
+						continuation: {
+							kind: "harness-summary" as const,
+							publicTailThrough: context.source,
+						},
+					}
+				: {}),
 			views,
+			resourceRevision: context.resourceRevision,
 			literalTailId: firstKeptEntryId,
 		},
 		maxBytes,
@@ -217,6 +260,7 @@ export class CanonicalContextCompiler {
 		limits: CanonicalContextLimits,
 		omittedAssistantIds: ReadonlySet<string> = new Set(),
 		frameOptions: Partial<TaskFrameLimits> = {},
+		resourceCapture?: OwnedResourceCapture,
 	): Promise<AgentMessage[]> {
 		const frameLimits = taskFrameLimits(frameOptions);
 		const previousSource = this.source;
@@ -345,6 +389,12 @@ export class CanonicalContextCompiler {
 					throw new Error("Context epoch checkpoint does not match its retained boundary");
 			}
 		}
+		const publicTail = checkpoint?.continuation?.publicTailThrough;
+		if (publicTail) {
+			if (!view.atSnapshot) throw new Error("Public summary transition requires its captured source");
+			await view.atSnapshot(publicTail);
+		}
+		let publicBytes = 0;
 		const boundary = JSON.stringify([first.summaryRef?.entryId ?? null, first.summaryRef?.revision ?? null]);
 		let resetFrame =
 			previousSource?.sessionId !== view.source.sessionId ||
@@ -367,10 +417,17 @@ export class CanonicalContextCompiler {
 		}
 		const referenceFrame = resetFrame ? checkpoint?.taskFrame : previousFrame;
 		let taskFrame = compileTaskFrame(tasks, frameLimits, referenceFrame);
+		const resource =
+			resourceCapture && (resourceCapture.enabled || checkpoint) ? renderResourceView(resourceCapture) : undefined;
+		if (resource) {
+			sourceBytes += resource.bytes;
+			if (sourceBytes > maxSourceBytes) throw new Error("Canonical context source byte budget exceeded");
+		}
 		const messageCount =
 			first.activeMessageCount +
 			(checkpoint ? checkpoint.views.length + (checkpoint.includeSummary ? 1 : 0) : first.summaryRef ? 1 : 0) +
-			(taskFrame?.messages.length ?? 0);
+			(taskFrame?.messages.length ?? 0) +
+			(resource ? 1 : 0);
 		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
 
 		const messages: AgentMessage[] = [];
@@ -451,15 +508,23 @@ export class CanonicalContextCompiler {
 					appendSentAgentMessageToToolResult(message, message.toolCallId, sent.message);
 				}
 			}
+			const publicHistory =
+				pinned?.rendering === PUBLIC_CONTEXT_RENDERER ||
+				(!pinned && publicTail !== undefined && ref.sequence <= publicTail.sourceSequence);
+			const rendered = publicHistory ? renderPublicHistory(message, ref.entryId, maxSourceBytes) : message;
+			if (publicHistory) {
+				publicBytes += Buffer.byteLength(JSON.stringify(rendered), "utf8");
+				if (publicBytes > maxSourceBytes) throw new Error("Public summary view byte budget exceeded");
+			}
 			if (message.role === "assistant")
-				messageSources.set(message, {
+				messageSources.set(rendered, {
 					sessionId: view.source.sessionId,
 					sessionFile: view.source.sessionFile,
 					entryId: ref.entryId,
 				});
-			messages.push(message);
-			literalSources.set(message, ref.entryId);
-			unitSources.set(message, {
+			messages.push(rendered);
+			literalSources.set(rendered, ref.entryId);
+			unitSources.set(rendered, {
 				...sourceUnit(
 					ref,
 					message.role === "toolResult" &&
@@ -471,15 +536,20 @@ export class CanonicalContextCompiler {
 							? "replay-group"
 							: "literal",
 				),
-				sourceRevision: JSON.stringify(revisions),
+				sourceRevision: JSON.stringify(rendered !== message ? [...revisions, PUBLIC_CONTEXT_RENDERER] : revisions),
 				exactSources,
 			});
 			const revision = JSON.stringify(revisions);
 			if (pinned && pinned.sourceRevision !== revision)
 				throw new Error("Context epoch view no longer matches its frozen source revisions");
-			if (pinned && unitSources.get(message)!.kind !== "recovery")
-				unitSources.set(message, { ...unitSources.get(message)!, kind: "fixed-view" });
-			epochReferences.set(message, { source: readView.source, ref, sourceRevision: revision });
+			if (pinned && unitSources.get(rendered)!.kind !== "recovery")
+				unitSources.set(rendered, { ...unitSources.get(rendered)!, kind: "fixed-view" });
+			epochReferences.set(rendered, {
+				source: readView.source,
+				ref,
+				sourceRevision: revision,
+				...(rendered !== message ? { rendering: PUBLIC_CONTEXT_RENDERER } : {}),
+			});
 			sourceOrder.set(ref.entryId, ref.sequence);
 		};
 		if (checkpoint) {
@@ -487,6 +557,13 @@ export class CanonicalContextCompiler {
 			const prefixViews = new Map<string, SessionHistoryReadView>();
 			const seen = new Set<string>();
 			for (const pinned of checkpoint.views) {
+				if (
+					pinned.rendering !== undefined &&
+					(pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
+						checkpoint.version !== 3 ||
+						pinned.ref.kind === "compaction")
+				)
+					throw new Error("Unsupported context epoch view rendering");
 				if (seen.has(pinned.ref.entryId) || refs.some((ref) => ref.entryId === pinned.ref.entryId))
 					throw new Error("Context epoch view overlaps its literal tail");
 				seen.add(pinned.ref.entryId);
@@ -574,6 +651,12 @@ export class CanonicalContextCompiler {
 				if (at < literal.length) messages.push(literal[at]);
 			}
 		}
+		if (resource) {
+			// Current owned display is regenerated; a stored acceptance marker is never a live view.
+			const at = messages[0] && unitSources.get(messages[0])?.kind === "task-frame" ? 1 : 0;
+			messages.splice(at, 0, resource.message);
+			unitSources.set(resource.message, resource.unit);
+		}
 		const unitLimits = {
 			maxUnits: maxMessages,
 			maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
@@ -610,6 +693,7 @@ export class CanonicalContextCompiler {
 			source: { ...view.source },
 			checkpoint,
 			taskFrame,
+			resourceRevision: resource?.revision,
 			references: closedMessages.map((message) => epochReferences.get(message) ?? null),
 		});
 		this.entries = next;
