@@ -39,6 +39,7 @@ export type {
 	OAuthSelectPrompt,
 } from "./utils/oauth/types.js";
 export * from "./utils/overflow.js";
+export { invokeRequestMeasurement, isLocalRequestPreparationError } from "./utils/provider-attempts.js";
 export * from "./utils/request-token-budget.js";
 export * from "./utils/stream-failure.js";
 export * from "./utils/typebox-helpers.js";

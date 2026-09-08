@@ -44,6 +44,13 @@ export interface ContextTokenObservation {
 	readonly value?: RetainedContextTokens;
 }
 
+/** Explicit one-to-one mapping supplied only by the supported serializer, before any selection. */
+export interface ProviderRequestProjection {
+	readonly kind: "openai-responses-text-v1";
+	/** A null item is fixed request context (for example the system prompt). */
+	readonly messageIndices: readonly (number | null)[];
+}
+
 /** Actual serialized request. No model text, schema, replay unit or prefix is modified. */
 export interface ProviderRequestRepresentation {
 	readonly api: Api;
@@ -163,6 +170,17 @@ function textInput(api: Api, input: unknown): boolean {
 	});
 }
 
+export interface RequestTokenBudgetEvaluator {
+	measure(request: ProviderRequestRepresentation): RequestTokenAssessment;
+	assert(assessment: RequestTokenAssessment): void;
+}
+
+interface CapturedRequestCalibration {
+	readonly key: string | undefined;
+	readonly calibration: RequestTokenCalibration;
+	readonly identity: object;
+}
+
 /** One replaceable, derived calibration bucket. Canonical receipts remain the only durable observations. */
 export class RequestTokenBudget {
 	private readonly options: RequestTokenBudgetOptions;
@@ -205,7 +223,30 @@ export class RequestTokenBudget {
 		}
 	}
 
+	/** Freeze measurement parameters at the first actual body; settlements still belong to this budget. */
+	capture(): RequestTokenBudgetEvaluator {
+		let captured: CapturedRequestCalibration | undefined;
+		return {
+			measure: (request) => {
+				if (!captured) {
+					const assessment = this.measure(request);
+					captured = { key: this.key, calibration: { ...this.calibration }, identity: this.calibrationIdentity };
+					return assessment;
+				}
+				return this.measureUsing(request, captured);
+			},
+			assert: (assessment) => this.assert(assessment),
+		};
+	}
+
 	measure(request: ProviderRequestRepresentation): RequestTokenAssessment {
+		return this.measureUsing(request);
+	}
+
+	private measureUsing(
+		request: ProviderRequestRepresentation,
+		captured?: CapturedRequestCalibration,
+	): RequestTokenAssessment {
 		const unknown: string[] = [];
 		const route = routeIdentity(request.url);
 		let body: Record<string, unknown> = {};
@@ -269,12 +310,20 @@ export class RequestTokenBudget {
 			),
 		);
 		const key = JSON.stringify([profile ?? null, configuration]);
-		if (this.key !== key) {
-			this.key = key;
-			this.calibration = unknownCalibration();
-			this.calibrationIdentity = {};
+		let calibration: RequestTokenCalibration;
+		let calibrationIdentity: object;
+		if (captured) {
+			calibration = captured.key === key ? { ...captured.calibration } : unknownCalibration();
+			calibrationIdentity = captured.key === key ? captured.identity : {};
+		} else {
+			if (this.key !== key) {
+				this.key = key;
+				this.calibration = unknownCalibration();
+				this.calibrationIdentity = {};
+			}
+			calibration = { ...this.calibration };
+			calibrationIdentity = this.calibrationIdentity;
 		}
-		const calibration = { ...this.calibration };
 		const measuredBody = request.retainedPrefix ? { ...body, [inputKey]: input } : body;
 		const estimate =
 			profile && unknown.length === 0
@@ -321,7 +370,7 @@ export class RequestTokenBudget {
 		});
 		if (profile && estimate !== null && !unknown.length)
 			this.measured.set(assessment, {
-				identity: this.calibrationIdentity,
+				identity: calibrationIdentity,
 				estimate,
 				models: profile.responseModels ?? [profile.model],
 			});

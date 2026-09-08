@@ -1,22 +1,30 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type AgentEvent, type StreamFn } from "@ponythewhite/base-context-agent";
+import { Agent, type AgentEvent, type AgentMessage, type StreamFn } from "@ponythewhite/base-context-agent";
 import * as ai from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
+import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
 import {
 	bindAuxiliaryInferenceStream,
 	createNativeInferenceStream,
 	InferenceCoordinator,
 } from "../src/core/inference-coordinator.js";
+import { convertToLlm } from "../src/core/messages.js";
 import type {
 	BoundRequestSink,
 	NativeRequestEvent,
 	RequestPurpose,
 	SourceSnapshotRef,
 } from "../src/core/request-events.js";
+import type {
+	RequestViewCandidate,
+	RequestViewCommit,
+	RequestViewValidate,
+} from "../src/core/request-view-selection.js";
 import { MODEL_REQUEST_ID_HEADER } from "../src/core/semantic-edges.js";
+import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
 import { readSessionJournal } from "../src/core/session-journal-reader.js";
 import { type SessionEntry, type SessionHeader, SessionManager } from "../src/core/session-manager.js";
 
@@ -93,13 +101,20 @@ function fakeTransport(sent: () => void | Promise<void>, gate?: Promise<void>): 
 	};
 }
 
-function createBudgetAgent(manager: SessionManager, contextTokens: number, releaseError?: Error) {
+function createBudgetAgent(
+	manager: SessionManager,
+	contextTokens: number | undefined,
+	releaseError?: Error,
+	commitView?: RequestViewCommit,
+	validateView?: RequestViewValidate,
+) {
 	const facts: NativeRequestEvent[] = [];
 	const requests = new InferenceCoordinator(
 		() => {
 			const sink = manager.bindRequestSink();
 			return {
 				source: sink.source,
+				readHistory: (read) => sink.readHistory(read),
 				retain: () => sink.retain(),
 				async release() {
 					await sink.release();
@@ -112,27 +127,59 @@ function createBudgetAgent(manager: SessionManager, contextTokens: number, relea
 			};
 		},
 		undefined,
-		{
-			mode: "enforce",
-			profiles: [
-				{
-					id: "offline-native-responses",
-					revision: "1",
-					api: model.api,
-					provider: model.provider,
-					url: `${model.baseUrl}/responses`,
-					model: model.id,
-					authMode: "api-key",
-					templateRevision: "offline-responses-1",
-					replayFamily: "responses",
-					contextTokens,
-					outputCeilingTokens: 20,
-					estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 0 },
+		contextTokens === undefined
+			? undefined
+			: {
+					mode: "enforce",
+					profiles: [
+						{
+							id: "offline-native-responses",
+							revision: "1",
+							api: model.api,
+							provider: model.provider,
+							url: `${model.baseUrl}/responses`,
+							model: model.id,
+							authMode: "api-key",
+							templateRevision: "offline-responses-1",
+							replayFamily: "responses",
+							contextTokens,
+							outputCeilingTokens: 20,
+							estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 0 },
+						},
+					],
 				},
-			],
-		},
 	);
-	const agent = new Agent({ initialState: { model }, getApiKey: () => "not-receipt-key" });
+	const agent = new Agent({
+		initialState: { model },
+		getApiKey: () => "not-receipt-key",
+		convertToLlm: commitView ? convertToLlm : undefined,
+	});
+	let viewMessages: AgentMessage[] | undefined;
+	if (commitView) {
+		const compiler = new CanonicalContextCompiler();
+		agent.bindContextOwner(async () => {
+			const capture = requests.capture();
+			try {
+				viewMessages = await capture.readHistory((view) =>
+					compiler.compile(view, { maxMessages: 32, maxSourceBytes: 128 * 1024 }),
+				);
+				capture.bindRequestViewBoundary(viewMessages, commitView, validateView);
+				return {
+					messages: viewMessages,
+					adoptMessages: true,
+					streamContext: capture,
+					release: () => capture.dispose(),
+				};
+			} catch (error) {
+				try {
+					await capture.dispose();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "Fixture context and source release failed");
+				}
+				throw error;
+			}
+		});
+	}
 	let events: Awaited<ReturnType<StreamFn>> | undefined;
 	agent.bindStreamOwner((streamFn) => {
 		const owned = requests.bindStream(streamFn, { purpose: "main" });
@@ -156,10 +203,25 @@ function createBudgetAgent(manager: SessionManager, contextTokens: number, relea
 		facts,
 		lifecycle,
 		inputAcks,
+		get viewMessages() {
+			return viewMessages!;
+		},
 		get events() {
 			return events!;
 		},
 	};
+}
+
+async function appendSelectionHistory(manager: SessionManager) {
+	await manager.appendMessage({ role: "user", content: "old question", timestamp: 1 });
+	const olderText = "older answer for selection ".repeat(1024);
+	const olderId = await manager.appendMessage({ ...output(), content: [{ type: "text", text: olderText }] });
+	await manager.appendMessage({ role: "user", content: "recent question", timestamp: 2 });
+	const latestId = await manager.appendMessage({
+		...output(),
+		content: [{ type: "text", text: "keep recent answer", textSignature: "msg_history_recent" }],
+	});
+	return { olderText, olderId, latestId };
 }
 
 const fixtureDirs: string[] = [];
@@ -234,6 +296,7 @@ describe("native inference coordination", () => {
 		expect(manager.getLeafId()).toBe(initialLeaf);
 		expect(JSON.stringify(facts)).not.toContain("not-receipt");
 
+		const selectionHistory = await appendSelectionHistory(manager);
 		// Offline transport only; native serialization, admission and source persistence remain real.
 		vi.mocked(ai.streamSimple).mockImplementation(nativeStreamSimple);
 		const budgeted = createBudgetAgent(manager, 4096);
@@ -308,6 +371,138 @@ describe("native inference coordination", () => {
 			).toEqual(["message_start", "message_end"]);
 		} finally {
 			await budgeted.requests.dispose();
+		}
+
+		// Actual native payload selection with an offline acceptance hook; Root owns the canonical epoch ACK.
+		const selectionManager = manager;
+		const history = selectionHistory;
+		const signedReply = await budgeted.events.result();
+		expect(signedReply.content[0]).toMatchObject({ textSignature: JSON.stringify({ v: 1, id: "msg_offline" }) });
+		const signedReplyId = selectionManager.getLeafId()!;
+		await selectionManager[bindNativeEntryWriter]().captureGoalOperation({
+			version: 1,
+			kind: "goal_operation",
+			operation: "create",
+			actor: "interactive",
+			actionId: "view-selection-fixture",
+			submittedText: "/goal Keep required task continuity",
+		})({
+			goalId: "ViewSelection/Goal",
+			objective: "Keep required task continuity",
+			active: true,
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+		});
+		let accept!: () => void;
+		const accepted = new Promise<void>((resolve) => {
+			accept = resolve;
+		});
+		let announce!: (candidate: RequestViewCandidate) => void;
+		const offered = new Promise<RequestViewCandidate>((resolve) => {
+			announce = resolve;
+		});
+		const commitView = vi.fn(async (candidate: RequestViewCandidate) => {
+			announce(candidate);
+			await accepted;
+		});
+		const selecting = createBudgetAgent(selectionManager, 8192, undefined, commitView);
+		const payloadHook = vi.fn((payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			metadata: { view_fixture: "single-pass" },
+		}));
+		selecting.agent.onPayload = payloadHook;
+		const sendsBeforeSelection = offlineFetch.mock.calls.length;
+		let sentBody: string | undefined;
+		offlineFetch.mockImplementation(async (_input, init) => {
+			sentBody = String(init?.body);
+			expect(selecting.facts.at(-1)).toMatchObject({
+				type: "attempt_admitted",
+				descriptor: { requestBudget: { status: "within-estimate", limitSource: "explicit-profile" } },
+			});
+			const item = {
+				type: "message",
+				id: "msg_selection",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "selected OK", annotations: [] }],
+			};
+			return new Response(
+				[
+					{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+					{ type: "response.output_item.done", output_index: 0, item },
+					{ type: "response.completed", response: { id: "resp_selection", model: model.id, status: "completed" } },
+				]
+					.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+					.join(""),
+				{
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				},
+			);
+		});
+		try {
+			const running = selecting.agent.prompt("new current input");
+			const candidate = await Promise.race([
+				offered,
+				running.then(() => {
+					throw new Error("Expected a request view candidate");
+				}),
+			]);
+			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection);
+			expect(selecting.facts).toEqual([]);
+			expect(selecting.inputAcks).toHaveLength(1);
+			expect(candidate.source).toMatchObject({
+				sessionId: selectionManager.getSessionId(),
+				leafId: selecting.inputAcks[0],
+				persistent: true,
+			});
+			expect(candidate.originalAssessment.status).toBe("over-budget");
+			expect(candidate.assessment.status).toBe("within-estimate");
+			expect(candidate.assessment.profile).toEqual(candidate.originalAssessment.profile);
+			const fullUnits = getCanonicalViewUnits(selecting.viewMessages)!;
+			expect(candidate.selectedUnitIds).not.toContain(
+				fullUnits.find((unit) => unit.exactSources.includes(history.olderId))!.id,
+			);
+			expect(candidate.selectedUnitIds).toContain(
+				fullUnits.find((unit) => unit.exactSources.includes(history.latestId))!.id,
+			);
+			expect(candidate.selectedUnitIds).toContain(
+				fullUnits.find((unit) => unit.exactSources.includes(signedReplyId))!.id,
+			);
+			for (const unit of fullUnits.filter((unit) => unit.kind === "task-frame"))
+				expect(candidate.selectedUnitIds).toContain(unit.id);
+			expect(candidate.selectedUnitIds.every((id) => fullUnits.some((unit) => unit.id === id))).toBe(true);
+			accept();
+			await running;
+			expect(commitView).toHaveBeenCalledTimes(1);
+			expect(payloadHook).toHaveBeenCalledTimes(1);
+			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
+			expect(sentBody).toBe(candidate.request.body);
+			expect(sentBody).not.toContain(history.olderText);
+			expect(sentBody).toContain("old question");
+			expect(sentBody).toContain("new current input");
+			expect(sentBody).toContain("keep recent answer");
+			expect(sentBody).toContain("Keep required task continuity");
+			expect(JSON.parse(sentBody!).metadata).toEqual({ view_fixture: "single-pass" });
+			expect(JSON.parse(sentBody!).input).toContainEqual(
+				expect.objectContaining({
+					type: "message",
+					role: "assistant",
+					id: "msg_offline",
+					status: "completed",
+				}),
+			);
+			expect(selecting.facts.map((fact) => fact.type)).toEqual(["attempt_admitted", "attempt_settled"]);
+			expect(selecting.facts[0]).toMatchObject({
+				type: "attempt_admitted",
+				descriptor: { requestBudget: candidate.assessment },
+			});
+			expect(await selecting.events.result()).toMatchObject({ content: [{ type: "text", text: "selected OK" }] });
+		} finally {
+			accept();
+			await selecting.requests.dispose();
 		}
 	});
 
@@ -494,6 +689,7 @@ describe("native inference coordination", () => {
 	});
 	it("gates custom registrations and later stream assignments before any native send", async () => {
 		const facts: NativeRequestEvent[] = [];
+		const nativeStreamSimple = ai.streamSimple;
 		const requests = new InferenceCoordinator(() => ({
 			source: Promise.resolve(source("subject")),
 			retain: () => {},
@@ -668,6 +864,123 @@ describe("native inference coordination", () => {
 			).toEqual([]);
 		} finally {
 			await unmetered.requests.dispose();
+		}
+
+		// A single onPayload rewrite breaks the proven input mapping; do not replay it to fit a candidate.
+		vi.mocked(ai.streamSimple).mockImplementation(nativeStreamSimple);
+		const unmappedDir = mkdtempSync(join(tmpdir(), "base-context-view-unmapped-"));
+		fixtureDirs.push(unmappedDir);
+		const unmappedManager = await SessionManager.create(unmappedDir, unmappedDir);
+		managers.push(unmappedManager);
+		await appendSelectionHistory(unmappedManager);
+		const commitView = vi.fn(async (_candidate: RequestViewCandidate) => {});
+		const validateView = vi.fn(
+			(request: ai.ProviderRequestRepresentation, assessment: ai.RequestTokenAssessment | undefined) => {
+				expect(request.body).toContain("unmapped hook input");
+				expect(assessment?.status).toBe("over-budget");
+			},
+		);
+		const unmapped = createBudgetAgent(unmappedManager, 8192, undefined, commitView, validateView);
+		const payloadHook = vi.fn((payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			input: [{ role: "user", content: [{ type: "input_text", text: "unmapped hook input ".repeat(2048) }] }],
+		}));
+		unmapped.agent.onPayload = payloadHook;
+		try {
+			await expect(unmapped.agent.prompt("retain accepted current input")).rejects.toMatchObject({
+				name: "RequestTokenBudgetError",
+				assessment: { status: "over-budget", limitSource: "explicit-profile" },
+			});
+			await expect(unmapped.events.result()).rejects.toBeInstanceOf(ai.RequestTokenBudgetError);
+			expect(payloadHook).toHaveBeenCalledTimes(1);
+			expect(commitView).not.toHaveBeenCalled();
+			expect(validateView).toHaveBeenCalledTimes(1);
+			expect(offlineFetch).not.toHaveBeenCalled();
+			expect(unmapped.facts).toEqual([]);
+			expect(unmapped.inputAcks).toHaveLength(1);
+			expect((await unmappedManager.readEntries()).filter((entry) => entry.type === "request")).toEqual([]);
+			expect(
+				unmapped.lifecycle.filter(
+					(event) =>
+						(event.type === "message_start" || event.type === "message_end") &&
+						event.message.role === "assistant",
+				),
+			).toEqual([]);
+		} finally {
+			await unmapped.requests.dispose();
+		}
+
+		// A full within-estimate view is offered too. Preserve the actual local rejection, not a model error.
+		const rejectedDir = mkdtempSync(join(tmpdir(), "base-context-view-checkpoint-refusal-"));
+		fixtureDirs.push(rejectedDir);
+		const rejectedManager = await SessionManager.create(rejectedDir, rejectedDir);
+		managers.push(rejectedManager);
+		const legacyReply = output();
+		legacyReply.content = [{ type: "text", text: "legacy reply", textSignature: "msg_legacy" }];
+		await rejectedManager.appendMessage(legacyReply);
+		const primaryError = new Error("fixture epoch acceptance failed");
+		const checkpointCleanupError = new Error("fixture checkpoint cleanup failed");
+		const checkpointFailure = new AggregateError([primaryError, checkpointCleanupError], "local checkpoint refusal");
+		const rejectView = vi.fn(async (candidate: RequestViewCandidate) => {
+			expect(candidate.originalAssessment.status).toBe("within-estimate");
+			expect(candidate.assessment).toBe(candidate.originalAssessment);
+			expect(candidate.request.body).toContain("msg_legacy");
+			expect(candidate.selectedUnitIds).toEqual(
+				getCanonicalViewUnits(rejected.viewMessages)!.map((unit) => unit.id),
+			);
+			throw checkpointFailure;
+		});
+		const rejected = createBudgetAgent(rejectedManager, 8192, undefined, rejectView);
+		try {
+			expect(ai.isLocalRequestPreparationError(checkpointFailure)).toBe(false);
+			await expect(rejected.agent.prompt("attempt full-view checkpoint")).rejects.toBe(checkpointFailure);
+			await expect(rejected.events.result()).rejects.toBe(checkpointFailure);
+			expect(ai.isLocalRequestPreparationError(checkpointFailure)).toBe(true);
+			expect(checkpointFailure.errors[0]).toBe(primaryError);
+			expect(checkpointFailure.errors[1]).toBe(checkpointCleanupError);
+			expect(rejectView).toHaveBeenCalledTimes(1);
+			expect(rejected.facts).toEqual([]);
+			expect(rejected.inputAcks).toHaveLength(1);
+			expect(offlineFetch).not.toHaveBeenCalled();
+			expect(rejected.agent.state.messages.filter((message) => message.role === "assistant")).toEqual([legacyReply]);
+			expect(
+				rejected.lifecycle.filter(
+					(event) =>
+						(event.type === "message_start" || event.type === "message_end") &&
+						event.message.role === "assistant",
+				),
+			).toEqual([]);
+		} finally {
+			await rejected.requests.dispose();
+		}
+
+		// Root's synchronous representation guard is still real when no token budget is configured.
+		const guardedDir = mkdtempSync(join(tmpdir(), "base-context-view-guard-only-"));
+		fixtureDirs.push(guardedDir);
+		const guardedManager = await SessionManager.create(guardedDir, guardedDir);
+		managers.push(guardedManager);
+		const guardFailure = new Error("fixture representation changed");
+		const unusedCommit = vi.fn(async (_candidate: RequestViewCandidate) => {});
+		const guard = vi.fn(
+			(request: ai.ProviderRequestRepresentation, assessment: ai.RequestTokenAssessment | undefined) => {
+				expect(request.body).toContain("guard-only current input");
+				expect(assessment).toBeUndefined();
+				throw guardFailure;
+			},
+		);
+		const guarded = createBudgetAgent(guardedManager, undefined, undefined, unusedCommit, guard);
+		try {
+			await expect(guarded.agent.prompt("guard-only current input")).rejects.toBe(guardFailure);
+			await expect(guarded.events.result()).rejects.toBe(guardFailure);
+			expect(ai.isLocalRequestPreparationError(guardFailure)).toBe(true);
+			expect(guard).toHaveBeenCalledTimes(1);
+			expect(unusedCommit).not.toHaveBeenCalled();
+			expect(guarded.facts).toEqual([]);
+			expect(guarded.inputAcks).toHaveLength(1);
+			expect(offlineFetch).not.toHaveBeenCalled();
+			expect(guarded.agent.state.messages.filter((message) => message.role === "assistant")).toEqual([]);
+		} finally {
+			await guarded.requests.dispose();
 		}
 	});
 });

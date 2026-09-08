@@ -527,8 +527,10 @@ refusal. That refusal does not undo code execution.
 Keep the normal built-ins when adding custom tools. For a Bash-only workflow with
 recovery, register custom Bash and select `tools: ["bash", "prime_context"]`.
 A full `baseToolsOverride` or a same-name custom replacement does not grant access
-to the owned recovery service. Recovery-specific retention across new epochs is
-not yet implemented.
+to the owned recovery service. Recovery qualification follows the actual selected
+executor entering the authorized reader, including the active Python cell. Public
+markers do not qualify, and retained imports lose native recovery admission.
+Recovery retention across ordinary summaries remains incomplete.
 
 #### Tools with Custom cwd
 
@@ -681,9 +683,9 @@ Direct/custom embeddings must preserve that native custom-message rendering cont
 the generic Agent converter intentionally drops custom roles and is not silently replaced.
 
 Compiled ViewUnit metadata records source/update revisions and replay/delta dependencies.
-Closure helpers preserve complete units or refuse, including conservative whole-context
-replay when the adapter has not authorized narrower groups. Model-aware token estimates,
-provider-budget enforcement and the complete stable-epoch/recovery pipeline remain open.
+The compiler materializes dependency-closed units or refuses. Conservative whole-context
+replay remains the default. Explicit request budgets and narrow native text selection are
+available below; complete Codex/tool replay and the epoch/recovery pipeline remain open.
 
 
 ### Explicit request-token budget profiles
@@ -707,9 +709,12 @@ estimate parameters. `contextTokens` means the combined input/output allowance; 
 substitute an input-only limit without checking its semantics. Auth mode is descriptive
 configuration, not authorization or proof of the live login. Normal auth rules still apply.
 
-`observe` preserves control thresholds. `enforce` refuses unknown or over-budget requests
-before sending; neither mode removes replay items or selects a smaller transcript. Without
-this option, the budget gate is absent. Direct Responses, Completions and Codex paths assess
+`observe` preserves control thresholds. In the native main-session plain-text Responses
+path, `enforce` can remove historical assistant literals after complete dependency closure.
+Users, the latest assistant, TaskFrames, fixed views and recovery remain mandatory. Selection
+runs after one payload hook and waits for a canonical epoch ACK before sending. Unknown
+layouts and over-budget mandatory sets refuse. Without this option, the budget gate is
+absent; an existing committed epoch still requires its matching explicit profile. Direct Responses, Completions and Codex paths assess
 the post-hook serialization, including instructions and tool schemas. Codex reserves its
 explicit route output ceiling because it does not serialize the generic `maxTokens` option.
 Reasoning is included in output for these adapters and is not reserved twice.
@@ -728,8 +733,15 @@ healthy replay state or falling back to a different transport. Native Coordinato
 propagate without inventing an assistant or physical-attempt receipt; the generic direct
 AI stream still follows its existing error-result contract.
 
-This is complete-or-refuse admission, not a ViewUnit packer. Allocation, full stable epochs,
-selective recovery and supported deployment-profile validation remain separate work.
+The native text path persists source recipes and frozen TaskFrames, not a second wire-body
+store. Same-journal reopen reconstructs the selected views. Known Responses V1/legacy reply
+identities are supported; retained generated item IDs may not shift. A captured evaluator
+covers selection and actual admission across the ACK wait. Final-body incompatibility and
+local checkpoint failures propagate without synthetic assistant output.
+
+This is not Codex/tool-bearing/opaque selection, provider cache-hit proof or deployment
+certification. Cross-file/fork/import epoch rebuilds, complete resource/replay boundaries
+and recovery retention across ordinary summaries remain open.
 
 
 ## Extensions

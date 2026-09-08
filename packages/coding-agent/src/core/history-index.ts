@@ -114,6 +114,9 @@ export interface ContextRef {
 	sequence: number;
 	/** Source classification, not authority inferred from rendered message text. */
 	authority?: IndexedSourceEvent["authority"];
+	/** Canonical frame control, never projected from message/details payloads. */
+	qualification?: NativeEntryQualification;
+	retention?: JournalFrameRetention;
 	kind: "message" | "custom_message" | "branch_summary" | "compaction";
 	locator: IndexedSourceEvent["locator"];
 	revision: string;

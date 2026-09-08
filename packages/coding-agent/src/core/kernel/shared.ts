@@ -79,6 +79,8 @@ export interface KernelStartOptions {
 export interface ExecuteOptions {
 	/** Only a finalized ipython tool call can retain recovery output; not bootstrap/state cells. */
 	nativeRecovery?: boolean;
+	/** @internal Host-only closure captured by the admitted owned executor; never sent to Python. */
+	runNativeRecovery?: <T>(read: () => Promise<T>) => Promise<T>;
 	/** Aborting interrupts the kernel out-of-band. */
 	signal?: AbortSignal;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;

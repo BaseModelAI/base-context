@@ -9,18 +9,28 @@ Scope is frozen to TaskFrame injection, ViewUnit dependency closure, model-aware
 token budgets, stable epochs and selective recovery. `SPEC_DEVIATIONS.md` is the
 backlog. Other findings are deferred unless they block these features.
 
-The current source wires complete dependency/replay closure into compiler output,
-adds bounded native/Python recovery, and binds compaction input and commit to one
-captured source. Stale leaf, branch ABA and source switches refuse before append.
-Known-ACK setup failures remain committed and stop automatic repetition. Service
-session creation now forwards the explicit request budget policy.
+W28 added native/Python recovery, complete compiler dependency closure, same-source
+compaction commits and service budget forwarding. W29 adds actual plain-text Responses
+selection at the final serialized request boundary. One payload hook runs before selection;
+a captured explicit token evaluator is shared across the awaited checkpoint ACK and send.
 
-Twelve focused cases passed across separate compiler, captured recovery, compaction,
-service and native/Python invocations. The real runtime path includes finalized
-output visibility, canonical reread, restricted/custom tools and stale-cell refusal.
-Provider responses were local simulations. `npm run check` passes. Initial type
-and fixture integration diagnostics remain recorded. Full token-budgeted selection,
-committed epoch identity and recovery retention across epochs remain open.
+The same canonical compaction owner commits qualified source-backed epoch recipes, frozen
+TaskFrames and representation identity before adoption or dispatch. Close/reopen reconstructs
+the same selected content. Actual service requests retain earlier prefix items and remain
+usable after an ordinary summary consumes the selected historical views. Native recovery
+qualification follows the real selected executor and authorized reader, not public markers.
+Retained copies do not retain native recovery admission. Ownership/RPC schema32 fences older
+readers; protocol11 and existing cleanup policy remain unchanged.
+
+Fourteen distinct focused cases passed across separate compiler2, services2, selector2,
+native/Python2, compaction4 and RPC2 scopes. Repeated cases are not new cases. Transport was
+fake-fetch/local faux; Python and canonical storage were real. Initial runtime/type/fixture
+failures remain recorded. The required full source check passes for this checkpoint.
+
+This is not Codex, tool-bearing or opaque replay support. Recovery retention across ordinary
+summaries, explicit cross-file/fork/import epoch rebuilds, full representation/resource
+boundaries and supported deployment profiles remain open. No provider cache-hit, live token
+accuracy, pricing, installed runtime or whole-harness certification is claimed.
 
 No live benchmark or readiness probe is allowed before all five features work.
 After that gate, the latest user order is all 30 isolated tasks at low effort,
@@ -49,9 +59,9 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 | W3 source durability, effects, complete receipts | Canonical session actor, ACK-gated publication, retained request sinks and owned removal implemented; source checks, scoped integration tests and clean packaged-worker probes pass; index feed work is active |
 | W4 durable task truth and SQLite evidence index | Canonical indexing, branch-scoped queries, native input/goal provenance and bounded payload recovery pass focused tests; authoritative item reduction, import trust and compiler integration remain open |
 | W5 bounded hot history and process memory | Captured read lifetimes and bounded exact branch membership implemented; whole-history resident stores and paged-query work remain open |
-| W6 compiler, batch recovery, evidence-local work | Captured native compiler active; model token profiles, dependency closure and selective recovery remain open |
+| W6 compiler, batch recovery, evidence-local work | Native TaskFrames, dependency closure, bounded recovery and explicit request budgets work in focused paths; Codex/tool selection and complete retention remain open |
 | W7 Sol control and generic deployment | S frozen; no parity or live validation claim |
-| W8 atomic checkpoints and continuation | Not implemented |
+| W8 atomic checkpoints and continuation | Qualified same-source epochs commit before native text requests and reconstruct on reopen; full replay/resource and cross-source boundaries remain open |
 | W9 Astra policy and route-scoped advanced features | Inherited catalog only; no certification claim |
 | W10 owned scheduler | Not implemented; preserve conservative child default |
 | W11 non-destructive migration and recovery | Explicit journal migration/recovery and diagnostic doctor available; full archive/checkpoint migration remains open |
@@ -60,9 +70,10 @@ See `baselines.json` for input identities. Original source checkouts stay unchan
 
 ## Evaluation rules
 
-- Sol and Astra are separate reported populations. Use medium effort.
-- User override: run only 4–6 sampled tasks at early benchmark gates. Defer full
-  30-task campaigns for both model classes until final goal phases.
+- Sol and Astra are separate reported populations.
+- Latest user override: no live samples before the five prerequisites work. Then run
+  all 30 isolated tasks at low effort first, followed by medium effort, using this
+  session's same ChatGPT subscription.
 - Each task/variant/attempt runs in isolation. Do not alter fixture or judge semantics.
 - Do not select faster retries or treat unknown usage as zero.
 - Confirmed provider capacity failures invalidate a run and do not affect its retry counter.

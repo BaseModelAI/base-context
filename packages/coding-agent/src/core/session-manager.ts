@@ -18,6 +18,7 @@ import { assertProductStatePath } from "../runtime-paths.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import { appendContextEpoch, CONTEXT_EPOCH_DETAIL, type ContextEpochCheckpoint } from "./context-epoch.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "./goals.js";
 import type {
 	ContextManifestOptions,
@@ -59,6 +60,8 @@ import {
 } from "./session-history-index.js";
 import {
 	APPEND_NATIVE_ADMISSION,
+	APPEND_NATIVE_CONTEXT_EPOCH,
+	APPEND_NATIVE_RECOVERY,
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
@@ -124,6 +127,7 @@ export interface SessionHeader {
 /** One captured branch for summary input, physical requests, and the queued compaction commit. */
 export interface BoundCompactionSink extends BoundSessionRequestSink {
 	readBranch(): Promise<SessionEntry[]>;
+	[appendContextEpoch](checkpoint: ContextEpochCheckpoint, tokensBefore: number): Promise<string>;
 	appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
@@ -668,9 +672,12 @@ function sessionFileEntry(
 }
 
 function appendSourceEntry(owner: SessionJournalOwner, json: string, entry: FileEntry): Promise<{ sequence: number }> {
-	return entryQualifications.get(entry) === "native-admission"
-		? owner[APPEND_NATIVE_ADMISSION](json, entryRetentions.get(entry))
-		: owner.appendJson(json, entryRetentions.get(entry));
+	const qualification = entryQualifications.get(entry);
+	if (qualification === "native-admission") return owner[APPEND_NATIVE_ADMISSION](json, entryRetentions.get(entry));
+	if (qualification === "native-recovery") return owner[APPEND_NATIVE_RECOVERY](json, entryRetentions.get(entry));
+	if (qualification === "native-context-epoch")
+		return owner[APPEND_NATIVE_CONTEXT_EPOCH](json, entryRetentions.get(entry));
+	return owner.appendJson(json, entryRetentions.get(entry));
 }
 
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
@@ -2318,6 +2325,62 @@ export class SessionManager {
 		void sink.source.catch((error: unknown) => {
 			captureFailure = error;
 		});
+		const appendCaptured = async (
+			summary: string,
+			firstKeptEntryId: string,
+			tokensBefore: number,
+			details?: unknown,
+			fromHook?: boolean,
+			instructions?: string,
+			usage?: Usage,
+			qualification?: NativeEntryQualification,
+		): Promise<string> => {
+			sink.assertRetained();
+			const values = {
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromHook,
+				instructions,
+				usage: usage ? cloneUsage(usage) : undefined,
+			};
+			const snapshot = JSON.parse(stringifyBoundedJson(values, MAX_SESSION_RECORD_BYTES)) as typeof values;
+			const assertCurrent = () => {
+				if (captureFailure !== undefined) throw captureFailure;
+				if (qualification === "native-context-epoch") {
+					const epoch = (snapshot.details as { [CONTEXT_EPOCH_DETAIL]: ContextEpochCheckpoint })[
+						CONTEXT_EPOCH_DETAIL
+					];
+					if (JSON.stringify(epoch.source) !== JSON.stringify(capturedSource))
+						throw new Error("Context epoch does not match the bound source capture");
+				}
+				if (
+					!capturedSource ||
+					this.writeState !== state ||
+					state.owner !== owner ||
+					state.retired ||
+					state.closed ||
+					this.sessionId !== sessionId ||
+					this.sessionFile !== sessionFile ||
+					state.branchSelectionRevision !== selectionRevision ||
+					state.leafId !== capturedSource.leafId
+				)
+					throw new Error("Compaction source or branch changed");
+			};
+			// Admission is synchronous; this append queues behind the capture before release can drain it.
+			const args = [
+				snapshot.summary,
+				snapshot.firstKeptEntryId,
+				snapshot.tokensBefore,
+				snapshot.details,
+				snapshot.fromHook,
+				snapshot.instructions,
+				snapshot.usage,
+				assertCurrent,
+			] as const;
+			return qualification ? this._appendCompaction(...args, qualification) : this.appendCompaction(...args);
+		};
 		return {
 			...sink,
 			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
@@ -2337,45 +2400,18 @@ export class SessionManager {
 					),
 				);
 			},
-			appendCompaction: async (summary, firstKeptEntryId, tokensBefore, details, fromHook, instructions, usage) => {
-				sink.assertRetained();
-				const values = {
-					summary,
-					firstKeptEntryId,
+			appendCompaction: appendCaptured,
+			[appendContextEpoch]: (checkpoint, tokensBefore) =>
+				appendCaptured(
+					"",
+					checkpoint.literalTailId,
 					tokensBefore,
-					details,
-					fromHook,
-					instructions,
-					usage: usage ? cloneUsage(usage) : undefined,
-				};
-				const snapshot = JSON.parse(stringifyBoundedJson(values, MAX_SESSION_RECORD_BYTES)) as typeof values;
-				const assertCurrent = () => {
-					if (captureFailure !== undefined) throw captureFailure;
-					if (
-						!capturedSource ||
-						this.writeState !== state ||
-						state.owner !== owner ||
-						state.retired ||
-						state.closed ||
-						this.sessionId !== sessionId ||
-						this.sessionFile !== sessionFile ||
-						state.branchSelectionRevision !== selectionRevision ||
-						state.leafId !== capturedSource.leafId
-					)
-						throw new Error("Compaction source or branch changed");
-				};
-				// Admission is synchronous; this append queues behind the capture before release can drain it.
-				return this.appendCompaction(
-					snapshot.summary,
-					snapshot.firstKeptEntryId,
-					snapshot.tokensBefore,
-					snapshot.details,
-					snapshot.fromHook,
-					snapshot.instructions,
-					snapshot.usage,
-					assertCurrent,
-				);
-			},
+					{ [CONTEXT_EPOCH_DETAIL]: checkpoint },
+					false,
+					undefined,
+					undefined,
+					"native-context-epoch",
+				),
 		};
 	}
 
@@ -2534,17 +2570,27 @@ export class SessionManager {
 	}
 
 	appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
+		return this._appendToolExchangeOnce(exchange);
+	}
+
+	private _appendToolExchangeOnce(
+		exchange: FinalizedToolExchange,
+		qualification?: "native-recovery",
+	): Promise<string> {
 		const executionId = exchange.executionId;
 		const pending = this.pendingToolExchanges.get(executionId);
 		if (pending) return pending;
-		const result = this._appendToolExchange(exchange).finally(() => {
+		const result = this._appendToolExchange(exchange, qualification).finally(() => {
 			this.pendingToolExchanges.delete(executionId);
 		});
 		this.pendingToolExchanges.set(executionId, result);
 		return result;
 	}
 
-	private async _appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
+	private async _appendToolExchange(
+		exchange: FinalizedToolExchange,
+		qualification?: "native-recovery",
+	): Promise<string> {
 		if (this.indexed) {
 			const state = this.writeState;
 			const executionId = exchange.executionId;
@@ -2563,7 +2609,7 @@ export class SessionManager {
 				}),
 			};
 			const acknowledged = await this._appendEntry(
-				entry,
+				withEntryRetention(entry, undefined, qualification),
 				false,
 				async (snapshot) => {
 					const invocationId = `${executionId}:intent`;
@@ -2601,7 +2647,7 @@ export class SessionManager {
 			execution: structuredClone(execution),
 		};
 		const finalized = this.finalizedToolMessages;
-		await this._appendEntry(entry);
+		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
 		finalized.set(result, entry.id);
 		return entry.id;
 	}
@@ -2635,6 +2681,11 @@ export class SessionManager {
 				throw new Error("Session source changed after native admission capture");
 		};
 		return {
+			captureRecoveryExchange: (executionId) => (exchange) => {
+				assertWriter();
+				if (exchange.executionId !== executionId) throw new Error("Recovery execution identity changed");
+				return this._appendToolExchangeOnce(exchange, "native-recovery");
+			},
 			captureMessage: (origin) => {
 				const captured = JSON.parse(stringifyBoundedJson(origin, MAX_SESSION_RECORD_BYTES)) as typeof origin;
 				return (message) => {
@@ -2735,6 +2786,29 @@ export class SessionManager {
 		usage?: Usage,
 		assertCurrent?: () => void,
 	): Promise<string> {
+		return this._appendCompaction(
+			summary,
+			firstKeptEntryId,
+			tokensBefore,
+			details,
+			fromHook,
+			customInstructions,
+			usage,
+			assertCurrent,
+		);
+	}
+
+	private async _appendCompaction<T = unknown>(
+		summary: string,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		details?: T,
+		fromHook?: boolean,
+		customInstructions?: string,
+		usage?: Usage,
+		assertCurrent?: () => void,
+		qualification?: NativeEntryQualification,
+	): Promise<string> {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id: this.indexed ? "" : generateId(this.byId),
@@ -2748,7 +2822,13 @@ export class SessionManager {
 			customInstructions,
 			usage,
 		};
-		await this._appendEntry(entry, false, undefined, undefined, assertCurrent);
+		await this._appendEntry(
+			withEntryRetention(entry, undefined, qualification),
+			false,
+			undefined,
+			undefined,
+			assertCurrent,
+		);
 		return entry.id;
 	}
 

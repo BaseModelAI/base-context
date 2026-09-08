@@ -61,6 +61,49 @@ function parseTextSignature(
 	return { id: signature };
 }
 
+/** Use the existing text-signature contract only when the full rendered item keeps its legal identity. */
+export function matchesResponsesTextSignature(signature: string | undefined, item: unknown): boolean {
+	if (
+		!item ||
+		typeof item !== "object" ||
+		!("type" in item) ||
+		item.type !== "message" ||
+		!("role" in item) ||
+		item.role !== "assistant" ||
+		!("status" in item) ||
+		item.status !== "completed" ||
+		!("id" in item) ||
+		typeof item.id !== "string" ||
+		!item.id ||
+		item.id.length > 64
+	)
+		return false;
+	const phase = "phase" in item ? item.phase : undefined;
+	if (signature === undefined) return phase === undefined;
+	if (signature.startsWith("{")) {
+		let encoded: unknown;
+		try {
+			encoded = JSON.parse(signature);
+		} catch {
+			return false;
+		}
+		if (
+			!encoded ||
+			typeof encoded !== "object" ||
+			Array.isArray(encoded) ||
+			!("v" in encoded) ||
+			encoded.v !== 1 ||
+			!("id" in encoded) ||
+			typeof encoded.id !== "string" ||
+			Object.keys(encoded).some((key) => key !== "v" && key !== "id" && key !== "phase") ||
+			("phase" in encoded && encoded.phase !== "commentary" && encoded.phase !== "final_answer")
+		)
+			return false;
+	}
+	const parsed = parseTextSignature(signature);
+	return parsed !== undefined && parsed.id === item.id && parsed.phase === phase;
+}
+
 export interface OpenAIResponsesStreamOptions {
 	attempts?: ProviderAttemptTracker;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];

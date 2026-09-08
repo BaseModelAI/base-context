@@ -17,6 +17,8 @@ const MAX_PENDING_IPC_BYTES = 1024 * 1024;
 const MAX_PENDING_OPERATIONS = 32;
 /** @internal Native admission and qualified canonical-copy paths only. */
 export const APPEND_NATIVE_ADMISSION = Symbol("session-journal.native-admission");
+export const APPEND_NATIVE_RECOVERY = Symbol("session-journal.native-recovery");
+export const APPEND_NATIVE_CONTEXT_EPOCH = Symbol("session-journal.native-context-epoch");
 
 export interface SessionJournalOwnerOptions {
 	journalPath: string;
@@ -35,7 +37,12 @@ export interface SessionJournalState {
 }
 
 export type SessionJournalRequest =
-	| { id: number; action: "begin" | "begin-admitted"; bytes: number; retention?: JournalFrameRetention }
+	| {
+			id: number;
+			action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch";
+			bytes: number;
+			retention?: JournalFrameRetention;
+	  }
 	| { id: number; action: "chunk"; data: string }
 	| { id: number; action: "commit" | "abort" | "flush" | "migrate" | "recover" | "close" };
 
@@ -296,10 +303,20 @@ export class SessionJournalOwner {
 		return this.uploadJson(json, retention, "begin-admitted");
 	}
 
+	/** @internal The bound recovery writer or a decoded copy preserves this frame qualifier. */
+	[APPEND_NATIVE_RECOVERY](json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+		return this.uploadJson(json, retention, "begin-recovery");
+	}
+
+	/** @internal Qualified checkpoint append; source CAS remains the bound checkpoint writer's responsibility. */
+	[APPEND_NATIVE_CONTEXT_EPOCH](json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+		return this.uploadJson(json, retention, "begin-context-epoch");
+	}
+
 	private async uploadJson(
 		json: string,
 		retention: JournalFrameRetention | undefined,
-		action: "begin" | "begin-admitted",
+		action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch",
 	): Promise<{ sequence: number }> {
 		const bytes = Buffer.byteLength(json);
 		if (bytes === 0 || bytes > SESSION_JOURNAL_MAX_RECORD_BYTES)

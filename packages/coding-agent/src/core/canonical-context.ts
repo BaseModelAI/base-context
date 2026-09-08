@@ -1,4 +1,12 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import {
+	CONTEXT_EPOCH_DETAIL,
+	CONTEXT_EPOCH_RENDERER,
+	type ContextEpochCheckpoint,
+	type EpochViewReference,
+	readContextEpoch,
+	snapshotContextEpoch,
+} from "./context-epoch.js";
 import type {
 	ContextManifestCursor,
 	ContextManifestPage,
@@ -18,7 +26,7 @@ import type { SessionEntry } from "./session-manager.js";
 import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
 import { readTaskStateFromView } from "./task-state-reader.js";
 import { cloneUsage } from "./usage.js";
-import { bindMessageReplayUnits, closeViewSelection, type ViewUnit } from "./view-units.js";
+import { bindMessageReplayUnits, closeViewSelection, type ViewUnit, type ViewUnitLimits } from "./view-units.js";
 
 export interface CanonicalContextLimits {
 	maxMessages: number;
@@ -33,18 +41,98 @@ interface CanonicalMessageSource {
 }
 
 const messageSources = new WeakMap<AgentMessage, CanonicalMessageSource>();
-const compiledViewUnits = new WeakMap<readonly AgentMessage[], readonly ViewUnit[]>();
+export interface CanonicalViewSelectionSource {
+	readonly source: SourceSnapshotRef;
+	readonly units: readonly ViewUnit[];
+	readonly limits: ViewUnitLimits;
+}
+
+const compiledViewUnits = new WeakMap<
+	readonly AgentMessage[],
+	{
+		units: readonly ViewUnit[];
+		selection: CanonicalViewSelectionSource;
+	}
+>();
 
 /** Detached rendering metadata only; reading it never changes a compiler or epoch. */
 export function getCanonicalViewUnits(messages: readonly AgentMessage[]): readonly ViewUnit[] | undefined {
-	const units = compiledViewUnits.get(messages);
+	const units = compiledViewUnits.get(messages)?.units;
 	return units ? structuredClone(units) : undefined;
+}
+
+/** Intrinsic dependencies for an explicitly supported native epoch boundary, never the default view policy. */
+export function getCanonicalViewSelectionSource(
+	messages: readonly AgentMessage[],
+): CanonicalViewSelectionSource | undefined {
+	const selection = compiledViewUnits.get(messages)?.selection;
+	return selection ? structuredClone(selection) : undefined;
 }
 
 /** Correlate a detached compiled message with its captured source, without retaining its body. */
 export function getCanonicalMessageSource(message: AgentMessage): CanonicalMessageSource | undefined {
 	const source = messageSources.get(message);
 	return source ? { ...source } : undefined;
+}
+
+interface CompiledEpochContext {
+	readonly source: SourceSnapshotRef;
+	readonly checkpoint?: ContextEpochCheckpoint;
+	readonly taskFrame?: CompiledTaskFrame;
+	readonly references: readonly (EpochViewReference | null)[];
+}
+const compiledEpochContexts = new WeakMap<readonly AgentMessage[], CompiledEpochContext>();
+
+export function getCanonicalEpochContext(messages: readonly AgentMessage[]): CompiledEpochContext | undefined {
+	const context = compiledEpochContexts.get(messages);
+	return context ? structuredClone(context) : undefined;
+}
+
+/** A candidate only. The caller must ACK the canonical checkpoint before adoption or send. */
+export function prepareCanonicalEpoch(
+	messages: readonly AgentMessage[],
+	selectedUnitIds: readonly string[],
+	representation: string,
+	maxBytes: number,
+): { checkpoint: ContextEpochCheckpoint; messages: AgentMessage[] } {
+	const context = compiledEpochContexts.get(messages);
+	const units = getCanonicalViewUnits(messages);
+	if (!context || !units || units.length !== messages.length || context.references.length !== messages.length)
+		throw new Error("Context epoch requires its captured compiler output");
+	const selected = new Set(selectedUnitIds);
+	if (selected.size !== selectedUnitIds.length || [...selected].some((id) => !units.some((unit) => unit.id === id)))
+		throw new Error("Context epoch selection has an unknown or repeated unit");
+	const chosen: AgentMessage[] = [];
+	const views: EpochViewReference[] = [];
+	for (const [index, unit] of units.entries()) {
+		if (!selected.has(unit.id)) {
+			if (unit.kind === "task-frame") throw new Error("Context epoch cannot omit its task frame");
+			continue;
+		}
+		chosen.push(messages[index]);
+		const reference = context.references[index];
+		if (reference) views.push(reference);
+	}
+	const tail = views.pop();
+	if (!tail || tail.ref.kind === "compaction") throw new Error("Context epoch literal tail is unavailable");
+	const lastLiteral = context.references.filter((ref) => ref !== null).at(-1);
+	if (lastLiteral?.ref.entryId !== tail.ref.entryId)
+		throw new Error("Context epoch cannot omit the current literal tail");
+	return {
+		checkpoint: snapshotContextEpoch(
+			{
+				version: 1,
+				renderer: CONTEXT_EPOCH_RENDERER,
+				source: context.source,
+				representation,
+				views,
+				taskFrame: context.taskFrame,
+				literalTailId: tail.ref.entryId,
+			},
+			maxBytes,
+		),
+		messages: chosen,
+	};
 }
 
 interface CachedEntry {
@@ -129,7 +217,7 @@ export class CanonicalContextCompiler {
 				if (ref.ordinal !== expected++) throw new Error("Canonical context manifest skipped an active message");
 				countBytes(ref);
 				refs.push(ref);
-				sourceOrder.set(ref.entryId, ref.ordinal);
+				sourceOrder.set(ref.entryId, ref.sequence);
 			}
 			if (!page.nextCursor) break;
 			if (!page.refs.length || page.nextCursor.nextOrdinal !== expected)
@@ -138,6 +226,69 @@ export class CanonicalContextCompiler {
 		}
 		if (refs.length !== first.activeMessageCount) throw new Error("Canonical context manifest is incomplete");
 
+		const next = new Map<string, CachedEntry>();
+		const hydrate = async (
+			ref: ContextRef | ContextUpdateRef,
+			target?: ContextUpdateTarget,
+			readView: SessionHistoryReadView = view,
+		): Promise<SessionEntry> => {
+			const cached = this.entries.get(ref.entryId);
+			if (cached?.revision === ref.revision) {
+				next.set(ref.entryId, cached);
+				return cached.entry;
+			}
+			const fragments: string[] = [];
+			let offset = 0;
+			let part = target
+				? await readView.readContextUpdatePayload(ref.entryId, target)
+				: await readView.readPayload(ref.entryId);
+			for (;;) {
+				if (!part || part.byteOffset !== offset || part.byteLength <= 0)
+					throw new Error("Canonical context payload is unavailable or incomplete");
+				offset += part.byteLength;
+				if (offset > ref.locator.length) throw new Error("Canonical context payload exceeds its source locator");
+				fragments.push(part.text);
+				if (!part.nextCursor) break;
+				part = target
+					? await readView.readContextUpdatePayload(ref.entryId, target, { cursor: part.nextCursor })
+					: await readView.readPayload(ref.entryId, { cursor: part.nextCursor });
+			}
+			const value: unknown = JSON.parse(fragments.join(""));
+			if (
+				!value ||
+				typeof value !== "object" ||
+				!("id" in value) ||
+				value.id !== ref.entryId ||
+				!("type" in value) ||
+				value.type !== ref.kind
+			)
+				throw new Error("Canonical context payload does not match its source reference");
+			const entry = value as SessionEntry;
+			next.set(ref.entryId, { revision: ref.revision, entry });
+			return entry;
+		};
+		let checkpoint: ContextEpochCheckpoint | undefined;
+		let summaryEntry: SessionEntry | undefined;
+		if (first.summaryRef) {
+			summaryEntry = await hydrate(first.summaryRef);
+			if (summaryEntry.type !== "compaction") throw new Error("Canonical context summary has the wrong source kind");
+			if (
+				summaryEntry.details &&
+				typeof summaryEntry.details === "object" &&
+				CONTEXT_EPOCH_DETAIL in summaryEntry.details
+			) {
+				const source = await view.get(first.summaryRef.entryId);
+				if (source?.qualification !== "native-context-epoch" || source.retention === "retained-import")
+					throw new Error("Context epoch checkpoint is not qualified on this source");
+				checkpoint = readContextEpoch(summaryEntry.details, maxSourceBytes);
+				if (
+					!checkpoint ||
+					checkpoint.literalTailId !== summaryEntry.firstKeptEntryId ||
+					checkpoint.views.length + first.activeMessageCount > maxMessages
+				)
+					throw new Error("Context epoch checkpoint does not match its retained boundary");
+			}
+		}
 		const boundary = JSON.stringify([first.summaryRef?.entryId ?? null, first.summaryRef?.revision ?? null]);
 		let resetFrame =
 			previousSource?.sessionId !== view.source.sessionId ||
@@ -158,53 +309,18 @@ export class CanonicalContextCompiler {
 			// The task reader has already required an exact locator for every represented frame.
 			countBytes({ locator: event.source.locator! });
 		}
-		let taskFrame = compileTaskFrame(tasks, frameLimits, resetFrame ? undefined : previousFrame);
-		const messageCount = first.activeMessageCount + (first.summaryRef ? 1 : 0) + (taskFrame?.messages.length ?? 0);
+		const referenceFrame = resetFrame ? checkpoint?.taskFrame : previousFrame;
+		let taskFrame = compileTaskFrame(tasks, frameLimits, referenceFrame);
+		const messageCount =
+			first.activeMessageCount +
+			(checkpoint?.views.length ?? (first.summaryRef ? 1 : 0)) +
+			(taskFrame?.messages.length ?? 0);
 		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
 
-		const next = new Map<string, CachedEntry>();
-		const hydrate = async (
-			ref: ContextRef | ContextUpdateRef,
-			target?: ContextUpdateTarget,
-		): Promise<SessionEntry> => {
-			const cached = this.entries.get(ref.entryId);
-			if (cached?.revision === ref.revision) {
-				next.set(ref.entryId, cached);
-				return cached.entry;
-			}
-			const fragments: string[] = [];
-			let offset = 0;
-			let part = target
-				? await view.readContextUpdatePayload(ref.entryId, target)
-				: await view.readPayload(ref.entryId);
-			for (;;) {
-				if (!part || part.byteOffset !== offset || part.byteLength <= 0)
-					throw new Error("Canonical context payload is unavailable or incomplete");
-				offset += part.byteLength;
-				if (offset > ref.locator.length) throw new Error("Canonical context payload exceeds its source locator");
-				fragments.push(part.text);
-				if (!part.nextCursor) break;
-				part = target
-					? await view.readContextUpdatePayload(ref.entryId, target, { cursor: part.nextCursor })
-					: await view.readPayload(ref.entryId, { cursor: part.nextCursor });
-			}
-			const value: unknown = JSON.parse(fragments.join(""));
-			if (
-				!value ||
-				typeof value !== "object" ||
-				!("id" in value) ||
-				value.id !== ref.entryId ||
-				!("type" in value) ||
-				value.type !== ref.kind
-			)
-				throw new Error("Canonical context payload does not match its source reference");
-			const entry = value as SessionEntry;
-			next.set(ref.entryId, { revision: ref.revision, entry });
-			return entry;
-		};
 		const messages: AgentMessage[] = [];
 		const literalSources = new Map<AgentMessage, string>();
 		const unitSources = new Map<AgentMessage, ViewUnit>();
+		const epochReferences = new Map<AgentMessage, EpochViewReference>();
 		const sourceUnit = (ref: ContextRef, kind: ViewUnit["kind"]): ViewUnit => ({
 			id: JSON.stringify([view.source.sessionId, view.source.sessionFile, ref.entryId]),
 			sourceRevision: ref.revision,
@@ -212,45 +328,54 @@ export class CanonicalContextCompiler {
 			exactSources: [ref.entryId],
 			requiredVisibleDependencies: [],
 			authority:
-				ref.authority === "user"
-					? "user"
-					: ref.authority === "assistant"
-						? "assistant-public"
-						: ref.authority === "runtime"
-							? "tool-data"
-							: "unrecorded",
+				kind === "recovery"
+					? "tool-data"
+					: ref.authority === "user"
+						? "user"
+						: ref.authority === "assistant"
+							? "assistant-public"
+							: ref.authority === "runtime"
+								? "tool-data"
+								: "unrecorded",
 			tokenEstimate: null,
 			immutableWithinEpoch: true,
 		});
-		if (first.summaryRef) {
-			const summary = await hydrate(first.summaryRef);
+		const addSummary = async (ref: ContextRef, readView: SessionHistoryReadView, retainedMessageCount: number) => {
+			const summary = await hydrate(ref, undefined, readView);
 			if (summary.type !== "compaction") throw new Error("Canonical context summary has the wrong source kind");
 			const message = createCompactionSummaryMessage(
 				summary.summary,
 				summary.tokensBefore,
 				summary.timestamp,
 				summary.customInstructions,
-				first.retainedMessageCount,
+				retainedMessageCount,
 			);
 			messages.push(message);
-			literalSources.set(message, first.summaryRef.entryId);
-			unitSources.set(message, sourceUnit(first.summaryRef, "fixed-view"));
-			sourceOrder.set(first.summaryRef.entryId, first.activeBase);
-		}
-		for (const ref of refs) {
-			const original = sessionEntryMessage(await hydrate(ref));
+			literalSources.set(message, ref.entryId);
+			unitSources.set(message, sourceUnit(ref, "fixed-view"));
+			epochReferences.set(message, {
+				source: readView.source,
+				ref,
+				sourceRevision: ref.revision,
+				retainedMessageCount,
+			});
+			sourceOrder.set(ref.entryId, -1);
+		};
+		if (first.summaryRef && !checkpoint) await addSummary(first.summaryRef, view, first.retainedMessageCount);
+		const addLiteral = async (ref: ContextRef, readView: SessionHistoryReadView, pinned?: EpochViewReference) => {
+			const original = sessionEntryMessage(await hydrate(ref, undefined, readView));
 			if (!original) throw new Error("Canonical context reference is not a visible context entry");
 			// These IDs come from actual native retry controls, not inferred transcript membership or stop reasons.
-			if (original.role === "assistant" && omitted.has(ref.entryId)) continue;
+			if (original.role === "assistant" && omitted.has(ref.entryId)) return;
 			// Neither canonical updates nor replaceable transforms may mutate cached source entries.
 			const message = structuredClone(original);
 			const revisions = [ref.revision];
 			const exactSources = [ref.entryId];
 			if (message.role === "assistant") {
 				const target: ContextUpdateTarget = { kind: "assistant-usage", targetId: ref.entryId };
-				for (const update of (await view.contextUpdates(target)).refs) {
+				for (const update of (await readView.contextUpdates(target)).refs) {
 					countBytes(update);
-					const entry = await hydrate(update, target);
+					const entry = await hydrate(update, target, readView);
 					revisions.push(update.revision);
 					exactSources.push(update.entryId);
 					if (entry.type !== "child_usage_attributed") throw new Error("Canonical usage update kind mismatch");
@@ -258,9 +383,9 @@ export class CanonicalContextCompiler {
 				}
 			} else if (message.role === "toolResult" && message.toolName === "ipython") {
 				const target: ContextUpdateTarget = { kind: "ipython-sent-message", toolCallId: message.toolCallId };
-				for (const update of (await view.contextUpdates(target)).refs) {
+				for (const update of (await readView.contextUpdates(target)).refs) {
 					countBytes(update); // Charge each application, even when the source record is cached.
-					const entry = await hydrate(update, target);
+					const entry = await hydrate(update, target, readView);
 					revisions.push(update.revision);
 					exactSources.push(update.entryId);
 					const sent = entry.type === "custom" ? parsePersistedIpythonSentAgentMessage(entry.data) : undefined;
@@ -280,18 +405,61 @@ export class CanonicalContextCompiler {
 			unitSources.set(message, {
 				...sourceUnit(
 					ref,
-					message.role === "toolResult" ||
-						(message.role === "assistant" && message.content.some((part) => part.type === "toolCall"))
-						? "replay-group"
-						: "literal",
+					message.role === "toolResult" &&
+						ref.qualification === "native-recovery" &&
+						ref.retention !== "retained-import"
+						? "recovery"
+						: message.role === "toolResult" ||
+								(message.role === "assistant" && message.content.some((part) => part.type === "toolCall"))
+							? "replay-group"
+							: "literal",
 				),
 				sourceRevision: JSON.stringify(revisions),
 				exactSources,
 			});
+			const revision = JSON.stringify(revisions);
+			if (pinned && pinned.sourceRevision !== revision)
+				throw new Error("Context epoch view no longer matches its frozen source revisions");
+			if (pinned && unitSources.get(message)!.kind !== "recovery")
+				unitSources.set(message, { ...unitSources.get(message)!, kind: "fixed-view" });
+			epochReferences.set(message, { source: readView.source, ref, sourceRevision: revision });
+			sourceOrder.set(ref.entryId, ref.sequence);
+		};
+		if (checkpoint) {
+			if (!view.atSnapshot) throw new Error("Context epoch requires a captured native prefix reader");
+			const prefixViews = new Map<string, SessionHistoryReadView>();
+			const seen = new Set<string>();
+			for (const pinned of checkpoint.views) {
+				if (seen.has(pinned.ref.entryId) || refs.some((ref) => ref.entryId === pinned.ref.entryId))
+					throw new Error("Context epoch view overlaps its literal tail");
+				seen.add(pinned.ref.entryId);
+				countBytes(pinned.ref);
+				const key = JSON.stringify(pinned.source);
+				let prefix = prefixViews.get(key);
+				if (!prefix) {
+					prefix = await view.atSnapshot(pinned.source);
+					prefixViews.set(key, prefix);
+				}
+				const actual = await prefix.get(pinned.ref.entryId);
+				if (
+					!actual ||
+					actual.revision !== pinned.ref.revision ||
+					actual.kind !== pinned.ref.kind ||
+					actual.sequence !== pinned.ref.sequence ||
+					JSON.stringify(actual.locator) !== JSON.stringify(pinned.ref.locator)
+				)
+					throw new Error("Context epoch view source is unavailable");
+				if (pinned.ref.kind === "compaction") {
+					if (pinned.retainedMessageCount === undefined)
+						throw new Error("Context epoch summary count is unavailable");
+					await addSummary(pinned.ref, prefix, pinned.retainedMessageCount);
+				} else await addLiteral(pinned.ref, prefix, pinned);
+			}
 		}
+		for (const ref of refs) await addLiteral(ref, view);
 		orderContextToolResults(messages);
 		if (taskFrame) {
-			if (!resetFrame && previousFrame && taskFrame !== previousFrame) {
+			if (referenceFrame && taskFrame !== referenceFrame) {
 				const last = messages.at(-1);
 				const anchor = last
 					? {
@@ -315,6 +483,12 @@ export class CanonicalContextCompiler {
 					tokenEstimate: null,
 					immutableWithinEpoch: true,
 				});
+			}
+			for (const anchor of taskFrame.anchors) {
+				if (!anchor || sourceOrder.has(anchor.entryId)) continue;
+				const origin = await view.get(anchor.entryId);
+				if (!origin) throw new Error("Task frame insertion source is unavailable");
+				sourceOrder.set(anchor.entryId, origin.sequence);
 			}
 			const positions = new Map(messages.map((message, index) => [literalSources.get(message)!, index]));
 			const slots = new Map<number, AgentMessage[]>();
@@ -348,15 +522,12 @@ export class CanonicalContextCompiler {
 			maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
 			maxMetadataBytes: maxSourceBytes,
 		};
-		const units = bindMessageReplayUnits(
-			messages,
-			messages.map((message) => {
-				const unit = unitSources.get(message);
-				if (!unit) throw new Error("Compiled view unit has no captured source");
-				return unit;
-			}),
-			unitLimits,
-		);
+		const sourceUnits = messages.map((message) => {
+			const unit = unitSources.get(message);
+			if (!unit) throw new Error("Compiled view unit has no captured source");
+			return unit;
+		});
+		const units = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
 		// Keep the full context, but refuse incomplete replay before returning provider-bound messages.
 		const closedUnits = closeViewSelection(
 			units,
@@ -365,7 +536,16 @@ export class CanonicalContextCompiler {
 		);
 		const messagesByUnit = new Map(units.map((unit, index) => [unit.id, messages[index]]));
 		const closedMessages = closedUnits.map((unit) => messagesByUnit.get(unit.id)!);
-		compiledViewUnits.set(closedMessages, closedUnits);
+		compiledViewUnits.set(closedMessages, {
+			units: closedUnits,
+			selection: { source: { ...view.source }, units: sourceUnits, limits: unitLimits },
+		});
+		compiledEpochContexts.set(closedMessages, {
+			source: { ...view.source },
+			checkpoint,
+			taskFrame,
+			references: closedMessages.map((message) => epochReferences.get(message) ?? null),
+		});
 		this.entries = next;
 		this.taskFrame = taskFrame;
 		this.taskBoundary = boundary;

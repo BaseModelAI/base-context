@@ -3,7 +3,7 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 
 export type JournalFrameRetention = "retained-import";
 /** Producer qualification decoded from the canonical frame, not from its payload. */
-export type NativeEntryQualification = "native-admission";
+export type NativeEntryQualification = "native-admission" | "native-recovery" | "native-context-epoch";
 
 export interface JournalCursor {
 	readonly sequence: number;
@@ -56,7 +56,12 @@ export function encodeJournalFrameJson(
 	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("Invalid journal frame byte limit");
 	if (retention !== undefined && retention !== "retained-import")
 		throw new Error("Unsupported journal frame retention");
-	if (qualification !== undefined && qualification !== "native-admission")
+	if (
+		qualification !== undefined &&
+		qualification !== "native-admission" &&
+		qualification !== "native-recovery" &&
+		qualification !== "native-context-epoch"
+	)
 		throw new Error("Unsupported journal frame qualification");
 	const prefix = framePrefix(cursor, retention, qualification);
 	const suffixBytes = Buffer.byteLength(`,"checksum":"${"0".repeat(64)}"}\n`);
@@ -105,7 +110,12 @@ export function decodeJournalFrame(
 	if (retention !== undefined && retention !== "retained-import")
 		throw new Error("Unsupported journal frame retention");
 	const qualification = frame.qualification;
-	if (qualification !== undefined && qualification !== "native-admission")
+	if (
+		qualification !== undefined &&
+		qualification !== "native-admission" &&
+		qualification !== "native-recovery" &&
+		qualification !== "native-context-epoch"
+	)
 		throw new Error("Unsupported journal frame qualification");
 	if (frame.sequence !== cursor.sequence || frame.previousChecksum !== cursor.checksum) {
 		throw new Error("Journal frame sequence or predecessor mismatch");

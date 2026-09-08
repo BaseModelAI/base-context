@@ -28,6 +28,8 @@ import type { SessionEntry } from "./session-manager.js";
 /** One source/branch frontier shared by every operation in a captured request. */
 export interface SessionHistoryReadView {
 	readonly source: SourceSnapshotRef;
+	/** A narrower ancestor/prefix on this same capture; its lifetime never outlives the parent read. */
+	atSnapshot?(source: SourceSnapshotRef): Promise<SessionHistoryReadView>;
 	contextManifest(options?: ContextManifestOptions): Promise<ContextManifestPage>;
 	contextUpdates(target: ContextUpdateTarget): Promise<ContextUpdates>;
 	readContextUpdatePayload(
@@ -114,6 +116,24 @@ export function createBranchHistoryReadView(
 	const scope = { leafId: source.leafId, through: source.sourceSequence };
 	return Object.freeze({
 		source,
+		atSnapshot: async (requested: SourceSnapshotRef) => {
+			const captured = Object.freeze({ ...requested });
+			if (
+				captured.sessionId !== sessionId ||
+				captured.sessionFile !== source.sessionFile ||
+				captured.persistent !== source.persistent ||
+				!Number.isSafeInteger(captured.sourceSequence) ||
+				captured.sourceSequence < 0 ||
+				captured.sourceSequence > source.sourceSequence
+			)
+				throw new Error("Context epoch snapshot is outside its captured source");
+			if (captured.leafId !== null) {
+				const leaf = await query(() => index.get(sessionId, captured.leafId!, scope));
+				if (!leaf || leaf.sequence > captured.sourceSequence)
+					throw new Error("Context epoch snapshot is outside its captured branch");
+			}
+			return createBranchHistoryReadView(index, captured, query);
+		},
 		contextManifest: (options: ContextManifestOptions = {}) =>
 			query(() => index.contextManifest(sessionId, scope, options)),
 		contextUpdates: (target: ContextUpdateTarget) => query(() => index.contextUpdates(sessionId, scope, target)),

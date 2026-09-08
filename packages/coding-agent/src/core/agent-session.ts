@@ -13,6 +13,7 @@ import {
 	type AgentOutputLimits,
 	type AgentState,
 	type AgentTool,
+	type BoundToolExecution,
 	type GetContinuationMessagesContext,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
@@ -97,9 +98,16 @@ import {
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
-import { CanonicalContextCompiler, getCanonicalMessageSource } from "./canonical-context.js";
+import {
+	CanonicalContextCompiler,
+	getCanonicalEpochContext,
+	getCanonicalMessageSource,
+	getCanonicalViewUnits,
+	prepareCanonicalEpoch,
+} from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
@@ -107,9 +115,11 @@ import {
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	prepareViewCompaction,
 	serializeConversation,
 	shouldCompact,
 } from "./compaction/index.js";
+import { appendContextEpoch, CONTEXT_EPOCH_DETAIL, contextEpochRepresentation } from "./context-epoch.js";
 import {
 	type ContextTreeNode,
 	ContextTreeRequest,
@@ -300,6 +310,7 @@ import {
 	type BranchSummaryEntry,
 	getLatestCompactionEntry,
 	type SessionContext,
+	type SessionEntry,
 	SessionManager,
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
@@ -1249,6 +1260,8 @@ export class AgentSession {
 	private _modelRegistry: ModelRegistry;
 
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	private _nativeRecoveryTools = new WeakMap<AgentTool, AgentTool["execute"]>();
+	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean }>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -1339,6 +1352,7 @@ export class AgentSession {
 			};
 		});
 		this.agent.bindInitializationOwner(() => this.initialize());
+		const contextEpochsEnabled = config.requestTokenBudget !== undefined;
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
 			await this._goalResumeOperation;
@@ -1364,7 +1378,12 @@ export class AgentSession {
 				this._contextOmissions = undefined;
 			const controls = this._contextOmissions;
 			const omitted = new Set(controls?.ids);
-			const captured = this.requests.capture();
+			const epochManager = this.sessionManager;
+			const compaction = epochManager.bindCompactionSink({
+				maxEntries: limits.maxMessages,
+				maxSourceBytes: limits.maxSourceBytes,
+			});
+			const captured = this.requests.capture(compaction);
 			try {
 				const messages = await captured.readHistory(async (view) => {
 					const sameSource =
@@ -1379,6 +1398,94 @@ export class AgentSession {
 				// Failed persistence outcomes are transient UI/request facts, never canonical history authority.
 				this._mergeUnpersistedOutcomes(messages, outcomes);
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
+				const epochContext = getCanonicalEpochContext(messages);
+				if (epochContext?.checkpoint && getCanonicalViewUnits(messages)?.length !== messages.length)
+					throw new Error("Committed context epoch cannot admit untracked transient messages");
+				if (
+					epochContext &&
+					(contextEpochsEnabled || epochContext.checkpoint) &&
+					getCanonicalViewUnits(messages)?.length === messages.length
+				) {
+					let committed = epochContext.checkpoint;
+					let accepted: string | undefined;
+					let acceptedBody: string | undefined;
+					let acknowledged: CompactionCommit | undefined;
+					const commitFailure = (cause: unknown) => {
+						if (!acknowledged) return cause;
+						const error = new CompactionCommittedError(acknowledged.entryId, acknowledged.result, cause);
+						this._compactionSetupFailure = error;
+						return error;
+					};
+					captured.bindRequestViewBoundary(
+						messages,
+						async (candidate) => {
+							const representation = contextEpochRepresentation(
+								candidate.request,
+								candidate.assessment,
+								limits.maxSourceBytes,
+							);
+							const selection = JSON.stringify([representation, candidate.selectedUnitIds]);
+							if (accepted !== undefined) {
+								if (accepted !== selection)
+									throw new Error("Captured epoch request selection changed after acceptance");
+								return;
+							}
+							if (
+								committed?.representation === representation &&
+								committed.taskFrame?.material === epochContext.taskFrame?.material &&
+								candidate.selectedUnitIds.length === messages.length
+							) {
+								accepted = selection;
+								acceptedBody = candidate.request.body;
+								return;
+							}
+							const prepared = prepareCanonicalEpoch(
+								messages,
+								candidate.selectedUnitIds,
+								representation,
+								limits.maxSourceBytes,
+							);
+							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
+								throw new Error("Context epoch candidate does not match its captured source");
+							const tokensBefore = candidate.originalAssessment.estimatedInputTokens;
+							if (tokensBefore === null) throw new Error("Context epoch input estimate is unavailable");
+							const result: CompactionResult = {
+								summary: "",
+								firstKeptEntryId: prepared.checkpoint.literalTailId,
+								tokensBefore,
+							};
+							// This is the sole commit. A resolved append is already canonical even if adoption fails.
+							const entryId = await compaction[appendContextEpoch](prepared.checkpoint, tokensBefore);
+							acknowledged = { entryId, result };
+							try {
+								if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+									throw new Error("Context epoch source changed before adoption");
+								this.agent.state.messages = prepared.messages;
+								committed = prepared.checkpoint;
+								accepted = selection;
+								acceptedBody = candidate.request.body;
+							} catch (cause) {
+								throw commitFailure(cause);
+							}
+						},
+						(request, assessment) => {
+							try {
+								if (!committed) return;
+								if (acceptedBody === undefined || request.body !== acceptedBody)
+									throw new Error("Committed context epoch requires a compatible final provider projection");
+								if (
+									contextEpochRepresentation(request, assessment, limits.maxSourceBytes) !==
+									committed.representation
+								)
+									throw new Error("Context epoch representation changed without a committed boundary");
+								if (committed.taskFrame?.material !== epochContext.taskFrame?.material)
+									throw new Error("Context epoch task revision requires a committed boundary");
+							} catch (cause) {
+								throw commitFailure(cause);
+							}
+						},
+					);
+				}
 				this._compactionSetupFailure = undefined;
 				return { messages, adoptMessages: true, streamContext: captured, release: () => captured.dispose() };
 			} catch (error) {
@@ -1391,10 +1498,25 @@ export class AgentSession {
 			}
 		});
 		this.agent.bindToolExecutionOwner({
-			onToolInvocationStarting: async (invocation) => {
+			onToolInvocationStarting: async (invocation, _signal, tool, execute) => {
 				await this.initialize();
 				await this._agentEventQueue;
+				// Identity is the selected registered object AND the executor actually called by the loop.
+				const recoveryWrite =
+					this._nativeRecoveryTools.get(tool) === execute
+						? this.sessionManager[bindNativeEntryWriter]().captureRecoveryExchange(invocation.executionId)
+						: undefined;
 				await this.sessionManager.appendToolInvocation(invocation);
+				if (!recoveryWrite) return;
+				const producer = { used: false };
+				const owner: BoundToolExecution = {
+					run: (run) => this._nativeRecoveryProducer.run(producer, run),
+					finalize: async (exchange) => {
+						if (producer.used) await recoveryWrite(exchange);
+						else await this.sessionManager.appendToolExchange(exchange);
+					},
+				};
+				return owner;
 			},
 			onToolExchangeFinalized: async (exchange) => {
 				await this.sessionManager.appendToolExchange(exchange);
@@ -3442,15 +3564,33 @@ export class AgentSession {
 				const settings = { ...this.settingsManager.getCompactionSettings() };
 				const sessionId = this.sessionId;
 				const sessionFile = this.sessionFile;
-				const branch = await this.sessionManager.readBranch();
-				if (sessionId !== this.sessionId || sessionFile !== this.sessionFile)
-					throw new Error("Session source changed during compact request");
+				const compaction = this.sessionManager.bindCompactionSink();
+				const captured = this.requests.capture(compaction);
+				let branch: SessionEntry[];
+				let preparation: CompactionPreparation | undefined;
+				try {
+					branch = await compaction.readBranch();
+					if (sessionId !== this.sessionId || sessionFile !== this.sessionFile)
+						throw new Error("Session source changed during compact request");
+					preparation = this.isStreaming
+						? await this._prepareCapturedCompaction(branch, settings, captured)
+						: undefined;
+				} catch (error) {
+					try {
+						await captured.dispose();
+					} catch (cleanupError) {
+						throw new AggregateError([error, cleanupError], "Compaction preparation and release failed", {
+							cause: error,
+						});
+					}
+					throw error;
+				}
+				await captured.dispose();
 				if (!this.isStreaming)
 					return {
 						scheduled: false,
 						reason: "no active turn; compaction can only be requested while a turn is running",
 					};
-				const preparation = prepareCompaction(branch, settings);
 				if (!preparation) {
 					const lastEntry = branch.at(-1);
 					return {
@@ -8184,6 +8324,42 @@ export class AgentSession {
 		}
 	}
 
+	/** Ordinary summaries must consume selected epoch views, not an empty checkpoint summary and its tail alone. */
+	private async _prepareCapturedCompaction(
+		pathEntries: SessionEntry[],
+		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
+		requests: InferenceCoordinator,
+	) {
+		let latest: SessionEntry | undefined;
+		for (let index = pathEntries.length - 1; index >= 0; index--) {
+			if (pathEntries[index].type === "compaction") {
+				latest = pathEntries[index];
+				break;
+			}
+		}
+		if (
+			latest?.type !== "compaction" ||
+			!latest.details ||
+			typeof latest.details !== "object" ||
+			!(CONTEXT_EPOCH_DETAIL in latest.details)
+		)
+			return prepareCompaction(pathEntries, settings);
+		return requests.readHistory(async (view) => {
+			const messages = await new CanonicalContextCompiler().compile(
+				view,
+				this.settingsManager.getCanonicalContextLimits(),
+			);
+			const epoch = getCanonicalEpochContext(messages);
+			if (!epoch?.checkpoint) throw new Error("Compaction epoch view is unavailable");
+			return prepareViewCompaction(
+				messages,
+				epoch.references.map((ref) => ref?.ref.entryId),
+				pathEntries,
+				settings,
+			);
+		});
+	}
+
 	/**
 	 * Shared compaction core behind /compact, auto-compaction, and the compact
 	 * skill. Throws CompactionSkippedError when there is nothing to compact and
@@ -8216,7 +8392,7 @@ export class AgentSession {
 			settings,
 		} = options;
 
-		const preparation = prepareCompaction(pathEntries, settings);
+		const preparation = await this._prepareCapturedCompaction(pathEntries, settings, requests);
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			if (lastEntry?.type === "compaction") {
@@ -9989,6 +10165,14 @@ export class AgentSession {
 			() => this._extensionRunner,
 		);
 
+		// Only these actual built-in wrappers can establish a recovery execution scope.
+		// Same-name custom tools and baseToolsOverride never enter this identity table.
+		if (!this._baseToolsOverride) {
+			for (const tool of wrappedBuiltInTools) {
+				if (tool.name === "prime_context" || tool.name === "ipython")
+					this._nativeRecoveryTools.set(tool, tool.execute);
+			}
+		}
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
@@ -10059,6 +10243,10 @@ export class AgentSession {
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				prime_context: { recover: (input, signal) => this.recoverNativeHistory(input, signal) },
 				ipython: {
+					captureNativeRecoveryScope: () => {
+						const producer = this._nativeRecoveryProducer.getStore();
+						return producer ? (run) => this._nativeRecoveryProducer.run(producer, run) : undefined;
+					},
 					provisioner: this._ipythonKernelProvisioner,
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
@@ -10185,6 +10373,10 @@ export class AgentSession {
 		) {
 			return createNativeRecoveryRefusal("not_authorized", "native_recovery_not_enabled", responseBytes);
 		}
+		// Only the real authorized reader can latch this private admitted execution.
+		// A replacement method/result or descriptive JSON cannot set the producer bit.
+		const producer = this._nativeRecoveryProducer.getStore();
+		if (producer) producer.used = true;
 		// readBranchHistory captures synchronously and preserves ordered read/release errors.
 		// Never accept a caller's owner/path/frontier or turn a failed read into evidence of absence.
 		try {

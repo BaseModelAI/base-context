@@ -357,7 +357,10 @@ function nativeGoalOrigin(
 export function* projectTaskStateSource(source: TaskStateSource): Generator<TaskStateProjection> {
 	if (source.retention !== undefined && source.retention !== "retained-import")
 		throw new Error("Unsupported task source retention");
-	if (source.qualification !== undefined && source.qualification !== "native-admission")
+	if (
+		source.qualification !== undefined &&
+		!["native-admission", "native-recovery", "native-context-epoch"].includes(source.qualification)
+	)
 		throw new Error("Unsupported task source qualification");
 	const retained = source.retention === "retained-import";
 	const qualified = source.qualification === "native-admission" && !retained;

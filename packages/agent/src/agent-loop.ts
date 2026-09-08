@@ -22,6 +22,7 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
+	BoundToolExecution,
 	FinalizedToolExchange,
 	StreamFn,
 	ToolExecutionMode,
@@ -760,6 +761,7 @@ async function executeToolCalls(
 }
 
 type ToolCallSource = {
+	owner?: BoundToolExecution;
 	executionId: string;
 	toolCall: AgentToolCall;
 	sourceOrder: number;
@@ -1019,9 +1021,10 @@ async function executePreparedToolCall(
 ): Promise<ExecutedToolCallOutcome> {
 	const invocationArgs = structuredClone(prepared.args);
 	const executedInput = structuredClone(invocationArgs);
+	const execute = prepared.tool.execute;
 	if (!signal?.aborted) {
 		// Admission failures must not become synthetic tool results or fall through to effects.
-		await config.onToolInvocationStarting?.(
+		const owner = await config.onToolInvocationStarting?.(
 			{
 				executionId: source.executionId,
 				sourceOrder: source.sourceOrder,
@@ -1032,7 +1035,10 @@ async function executePreparedToolCall(
 				toolExecution,
 			},
 			signal,
+			prepared.tool,
+			execute,
 		);
+		if (owner) source.owner = owner;
 	}
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
@@ -1041,8 +1047,8 @@ async function executePreparedToolCall(
 	try {
 		throwIfAborted(signal);
 		executionStarted = true;
-		const result = await raceWithAbort(
-			prepared.tool.execute(prepared.toolCall.id, invocationArgs as never, signal, (partialResult) => {
+		const run = () =>
+			execute.call(prepared.tool, prepared.toolCall.id, invocationArgs as never, signal, (partialResult) => {
 				if (!acceptingUpdates || signal?.aborted) {
 					return;
 				}
@@ -1057,9 +1063,8 @@ async function executePreparedToolCall(
 						}),
 					),
 				);
-			}),
-			signal,
-		);
+			});
+		const result = await raceWithAbort(source.owner ? source.owner.run(run) : run(), signal);
 		acceptingUpdates = false;
 		try {
 			await raceWithAbort(
@@ -1165,7 +1170,7 @@ async function publishToolExchange(
 		cancellationRequested: signal?.aborted ?? false,
 		result: createToolResultMessage(finalized),
 	};
-	await config.onToolExchangeFinalized?.(exchange, signal);
+	await config.onToolExchangeFinalized?.(exchange, signal, source.owner);
 	await emit({
 		type: "tool_execution_end",
 		toolCallId: finalized.toolCall.id,

@@ -107,6 +107,159 @@ describe("createAgentSessionFromServices", () => {
 			fetch.mockRestore();
 			await session.disposeAsync();
 		}
+
+		// Actual service -> AgentSession -> final native body -> canonical epoch ACK.
+		const epochDir = join(tempDir, "epoch-native");
+		mkdirSync(epochDir);
+		const epochServices = await createAgentSessionServices({
+			cwd: epochDir,
+			agentDir: epochDir,
+			authStorage: AuthStorage.inMemory(),
+			telemetryDisabled: true,
+			settingsManager: SettingsManager.inMemory({
+				compaction: { enabled: false, reserveTokens: 16, keepRecentTokens: 4 },
+				autoRefine: { enabled: false },
+				retry: { enabled: false },
+			}),
+			resourceLoaderOptions: { noExtensions: true, noPromptTemplates: true, noThemes: true },
+		});
+		const model: Model<"openai-responses"> = {
+			id: "offline-epoch-services",
+			name: "Offline epoch services",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			contextWindow: 500_000,
+			maxTokens: 16,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		};
+		epochServices.modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "offline-epoch-key",
+			api: model.api,
+			models: [
+				{
+					id: model.id,
+					name: model.name,
+					api: model.api,
+					reasoning: model.reasoning,
+					input: model.input,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					cost: model.cost,
+				},
+			],
+		});
+		const epochManager = await SessionManager.create(epochDir, join(epochDir, "sessions"));
+		const epochsAtSend: string[] = [];
+		const bodies: string[] = [];
+		const summaryBodies: string[] = [];
+		let summarizing = false;
+		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+			const epochs = await epochManager.readBranchHistory(async (history) => {
+				const ids: string[] = [];
+				for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 }))
+					if (item.source.qualification === "native-context-epoch") ids.push(item.source.id);
+				return ids;
+			});
+			expect(epochs).toHaveLength(summarizing ? 2 : bodies.length + 1);
+			if (!summarizing) epochsAtSend.push(epochs.at(-1)!);
+			expect(typeof init?.body).toBe("string");
+			(summarizing ? summaryBodies : bodies).push(init!.body as string);
+			const item = {
+				type: "message",
+				id: `msg_epoch_${bodies.length + summaryBodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "OK", annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_epoch_${bodies.length + summaryBodies.length}`,
+						model: model.id,
+						status: "completed",
+						usage: {
+							input_tokens: 10,
+							output_tokens: 1,
+							total_tokens: 11,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		let epochSession: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
+		try {
+			({ session: epochSession } = await createAgentSessionFromServices({
+				services: epochServices,
+				sessionManager: epochManager,
+				model,
+				tools: [],
+				noTools: "all",
+				includeGoals: false,
+				includeCompactSkill: false,
+				prewarmIpythonKernel: false,
+				telemetryDisabled: true,
+				requestTokenBudget: {
+					mode: "enforce",
+					profiles: [
+						{
+							id: "offline-epoch",
+							revision: "1",
+							api: model.api,
+							provider: model.provider,
+							url: "https://example.invalid/v1/responses",
+							model: model.id,
+							authMode: "fixture-api-key",
+							templateRevision: "responses-text-v1",
+							replayFamily: "responses-text-v1",
+							contextTokens: 500_000,
+							outputCeilingTokens: 16,
+							estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
+						},
+					],
+				},
+			}));
+			await epochSession.prompt("Preserve Foo.txt.");
+			await epochSession.prompt("Also preserve Bar.txt.");
+			expect(new Set(epochsAtSend).size).toBe(2);
+			expect(bodies).toHaveLength(2);
+			const firstBody = JSON.parse(bodies[0]);
+			const secondBody = JSON.parse(bodies[1]);
+			// The original task frame and input remain literal prefix items after the next ACK.
+			expect(secondBody.input.slice(0, firstBody.input.length)).toEqual(firstBody.input);
+			// An ordinary summary consumes selected historical views, then the next main request commits a new epoch.
+			summarizing = true;
+			await epochSession.compact();
+			summarizing = false;
+			expect(summaryBodies).toHaveLength(1);
+			expect(summaryBodies[0]).toContain("Preserve Foo.txt.");
+			await epochSession.prompt("Continue with both files.");
+			expect(new Set(epochsAtSend).size).toBe(3);
+			expect(bodies).toHaveLength(3);
+			expect(bodies[2]).toContain("Foo.txt.");
+			expect(bodies[2]).toContain("Bar.txt.");
+		} finally {
+			try {
+				await epochSession?.disposeAsync({ kernelSnapshot: false });
+			} finally {
+				epochFetch.mockRestore();
+				await epochManager.close();
+			}
+		}
 	});
 
 	it("does not install top-level telemetry for a resumed child session", async () => {

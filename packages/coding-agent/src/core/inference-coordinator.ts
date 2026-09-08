@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
+import type { AgentMessage, AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
 import {
 	type Api,
 	type AssistantMessage,
 	assertBuiltInAttemptSupport,
 	type Context,
 	completeSimple,
+	invokeRequestMeasurement,
 	isLocalFauxStream,
 	type Model,
 	type ProviderAttemptObserver,
@@ -21,6 +22,14 @@ import type {
 	RequestPurpose,
 	ResolvedModelContract,
 } from "./request-events.js";
+import {
+	type CapturedRequestViewBoundary,
+	captureRequestViewBoundary,
+	matchesRequestView,
+	type RequestViewCommit,
+	type RequestViewValidate,
+	selectRequestView,
+} from "./request-view-selection.js";
 import { hashTurnBody, MODEL_REQUEST_ID_HEADER, unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 import type { SessionHistoryReadView } from "./session-history-index.js";
 
@@ -115,6 +124,7 @@ export function createNativeInferenceStream(
 /** Routes physical observations to the source writer. It owns no receipt store. */
 export class InferenceCoordinator {
 	private retryTurn = false;
+	private requestViewBoundary?: CapturedRequestViewBoundary;
 	private active = new Set<Promise<void>>();
 	private capturedSink?: SinkUse;
 	private captureReserved = false;
@@ -128,6 +138,7 @@ export class InferenceCoordinator {
 		admissionOpen: true,
 		cancellation: new AbortController(),
 		budget: undefined as RequestTokenBudget | undefined,
+		budgetMode: undefined as RequestTokenBudgetOptions["mode"] | undefined,
 	};
 
 	get hasPending(): boolean {
@@ -176,7 +187,10 @@ export class InferenceCoordinator {
 		private readonly owner: () => Omit<RequestOwnerRef, "sessionId"> = () => ({}),
 		requestTokenBudget?: RequestTokenBudgetOptions,
 	) {
-		if (requestTokenBudget) this.work.budget = new RequestTokenBudget(requestTokenBudget);
+		if (requestTokenBudget) {
+			this.work.budget = new RequestTokenBudget(requestTokenBudget);
+			this.work.budgetMode = requestTokenBudget.mode;
+		}
 	}
 
 	private assertAdmission(): void {
@@ -227,6 +241,18 @@ export class InferenceCoordinator {
 		};
 		this.notifyActivity();
 		return captured;
+	}
+
+	/** Explicit Root-owned epoch boundary, on this same captured MAIN source only. */
+	bindRequestViewBoundary(
+		messages: readonly AgentMessage[],
+		commit: RequestViewCommit,
+		validate?: RequestViewValidate,
+	): void {
+		this.assertAdmission();
+		if (!this.capturedSink) throw new Error("Request view boundary requires a captured inference owner");
+		if (this.requestViewBoundary) throw new Error("Request view boundary is already bound");
+		this.requestViewBoundary = captureRequestViewBoundary(messages, commit, validate);
 	}
 
 	/** Read through an explicit capture, never by recapturing the mutable current session. */
@@ -354,7 +380,7 @@ export class InferenceCoordinator {
 			this.releaseCapture();
 			this.finishCapturePending?.();
 			// Capture the opted-in budgeted invocation before source/auth waits. Callbacks and signals stay live handles.
-			if (this.work.budget) {
+			if (this.work.budget || (this.requestViewBoundary && operation.metadata.purpose === "main")) {
 				model = structuredClone(model);
 				context = structuredClone(context);
 				options = options
@@ -379,35 +405,60 @@ export class InferenceCoordinator {
 			}
 			assertBuiltInAttemptSupport(model.api);
 			if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
-			const budget = this.work.budget;
-			const measureRequest: ProviderAttemptObserver["measureRequest"] = budget
-				? (representation) => {
-						const assessment = budget.measure(representation);
-						try {
-							budget.assert(assessment);
-						} catch (error) {
-							budgetFailure = error;
-							throw error;
+			const parentBudget = this.work.budget;
+			const boundary = operation.metadata.purpose === "main" ? this.requestViewBoundary : undefined;
+			const budget = boundary ? parentBudget?.capture() : parentBudget;
+			let measuredForAdmission = false;
+			const measureRequest: ProviderAttemptObserver["measureRequest"] =
+				budget || boundary?.validate
+					? (representation) => {
+							try {
+								const assessment = budget?.measure(representation);
+								boundary?.validate?.(representation, assessment);
+								if (budget && assessment) budget.assert(assessment);
+								measuredForAdmission = true;
+								return assessment;
+							} catch (error) {
+								budgetFailure = error;
+								throw error;
+							}
 						}
-						return assessment;
-					}
-				: undefined;
+					: undefined;
+			const canSelect = budget && boundary && matchesRequestView(boundary, source, context);
 			const attempts: ProviderAttemptObserver = {
 				...(measureRequest ? { measureRequest } : {}),
+				...(canSelect
+					? ({
+							prepareRequest: async (representation, projection) => {
+								try {
+									if (JSON.parse(representation.body!).model !== model.id) return;
+									return await selectRequestView(
+										boundary!,
+										representation,
+										projection,
+										budget!,
+										this.work.budgetMode === "enforce",
+									);
+								} catch (error) {
+									budgetFailure = error;
+									throw error;
+								}
+							},
+						} satisfies Pick<ProviderAttemptObserver, "prepareRequest">)
+					: {}),
 				admit: async (descriptor) => {
 					if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
 					// An adapter without a serializer meter must not bypass an enforced budget.
-					if (measureRequest && !descriptor.requestBudget) {
-						descriptor = {
-							...descriptor,
-							requestBudget: measureRequest({
-								api: descriptor.api,
-								provider: descriptor.provider,
-								url: "",
-								body: undefined,
-							}),
-						};
+					if (measureRequest && !descriptor.requestBudget && (budget || !measuredForAdmission)) {
+						const assessment = invokeRequestMeasurement(attempts, {
+							api: descriptor.api,
+							provider: descriptor.provider,
+							url: "",
+							body: undefined,
+						});
+						if (assessment) descriptor = { ...descriptor, requestBudget: assessment };
 					}
+					measuredForAdmission = false;
 					const attemptId = randomUUID();
 					const write = operation.binding.sink.persist({
 						...metadata,
@@ -431,7 +482,7 @@ export class InferenceCoordinator {
 					});
 					receiptWrites.push(write);
 					await write;
-					budget?.observe(receipt);
+					parentBudget?.observe(receipt);
 				},
 			};
 			const signal = options?.signal

@@ -1,3 +1,4 @@
+import type { FinalizedToolExchange } from "@ponythewhite/base-context-agent";
 import type { ImageContent, Message, TextContent } from "@ponythewhite/base-context-ai";
 
 import type { CustomMessage } from "./messages.js";
@@ -37,6 +38,8 @@ export type CapturedNativeMessageWrite = (message: Message | CustomMessage) => P
 export type CapturedNativeGoalWrite = (goal: unknown) => Promise<string>;
 
 export interface NativeEntryWriter {
+	/** Separate from input/goal admission. The bound execution owner alone uses this writer. */
+	captureRecoveryExchange(executionId: string): (exchange: FinalizedToolExchange) => Promise<string>;
 	captureMessage(origin: Extract<NativeEntryOrigin, { kind: "input" }>): CapturedNativeMessageWrite;
 	captureGoalOperation(origin: Extract<NativeEntryOrigin, { kind: "goal_operation" }>): CapturedNativeGoalWrite;
 }

@@ -10,6 +10,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
+	type ExecuteOptions,
 	type ExecuteResult,
 	type HostRequestHandlers,
 	type KernelAttachment,
@@ -277,6 +278,8 @@ export interface IpythonToolDetails {
 }
 
 export interface IpythonToolOptions {
+	/** @internal Captured inside an actual owned tool invocation, not inferred from cell output. */
+	captureNativeRecoveryScope?: () => ExecuteOptions["runNativeRecovery"];
 	/** Python override. Must have base-context-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
@@ -568,6 +571,7 @@ async function executeWithBusyKernelChoice(
 	onStream: (chunk: string, name: "stdout" | "stderr") => void,
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
+	runNativeRecovery: ExecuteOptions["runNativeRecovery"],
 	ctx: ExtensionContext | undefined,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
@@ -578,6 +582,7 @@ async function executeWithBusyKernelChoice(
 				result: await m.execute(code, {
 					signal,
 					nativeRecovery: true,
+					runNativeRecovery,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -657,6 +662,7 @@ export function createIpythonToolDefinition(
 					},
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
+					options?.captureNativeRecoveryScope?.(),
 					ctx,
 				);
 

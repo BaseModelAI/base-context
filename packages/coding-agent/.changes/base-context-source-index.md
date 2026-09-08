@@ -42,3 +42,7 @@
 - Enforced complete ViewUnit dependency/replay closure in actual canonical compiler output.
 - Bound compaction reads and commit checks to one captured source, with branch-ABA rejection and typed known-commit setup errors.
 - Forwarded explicit request budget policy through service-based session creation and enabled recovery only for the native benchmark arm.
+- Select plain-text Responses views at the final request boundary and commit source-backed epochs before sending.
+- Reconstruct frozen views and TaskFrames on same-journal reopen; prepare ordinary summaries from the selected views.
+- Qualify recovery from actual native execution and preserve original local checkpoint failures without synthetic replies.
+- Require ownership/RPC schema32 for qualified recovery and epochs; Codex/tool selection and complete recovery retention remain open.

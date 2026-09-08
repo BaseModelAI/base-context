@@ -6,9 +6,13 @@ import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { expect, it, vi } from "vitest";
 import {
 	CanonicalContextCompiler,
+	getCanonicalEpochContext,
 	getCanonicalMessageSource,
 	getCanonicalViewUnits,
+	prepareCanonicalEpoch,
 } from "../src/core/canonical-context.js";
+import { prepareViewCompaction } from "../src/core/compaction/index.js";
+import { appendContextEpoch } from "../src/core/context-epoch.js";
 import { HistoryIndex } from "../src/core/history-index.js";
 import { InferenceCoordinator } from "../src/core/inference-coordinator.js";
 import { type CustomMessage, convertToLlm } from "../src/core/messages.js";
@@ -369,6 +373,55 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			});
 		}
 		expect(await manager.readEntries()).toEqual(sourceBeforeSecondDelta);
+
+		// Persist actual source recipes, then discard both the compiler and source owner.
+		// This is an epoch/compiler path, not a provider token-estimate or cache-hit test.
+		await capture.dispose();
+		const checkpointSink = manager.bindCompactionSink();
+		capture = requests.capture(checkpointSink);
+		const checkpointInput = await capture.readHistory((view) => compiler.compile(view, frameLimits, omittedIds));
+		const prepared = prepareCanonicalEpoch(
+			checkpointInput,
+			getCanonicalViewUnits(checkpointInput)!.map((unit) => unit.id),
+			"fixture-native-template/1",
+			frameLimits.maxSourceBytes,
+		);
+		const epochId = await checkpointSink[appendContextEpoch](prepared.checkpoint, 100);
+		expect(await manager.readBranchHistory((history) => history.get(epochId))).toMatchObject({
+			qualification: "native-context-epoch",
+		});
+		await capture.dispose();
+		capture = undefined;
+		const sessionFile = manager.getSessionFile()!;
+		await manager.close();
+		const reopened = await SessionManager.open(sessionFile, dir);
+		const resumedRequests = new InferenceCoordinator(() => reopened.bindRequestSink());
+		const resumed = resumedRequests.capture();
+		try {
+			const rebuilt = await resumed.readHistory((view) => new CanonicalContextCompiler().compile(view, frameLimits));
+			expect(convertToLlm(rebuilt)).toEqual(convertToLlm(prepared.messages));
+			expect(rebuilt.filter(isTaskFrame).map(frameText)).toEqual(secondFrames.map(frameText));
+			expect(getCanonicalViewUnits(rebuilt)!.some((unit) => unit.kind === "fixed-view")).toBe(true);
+			const view = getCanonicalEpochContext(rebuilt)!;
+			const preparation = prepareViewCompaction(
+				rebuilt,
+				view.references.map((ref) => ref?.ref.entryId),
+				await reopened.readBranch(),
+				{ enabled: true, reserveTokens: 64, keepRecentTokens: 1 },
+			);
+			expect(preparation?.firstKeptEntryId).toBe(laterInputId);
+			expect(preparation?.messagesToSummarize).toContainEqual(earlierInput);
+			expect(preparation?.messagesToSummarize.filter(isTaskFrame).map(frameText)).toEqual(
+				secondFrames.map(frameText),
+			);
+		} finally {
+			try {
+				await resumed.dispose();
+				await resumedRequests.dispose();
+			} finally {
+				await reopened.close();
+			}
+		}
 	} finally {
 		try {
 			await capture?.dispose();
@@ -454,6 +507,33 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 		).rejects.toThrow("View-unit replay group is incomplete");
 		expect(compiler.hasActiveEntry(orphanId)).toBe(false);
 		expect(await manager.readEntries()).toEqual(beforeRefusal);
+
+		await capture.dispose();
+		capture = undefined;
+		await manager.branchTo(secondEntryId);
+		const checkpointSink = manager.bindCompactionSink();
+		capture = requests.capture(checkpointSink);
+		const epochLimits = { maxMessages: 16, maxSourceBytes: 64 * 1024 };
+		const candidate = await capture.readHistory(async (view) => {
+			await expect(
+				view.atSnapshot!({ ...view.source, sourceSequence: view.source.sourceSequence + 1 }),
+			).rejects.toThrow("outside its captured source");
+			await expect(view.atSnapshot!({ ...view.source, leafId: orphanId })).rejects.toThrow(
+				"outside its captured branch",
+			);
+			return new CanonicalContextCompiler().compile(view, epochLimits);
+		});
+		const prepared = prepareCanonicalEpoch(
+			candidate,
+			getCanonicalViewUnits(candidate)!.map((unit) => unit.id),
+			"fixture-native-template/1",
+			epochLimits.maxSourceBytes,
+		);
+		const newer = await manager.appendMessage({ role: "user", content: "newer admitted input", timestamp: 4 });
+		await expect(checkpointSink[appendContextEpoch](prepared.checkpoint, 10)).rejects.toThrow(
+			"source or branch changed",
+		);
+		expect(manager.getLeafId()).toBe(newer);
 	} finally {
 		try {
 			await capture?.dispose();

@@ -1,6 +1,7 @@
 import {
 	createAssistantMessageDiagnostic,
 	type ImageContent,
+	isLocalRequestPreparationError,
 	type Message,
 	type Model,
 	RequestTokenBudgetError,
@@ -34,10 +35,11 @@ import type {
 	ToolInvocation,
 } from "./types.js";
 
-/** Preserve a local budget refusal and any secondary cleanup errors without inventing an assistant. */
+/** Preserve actual local request preparation failures and primary cleanup chains without inventing an assistant. */
 function isRequestTokenBudgetFailure(error: unknown): error is Error {
 	return (
 		error instanceof RequestTokenBudgetError ||
+		isLocalRequestPreparationError(error) ||
 		(error instanceof AggregateError && isRequestTokenBudgetFailure(error.errors[0]))
 	);
 }
@@ -268,11 +270,11 @@ export class Agent {
 	) => Promise<AfterToolCallResult | undefined>;
 	public onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
 	public onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
-	private toolExecutionOwner?: Required<Pick<AgentOptions, "onToolInvocationStarting" | "onToolExchangeFinalized">>;
+	private toolExecutionOwner?: Required<Pick<AgentLoopConfig, "onToolInvocationStarting" | "onToolExchangeFinalized">>;
 
 	/** Native persistence runs before replaceable caller hooks. */
 	bindToolExecutionOwner(
-		owner: Required<Pick<AgentOptions, "onToolInvocationStarting" | "onToolExchangeFinalized">>,
+		owner: Required<Pick<AgentLoopConfig, "onToolInvocationStarting" | "onToolExchangeFinalized">>,
 	): void {
 		if (this.toolExecutionOwner) throw new Error("Agent tool execution owner is already bound");
 		this.toolExecutionOwner = {
@@ -554,12 +556,14 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			onToolInvocationStarting: async (invocation, signal) => {
-				await this.toolExecutionOwner?.onToolInvocationStarting(invocation, signal);
+			onToolInvocationStarting: async (invocation, signal, tool, execute) => {
+				const owner = await this.toolExecutionOwner?.onToolInvocationStarting(invocation, signal, tool, execute);
 				await onToolInvocationStarting?.(invocation, signal);
+				return owner || undefined;
 			},
-			onToolExchangeFinalized: async (exchange, signal) => {
-				await this.toolExecutionOwner?.onToolExchangeFinalized(exchange, signal);
+			onToolExchangeFinalized: async (exchange, signal, owner) => {
+				if (owner) await owner.finalize(exchange, signal);
+				else await this.toolExecutionOwner?.onToolExchangeFinalized(exchange, signal);
 				await onToolExchangeFinalized?.(exchange, signal);
 			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,

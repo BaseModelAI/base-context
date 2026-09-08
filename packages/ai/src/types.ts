@@ -1,6 +1,10 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
-import type { ProviderRequestRepresentation, RequestTokenAssessment } from "./utils/request-token-budget.js";
+import type {
+	ProviderRequestProjection,
+	ProviderRequestRepresentation,
+	RequestTokenAssessment,
+} from "./utils/request-token-budget.js";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.js";
 
@@ -144,7 +148,12 @@ export interface ProviderAttemptReceipt extends ProviderAttemptInfo {
 /** Optional for SDK embeddings. Built-in adapters await both callbacks in their producer lifecycle. */
 export interface ProviderAttemptObserver {
 	/** Optional native pre-send budget gate. It does not admit a physical attempt. */
-	measureRequest?(request: ProviderRequestRepresentation): RequestTokenAssessment;
+	measureRequest?(request: ProviderRequestRepresentation): RequestTokenAssessment | undefined;
+	/** Optional native epoch-boundary selection; resolution means the owner accepted the candidate. */
+	prepareRequest?(
+		request: ProviderRequestRepresentation,
+		projection: ProviderRequestProjection,
+	): Promise<string | undefined>;
 	/** Persist admission and return its local ID before the physical transport sends. */
 	admit(info: ProviderAttemptInfo): Promise<string>;
 	/** Persist settlement even when the assistant stream has no remaining listener. */

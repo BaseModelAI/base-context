@@ -279,7 +279,12 @@ function transaction(action: () => void): void {
 function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 	if (item.retention !== undefined && item.retention !== "retained-import")
 		throw new Error("Unsupported indexed source retention");
-	if (item.qualification !== undefined && item.qualification !== "native-admission")
+	if (
+		item.qualification !== undefined &&
+		item.qualification !== "native-admission" &&
+		item.qualification !== "native-recovery" &&
+		item.qualification !== "native-context-epoch"
+	)
 		throw new Error("Unsupported indexed source qualification");
 	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
 		sessionId,
@@ -989,9 +994,11 @@ function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evid
 	return page;
 }
 
-type ContextNode = BranchNode & ContextState & Pick<Row, "sequence" | "kind" | "locator" | "revision" | "authority">;
+type ContextNode = BranchNode &
+	ContextState &
+	Pick<Row, "sequence" | "kind" | "locator" | "revision" | "authority" | "qualification" | "retention">;
 const manifestNode =
-	db.prepare(`SELECT e.id,e.parent_id,e.sequence,e.kind,e.locator,e.revision,e.authority,a.depth,c.visible_head,c.previous_visible,c.visible_count,c.latest_compaction,c.first_kept_id
+	db.prepare(`SELECT e.id,e.parent_id,e.sequence,e.kind,e.locator,e.revision,e.authority,e.qualification,e.retention,a.depth,c.visible_head,c.previous_visible,c.visible_count,c.latest_compaction,c.first_kept_id
  FROM source_event e JOIN context_node c ON c.session=e.session AND c.id=e.id
  LEFT JOIN source_ancestry a ON a.session=e.session AND a.id=e.id
  WHERE e.session=? AND e.id=? AND e.sequence<=?`);
@@ -1003,6 +1010,8 @@ function contextRef(node: ContextNode): ContextRef {
 		entryId: node.id,
 		sequence: node.sequence,
 		authority: node.authority,
+		...(node.qualification === null ? {} : { qualification: node.qualification }),
+		...(node.retention === null ? {} : { retention: node.retention }),
 		kind: node.kind as ContextRef["kind"],
 		locator: JSON.parse(node.locator) as ContextRef["locator"],
 		revision: node.revision,

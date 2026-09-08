@@ -1283,10 +1283,14 @@ export class ReplKernelManager {
 			execution.nativeRecoveryBytes += maxBytes + 1;
 			let reserved = maxBytes + 1;
 			try {
-				const response = (await handler(data, {
-					signal: execution.nativeRecoveryAbort.signal,
-					nativeRecovery: { maxBytes },
-				})) as unknown as NativeRecoveryResponse;
+				const read = async () =>
+					handler(data, {
+						signal: execution.nativeRecoveryAbort.signal,
+						nativeRecovery: { maxBytes },
+					});
+				const response = (await (execution.opts.runNativeRecovery
+					? execution.opts.runNativeRecovery(read)
+					: read())) as unknown as NativeRecoveryResponse;
 				execution.nativeRecoveryAbort.signal.throwIfAborted();
 				if (this.activeExecution !== execution || execution.settled) {
 					throw new Error("Native recovery cell has finalized");

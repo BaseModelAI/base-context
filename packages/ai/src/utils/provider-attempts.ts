@@ -3,6 +3,7 @@ import type {
 	AssistantMessage,
 	Model,
 	ProviderAttemptInfo,
+	ProviderAttemptObserver,
 	ProviderAttemptOutcome,
 	ProviderAttemptReceipt,
 	ProviderAttemptUsage,
@@ -12,9 +13,39 @@ import type {
 import type { AssistantMessageEventStream } from "./event-stream.js";
 import type {
 	ContextTokenObservation,
+	ProviderRequestProjection,
 	ProviderRequestRepresentation,
+	RequestTokenAssessment,
 	RetainedContextTokens,
 } from "./request-token-budget.js";
+
+const localPreparationErrors = new WeakSet<object>();
+
+function markLocalPreparationError(error: unknown): void {
+	if ((typeof error === "object" && error !== null) || typeof error === "function") localPreparationErrors.add(error);
+}
+
+export function isLocalRequestPreparationError(error: unknown): boolean {
+	return (
+		((typeof error === "object" && error !== null) || typeof error === "function") &&
+		localPreparationErrors.has(error)
+	);
+}
+
+/** Invoke the actual meter/validator, including native admission fallback, without replacing its error. */
+export function invokeRequestMeasurement(
+	observer: Pick<ProviderAttemptObserver, "measureRequest">,
+	request: ProviderRequestRepresentation,
+): RequestTokenAssessment | undefined {
+	const measure = observer.measureRequest;
+	if (!measure) return;
+	try {
+		return measure.call(observer, request);
+	} catch (error) {
+		markLocalPreparationError(error);
+		throw error;
+	}
+}
 
 interface ActiveAttempt {
 	info: ProviderAttemptInfo;
@@ -73,13 +104,36 @@ export class ProviderAttemptTracker {
 		return this.contextObservation;
 	}
 
+	async prepareRequest(
+		request: Omit<ProviderRequestRepresentation, "api" | "provider">,
+		projection?: ProviderRequestProjection,
+	): Promise<string | undefined> {
+		if (this.budgetError !== undefined) throw this.budgetError;
+		const observer = this.options?.attempts;
+		const prepare = observer?.prepareRequest;
+		let selectedBody: string | undefined;
+		if (projection && prepare) {
+			const representation = { ...request, api: this.model.api, provider: this.model.provider };
+			try {
+				selectedBody = await prepare.call(observer, representation, projection);
+			} catch (error) {
+				this.budgetError = error;
+				markLocalPreparationError(error);
+				throw error;
+			}
+		}
+		const body = selectedBody ?? request.body;
+		await this.measureRequest({ ...request, body });
+		return body;
+	}
+
 	async measureRequest(request: Omit<ProviderRequestRepresentation, "api" | "provider">): Promise<void> {
 		if (this.budgetError !== undefined) throw this.budgetError;
 		const measure = this.options?.attempts?.measureRequest;
 		if (!measure) return;
 		try {
 			this.configure({
-				requestBudget: measure.call(this.options?.attempts, {
+				requestBudget: invokeRequestMeasurement(this.options!.attempts!, {
 					...request,
 					api: this.model.api,
 					provider: this.model.provider,

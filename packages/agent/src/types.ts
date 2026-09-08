@@ -134,6 +134,12 @@ export interface ToolInvocation {
 	readonly toolExecution: ToolExecutionMode;
 }
 
+/** @internal Per-invocation owner closure; never serialized or supplied by result metadata. */
+export interface BoundToolExecution {
+	run(execute: () => Promise<AgentToolResult<unknown>>): Promise<AgentToolResult<unknown>>;
+	finalize(exchange: FinalizedToolExchange, signal?: AbortSignal): void | Promise<void>;
+}
+
 /** Finalized source evidence; parallel exchanges retain assistant call order via sourceOrder. */
 export interface FinalizedToolExchange extends Omit<ToolInvocation, "executedInput"> {
 	/** Snapshot at invocation; absent when execution never started. */
@@ -329,14 +335,23 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Awaited before invoking the tool. Rejection prevents execution and stops the loop.
 	 * The owner records intent here; admission is not proof that an external effect occurred.
 	 */
-	onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
+	onToolInvocationStarting?: (
+		invocation: ToolInvocation,
+		signal: AbortSignal | undefined,
+		tool: AgentTool,
+		execute: AgentTool["execute"],
+	) => void | BoundToolExecution | Promise<void> | Promise<BoundToolExecution | undefined>;
 
 	/**
 	 * Native execution owner, awaited after final middleware and before observer/result events.
 	 * Persist source evidence here. Rejection stops publication; this is not an observer hook.
 	 * Cancellation does not skip settlement. The owner must bound its own persistence work.
 	 */
-	onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
+	onToolExchangeFinalized?: (
+		exchange: FinalizedToolExchange,
+		signal?: AbortSignal,
+		owner?: BoundToolExecution,
+	) => void | Promise<void>;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.

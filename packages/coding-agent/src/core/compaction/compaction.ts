@@ -593,6 +593,74 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+/** Prepare the actual selected epoch view. Entry IDs are only real cut anchors, never synthetic rows. */
+export function prepareViewCompaction(
+	messages: readonly AgentMessage[],
+	entryIds: readonly (string | undefined)[],
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+): CompactionPreparation | undefined {
+	if (messages.length !== entryIds.length) throw new Error("Compaction views do not match their source anchors");
+	const cuts = messages.flatMap((message, index) =>
+		entryIds[index] && message.role !== "toolResult" && message.role !== "compactionSummary" ? [index] : [],
+	);
+	if (!cuts.length) return;
+	let cut = cuts[0];
+	let tokens = 0;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (!entryIds[index] || messages[index].role === "compactionSummary") continue;
+		tokens += estimateTokens(messages[index]);
+		if (tokens >= settings.keepRecentTokens) {
+			cut = cuts.find((candidate) => candidate >= index) ?? cut;
+			break;
+		}
+	}
+	let turnStart = -1;
+	if (messages[cut].role !== "user") {
+		for (let index = cut; index >= 0; index--) {
+			if (entryIds[index] && ["user", "custom", "branchSummary", "bashExecution"].includes(messages[index].role)) {
+				turnStart = index;
+				break;
+			}
+		}
+	}
+	const isSplitTurn = turnStart >= 0;
+	const historyEnd = isSplitTurn ? turnStart : cut;
+	let previousSummary: string | undefined;
+	let previousSummaryIndex = -1;
+	for (const [index, message] of messages.entries()) {
+		if (message.role !== "compactionSummary") continue;
+		previousSummary = message.summary;
+		previousSummaryIndex = pathEntries.findIndex((entry) => entry.id === entryIds[index]);
+	}
+	const historical = messages.filter(
+		(message, index) => entryIds[index] && index < historyEnd && message.role !== "compactionSummary",
+	);
+	const turnPrefixMessages = isSplitTurn
+		? messages.filter(
+				(message, index) =>
+					entryIds[index] && index >= turnStart && index < cut && message.role !== "compactionSummary",
+			)
+		: [];
+	if (!historical.length && !turnPrefixMessages.length && !previousSummary) return;
+	// Virtual TaskFrame displays are continuity input, never a canonical suffix boundary.
+	const messagesToSummarize = messages.filter(
+		(message, index) => message.role !== "compactionSummary" && (!entryIds[index] || index < historyEnd),
+	);
+	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, previousSummaryIndex);
+	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
+	return {
+		firstKeptEntryId: entryIds[cut]!,
+		messagesToSummarize,
+		turnPrefixMessages,
+		isSplitTurn,
+		tokensBefore: estimateContextTokens([...messages]).tokens,
+		previousSummary,
+		fileOps,
+		settings,
+	};
+}
+
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,

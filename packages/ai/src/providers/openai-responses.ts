@@ -17,6 +17,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import type { ProviderRequestProjection } from "../utils/request-token-budget.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -24,7 +25,12 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	matchesResponsesTextSignature,
+	processResponsesStream,
+} from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -61,6 +67,38 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+}
+
+function textRequestProjection(
+	model: Model<"openai-responses">,
+	context: Context,
+	input: ResponseCreateParamsStreaming["input"],
+): ProviderRequestProjection | undefined {
+	if (model.provider !== "openai" || !Array.isArray(input)) return;
+	const messageIndices: Array<number | null> = context.systemPrompt ? [null] : [];
+	for (const [index, message] of context.messages.entries()) {
+		if (message.role === "user") {
+			if (
+				typeof message.content !== "string" &&
+				(!message.content.length || message.content.some((part) => part.type !== "text"))
+			)
+				return;
+		} else if (message.role === "assistant") {
+			if (
+				message.api !== model.api ||
+				message.provider !== model.provider ||
+				message.model !== model.id ||
+				message.stopReason !== "stop" ||
+				message.content.length !== 1 ||
+				message.content[0].type !== "text"
+			)
+				return;
+			if (!matchesResponsesTextSignature(message.content[0].textSignature, input[messageIndices.length])) return;
+		} else return;
+		messageIndices.push(index);
+	}
+	if (input.length !== messageIndices.length) return;
+	return { kind: "openai-responses-text-v1", messageIndices };
 }
 
 export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
@@ -100,6 +138,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}
 			let params = buildParams(model, context, options);
+			const projection = options?.attempts?.prepareRequest
+				? textRequestProjection(model, context, params.input)
+				: undefined;
+			const originalInput = projection ? JSON.stringify(params.input) : undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -107,8 +149,12 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
 			if (attempts.hasRequestBudget) {
 				const body = JSON.stringify(params);
-				params = JSON.parse(body) as ResponseCreateParamsStreaming;
-				await attempts.measureRequest({ url: `${client.baseURL.replace(/\/$/, "")}/responses`, body });
+				const serialized = JSON.parse(body) as ResponseCreateParamsStreaming;
+				const selected = await attempts.prepareRequest(
+					{ url: `${client.baseURL.replace(/\/$/, "")}/responses`, body },
+					projection && JSON.stringify(serialized.input) === originalInput ? projection : undefined,
+				);
+				params = JSON.parse(selected!) as ResponseCreateParamsStreaming;
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),

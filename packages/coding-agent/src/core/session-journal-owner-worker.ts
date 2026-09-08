@@ -480,9 +480,19 @@ async function start(): Promise<void> {
 				!request ||
 				!Number.isSafeInteger(request.id) ||
 				request.id < 1 ||
-				!["begin", "begin-admitted", "chunk", "commit", "abort", "flush", "recover", "migrate", "close"].includes(
-					request.action,
-				)
+				![
+					"begin",
+					"begin-admitted",
+					"begin-recovery",
+					"begin-context-epoch",
+					"chunk",
+					"commit",
+					"abort",
+					"flush",
+					"recover",
+					"migrate",
+					"close",
+				].includes(request.action)
 			)
 				throw new Error("Invalid session journal request");
 			bytes = Buffer.byteLength(encoded);
@@ -507,6 +517,8 @@ async function start(): Promise<void> {
 			switch (request.action) {
 				case "begin":
 				case "begin-admitted":
+				case "begin-recovery":
+				case "begin-context-epoch":
 					requireAppendable();
 					if (upload) throw new Error("Session journal upload already active");
 					if (request.retention !== undefined && request.retention !== "retained-import")
@@ -522,7 +534,14 @@ async function start(): Promise<void> {
 						expected: request.bytes,
 						received: 0,
 						retention: request.retention,
-						qualification: request.action === "begin-admitted" ? "native-admission" : undefined,
+						qualification:
+							request.action === "begin-admitted"
+								? "native-admission"
+								: request.action === "begin-recovery"
+									? "native-recovery"
+									: request.action === "begin-context-epoch"
+										? "native-context-epoch"
+										: undefined,
 					};
 					return;
 				case "chunk": {
@@ -580,6 +599,8 @@ async function start(): Promise<void> {
 						if (
 							request.action === "begin" ||
 							request.action === "begin-admitted" ||
+							request.action === "begin-recovery" ||
+							request.action === "begin-context-epoch" ||
 							request.action === "chunk" ||
 							request.action === "commit"
 						)

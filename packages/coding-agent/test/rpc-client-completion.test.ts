@@ -75,9 +75,11 @@ describe("RpcClient completion", () => {
 		});
 		await expect(client.promptAndWait("work")).rejects.toBeInstanceOf(AgentOutputLimitError);
 		expect(unsubscribe).toHaveBeenCalledOnce();
-		const server = startup(30);
+		const server = startup(DAEMON_SCHEMA_REVISION - 1);
 		try {
-			await expect(server.client.start()).rejects.toThrow("Incompatible RPC schema: expected at least 31, got 30");
+			await expect(server.client.start()).rejects.toThrow(
+				`Incompatible RPC schema: expected at least ${DAEMON_SCHEMA_REVISION}, got ${DAEMON_SCHEMA_REVISION - 1}`,
+			);
 			expect(existsSync(server.stopped)).toBe(true);
 		} finally {
 			await server.client.stop();

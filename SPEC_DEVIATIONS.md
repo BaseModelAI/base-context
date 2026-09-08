@@ -370,6 +370,22 @@ Parent reports later live work. It does not alter any W26 finding above:
 
 No later message supplies the missing complete W26 epoch/recovery, whole-harness memory, exact live provider, installed release or campaign evidence.
 
+## Current prerequisite implementation — W28/W29
+
+This update does not change the immutable W26 findings or line anchors above.
+Scope remains frozen to the five benchmark prerequisites; unrelated findings remain deferred.
+
+- **TaskFrame:** native source-qualified frames remain in provider context. W29 stores frozen frame text/anchors in source-backed epoch checkpoints and reconstructs them on same-journal reopen. This does not complete authoritative resource generations.
+- **ViewUnit closure/selection:** W28 applies complete replay/dependency closure to real compiler output. W29 selects historical plain assistant literals in the actual native OpenAI Responses request after one payload hook. Current users, latest assistant, TaskFrames, fixed views and genuine recovery units remain mandatory. Exact V1/legacy reply identities are supported; retained generated IDs may not shift. Tool-bearing, Codex and opaque projections remain unsupported/intact-or-refused.
+- **Model-aware budgets:** actual serialization uses an explicit route/model/profile and conservative estimates. Selection and admission share one captured evaluator across the checkpoint wait; ordinary receipt observations still feed future requests. No tokenizer, live cost/accuracy or deployment certification is implied.
+- **Committed epochs:** the existing compaction owner ACKs qualified source recipes, frozen TaskFrames and actual representation identity before adoption/send. Same-source CAS, restart reconstruction, stable service-request prefixes and ordinary-summary continuation have focused offline working paths. Cross-file/fork/import rebuilds, full replay/resource boundaries and ordinary-summary recovery retention remain open. Ownership/RPC schema32 rejects older source readers; protocol11 remains unchanged.
+- **Selective recovery:** native `prime_context` and active-cell `rlm.prime_context` return bounded selected source data in the actual finalized tool output. W29 qualifies only the selected executor entering the authorized reader. Forged markers/custom replacements cannot qualify; retained imports lose recovery-kind admission. This is producer provenance, not success, authority promotion or resource freshness.
+
+The five-feature benchmark gate is **still closed**. Once all five features work,
+run all 30 tasks at low effort, then medium effort, with the same existing session ChatGPT
+subscription and exact `gpt-5.6-sol` / `gpt-6-astra`. No live benchmark, model/auth/readiness
+probe or publication was performed for this milestone.
+
 ## Completed D/S setup handoff — setup only
 
 The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.
