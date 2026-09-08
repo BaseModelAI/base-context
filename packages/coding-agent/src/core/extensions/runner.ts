@@ -246,7 +246,7 @@ export class ExtensionRunner {
 	private waitForIdleFn: () => Promise<void> = async () => {};
 	private abortFn: () => void = () => {};
 	private hasPendingMessagesFn: () => boolean = () => false;
-	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
+	private getContextUsageFn: () => Promise<ContextUsage | undefined> = async () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });

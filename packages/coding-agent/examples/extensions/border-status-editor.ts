@@ -47,8 +47,8 @@ function formatCwd(cwd: string): string {
 	return cwd;
 }
 
-function formatContext(ctx: ExtensionContext): string {
-	const usage = ctx.getContextUsage();
+async function formatContext(ctx: ExtensionContext): Promise<string> {
+	const usage = await ctx.getContextUsage();
 	const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
 	if (!contextWindow || !usage || usage.percent === null) {
 		return "ctx ?";
@@ -73,7 +73,19 @@ export default function (pi: ExtensionAPI) {
 	let spinnerIndex = 0;
 	let spinnerTimer: ReturnType<typeof setInterval> | undefined;
 	let activeTui: TUI | undefined;
+	let contextText = "ctx ?";
+	let contextGeneration = 0;
 	const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+	const refreshContext = async (ctx: ExtensionContext) => {
+		const generation = ++contextGeneration;
+		contextText = "ctx ?";
+		activeTui?.requestRender();
+		const nextText = await formatContext(ctx);
+		if (generation !== contextGeneration) return;
+		contextText = nextText;
+		activeTui?.requestRender();
+	};
 
 	const stopSpinner = () => {
 		if (spinnerTimer) {
@@ -82,7 +94,7 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", async (_event, ctx) => {
 		isWorking = true;
 		stopSpinner();
 		spinnerTimer = setInterval(() => {
@@ -90,20 +102,30 @@ export default function (pi: ExtensionAPI) {
 			activeTui?.requestRender();
 		}, 80);
 		activeTui?.requestRender();
+		await refreshContext(ctx);
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_end", async (_event, ctx) => {
 		isWorking = false;
 		stopSpinner();
 		activeTui?.requestRender();
+		await refreshContext(ctx);
 	});
 
+	pi.on("message_end", (_event, ctx) => refreshContext(ctx));
+	pi.on("turn_end", (_event, ctx) => refreshContext(ctx));
+	pi.on("session_compact", (_event, ctx) => refreshContext(ctx));
+	pi.on("session_tree", (_event, ctx) => refreshContext(ctx));
+	pi.on("model_select", (_event, ctx) => refreshContext(ctx));
+
 	pi.on("session_shutdown", () => {
+		contextGeneration++;
 		stopSpinner();
 		activeTui = undefined;
 	});
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		contextText = "ctx ?";
 		ctx.ui.setWorkingVisible(false);
 		ctx.ui.setFooter(() => new EmptyFooter());
 
@@ -135,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 				const bottomLeft = thm.fg("muted", ` ${model} · ${formatThinking(thinking)} `);
 				const bottomRight = thm.fg(
 					"muted",
-					` ${formatContext(ctx)} · ${formatCwd(ctx.cwd)}${branch ? ` (${branch})` : ""} `,
+					` ${contextText} · ${formatCwd(ctx.cwd)}${branch ? ` (${branch})` : ""} `,
 				);
 				const borderColor = (text: string) => this.borderColor(text);
 
@@ -146,5 +168,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => new BorderStatusEditor(tui, theme, keybindings));
+		await refreshContext(ctx);
 	});
 }

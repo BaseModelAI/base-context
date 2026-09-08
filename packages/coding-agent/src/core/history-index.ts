@@ -50,6 +50,7 @@ export interface BranchBootstrapState {
 	goalState: IndexedSourceEvent | null;
 	rlmMaxDepth: IndexedSourceEvent | null;
 	latestCompaction: IndexedSourceEvent | null;
+	contextUsageAssistant: IndexedSourceEvent | null;
 	hasContextMessages: boolean;
 	/** Exact message-entry presence, independent of payload truthiness. */
 	hasBranchMessage: boolean;
@@ -564,7 +565,7 @@ export class HistoryIndex {
 			},
 		})) as ParentPathPage;
 	}
-	/** At most six source refs and exact message/goal-seeding facts for the captured branch. */
+	/** At most seven source refs and exact message/goal-seeding facts for the captured branch. */
 	async branchBootstrap(
 		sessionId: string,
 		scope: HistoryIndexScope & { through: number },

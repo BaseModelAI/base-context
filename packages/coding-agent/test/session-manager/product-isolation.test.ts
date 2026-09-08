@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
@@ -41,6 +42,7 @@ describe("session write isolation", () => {
 			goalState: null,
 			rlmMaxDepth: null,
 			latestCompaction: null,
+			contextUsageAssistant: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -329,11 +331,33 @@ describe("session write isolation", () => {
 				entry: { data: { maxDepth: 0 } },
 			});
 		});
+		const usageAssistant = {
+			role: "assistant",
+			content: [],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-4.1",
+			usage: {
+				input: 1000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		} satisfies AssistantMessage;
+		const preCompactionAssistantId = await copied.appendMessage(usageAssistant);
+		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			contextUsageAssistant: { id: preCompactionAssistantId },
+		});
 		const compactionId = await copied.appendCompaction("Exact compacted context", "Imported-User", 1200);
 		const compactionTimestamp = copied.getEntry(compactionId)!.timestamp;
 		await copied.readBranchHistory(async (history) => {
 			const bootstrap = await history.branchBootstrap();
 			expect(bootstrap.latestCompaction?.id).toBe(compactionId);
+			expect(bootstrap.contextUsageAssistant).toBeNull();
 			expect(await history.hydrateEntry(bootstrap.latestCompaction!.id, 64 * 1024)).toMatchObject({
 				entry: {
 					type: "compaction",
@@ -343,16 +367,33 @@ describe("session write isolation", () => {
 				},
 			});
 		});
+		// Path position, not the assistant timestamp, defines the compaction boundary.
+		await copied.appendMessage(usageAssistant);
+		const zeroUsageId = await copied.appendMessage({
+			...usageAssistant,
+			usage: { ...usageAssistant.usage, input: 0, totalTokens: 0 },
+		});
+		await copied.appendMessage({ ...usageAssistant, stopReason: "error" });
+		const abortedUsageId = await copied.appendMessage({ ...usageAssistant, stopReason: "aborted" });
+		await copied.readBranchHistory(async (history) => {
+			const bootstrap = await history.branchBootstrap();
+			expect(bootstrap.contextUsageAssistant?.id).toBe(zeroUsageId);
+			expect(await history.hydrateEntry(bootstrap.contextUsageAssistant!.id, 64 * 1024)).toMatchObject({
+				entry: { message: { usage: { input: 0, totalTokens: 0 } } },
+			});
+		});
 		copied.branch(depthId);
 		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			latestCompaction: null,
+			contextUsageAssistant: null,
 		});
-		copied.branch(compactionId);
+		copied.branch(abortedUsageId);
 		const retainedDepth = await SessionManager.importRetainedFrom(copied.getSessionFile()!, dir, ownedDir);
 		managers.push(retainedDepth);
 		expect(await retainedDepth.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			rlmMaxDepth: { id: depthId, retention: "retained-import" },
 			latestCompaction: { id: compactionId, retention: "retained-import" },
+			contextUsageAssistant: { id: zeroUsageId, retention: "retained-import" },
 			goalState: null,
 			hasBranchMessage: true,
 		});
@@ -387,6 +428,7 @@ describe("session write isolation", () => {
 				hasBranchMessage: false,
 				rlmMaxDepth: null,
 				latestCompaction: null,
+				contextUsageAssistant: null,
 				goalSeedable: false,
 				model: { id: rootModelId },
 			});

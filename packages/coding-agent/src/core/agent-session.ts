@@ -264,6 +264,7 @@ import {
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
+import { ContextUsageReader } from "./session-context-usage.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
@@ -1004,6 +1005,7 @@ export class AgentSession {
 	readonly requests: InferenceCoordinator;
 	readonly runtimeServices: SessionRuntimeServices;
 	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private readonly _contextUsageReader = new ContextUsageReader();
 	private _compactionBoundaryCache?: {
 		sessionId: string;
 		sessionFile: string | undefined;
@@ -3213,18 +3215,22 @@ export class AgentSession {
 	 * abort the run executing the requesting cell, so compact.run only schedules
 	 * it; _checkCompaction consumes the request at the turn boundary.
 	 */
-	handleCompactHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleCompactHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
 		if (!this._includeCompactSkill) {
 			throw new Error("the compact skill is disabled in this session");
 		}
 		switch (type) {
 			case "compact.status": {
-				const usage = this.getContextUsage();
+				const scheduled = this._pendingRequestedCompaction !== undefined;
+				const usage = await this.getContextUsage();
 				return {
 					tokens: usage?.tokens ?? null,
 					context_window: usage?.contextWindow ?? null,
 					percent: usage?.percent ?? null,
-					scheduled: this._pendingRequestedCompaction !== undefined,
+					scheduled,
 				};
 			}
 			case "compact.run": {
@@ -12299,7 +12305,7 @@ export class AgentSession {
 		return "";
 	}
 
-	getSessionStats(): SessionStats {
+	async getSessionStats(): Promise<SessionStats> {
 		const state = this.state;
 		const userMessages = state.messages.filter((m) => m.role === "user").length;
 		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
@@ -12340,53 +12346,25 @@ export class AgentSession {
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
-			contextUsage: this.getContextUsage(),
+			contextUsage: await this.getContextUsage(),
 		};
 	}
 
-	getContextUsage(): ContextUsage | undefined {
+	async getContextUsage(): Promise<ContextUsage | undefined> {
 		const model = this.model;
 		if (!model) return undefined;
-
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
-		}
-
+		// Capture the working-view estimate before the source read can yield.
 		const estimate = estimateContextTokens(this.messages);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		if (!(await this._contextUsageReader.hasPostCompactionUsage(this.sessionManager, maxSourceBytes)))
+			return { tokens: null, contextWindow, percent: null };
 		return {
 			tokens: estimate.tokens,
 			contextWindow,
-			percent,
+			percent: (estimate.tokens / contextWindow) * 100,
 		};
 	}
 
@@ -12420,43 +12398,52 @@ export class AgentSession {
 	 * from their live sessions; completed children from their persisted session
 	 * dirs, so the tree survives child disposal and session resume.
 	 */
-	getContextTree(): ContextTreeNode {
+	async getContextTree(): Promise<ContextTreeNode> {
 		const resolveContextWindow = this._contextWindowResolver();
 		const { ownUsage, totalUsage } = computeOwnAndTotalUsage(
 			this.sessionManager.getBranch(),
 			this.sessionManager.getEntries(),
 		);
-
-		const children: ContextTreeNode[] = [];
-		const liveIds = new Set<string>();
-		for (const run of this._activeRlmChildRuns.values()) {
-			liveIds.add(run.id);
-			const node =
-				run.session?.getContextTree() ?? loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow);
-			children.push({
-				...(node ?? {
-					ownUsage: emptyUsage(),
-					totalUsage: emptyUsage(),
-					children: [],
-				}),
-				id: run.id,
-				label: rlmChildLabel(run.prompt),
-				status: run.status,
-			});
-		}
-		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
-
+		const runs = [...this._activeRlmChildRuns.values()].map((run) => ({
+			id: run.id,
+			label: rlmChildLabel(run.prompt),
+			status: run.status,
+			session: run.session,
+			diskNode: run.session ? undefined : loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow),
+		}));
+		const diskChildren = loadContextTreeChildrenFromDisk(
+			this._rlmSessionDirForReading(),
+			resolveContextWindow,
+			new Set(runs.map((run) => run.id)),
+		);
 		const model = this.model;
-		return {
+		const rootNode = {
 			id: "root",
 			label: this.sessionName ?? "main agent",
-			status: "active",
+			status: "active" as const,
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 			ownUsage,
 			totalUsage,
-			contextUsage: this.getContextUsage(),
-			children,
 		};
+		// Start all live reads before yielding and join every accepted read on failure too.
+		const results = await Promise.allSettled([
+			this.getContextUsage(),
+			...runs.map((run) => run.session?.getContextTree() ?? Promise.resolve(run.diskNode)),
+		]);
+		const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Context tree reads failed");
+		const contextUsage = (results[0] as PromiseFulfilledResult<ContextUsage | undefined>).value;
+		const children = runs.map((run, index) => {
+			const node = (results[index + 1] as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
+			return {
+				...(node ?? { ownUsage: emptyUsage(), totalUsage: emptyUsage(), children: [] }),
+				id: run.id,
+				label: run.label,
+				status: run.status,
+			};
+		});
+		return { ...rootNode, contextUsage, children: [...children, ...diskChildren] };
 	}
 
 	/**

@@ -2456,13 +2456,13 @@ describe("AgentSession rlm recursion", () => {
 		if (!initialParentEntry) throw new Error("Missing acknowledged parent assistant entry");
 		const parentEntryId = initialParentEntry.id;
 
-		const before = root.getSessionStats();
+		const before = await root.getSessionStats();
 		const spawned = await root.runRlmChild("summarize shard 2");
 		await waitFor(() => root.sessionManager.getEntries().some((entry) => entry.type === "child_usage_attributed"));
 		const child = root.getRlmChildSession(spawned.rlm_child_id);
 		if (!child) throw new Error("Missing completed child session");
 		const observedUsage = lastAssistantUsage(child);
-		const after = root.getSessionStats();
+		const after = await root.getSessionStats();
 
 		expect(after.tokens.input).toBeGreaterThanOrEqual(before.tokens.input + observedUsage.input);
 		expect(after.tokens.output).toBeGreaterThanOrEqual(before.tokens.output + observedUsage.output);

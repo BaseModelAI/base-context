@@ -79,7 +79,7 @@ describe("ExtensionRunner", () => {
 		abort: () => {},
 		hasPendingMessages: () => false,
 		shutdown: () => {},
-		getContextUsage: () => undefined,
+		getContextUsage: async () => undefined,
 		compact: () => {},
 		getSystemPrompt: () => "",
 	};
@@ -436,9 +436,11 @@ describe("ExtensionRunner", () => {
 			runner.bindCore(extensionActions, {
 				...extensionContextActions,
 				getSignal: () => controller.signal,
+				getContextUsage: async () => ({ tokens: 1, contextWindow: 2, percent: 50 }),
 			});
 
 			const ctx = runner.createContext();
+			await expect(ctx.getContextUsage()).resolves.toEqual({ tokens: 1, contextWindow: 2, percent: 50 });
 			expect(ctx.signal).toBe(controller.signal);
 			expect(ctx.signal?.aborted).toBe(false);
 
@@ -472,6 +474,14 @@ describe("ExtensionRunner", () => {
 			expect(errors.length).toBe(1);
 			expect(errors[0].error).toContain("Handler error!");
 			expect(errors[0].event).toBe("context");
+			const usageError = new Error("Context usage read failed");
+			runner.bindCore(extensionActions, {
+				...extensionContextActions,
+				getContextUsage: async () => {
+					throw usageError;
+				},
+			});
+			await expect(runner.createContext().getContextUsage()).rejects.toBe(usageError);
 		});
 	});
 

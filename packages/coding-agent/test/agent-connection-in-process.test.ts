@@ -121,7 +121,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		},
 		scopedModels: [],
 		getActiveToolNames: () => ["ipython"],
-		getContextUsage: () => undefined,
+		getContextUsage: async () => undefined,
 		cancelRlmChildRun: (childId: string) => childId === "child-1",
 		getRlmChildSnapshots: () => [],
 		getToolDefinition: (toolName: string) => ({
@@ -275,20 +275,47 @@ describe("InProcessAgentConnection", () => {
 		const materialize = vi.spyOn(session.session.sessionManager, "materializeResidentHistory");
 		const runtime = new FakeRuntime(session.session);
 		const connection = new InProcessAgentConnection(asRuntime(runtime));
+		const contextUsage = { tokens: 10, contextWindow: 100, percent: 10 };
+		let releaseReads = () => {};
+		const readGate = new Promise<void>((resolve) => {
+			releaseReads = resolve;
+		});
+		const getUsage = vi.spyOn(session.session, "getContextUsage").mockImplementation(async () => {
+			await readGate;
+			return contextUsage;
+		});
+		const getContext = vi.spyOn(session.session, "buildSessionContext").mockImplementation(async () => {
+			const capturedMessages = [...messages];
+			await readGate;
+			return { messages: capturedMessages, thinkingLevel: "medium", serviceTier: "default", model: null };
+		});
+		const streamingMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "snapshot reply" }],
+		} as AgentMessage;
+		Object.assign(session.session, { state: { streamingMessage } });
 
 		const getChildren = vi.spyOn(session.session, "getRlmChildSnapshots");
 		const pendingSnapshot = connection.getInitialSnapshot();
 		expect(getChildren).toHaveBeenCalledTimes(1);
+		expect(getUsage).toHaveBeenCalledTimes(1);
+		expect(getContext).toHaveBeenCalledTimes(1);
+		messages.push(userMessage("pending context", 2));
+		Object.assign(session.session, { sessionName: "later name", state: {} });
+		releaseReads();
 		const snapshot = await pendingSnapshot;
 
 		expect(snapshot).toMatchObject({
 			state: {
 				cwd: "/tmp/snapshot",
 				sessionId: "snapshot",
+				sessionName: "snapshot name",
 				messageCount: 1,
 				leafId: "snapshot-leaf",
+				contextUsage,
 			},
 			messages: [userMessage("snapshot context", 1)],
+			streamingMessage,
 			sessionContext: {
 				messages: [userMessage("snapshot context", 1)],
 				thinkingLevel: "medium",
@@ -304,9 +331,40 @@ describe("InProcessAgentConnection", () => {
 		expect(materialize).toHaveBeenCalledWith(DEFAULT_FORK_MESSAGE_LIMITS);
 		expect(getEntries).not.toHaveBeenCalled();
 		expect(getTree).not.toHaveBeenCalled();
+		expect(snapshot.state).not.toBeInstanceOf(Promise);
+		expect(snapshot.state.contextUsage).not.toBeInstanceOf(Promise);
 		expect(snapshot.sessionContext).not.toBeInstanceOf(Promise);
 		messages.push(userMessage("later context", 2));
 		expect(snapshot.messages).toEqual([userMessage("snapshot context", 1)]);
+
+		const usageError = new Error("usage read failed");
+		const contextError = new Error("context read failed");
+		let rejectContext = (_error: Error) => {};
+		const contextRead = new Promise<Awaited<ReturnType<RuntimeSession["buildSessionContext"]>>>(
+			(_resolve, reject) => {
+				rejectContext = reject;
+			},
+		);
+		getUsage.mockRejectedValueOnce(usageError);
+		getContext.mockReturnValueOnce(contextRead);
+		let snapshotSettled = false;
+		const failedSnapshot = connection.getInitialSnapshot().then(
+			() => {
+				snapshotSettled = true;
+			},
+			(error: unknown) => {
+				snapshotSettled = true;
+				return error;
+			},
+		);
+		expect(getUsage).toHaveBeenCalledTimes(2);
+		expect(getContext).toHaveBeenCalledTimes(2);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(snapshotSettled).toBe(false);
+		rejectContext(contextError);
+		const failure = await failedSnapshot;
+		expect(failure).toBeInstanceOf(AggregateError);
+		expect(failure).toHaveProperty("errors", [usageError, contextError]);
 
 		const root = mkdtempSync(join(tmpdir(), "bc-session-tree-"));
 		const manager = await SessionManager.create(root, join(root, "sessions"));
@@ -508,7 +566,21 @@ describe("InProcessAgentConnection", () => {
 		expect(oldSession.listenerCount()).toBe(1);
 		runtime.invalidateCurrentSession();
 
-		await runtime.replaceSession(newSession.session);
+		const contextUsage = { tokens: 20, contextWindow: 100, percent: 20 };
+		let releaseUsage = () => {};
+		const usageGate = new Promise<void>((resolve) => {
+			releaseUsage = resolve;
+		});
+		vi.spyOn(newSession.session, "getContextUsage").mockImplementation(async () => {
+			await usageGate;
+			return contextUsage;
+		});
+		const replacement = runtime.replaceSession(newSession.session);
+		newSession.session.messages.push(userMessage("later replacement", 3));
+		Object.assign(newSession.session, { sessionName: "later name" });
+		expect(events).toEqual([]);
+		releaseUsage();
+		await replacement;
 
 		expect(invalidations).toEqual(["invalidated"]);
 		expect(oldSession.listenerCount()).toBe(0);
@@ -524,6 +596,7 @@ describe("InProcessAgentConnection", () => {
 					messageCount: 1,
 					leafId: "new-leaf",
 					activeToolNames: ["ipython"],
+					contextUsage,
 				}),
 				messages: [userMessage("new", 2)],
 			},

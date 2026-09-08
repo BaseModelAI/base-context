@@ -703,7 +703,7 @@ function makeRuntimeSession(
 		getAvailableThinkingLevels: vi.fn(() => []),
 		scopedModels: [],
 		getActiveToolNames: vi.fn(() => []),
-		getContextUsage: vi.fn(() => undefined),
+		getContextUsage: vi.fn(async () => undefined),
 		setSessionName: vi.fn((name: string) => sessionManager.appendSessionInfo(name)),
 		dispose: vi.fn(),
 		disposeAsync: vi.fn(async () => {

@@ -24,8 +24,8 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
-	pi.on("turn_end", (_event, ctx) => {
-		const usage = ctx.getContextUsage();
+	pi.on("turn_end", async (_event, ctx) => {
+		const usage = await ctx.getContextUsage();
 		const currentTokens = usage?.tokens ?? null;
 		if (currentTokens === null) {
 			return;

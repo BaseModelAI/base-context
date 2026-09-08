@@ -64,10 +64,12 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		const runResult = harness.session.handleCompactHostRequest("compact.run", { instructions: "keep the plan" });
+		const runResult = await harness.session.handleCompactHostRequest("compact.run", {
+			instructions: "keep the plan",
+		});
 		setStreaming(harness, false);
 		expect(runResult.scheduled).toBe(true);
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(true);
 
 		const internals = harness.session as unknown as SessionInternals;
 		const compacted = await internals._checkCompaction(createAssistant(harness));
@@ -80,7 +82,7 @@ describe("AgentSession compact skill host requests", () => {
 			customInstructions: "keep the plan",
 		});
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ reason: "requested" });
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 	});
 
 	it("reports skipped when there is nothing to compact", async () => {
@@ -89,10 +91,10 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("one");
 
 		setStreaming(harness, true);
-		const result = harness.session.handleCompactHostRequest("compact.run");
+		const result = await harness.session.handleCompactHostRequest("compact.run");
 		setStreaming(harness, false);
 		expect(result).toEqual({ scheduled: false, reason: "session is too short to compact" });
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 	});
 
 	it("runs a requested compaction even when auto-compaction is disabled", async () => {
@@ -105,7 +107,7 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		expect(harness.session.handleCompactHostRequest("compact.run").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.run")).scheduled).toBe(true);
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
@@ -128,13 +130,13 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		expect(harness.session.handleCompactHostRequest("compact.run").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.run")).scheduled).toBe(true);
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
 		const compacted = await internals._checkCompaction(createAssistant(harness, { stopReason: "aborted" }));
 		expect(compacted).toBe(false);
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 
@@ -148,13 +150,13 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		expect(harness.session.handleCompactHostRequest("compact.run").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.run")).scheduled).toBe(true);
 		setStreaming(harness, false);
 
 		const internals = harness.session as unknown as SessionInternals;
 		const compacted = await internals._checkCompaction(createAssistant(harness, { stopReason: "aborted" }), false);
 		expect(compacted).toBe(false);
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction")).toHaveLength(0);
 	});
 
@@ -167,10 +169,10 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		const result = harness.session.handleCompactHostRequest("compact.run");
+		const result = await harness.session.handleCompactHostRequest("compact.run");
 		expect(result.scheduled).toBe(false);
 		expect(result.reason).toContain("no active turn");
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 	});
 
 	it("prioritizes overflow recovery over a pending requested compaction", async () => {
@@ -186,7 +188,8 @@ describe("AgentSession compact skill host requests", () => {
 
 		setStreaming(harness, true);
 		expect(
-			harness.session.handleCompactHostRequest("compact.run", { instructions: "keep the todo list" }).scheduled,
+			(await harness.session.handleCompactHostRequest("compact.run", { instructions: "keep the todo list" }))
+				.scheduled,
 		).toBe(true);
 		setStreaming(harness, false);
 
@@ -202,7 +205,7 @@ describe("AgentSession compact skill host requests", () => {
 			reason: "overflow",
 			customInstructions: "keep the todo list",
 		});
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 		expect(continueSpy).toHaveBeenCalled();
 	});
 
@@ -246,11 +249,11 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		expect(harness.session.handleCompactHostRequest("compact.run").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.run")).scheduled).toBe(true);
 		setStreaming(harness, false);
 
 		await expect(harness.session.compact()).rejects.toThrow("Compaction cancelled");
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(true);
 	});
 
 	it("clears a pending requested compaction when manual compaction succeeds", async () => {
@@ -263,11 +266,11 @@ describe("AgentSession compact skill host requests", () => {
 		await harness.session.prompt("two");
 
 		setStreaming(harness, true);
-		expect(harness.session.handleCompactHostRequest("compact.run").scheduled).toBe(true);
+		expect((await harness.session.handleCompactHostRequest("compact.run")).scheduled).toBe(true);
 		setStreaming(harness, false);
 
 		await harness.session.compact();
-		expect(harness.session.handleCompactHostRequest("compact.status").scheduled).toBe(false);
+		expect((await harness.session.handleCompactHostRequest("compact.status")).scheduled).toBe(false);
 	});
 
 	it("reports context usage via compact.status", async () => {
@@ -275,7 +278,7 @@ describe("AgentSession compact skill host requests", () => {
 		harnesses.push(harness);
 		await harness.session.prompt("one");
 
-		const status = harness.session.handleCompactHostRequest("compact.status");
+		const status = await harness.session.handleCompactHostRequest("compact.status");
 		expect(status.scheduled).toBe(false);
 		expect(status.context_window).not.toBeNull();
 	});
@@ -284,7 +287,7 @@ describe("AgentSession compact skill host requests", () => {
 		const harness = await createHarness({ settings: { compaction: { agentCallable: false } } });
 		harnesses.push(harness);
 
-		expect(() => harness.session.handleCompactHostRequest("compact.run")).toThrow(
+		await expect(harness.session.handleCompactHostRequest("compact.run")).rejects.toThrow(
 			"the compact skill is disabled in this session",
 		);
 		const internals = harness.session as unknown as SessionInternals;

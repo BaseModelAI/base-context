@@ -3116,7 +3116,7 @@ function createFakeConnectionSession(commandName: string): AgentSessionRuntime["
 		},
 		getAvailableThinkingLevels: () => ["medium"],
 		getActiveToolNames: () => [],
-		getContextUsage: () => undefined,
+		getContextUsage: async () => undefined,
 		thinkingLevel: "medium",
 		serviceTier: "default",
 		isStreaming: false,

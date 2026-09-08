@@ -53,7 +53,8 @@ if (
 		schemaVersion !== 9 &&
 		schemaVersion !== 10 &&
 		schemaVersion !== 11 &&
-		schemaVersion !== 12)
+		schemaVersion !== 12 &&
+		schemaVersion !== 13)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -123,7 +124,7 @@ transaction(() => {
  CREATE TABLE IF NOT EXISTS context_node (
  session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,
  latest_model TEXT,latest_thinking TEXT,latest_service_tier TEXT,latest_goal TEXT,has_session_message INTEGER,goal_seedable INTEGER,
- latest_rlm_max_depth TEXT,has_branch_message INTEGER,PRIMARY KEY(session,id)
+ latest_rlm_max_depth TEXT,has_branch_message INTEGER,context_usage_assistant TEXT,PRIMARY KEY(session,id)
  );
  CREATE TABLE IF NOT EXISTS context_update (
   session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
@@ -131,7 +132,7 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 12) {
+	if (schemaVersion !== 13) {
 		if (
 			!db
 				.prepare("PRAGMA table_info(source_event)")
@@ -163,6 +164,13 @@ transaction(() => {
  ALTER TABLE context_node ADD COLUMN latest_rlm_max_depth TEXT;
  ALTER TABLE context_node ADD COLUMN has_branch_message INTEGER;
  `);
+		if (
+			!db
+				.prepare("PRAGMA table_info(context_node)")
+				.all()
+				.some((column) => column.name === "context_usage_assistant")
+		)
+			db.exec("ALTER TABLE context_node ADD COLUMN context_usage_assistant TEXT");
 		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
 	}
 	db.exec(`
@@ -171,7 +179,7 @@ transaction(() => {
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=12");
+	db.exec("PRAGMA user_version=13");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -286,6 +294,7 @@ type BootstrapColumns = {
 	goal_seedable: number;
 	latest_rlm_max_depth: string | null;
 	has_branch_message: number;
+	context_usage_assistant: string | null;
 };
 function isPersistedRlmMaxDepthState(value: unknown): boolean {
 	if (typeof value !== "object" || value === null) return false;
@@ -293,7 +302,7 @@ function isPersistedRlmMaxDepthState(value: unknown): boolean {
 	return typeof maxDepth === "number" && Number.isSafeInteger(maxDepth) && maxDepth >= 0;
 }
 const contextParent = db.prepare("SELECT * FROM context_node WHERE session=? AND id=?");
-const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 function insertContext(
 	sessionId: string,
 	item: IndexedSourceEvent,
@@ -321,9 +330,13 @@ function insertContext(
 		entry.firstKeptEntryId.length <= 512
 			? entry.firstKeptEntryId
 			: null;
-	const modelProducer =
-		entry.type === "model_change" ||
-		(entry.type === "message" && (entry.message as { role?: unknown } | null)?.role === "assistant");
+	const message = entry.message as { role?: unknown; stopReason?: unknown } | null;
+	const modelProducer = entry.type === "model_change" || (entry.type === "message" && message?.role === "assistant");
+	const contextUsageAssistant =
+		entry.type === "message" &&
+		message?.role === "assistant" &&
+		message.stopReason !== "aborted" &&
+		message.stopReason !== "error";
 	const eligibleGoal =
 		entry.type === "custom" &&
 		entry.customType === GOAL_STATE_CUSTOM_TYPE &&
@@ -351,6 +364,7 @@ function insertContext(
 		seedControl && (item.parentId === null || parent?.goal_seedable === 1) ? 1 : 0,
 		eligibleRlmMaxDepth ? item.id : (parent?.latest_rlm_max_depth ?? null),
 		parent?.has_branch_message === 1 || entry.type === "message" ? 1 : 0,
+		compaction ? null : contextUsageAssistant ? item.id : (parent?.context_usage_assistant ?? null),
 	);
 }
 // Only bounded relation keys and source refs live here; never usage or sent-message bodies.
@@ -986,6 +1000,7 @@ function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch
 		goalState: reference(state?.latest_goal),
 		rlmMaxDepth: reference(state?.latest_rlm_max_depth),
 		latestCompaction: reference(state?.latest_compaction),
+		contextUsageAssistant: reference(state?.context_usage_assistant),
 		hasBranchMessage: state?.has_branch_message === 1,
 		hasContextMessages: !!state && (state.has_session_message === 1 || state.latest_compaction !== null),
 		goalSeedable: !state || state.goal_seedable === 1,

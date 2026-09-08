@@ -303,7 +303,7 @@ export interface ExtensionContext {
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
-	getContextUsage(): ContextUsage | undefined;
+	getContextUsage(): Promise<ContextUsage | undefined>;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -1369,7 +1369,7 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
-	getContextUsage: () => ContextUsage | undefined;
+	getContextUsage: () => Promise<ContextUsage | undefined>;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 }

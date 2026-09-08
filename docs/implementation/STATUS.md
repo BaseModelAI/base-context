@@ -489,3 +489,22 @@ through dropped git facts still run after the source read. Legacy migration and 
 retention remain unchanged. The existing single-stream reader has no fixed byte-frontier
 capture guarantee. Destination entries/maps and dropped-parent metadata remain resident;
 this change does not establish a total copy-memory or startup-memory bound.
+
+## Captured context-usage availability
+
+Schema13 records a source reference to the latest eligible parent-path assistant since
+compaction. Aborted/error assistants do not replace it; a zero-usage assistant does.
+The native availability check reads that assistant and its authorized latest aggregate
+within one capture. Its scalar cache retains no bodies and charges source bytes on hits.
+Working-view token estimates and model metadata are captured before the read yields.
+These estimates keep their existing semantics; they are not model-aware token limits.
+
+Native context usage, session stats, context trees and compact host responses are now
+asynchronous. Extension context usage is asynchronous too, without waiting on native
+initialization from inside an extension lifecycle callback. Mode responses contain plain
+values, not Promises. Snapshot and live-child reads drain their accepted work and retain
+errors; metadata is captured before the new awaits. Example border rendering stays
+synchronous and refreshes its usage outside render.
+
+Context-tree spend and completed-child loading still use their existing eager readers.
+Persistent Manager stores and current-invocation Agent collectors are not removed here.

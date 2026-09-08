@@ -4673,7 +4673,7 @@ export class AgentDaemon {
 
 			case "get_connection_state": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_connection_state", this.createConnectionState(state));
+				return success(command.id, "get_connection_state", await this.createConnectionState(state));
 			}
 
 			case "get_messages": {
@@ -4693,13 +4693,13 @@ export class AgentDaemon {
 
 			case "get_session_stats": {
 				const state = this.getSessionState(command.activeSessionId);
-				const stats: SessionStats = state.runtime.session.getSessionStats();
+				const stats: SessionStats = await state.runtime.session.getSessionStats();
 				return success(command.id, "get_session_stats", stats);
 			}
 
 			case "get_context_tree": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_context_tree", state.runtime.session.getContextTree());
+				return success(command.id, "get_context_tree", await state.runtime.session.getContextTree());
 			}
 
 			case "get_commands": {
@@ -5266,11 +5266,10 @@ export class AgentDaemon {
 		}
 		session = state.runtime.session;
 		const connectionState = this.createConnectionState(state);
-		return {
+		const snapshot = {
 			activeSessionId: state.activeSessionId,
 			summary: summaryForActiveSession(state),
-			state: connectionState,
-			messages: session.messages,
+			messages: [...session.messages],
 			// Omit duplicate heavy payloads from attach. The client can derive render
 			// context from messages + state, and fetch the full session tree lazily
 			// when the tree/branch selector opens.
@@ -5282,6 +5281,7 @@ export class AgentDaemon {
 			...(parent ? { parent } : {}),
 			children,
 		};
+		return { ...snapshot, state: await connectionState };
 	}
 
 	private async streamWorkerSnapshot(
@@ -5506,12 +5506,13 @@ export class AgentDaemon {
 		});
 	}
 
-	private createConnectionState(state: ActiveSessionState): ReturnType<typeof createAgentConnectionState> {
-		const connectionState = createAgentConnectionState(state.runtime, state.activeSessionId);
-		connectionState.heartbeat = this.cronStore.getLatestHeartbeat(state.activeSessionId) ?? null;
-		if (state.summaryState?.summary) {
-			connectionState.recap = state.summaryState.summary;
-		}
+	private async createConnectionState(state: ActiveSessionState): ReturnType<typeof createAgentConnectionState> {
+		const stateRead = createAgentConnectionState(state.runtime, state.activeSessionId);
+		const heartbeat = this.cronStore.getLatestHeartbeat(state.activeSessionId) ?? null;
+		const recap = state.summaryState?.summary;
+		const connectionState = await stateRead;
+		connectionState.heartbeat = heartbeat;
+		if (recap) connectionState.recap = recap;
 		return connectionState;
 	}
 

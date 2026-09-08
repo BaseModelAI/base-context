@@ -195,6 +195,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			goalState: null,
 			rlmMaxDepth: null,
 			latestCompaction: null,
+			contextUsageAssistant: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -509,6 +510,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			goalState: null,
 			rlmMaxDepth: null,
 			latestCompaction: null,
+			contextUsageAssistant: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -606,6 +608,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			goalState: await index.getSource("canonical", "bootstrap-goal", visibleScope.through),
 			rlmMaxDepth: await index.getSource("canonical", "bootstrap-rlm-depth", visibleScope.through),
 			latestCompaction: await index.getSource("canonical", "context-compact", visibleScope.through),
+			contextUsageAssistant: null,
 			hasBranchMessage: true,
 			hasContextMessages: true,
 			goalSeedable: false,
@@ -746,6 +749,42 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		).toBe(earlyUsageJson);
 		expect(await index.readPayload("canonical", "usage-before-assistant", earlyUpdateScope)).toBeUndefined();
 
+		expect((await index.branchBootstrap("canonical", earlyUpdateScope)).contextUsageAssistant).toEqual(
+			await index.getSource("canonical", usageTarget.targetId, earlyUpdateScope.through),
+		);
+		let contextUsageLeaf: string = usageTarget.targetId;
+		for (const [id, stopReason, input] of [
+			["context-usage-positive", "stop", 7],
+			["context-usage-zero", "stop", 0],
+			["context-usage-error", "error", 0],
+			["context-usage-aborted", "aborted", 0],
+		] as const) {
+			await owner.appendJson(
+				JSON.stringify({
+					id,
+					parentId: contextUsageLeaf,
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [],
+						stopReason,
+						timestamp: 0,
+						usage: { input, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: input },
+					},
+				}),
+				id === "context-usage-zero" ? "retained-import" : undefined,
+			);
+			contextUsageLeaf = id;
+		}
+		const contextUsageSnapshot = owner.getSnapshot();
+		const contextUsageScope = { leafId: contextUsageLeaf, through: contextUsageSnapshot.nextSequence - 1 };
+		await index.syncSource("canonical", contextUsageSnapshot);
+		const contextUsageBootstrap = await index.branchBootstrap("canonical", contextUsageScope);
+		expect(contextUsageBootstrap.contextUsageAssistant).toEqual(
+			await index.getSource("canonical", "context-usage-zero", contextUsageScope.through),
+		);
+		expect(contextUsageBootstrap.contextUsageAssistant?.retention).toBe("retained-import");
+
 		const sentBeforeJson = JSON.stringify({
 			id: "sent-before-compaction",
 			parentId: usageTarget.targetId,
@@ -854,6 +893,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const updateSnapshot = owner.getSnapshot();
 		const updateScope = { leafId: updateLeaf, through: updateSnapshot.nextSequence - 1 };
 		await index.syncSource("canonical", updateSnapshot);
+		expect((await index.branchBootstrap("canonical", updateScope)).contextUsageAssistant).toBeNull();
 		const latestUsageRefs = await relatedRefs(["usage-latest"]);
 		const sentRefs = await relatedRefs(["sent-before-compaction", "sent-late"]);
 		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
@@ -975,7 +1015,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE context_node DROP COLUMN context_usage_assistant; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -1015,6 +1055,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			visibleIds.slice(130),
 		);
 		await index.syncSource("canonical", updateSnapshot);
+		expect(await index.branchBootstrap("canonical", contextUsageScope)).toEqual(contextUsageBootstrap);
 		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
 			refs: latestUsageRefs,
 			order: "source",
@@ -1337,6 +1378,7 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 			}),
 		).toMatchObject({
 			latestCompaction: await index.getSource("edge", "empty-boundary", emptyBoundarySnapshot.nextSequence - 1),
+			contextUsageAssistant: null,
 			hasContextMessages: true,
 			goalSeedable: false,
 		});

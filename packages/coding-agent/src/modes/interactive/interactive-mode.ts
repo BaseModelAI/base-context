@@ -3158,7 +3158,7 @@ export class InteractiveMode {
 			shutdown: () => {
 				this.shutdownRequested = true;
 			},
-			getContextUsage: () => this.getConnectionContextUsage(),
+			getContextUsage: async () => this.getConnectionContextUsage(),
 			compact: (options) => {
 				void (async () => {
 					try {

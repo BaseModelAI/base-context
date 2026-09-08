@@ -207,8 +207,8 @@ describe("daemon extension binding", () => {
 					phases.push("broadcast:session_replaced");
 				}
 			},
-			createConnectionState: (targetState) => {
-				const connectionState = createAgentConnectionState(targetState.runtime, targetState.activeSessionId);
+			createConnectionState: async (targetState) => {
+				const connectionState = await createAgentConnectionState(targetState.runtime, targetState.activeSessionId);
 				if (targetState.summaryState?.summary) {
 					connectionState.recap = targetState.summaryState.summary;
 				}
@@ -247,6 +247,8 @@ describe("daemon extension binding", () => {
 			(message): message is Extract<DaemonOutbound, { type: "session_replaced" }> =>
 				message.type === "session_replaced",
 		);
+		expect(replaced?.state).not.toBeInstanceOf(Promise);
+		expect(replaced?.state.contextUsage).not.toBeInstanceOf(Promise);
 		expect(replaced?.state.recap).toBeUndefined();
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:daemon replacement message",

@@ -100,10 +100,12 @@ export class InProcessAgentConnection implements AgentConnection {
 			if (this.headlessExtensionOptions) {
 				await this.bindCurrentSessionExtensions();
 			}
+			const state = createAgentConnectionState(this.runtimeHost);
+			const messages = [...this.runtimeHost.session.messages];
 			await this.emit({
 				type: "session_replaced",
-				state: createAgentConnectionState(this.runtimeHost),
-				messages: this.runtimeHost.session.messages,
+				state: await state,
+				messages,
 			});
 		});
 	}

@@ -19,13 +19,13 @@ function persistedRecap(sessionManager: {
 	return sessionManager.getLatestAgentStatus?.()?.summary;
 }
 
-export function createAgentConnectionState(
+export async function createAgentConnectionState(
 	runtime: AgentSessionRuntime,
 	activeSessionId?: string,
-): AgentConnectionState {
+): Promise<AgentConnectionState> {
 	const session = runtime.session;
 	const sessionManager = session.sessionManager;
-	return {
+	const state: AgentConnectionState = {
 		activeSessionId,
 		cwd: sessionManager.getCwd(),
 		model: toConnectionModel(session.model),
@@ -53,10 +53,12 @@ export function createAgentConnectionState(
 			thinkingLevel: scoped.thinkingLevel,
 		})),
 		activeToolNames: session.getActiveToolNames(),
-		contextUsage: session.getContextUsage(),
+		contextUsage: undefined,
 		// Baseline recap; the daemon overlays the live summary when attaching.
 		recap: persistedRecap(sessionManager),
 	};
+	state.contextUsage = await session.getContextUsage();
+	return state;
 }
 
 export async function createAgentConnectionSnapshot(
@@ -65,11 +67,24 @@ export async function createAgentConnectionSnapshot(
 ): Promise<AgentConnectionSnapshot> {
 	const session = runtime.session;
 	const children = session.getRlmChildSnapshots();
+	const stateRead = createAgentConnectionState(runtime, activeSessionId);
+	const messages = [...session.messages];
+	const streamingMessage = session.state?.streamingMessage;
+	const [state, context] = await Promise.allSettled([stateRead, session.buildSessionContext()]);
+	// Both reads were accepted before awaiting; drain both even if either fails.
+	if (state.status === "rejected") {
+		if (context.status === "rejected" && context.reason !== state.reason)
+			throw new AggregateError([state.reason, context.reason], "Connection snapshot reads failed", {
+				cause: state.reason,
+			});
+		throw state.reason;
+	}
+	if (context.status === "rejected") throw context.reason;
 	return {
-		state: createAgentConnectionState(runtime, activeSessionId),
-		messages: [...session.messages],
-		...(session.state?.streamingMessage ? { streamingMessage: session.state.streamingMessage } : {}),
-		sessionContext: await session.buildSessionContext(),
+		state: state.value,
+		messages,
+		...(streamingMessage ? { streamingMessage } : {}),
+		sessionContext: context.value,
 		children,
 	};
 }

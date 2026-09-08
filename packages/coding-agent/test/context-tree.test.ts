@@ -359,7 +359,7 @@ describe("AgentSession.getContextTree", () => {
 		await sessionManager.appendChildUsageAttribution(assistantEntryId, childUsage, aggregate);
 		syncAgentMessages(session, sessionManager);
 
-		const tree = session.getContextTree();
+		const tree = await session.getContextTree();
 		expect(tree.id).toBe("root");
 		expect(tree.status).toBe("active");
 		expect(tree.model).toEqual({ provider: model.provider, id: model.id });
@@ -383,7 +383,7 @@ describe("AgentSession.getContextTree", () => {
 		await sessionManager.appendMessage(createAssistantMessage("after compaction", createUsage(200, 50, 0.02)));
 		syncAgentMessages(session, sessionManager);
 
-		const tree = session.getContextTree();
+		const tree = await session.getContextTree();
 		expect(tree.totalUsage.input).toBe(5200);
 		expect(tree.totalUsage.cost.total).toBeCloseTo(0.52);
 		expect(tree.ownUsage.input).toBe(5200);
