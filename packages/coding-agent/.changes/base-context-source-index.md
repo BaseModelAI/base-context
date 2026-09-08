@@ -23,3 +23,4 @@
 - Port compaction/navigation/refinement and extension history consumers, and capture fork inputs before hooks without holding the reader across hook completion.
 - Bound completed-child and global refinement history reads by source bytes and entries; await disk-tree reads and ordered global appends.
 - Record native 10k/100k/1m storage measurements without claiming whole-harness or provider memory bounds.
+- Bound persisted harness_state.json reads/writes in the host and owned Python runtime without trimming state or hiding size refusal as an empty store.

@@ -1,5 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readSync,
+	renameSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
@@ -283,17 +294,81 @@ export function getHarnessStatePath(harnessStateDir: string = getGlobalHarnessSt
 	return join(harnessStateDir, "harness_state.json");
 }
 
+const HARNESS_STATE_LIMITS: SessionHistoryReadLimits = {
+	maxEntries: 16_384,
+	maxSourceBytes: 64 * 1024 * 1024,
+};
+
+class HarnessStateLimitError extends Error {}
+
+function harnessStateLimits(limits: SessionHistoryReadLimits): SessionHistoryReadLimits {
+	const { maxEntries, maxSourceBytes } = limits;
+	if (
+		!Number.isSafeInteger(maxEntries) ||
+		maxEntries <= 0 ||
+		!Number.isSafeInteger(maxSourceBytes) ||
+		maxSourceBytes <= 0
+	) {
+		throw new Error("Invalid harness state limits");
+	}
+	return { maxEntries, maxSourceBytes };
+}
+
+/** Count only owned kind records and refinement events, not arbitrary nested memory. */
+function assertHarnessStateItemLimit(state: Partial<HarnessState>, maxEntries: number): void {
+	let count = Array.isArray(state.refinements) ? state.refinements.length : 0;
+	if (count > maxEntries) throw new HarnessStateLimitError("Harness state item limit exceeded");
+	for (const kind of ["prompt", "memory", "skill", "subagent"] as const) {
+		const records = state.entries?.[kind];
+		if (!records || typeof records !== "object") continue;
+		for (const id in records) {
+			if (!Object.hasOwn(records, id) || !objectRecord(records[id])) continue;
+			if (++count > maxEntries) throw new HarnessStateLimitError("Harness state item limit exceeded");
+		}
+	}
+}
+
+function readHarnessStateImage(statePath: string, maxSourceBytes: number): Buffer {
+	const fd = openSync(statePath, "r");
+	let captured: Buffer;
+	try {
+		const size = fstatSync(fd, { bigint: true }).size;
+		if (size > BigInt(maxSourceBytes)) throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+		captured = Buffer.alloc(Number(size));
+		let offset = 0;
+		while (offset < captured.length) {
+			const count = readSync(fd, captured, offset, Math.min(64 * 1024, captured.length - offset), offset);
+			if (count === 0) throw new Error("Harness state source changed during read");
+			offset += count;
+		}
+		const after = fstatSync(fd, { bigint: true }).size;
+		if (after > BigInt(maxSourceBytes)) throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+		if (after !== size) throw new Error("Harness state source changed during read");
+	} catch (error) {
+		try {
+			closeSync(fd);
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "Harness state read and close failed", { cause: error });
+		}
+		throw error;
+	}
+	closeSync(fd);
+	return captured;
+}
+
 export function loadHarnessState(
 	harnessStateDir: string = getGlobalHarnessStateDir(),
 	scope: HarnessScope = "global",
+	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
 ): HarnessState {
+	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
 	const statePath = getHarnessStatePath(harnessStateDir);
 	if (!existsSync(statePath)) {
 		return emptyHarnessState();
 	}
 	let parsed: Partial<HarnessState>;
 	try {
-		const raw = JSON.parse(readFileSync(statePath, "utf8"));
+		const raw = JSON.parse(readHarnessStateImage(statePath, maxSourceBytes).toString("utf8"));
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
 		// than throw and break the session. The next saveHarnessState rewrites it cleanly.
@@ -301,16 +376,24 @@ export function loadHarnessState(
 			return emptyHarnessState();
 		}
 		parsed = raw as Partial<HarnessState>;
-	} catch {
+	} catch (error) {
+		// An oversized valid store must never become an empty snapshot that a later save can overwrite.
+		if (
+			error instanceof HarnessStateLimitError ||
+			(error instanceof AggregateError && error.cause instanceof HarnessStateLimitError)
+		)
+			throw error;
 		return emptyHarnessState();
 	}
+	assertHarnessStateItemLimit(parsed, maxEntries);
 	const state = emptyHarnessState();
 	state.schema = typeof parsed.schema === "number" ? parsed.schema : 1;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const records = parsed.entries?.[kind];
 		if (records && typeof records === "object") {
-			for (const [id, rawEntry] of Object.entries(records)) {
-				const entry = objectRecord(rawEntry);
+			for (const id in records) {
+				if (!Object.hasOwn(records, id)) continue;
+				const entry = objectRecord(records[id]);
 				if (!entry) continue;
 				state.entries[kind][id] = {
 					...(entry as unknown as HarnessEntry),
@@ -347,13 +430,23 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
-export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
+export function saveHarnessState(
+	harnessStateDir: string,
+	state: HarnessState,
+	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
+): string {
+	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
+	assertHarnessStateItemLimit(state, maxEntries);
+	const serialized = `${JSON.stringify(state, null, 2)}\n`;
+	if (Buffer.byteLength(serialized) > maxSourceBytes) {
+		throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+	}
 	const statePath = getHarnessStatePath(harnessStateDir);
 	const tempPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
 	mkdirSync(harnessStateDir, { recursive: true });
 	try {
 		const mode = existsSync(statePath) ? statSync(statePath).mode & 0o777 : 0o600;
-		writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode });
+		writeFileSync(tempPath, serialized, { encoding: "utf8", mode });
 		renameSync(tempPath, statePath);
 	} finally {
 		if (existsSync(tempPath)) {

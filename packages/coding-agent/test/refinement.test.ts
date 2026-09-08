@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
@@ -665,6 +674,20 @@ describe("harness refinement", () => {
 			trigger: "Add prompt note",
 			changes: ["create prompt:focused_edits"],
 		});
+		const image = readFileSync(statePath);
+		const limits = { maxEntries: 2, maxSourceBytes: image.length };
+		expect(loadHarnessState(dir, "local", limits)).toEqual(reloaded);
+		expect(saveHarnessState(dir, state, limits)).toBe(statePath);
+		for (const refused of [
+			{ ...limits, maxEntries: 1 },
+			{ ...limits, maxSourceBytes: image.length - 1 },
+		]) {
+			expect(() => loadHarnessState(dir, "local", refused)).toThrow(
+				/Harness state (item|source byte) limit exceeded/,
+			);
+			expect(() => saveHarnessState(dir, state, refused)).toThrow(/Harness state (item|source byte) limit exceeded/);
+			expect(readFileSync(statePath)).toEqual(image);
+		}
 	});
 
 	it.each(["not json at all", "null", "[]", '"a string"', "123"])(

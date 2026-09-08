@@ -641,3 +641,33 @@ did not grow proportionally to this fixture's retained history. This does not ce
 whole-harness gate: Agent invocation collectors, daemon/kernel/provider working sets,
 queued/subscriber data and remaining configuration-state residency still need work.
 No numeric RSS/growth/latency pass threshold was invented, and no model benchmark ran.
+
+### Persisted harness state bounds (W21)
+
+The TypeScript host and owned Python runtime now cap each harness_state.json image at
+64 MiB and 16,384 combined owned prompt/memory/skill/subagent records plus refinement
+items. Reads use one descriptor, a fixed accepted size and at most 64-KiB read requests.
+Limits are copied/validated before use. No entries, metadata, event IDs or history tails
+are trimmed. The existing schema and language-specific normalization stay unchanged.
+
+Oversize state refuses rather than becoming an empty snapshot that a later save could
+overwrite. This refusal can stop synchronous prompt construction or refinement. Ordinary
+missing, unreadable, corrupt and non-object files within the budget retain their empty-state
+fallback. A byte-limit refusal still escapes if descriptor cleanup also fails.
+
+Both writers check the encoded image before file effects. TypeScript keeps its atomic
+rename, existing mode and temporary-file cleanup. Python keeps its in-place writer and
+platform newline formatting. Python owned CRUD/event calls undo only a refused budget
+mutation, preserving existing object identities, map order and length-based event IDs;
+ordinary I/O and serialization failure behavior is not made transactional.
+
+Four distinct existing cases passed across two separate language invocations: one persistence
+and one corrupt/non-object case each. The persistence cases also cover exact byte/item caps,
+unchanged files on refusal, and Python cached mutation/ID handling. The first Python launch
+stopped before imports/tests because bwrap added PWD; the corrected inner six-key env-i
+launch passed. This setup failure is not a runtime test failure or an additional case.
+
+These are per-store accepted image/item bounds, not a whole-process memory result. JSON
+parsing, serialization/asdict transients, Python in-memory stores, public container mutation,
+merged store copies and the aggregate Python path cache remain outside this slice. The APIs
+accept explicit higher positive limits; no new CLI setting or retention policy was added.
