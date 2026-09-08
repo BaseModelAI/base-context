@@ -270,6 +270,7 @@ export class AuthStorage {
 	private constructor(
 		private storage: AuthStorageBackend,
 		private options: AuthStorageOptions = {},
+		private readonly existingOpenAICodexSubscription = false,
 	) {
 		this.reload();
 	}
@@ -279,8 +280,38 @@ export class AuthStorage {
 		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")), authOptions);
 	}
 
-	static fromStorage(storage: AuthStorageBackend, options?: AuthStorageOptions): AuthStorage {
-		return new AuthStorage(storage, options);
+	/** Reuse an existing host login only through an explicitly read-only backend.
+	 * This does not authorize this distribution's OAuth login or refresh client.
+	 */
+	static fromStorage(
+		storage: AuthStorageBackend,
+		options?: AuthStorageOptions & { existingOpenAICodexSubscription?: boolean },
+	): AuthStorage {
+		const existing = options?.existingOpenAICodexSubscription === true;
+		if (!existing) return new AuthStorage(storage, options);
+		if (storage instanceof FileAuthStorageBackend)
+			throw new Error("Existing OpenAI subscription requires a read-only auth backend");
+		const readOnly: AuthStorageBackend = {
+			withLock: (read) =>
+				storage.withLock((current) => {
+					const { result, next } = read(current);
+					if (next !== undefined) throw new Error("Existing OpenAI subscription storage is read-only");
+					return { result };
+				}),
+			// Refresh happens inside this callback, so never invoke it in this mode.
+			withLockAsync: async () => {
+				throw new Error("Existing OpenAI subscription refresh is disabled");
+			},
+		};
+		return new AuthStorage(readOnly, { ...options, usePrimeCliConfig: false }, true);
+	}
+
+	isExistingOpenAICodexSubscription(provider: string): boolean {
+		return this.existingOpenAICodexSubscription && provider === "openai-codex";
+	}
+
+	private assertWritableStorage(): void {
+		if (this.existingOpenAICodexSubscription) throw new Error("Existing OpenAI subscription storage is read-only");
 	}
 
 	static inMemory(data: AuthStorageData = {}, options?: AuthStorageOptions): AuthStorage {
@@ -375,6 +406,8 @@ export class AuthStorage {
 			}
 			return `api_key:${credential.key}\0${resolvedKey ?? ""}`;
 		}
+		if (this.isExistingOpenAICodexSubscription(providerId))
+			return `oauth:${credential.access}\0${credential.expires}`;
 		if (getProviderAuthContract(providerId).oauth !== "validated") {
 			return undefined;
 		}
@@ -420,7 +453,12 @@ export class AuthStorage {
 		options?: { resolveCommandValue?: boolean; resolvedCommandValue?: string },
 	): AuthSourceCandidate | undefined {
 		const credential = this.data[provider];
-		if (!credential || (credential.type === "oauth" && getProviderAuthContract(provider).oauth !== "validated")) {
+		if (
+			!credential ||
+			(credential.type === "oauth" &&
+				getProviderAuthContract(provider).oauth !== "validated" &&
+				!this.isExistingOpenAICodexSubscription(provider))
+		) {
 			return undefined;
 		}
 		const isCommandApiKey = credential.type === "api_key" && credential.key.startsWith("!");
@@ -709,6 +747,7 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		this.assertWritableStorage();
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
@@ -718,6 +757,7 @@ export class AuthStorage {
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
+		this.assertWritableStorage();
 		this.clearStaleAuthSource(provider, "stored");
 		delete this.data[provider];
 		this.persistProviderChange(provider, undefined);
@@ -730,6 +770,7 @@ export class AuthStorage {
 	 * and idempotent — in-memory state is only updated after the write succeeds.
 	 */
 	removeVerified(provider: string): void {
+		this.assertWritableStorage();
 		this.storage.withLock((current) => {
 			const currentData = this.parseStorageData(current);
 			if (!(provider in currentData)) return { result: undefined };
@@ -788,6 +829,7 @@ export class AuthStorage {
 	 * Login to an OAuth provider.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+		this.assertWritableStorage();
 		const contract = getProviderAuthContract(providerId);
 		if (contract.oauth !== "validated") {
 			throw new Error(contract.guidance);
@@ -882,6 +924,28 @@ export class AuthStorage {
 		providerId: string,
 		options?: { includeFallback?: boolean },
 	): Promise<AuthApiKeyResult> {
+		if (this.isExistingOpenAICodexSubscription(providerId)) {
+			if (this.runtimeOverrides.has(providerId))
+				throw new Error("Existing OpenAI subscription does not accept API-key overrides");
+			const credential = this.data[providerId];
+			if (
+				!credential ||
+				credential.type !== "oauth" ||
+				typeof credential.access !== "string" ||
+				!credential.access ||
+				!Number.isFinite(credential.expires)
+			)
+				throw new Error("Existing OpenAI subscription credential is unavailable");
+			if (Date.now() >= credential.expires) throw new Error("Existing OpenAI subscription credential has expired");
+			const candidate = this.getStoredAuthCandidate(providerId);
+			if (!candidate || this.isAuthSourceStale(providerId, candidate))
+				throw new Error("Existing OpenAI subscription credential is unavailable");
+			return {
+				apiKey: credential.access,
+				sourceToken: this.getAuthSourceTokenForCandidate(providerId, candidate),
+			};
+		}
+
 		// Runtime overrides take precedence over stored credentials and environment keys.
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);

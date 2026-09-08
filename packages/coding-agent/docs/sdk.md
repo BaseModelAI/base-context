@@ -414,6 +414,25 @@ If no model is provided:
 
 ### API Keys and OAuth
 
+
+For an existing OpenAI Codex subscription, explicitly inject a read-only backend:
+
+```typescript
+import { AuthStorage } from "@ponythewhite/base-context";
+
+const authStorage = AuthStorage.fromStorage(readOnlyBackend, {
+  existingOpenAICodexSubscription: true,
+  usePrimeCliConfig: false,
+});
+```
+
+The backend implements `AuthStorageBackend` and supplies only the existing OAuth access
+credential and expiry. File-backed writable storage is rejected in this mode. Missing,
+stale or expired credentials refuse use; login, refresh, storage writes and API-key
+fallback are disabled. This authorizes only this instance's official
+`openai-codex` / `openai-codex-responses` route. It does not globally validate OAuth clients
+or protect against trusted in-process code. Keep the credential backend outside tools.
+
 API key resolution priority (handled by AuthStorage):
 1. Runtime overrides (via `setRuntimeApiKey`, not persisted)
 2. Stored credentials in `auth.json` (API keys or OAuth tokens)

@@ -70,25 +70,36 @@ python3.12 -E -S -B prepare-hosts.py \
 Setup only reads local packages, queries `node --version`, extracts H, and
 writes a v2 `hosts.json`. It does not launch a product or copy auth. `vanilla`
 uses `@earendil-works/pi-coding-agent@0.9.3`; `current` uses the clean candidate's
-`@ponythewhite/base-context`. Both launch their published `dist/bundle/cli.js`.
+`@ponythewhite/base-context`. Both use an external SDK bootstrap importing their
+published `dist/index.js`, with the existing runtime and JSONL RPC mode. The
+native candidate must include the instance-scoped host-subscription authorization;
+older frozen candidates refuse this route.
 
-Inference requires explicit admission and a real OpenAI API key. Put the key
-in a private, user-readable-only file. Pass its path with `--api-key-file`.
-The file must contain one API key, not an `auth.json` or subscription token.
-There is no default auth lookup, credential copy, or inherited OAuth fallback.
-The runner passes only the deliberate key as `OPENAI_API_KEY` in a fresh
-allowlisted environment. It never puts the key in argv or invocation metadata.
-The tool sandbox clears it before executing a command.
+Inference uses only the existing host OpenAI subscription through
+`openai-codex` / `openai-codex-responses`. API-key files, credential copies,
+login, refresh, provider aliases and inherited credentials are not used.
+`--admit-provider-calls` explicitly admits inference for this run.
+
+Pass the existing host auth file path with `--host-openai-codex-auth-file`.
+The Python runner checks file metadata only. The provider process reads the
+file through `AuthStorage.fromStorage()` using an owned read-only backend.
+It retains only the fresh Codex access credential in auth/provider memory.
+The exact file is mounted read-only at `/run/host-openai-codex-auth.json` in
+the agent process. Bash tools, candidate services, and judges have separate
+mount/PID views that do not contain this path or the host auth directory.
+No credential is passed through environment variables, argv, or run files.
+An absent, invalid, or expired login refuses the run. Refresh is never attempted.
 
 After admission, the full comparison command is:
 
 ```sh
 python3.12 -E -S -B run.py \
   --hosts-manifest /absolute/path/to/new-host-directory/hosts.json \
-  --api-key-file /absolute/private/path/openai-api-key \
+  --host-openai-codex-auth-file /absolute/path/to/existing/host/auth.json \
+  --admit-provider-calls \
   --tasks all \
   --variants vanilla,current \
-  --provider openai \
+  --provider openai-codex \
   --model gpt-5.6-sol \
   --thinking medium \
   --timeout-seconds 1800 \
@@ -98,10 +109,12 @@ python3.12 -E -S -B run.py \
 ```
 
 Both local catalogs contain exact `gpt-5.6-sol` and `gpt-6-astra` under
-`openai` / `openai-responses`. `--model gpt-6-astra` selects the other supported
-model; no aliases or catalog overrides are added. Catalog recognition does
-not establish account access. `openai-codex` is not a supported native route.
-`--offline` prevents background package/catalog access, not admitted inference.
+`openai-codex` / `openai-codex-responses`. `--model gpt-6-astra` selects the
+other supported model; no aliases or catalog overrides are added. Catalog
+recognition does not establish account access. `--offline` prevents background
+package/catalog access, not explicitly admitted inference. H/S/D controls stay
+frozen; this external runner does not call archived auth-copy runners. Its
+implemented comparison arms are H0.9.3 and the newly authorized native candidate.
 
 Each wave contains three tasks in two flavors, for at most six isolated agent
 processes. The first valid attempt is the primary and drives every headline,

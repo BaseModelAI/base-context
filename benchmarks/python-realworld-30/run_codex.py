@@ -339,13 +339,17 @@ def run_codex_session(
     model: str = MODEL,
     thinking: str = REASONING_EFFORT,
     pricing: str = "historical",
+    *,
+    bwrap: str | None,
 ) -> dict[str, Any]:
+    if not bwrap:
+        raise ValueError("bubblewrap is required for benchmark service isolation")
     environment = clean_codex_environment(codex_home)
     services: list[Service] = []
     service_events: list[dict[str, Any]] = []
     fixture = scenario.get("fixture_service")
     if isinstance(fixture, dict):
-        service = start_service("fixture-service", fixture, task_dir, workspace, attempt_dir)
+        service = start_service("fixture-service", fixture, task_dir, workspace, attempt_dir, bwrap, private_network=False)
         services.append(service)
         service_events.append({"kind": "fixture_service", "event": "started", "url": service.url, "at": utc_now()})
 
@@ -385,7 +389,7 @@ def run_codex_session(
             if port:
                 service_spec["_port_override"] = port
         try:
-            service = start_service("candidate-service", service_spec, task_dir, workspace, attempt_dir)
+            service = start_service("candidate-service", service_spec, task_dir, workspace, attempt_dir, bwrap, private_network=False)
         except Exception as exc:
             service_events.append({"kind": "candidate_service", "event": "start_failed", "stage": stage_id, "error": f"{type(exc).__name__}: {exc}", "at": utc_now()})
             return
@@ -510,7 +514,7 @@ def run_attempt(
         setup_seconds = time.monotonic() - setup_started
         session = run_codex_session(
             codex, shared_codex_home, task_dir, scenario, workspace, attempt_dir,
-            timeout_seconds, rates, model, thinking, pricing,
+            timeout_seconds, rates, model, thinking, pricing, bwrap=bwrap,
         )
         judge, judge_seconds, judge_log = run_judge(task_dir, scenario, workspace, bwrap)
         result = {

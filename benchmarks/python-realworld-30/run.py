@@ -27,8 +27,10 @@ from benchlib import (
     USAGE_KEYS,
     primary_attempt_index,
     clean_environment,
+    clean_python_environment,
     collect_sessions,
     inject_stage,
+    isolated_python_command,
     load_scenarios,
     make_read_only,
     make_writable_tree,
@@ -307,7 +309,7 @@ def prepare_agent_home(run_dir: Path, args: argparse.Namespace) -> dict[str, Pat
     roots["launcher"] = create_sandbox_scripts(run_dir, args)
     # No auth file, OAuth copy, package resolution, or inherited user settings.
     settings = {
-        "defaultProvider": "openai",
+        "defaultProvider": "openai-codex",
         "defaultModel": args.model,
         "defaultThinkingLevel": args.thinking,
         "shellPath": str(roots["launcher"]),
@@ -338,24 +340,24 @@ def agent_command(
     variant: str,
     workspace: Path,
     roots: dict[str, Path],
-    daemon_socket: Path,
     args: argparse.Namespace,
 ) -> list[str]:
-    return [
-        *args.hosts[variant]["argv"],
-        "--mode", "rpc", "--offline",
-        "--cwd", str(workspace),
-        "--session-dir", str(roots["sessions"]),
-        "--daemon-socket", str(daemon_socket),
-        "--provider", "openai", "--model", args.model, "--thinking", args.thinking,
-        "--tools", "bash",
-        "--no-context-files", "--no-skills", "--no-prompt-templates", "--no-themes",
-        "--no-extensions", "--extension", str(ROOT / "bash-tool.mjs"),
-    ]
+    bootstrap = roots["config"].parent / "rpc-bootstrap.mjs"
+    package = Path(args.hosts[variant]["package_root"])
+    options = {
+        "variant": variant, "cwd": str(workspace), "agentDir": str(roots["config"]),
+        "sessionDir": str(roots["sessions"]), "modelId": args.model, "thinkingLevel": args.thinking,
+    }
+    bootstrap.write_text(
+        f"import * as host from {json.dumps((package / 'dist/index.js').as_uri())};\n"
+        f"import {{ runSubscriptionRpc }} from {json.dumps((ROOT / 'subscription-rpc.mjs').as_uri())};\n"
+        f"await runSubscriptionRpc(host, {json.dumps(options)});\n"
+    )
+    return [*args.hosts[variant]["argv"][:-1], str(bootstrap)]
 
 
 def isolated_agent_command(
-    command: list[str], host: dict[str, Any], run_dir: Path, daemon_root: Path, args: argparse.Namespace,
+    command: list[str], host: dict[str, Any], run_dir: Path, args: argparse.Namespace,
 ) -> list[str]:
     manifest = args.host_manifest
     image = Path(host["package_root"])
@@ -375,10 +377,13 @@ def isolated_agent_command(
             result.extend(["--ro-bind", source, source])
     for source in dict.fromkeys(path.resolve() for path in mounts):
         result.extend(["--ro-bind", str(source), str(source)])
-    adapter = ROOT / "bash-tool.mjs"
-    result.extend(["--ro-bind", str(adapter), str(adapter), "--bind", str(run_dir), str(run_dir),
-                   "--bind", str(daemon_root), "/rpc", "--chdir", str(run_dir / "workspace"),
-                   "--", "/usr/bin/env", "-u", "PWD", *command])
+    for name in ("bash-tool.mjs", "subscription-rpc.mjs", "host-subscription-backend.mjs"):
+        adapter = ROOT / name
+        result.extend(["--ro-bind", str(adapter), str(adapter)])
+    # Agent-only mount. The Bash, service, and judge sandboxes never mount /run.
+    result.extend(["--dir", "/run", "--ro-bind", str(args.host_openai_codex_auth_file),
+                   "/run/host-openai-codex-auth.json", "--bind", str(run_dir), str(run_dir),
+                   "--chdir", str(run_dir / "workspace"), "--", "/usr/bin/env", "-u", "PWD", *command])
     return result
 
 
@@ -423,6 +428,9 @@ def start_service(
     task_dir: Path,
     workspace: Path,
     run_dir: Path,
+    bwrap: str,
+    *,
+    private_network: bool = True,
 ) -> Service:
     raw_command = [
         str(part).replace("{workspace}", str(workspace))
@@ -435,9 +443,15 @@ def start_service(
     command = service_command(raw_command)
     if spec.get("_port_override") is not None:
         command = command_with_port(command, int(spec["_port_override"]))
+    command = isolated_python_command(
+        command, cwd, workspace, bwrap,
+        task_dir=task_dir if name == "fixture-service" else None,
+        private_network=private_network,
+    )
     process = subprocess.Popen(
         command,
         cwd=cwd,
+        env=clean_python_environment(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -609,7 +623,7 @@ def run_rpc(
 ) -> dict[str, Any]:
     roots = prepare_agent_home(run_dir, args)
     environment = clean_environment(
-        roots["config"], roots["home"], variant=variant, api_key=args.api_key,
+        roots["config"], roots["home"], variant=variant,
         node=Path(args.host_manifest["node_executable"]), tmpdir=Path("/tmp"),
     )
     # Adapter-owned variable, not a Prime Context product extension.
@@ -618,14 +632,12 @@ def run_rpc(
     stderr_path = run_dir / "rpc-stderr.txt"
     transcript_path = run_dir / "transcript.jsonl"
     q: queue.Queue[str | None] = queue.Queue()
-    daemon_root = Path(tempfile.mkdtemp(prefix="pcb-daemon-", dir=roots["tmp"]))
-    daemon_socket = Path("/rpc/daemon.sock")
-    command = isolated_agent_command(agent_command(variant, workspace, roots, daemon_socket, args), args.hosts[variant], run_dir, daemon_root, args)
+    command = isolated_agent_command(agent_command(variant, workspace, roots, args), args.hosts[variant], run_dir, args)
     services: list[Service] = []
     service_events: list[dict[str, Any]] = []
     fixture = scenario.get("fixture_service")
     if isinstance(fixture, dict):
-        service = start_service("fixture-service", fixture, task_dir, workspace, run_dir)
+        service = start_service("fixture-service", fixture, task_dir, workspace, run_dir, args.bwrap)
         services.append(service)
         service_events.append({"kind": "fixture_service", "event": "started", "url": service.url, "at": utc_now()})
     json_dump(run_dir / "sandbox-runtime" / "services.json", {
@@ -648,7 +660,6 @@ def run_rpc(
         except Exception:
             for service in reversed(services):
                 service.stop()
-            shutil.rmtree(daemon_root, ignore_errors=True)
             raise
         assert process.stdin is not None and process.stdout is not None
 
@@ -724,7 +735,7 @@ def run_rpc(
                 if port:
                     service_spec["_port_override"] = port
             try:
-                service = start_service("candidate-service", service_spec, task_dir, workspace, run_dir)
+                service = start_service("candidate-service", service_spec, task_dir, workspace, run_dir, args.bwrap)
             except Exception as exc:
                 service_events.append({"kind": "candidate_service", "event": "start_failed", "stage": stage_id, "error": f"{type(exc).__name__}: {exc}", "at": utc_now()})
                 return
@@ -853,7 +864,7 @@ def run_rpc(
             for service in reversed(services):
                 service.stop()
                 service_events.append({"kind": service.name.replace("-", "_"), "event": "stopped", "at": utc_now()})
-            stop_attempt_processes(run_dir, daemon_root)
+            stop_attempt_processes(run_dir)
 
     metrics = aggregate_sessions(collect_sessions(roots["sessions"]))
     metrics.update({
@@ -864,7 +875,6 @@ def run_rpc(
         "archive_writes": None,
         "archive_bytes": None,
     })
-    shutil.rmtree(daemon_root, ignore_errors=True)
     return {
         "agent_wall_seconds": agent_wall,
         "capacity_invalid": capacity_confirmed or metrics.get("provider_capacity_confirmed") is True,
@@ -1448,7 +1458,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tasks", default="all")
     parser.add_argument("--variants", default=",".join(VARIANTS))
     parser.add_argument("--output", type=Path, default=ROOT / "results" / datetime.now().strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--provider", choices=("openai",), default="openai")
+    parser.add_argument("--provider", choices=("openai-codex",), default="openai-codex")
     parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-5.6-sol")
     parser.add_argument("--thinking", default="medium")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -1456,7 +1466,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-workers", type=int, default=6)
     parser.add_argument("--retry-failed", type=int, choices=(0, 1), default=1)
     parser.add_argument("--hosts-manifest", type=Path, help="local-only H0.9.3/native manifest from prepare-hosts.py")
-    parser.add_argument("--api-key-file", type=Path, help="explicit file containing one OpenAI API key; never copied into agent state")
+    parser.add_argument("--host-openai-codex-auth-file", type=Path, help="existing host OpenAI Codex subscription auth; agent-only readonly mount")
+    parser.add_argument("--admit-provider-calls", action="store_true", help="explicitly admit subscription inference for this run")
     parser.add_argument("--bwrap", default=shutil.which("bwrap") or "", help="bubblewrap executable for RPC and tool isolation")
     parser.add_argument("--validate-only", action="store_true")
     return parser
@@ -1480,12 +1491,14 @@ def main() -> int:
         raise SystemExit("--group-size must equal the number of selected variants so each task runs as one comparison group")
     if not args.bwrap:
         raise SystemExit("bubblewrap (bwrap) is required for hermetic tool execution")
-    if args.api_key_file is None:
-        raise ValueError("--api-key-file is required; no inherited credentials or OAuth fallback are used")
-    args.api_key_file = args.api_key_file.expanduser().resolve(strict=True)
-    args.api_key = args.api_key_file.read_text().strip()
-    if not args.api_key or any(character.isspace() for character in args.api_key):
-        raise ValueError("--api-key-file must contain one non-empty OpenAI API key")
+    if not args.admit_provider_calls:
+        raise ValueError("--admit-provider-calls is required; --offline is not inference authorization")
+    if args.host_openai_codex_auth_file is None:
+        raise ValueError("--host-openai-codex-auth-file must select the existing host subscription")
+    # Metadata only. Credential reads happen only in the agent auth backend.
+    args.host_openai_codex_auth_file = args.host_openai_codex_auth_file.expanduser().resolve(strict=True)
+    if not args.host_openai_codex_auth_file.is_file():
+        raise ValueError("host subscription auth must be an existing file")
     for variant in variants:
         if variant not in hosts_manifest["hosts"]:
             raise ValueError(f"host not prepared: {variant}")
@@ -1494,8 +1507,8 @@ def main() -> int:
         publication_blockers.append("tasks must contain all 30 scenarios")
     if variants != list(VARIANTS):
         publication_blockers.append("variants must be vanilla,current")
-    if args.provider != "openai":
-        publication_blockers.append("provider must be openai")
+    if args.provider != "openai-codex":
+        publication_blockers.append("provider must be openai-codex")
     if args.model not in {"gpt-5.6-sol", "gpt-6-astra"}:
         publication_blockers.append("model must be an exact supported Sol/Astra ID")
     if args.thinking != "medium":
@@ -1531,7 +1544,10 @@ def main() -> int:
         "hosts": hosts_manifest["hosts"],
         "node_executable": hosts_manifest["node_executable"],
         "candidate_commit": hosts_manifest["candidate_commit"],
-        "auth_route": "explicit-openai-api-key-file",
+        "auth_route": "existing-host-openai-codex-subscription",
+        "provider_api": "openai-codex-responses",
+        "provider_calls_admitted": args.admit_provider_calls,
+        "rpc_adapter": "external-sdk-runtime",
         "rpc_process_isolation": "private PID/mount view; read-only package inputs; allowlisted environment",
         "host_version": H_VERSION,
         "publication_protocol": not publication_blockers,

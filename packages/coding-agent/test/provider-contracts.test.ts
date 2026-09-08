@@ -1,7 +1,7 @@
-import type { Api, Model } from "@ponythewhite/base-context-ai";
+import { type Api, getApiProvider, type Model } from "@ponythewhite/base-context-ai";
 import { resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import { afterEach, expect, it, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { getProviderAuthContract, isProviderApiKeyAllowed } from "../src/core/provider-contracts.js";
 
@@ -85,4 +85,70 @@ it("does not validate OAuth by registration, token relabeling, headers, or proto
 		expect(registry.hasConfiguredAuth(deniedModel)).toBe(false);
 		await expect(registry.getApiKeyAndHeaders(deniedModel)).resolves.toMatchObject({ ok: false });
 	}
+
+	const codexModel: Model<Api> = {
+		...model,
+		provider: "openai-codex",
+		api: "openai-codex-responses",
+		baseUrl: "https://chatgpt.com/backend-api/codex",
+	};
+	const hostCredential = { type: "oauth", access: "host-access-dummy", expires: Date.now() + 60_000 };
+	let current = JSON.stringify({ "openai-codex": hostCredential, "renamed-codex": hostCredential });
+	const backend: AuthStorageBackend = {
+		withLock(fn) {
+			const { result, next } = fn(current);
+			expect(next).toBeUndefined();
+			return result;
+		},
+		withLockAsync: vi.fn(async () => {
+			throw new Error("Borrowed host storage must not use async callbacks");
+		}),
+	};
+	const nativeStream = getApiProvider("openai-codex-responses")!.streamSimple;
+	const subscriptionStorage = AuthStorage.fromStorage(backend, {
+		existingOpenAICodexSubscription: true,
+		usePrimeCliConfig: false,
+	});
+	const subscriptionRegistry = ModelRegistry.inMemory(subscriptionStorage);
+	expect(subscriptionRegistry.hasConfiguredAuth(codexModel)).toBe(true);
+	expect(subscriptionRegistry.isUsingOAuth(codexModel)).toBe(true);
+	await expect(subscriptionRegistry.getApiKeyAndHeaders(codexModel)).resolves.toMatchObject({
+		ok: true,
+		apiKey: hostCredential.access,
+	});
+	for (const deniedModel of [
+		{ ...codexModel, provider: "renamed-codex" },
+		{ ...codexModel, api: "openai-responses" as const },
+		{ ...codexModel, baseUrl: "https://provider.test/codex" },
+	]) {
+		expect(subscriptionRegistry.hasConfiguredAuth(deniedModel)).toBe(false);
+		expect(subscriptionRegistry.isUsingOAuth(deniedModel)).toBe(false);
+		await expect(subscriptionRegistry.getApiKeyAndHeaders(deniedModel)).resolves.toMatchObject({ ok: false });
+	}
+	await expect(
+		subscriptionRegistry.getApiKeyAndHeaders({
+			...codexModel,
+			headers: { Authorization: `Bearer ${hostCredential.access}` },
+		}),
+	).resolves.toMatchObject({ ok: false });
+	subscriptionStorage.setRuntimeApiKey("openai-codex", hostCredential.access);
+	await expect(subscriptionRegistry.getApiKeyAndHeaders(codexModel)).resolves.toMatchObject({ ok: false });
+	subscriptionStorage.removeRuntimeApiKey("openai-codex");
+	for (const config of [
+		{ apiKey: hostCredential.access },
+		{ authHeader: true },
+		{ headers: { Authorization: `Bearer ${hostCredential.access}` } },
+	]) {
+		const configuredRegistry = ModelRegistry.inMemory(subscriptionStorage);
+		configuredRegistry.registerProvider("openai-codex", config);
+		await expect(configuredRegistry.getApiKeyAndHeaders(codexModel)).resolves.toMatchObject({ ok: false });
+	}
+	current = JSON.stringify({ "openai-codex": { type: "api_key", key: hostCredential.access } });
+	subscriptionStorage.reload();
+	subscriptionStorage.setFallbackResolver(() => hostCredential.access);
+	expect(subscriptionRegistry.hasConfiguredAuth(codexModel)).toBe(false);
+	expect(subscriptionRegistry.isUsingOAuth(codexModel)).toBe(false);
+	await expect(subscriptionRegistry.getApiKeyAndHeaders(codexModel)).resolves.toMatchObject({ ok: false });
+	expect(backend.withLockAsync).not.toHaveBeenCalled();
+	expect(getApiProvider("openai-codex-responses")!.streamSimple).toBe(nativeStream);
 });

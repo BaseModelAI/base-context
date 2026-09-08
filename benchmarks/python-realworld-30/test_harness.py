@@ -82,6 +82,7 @@ def native_journal(path: Path, *, session_id: str = "root", incomplete: bool = F
         *[{"type": "request", "id": f"physical-attempt:{event['type']}", "parentId": None,
            "timestamp": timestamp, "request": event} for event in events],
         {"type": "message", "message": {"role": "assistant", "content": [],
+                                       "stopReason": "error", "errorMessage": "Selected model is at capacity.",
                                        "usage": {"input": 99999, "output": 99999, "cost": {"total": 99}}}},
     ]
     # Accounting consumes the documented payload envelope, not frame-integrity validation.
@@ -118,6 +119,7 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
         self.assertEqual(metrics["cost_basis"], "catalog_estimate")
         self.assertTrue(metrics["cost_complete"])
+        self.assertFalse(metrics["provider_capacity_confirmed"])
         # The actual runner gates compaction on its matched response, not a
         # nonexistent needs_input/extra agent_end event. This is mocked RPC,
         # with no provider, fixture service, judge, or subprocess execution.
@@ -128,7 +130,7 @@ class HarnessComparisonTests(unittest.TestCase):
             node = Path("/usr/bin/node")
             host = {"package_root": str(root / "image/unpacked/base-context/package"), "argv": [str(node), "/frozen/cli.js"]}
             args = argparse.Namespace(
-                api_key="explicit-unit-key", model="gpt-5.6-sol", thinking="medium",
+                host_openai_codex_auth_file=root / "host-auth.json", model="gpt-5.6-sol", thinking="medium",
                 bwrap="/usr/bin/bwrap", timeout_seconds=10, hosts={"current": host},
                 host_manifest={"node_executable": str(node), "dependency_root": str(root / "dependencies"), "hosts": {"current": host}},
             )
@@ -159,14 +161,44 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertEqual(command[:4], ["/usr/bin/bwrap", "--die-with-parent", "--unshare-pid", "--new-session"])
             self.assertIn("--ro-bind", command)
             self.assertNotIn(["--ro-bind", "/", "/"], [command[index:index + 3] for index in range(len(command) - 2)])
-            self.assertEqual(command[command.index("--tools") + 1], "bash")
+            self.assertEqual(command[-1], str(root / "rpc-bootstrap.mjs"))
             self.assertNotIn("prime_context", command)
-            self.assertNotIn("explicit-unit-key", command)
-            self.assertEqual(environment["OPENAI_API_KEY"], "explicit-unit-key")
+            self.assertNotIn("OPENAI_API_KEY", environment)
             self.assertEqual(environment["TMPDIR"], "/tmp")
-            self.assertEqual(command[command.index("--daemon-socket") + 1], "/rpc/daemon.sock")
+            self.assertNotIn("--daemon-socket", command)
+            self.assertIn(["--ro-bind", str(args.host_openai_codex_auth_file), "/run/host-openai-codex-auth.json"],
+                          [command[index:index + 3] for index in range(len(command) - 2)])
+            self.assertNotIn(str(args.host_openai_codex_auth_file), (root / "bash").read_text())
+            self.assertNotIn("/run/host-openai-codex-auth.json", (root / "bash").read_text())
+            isolated = benchmark.isolated_python_command(
+                ["/usr/bin/python3.12", "judge.py"], root, workspace, "/usr/bin/bwrap", task_dir=root,
+            )
+            self.assertIn("--unshare-pid", isolated)
+            self.assertIn("--clearenv", isolated)
+            self.assertNotIn(["--bind", "/", "/"], [isolated[index:index + 3] for index in range(len(isolated) - 2)])
             self.assertIn("BASE_CONTEXT_HOME", environment)
             self.assertFalse((root / "config/auth.json").exists())
+
+        # Actual candidate Python mount/PID isolation, separate from mocked RPC above.
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            (workspace / "input.txt").write_text("workspace-ok")
+            host_only = root / "host-auth.json"
+            host_only.write_text("dummy-not-a-credential")
+            code = ("from pathlib import Path; "
+                    f"assert not Path({str(host_only)!r}).exists(); "
+                    "assert not Path('/run/host-openai-codex-auth.json').exists(); "
+                    "print(Path('input.txt').read_text())")
+            command = benchmark.isolated_python_command(
+                [benchmark.service_command(["python3.12"])[0], "-E", "-S", "-c", code],
+                workspace, workspace, "/usr/bin/bwrap",
+            )
+            completed = benchmark.subprocess.run(command, env=benchmark.clean_python_environment(),
+                                                  text=True, capture_output=True, timeout=10)
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stdout.strip(), "workspace-ok")
 
     def test_vanilla_failure_is_a_current_correctness_win(self) -> None:
         vanilla_attempt = attempt(wall=12.0, cost=0.12, progress=3)
@@ -207,9 +239,9 @@ class HarnessComparisonTests(unittest.TestCase):
             for variant, config_key in (("vanilla", "PRIME_AGENT_CODING_AGENT_DIR"), ("current", "BASE_CONTEXT_HOME")):
                 environment = benchmark.clean_environment(
                     Path("/private/config"), Path("/private/home"), variant=variant,
-                    api_key="explicit-key", node=Path("/private/node/bin/node"), tmpdir=Path("/private/tmp"),
+                    node=Path("/private/node/bin/node"), tmpdir=Path("/private/tmp"),
                 )
-                self.assertEqual(environment["OPENAI_API_KEY"], "explicit-key")
+                self.assertNotIn("OPENAI_API_KEY", environment)
                 self.assertEqual(environment[config_key], "/private/config")
                 for name in ("PRIME_API_KEY", "HTTP_PROXY", "NODE_OPTIONS", "CODEX_HOME", "PRIME_CONTEXT_HOME", "PYTHONPATH"):
                     self.assertNotIn(name, environment)
@@ -245,6 +277,21 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertIsNone(metrics["provider_usage"]["cacheWrite"])
             self.assertIsNone(metrics["api_cost"]["total"])
             self.assertFalse(metrics["cost_complete"])
+            legacy_path = root / "legacy.jsonl"
+            observed_usage = {"input": 100, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145,
+                              "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0.01, "cacheWrite": 0, "total": 0.31}}
+            legacy_path.write_text(json.dumps({"type": "session", "id": "legacy", "version": 3}) + "\n" +
+                                   json.dumps({"type": "message", "message": {**exact_error["message"], "usage": observed_usage}}) + "\n")
+            legacy = aggregate_sessions([parse_session_file(legacy_path)])
+            self.assertEqual(legacy["accounting_source"], "assistant_messages_observational")
+            self.assertFalse(legacy["cost_complete"])
+            self.assertFalse(legacy["usage_complete"])
+            self.assertIsNone(legacy["all_model_calls"])
+            self.assertIsNone(legacy["api_cost"]["total"])
+            self.assertEqual(legacy["observed_api_cost"]["total"], 0.31)
+            self.assertEqual(legacy["observed_provider_usage"]["totalTokens"], 145)
+            self.assertEqual(legacy["assistant_usage_observations"][0]["usage"], [observed_usage])
+            self.assertTrue(legacy["provider_capacity_confirmed"])
             current = result("current", attempt(wall=8, cost=None))
             summary = benchmark.comprehensive_summary([vanilla, current])
             self.assertIsNone(summary["matched_strict_pass_comparisons"][0]["api_cost_delta_current_minus_baseline"])

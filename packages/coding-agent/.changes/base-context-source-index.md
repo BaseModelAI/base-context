@@ -29,3 +29,5 @@
 - Bound whole context-tree requests with shared node, metadata and directory limits, serialized captured reductions, and accepted-read drain.
 - Qualify native task admission in canonical frames and expose bounded explicit task-state reduction.
 - Require native ownership/RPC schema31 while retaining protocol11 and existing cleanup policy.
+- Support read-only existing OpenAI Codex subscriptions without enabling login or refresh.
+- Isolate benchmark candidate services/judges and distinguish legacy observations from physical usage.

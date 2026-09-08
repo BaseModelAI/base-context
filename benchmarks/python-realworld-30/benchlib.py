@@ -365,12 +365,12 @@ def make_writable_tree(path: Path) -> None:
 
 
 def clean_environment(
-    config: Path, home: Path, *, variant: str, api_key: str, node: Path, tmpdir: Path,
+    config: Path, home: Path, *, variant: str, node: Path, tmpdir: Path,
 ) -> dict[str, str]:
     environment = {
         "HOME": str(home), "PATH": f"{node.parent}:/usr/bin:/bin", "TMPDIR": str(tmpdir),
         "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "dumb", "TZ": "UTC",
-        "DO_NOT_TRACK": "1", "NO_COLOR": "1", "OPENAI_API_KEY": api_key,
+        "DO_NOT_TRACK": "1", "NO_COLOR": "1",
         "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "UV_OFFLINE": "1",
         "npm_config_offline": "true", "npm_config_audit": "false", "npm_config_fund": "false",
     }
@@ -458,6 +458,7 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     requests: dict[str, dict[str, Any]] = {}
     assistant_usage: list[dict[str, Any]] = []
     native = False
+    capacity_confirmed = False
     incomplete = False
     framed_format: bool | None = None
     tool_calls = tool_results = visible_tool_bytes = compactions = refinement_entries = recovery_tool_calls = 0
@@ -525,6 +526,10 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
             role = message.get("role")
             if role == "assistant":
                 assistant_usage.append(message.get("usage") or {})
+                capacity_confirmed = capacity_confirmed or (
+                    message.get("stopReason") == "error"
+                    and message.get("errorMessage") == "Selected model is at capacity."
+                )
                 calls = [
                     block for block in message.get("content") or []
                     if isinstance(block, dict) and block.get("type") == "toolCall"
@@ -537,35 +542,43 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     if not header:
         return None
 
+    usages = []
+    for item in assistant_usage:
+        usage_item = {key: item.get(key) for key in USAGE_KEYS}
+        usage_item["inputTotal"] = sum_known(item.get(key) for key in ("input", "cacheRead", "cacheWrite"))
+        usages.append(usage_item)
+    observed_usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
+    observed_cost = {key: sum_known((item.get("cost") or {}).get(key) for item in assistant_usage) for key in COST_KEYS}
     if native:
         accounting = _native_request_accounting(requests)
-        # Exact native events, held only until aggregate_sessions deduplicates IDs.
         accounting["_native_requests"] = requests
         accounting["accounting_incomplete"] = incomplete
         if incomplete:
             _mark_incomplete(accounting)
     else:
-        usages = []
-        for item in assistant_usage:
-            usage_item = {key: item.get(key) for key in USAGE_KEYS}
-            usage_item["inputTotal"] = sum_known(item.get(key) for key in ("input", "cacheRead", "cacheWrite"))
-            usages.append(usage_item)
-        usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
-        cost = {key: sum_known((item.get("cost") or {}).get(key) for item in assistant_usage) for key in COST_KEYS}
+        # Legacy assistant messages cannot enumerate failed/retried physical calls.
         accounting = {
-            "accounting_source": "assistant_messages",
-            "cost_basis": "assistant_usage_cost",
-            "usage_complete": all(value is not None for value in usage.values()),
-            "cost_complete": all(value is not None for value in cost.values()),
-            "provider_capacity_confirmed": False,
-            "unsettled_attempts": 0,
-            "model_calls": len(usages) if usages else None,
+            "accounting_source": "assistant_messages_observational",
+            "cost_basis": None,
+            "accounting_incomplete": True,
+            "usage_complete": False,
+            "cost_complete": False,
+            "provider_capacity_confirmed": capacity_confirmed,
+            "unsettled_attempts": None,
+            "model_calls": None,
             "model_calls_by_purpose": {},
-            "usage": usage,
-            "cost": cost,
+            "usage": {key: None for key in USAGE_KEYS},
+            "cost": {key: None for key in COST_KEYS},
             "final_response_tokens": assistant_usage[-1].get("output") if assistant_usage else None,
             "provider_prompt_token_samples": [item["inputTotal"] for item in usages],
         }
+    accounting.update({
+        "assistant_usage_observations": assistant_usage,
+        "observed_model_calls": len(assistant_usage),
+        "observed_provider_usage": observed_usage,
+        "observed_api_cost": observed_cost,
+        "observed_cost_basis": "assistant_usage_cost",
+    })
     return {
         "path": str(path),
         "session_id": header.get("id"),
@@ -600,7 +613,9 @@ def collect_sessions(root: Path) -> list[dict[str, Any]]:
                 else:
                     requests.setdefault(attempt_id, request)
             incomplete = previous.get("accounting_incomplete") is True or parsed.get("accounting_incomplete") is True
+            capacity_confirmed = previous.get("provider_capacity_confirmed") is True or parsed.get("provider_capacity_confirmed") is True
             parsed.update(_native_request_accounting(requests))
+            parsed["provider_capacity_confirmed"] = parsed["provider_capacity_confirmed"] or capacity_confirmed
             parsed["_native_requests"] = requests
             parsed["accounting_incomplete"] = incomplete
             if incomplete:
@@ -610,7 +625,7 @@ def collect_sessions(root: Path) -> list[dict[str, Any]]:
 
 
 def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
-    incomplete = any(item.get("accounting_incomplete") is True for item in sessions)
+    incomplete = not sessions or any(item.get("accounting_incomplete") is True for item in sessions)
     requests: dict[str, dict[str, Any]] = {}
     accounting = []
     for item in sessions:
@@ -640,9 +655,9 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         if any(not item.get("_native_requests") for item in native_roots):
             main_counts.append(None)
     samples = [sample for item in accounting for sample in item["provider_prompt_token_samples"]]
-    sample_total = sum_known(samples) if not incomplete and all(item["model_calls"] is not None for item in accounting) else None
+    sample_total = sum_known(samples)
     sources = {item["accounting_source"] for item in sessions}
-    bases = {item["cost_basis"] for item in sessions}
+    bases = {item["cost_basis"] for item in sessions if item.get("cost_basis")}
     purposes: dict[str, int] = {}
     for item in accounting:
         for purpose, count in item["model_calls_by_purpose"].items():
@@ -655,8 +670,23 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "accounting_incomplete": incomplete,
         "usage_complete": not incomplete and bool(accounting) and all(item["usage_complete"] for item in accounting),
         "cost_complete": not incomplete and bool(accounting) and all(item["cost_complete"] for item in accounting),
-        "provider_capacity_confirmed": any(item["provider_capacity_confirmed"] for item in accounting),
-        "unsettled_attempts": sum(item["unsettled_attempts"] for item in accounting),
+        "provider_capacity_confirmed": any(item["provider_capacity_confirmed"] for item in sessions + accounting),
+        "unsettled_attempts": sum_known(item["unsettled_attempts"] for item in accounting),
+        "physical_attempts": list(requests.values()),
+        "observed_model_calls": sum_known(item["observed_model_calls"] for item in sessions),
+        "observed_main_model_calls": sum_known(item["observed_model_calls"] for item in roots),
+        "observed_provider_usage": {
+            key: sum_known(item["observed_provider_usage"].get(key) for item in sessions) for key in USAGE_KEYS
+        },
+        "observed_api_cost": {
+            key: sum_known(item["observed_api_cost"].get(key) for item in sessions) for key in COST_KEYS
+        },
+        "observed_cost_basis": "assistant_usage_cost" if sessions else None,
+        "assistant_usage_observations": [
+            {"session_id": item["session_id"], "path": item["path"], "usage": item["assistant_usage_observations"]}
+            for item in sessions
+        ],
+        "observed_accounting_scope": "solver_messages",
         "main_model_calls": sum_known(main_counts) if not incomplete else None,
         "all_model_calls": sum_known(item["model_calls"] for item in accounting) if not incomplete else None,
         "model_calls_by_purpose": purposes,
@@ -674,7 +704,8 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "average_provider_prompt_tokens": sample_total / len(samples) if sample_total is not None else None,
         "provider_prompt_token_sum": sample_total,
         "provider_prompt_sample_count": len(samples),
-        "final_response_tokens": roots[-1]["final_response_tokens"] if roots and not incomplete else None,
+        "provider_prompt_token_samples": samples,
+        "final_response_tokens": roots[-1]["final_response_tokens"] if roots else None,
     }
 
 
@@ -689,6 +720,35 @@ def last_json_object(stdout: str) -> dict[str, Any]:
     raise ValueError("judge did not print a JSON object")
 
 
+def clean_python_environment() -> dict[str, str]:
+    return {
+        "HOME": "/tmp", "TMPDIR": "/tmp", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def isolated_python_command(
+    command: list[str], cwd: Path, workspace: Path, bwrap: str, *, task_dir: Path | None = None,
+    private_network: bool = True,
+) -> list[str]:
+    result = [
+        str(Path(bwrap).resolve()), "--die-with-parent",
+        *(["--unshare-net"] if private_network else []), "--unshare-pid",
+        "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+        "--symlink", "usr/bin", "/bin", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+    ]
+    for source in ("/etc/ld.so.cache", "/etc/hosts", "/etc/localtime"):
+        if Path(source).exists():
+            result.extend(["--ro-bind", source, source])
+    if task_dir is not None:
+        result.extend(["--ro-bind", str(task_dir), str(task_dir)])
+    result.extend(["--bind", str(workspace), str(workspace), "--clearenv"])
+    for name, value in clean_python_environment().items():
+        result.extend(["--setenv", name, value])
+    result.extend(["--chdir", str(cwd), "--", *command])
+    return result
+
+
 def run_judge(
     task_dir: Path,
     scenario: dict[str, Any],
@@ -700,21 +760,14 @@ def run_judge(
     command = [str(workspace) if part == "{workspace}" else str(part) for part in scenario["judge_command"]]
     if command and command[0] in {"python", "python3", "python3.12"}:
         command[0:1] = [python312(), "-E", "-S"]
-    if bwrap:
-        command = [
-            str(Path(bwrap).resolve()),
-            "--die-with-parent",
-            "--unshare-net",
-            "--bind", "/", "/",
-            "--dev-bind", "/dev", "/dev",
-            "--proc", "/proc",
-            "--",
-            *command,
-        ]
+    if not bwrap:
+        raise ValueError("bubblewrap is required for candidate judge execution")
+    command = isolated_python_command(command, task_dir, workspace, bwrap, task_dir=task_dir)
     started = time.monotonic()
     completed = subprocess.run(
         command,
         cwd=task_dir,
+        env=clean_python_environment(),
         text=True,
         capture_output=True,
         timeout=600,
@@ -760,9 +813,13 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             "primary_cost_complete": True,
             "all_attempt_cost_complete": True,
         })
-        retained_cost = sum_known((item.get("metrics", {}).get("api_cost") or {}).get("total") for item in attempts) if attempts else 0.0
+        retained_cost = sum_known(
+            (item.get("metrics", {}).get("api_cost") or {}).get("total")
+            if item.get("metrics", {}).get("cost_complete") is True else None
+            for item in attempts
+        )
         bucket["all_attempt_cost"] = sum_known((bucket["all_attempt_cost"], retained_cost))
-        bucket["all_attempt_cost_complete"] = bucket["all_attempt_cost_complete"] and all(
+        bucket["all_attempt_cost_complete"] = bucket["all_attempt_cost_complete"] and bool(attempts) and all(
             item.get("metrics", {}).get("cost_complete") is True for item in attempts
         )
         if index is None:
@@ -774,7 +831,10 @@ def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
         bucket["runs"] += 1
         bucket["strict_passes"] += int(judge.get("status") == "pass" and judge.get("progress_level") == 5)
         bucket["progress_sum"] += float(judge.get("progress_level") or 0)
-        bucket["primary_cost"] = sum_known((bucket["primary_cost"], (metrics.get("api_cost") or {}).get("total")))
+        bucket["primary_cost"] = sum_known((
+            bucket["primary_cost"],
+            (metrics.get("api_cost") or {}).get("total") if metrics.get("cost_complete") is True else None,
+        ))
         bucket["primary_cost_complete"] = bucket["primary_cost_complete"] and metrics.get("cost_complete") is True
         bucket["primary_agent_wall_seconds"] = sum_known((bucket["primary_agent_wall_seconds"], attempt.get("agent_wall_seconds")))
     for bucket in by_variant.values():

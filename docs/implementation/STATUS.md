@@ -781,7 +781,7 @@ The existing native ownership floor and advertised daemon schema advance togethe
 protocol11 and capability names remain. New clients refuse old11/30 owners; supervisor
 preservation/cleanup policy remains. RPC get_state advertises schemaRevision and startup
 requires at least31 in addition to protocol11, using the existing failure cleanup path.
-The --rpc-protocol-version11 flag remains a separate flag/value pair; no new launch flag.
+The --rpc-protocol-version 11 flag remains a separate flag/value pair; no new launch flag.
 
 Twelve distinct focused cases passed across separate invocations and corrected repeats:
 reducer/reader2, existing index2/codec2, native goal2/input1 and RPC2/daemon1. Actual native
@@ -797,3 +797,34 @@ its newline escape; String.raw corrected that fixture. Neither was a production 
 Subscription auth/benchmark adapters remain separate external work, not part of W24.
 ViewUnits/model-token budgets/epochs/recovery, remaining coordinator/whole-process bounds,
 real isolated medium-effort campaigns and approved release remain unfinished.
+
+### Existing subscription authorization and benchmark adapters (W25)
+
+AuthStorage.fromStorage can explicitly reuse an existing OpenAI Codex login through a
+read-only backend. This instance-only option does not validate copied OAuth clients or
+enable login/refresh. It rejects writes, API-key overrides, stale/expired credentials and
+fallback. ModelRegistry permits only the existing Codex provider/API and official backend
+URLs; custom auth headers/config and provider/protocol/endpoint aliases stay rejected.
+The owned dispatcher and physical-attempt recording are unchanged.
+
+The native/H runner now injects that backend through each package's existing SDK/runtime
+and RPC APIs. The selected auth file is mounted read-only only in the trusted outer
+process. The backend filters out refresh tokens and unrelated providers. Candidate Bash,
+service and judge execution use separate filesystem/PID/environment views. The shared
+Python sandbox keeps workspace access while excluding a dummy host-only file in the
+focused test. This is not isolation of trusted in-process extensions. The required
+run_codex service-helper signature port does not authorize its separate auth-copy route.
+
+Legacy assistant/plugin observations cannot establish physical-attempt totals under
+hidden retries. Their known fields remain separate observations; physical count/usage/cost
+stay unknown/incomplete. Native receipts retain identity-based deduplication and capacity
+authority; assistant error text cannot override a native receipt. Exact legacy capacity
+errors remain recognized. First valid primary and capacity-independent retry limits remain.
+
+Four distinct existing focused cases passed: auth2 and benchmark2. Repeats are separate;
+the sandbox assertion initially landed in an unselected neighboring case, so that repeat
+did not execute it. It was moved into the selected happy case, which then passed with a
+real nested sandbox. No real credentials, provider calls, installed SDK/RPC startup or
+kernel ran. The benchmark directory is excluded from Biome; its two new JS scripts passed
+Node syntax checks, not runtime tests. Frozen D/S adapter drafts remain external and
+unexecuted. Actual subscription freshness/entitlement and all campaigns remain untested.

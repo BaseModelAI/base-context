@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.js";
 import * as providerContracts from "../src/core/provider-contracts.js";
 
 describe("AuthStorage", () => {
@@ -940,6 +940,50 @@ describe("AuthStorage", () => {
 					);
 					expect(authStorage.getAll()).toEqual({ [providerId]: credential });
 				}
+			}
+
+			for (const fresh of [true, false]) {
+				const credential = {
+					type: "oauth",
+					access: "host-access-dummy",
+					expires: Date.now() + (fresh ? 60_000 : -60_000),
+				};
+				const current = JSON.stringify({ "openai-codex": credential });
+				const backend: AuthStorageBackend = {
+					withLock(fn) {
+						const { result, next } = fn(current);
+						expect(next).toBeUndefined();
+						return result;
+					},
+					withLockAsync: vi.fn(async () => {
+						throw new Error("Borrowed host storage must not use async callbacks");
+					}),
+				};
+				authStorage = AuthStorage.fromStorage(backend, {
+					existingOpenAICodexSubscription: true,
+					usePrimeCliConfig: false,
+				});
+				const isolated = AuthStorage.fromStorage(backend, { usePrimeCliConfig: false });
+				expect(await isolated.getApiKey("openai-codex")).toBeUndefined();
+				expect(providerContracts.getProviderAuthContract("openai-codex").oauth).toBe("unvalidated");
+				expect(authStorage.getOAuthProviders()).toEqual([]);
+				await expect(authStorage.login("openai-codex", callbacks)).rejects.toThrow(
+					"Existing OpenAI subscription storage is read-only",
+				);
+				if (fresh) {
+					expect(authStorage.hasAuth("openai-codex")).toBe(true);
+					expect(authStorage.getAuthStatus("openai-codex")).toEqual({ configured: true, source: "stored" });
+					expect(await authStorage.getApiKey("openai-codex")).toBe(credential.access);
+				} else {
+					await expect(authStorage.getApiKey("openai-codex")).rejects.toThrow(
+						"Existing OpenAI subscription credential has expired",
+					);
+				}
+				expect(() => authStorage.set("openai-codex", { type: "api_key", key: "dummy" })).toThrow("read-only");
+				expect(() => authStorage.remove("openai-codex")).toThrow("read-only");
+				expect(() => authStorage.removeVerified("openai-codex")).toThrow("read-only");
+				expect(authStorage.getAll()).toEqual({ "openai-codex": credential });
+				expect(backend.withLockAsync).not.toHaveBeenCalled();
 			}
 			expect(login).not.toHaveBeenCalled();
 			expect(refreshToken).not.toHaveBeenCalled();

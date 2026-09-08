@@ -28,7 +28,11 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Global config directory. Default: ~/.base-context */
 	agentDir?: string;
 
-	/** Auth storage for credentials. Default: AuthStorage.create(agentDir/auth.json) */
+	/** Auth storage for credentials. Default: AuthStorage.create(agentDir/auth.json).
+	 * Existing host Codex subscriptions can be injected with
+	 * AuthStorage.fromStorage(readOnlyBackend, { existingOpenAICodexSubscription: true }).
+	 * This retains the built-in owned dispatcher; it does not enable OAuth login/refresh.
+	 */
 	authStorage?: AuthStorage;
 	/** Model registry. Default: ModelRegistry.create(authStorage, agentDir/models.json) */
 	modelRegistry?: ModelRegistry;
