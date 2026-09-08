@@ -7,6 +7,7 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	CompactionCommittedError,
 	type ModelCycleResult,
 	type PromptOptions,
 } from "./core/agent-session.js";
@@ -200,10 +201,20 @@ export {
 	// Tool factories (for custom cwd)
 	createEditTool,
 	createIpythonTool,
+	createPrimeContextTool,
 	type PromptTemplate,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";
+export {
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryInput,
+	type NativeRecoveryLimits,
+	type NativeRecoveryResponse,
+	nativeRecoveryInputSchema,
+	nativeRecoveryToolSchema,
+} from "./core/selective-recovery.js";
 export type { SessionActionSnapshot } from "./core/session-action-store.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
@@ -272,6 +283,7 @@ export {
 	createEditToolDefinition,
 	createIpythonToolDefinition,
 	createLocalBashOperations,
+	createPrimeContextToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type EditOperations,
@@ -283,6 +295,9 @@ export {
 	type IpythonToolDetails,
 	type IpythonToolInput,
 	type IpythonToolOptions,
+	type PrimeContextToolDetails,
+	type PrimeContextToolOptions,
+	type ToolName,
 	type ToolsOptions,
 	type TruncationOptions,
 	type TruncationResult,

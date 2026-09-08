@@ -3,6 +3,30 @@
 Base Context is being implemented from Prime Agent **v0.9.3**, commit
 `915c78f42c248b08238dd27fcd4bcab32c60beab`. This is not a certified release.
 
+## Current focus: five benchmark prerequisites
+
+Scope is frozen to TaskFrame injection, ViewUnit dependency closure, model-aware
+token budgets, stable epochs and selective recovery. `SPEC_DEVIATIONS.md` is the
+backlog. Other findings are deferred unless they block these features.
+
+The current source wires complete dependency/replay closure into compiler output,
+adds bounded native/Python recovery, and binds compaction input and commit to one
+captured source. Stale leaf, branch ABA and source switches refuse before append.
+Known-ACK setup failures remain committed and stop automatic repetition. Service
+session creation now forwards the explicit request budget policy.
+
+Twelve focused cases passed across separate compiler, captured recovery, compaction,
+service and native/Python invocations. The real runtime path includes finalized
+output visibility, canonical reread, restricted/custom tools and stale-cell refusal.
+Provider responses were local simulations. `npm run check` passes. Initial type
+and fixture integration diagnostics remain recorded. Full token-budgeted selection,
+committed epoch identity and recovery retention across epochs remain open.
+
+No live benchmark or readiness probe is allowed before all five features work.
+After that gate, the latest user order is all 30 isolated tasks at low effort,
+then medium effort, using the same session ChatGPT subscription. Publication
+still requires approval.
+
 ## Source correction
 
 The supplied archive hash verifies, but its commit `9c54a35…` is v0.9.2.

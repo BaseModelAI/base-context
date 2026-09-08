@@ -200,10 +200,10 @@ export class InferenceCoordinator {
 	}
 
 	/** Capture an auxiliary operation's subject before asynchronous auth or UI work. */
-	capture(): InferenceCoordinator {
+	capture(sink?: BoundRequestSink): InferenceCoordinator {
 		this.assertAdmission();
 		const owner = Object.freeze({ ...this.owner() });
-		const binding = this.sinkUse(this.bindSink());
+		const binding = this.sinkUse(sink ?? this.bindSink());
 		binding.sink.retain();
 		binding.release = undefined;
 		binding.captures++;

@@ -19,6 +19,7 @@ import {
 import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
 import { buildSessionContext, SessionManager } from "../src/core/session-manager.js";
 import { TASK_STATE_CUSTOM_TYPE, TASK_STATE_SCHEMA } from "../src/core/task-state.js";
+import { closeViewSelection } from "../src/core/view-units.js";
 
 it("reconstructs the whole retained context across pages and caches immutable source entries", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "base-context-compile-"));
@@ -347,11 +348,19 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			previousFrameUnits.map((unit) => [unit.id, unit.sourceRevision]),
 		);
 		expect(nextFrameUnits[2].requiredVisibleDependencies).toContain(nextFrameUnits[1].id);
+		const providerUnits = getCanonicalViewUnits(withSecondDelta)!;
+		const closedUnits = closeViewSelection(providerUnits, [nextFrameUnits[2].id], {
+			maxUnits: frameLimits.maxMessages,
+			maxDependencies: frameLimits.maxMessages * 4,
+			maxMetadataBytes: frameLimits.maxSourceBytes,
+		});
+		expect(closedUnits.map((unit) => unit.id)).toEqual(providerUnits.map((unit) => unit.id));
 		// Rendered input can be callback-expanded; only the separately projected submitted clause has user authority.
 		expect(
 			getCanonicalViewUnits(withSecondDelta)!.find((unit) => unit.exactSources.includes(laterInputId))!.authority,
 		).toBe("unrecorded");
 		const providerMessages = convertToLlm(withSecondDelta);
+		expect(providerMessages).toHaveLength(closedUnits.length);
 		for (const frame of secondFrames) {
 			expect(providerMessages[withSecondDelta.indexOf(frame)]).toEqual({
 				role: "user",
@@ -426,6 +435,25 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 			capture.readHistory((view) => compiler.compile(view, { maxMessages: 2, maxSourceBytes: 4096 })),
 		).rejects.toThrow("Canonical context message budget exceeded");
 		expect(reads).not.toHaveBeenCalled();
+
+		// Real captured compiler output refusal; no native transport or provider claim.
+		await capture.dispose();
+		capture = undefined;
+		const orphanId = await manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "missing-call",
+			toolName: "fixture",
+			content: [{ type: "text", text: "result without a retained call" }],
+			isError: false,
+			timestamp: 3,
+		});
+		const beforeRefusal = await manager.readEntries();
+		capture = requests.capture();
+		await expect(
+			capture.readHistory((view) => compiler.compile(view, { maxMessages: 16, maxSourceBytes: 64 * 1024 })),
+		).rejects.toThrow("View-unit replay group is incomplete");
+		expect(compiler.hasActiveEntry(orphanId)).toBe(false);
+		expect(await manager.readEntries()).toEqual(beforeRefusal);
 	} finally {
 		try {
 			await capture?.dispose();

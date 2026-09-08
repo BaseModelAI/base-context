@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerFauxProvider } from "@ponythewhite/base-context-ai";
+import { type Model, RequestTokenBudgetError, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
@@ -77,10 +77,34 @@ describe("createAgentSessionFromServices", () => {
 			services,
 			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 			telemetryDisabled: true,
+			requestTokenBudget: { mode: "enforce", profiles: [] },
 		});
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unbudgeted service request sent"));
 		try {
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+			const model: Model<"openai-responses"> = {
+				id: "offline-services",
+				name: "Offline services",
+				api: "openai-responses",
+				provider: "openai",
+				baseUrl: "https://example.invalid/v1",
+				reasoning: false,
+				input: ["text"],
+				contextWindow: 1024,
+				maxTokens: 16,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			};
+			await expect(
+				session.requests.complete(
+					model,
+					{ messages: [] },
+					{ apiKey: "offline-services-key", maxRetries: 0 },
+					{ purpose: "main" },
+				),
+			).rejects.toBeInstanceOf(RequestTokenBudgetError);
+			expect(fetch).not.toHaveBeenCalled();
 		} finally {
+			fetch.mockRestore();
 			await session.disposeAsync();
 		}
 	});
@@ -106,6 +130,20 @@ describe("createAgentSessionFromServices", () => {
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
 		} finally {
 			await session.disposeAsync();
+		}
+		const invalidManager = await SessionManager.create(tempDir, join(tempDir, "invalid-budget"));
+		try {
+			await expect(
+				createAgentSessionFromServices({
+					services,
+					sessionManager: invalidManager,
+					telemetryDisabled: true,
+					// Invalid runtime configuration must reach the SDK validator, not disappear in the factory.
+					requestTokenBudget: { mode: "invalid" as "enforce", profiles: [] },
+				}),
+			).rejects.toThrow("Invalid request token budget mode");
+		} finally {
+			await invalidManager.close();
 		}
 	});
 

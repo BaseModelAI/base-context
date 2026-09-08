@@ -18,7 +18,7 @@ import type { SessionEntry } from "./session-manager.js";
 import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
 import { readTaskStateFromView } from "./task-state-reader.js";
 import { cloneUsage } from "./usage.js";
-import { bindMessageReplayUnits, type ViewUnit } from "./view-units.js";
+import { bindMessageReplayUnits, closeViewSelection, type ViewUnit } from "./view-units.js";
 
 export interface CanonicalContextLimits {
 	maxMessages: number;
@@ -343,6 +343,11 @@ export class CanonicalContextCompiler {
 				if (at < literal.length) messages.push(literal[at]);
 			}
 		}
+		const unitLimits = {
+			maxUnits: maxMessages,
+			maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
+			maxMetadataBytes: maxSourceBytes,
+		};
 		const units = bindMessageReplayUnits(
 			messages,
 			messages.map((message) => {
@@ -350,19 +355,23 @@ export class CanonicalContextCompiler {
 				if (!unit) throw new Error("Compiled view unit has no captured source");
 				return unit;
 			}),
-			{
-				maxUnits: maxMessages,
-				maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
-				maxMetadataBytes: maxSourceBytes,
-			},
+			unitLimits,
 		);
-		compiledViewUnits.set(messages, units);
+		// Keep the full context, but refuse incomplete replay before returning provider-bound messages.
+		const closedUnits = closeViewSelection(
+			units,
+			units.map((unit) => unit.id),
+			unitLimits,
+		);
+		const messagesByUnit = new Map(units.map((unit, index) => [unit.id, messages[index]]));
+		const closedMessages = closedUnits.map((unit) => messagesByUnit.get(unit.id)!);
+		compiledViewUnits.set(closedMessages, closedUnits);
 		this.entries = next;
 		this.taskFrame = taskFrame;
 		this.taskBoundary = boundary;
 		this.source = view.source;
 		this.sourceBytes = sourceBytes;
 		this.messageCount = messageCount;
-		return messages;
+		return closedMessages;
 	}
 }

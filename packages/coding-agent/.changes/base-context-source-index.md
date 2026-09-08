@@ -37,3 +37,8 @@
 - Preserve cached Codex context on local budget refusal and account for acknowledged retained context.
 - Remove unsupported kernel-survival assertions and correct fork installation and support documentation.
 - Map canonical specification coverage, deviations, evidence limits, and remaining work in SPEC_DEVIATIONS.md.
+
+- Added bounded native `prime_context` recovery and the active-cell `rlm.prime_context` bridge, with selected data included in finalized tool output.
+- Enforced complete ViewUnit dependency/replay closure in actual canonical compiler output.
+- Bound compaction reads and commit checks to one captured source, with branch-ABA rejection and typed known-commit setup errors.
+- Forwarded explicit request budget policy through service-based session creation and enabled recovery only for the native benchmark arm.

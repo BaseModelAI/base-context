@@ -64,7 +64,7 @@ export interface Args {
 }
 
 const REMOVED_BUILTIN_TOOL_NAMES = new Set(["read", "write", "grep", "find", "ls"]);
-const BUILTIN_TOOL_NAMES = ["ipython"];
+const BUILTIN_TOOL_NAMES = ["ipython", "prime_context"];
 
 export const INTERNAL_RUNTIME_COMMAND_MARKER = "\0prime-agent-runtime-command";
 

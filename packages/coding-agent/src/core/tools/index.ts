@@ -28,6 +28,12 @@ export {
 	type IpythonToolOptions,
 } from "./ipython.js";
 export {
+	createPrimeContextTool,
+	createPrimeContextToolDefinition,
+	type PrimeContextToolDetails,
+	type PrimeContextToolOptions,
+} from "./prime-context.js";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -41,17 +47,20 @@ export {
 import type { AgentTool } from "@ponythewhite/base-context-agent";
 import type { ToolDefinition } from "../extensions/types.js";
 import { createIpythonToolDefinition, type IpythonToolOptions } from "./ipython.js";
+import { createPrimeContextToolDefinition, type PrimeContextToolOptions } from "./prime-context.js";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "ipython";
+export type ToolName = "ipython" | "prime_context";
 
 export interface ToolsOptions {
 	ipython?: IpythonToolOptions;
+	prime_context?: PrimeContextToolOptions;
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	return {
 		ipython: createIpythonToolDefinition(cwd, options?.ipython),
+		prime_context: createPrimeContextToolDefinition(options?.prime_context),
 	};
 }

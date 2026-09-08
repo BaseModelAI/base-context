@@ -12,8 +12,11 @@ import {
 	type Usage,
 } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CompactionCommittedError } from "../../src/core/agent-session.js";
+import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { SessionManager } from "../../src/core/session-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -142,9 +145,24 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
+		let postAckSummary = false;
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						if (!postAckSummary) return;
+						return {
+							compaction: {
+								summary: "acknowledged refresh probe",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						};
+					});
+				},
+			],
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -184,7 +202,22 @@ describe("AgentSession compaction characterization", () => {
 			sourceRead.mockRestore();
 		}
 
+		const originalBind = harness.sessionManager.bindCompactionSink.bind(harness.sessionManager);
+		let branchReads = 0;
+		const bound = vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((limits) => {
+			const sink = originalBind(limits);
+			const read = sink.readBranch.bind(sink);
+			vi.spyOn(sink, "readBranch").mockImplementation(() => {
+				branchReads++;
+				return read();
+			});
+			return sink;
+		});
+		const captures = vi.spyOn(InferenceCoordinator.prototype, "capture");
 		const result = await harness.session.compact();
+		expect(bound).toHaveBeenCalledOnce();
+		expect(branchReads).toBe(1);
+		expect(captures).toHaveBeenCalledWith(bound.mock.results[0].value);
 		const entry = (await harness.sessionManager.readEntries()).find((candidate) => candidate.type === "compaction");
 
 		expect(result.summary).toContain("model-generated summary");
@@ -207,7 +240,11 @@ describe("AgentSession compaction characterization", () => {
 		);
 		expect((ownUsage?.outputTokens ?? 0) - (usageBeforeCompaction?.outputTokens ?? 0)).toBe(compactionUsage.output);
 		expect((ownUsage?.cost ?? 0) - (usageBeforeCompaction?.cost ?? 0)).toBeCloseTo(compactionUsage.cost.total);
-		expect(harness.session.messages[0]).toMatchObject({
+		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: TASK_FRAME_CUSTOM_TYPE });
+		const literalMessages = harness.session.messages.filter(
+			(message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE,
+		);
+		expect(literalMessages[0]).toMatchObject({
 			role: "compactionSummary",
 			summary: expect.stringContaining("model-generated summary"),
 		});
@@ -227,6 +264,110 @@ describe("AgentSession compaction characterization", () => {
 			role: "assistant",
 			content: [{ type: "text", text: "still usable" }],
 		});
+
+		// A real canonical append ACK followed by a failed bootstrap is not a failed append or usable projection.
+		const countBeforeSetupFailure = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "compaction",
+		).length;
+		const startsBeforeSetupFailure = harness.eventsOfType("compaction_start").length;
+		const refreshError = new Error("post-ACK compaction refresh failed");
+		const append = harness.sessionManager.appendCompaction.bind(harness.sessionManager);
+		let committedEntryId: string | undefined;
+		let restoreRefresh: (() => void) | undefined;
+		const appendProbe = vi
+			.spyOn(harness.sessionManager, "appendCompaction")
+			.mockImplementationOnce(async (...args) => {
+				const id = await append(...args);
+				committedEntryId = id;
+				const refresh = vi.spyOn(harness.sessionManager, "readBranchHistory").mockRejectedValueOnce(refreshError);
+				restoreRefresh = () => refresh.mockRestore();
+				return id;
+			});
+		const finish = vi.spyOn(harness.session.semanticEdges, "finishCompaction");
+		const continueAgent = vi.spyOn(harness.session.agent, "continue");
+		postAckSummary = true;
+		try {
+			const error = await harness.session.compact().then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+			expect(error).toBeInstanceOf(CompactionCommittedError);
+			const committed = error as CompactionCommittedError;
+			expect(committed.entryId).toBe(committedEntryId);
+			expect(committed.result.summary).toBe("acknowledged refresh probe");
+			expect(committed.cause).toBe(refreshError);
+			await expect(harness.session.compact()).rejects.toBe(committed);
+			expect(appendProbe).toHaveBeenCalledOnce();
+			expect(await harness.sessionManager.readEntry(committed.entryId)).toMatchObject({
+				id: committed.entryId,
+				type: "compaction",
+				summary: committed.result.summary,
+			});
+			expect(
+				(await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction"),
+			).toHaveLength(countBeforeSetupFailure + 1);
+			expect(finish.mock.calls.map(([, status]) => status)).toEqual(["completed"]);
+			expect(harness.eventsOfType("compaction_start")).toHaveLength(startsBeforeSetupFailure + 1);
+			expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+				result: committed.result,
+				errorMessage: committed.message,
+				errorSeverity: "error",
+				willRetry: false,
+			});
+			expect(continueAgent).not.toHaveBeenCalled();
+		} finally {
+			postAckSummary = false;
+			restoreRefresh?.();
+			appendProbe.mockRestore();
+			finish.mockRestore();
+			continueAgent.mockRestore();
+		}
+
+		// These are storage arguments, not a physical provider usage receipt.
+		const branchBeforeAdmission = await harness.sessionManager.readBranch();
+		const firstKept = branchBeforeAdmission.find((candidate) => candidate.type === "message");
+		if (!firstKept) throw new Error("Expected a real message for bound append admission");
+		const details = { readFiles: ["Before.ts"], nested: { text: "before source wait" } };
+		const usage: Usage = {
+			input: 7,
+			output: 3,
+			cacheRead: 2,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0.7, output: 0.3, cacheRead: 0.2, cacheWrite: 0, total: 1.2 },
+		};
+		const originalDetails = structuredClone(details);
+		const originalUsage = structuredClone(usage);
+		const admitted = harness.sessionManager.bindCompactionSink();
+		admitted.retain();
+		try {
+			const reading = admitted.readBranch();
+			const appending = admitted.appendCompaction(
+				"bound argument snapshot",
+				firstKept.id,
+				64,
+				details,
+				false,
+				undefined,
+				usage,
+			);
+			details.readFiles[0] = "After.ts";
+			details.nested.text = "mutated before the first await";
+			usage.input = 700;
+			usage.cost.input = 70;
+			const releasing = admitted.release();
+			const [entryId, readBranch] = await Promise.all([appending, reading, releasing]);
+			expect(readBranch).toEqual(branchBeforeAdmission);
+			expect(await harness.sessionManager.readEntry(entryId)).toMatchObject({
+				type: "compaction",
+				summary: "bound argument snapshot",
+				firstKeptEntryId: firstKept.id,
+				details: originalDetails,
+				usage: originalUsage,
+			});
+		} finally {
+			await admitted.release();
+		}
 	});
 
 	it("renders an executing /compact as activity instead of queued work", async () => {
@@ -366,13 +507,22 @@ describe("AgentSession compaction characterization", () => {
 	it("waits for active auto-compaction before continuing", async () => {
 		const compactionStarted = createDeferred();
 		const compactionRelease = createDeferred();
+		let staleCompactionStarted: (() => void) | undefined;
+		let staleCompactionRelease: Promise<void> | undefined;
+		let staleBranchIds: string[] = [];
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => {
 						compactionStarted.resolve();
 						await compactionRelease.promise;
+						if (staleCompactionStarted) {
+							staleBranchIds = event.branchEntries.map((entry) => entry.id);
+							staleCompactionStarted();
+							await staleCompactionRelease;
+						}
 						return {
 							compaction: {
 								summary: "summary from extension",
@@ -406,6 +556,95 @@ describe("AgentSession compaction characterization", () => {
 		await compaction;
 		await harness.session.waitForHeadlessIdle();
 		expect(continueAgent).toHaveBeenCalledTimes(1);
+
+		// Extend the existing held-hook case without another provider/summary response.
+		const before = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction");
+		await harness.sessionManager.appendMessage({ role: "user", content: "Prepare stale summary", timestamp: 3 });
+		const keptId = await harness.sessionManager.appendMessage({
+			role: "user",
+			content: "Keep exact input",
+			timestamp: 4,
+		});
+		const staleStarted = createDeferred();
+		const staleRelease = createDeferred();
+		staleCompactionStarted = () => staleStarted.resolve();
+		staleCompactionRelease = staleRelease.promise;
+		const stale = internals._runAutoCompaction("threshold", false);
+		let lateId: string;
+		try {
+			await staleStarted.promise;
+			lateId = await harness.sessionManager.appendMessage({
+				role: "user",
+				content: "Later source input",
+				timestamp: 5,
+			});
+			expect(staleBranchIds).toContain(keptId);
+			expect(staleBranchIds).not.toContain(lateId);
+		} finally {
+			staleRelease.resolve();
+			await stale;
+			staleCompactionStarted = undefined;
+			staleCompactionRelease = undefined;
+		}
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+			before,
+		);
+		expect(await harness.sessionManager.readEntry(lateId!)).toMatchObject({
+			type: "message",
+			message: { role: "user", content: "Later source input" },
+		});
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			result: undefined,
+			errorMessage: expect.stringContaining("Compaction source or branch changed"),
+		});
+		// Established auto-failure outcome records may still follow that input; do not claim a frozen leaf.
+
+		// Public selection away/back invalidates this in-memory candidate even when the leaf is restored.
+		const aba = harness.sessionManager.bindCompactionSink();
+		aba.retain();
+		try {
+			const source = await aba.source;
+			const branch = await aba.readBranch();
+			const away = branch.find((entry) => entry.id !== source.leafId);
+			const firstKept = branch.find((entry) => entry.type === "message");
+			if (!source.leafId || !away || !firstKept) throw new Error("Expected real source selections for ABA");
+			await harness.sessionManager.branchTo(away.id);
+			await harness.sessionManager.branchTo(source.leafId);
+			expect(harness.sessionManager.getLeafId()).toBe(source.leafId);
+			await expect(aba.appendCompaction("stale ABA summary", firstKept.id, 1)).rejects.toThrow(
+				"Compaction source or branch changed",
+			);
+			expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+				before,
+			);
+		} finally {
+			await aba.release();
+		}
+
+		const captured = harness.sessionManager.bindCompactionSink();
+		captured.retain();
+		try {
+			const source = await captured.source;
+			const branch = await captured.readBranch();
+			const firstKept = branch.find((entry) => entry.type === "message");
+			if (!firstKept) throw new Error("Expected a real captured source message");
+			await harness.sessionManager.newSession();
+			expect(harness.sessionManager.getSessionId()).not.toBe(source.sessionId);
+			expect(await captured.readBranch()).toEqual(branch);
+			await expect(captured.appendCompaction("stale source summary", firstKept.id, 1)).rejects.toThrow(
+				"Compaction source or branch changed",
+			);
+			expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+				[],
+			);
+		} finally {
+			await captured.release();
+		}
+		await expect(captured.readBranch()).rejects.toThrow("Captured request sink is not retained");
+		await expect(captured.appendCompaction("released source summary", keptId, 1)).rejects.toThrow(
+			"Captured request sink is not retained",
+		);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([]);
 	});
 
 	it("treats session-owned queued inputs as queued work after compaction", async () => {

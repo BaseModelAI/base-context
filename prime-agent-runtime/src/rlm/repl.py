@@ -109,7 +109,7 @@ async def host_request(data: dict[str, Any]) -> dict[str, Any]:
     future: asyncio.Future[dict[str, Any]] = _loop.create_future()
     _pending_host[rid] = future
     try:
-        _send({"event": "host_request", "id": rid, "data": data})
+        _send({"event": "host_request", "id": rid, "cellId": _current_cell.get(), "data": data})
         return await future
     finally:
         _pending_host.pop(rid, None)

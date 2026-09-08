@@ -1,12 +1,6 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type AgentOutputLimits, type ThinkingLevel } from "@ponythewhite/base-context-agent";
-import {
-	clampThinkingLevel,
-	type Message,
-	type Model,
-	type RequestTokenBudgetOptions,
-	supportsFastMode,
-} from "@ponythewhite/base-context-ai";
+import { clampThinkingLevel, type Message, type Model, supportsFastMode } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import type { AgentSessionCreationOptions } from "./agent-session-services.js";
@@ -26,11 +20,15 @@ import { readSessionBootstrap } from "./session-bootstrap.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { time } from "./timings.js";
-import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue } from "./tools/index.js";
+import {
+	createBashTool,
+	createEditTool,
+	createIpythonTool,
+	createPrimeContextTool,
+	withFileMutationQueue,
+} from "./tools/index.js";
 
 export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
-	/** Explicit native request-budget rollout. No catalog/default limit inference. */
-	requestTokenBudget?: RequestTokenBudgetOptions;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.base-context */
@@ -56,14 +54,14 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tool (ipython)
+	 * - "builtin": disable the default built-in tools (ipython and prime_context)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, Base Context enables the default built-in tool (ipython)
+	 * When omitted, Base Context enables the default built-in tools (ipython and prime_context)
 	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
 	 * When provided, only the listed tool names are enabled.
 	 */
@@ -117,7 +115,7 @@ export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRunti
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
-export { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue };
+export { createBashTool, createEditTool, createIpythonTool, createPrimeContextTool, withFileMutationQueue };
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
@@ -261,7 +259,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			options.allowedToolNames ?? options.tools ?? (options.noTools === "all" ? [] : undefined);
 		const includeGoals = options.includeGoals ?? (options.tools !== undefined || options.noTools !== "all");
 		const initialActiveToolNames: string[] =
-			options.initialActiveToolNames ?? (options.tools ? [...options.tools] : options.noTools ? [] : ["ipython"]);
+			options.initialActiveToolNames ??
+			(options.tools ? [...options.tools] : options.noTools ? [] : ["ipython", "prime_context"]);
 
 		let agent: Agent;
 

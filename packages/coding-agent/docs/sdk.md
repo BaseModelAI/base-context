@@ -491,9 +491,9 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 ### Tools
 
 ```typescript
-// Use the default built-in tool set: ipython
+// Use both default built-in tools
 const { session } = await createAgentSession({
-  tools: ["ipython"],
+  tools: ["ipython", "prime_context"],
 });
 
 // Pick specific tools
@@ -501,6 +501,34 @@ const { session } = await createAgentSession({
   tools: ["ipython"],
 });
 ```
+
+#### Native history recovery
+
+The built-in `prime_context` tool reads selected public text from one captured
+branch. It supports exact entry IDs, revisions, line windows, literal search,
+and bounded batches. Results include source references, coverage, and unknown
+freshness. They are tool data, not instructions or proof of current runtime state.
+
+When both built-ins are active, Python can use the same reader:
+
+```python
+selected = await rlm.prime_context({
+    "action": "recover", "ref": "ENTRY_ID", "need": "exact literal"
+})
+```
+
+Selected data is attached to that cell's finalized tool result. A Python variable
+alone does not update model context. Requests outside an active cell are refused.
+The default response cap is 64 KiB, with 1 MiB of source reads, 16 items and eight
+operations per batch. Python cells share a 64 KiB/eight-request recovery cap.
+A recovery-bearing tool result that exceeds 256 KiB returns an explicit output
+refusal. That refusal does not undo code execution.
+
+Keep the normal built-ins when adding custom tools. For a Bash-only workflow with
+recovery, register custom Bash and select `tools: ["bash", "prime_context"]`.
+A full `baseToolsOverride` or a same-name custom replacement does not grant access
+to the owned recovery service. Recovery-specific retention across new epochs is
+not yet implemented.
 
 #### Tools with Custom cwd
 

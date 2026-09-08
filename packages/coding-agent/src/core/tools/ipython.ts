@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@ponythewhite/base-context-agent";
+import type { AgentTool, AgentToolResult } from "@ponythewhite/base-context-agent";
 import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
 import { PRODUCT } from "../../product-identity.js";
@@ -20,7 +20,9 @@ import {
 	ReplKernelManager,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import { nativeRecoveryMetadata, stringifyNativeRecoveryResponse } from "../selective-recovery.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
+import { admitNativeRecoveryToolResult, nativeRecoveryToolResult } from "./prime-context.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const RLM_BOOTSTRAP_HEADER_CODE = `
@@ -249,6 +251,8 @@ function setWorkingMessage(ctx: ExtensionContext | undefined, message?: string):
 export type IpythonToolInput = Static<typeof ipythonSchema>;
 
 export interface IpythonToolDetails {
+	/** Descriptive selectors only; the exact selected body is in this tool result's content. */
+	nativeRecoveries?: ReturnType<typeof nativeRecoveryMetadata>[];
 	durationMs?: number;
 	status?: "ok" | "error" | "aborted" | "starting";
 	errorEname?: string;
@@ -573,6 +577,7 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
+					nativeRecovery: true,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -670,8 +675,12 @@ export function createIpythonToolDefinition(
 
 				const imageBlocks = imageBlocksFromAttachments(r.attachments);
 				const content: (TextContent | ImageContent)[] = [{ type: "text", text: text || "" }, ...imageBlocks];
+				// Bypass stdout/trailing-expression truncation. This is the sole selected-body persistence path.
+				for (const recovery of r.nativeRecoveries ?? []) {
+					content.push({ type: "text", text: stringifyNativeRecoveryResponse(recovery) });
+				}
 
-				return {
+				const result: AgentToolResult<IpythonToolDetails> & { isError: boolean } = {
 					content,
 					details: {
 						durationMs: r.durationMs,
@@ -684,11 +693,24 @@ export function createIpythonToolDefinition(
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
+						nativeRecoveries: r.nativeRecoveries?.map(nativeRecoveryMetadata),
 						kernelRestarted,
 						error: r.error,
 					},
 					isError: r.status === "error" || r.status === "aborted",
 				};
+				return r.nativeRecoveries?.length
+					? admitNativeRecoveryToolResult(result, (refusal) => ({
+							content: nativeRecoveryToolResult(refusal).content,
+							details: {
+								status: r.status,
+								durationMs: r.durationMs,
+								kernelRestarted,
+								nativeRecoveries: [nativeRecoveryMetadata(refusal)],
+							},
+							isError: true,
+						}))
+					: result;
 			} finally {
 				if (hasWorkingMessage) {
 					setToolWorkingMessage();

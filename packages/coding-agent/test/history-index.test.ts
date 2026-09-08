@@ -11,6 +11,14 @@ import {
 } from "../src/core/history-index.js";
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
 import {
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	nativeRecoveryMetadata,
+	recoverCapturedHistory,
+	stringifyNativeRecoveryResponse,
+} from "../src/core/selective-recovery.js";
+import { createBranchHistoryReadView } from "../src/core/session-history-index.js";
+import {
 	APPEND_NATIVE_ADMISSION,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
@@ -129,7 +137,13 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			decodeJournalFrame(frame, { sequence: 1, checksum: header.checksum }, SESSION_JOURNAL_MAX_FRAME_BYTES),
 		).toMatchObject({ payload: { id: "root" }, retention: "retained-import", qualification: "native-admission" });
 		await owner[APPEND_NATIVE_ADMISSION](
-			entry("chosen", "root", `chosen ${"é".repeat(8192)}`, "message", inputOrigin("chosen")),
+			entry(
+				"chosen",
+				"root",
+				`chosen ${"é".repeat(8192)}\nDecisive Needle\nsecond line\nsuffix`,
+				"message",
+				inputOrigin("chosen"),
+			),
 		);
 		await owner.appendJson(entry("root-request", "root", "root request", "request"));
 		await owner.appendJson(entry("sibling-request", "sibling", "sibling request", "request"));
@@ -195,6 +209,90 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const chosen = await index.get("canonical", "chosen");
 		expect(Buffer.byteLength(chosen!.text)).toBeLessThanOrEqual(8192);
 		expect(chosen?.textComplete).toBe(false);
+		const recoveryView = createBranchHistoryReadView(
+			index,
+			{
+				sessionId: "canonical",
+				sessionFile: journalPath,
+				leafId: "chosen",
+				sourceSequence: 5,
+				persistent: true,
+			},
+			(query) => query(),
+		);
+		const recovery = await recoverCapturedHistory(recoveryView, {
+			action: "batch",
+			requests: [
+				{ action: "read", ref: "root", revision: indexed!.revision },
+				{ action: "recover", ref: "chosen", revision: chosen!.revision, need: "Decisive Needle\nsecond line" },
+				{ action: "search", ref: "root", query: "SOURCE" },
+				{ action: "read", ref: "chosen", revision: chosen!.revision, field: "/nativeOrigin/submitted/text" },
+				{ action: "read", ref: "root", revision: indexed!.revision, field: "/nativeOrigin/submitted/text" },
+			],
+		});
+		expect(recovery).toMatchObject({
+			kind: "native-recovery",
+			nativeRecovery: 1,
+			version: 1,
+			authority: "tool-data",
+			freshness: "unknown",
+			status: "partial",
+			coverage: "partial",
+			scope: { kind: "branch", sourceSessionId: "canonical", leafId: "chosen", sourceSequence: 5 },
+		});
+		expect(recovery.results.map((result) => result.status)).toEqual([
+			"found",
+			"partial",
+			"complete-miss",
+			"found",
+			"unavailable",
+		]);
+		expect(recovery.results[0].records[0]).toMatchObject({
+			ref: "root",
+			revision: indexed!.revision,
+			field: "/message/content",
+			text: "source root",
+		});
+		expect(recovery.results[1]).toMatchObject({ coverage: "partial", reason: "need_window" });
+		expect(recovery.results[1].records[0].text).toBe("Decisive Needle\nsecond line");
+		expect(recovery.results[3].records[0]).toMatchObject({
+			ref: "chosen",
+			revision: chosen!.revision,
+			field: "/nativeOrigin/submitted/text",
+			text: "  exact chosen  ",
+		});
+		// The same original-subject field is unavailable on the retained-import root.
+		expect(recovery.results[4].records).toEqual([]);
+		expect(recovery.sources).toEqual([
+			{
+				sourceSessionId: "canonical",
+				entryId: "root",
+				revision: indexed!.revision,
+				field: "/message/content",
+				startLine: 1,
+				endLine: 1,
+			},
+			{
+				sourceSessionId: "canonical",
+				entryId: "chosen",
+				revision: chosen!.revision,
+				field: "/message/content",
+				startLine: 2,
+				endLine: 3,
+			},
+			{
+				sourceSessionId: "canonical",
+				entryId: "chosen",
+				revision: chosen!.revision,
+				field: "/nativeOrigin/submitted/text",
+				startLine: 1,
+				endLine: 1,
+			},
+		]);
+		expect(stringifyNativeRecoveryResponse(recovery)).not.toContain(journalPath);
+		expect(stringifyNativeRecoveryResponse(recovery)).not.toContain('"nativeOrigin":');
+		expect(nativeRecoveryMetadata(recovery)).not.toHaveProperty("results");
+		expect(nativeRecoveryMetadata(recovery).sources).toEqual(recovery.sources);
 		const contextScope = { leafId: "chosen", through: 5 };
 		const contextFirst = await index.contextManifest("canonical", contextScope, { limit: 1 });
 		expect(contextFirst).toMatchObject({
@@ -1394,6 +1492,33 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 	await expect(index.page("session", 0, 1, 129)).rejects.toThrow("page limit");
 	await expect(index.apply("session", [], 2)).rejects.toThrow("unindexed source coverage");
 	expect((await index.page("session", 0, 2)).indexedThrough).toBe(1);
+	const partialRecoveryView = createBranchHistoryReadView(
+		index,
+		{
+			sessionId: "session",
+			leafId: "Item",
+			sourceSequence: 2,
+			persistent: true,
+		},
+		(query) => query(),
+	);
+	const partialRecovery = await recoverCapturedHistory(partialRecoveryView, {
+		action: "batch",
+		requests: [
+			{ action: "search", query: "not-present" },
+			{ action: "read", ref: "Item", sourceSessionId: "Session" },
+		],
+	});
+	expect(partialRecovery.results.map((result) => result.status)).toEqual(["partial", "not_authorized"]);
+	expect(partialRecovery.results[0].coverage).toBe("partial");
+	expect(partialRecovery.sources).toEqual([]);
+	await expect(
+		recoverCapturedHistory(partialRecoveryView, {
+			action: "read",
+			ref: "Item",
+			maxBytes: 1,
+		}),
+	).rejects.toBeInstanceOf(NativeRecoveryBudgetRefusal);
 	const applyBatches = async (sessionId: string, values: IndexedSourceEvent[]) => {
 		for (let offset = 0; offset < values.length; offset += 128) {
 			const batch = values.slice(offset, offset + 128);
@@ -1493,6 +1618,43 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		await expect(index.getSource("edge", "kept", -1)).rejects.toThrow("Invalid history source prefix");
 		await expect(index.syncSource("wrong-session", snapshot)).rejects.toThrow("session identity");
 		await index.syncSource("edge", snapshot);
+		const edgeRecoveryView = createBranchHistoryReadView(
+			index,
+			{
+				sessionId: "edge",
+				sessionFile: journalPath,
+				leafId: "staged",
+				sourceSequence: snapshot.nextSequence - 1,
+				persistent: true,
+			},
+			(query) => query(),
+		);
+		const edgeRecovery = await recoverCapturedHistory(edgeRecoveryView, {
+			action: "batch",
+			requests: [
+				{ action: "read", ref: "Kept" },
+				{ action: "read", ref: "kept", revision: "not-the-source-revision" },
+				{ action: "read", ref: "staged" },
+				{ action: "read", ref: "kept", field: "/nativeOrigin/submitted/text" },
+			],
+		});
+		expect(edgeRecovery.results.map((result) => result.status)).toEqual([
+			"not_authorized",
+			"unavailable",
+			"unavailable",
+			"unavailable",
+		]);
+		expect(edgeRecovery.sources).toEqual([]);
+		expect(
+			await recoverCapturedHistory(
+				edgeRecoveryView,
+				{ action: "read", ref: "kept" },
+				{
+					...DEFAULT_NATIVE_RECOVERY_LIMITS,
+					maxSourceBytes: 1,
+				},
+			),
+		).toMatchObject({ status: "budget_refused", sources: [] });
 		expect(
 			(
 				await index.taskEvidence(

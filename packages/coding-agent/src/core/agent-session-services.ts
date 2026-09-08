@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
-import type { Model, ServiceTier } from "@ponythewhite/base-context-ai";
+import type { Model, RequestTokenBudgetOptions, ServiceTier } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
@@ -45,6 +45,8 @@ export interface CreateAgentSessionServicesOptions {
 }
 
 export interface AgentSessionCreationOptions {
+	/** Explicit native request-budget rollout; also forwarded by the services/runtime factory. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
@@ -241,6 +243,7 @@ export async function createAgentSessionFromServices(
 		mcpManager: options.services.mcpManager,
 		sessionManager: options.sessionManager,
 		model: options.model,
+		requestTokenBudget: options.requestTokenBudget,
 		thinkingLevel: options.thinkingLevel,
 		serviceTier: options.serviceTier,
 		scopedModels: options.scopedModels,

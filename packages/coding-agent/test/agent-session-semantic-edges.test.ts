@@ -598,7 +598,7 @@ describe("AgentSession semantic edges", () => {
 		]);
 	});
 
-	it("commits the completed-compaction ledger event before the transcript entry", async () => {
+	it("records completed compaction only after the transcript ACK", async () => {
 		const { session, sessionManager } = await createCompactionSession();
 		await session.prompt("one");
 		await session.prompt("two");
@@ -614,7 +614,10 @@ describe("AgentSession semantic edges", () => {
 
 		await session.compact();
 
-		expect(finishedAtCommit).toEqual([expect.objectContaining({ status: "completed" })]);
+		expect(finishedAtCommit).toEqual([]);
+		expect(ledgerFor(session).filter((event) => event.type === "compaction_finished")).toEqual([
+			expect.objectContaining({ status: "completed" }),
+		]);
 	});
 
 	it("does not double-finish the compaction when the transcript commit fails", async () => {
@@ -627,7 +630,7 @@ describe("AgentSession semantic edges", () => {
 		await expect(session.compact()).rejects.toThrow("append failed");
 
 		const finished = ledgerFor(session).filter((event) => event.type === "compaction_finished");
-		expect(finished).toEqual([expect.objectContaining({ status: "completed" })]);
+		expect(finished).toEqual([expect.objectContaining({ status: "failed" })]);
 	});
 
 	it("keeps prompting and settling children when the session ledger becomes unwritable", async () => {

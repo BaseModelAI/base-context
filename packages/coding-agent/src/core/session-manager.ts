@@ -121,6 +121,20 @@ export interface SessionHeader {
 	git?: GitContext;
 }
 
+/** One captured branch for summary input, physical requests, and the queued compaction commit. */
+export interface BoundCompactionSink extends BoundSessionRequestSink {
+	readBranch(): Promise<SessionEntry[]>;
+	appendCompaction<T = unknown>(
+		summary: string,
+		firstKeptEntryId: string,
+		tokensBefore: number,
+		details?: T,
+		fromHook?: boolean,
+		customInstructions?: string,
+		usage?: Usage,
+	): Promise<string>;
+}
+
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: string;
@@ -1279,6 +1293,7 @@ interface SessionWriteState {
 	bytes: number;
 	reservedLeaf: string | null;
 	leafId: string | null;
+	branchSelectionRevision: number;
 	pins: number;
 	retired: boolean;
 	closed: boolean;
@@ -1307,6 +1322,7 @@ function newSessionWriteState(): SessionWriteState {
 		bytes: 0,
 		reservedLeaf: null,
 		leafId: null,
+		branchSelectionRevision: 0,
 		pins: 0,
 		retired: false,
 		closed: false,
@@ -2073,6 +2089,7 @@ export class SessionManager {
 		onDuplicate?: (entry: SessionEntry) => SessionEntry,
 		advanceLeaf = true,
 		deduplicate?: (history: SessionHistoryReadScope) => Promise<SessionEntry | undefined>,
+		assertCurrent?: () => void,
 	): Promise<SessionEntry> {
 		if (state.failure) throw state.failure;
 		const generated = entry.id === "";
@@ -2125,6 +2142,7 @@ export class SessionManager {
 				if (prepare) await prepare(snapshot);
 				const metadata = await this._prepareOwnedMetadata(state, snapshot, history, advanceLeaf);
 				const json = stringifyBoundedJson(snapshot, Math.min(admittedBytes, MAX_SESSION_RECORD_BYTES));
+				assertCurrent?.();
 				try {
 					const ack = await appendSourceEntry(state.owner!, json, snapshot);
 					state.sequence = ack.sequence;
@@ -2152,9 +2170,20 @@ export class SessionManager {
 		explicitParent = false,
 		prepare?: (snapshot: SessionEntry) => void | Promise<void>,
 		onDuplicate?: (entry: SessionEntry) => SessionEntry,
+		assertCurrent?: () => void,
 	): Promise<SessionEntry> {
 		this._assertMutable();
-		if (this.indexed) return this._appendIndexedEntry(this.writeState, entry, explicitParent, prepare, onDuplicate);
+		if (this.indexed)
+			return this._appendIndexedEntry(
+				this.writeState,
+				entry,
+				explicitParent,
+				prepare,
+				onDuplicate,
+				true,
+				undefined,
+				assertCurrent,
+			);
 		const state = this.writeState;
 		if (state.failure) throw state.failure;
 		if (state.owner?.format === "legacy") throw new Error("Session journal requires explicit legacy migration");
@@ -2165,7 +2194,12 @@ export class SessionManager {
 		const retention = entryRetentions.get(entry);
 		const snapshot = withEntryRetention(JSON.parse(json) as SessionEntry, retention, entryQualifications.get(entry));
 		// Queued usage projection only changes a fixed set of numeric fields.
-		const admittedBytes = Buffer.byteLength(json) + (prepare ? 16 * 1024 : 0);
+		let parentBytes = 0;
+		if (!explicitParent) {
+			parentBytes = Math.max(38, Buffer.byteLength(JSON.stringify(state.leafId)));
+			for (const id of state.pendingIds) parentBytes = Math.max(parentBytes, Buffer.byteLength(JSON.stringify(id)));
+		}
+		const admittedBytes = Buffer.byteLength(json) + parentBytes + (prepare ? 16 * 1024 : 0);
 		const entries = this.fileEntries;
 		const byId = this.byId;
 		const labels = this.labelsById;
@@ -2176,11 +2210,11 @@ export class SessionManager {
 		state.pendingIds.add(snapshot.id);
 		try {
 			await this._enqueue(state, admittedBytes, async () => {
+				if (!explicitParent) snapshot.parentId = state.leafId;
+				if (prepare) await prepare(snapshot);
+				json = stringifyBoundedJson(snapshot, admittedBytes);
+				assertCurrent?.();
 				try {
-					if (prepare) {
-						await prepare(snapshot);
-						json = stringifyBoundedJson(snapshot, admittedBytes);
-					}
 					if (state.owner) {
 						const ack = await appendSourceEntry(state.owner, json, snapshot);
 						state.sequence = ack.sequence;
@@ -2260,9 +2294,95 @@ export class SessionManager {
 		return this._bindHistorySource(createBranchHistoryReadView);
 	}
 
+	bindCompactionSink(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): BoundCompactionSink {
+		const state = this.writeState;
+		const owner = state.owner;
+		const sessionId = this.sessionId;
+		const sessionFile = this.sessionFile;
+		const indexed = this.indexed;
+		const byId = this.byId;
+		const capturedLimits = { ...limits };
+		let residentBranch: SessionEntry[] | undefined;
+		let capturedSource: SourceSnapshotRef | undefined;
+		let captureFailure: unknown;
+		let selectionRevision: number;
+		const sink = this._bindHistorySource(
+			(index, source, query) => createSessionHistoryReadScope(index, source, query, "source"),
+			(source) => {
+				selectionRevision = state.branchSelectionRevision;
+				if (!indexed)
+					residentBranch = this._readResidentBranches([source.leafId], capturedLimits, byId).branches[0];
+				capturedSource = source;
+			},
+		);
+		void sink.source.catch((error: unknown) => {
+			captureFailure = error;
+		});
+		return {
+			...sink,
+			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
+			readBranch: async () => {
+				if (indexed)
+					return sink.readHistory(
+						async (history) =>
+							(await this._readBranchesAt(history, [history.source.leafId], capturedLimits)).branches[0],
+					);
+				sink.assertRetained();
+				await sink.source;
+				return residentBranch!.map((entry) =>
+					withEntryRetention(
+						JSON.parse(stringifyBoundedJson(entry, capturedLimits.maxSourceBytes)) as SessionEntry,
+						entryRetentions.get(entry),
+						entryQualifications.get(entry),
+					),
+				);
+			},
+			appendCompaction: async (summary, firstKeptEntryId, tokensBefore, details, fromHook, instructions, usage) => {
+				sink.assertRetained();
+				const values = {
+					summary,
+					firstKeptEntryId,
+					tokensBefore,
+					details,
+					fromHook,
+					instructions,
+					usage: usage ? cloneUsage(usage) : undefined,
+				};
+				const snapshot = JSON.parse(stringifyBoundedJson(values, MAX_SESSION_RECORD_BYTES)) as typeof values;
+				const assertCurrent = () => {
+					if (captureFailure !== undefined) throw captureFailure;
+					if (
+						!capturedSource ||
+						this.writeState !== state ||
+						state.owner !== owner ||
+						state.retired ||
+						state.closed ||
+						this.sessionId !== sessionId ||
+						this.sessionFile !== sessionFile ||
+						state.branchSelectionRevision !== selectionRevision ||
+						state.leafId !== capturedSource.leafId
+					)
+						throw new Error("Compaction source or branch changed");
+				};
+				// Admission is synchronous; this append queues behind the capture before release can drain it.
+				return this.appendCompaction(
+					snapshot.summary,
+					snapshot.firstKeptEntryId,
+					snapshot.tokensBefore,
+					snapshot.details,
+					snapshot.fromHook,
+					snapshot.instructions,
+					snapshot.usage,
+					assertCurrent,
+				);
+			},
+		};
+	}
+
 	private _bindHistorySource<View>(
 		createView: (index: HistoryIndex, source: SourceSnapshotRef, query: HistoryReadQuery) => View,
-	): BoundHistoryReadSink<View> {
+		onCapture?: (source: SourceSnapshotRef) => void,
+	): BoundHistoryReadSink<View> & { assertRetained(): void } {
 		this._assertMutable();
 		const state = this.writeState;
 		const sourceFile =
@@ -2279,6 +2399,9 @@ export class SessionManager {
 			held = true;
 			state.pins++;
 		};
+		const assertRetained = () => {
+			if (!held) throw new Error("Captured request sink is not retained");
+		};
 		retain();
 		const captured = this._enqueue(state, 0, async () => {
 			await state.owner?.flush();
@@ -2289,15 +2412,18 @@ export class SessionManager {
 				sourceSequence: state.sequence,
 				persistent,
 			});
-			return { source, snapshot: state.owner?.getSnapshot() };
+			const snapshot = state.owner?.getSnapshot();
+			onCapture?.(source);
+			return { source, snapshot };
 		});
 		const source = captured.then((value) => value.source);
 		// A captured auxiliary operation can await UI work before consuming its barrier.
 		void source.catch(() => undefined);
 		return {
 			source,
+			assertRetained,
 			readHistory: async <T>(read: (view: View) => Promise<T>): Promise<T> => {
-				if (!held) throw new Error("Captured request sink is not retained");
+				assertRetained();
 				// A running read holds its own pin if request disposal happens concurrently.
 				state.pins++;
 				try {
@@ -2336,7 +2462,7 @@ export class SessionManager {
 				await this._releaseSourcePin(state);
 			},
 			persist: async (event: NativeRequestEvent) => {
-				if (!held) throw new Error("Captured request sink is not retained");
+				assertRetained();
 				if (state.owner) assertProductStatePath(state.owner.journalPath);
 				if (state.owner?.format === "legacy") throw new Error("Session journal requires explicit legacy migration");
 				const snapshot = await source;
@@ -2607,6 +2733,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		customInstructions?: string,
 		usage?: Usage,
+		assertCurrent?: () => void,
 	): Promise<string> {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -2621,7 +2748,7 @@ export class SessionManager {
 			customInstructions,
 			usage,
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(entry, false, undefined, undefined, assertCurrent);
 		return entry.id;
 	}
 
@@ -3079,14 +3206,14 @@ export class SessionManager {
 		return { source: history.source, branches, sourceBytes };
 	}
 
-	private _residentParentPath(id: string | null): SessionEntry[] {
+	private _residentParentPath(id: string | null, byId = this.byId): SessionEntry[] {
 		const entries: SessionEntry[] = [];
 		const seen = new Set<string>();
 		let current = id;
 		while (current !== null) {
 			if (seen.has(current)) throw new Error("Parent path lineage is unresolved");
 			seen.add(current);
-			const entry = this.byId.get(current);
+			const entry = byId.get(current);
 			if (!entry) throw new Error("Parent path lineage is unresolved");
 			entries.push(entry);
 			current = entry.parentId;
@@ -3101,7 +3228,15 @@ export class SessionManager {
 		const ids = [...leafIds];
 		const capturedLimits = { ...limits };
 		if (this.indexed) return this.readSourceHistory((history) => this._readBranchesAt(history, ids, capturedLimits));
-		const { maxEntries, maxSourceBytes } = capturedLimits;
+		return this._readResidentBranches(ids, capturedLimits, this.byId);
+	}
+
+	private _readResidentBranches(
+		ids: readonly (string | null)[],
+		limits: SessionHistoryReadLimits,
+		byId: Map<string, SessionEntry>,
+	): { branches: SessionEntry[][]; sourceBytes: number } {
+		const { maxEntries, maxSourceBytes } = limits;
 		if (
 			!Number.isSafeInteger(maxEntries) ||
 			maxEntries <= 0 ||
@@ -3112,7 +3247,7 @@ export class SessionManager {
 		const cloned = new Map<string, SessionEntry>();
 		let sourceBytes = 0;
 		const branches = ids.map((id) =>
-			this._residentParentPath(id).map((entry) => {
+			this._residentParentPath(id, byId).map((entry) => {
 				const existing = cloned.get(entry.id);
 				if (existing) return existing;
 				if (cloned.size >= maxEntries) throw new Error("Parent-path entry budget exceeded");
@@ -3165,6 +3300,7 @@ export class SessionManager {
 			state.leafId = id;
 			try {
 				await this._refreshOwnedMetadata(state);
+				if (id !== previous) state.branchSelectionRevision++;
 			} catch (error) {
 				state.leafId = previous;
 				throw error;
@@ -3475,6 +3611,7 @@ export class SessionManager {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		if (this.writeState.pending > 0) throw new Error("Drain session writes before changing the branch");
+		if (this.writeState.leafId !== branchFromId) this.writeState.branchSelectionRevision++;
 		this.leafId = branchFromId;
 		this.writeState.leafId = branchFromId;
 		this.writeState.reservedLeaf = branchFromId;
@@ -3483,6 +3620,7 @@ export class SessionManager {
 	resetLeaf(): void {
 		this._assertResident();
 		if (this.writeState.pending > 0) throw new Error("Drain session writes before changing the branch");
+		if (this.writeState.leafId !== null) this.writeState.branchSelectionRevision++;
 		this.leafId = null;
 		this.writeState.leafId = null;
 		this.writeState.reservedLeaf = null;

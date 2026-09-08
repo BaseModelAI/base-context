@@ -244,6 +244,15 @@ import {
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
+	createNativeRecoveryRefusal,
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryInput,
+	type NativeRecoveryResponse,
+	parseNativeRecoveryInput,
+	recoverCapturedHistory,
+} from "./selective-recovery.js";
+import {
 	modelRequestHeaders,
 	SemanticEdgeRecorder,
 	semanticEdgeLedgerPath,
@@ -287,6 +296,7 @@ import type { SessionHistoryReadLimits } from "./session-history-index.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import {
 	applyChildUsageAttributions,
+	type BoundCompactionSink,
 	type BranchSummaryEntry,
 	getLatestCompactionEntry,
 	type SessionContext,
@@ -424,6 +434,31 @@ type UserBashEndDetails = {
 };
 
 export class CompactionSkippedError extends Error {}
+
+interface CompactionCommit {
+	entryId: string;
+	result: CompactionResult;
+}
+
+/** The canonical compaction is already ACKed; only subsequent setup failed. */
+export class CompactionCommittedError extends Error {
+	constructor(
+		readonly entryId: string,
+		readonly result: CompactionResult,
+		cause: unknown,
+	) {
+		super(
+			`Compaction ${entryId} committed, but setup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause },
+		);
+		this.name = "CompactionCommittedError";
+	}
+}
+
+function primaryCommittedCompactionError(error: unknown): CompactionCommittedError | undefined {
+	while (error instanceof AggregateError) error = error.errors[0];
+	return error instanceof CompactionCommittedError ? error : undefined;
+}
 
 /** Thrown when a session_before_refine extension skips the refinement round. */
 export class RefineSkippedError extends Error {}
@@ -1098,6 +1133,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _compactionOperation: Promise<void> | undefined = undefined;
+	private _compactionSetupFailure: CompactionCommittedError | undefined;
 	/** One recovery attempt per overflow; "reported" dedups the failure notice. */
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
 	private _continueAfterThresholdCompaction = false;
@@ -1306,11 +1342,19 @@ export class AgentSession {
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
 			await this._goalResumeOperation;
-			await this._agentEventQueue;
+			await this._waitForAgentEventsBeforeContext();
 			await this._waitForChildUsageWrites();
 			await this.sessionManager.flushNow();
 			// In-memory sessions have no canonical archive. This is an explicit mode, not an index-error fallback.
-			if (!this.sessionManager.isPersisted()) return;
+			if (!this.sessionManager.isPersisted()) {
+				if (!this._compactionSetupFailure) return;
+				const rebuilt = await readSessionBootstrap(
+					this.sessionManager,
+					this.settingsManager.getCanonicalContextLimits(),
+				);
+				this._compactionSetupFailure = undefined;
+				return { messages: rebuilt.context.messages, adoptMessages: true };
+			}
 			const limits = this.settingsManager.getCanonicalContextLimits();
 			const outcomes = structuredClone(this._unpersistedOutcomes);
 			if (
@@ -1335,6 +1379,7 @@ export class AgentSession {
 				// Failed persistence outcomes are transient UI/request facts, never canonical history authority.
 				this._mergeUnpersistedOutcomes(messages, outcomes);
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
+				this._compactionSetupFailure = undefined;
 				return { messages, adoptMessages: true, streamContext: captured, release: () => captured.dispose() };
 			} catch (error) {
 				try {
@@ -2624,6 +2669,7 @@ export class AgentSession {
 	 * in-flight guards and counter resets.
 	 */
 	private async _runSerializedRefineCheckpoint(): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2714,6 +2760,7 @@ export class AgentSession {
 	}
 
 	private async _runSerializedRefineCheckpointAfterBackground(branchVersion: number): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		// No background result, or a refine.run arrived while the background result was
 		// in flight. Fall through so an explicit pending request is serviced at this boundary.
 
@@ -3879,6 +3926,14 @@ export class AgentSession {
 		});
 	}
 
+	private async _waitForAgentEventsBeforeContext(): Promise<void> {
+		try {
+			await this._agentEventQueue;
+		} catch (error) {
+			if (!(error instanceof CompactionCommittedError) || error !== this._compactionSetupFailure) throw error;
+		}
+	}
+
 	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
 		if (event.type === "agent_end" && event.refusal) this._invocationOutputRefused = true;
 		if (event.type === "agent_start") this._invocationSuppressedAutonomousContinuation = false;
@@ -4483,6 +4538,7 @@ export class AgentSession {
 					await new Promise<void>((resolve) => setTimeout(resolve, 0));
 				}
 			}
+			if (this._compactionSetupFailure) return;
 			// Drain an agent-callable refine.run request that was scheduled but
 			// not yet consumed. Use the direct serialized path (no waitForIdle)
 			// since the agent may still own activeRun at the final agent_end.
@@ -6305,7 +6361,7 @@ export class AgentSession {
 					}
 					return;
 				}
-				if (!this._hasCancelledDispatchCapture()) await this._agentEventQueue;
+				if (!this._hasCancelledDispatchCapture()) await this._waitForAgentEventsBeforeContext();
 				if (!preselected || preselected.payload.kind === "session_command") await this._waitForRefineIdle();
 				const activity = this._runtimeActivity();
 				const canSelectPreselectedTurn =
@@ -6515,6 +6571,7 @@ export class AgentSession {
 	}
 
 	private _isDeferredSessionInputError(error: unknown, epoch: number): boolean {
+		if (primaryCommittedCompactionError(error)) return false;
 		if (error instanceof DeferredSessionInputError) return true;
 		if (epoch !== this._sessionInputPumpEpoch) return true;
 		if (this._isBusyForSessionInput("pump")) {
@@ -8006,15 +8063,20 @@ export class AgentSession {
 	}
 
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
+		if (this._compactionSetupFailure) throw this._compactionSetupFailure;
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
+		const consumedRequest = this._pendingRequestedCompaction;
 		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
 		const continueAfterSessionInput = this._postCompactionContinuationSettlement?.continueAfterSessionInput ?? false;
 		this._disconnectFromAgent();
 		if (!options.skipAbort) await this.abort();
 		let didCompact = false;
 		let requests: InferenceCoordinator | undefined;
+		let compaction: BoundCompactionSink | undefined;
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
 		this._compactionAbortController = new AbortController();
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
@@ -8035,21 +8097,26 @@ export class AgentSession {
 			const model = { ...this.model, cost: { ...this.model.cost } };
 			const thinkingLevel = this.thinkingLevel;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
-			requests = this.requests.capture();
-			const pathEntries = await this.sessionManager.readBranch();
+			const semanticEdges = this._semanticEdges;
+			compaction = this.sessionManager.bindCompactionSink();
+			requests = this.requests.capture(compaction);
+			const pathEntries = await compaction.readBranch();
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-			const result = await this._performCompaction({
+			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
 				pathEntries,
 				settings,
 				requests,
+				compaction,
+				semanticEdges,
 				apiKey,
 				headers,
 				customInstructions,
 				signal: this._compactionAbortController.signal,
 			});
 
+			const result = committed.result;
 			await requests.dispose();
 			this._emit({
 				type: "compaction_end",
@@ -8062,9 +8129,20 @@ export class AgentSession {
 			didCompact = true;
 			// A manual compaction satisfies any pending model request; on failure the
 			// request stays scheduled for the next turn boundary.
-			this._pendingRequestedCompaction = undefined;
+			if (this._pendingRequestedCompaction === consumedRequest) this._pendingRequestedCompaction = undefined;
 			return result;
 		} catch (error) {
+			const primaryCommit = primaryCommittedCompactionError(error);
+			const knownCommit = primaryCommit ?? committed;
+			failure =
+				knownCommit && !(error instanceof CompactionCommittedError)
+					? new CompactionCommittedError(knownCommit.entryId, knownCommit.result, error)
+					: error;
+			if (failure instanceof CompactionCommittedError) {
+				if (this._pendingRequestedCompaction === consumedRequest) this._pendingRequestedCompaction = undefined;
+				this._reportCommittedCompactionFailure(failure, "manual", customInstructions);
+				throw failure;
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			const skipped = error instanceof CompactionSkippedError;
@@ -8081,7 +8159,7 @@ export class AgentSession {
 			throw error;
 		} finally {
 			try {
-				await requests?.dispose();
+				await this._releaseCompactionCapture(requests, compaction, failure);
 			} finally {
 				this._compactionAbortController = undefined;
 				this._reconnectToAgent();
@@ -8119,11 +8197,24 @@ export class AgentSession {
 		signal: AbortSignal;
 		thinkingLevel: ThinkingLevel;
 		requests: InferenceCoordinator;
+		compaction: BoundCompactionSink;
+		semanticEdges: SemanticEdgeRecorder;
 		pathEntries: Awaited<ReturnType<SessionManager["readBranch"]>>;
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
-	}): Promise<CompactionResult> {
-		const { model, apiKey, headers, customInstructions, signal, thinkingLevel, requests, pathEntries, settings } =
-			options;
+	}): Promise<CompactionCommit> {
+		const {
+			model,
+			apiKey,
+			headers,
+			customInstructions,
+			signal,
+			thinkingLevel,
+			requests,
+			compaction,
+			semanticEdges,
+			pathEntries,
+			settings,
+		} = options;
 
 		const preparation = prepareCompaction(pathEntries, settings);
 		if (!preparation) {
@@ -8137,8 +8228,8 @@ export class AgentSession {
 		let extensionCompaction: CompactionResult | undefined;
 		let fromExtension = false;
 
-		const semanticCompaction = this._semanticEdges.beginCompaction();
-		let compactionRecorded = false;
+		const semanticCompaction = semanticEdges.beginCompaction();
+		let committed: CompactionCommit | undefined;
 		const uncommittedSlices: string[] = [];
 		let compactionSettled = false;
 		let summary: string;
@@ -8178,7 +8269,7 @@ export class AgentSession {
 				const summaryCall = async <T>(
 					call: (callHeaders: Record<string, string> | undefined) => Promise<T>,
 				): Promise<T> => {
-					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
+					const requestId = semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
 						return call(headers);
 					}
@@ -8187,82 +8278,144 @@ export class AgentSession {
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
-							this._semanticEdges.failRequest(requestId);
+							semanticEdges.failRequest(requestId);
 						} else {
 							uncommittedSlices.push(requestId);
 						}
 						return result;
 					} catch (error) {
-						this._semanticEdges.failRequest(requestId);
+						semanticEdges.failRequest(requestId);
 						throw error;
 					}
 				};
-				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
-					preparation,
-					model,
-					apiKey,
-					headers,
-					customInstructions,
-					signal,
-					thinkingLevel,
-					summaryCall,
-					requests,
-				));
+				const summaryRequests = requests.capture();
+				let summaryFailure: unknown;
+				try {
+					({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
+						preparation,
+						model,
+						apiKey,
+						headers,
+						customInstructions,
+						signal,
+						thinkingLevel,
+						summaryCall,
+						summaryRequests,
+					));
+				} catch (error) {
+					summaryFailure = error;
+					throw error;
+				} finally {
+					await this._releaseCompactionCapture(summaryRequests, undefined, summaryFailure);
+				}
 			}
 
 			if (signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
-			// Ledger-before-effect: the compaction outcome is durable before the transcript
-			// commits it. Marked first: the ID is consumed even when the write throws, and a
-			// second finish attempt would mask the original I/O error.
-			compactionRecorded = true;
-			compactionSettled = true;
-			for (const requestId of uncommittedSlices.splice(0)) {
-				this._semanticEdges.finishRequest(requestId);
-			}
-			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
-			savedCompactionId = await this.sessionManager.appendCompaction(
+			const result: CompactionResult = JSON.parse(
+				JSON.stringify({ summary, firstKeptEntryId, tokensBefore, details }),
+			);
+			savedCompactionId = await compaction.appendCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
-				details,
+				result.details,
 				fromExtension,
 				customInstructions,
 				usage,
 			);
-		} catch (error) {
+			// Only the canonical append ACK commits summary slices and advances the semantic epoch.
+			committed = { entryId: savedCompactionId, result };
 			compactionSettled = true;
 			for (const requestId of uncommittedSlices.splice(0)) {
-				this._semanticEdges.failRequest(requestId);
+				semanticEdges.finishRequest(requestId);
 			}
-			if (!compactionRecorded) {
-				const cancelled =
-					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
-				this._semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
+			semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
+		} catch (error) {
+			compactionSettled = true;
+			if (committed) throw new CompactionCommittedError(committed.entryId, committed.result, error);
+			for (const requestId of uncommittedSlices.splice(0)) {
+				semanticEdges.failRequest(requestId);
 			}
+			const cancelled =
+				error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
+			semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
 			throw error;
 		}
-		this.agent.state.messages = (
-			await readSessionBootstrap(this.sessionManager, this.settingsManager.getCanonicalContextLimits())
-		).context.messages;
-		this._contextOmissions = undefined;
-		this._mergeUnpersistedOutcomes(this.agent.state.messages);
-		this._restoreLateIpythonSentAgentMessages();
+		try {
+			this.agent.state.messages = (
+				await readSessionBootstrap(this.sessionManager, this.settingsManager.getCanonicalContextLimits())
+			).context.messages;
+			this._contextOmissions = undefined;
+			this._mergeUnpersistedOutcomes(this.agent.state.messages);
+			this._restoreLateIpythonSentAgentMessages();
 
-		const savedCompactionEntry = await this.sessionManager.readEntry(savedCompactionId);
-		if (savedCompactionEntry?.type === "compaction") {
-			await this._extensionRunner.emit({
-				type: "session_compact",
-				compactionEntry: savedCompactionEntry,
-				fromExtension,
-			});
+			const savedCompactionEntry = await this.sessionManager.readEntry(savedCompactionId);
+			if (savedCompactionEntry?.type === "compaction") {
+				await this._extensionRunner.emit({
+					type: "session_compact",
+					compactionEntry: savedCompactionEntry,
+					fromExtension,
+				});
+			}
+			await this._syncKernelStateAfterCompaction();
+			await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+		} catch (error) {
+			throw new CompactionCommittedError(committed!.entryId, committed!.result, error);
 		}
-		await this._syncKernelStateAfterCompaction();
-		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+		return committed!;
+	}
 
-		return { summary, firstKeptEntryId, tokensBefore, details };
+	private _reportCommittedCompactionFailure(
+		error: CompactionCommittedError,
+		reason: CompactionReason,
+		customInstructions?: string,
+	): void {
+		this._compactionSetupFailure = error;
+		this._sessionInputPumpRequested = false;
+		this._sessionInputPumpEpoch++;
+		this._sessionInputPumpSuspended = true;
+		this._settlePostCompactionContinue(error);
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._autoRefineBranchVersion++;
+		this._resolveRetry();
+		this._emit({
+			type: "compaction_end",
+			reason,
+			result: error.result,
+			aborted: false,
+			willRetry: false,
+			errorMessage: error.message,
+			errorSeverity: "error",
+			customInstructions,
+		});
+	}
+
+	private async _releaseCompactionCapture(
+		requests: InferenceCoordinator | undefined,
+		compaction: BoundCompactionSink | undefined,
+		failure: unknown,
+	): Promise<void> {
+		try {
+			if (requests) await requests.dispose();
+			else await compaction?.release();
+		} catch (cleanupError) {
+			if (failure instanceof CompactionCommittedError) {
+				if (cleanupError === failure || cleanupError === failure.cause) throw failure;
+				const combined = new CompactionCommittedError(
+					failure.entryId,
+					failure.result,
+					new AggregateError([failure.cause, cleanupError], "Compaction setup and source release failed"),
+				);
+				this._compactionSetupFailure = combined;
+				throw combined;
+			}
+			if (failure !== undefined && failure !== cleanupError)
+				throw new AggregateError([failure, cleanupError], "Compaction and source release failed");
+			throw cleanupError;
+		}
 	}
 
 	private async _reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void> {
@@ -8359,6 +8512,7 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefineAfterAgentEnd(): void {
+		if (this._compactionSetupFailure) return;
 		if (!this._autoRefineAllowedForSession()) {
 			return;
 		}
@@ -8553,6 +8707,7 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefine(reason: AutoRefineReason, branchVersion = this._autoRefineBranchVersion): void {
+		if (this._compactionSetupFailure) return;
 		const timer = setTimeout(() => {
 			this._scheduledAutoRefineTimers.delete(timer);
 			if (branchVersion !== this._autoRefineBranchVersion) {
@@ -8566,6 +8721,7 @@ export class AgentSession {
 	}
 
 	private async _maybeAutoRefine(reason: AutoRefineReason): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		if (this._disposed || this._disposing) {
 			this._discardPendingAutoRefine();
 			return;
@@ -8679,6 +8835,7 @@ export class AgentSession {
 	}
 
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		this._autoRefineInProgress = true;
 		try {
 			await this.refine({ instructions: autoRefineInstructions(reason, review) }, { trigger: "auto" });
@@ -9190,6 +9347,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
 	): Promise<boolean> {
+		if (this._compactionSetupFailure) return false;
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
@@ -9384,14 +9542,19 @@ export class AgentSession {
 		});
 		this._compactionOperation = compactionOperation;
 		let requests: InferenceCoordinator | undefined;
+		let compaction: BoundCompactionSink | undefined;
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
 
 		try {
 			const selectedModel = this.model;
 			const model = selectedModel ? { ...selectedModel, cost: { ...selectedModel.cost } } : undefined;
 			const thinkingLevel = this.thinkingLevel;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
-			requests = this.requests.capture();
-			const pathEntries = await this.sessionManager.readBranch();
+			const semanticEdges = this._semanticEdges;
+			compaction = this.sessionManager.bindCompactionSink();
+			requests = this.requests.capture(compaction);
+			const pathEntries = await compaction.readBranch();
 			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
 			if (!model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
@@ -9409,18 +9572,21 @@ export class AgentSession {
 				return false;
 			}
 
-			const result = await this._performCompaction({
+			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
 				pathEntries,
 				settings,
 				requests,
+				compaction,
+				semanticEdges,
 				apiKey: authResult.apiKey,
 				headers: authResult.headers,
 				customInstructions,
 				signal: this._autoCompactionAbortController.signal,
 			});
 
+			const result = committed.result;
 			await requests.dispose();
 			this._emit({
 				type: "compaction_end",
@@ -9454,6 +9620,16 @@ export class AgentSession {
 			}
 			return false;
 		} catch (error) {
+			const primaryCommit = primaryCommittedCompactionError(error);
+			const knownCommit = primaryCommit ?? committed;
+			failure =
+				knownCommit && !(error instanceof CompactionCommittedError)
+					? new CompactionCommittedError(knownCommit.entryId, knownCommit.result, error)
+					: error;
+			if (failure instanceof CompactionCommittedError) {
+				this._reportCommittedCompactionFailure(failure, reason, customInstructions);
+				throw failure;
+			}
 			this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 				reason === "threshold" && shouldContinueAfterCompaction,
 				queuedAutonomousContinuationsForThisCompaction,
@@ -9499,7 +9675,7 @@ export class AgentSession {
 			return false;
 		} finally {
 			try {
-				await requests?.dispose();
+				await this._releaseCompactionCapture(requests, compaction, failure);
 			} finally {
 				this._autoCompactionAbortController = undefined;
 				if (this._compactionOperation === compactionOperation) {
@@ -9881,6 +10057,7 @@ export class AgentSession {
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
+				prime_context: { recover: (input, signal) => this.recoverNativeHistory(input, signal) },
 				ipython: {
 					provisioner: this._ipythonKernelProvisioner,
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
@@ -9934,7 +10111,9 @@ export class AgentSession {
 		for (const tool of acpMcpTools) this._allowedToolNames?.add(tool.name);
 		this._acpMcpTools = acpMcpTools;
 
-		const defaultActiveToolNames = this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["ipython"];
+		const defaultActiveToolNames = this._baseToolsOverride
+			? Object.keys(this._baseToolsOverride)
+			: ["ipython", "prime_context"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
 		if (this._goalState.status === "active" && this._includeGoals) {
 			// An active goal needs ipython so the model can reach the goal skill.
@@ -9987,8 +10166,52 @@ export class AgentSession {
 		return skills;
 	}
 
+	/** Read only the server-owned branch captured for this operation (including a batch). */
+	async recoverNativeHistory(
+		input: NativeRecoveryInput,
+		signal?: AbortSignal,
+		maxBytes = DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes,
+	): Promise<NativeRecoveryResponse> {
+		signal?.throwIfAborted();
+		const request = parseNativeRecoveryInput(input);
+		const responseBytes = Math.min(maxBytes, DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes, request.maxBytes ?? Infinity);
+		const nativeDefinition = this._baseToolDefinitions.get("prime_context");
+		if (
+			this._baseToolsOverride ||
+			!nativeDefinition ||
+			this._toolDefinitions.get("prime_context")?.definition !== nativeDefinition ||
+			!this.getActiveToolNames().includes("prime_context") ||
+			(this._allowedToolNames && !this._allowedToolNames.has("prime_context"))
+		) {
+			return createNativeRecoveryRefusal("not_authorized", "native_recovery_not_enabled", responseBytes);
+		}
+		// readBranchHistory captures synchronously and preserves ordered read/release errors.
+		// Never accept a caller's owner/path/frontier or turn a failed read into evidence of absence.
+		try {
+			return await this.sessionManager.readBranchHistory((history) =>
+				recoverCapturedHistory(
+					history.branchContext,
+					request,
+					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
+					signal,
+				),
+			);
+		} catch (error) {
+			signal?.throwIfAborted();
+			if (error instanceof NativeRecoveryBudgetRefusal) throw error;
+			return createNativeRecoveryRefusal("unavailable", "captured_history_unavailable", responseBytes);
+		}
+	}
+
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
+			prime_context: async (payload, context) => {
+				if (!context?.nativeRecovery) {
+					return { ...createNativeRecoveryRefusal("not_authorized", "active_cell_required") };
+				}
+				const input = parseNativeRecoveryInput(payload.request);
+				return { ...(await this.recoverNativeHistory(input, context.signal, context.nativeRecovery.maxBytes)) };
+			},
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
 				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
 			})),

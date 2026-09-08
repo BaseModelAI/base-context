@@ -1,4 +1,5 @@
 import { registerSessionResourceCleanup } from "@ponythewhite/base-context-ai";
+import type { NativeRecoveryResponse } from "../selective-recovery.js";
 import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootstrap.js";
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 
@@ -25,7 +26,17 @@ export class KernelBusyAfterInterruptError extends Error {
  * Handles one typed request from Python code running in the kernel.
  * The returned record is delivered verbatim to the Python caller.
  */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export interface HostRequestContext {
+	/** Actual active tool/cell cancellation; never read from the Python payload. */
+	signal?: AbortSignal;
+	/** A host-reserved share of this cell's aggregate recovery response budget. */
+	nativeRecovery?: { maxBytes: number };
+}
+
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
@@ -66,6 +77,8 @@ export interface KernelStartOptions {
 }
 
 export interface ExecuteOptions {
+	/** Only a finalized ipython tool call can retain recovery output; not bootstrap/state cells. */
+	nativeRecovery?: boolean;
 	/** Aborting interrupts the kernel out-of-band. */
 	signal?: AbortSignal;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
@@ -126,6 +139,8 @@ export interface KernelSentAgentMessage {
 }
 
 export interface ExecuteResult {
+	/** Host-selected public data transferred once to the normal finalized ipython result. */
+	nativeRecoveries?: NativeRecoveryResponse[];
 	stdout: string;
 	stderr: string;
 	/** Text of the cell's trailing expression value, if the cell produced one. */

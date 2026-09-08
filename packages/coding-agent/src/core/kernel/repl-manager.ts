@@ -9,6 +9,13 @@ import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
 import { PRODUCT } from "../../product-identity.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
+import {
+	createNativeRecoveryRefusal,
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryResponse,
+	stringifyNativeRecoveryResponse,
+} from "../selective-recovery.js";
 import { ensureKernelPython } from "./bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
@@ -92,6 +99,11 @@ interface ActiveExecution {
 	diffs: KernelDiffDisplay[];
 	attachments: KernelAttachment[];
 	sentAgentMessages: KernelSentAgentMessage[];
+	// Ephemeral, per-cell output attachment; only the finalized tool result persists it.
+	nativeRecoveries: NativeRecoveryResponse[];
+	nativeRecoveryBytes: number;
+	nativeRecoveryRequests: number;
+	nativeRecoveryAbort: AbortController;
 	/** Stream text without this execution's id: user threads, other cells' leftovers, raw fd writes. */
 	backgroundOutput: string;
 	backgroundOutputTruncated: boolean;
@@ -742,7 +754,7 @@ export class ReplKernelManager {
 			return;
 		}
 		if (type === "host_request") {
-			if (typeof event.id === "string") this.startHostRequest(event.id, event.data);
+			if (typeof event.id === "string") this.startHostRequest(event.id, event.data, event.cellId);
 			return;
 		}
 
@@ -944,6 +956,10 @@ export class ReplKernelManager {
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
+			nativeRecoveries: [],
+			nativeRecoveryBytes: 2, // JSON array brackets; reserve one delimiter per admitted response.
+			nativeRecoveryRequests: 0,
+			nativeRecoveryAbort: new AbortController(),
 			backgroundOutput: this.pendingBackgroundOutput,
 			backgroundOutputTruncated: this.pendingBackgroundOutputTruncated,
 			status: "ok",
@@ -970,6 +986,7 @@ export class ReplKernelManager {
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
+			execution.nativeRecoveryAbort.abort();
 			void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
@@ -1004,6 +1021,7 @@ export class ReplKernelManager {
 		} finally {
 			clearAbortTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
+			execution.nativeRecoveryAbort.abort();
 		}
 	}
 
@@ -1047,6 +1065,7 @@ export class ReplKernelManager {
 		}
 		if (!execution.settled) {
 			execution.settled = true;
+			execution.nativeRecoveryAbort.abort();
 			if (execution.opts.onLateSentAgentMessage) {
 				this.registerLateSentAgentMessageHandler(execution.requestId, execution.opts.onLateSentAgentMessage);
 			}
@@ -1075,12 +1094,14 @@ export class ReplKernelManager {
 				diffs: execution.diffs.length > 0 ? execution.diffs : undefined,
 				attachments: execution.attachments.length > 0 ? execution.attachments : undefined,
 				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
+				nativeRecoveries: execution.nativeRecoveries.length > 0 ? execution.nativeRecoveries : undefined,
 				backgroundOutput: backgroundOutput.length > 0 ? backgroundOutput : undefined,
 				error: execution.error,
 				status,
 				durationMs: Date.now() - execution.started,
 				doneFields: execution.doneFields,
 			});
+			execution.nativeRecoveries = [];
 		}
 		if (didClearActive) {
 			this.notifyActiveExecutionIdle();
@@ -1122,6 +1143,8 @@ export class ReplKernelManager {
 			return;
 		}
 		this.activeExecution = undefined;
+		execution.nativeRecoveryAbort.abort();
+		execution.nativeRecoveries = [];
 		execution.reject(error);
 		this.notifyActiveExecutionIdle();
 	}
@@ -1184,7 +1207,7 @@ export class ReplKernelManager {
 		}
 	}
 
-	private startHostRequest(requestId: string, data: unknown): void {
+	private startHostRequest(requestId: string, data: unknown, cellId: unknown): void {
 		if (this.handledHostRequestIds.has(requestId)) {
 			return;
 		}
@@ -1197,7 +1220,7 @@ export class ReplKernelManager {
 
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data);
+				const result = await this.handleHostRequest(data, cellId);
 				try {
 					await this.writeLine({ type: "host_reply", id: requestId, data: { status: "ok", result } });
 				} catch (replyError) {
@@ -1226,7 +1249,7 @@ export class ReplKernelManager {
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
+	private async handleHostRequest(data: unknown, cellId: unknown): Promise<Record<string, unknown>> {
 		if (!isRecord(data)) {
 			throw new Error("host request payload must be an object");
 		}
@@ -1237,6 +1260,47 @@ export class ReplKernelManager {
 		const handler = this.options.hostHandlers?.[data.type];
 		if (!handler) {
 			throw new Error(`host request type "${data.type}" is not available in this session`);
+		}
+		if (data.type === "prime_context") {
+			const execution = this.activeExecution;
+			// Only the transport's current cell may own an attachment. No last-cell fallback.
+			if (
+				!execution ||
+				execution.settled ||
+				execution.opts.internal ||
+				!execution.opts.nativeRecovery ||
+				cellId !== execution.requestId ||
+				execution.nativeRecoveryAbort.signal.aborted
+			) {
+				return { ...createNativeRecoveryRefusal("not_authorized", "active_cell_required") };
+			}
+			const maxBytes = DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes - execution.nativeRecoveryBytes - 1;
+			if (execution.nativeRecoveryRequests >= DEFAULT_NATIVE_RECOVERY_LIMITS.maxRequests || maxBytes <= 0) {
+				throw new NativeRecoveryBudgetRefusal();
+			}
+			// Reserve before invoking the handler: concurrent requests cannot grow past the cell cap.
+			execution.nativeRecoveryRequests++;
+			execution.nativeRecoveryBytes += maxBytes + 1;
+			let reserved = maxBytes + 1;
+			try {
+				const response = (await handler(data, {
+					signal: execution.nativeRecoveryAbort.signal,
+					nativeRecovery: { maxBytes },
+				})) as unknown as NativeRecoveryResponse;
+				execution.nativeRecoveryAbort.signal.throwIfAborted();
+				if (this.activeExecution !== execution || execution.settled) {
+					throw new Error("Native recovery cell has finalized");
+				}
+				const encoded = stringifyNativeRecoveryResponse(response, maxBytes);
+				const admittedBytes = Buffer.byteLength(encoded) + 1;
+				execution.nativeRecoveryBytes -= reserved - admittedBytes;
+				reserved = 0;
+				const admitted = JSON.parse(encoded) as NativeRecoveryResponse;
+				execution.nativeRecoveries.push(admitted);
+				return { ...admitted };
+			} finally {
+				execution.nativeRecoveryBytes -= reserved;
+			}
 		}
 		// Tag the request with the cell that triggered it. A blocking call is still
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after

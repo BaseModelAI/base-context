@@ -82,6 +82,17 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     return _parse_host_reply(request_type, reply)
 
 
+async def prime_context(request: object) -> dict[str, object]:
+    """Recover bounded public history through the owned host reader.
+
+    The host validates the shared native schema. Selected public data is also
+    attached intact to this active cell's finalized ipython tool result. The
+    returned value alone is not a model-context update. Freshness is unknown.
+    Detached requests and sessions without the native tool are not authorized.
+    """
+    return await host_request("prime_context", {"request": request})
+
+
 def emit(data: dict[str, Any]) -> None:
     """Ship one display event (dict of MIME type -> JSON payload) to the host."""
     from . import repl
@@ -235,6 +246,7 @@ _harness_state = _HarnessProxy()
 class _RLMCallable:
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
+    prime_context = staticmethod(prime_context)
 
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
@@ -284,6 +296,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "prime_context",
     "rlm",
     "run",
 ]

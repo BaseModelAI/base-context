@@ -31,7 +31,8 @@ export async function runSubscriptionRpc(host, options) {
   const createRuntime = async ({ sessionManager, sessionStartEvent }) => {
     const result = await host.createAgentSessionFromServices({
       services, sessionManager, sessionStartEvent, model, thinkingLevel,
-      tools: ["bash"], prewarmIpythonKernel: false, telemetryDisabled: true,
+      tools: variant === "current" ? ["bash", "prime_context"] : ["bash"],
+      prewarmIpythonKernel: false, telemetryDisabled: true,
     });
     return { ...result, services, diagnostics: services.diagnostics };
   };
