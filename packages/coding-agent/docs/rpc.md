@@ -10,7 +10,7 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 base-context --mode rpc --rpc-protocol-version 11 [options]
 ```
 
-`--rpc-protocol-version 11` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 11 through the existing `get_state` response before use. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
+`--rpc-protocol-version 11` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 11 and schema revision at least 31 through the existing `get_state` response before use. Older schema-30 hosts do not qualify native task admission and are refused; an incompatible startup uses the existing process cleanup path. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
 
 This uses the current Base Context daemon protocol marker, not the package version. Updating only the server cannot make an old client understand a new terminal event.
 

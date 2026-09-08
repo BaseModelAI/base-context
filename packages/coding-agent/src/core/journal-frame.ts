@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { stringifyBoundedJson } from "./bounded-json.js";
 
 export type JournalFrameRetention = "retained-import";
+/** Producer qualification decoded from the canonical frame, not from its payload. */
+export type NativeEntryQualification = "native-admission";
 
 export interface JournalCursor {
 	readonly sequence: number;
@@ -11,9 +13,14 @@ export interface JournalCursor {
 export const INITIAL_JOURNAL_CURSOR: JournalCursor = Object.freeze({ sequence: 0, checksum: null });
 export const MAX_JOURNAL_FRAME_BYTES = 1024 * 1024;
 
-function framePrefix(cursor: JournalCursor, retention?: JournalFrameRetention): string {
-	const qualifier = retention === undefined ? "" : `,"retention":${JSON.stringify(retention)}`;
-	return `{"journalFrame":1,"sequence":${cursor.sequence},"previousChecksum":${JSON.stringify(cursor.checksum)}${qualifier},"payload":`;
+function framePrefix(
+	cursor: JournalCursor,
+	retention?: JournalFrameRetention,
+	qualification?: NativeEntryQualification,
+): string {
+	const retained = retention === undefined ? "" : `,"retention":${JSON.stringify(retention)}`;
+	const admitted = qualification === undefined ? "" : `,"qualification":${JSON.stringify(qualification)}`;
+	return `{"journalFrame":1,"sequence":${cursor.sequence},"previousChecksum":${JSON.stringify(cursor.checksum)}${retained}${admitted},"payload":`;
 }
 
 function assertCursor(cursor: JournalCursor): void {
@@ -32,8 +39,9 @@ export function encodeJournalFrame(
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
 	retention?: JournalFrameRetention,
+	qualification?: NativeEntryQualification,
 ): { line: string; next: JournalCursor } {
-	return encodeJournalFrameJson(stringifyBoundedJson(payload, maxBytes), cursor, maxBytes, retention);
+	return encodeJournalFrameJson(stringifyBoundedJson(payload, maxBytes), cursor, maxBytes, retention, qualification);
 }
 
 /** Preserve validated retained JSON text, including numeric lexemes that a parse/stringify would change. */
@@ -42,12 +50,15 @@ export function encodeJournalFrameJson(
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
 	retention?: JournalFrameRetention,
+	qualification?: NativeEntryQualification,
 ): { line: string; next: JournalCursor } {
 	assertCursor(cursor);
 	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("Invalid journal frame byte limit");
 	if (retention !== undefined && retention !== "retained-import")
 		throw new Error("Unsupported journal frame retention");
-	const prefix = framePrefix(cursor, retention);
+	if (qualification !== undefined && qualification !== "native-admission")
+		throw new Error("Unsupported journal frame qualification");
+	const prefix = framePrefix(cursor, retention, qualification);
 	const suffixBytes = Buffer.byteLength(`,"checksum":"${"0".repeat(64)}"}\n`);
 	if (Buffer.byteLength(prefix) + Buffer.byteLength(json) + suffixBytes > maxBytes) {
 		throw new Error("Journal frame byte limit exceeded");
@@ -67,7 +78,13 @@ export function decodeJournalFrame(
 	bytes: Buffer,
 	cursor: JournalCursor,
 	maxBytes = MAX_JOURNAL_FRAME_BYTES,
-): { payload: unknown; json: string; next: JournalCursor; retention?: JournalFrameRetention } {
+): {
+	payload: unknown;
+	json: string;
+	next: JournalCursor;
+	retention?: JournalFrameRetention;
+	qualification?: NativeEntryQualification;
+} {
 	assertCursor(cursor);
 	if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || bytes.length > maxBytes) {
 		throw new Error("Journal frame byte limit exceeded");
@@ -87,6 +104,9 @@ export function decodeJournalFrame(
 	const retention = frame.retention;
 	if (retention !== undefined && retention !== "retained-import")
 		throw new Error("Unsupported journal frame retention");
+	const qualification = frame.qualification;
+	if (qualification !== undefined && qualification !== "native-admission")
+		throw new Error("Unsupported journal frame qualification");
 	if (frame.sequence !== cursor.sequence || frame.previousChecksum !== cursor.checksum) {
 		throw new Error("Journal frame sequence or predecessor mismatch");
 	}
@@ -99,7 +119,7 @@ export function decodeJournalFrame(
 	if (createHash("sha256").update(body).digest("hex") !== frame.checksum) {
 		throw new Error("Journal frame checksum mismatch");
 	}
-	const prefix = framePrefix(cursor, retention);
+	const prefix = framePrefix(cursor, retention, qualification);
 	if (!body.startsWith(prefix)) throw new Error("Invalid journal frame encoding");
 	const json = body.slice(prefix.length, -1);
 	JSON.parse(json);
@@ -108,5 +128,6 @@ export function decodeJournalFrame(
 		json,
 		next: { sequence: cursor.sequence + 1, checksum: frame.checksum },
 		...(retention === undefined ? {} : { retention }),
+		...(qualification === undefined ? {} : { qualification }),
 	};
 }

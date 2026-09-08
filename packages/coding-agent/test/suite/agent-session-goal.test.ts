@@ -154,16 +154,19 @@ describe("AgentSession goals", () => {
 		}
 	});
 
-	async function createGoalHarness(extraTools: AgentTool[] = []): Promise<Harness> {
+	async function createGoalHarness(extraTools: AgentTool[] = [], persistSession = false): Promise<Harness> {
 		const sessionRef: { current?: AgentSession } = {};
-		const harness = await createHarness({ tools: [createFauxIpythonTool(sessionRef), ...extraTools] });
+		const harness = await createHarness({
+			persistSession,
+			tools: [createFauxIpythonTool(sessionRef), ...extraTools],
+		});
 		sessionRef.current = harness.session;
 		harnesses.push(harness);
 		return harness;
 	}
 
 	it("keeps continuing until the model completes the goal through ipython", async () => {
-		const harness = await createGoalHarness();
+		const harness = await createGoalHarness([], true);
 		harness.setResponses([
 			fauxAssistantMessage("I need another step."),
 			fauxAssistantMessage("The work is complete."),
@@ -187,9 +190,9 @@ describe("AgentSession goals", () => {
 			lastReason: "Goal achieved",
 		});
 		expect(harness.getPendingResponseCount()).toBe(0);
-		const goalEntries = harness.sessionManager
-			.getEntries()
-			.filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE);
+		const goalEntries = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE,
+		);
 		const operations = goalEntries
 			.map((entry) => entry.nativeOrigin)
 			.filter((origin) => origin?.kind === "goal_operation");
@@ -210,6 +213,32 @@ describe("AgentSession goals", () => {
 			previousGoalId: harness.session.goalState.goalId,
 		});
 		expect(goalEntries.some((entry) => entry.nativeOrigin === undefined)).toBe(true);
+
+		const evidence = await harness.sessionManager.taskEvidence({ limit: 64 });
+		expect(evidence.nextAfter).toBeNull();
+		const projected = evidence.entries.flatMap((item) => (item.truncated ? [] : [item.projection]));
+		expect(projected.find((item) => item.goalState?.operation === "create")).toMatchObject({
+			kind: "user_goal_revision",
+			authority: "user",
+			attribution: "source-backed",
+			source: { qualification: "native-admission" },
+			goalState: { goalId: harness.session.goalState.goalId, operation: "create" },
+		});
+		expect(projected.find((item) => item.goalState?.operation === "complete")).toMatchObject({
+			authority: "tool-data",
+			source: { qualification: "native-admission" },
+			goalState: { operation: "complete", previousGoalId: harness.session.goalState.goalId },
+		});
+		const task = await harness.sessionManager.readTaskState();
+		expect(task.items.find((item) => item.event.kind === "user_goal_revision")).toMatchObject({
+			state: "completed",
+			unresolved: false,
+		});
+		expect(task.items.find((item) => item.event.goalState?.operation === "complete")).toMatchObject({
+			state: "descriptive",
+			unresolved: false,
+			event: { authority: "tool-data", attribution: "descriptive" },
+		});
 	});
 
 	it("counts tokens from the goal completion turn", async () => {
@@ -685,7 +714,7 @@ describe("AgentSession goals", () => {
 	});
 
 	it("does not persist a goal when start preflight fails", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
+		const harness = await createHarness({ withConfiguredAuth: false, persistSession: true });
 		harnesses.push(harness);
 
 		await harness.session.prompt("/goal do task");
@@ -698,6 +727,62 @@ describe("AgentSession goals", () => {
 			role: "custom",
 			customType: "session_slash_command_result",
 			details: { success: false },
+		});
+
+		expect(
+			(await harness.sessionManager.readEntries()).some(
+				(entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE,
+			),
+		).toBe(false);
+		// Deliberately unqualified raw SDK claims. These IDs are data, not native admissions.
+		const rawInput = {
+			version: 1 as const,
+			kind: "input" as const,
+			actionId: "raw-sdk-claim",
+			recordId: "raw-sdk-record",
+			inputSource: "interactive" as const,
+			recordRole: "primary" as const,
+			submitted: { text: "Keep ExactCase.txt" },
+		};
+		const inputId = await harness.sessionManager.appendMessage(
+			{ role: "user", content: "a different expanded body", timestamp: 1 },
+			rawInput,
+		);
+		const goalOrigin = {
+			version: 1 as const,
+			kind: "goal_operation" as const,
+			operation: "revise" as const,
+			actor: "rpc" as const,
+			actionId: "raw-sdk-claim",
+			submittedText: "/goal imported claim",
+			previousGoalId: "ExactPreviousGoal",
+		};
+		const goalId = await harness.sessionManager.appendCustomEntry(
+			GOAL_STATE_CUSTOM_TYPE,
+			{
+				...harness.session.goalState,
+				active: true,
+				status: "active",
+				goalId: "RawGoal",
+				objective: "imported claim",
+			},
+			goalOrigin,
+		);
+		expect((await harness.sessionManager.readEntry(inputId))?.nativeOrigin).toEqual(rawInput);
+		expect((await harness.sessionManager.readEntry(goalId))?.nativeOrigin).toEqual(goalOrigin);
+		const evidence = await harness.sessionManager.taskEvidence({ limit: 64 });
+		expect(evidence.nextAfter).toBeNull();
+		const claims = evidence.entries
+			.flatMap((item) => (item.truncated ? [] : [item.projection]))
+			.filter((item) => item.source.entryId === inputId || item.source.entryId === goalId);
+		expect(claims).toHaveLength(2);
+		expect(claims.every((item) => item.authority === "unrecorded" && item.attribution === "proposal")).toBe(true);
+		expect(claims.every((item) => item.source.qualification === undefined)).toBe(true);
+		expect(claims.find((item) => item.source.entryId === inputId)).toMatchObject({ text: "Keep ExactCase.txt" });
+		expect(claims.find((item) => item.source.entryId === goalId)).toMatchObject({
+			itemId: "RawGoal",
+			relations: [{ kind: "supersedes", itemId: "ExactPreviousGoal" }],
+			goalState: { previousGoalId: "ExactPreviousGoal" },
 		});
 	});
 

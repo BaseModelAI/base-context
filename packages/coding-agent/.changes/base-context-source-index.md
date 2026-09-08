@@ -27,3 +27,5 @@
 - Enable bounded complete native invocation outputs with finalized callback values, explicit refusal, and accepted-effect drain.
 - Fence refusal-unaware clients with daemon protocol11/schema30 and explicit RPC protocol-version startup checks.
 - Bound whole context-tree requests with shared node, metadata and directory limits, serialized captured reductions, and accepted-read drain.
+- Qualify native task admission in canonical frames and expose bounded explicit task-state reduction.
+- Require native ownership/RPC schema31 while retaining protocol11 and existing cleanup policy.

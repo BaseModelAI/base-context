@@ -589,6 +589,34 @@ bind before that wait; disk file-image capture starts when its reduction runs. A
 reads finish before a failure is returned. Limits do not bound concurrent requests,
 provider or kernel memory, transient decoding, or process RSS.
 
+### Structured task-state view
+
+For a native captured Manager, read the complete bounded structured branch view:
+
+```typescript
+const task = await session.sessionManager.readTaskState({
+  maxItems: 16_384,
+  maxSourceBytes: 64 * 1024 * 1024,
+  maxViewBytes: 64 * 1024 * 1024,
+});
+```
+
+The view keeps every admitted projection and its exact source, text, literal ID and
+relations. Requirement amendments need qualified `source-backed` evidence and explicit
+operations or relations. Similar wording, missing items in later snapshots, and unqualified
+proposals cannot retire requirements. Missing or ambiguous targets remain unresolved.
+Separately, qualified native goal completion/clear facts can close that exact goal, not
+unrelated requirements. Those control facts retain their descriptive attribution.
+
+`maxItems` counts projection records and explicit relation edges. Distinct canonical
+frames count toward `maxSourceBytes`; projection and complete result encodings each
+must fit `maxViewBytes`. Oversized inline evidence is recovered from the same captured
+source, not clipped. The whole call refuses on a limit or incomplete index coverage.
+Legacy import-loss markers retain `coverage: "partial"`. `structuredOnly` and `selective`
+remain true: a complete structured view is not exhaustive natural-language extraction.
+This read does not activate a goal or change canonical state. Explicit resident Managers
+are outside this new captured-native API.
+
 ## Extensions
 
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.

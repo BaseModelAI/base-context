@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
 import type { CanonicalPayloadCursor, CanonicalPayloadFragment } from "./canonical-payload-parts.js";
-import type { JournalFrameRetention } from "./journal-frame.js";
+import type { JournalFrameRetention, NativeEntryQualification } from "./journal-frame.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import type { TaskStateProjection, TaskStateSourceRef } from "./task-state.js";
 
@@ -21,6 +21,8 @@ export interface IndexedSourceEvent {
 	revision: string;
 	/** Decoded frame qualifier, never a claim inside the payload. */
 	retention?: JournalFrameRetention;
+	/** Positive qualification comes only from synchronized canonical frame control. */
+	qualification?: NativeEntryQualification;
 	text: string;
 	textComplete: boolean;
 }

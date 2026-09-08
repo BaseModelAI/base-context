@@ -79,8 +79,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 28 requires native inference ownership for work and exposes optional finalized tool evidence.
 // Revision 29 requires canonical session ownership, framed readers, and fenced persistence ACKs.
 // Revision 30 requires bounded invocation output and agent_end refusal without successful messages.
-export const DAEMON_SCHEMA_REVISION = 30;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-30-37e5213f9781";
+// Revision 31 requires canonical producer qualification for native task-origin authority.
+export const DAEMON_SCHEMA_REVISION = 31;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-31-37e5213f9781";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -718,7 +719,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 30,
+	minSchemaRevision: 31,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

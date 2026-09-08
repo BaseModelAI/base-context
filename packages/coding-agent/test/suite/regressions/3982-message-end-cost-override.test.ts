@@ -19,6 +19,10 @@ describe("regression #3982: message_end cost override", () => {
 			extensionFactories: [
 				(pi) => {
 					pi.on("message_end", async (event) => {
+						if (event.message.role === "user") {
+							event.message.content = "callback-expanded hi";
+							return;
+						}
 						if (event.message.role !== "assistant") return;
 						originalAssistant = event.message;
 						event.message.content = expectedContent;
@@ -75,6 +79,21 @@ describe("regression #3982: message_end cost override", () => {
 		expect(persisted).toMatchObject({
 			type: "message",
 			message: { content: expectedContent, usage: { cost: { total: 0.123 } } },
+		});
+		expect(
+			(await harness.sessionManager.readEntries()).find(
+				(entry) => entry.type === "message" && entry.message.role === "user",
+			),
+		).toMatchObject({ message: { content: "callback-expanded hi" }, nativeOrigin: { submitted: { text: "hi" } } });
+		const task = await harness.sessionManager.readTaskState();
+		expect(task.items.find((item) => item.event.kind === "user_requirement")).toMatchObject({
+			state: "active",
+			event: {
+				text: "hi",
+				authority: "user",
+				attribution: "source-backed",
+				source: { qualification: "native-admission", field: "/nativeOrigin/submitted/text" },
+			},
 		});
 	});
 });

@@ -273,7 +273,14 @@ import {
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
 import { ContextUsageReader } from "./session-context-usage.js";
-import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
+import {
+	bindNativeEntryWriter,
+	type CapturedNativeGoalWrite,
+	type CapturedNativeMessageWrite,
+	type NativeEntryOrigin,
+	type NativeEntryWriter,
+	type NativeSubmittedInput,
+} from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
 import type { SessionHistoryReadLimits } from "./session-history-index.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
@@ -722,7 +729,9 @@ export interface SessionActionRecoverySnapshot {
 }
 
 type GoalOperationOrigin = Extract<NativeEntryOrigin, { kind: "goal_operation" }>;
-type GoalOriginContext = Pick<GoalOperationOrigin, "actor" | "actionId" | "submittedText">;
+type GoalOriginContext = Pick<GoalOperationOrigin, "actor" | "actionId" | "submittedText"> & {
+	writer: NativeEntryWriter;
+};
 
 function captureSubmittedInput(
 	text: string,
@@ -1961,8 +1970,9 @@ export class AgentSession {
 		}
 	}
 
-	private async _persistGoalState(goal: GoalState, nativeOrigin?: GoalOperationOrigin): Promise<void> {
-		await this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal, nativeOrigin);
+	private async _persistGoalState(goal: GoalState, nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
+		if (nativeGoalWrite) await nativeGoalWrite(goal);
+		else await this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
 		// Force flush so the goal state is durable on disk immediately,
 		// even before the first assistant response. This ensures idempotent
 		// restart/rehydration can detect the persisted goal.
@@ -1971,14 +1981,14 @@ export class AgentSession {
 
 	private async _setGoalState(
 		next: GoalState,
-		options: { persist?: boolean; nativeOrigin?: GoalOperationOrigin } = {},
+		options: { persist?: boolean; nativeGoalWrite?: CapturedNativeGoalWrite } = {},
 	): Promise<GoalState> {
 		const normalized = normalizeGoalState({
 			...next,
 			updatedAt: Date.now(),
 		});
 		if (options.persist !== false) {
-			await this._persistGoalState(normalized, options.nativeOrigin);
+			await this._persistGoalState(normalized, options.nativeGoalWrite);
 		}
 		this._goalState = normalized;
 		if (normalized.status === "active") {
@@ -2095,7 +2105,7 @@ export class AgentSession {
 	private async _startGoal(
 		objectiveText: string,
 		tokenBudget: number | undefined,
-		nativeOrigin?: GoalOperationOrigin,
+		nativeGoalWrite?: CapturedNativeGoalWrite,
 	): Promise<GoalState> {
 		const objective = validateGoalObjective(objectiveText);
 		const budget = validateGoalBudget(tokenBudget);
@@ -2114,15 +2124,15 @@ export class AgentSession {
 		};
 		this._goalAccountingStartedAt = now;
 		this._goalContinuationAwaitsRlmWork = false;
-		return this._setGoalState(goal, { nativeOrigin });
+		return this._setGoalState(goal, { nativeGoalWrite });
 	}
 
-	private async _clearGoal(nativeOrigin?: GoalOperationOrigin): Promise<void> {
+	private async _clearGoal(nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		this._clearQueuedGoalContexts();
-		await this._setGoalState(emptyGoalState(), { nativeOrigin });
+		await this._setGoalState(emptyGoalState(), { nativeGoalWrite });
 	}
 
-	private async _pauseGoal(reason = "Paused by user", nativeOrigin?: GoalOperationOrigin): Promise<void> {
+	private async _pauseGoal(reason = "Paused by user", nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		this._clearQueuedGoalContexts();
 		if (this._goalState.status !== "active") {
 			this._emitGoalUpdate();
@@ -2137,11 +2147,11 @@ export class AgentSession {
 				lastReason: reason,
 				lastError: undefined,
 			},
-			{ nativeOrigin },
+			{ nativeGoalWrite },
 		);
 	}
 
-	private async _resumeGoal(nativeOrigin?: GoalOperationOrigin): Promise<void> {
+	private async _resumeGoal(nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		if (!this._goalState.objective) {
 			this._emitGoalUpdate();
 			return;
@@ -2161,7 +2171,7 @@ export class AgentSession {
 				lastReason: exhausted ? "Goal token budget already reached" : undefined,
 				lastError: undefined,
 			},
-			{ nativeOrigin },
+			{ nativeGoalWrite },
 		);
 		if (nextStatus === "active") {
 			await this._runOrQueueGoalContext("continuation");
@@ -2450,8 +2460,17 @@ export class AgentSession {
 
 		const previousGoalId = this._goalState.goalId;
 		const replacementOperation = this._goalState.objective ? "revise" : "create";
-		const origin = (operation: GoalOperationOrigin["operation"]): GoalOperationOrigin | undefined =>
-			context ? { version: 1, kind: "goal_operation", ...context, operation, previousGoalId } : undefined;
+		const origin = (operation: GoalOperationOrigin["operation"]): CapturedNativeGoalWrite | undefined => {
+			if (!context) return undefined;
+			const { writer, ...captured } = context;
+			return writer.captureGoalOperation({
+				version: 1,
+				kind: "goal_operation",
+				...captured,
+				operation,
+				previousGoalId,
+			});
+		};
 
 		if (command.kind === "status") {
 			this._emitGoalUpdate();
@@ -2474,12 +2493,13 @@ export class AgentSession {
 		}
 
 		const previousWasActive = this._goalState.status === "active";
+		const nativeGoalWrite = origin(replacementOperation);
 		if (!this.isStreaming) {
 			await this._validateCanStartAgentRun();
 		}
 		this._ensureGoalRuntimeActive();
 		this._clearQueuedGoalContexts();
-		await this._startGoal(command.objective, command.tokenBudget, origin(replacementOperation));
+		await this._startGoal(command.objective, command.tokenBudget, nativeGoalWrite);
 		await this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images);
 		return true;
 	}
@@ -3643,13 +3663,17 @@ export class AgentSession {
 				);
 			default:
 				// idle, or a terminal record (complete / error): nothing pending, start fresh.
-				return this._startGoal(objective, tokenBudget, {
-					version: 1,
-					kind: "goal_operation",
-					operation: "create",
-					actor: "runtime",
-					submittedText: objective,
-				});
+				return this._startGoal(
+					objective,
+					tokenBudget,
+					this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
+						version: 1,
+						kind: "goal_operation",
+						operation: "create",
+						actor: "runtime",
+						submittedText: objective,
+					}),
+				);
 		}
 	}
 
@@ -3671,13 +3695,13 @@ export class AgentSession {
 				lastError: undefined,
 			},
 			{
-				nativeOrigin: {
+				nativeGoalWrite: this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
 					version: 1,
 					kind: "goal_operation",
 					operation: "complete",
 					actor: "runtime",
 					previousGoalId: goal.goalId,
-				},
+				}),
 			},
 		);
 	}
@@ -3833,14 +3857,14 @@ export class AgentSession {
 			);
 	}
 
-	private _captureInputOrigin(message: UserMessage | CustomMessage): NativeEntryOrigin | undefined {
+	private _captureInputOrigin(message: UserMessage | CustomMessage): CapturedNativeMessageWrite | undefined {
 		const actions = this._actionStore.actionsForMessage(message);
 		if (actions.length !== 1) return undefined;
 		const action = actions[0];
 		if (action.payload.kind !== "turn") return undefined;
 		const record = action.payload.records.find((record) => record.message === message);
 		if (!record) return undefined;
-		return {
+		return this.sessionManager[bindNativeEntryWriter]().captureMessage({
 			version: 1,
 			kind: "input",
 			actionId: action.id,
@@ -3848,7 +3872,7 @@ export class AgentSession {
 			inputSource: action.payload.acceptedAgentMessage ? "internal" : action.source,
 			recordRole: record.role,
 			...(record.role === "primary" && action.payload.submitted ? { submitted: action.payload.submitted } : {}),
-		};
+		});
 	}
 
 	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
@@ -3860,9 +3884,8 @@ export class AgentSession {
 		) {
 			this._invocationSuppressedAutonomousContinuation = true;
 		}
-		const nativeOrigin =
-			(event.type === "message_start" || event.type === "message_end") &&
-			(event.message.role === "user" || event.message.role === "custom")
+		const nativeMessageWrite =
+			event.type === "message_end" && (event.message.role === "user" || event.message.role === "custom")
 				? this._captureInputOrigin(event.message)
 				: undefined;
 		this._createRetryPromiseForAgentEnd(event);
@@ -3902,8 +3925,8 @@ export class AgentSession {
 			}
 		}
 		const job = this._agentEventQueue.then(
-			() => this._processAgentEvent(event, nativeOrigin),
-			() => this._processAgentEvent(event, nativeOrigin),
+			() => this._processAgentEvent(event, nativeMessageWrite),
+			() => this._processAgentEvent(event, nativeMessageWrite),
 		);
 		this._agentEventQueue = job;
 		job.catch(() => {});
@@ -3966,7 +3989,7 @@ export class AgentSession {
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
 	}
 
-	private async _processAgentEvent(event: AgentEvent, nativeOrigin?: NativeEntryOrigin): Promise<void> {
+	private async _processAgentEvent(event: AgentEvent, nativeMessageWrite?: CapturedNativeMessageWrite): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
 			if (this.sessionManager.supportsCapturedHistoryReads())
@@ -4065,13 +4088,14 @@ export class AgentSession {
 
 		if (event.type === "message_end") {
 			if (event.message.role === "custom") {
-				await this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-					nativeOrigin,
-				);
+				if (nativeMessageWrite) await nativeMessageWrite(event.message);
+				else
+					await this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
@@ -4079,7 +4103,9 @@ export class AgentSession {
 			) {
 				const sessionId = this.sessionManager.getSessionId();
 				const sessionFile = this.sessionManager.getSessionFile();
-				const entryId = await this.sessionManager.appendMessage(event.message, nativeOrigin);
+				const entryId = nativeMessageWrite
+					? await nativeMessageWrite(event.message)
+					: await this.sessionManager.appendMessage(event.message);
 				if (event.message.role === "assistant")
 					this._assistantEntryIds.set(event.message, { sessionId, sessionFile, entryId });
 			}
@@ -6636,11 +6662,6 @@ export class AgentSession {
 	private async _executeQueuedSessionCommand(action: QueuedSessionAction): Promise<void> {
 		if (action.payload.kind !== "session_command") throw new Error("Expected a session command action");
 		const input = action.payload;
-		const goalOrigin: GoalOriginContext = {
-			actor: action.source,
-			actionId: action.id,
-			submittedText: input.submitted?.text,
-		};
 		try {
 			let resultText: string | undefined;
 			let displayResult = true;
@@ -6666,12 +6687,19 @@ export class AgentSession {
 					displayResult = false;
 					break;
 				}
-				case "goal":
+				case "goal": {
+					const goalOrigin: GoalOriginContext = {
+						writer: this.sessionManager[bindNativeEntryWriter](),
+						actor: action.source,
+						actionId: action.id,
+						submittedText: input.submitted?.text,
+					};
 					await this._handleGoalSlashCommand(input.text, input.images, goalOrigin);
 					resultText = this._goalState.objective
 						? `Goal ${this._goalState.status}: ${this._goalState.objective}`
 						: "No active goal.";
 					break;
+				}
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
 					break;

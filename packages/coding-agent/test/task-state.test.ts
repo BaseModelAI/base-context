@@ -91,7 +91,8 @@ describe("canonical task-state source projection", () => {
 		};
 		const original = [...projectTaskStateSource(source(userEntry))];
 		expect(original.map((item) => item.text)).toEqual(["  /raw Foo.txt  ", "Keep --Case"]);
-		expect(original.every((item) => item.authority === "user" && item.attribution === "source-backed")).toBe(true);
+		expect(original.every((item) => item.authority === "unrecorded" && item.attribution === "proposal")).toBe(true);
+		expect(original.every((item) => item.claimedAuthority === "user")).toBe(true);
 		expect(original.map((item) => item.source.field)).toEqual([
 			"/nativeOrigin/submitted/text",
 			"/nativeOrigin/submitted/content/0/text",
@@ -269,10 +270,12 @@ describe("canonical task-state source projection", () => {
 		];
 		expect(runtimeComplete[0]).toMatchObject({
 			kind: "observed_fact",
-			authority: "tool-data",
+			authority: "unrecorded",
+			attribution: "proposal",
+			claimedAuthority: "tool-data",
 			operation: "observe",
 			relations: [],
-			goalState: { operation: "complete" },
+			goalState: { operation: "complete", previousGoalId: "Goal-A" },
 		});
 		const userRevision = [
 			...projectTaskStateSource(
@@ -304,7 +307,9 @@ describe("canonical task-state source projection", () => {
 		];
 		expect(userRevision[0]).toMatchObject({
 			kind: "user_goal_revision",
-			authority: "user",
+			authority: "unrecorded",
+			attribution: "proposal",
+			claimedAuthority: "user",
 			operation: "amend",
 			relations: [{ kind: "supersedes", itemId: "Goal-A" }],
 			originalSource: { entryId: "user-revision", field: "/nativeOrigin/submittedText" },

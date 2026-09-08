@@ -1,5 +1,5 @@
 import { GOAL_STATE_CUSTOM_TYPE, isPersistedGoalState } from "./goals.js";
-import type { JournalFrameRetention } from "./journal-frame.js";
+import type { JournalFrameRetention, NativeEntryQualification } from "./journal-frame.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
 
 export const TASK_STATE_CUSTOM_TYPE = "task_state";
@@ -32,6 +32,8 @@ export interface TaskStateSource {
 	revision?: string;
 	/** Decoded frame/import control, not a claim inside entry data. */
 	retention?: JournalFrameRetention;
+	/** Decoded canonical producer control; entry.nativeOrigin alone is only a claim. */
+	qualification?: NativeEntryQualification;
 	entry: {
 		id: string;
 		parentId: string | null;
@@ -53,6 +55,7 @@ export interface TaskStateSourceRef {
 	locator?: TaskStateLocator;
 	revision?: string;
 	retention?: JournalFrameRetention;
+	qualification?: NativeEntryQualification;
 }
 
 export interface TaskStateOriginalSource {
@@ -92,7 +95,7 @@ export interface TaskStateProjection {
 	operation: TaskStateOperation;
 	relations: readonly TaskStateRelation[];
 	originalSource?: TaskStateOriginalSource;
-	/** Authority comes only from native origin at an expected message/control location. */
+	/** Authority requires qualified native origin at an expected message/control location. */
 	authority: TaskStateAuthority;
 	attribution: "proposal" | "descriptive" | "source-backed";
 	claimedAuthority?: string;
@@ -103,6 +106,7 @@ export interface TaskStateProjection {
 	};
 	goalState?: {
 		goalId?: string;
+		previousGoalId?: string;
 		status: string;
 		operation?: Extract<NativeEntryOrigin, { kind: "goal_operation" }>["operation"];
 	};
@@ -131,6 +135,7 @@ function sourceRef(source: TaskStateSource, field: string): TaskStateSourceRef {
 		locator: source.locator,
 		revision: source.revision,
 		...(source.retention === undefined ? {} : { retention: source.retention }),
+		...(source.qualification === undefined ? {} : { qualification: source.qualification }),
 	};
 }
 
@@ -294,16 +299,16 @@ function* nativeInput(source: TaskStateSource): Generator<TaskStateProjection> {
 		typeof submitted?.text !== "string"
 	)
 		return;
-	const retained = source.retention === "retained-import";
+	const qualified = source.qualification === "native-admission" && source.retention !== "retained-import";
 	const input = (value: string, field: string): TaskStateProjection => ({
 		source: sourceRef(source, field),
 		kind: "user_requirement",
 		text: value,
 		operation: "observe",
 		relations: [],
-		authority: retained ? "unrecorded" : "user",
-		attribution: retained ? "proposal" : "source-backed",
-		...(retained ? { claimedAuthority: "user" } : {}),
+		authority: qualified ? "user" : "unrecorded",
+		attribution: qualified ? "source-backed" : "proposal",
+		...(!qualified ? { claimedAuthority: "user" } : {}),
 	});
 	// These are complete source text fields, not extracted or inferred individual requirements.
 	yield input(submitted.text, "/nativeOrigin/submitted/text");
@@ -352,7 +357,10 @@ function nativeGoalOrigin(
 export function* projectTaskStateSource(source: TaskStateSource): Generator<TaskStateProjection> {
 	if (source.retention !== undefined && source.retention !== "retained-import")
 		throw new Error("Unsupported task source retention");
+	if (source.qualification !== undefined && source.qualification !== "native-admission")
+		throw new Error("Unsupported task source qualification");
 	const retained = source.retention === "retained-import";
+	const qualified = source.qualification === "native-admission" && !retained;
 	const { entry } = source;
 	const data = record(entry.data);
 	if (entry.type === "message") {
@@ -412,18 +420,28 @@ export function* projectTaskStateSource(source: TaskStateSource): Generator<Task
 						field: "/nativeOrigin/submittedText",
 					}
 				: undefined,
-			authority: retained
+			authority: !qualified
 				? "unrecorded"
 				: userControl
 					? "user"
 					: origin?.actor === "runtime"
 						? "tool-data"
 						: "unrecorded",
-			attribution: retained ? "proposal" : userRevision ? "source-backed" : "descriptive",
-			...(retained && (userControl || origin?.actor === "runtime")
+			attribution:
+				retained || (!qualified && (userControl || origin?.actor === "runtime"))
+					? "proposal"
+					: userRevision
+						? "source-backed"
+						: "descriptive",
+			...(!qualified && (userControl || origin?.actor === "runtime")
 				? { claimedAuthority: userControl ? "user" : "tool-data" }
 				: {}),
-			goalState: { goalId: text(data.goalId), status: data.status, operation: origin?.operation },
+			goalState: {
+				goalId: text(data.goalId),
+				status: data.status,
+				operation: origin?.operation,
+				...(origin?.previousGoalId === undefined ? {} : { previousGoalId: origin.previousGoalId }),
+			},
 		};
 	} else {
 		const legacy = legacySnapshotSource(source);

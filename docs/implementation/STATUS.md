@@ -745,3 +745,55 @@ unused emptyUsage import; Root removed that import after source-reading jobs set
 These are per-request encoded/work limits, not exact serialized tree size, transient
 JSON/heap bounds, concurrent-request limits, index-sync limits or whole-process bounds.
 Task authority/reduction, ViewUnits/token budgets/epochs and release gates remain open.
+
+### Qualified native task admission and bounded reduction (W24)
+
+Native input/goal admission now binds the current Manager writer before waits. Origin
+fields are copied then; the actual finalized message/normalized goal is appended after
+callbacks. Original action/record, cancellation and ACK identities remain unchanged.
+Only message_end mints a message append callback. Raw public append APIs keep accepting
+descriptive nativeOrigin JSON but cannot mint native qualification.
+
+The owner stamps qualification:"native-admission" in the existing canonical frame via
+an internal admitted-append verb. Frame/source readers, captured hydration, resident
+metadata, native forks and copies retain it outside unchanged payload JSON. Retained
+imports still lower authority. Record-body limits are unchanged; frame allowance is
+record bytes+320. Existing exact-prefix/verb rejection is not a universal old-binary
+fence: old remove mode does not decode, and hostile same-process/same-UID code is not
+isolated by internal module symbols. No new journal, authority store or crypto scheme.
+
+Derived index schema15 rebuilds old task promotions. Positive task authority requires
+qualified native admission as well as the expected control shape. Unqualified/old claims
+retain exact fields/text/IDs/relations and claimed authority as proposals. Descriptive
+goal control attribution remains descriptive. Existing legacy goal-resume behavior is
+unchanged; this is a task-projection repair, not completion of every import/execution gate.
+
+SessionManager.readTaskState now provides a complete bounded captured structured branch
+reduction: default16,384 projection/edge items,64MiB distinct source frames and64MiB each
+for admitted projection/result encodings. Oversized inline evidence is hydrated within
+the same captured read. Literal identities are separate from text. Only explicit qualified
+relations/operations retire an unambiguous target; missing/ambiguous targets and proposals
+do not remove requirements. Native goal completion/clear affects that exact goal only.
+Import coverage stays explicit; structuredOnly/selective are not exhaustive semantic
+extraction claims. No active-state SQL table, second task store or global cache was added.
+
+The existing native ownership floor and advertised daemon schema advance together to31;
+protocol11 and capability names remain. New clients refuse old11/30 owners; supervisor
+preservation/cleanup policy remains. RPC get_state advertises schemaRevision and startup
+requires at least31 in addition to protocol11, using the existing failure cleanup path.
+The --rpc-protocol-version11 flag remains a separate flag/value pair; no new launch flag.
+
+Twelve distinct focused cases passed across separate invocations and corrected repeats:
+reducer/reader2, existing index2/codec2, native goal2/input1 and RPC2/daemon1. Actual native
+input keeps submitted text "hi" while its callback-expanded body is stored; descriptive
+runtime completion closes its exact qualified goal. RPC uses a real Node mock-server
+process, not an installed CLI or provider. Local-faux/faux-ipython-tool cases do not run a
+kernel or physical provider. Detailed commands/PIDs are in .work/namespace-state.json.
+The initial index fixture incorrectly expected indexedThrough5 after rebuilding to12;
+Root corrected the expected frontier from the actual task snapshot without changing
+entry equality. Two RPC cases initially failed because the mock script template consumed
+its newline escape; String.raw corrected that fixture. Neither was a production failure.
+
+Subscription auth/benchmark adapters remain separate external work, not part of W24.
+ViewUnits/model-token budgets/epochs/recovery, remaining coordinator/whole-process bounds,
+real isolated medium-effort campaigns and approved release remain unfinished.

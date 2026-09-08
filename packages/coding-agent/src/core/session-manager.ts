@@ -18,6 +18,7 @@ import { assertProductStatePath } from "../runtime-paths.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import { GOAL_STATE_CUSTOM_TYPE } from "./goals.js";
 import type {
 	ContextManifestOptions,
 	ContextManifestPage,
@@ -28,7 +29,12 @@ import type {
 	TaskEvidenceOptions,
 	TaskEvidencePage,
 } from "./history-index.js";
-import { decodeJournalFrame, INITIAL_JOURNAL_CURSOR, type JournalFrameRetention } from "./journal-frame.js";
+import {
+	decodeJournalFrame,
+	INITIAL_JOURNAL_CURSOR,
+	type JournalFrameRetention,
+	type NativeEntryQualification,
+} from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
@@ -37,7 +43,7 @@ import {
 	type PersistedIpythonSentAgentMessage,
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
-import type { NativeEntryOrigin } from "./session-entry-origin.js";
+import { bindNativeEntryWriter, type NativeEntryOrigin, type NativeEntryWriter } from "./session-entry-origin.js";
 import {
 	type BoundHistoryReadSink,
 	type BoundSessionRequestSink,
@@ -52,12 +58,15 @@ import {
 	type SessionHistoryReadView,
 } from "./session-history-index.js";
 import {
+	APPEND_NATIVE_ADMISSION,
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
 	type SessionJournalState,
 } from "./session-journal-owner.js";
 import { readSessionJournal, readSessionJournalHeader, SessionJournalDecoder } from "./session-journal-reader.js";
+import { readTaskStateFromHistory, type TaskStateView } from "./task-state-reader.js";
+import { type TaskStateReadLimits, taskStateReadLimits } from "./task-state-reducer.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -212,7 +221,13 @@ interface CapturedForkInput {
 	source?: SourceSnapshotRef;
 	selectedEntry?: SessionEntry;
 	path: SessionEntry[];
-	labels: { targetId: string; label: string; timestamp: string; retention?: JournalFrameRetention }[];
+	labels: {
+		targetId: string;
+		label: string;
+		timestamp: string;
+		retention?: JournalFrameRetention;
+		qualification?: NativeEntryQualification;
+	}[];
 	sourceFile?: string;
 	cwd: string;
 	sessionDir: string;
@@ -314,8 +329,9 @@ export interface SessionTreeNode extends SessionTreeFlatNode {
 export interface ResidentSessionHistory {
 	header: SessionHeader | null;
 	entries: SessionEntry[];
-	/** Per-row lowering metadata, outside the unchanged entry payloads. */
+	/** Per-row source controls, outside the unchanged entry payloads. */
 	retentions: (JournalFrameRetention | null)[];
+	qualifications: (NativeEntryQualification | null)[];
 	leafId: string | null;
 	/** Serialized header/entry JSON bytes, not physical frame bytes or heap size. */
 	sourceBytes: number;
@@ -615,16 +631,32 @@ export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefault
 
 // Actual reader/import control metadata, never a field in the entry payload.
 const entryRetentions = new WeakMap<FileEntry, JournalFrameRetention>();
+const entryQualifications = new WeakMap<FileEntry, NativeEntryQualification>();
 
-function withEntryRetention<T extends FileEntry>(entry: T, retention?: JournalFrameRetention): T {
+function withEntryRetention<T extends FileEntry>(
+	entry: T,
+	retention?: JournalFrameRetention,
+	qualification?: NativeEntryQualification,
+): T {
 	if (retention !== undefined) entryRetentions.set(entry, retention);
+	if (qualification !== undefined) entryQualifications.set(entry, qualification);
 	return entry;
 }
 
-function sessionFileEntry(value: unknown, retention?: JournalFrameRetention): FileEntry {
+function sessionFileEntry(
+	value: unknown,
+	retention?: JournalFrameRetention,
+	qualification?: NativeEntryQualification,
+): FileEntry {
 	if (!value || typeof value !== "object" || !("type" in value) || typeof value.type !== "string")
 		throw new Error("Invalid session journal entry");
-	return withEntryRetention(value as FileEntry, retention);
+	return withEntryRetention(value as FileEntry, retention, qualification);
+}
+
+function appendSourceEntry(owner: SessionJournalOwner, json: string, entry: FileEntry): Promise<{ sequence: number }> {
+	return entryQualifications.get(entry) === "native-admission"
+		? owner[APPEND_NATIVE_ADMISSION](json, entryRetentions.get(entry))
+		: owner.appendJson(json, entryRetentions.get(entry));
 }
 
 function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
@@ -635,7 +667,7 @@ function parseEntriesFromBuffer(buffer: Buffer): FileEntry[] {
 		const end = buffer.indexOf(0x0a, start);
 		if (end === -1) break; // Only exclusive recovery may change an incomplete tail.
 		const record = decoder.decode(buffer.subarray(start, end + 1));
-		if (record) entries.push(sessionFileEntry(record.entry, record.retention));
+		if (record) entries.push(sessionFileEntry(record.entry, record.retention, record.qualification));
 		start = end + 1;
 	}
 	return entries;
@@ -663,7 +695,7 @@ export async function loadEntriesFromFileAsync(
 	const entries: FileEntry[] = [];
 	let bytesSinceYield = 0;
 	for await (const record of readSessionJournal(filePath)) {
-		entries.push(sessionFileEntry(record.entry, record.retention));
+		entries.push(sessionFileEntry(record.entry, record.retention, record.qualification));
 		bytesSinceYield += Buffer.byteLength(record.json);
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 			bytesSinceYield = 0;
@@ -1045,7 +1077,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				continue;
 			}
 
-			const entry = sessionFileEntry(record.entry);
+			const entry = sessionFileEntry(record.entry, record.retention, record.qualification);
 
 			if (entry.type === "session_info") {
 				const infoEntry = entry as SessionInfoEntry;
@@ -1387,10 +1419,7 @@ export class SessionManager {
 		this.sessionFile = owner.journalPath;
 		try {
 			for (const entry of this.fileEntries) {
-				const ack = await owner.appendJson(
-					stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES),
-					entryRetentions.get(entry),
-				);
+				const ack = await appendSourceEntry(owner, stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES), entry);
 				state.sequence = ack.sequence;
 			}
 			await this._activateIndexedSource(this.fileEntries[0] as SessionHeader);
@@ -1737,7 +1766,11 @@ export class SessionManager {
 			const captured = this.materializeResidentHistory(DEFAULT_MANAGER_HISTORY_LIMITS);
 			next.fileEntries.push(
 				...captured.entries.map((entry, index) =>
-					withEntryRetention(entry, captured.retentions[index] ?? undefined),
+					withEntryRetention(
+						entry,
+						captured.retentions[index] ?? undefined,
+						captured.qualifications[index] ?? undefined,
+					),
 				),
 			);
 			next._buildIndex();
@@ -1811,6 +1844,14 @@ export class SessionManager {
 			),
 			read,
 		);
+	}
+
+	/** Complete bounded structured task reduction on one captured native branch. */
+	async readTaskState(limits: Partial<TaskStateReadLimits> = {}): Promise<TaskStateView> {
+		const captured = taskStateReadLimits(limits);
+		if (!this.supportsCapturedHistoryReads())
+			throw new Error("Task-state reduction requires captured native history");
+		return this.readSourceHistory((history) => readTaskStateFromHistory(history, captured));
 	}
 
 	/** Complete actual parent chain, excluding merely attached request evidence. */
@@ -2039,6 +2080,7 @@ export class SessionManager {
 		const snapshot = withEntryRetention(
 			JSON.parse(stringifyBoundedJson(initial, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
 			entryRetentions.get(entry),
+			entryQualifications.get(entry),
 		);
 		const ownsPendingId = !generated && !state.pendingIds.has(snapshot.id);
 		if (!generated && !ownsPendingId && !onDuplicate) throw new Error(`Duplicate session entry: ${snapshot.id}`);
@@ -2084,7 +2126,7 @@ export class SessionManager {
 				const metadata = await this._prepareOwnedMetadata(state, snapshot, history, advanceLeaf);
 				const json = stringifyBoundedJson(snapshot, Math.min(admittedBytes, MAX_SESSION_RECORD_BYTES));
 				try {
-					const ack = await state.owner!.appendJson(json, entryRetentions.get(snapshot));
+					const ack = await appendSourceEntry(state.owner!, json, snapshot);
 					state.sequence = ack.sequence;
 				} catch (error) {
 					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
@@ -2121,7 +2163,7 @@ export class SessionManager {
 		if (!explicitParent) entry.parentId = state.pending ? state.reservedLeaf : this.leafId;
 		let json = stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES);
 		const retention = entryRetentions.get(entry);
-		const snapshot = withEntryRetention(JSON.parse(json) as SessionEntry, retention);
+		const snapshot = withEntryRetention(JSON.parse(json) as SessionEntry, retention, entryQualifications.get(entry));
 		// Queued usage projection only changes a fixed set of numeric fields.
 		const admittedBytes = Buffer.byteLength(json) + (prepare ? 16 * 1024 : 0);
 		const entries = this.fileEntries;
@@ -2140,7 +2182,7 @@ export class SessionManager {
 						json = stringifyBoundedJson(snapshot, admittedBytes);
 					}
 					if (state.owner) {
-						const ack = await state.owner.appendJson(json, retention);
+						const ack = await appendSourceEntry(state.owner, json, snapshot);
 						state.sequence = ack.sequence;
 					} else {
 						state.sequence++;
@@ -2457,9 +2499,54 @@ export class SessionManager {
 		return { ...entry.execution, result: entry.message };
 	}
 
-	async appendMessage(
+	/** Internal native admission. Ordinary append arguments remain descriptive JSON. */
+	[bindNativeEntryWriter](): NativeEntryWriter {
+		this._assertMutable();
+		const state = this.writeState;
+		const assertWriter = () => {
+			this._assertMutable();
+			if (this.writeState !== state || state.retired || state.closed)
+				throw new Error("Session source changed after native admission capture");
+		};
+		return {
+			captureMessage: (origin) => {
+				const captured = JSON.parse(stringifyBoundedJson(origin, MAX_SESSION_RECORD_BYTES)) as typeof origin;
+				return (message) => {
+					assertWriter();
+					// Hooks may replace the body. Admission remains the original action/record capture.
+					return message.role === "custom"
+						? this._appendCustomMessageEntry(
+								message.customType,
+								message.content,
+								message.display,
+								message.details,
+								captured,
+								"native-admission",
+							)
+						: this._appendMessage(message, captured, "native-admission");
+				};
+			},
+			captureGoalOperation: (origin) => {
+				const captured = JSON.parse(stringifyBoundedJson(origin, MAX_SESSION_RECORD_BYTES)) as typeof origin;
+				return (goal) => {
+					assertWriter();
+					return this._appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal, captured, "native-admission");
+				};
+			},
+		};
+	}
+
+	appendMessage(
 		message: Message | CustomMessage | BashExecutionMessage,
 		nativeOrigin?: NativeEntryOrigin,
+	): Promise<string> {
+		return this._appendMessage(message, nativeOrigin);
+	}
+
+	private async _appendMessage(
+		message: Message | CustomMessage | BashExecutionMessage,
+		nativeOrigin?: NativeEntryOrigin,
+		qualification?: NativeEntryQualification,
 	): Promise<string> {
 		const finalized = this.finalizedToolMessages.get(message);
 		if (finalized) return finalized;
@@ -2471,7 +2558,7 @@ export class SessionManager {
 			message,
 			...(nativeOrigin ? { nativeOrigin } : {}),
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
 		return entry.id;
 	}
 
@@ -2538,7 +2625,16 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	async appendCustomEntry(customType: string, data?: unknown, nativeOrigin?: NativeEntryOrigin): Promise<string> {
+	appendCustomEntry(customType: string, data?: unknown, nativeOrigin?: NativeEntryOrigin): Promise<string> {
+		return this._appendCustomEntry(customType, data, nativeOrigin);
+	}
+
+	private async _appendCustomEntry(
+		customType: string,
+		data?: unknown,
+		nativeOrigin?: NativeEntryOrigin,
+		qualification?: NativeEntryQualification,
+	): Promise<string> {
 		const entry: CustomEntry = {
 			type: "custom",
 			customType,
@@ -2548,7 +2644,7 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
 		return entry.id;
 	}
 
@@ -2804,12 +2900,23 @@ export class SessionManager {
 		return undefined;
 	}
 
-	async appendCustomMessageEntry<T = unknown>(
+	appendCustomMessageEntry<T = unknown>(
 		customType: string,
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: T,
 		nativeOrigin?: NativeEntryOrigin,
+	): Promise<string> {
+		return this._appendCustomMessageEntry(customType, content, display, details, nativeOrigin);
+	}
+
+	private async _appendCustomMessageEntry<T = unknown>(
+		customType: string,
+		content: string | (TextContent | ImageContent)[],
+		display: boolean,
+		details?: T,
+		nativeOrigin?: NativeEntryOrigin,
+		qualification?: NativeEntryQualification,
 	): Promise<string> {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -2822,7 +2929,7 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
 		return entry.id;
 	}
 
@@ -2851,12 +2958,13 @@ export class SessionManager {
 				? withEntryRetention(
 						JSON.parse(stringifyBoundedJson(entry, maxSourceBytes)) as SessionEntry,
 						entryRetentions.get(entry),
+						entryQualifications.get(entry),
 					)
 				: undefined;
 		}
 		return this.readSourceHistory(async (history) => {
 			const value = await this._storedEntry(history, id, maxSourceBytes);
-			return value ? withEntryRetention(value.entry, value.source.retention) : undefined;
+			return value ? withEntryRetention(value.entry, value.source.retention, value.source.qualification) : undefined;
 		});
 	}
 
@@ -2869,7 +2977,7 @@ export class SessionManager {
 		return this.readSourceHistory(async (history) => {
 			if (history.source.leafId === null) return undefined;
 			const value = await this._storedEntry(history, history.source.leafId, maxSourceBytes);
-			return value ? withEntryRetention(value.entry, value.source.retention) : undefined;
+			return value ? withEntryRetention(value.entry, value.source.retention, value.source.qualification) : undefined;
 		});
 	}
 
@@ -2902,12 +3010,18 @@ export class SessionManager {
 		if (!this.indexed) {
 			const resident = this.materializeResidentHistory(capturedLimits);
 			return resident.entries.map((entry, index) =>
-				withEntryRetention(entry, resident.retentions[index] ?? undefined),
+				withEntryRetention(
+					entry,
+					resident.retentions[index] ?? undefined,
+					resident.qualifications[index] ?? undefined,
+				),
 			);
 		}
 		return this.readSourceHistory(async (history) => {
 			const result = await history.materialize(capturedLimits);
-			const entries = result.entries.map(({ entry, source }) => withEntryRetention(entry, source.retention));
+			const entries = result.entries.map(({ entry, source }) =>
+				withEntryRetention(entry, source.retention, source.qualification),
+			);
 			applyChildUsageAttributions(entries);
 			return entries;
 		});
@@ -2937,7 +3051,7 @@ export class SessionManager {
 			if (sourceBytes > maxSourceBytes) throw new Error("Parent-path source byte budget exceeded");
 			const value = await history.hydrateEntry(reference.id, remaining);
 			if (!value) throw new Error("Parent-path entry source is unavailable");
-			const entry = withEntryRetention(value.entry, value.source.retention);
+			const entry = withEntryRetention(value.entry, value.source.retention, value.source.qualification);
 			loaded.set(entry.id, entry);
 			return entry;
 		};
@@ -3004,7 +3118,11 @@ export class SessionManager {
 				if (cloned.size >= maxEntries) throw new Error("Parent-path entry budget exceeded");
 				const json = stringifyBoundedJson(entry, maxSourceBytes - sourceBytes);
 				sourceBytes += Buffer.byteLength(json);
-				const copy = withEntryRetention(JSON.parse(json) as SessionEntry, entryRetentions.get(entry));
+				const copy = withEntryRetention(
+					JSON.parse(json) as SessionEntry,
+					entryRetentions.get(entry),
+					entryQualifications.get(entry),
+				);
 				cloned.set(copy.id, copy);
 				return copy;
 			}),
@@ -3175,13 +3293,15 @@ export class SessionManager {
 		const header = originalHeader ? clone(originalHeader) : null;
 		const entries: SessionEntry[] = [];
 		const retentions: (JournalFrameRetention | null)[] = [];
+		const qualifications: (NativeEntryQualification | null)[] = [];
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			if (entries.length >= maxEntries) throw new Error("Resident history entry budget exceeded");
 			entries.push(clone(entry));
 			retentions.push(entryRetentions.get(entry) ?? null);
+			qualifications.push(entryQualifications.get(entry) ?? null);
 		}
-		return { header, entries, retentions, leafId, sourceBytes };
+		return { header, entries, retentions, qualifications, leafId, sourceBytes };
 	}
 
 	getEntries(): SessionEntry[] {
@@ -3220,7 +3340,11 @@ export class SessionManager {
 					entry:
 						parentId === entry.parentId
 							? entry
-							: withEntryRetention({ ...entry, parentId }, entryRetentions.get(entry)),
+							: withEntryRetention(
+									{ ...entry, parentId },
+									entryRetentions.get(entry),
+									entryQualifications.get(entry),
+								),
 					label: label?.value,
 					labelTimestamp: label?.timestamp,
 				};
@@ -3465,6 +3589,7 @@ export class SessionManager {
 						label: entry.label,
 						timestamp: entry.timestamp,
 						retention: entryRetentions.get(entry),
+						qualification: entryQualifications.get(entry),
 					});
 				else activeLabels.delete(entry.targetId);
 			}
@@ -3475,6 +3600,7 @@ export class SessionManager {
 					? withEntryRetention(
 							JSON.parse(stringifyBoundedJson(selectedEntry, limits.maxSourceBytes)) as SessionEntry,
 							entryRetentions.get(selectedEntry),
+							entryQualifications.get(selectedEntry),
 						)
 					: undefined,
 				path: copied,
@@ -3484,7 +3610,13 @@ export class SessionManager {
 		if (!this.indexed) {
 			const resident = this.materializeResidentHistory(limits);
 			return finish(
-				resident.entries.map((entry, index) => withEntryRetention(entry, resident.retentions[index] ?? undefined)),
+				resident.entries.map((entry, index) =>
+					withEntryRetention(
+						entry,
+						resident.retentions[index] ?? undefined,
+						resident.qualifications[index] ?? undefined,
+					),
+				),
 			);
 		}
 		const headerBytes = Buffer.byteLength(stringifyBoundedJson(header, limits.maxSourceBytes));
@@ -3494,7 +3626,9 @@ export class SessionManager {
 				...limits,
 				maxSourceBytes: limits.maxSourceBytes - headerBytes,
 			});
-			const entries = materialized.entries.map(({ entry, source }) => withEntryRetention(entry, source.retention));
+			const entries = materialized.entries.map(({ entry, source }) =>
+				withEntryRetention(entry, source.retention, source.qualification),
+			);
 			applyChildUsageAttributions(entries);
 			return finish(entries, history);
 		});
@@ -3506,11 +3640,15 @@ export class SessionManager {
 			rlmDepth: input.rlmDepth,
 		});
 		let bytes = Buffer.byteLength(stringifyBoundedJson(next.fileEntries[0], input.limits.maxSourceBytes));
-		const append = (entry: SessionEntry, retention?: JournalFrameRetention) => {
+		const append = (
+			entry: SessionEntry,
+			retention?: JournalFrameRetention,
+			qualification = entryQualifications.get(entry),
+		) => {
 			if (next.fileEntries.length - 1 >= input.limits.maxEntries) throw new Error("Fork entry budget exceeded");
 			const json = stringifyBoundedJson(entry, input.limits.maxSourceBytes - bytes);
 			bytes += Buffer.byteLength(json);
-			next.fileEntries.push(withEntryRetention(JSON.parse(json) as SessionEntry, retention));
+			next.fileEntries.push(withEntryRetention(JSON.parse(json) as SessionEntry, retention, qualification));
 		};
 		for (const entry of input.path) append(entry, entryRetentions.get(entry));
 		const ids = new Set(input.path.map((entry) => entry.id));
@@ -3521,6 +3659,7 @@ export class SessionManager {
 			append(
 				{ type: "label", id, parentId, timestamp: label.timestamp, targetId: label.targetId, label: label.label },
 				label.retention,
+				label.qualification,
 			);
 			parentId = id;
 		}
@@ -3719,14 +3858,17 @@ export class SessionManager {
 		const keep = (entry: FileEntry) => {
 			if (entry.type === "session") return;
 			if (entry.type === "git_state") dropped.set(entry.id, entry.parentId);
-			else targetEntries.push(withEntryRetention(entry, retention ?? entryRetentions.get(entry)));
+			else
+				targetEntries.push(
+					withEntryRetention(entry, retention ?? entryRetentions.get(entry), entryQualifications.get(entry)),
+				);
 		};
 		if (existsSync(sourcePath)) {
 			let bytesSinceYield = 0;
 			for await (const record of readSessionJournal(sourcePath)) {
 				sourceBytes += Buffer.byteLength(record.json);
 				if (sourceBytes > maxSourceBytes) throw new Error("Copied history JSON byte budget exceeded");
-				const entry = sessionFileEntry(record.entry, record.retention);
+				const entry = sessionFileEntry(record.entry, record.retention, record.qualification);
 				if (!sourceHeader) {
 					if (entry.type !== "session" || typeof entry.id !== "string")
 						throw new Error("Session source has no valid header");
@@ -3765,7 +3907,11 @@ export class SessionManager {
 				parentId = dropped.get(parentId) ?? null;
 			}
 			if (parentId !== entry.parentId)
-				targetEntries[index] = withEntryRetention({ ...entry, parentId }, entryRetentions.get(entry));
+				targetEntries[index] = withEntryRetention(
+					{ ...entry, parentId },
+					entryRetentions.get(entry),
+					entryQualifications.get(entry),
+				);
 		}
 		targetEntries.unshift(manager.fileEntries[0]);
 		manager.fileEntries = targetEntries;

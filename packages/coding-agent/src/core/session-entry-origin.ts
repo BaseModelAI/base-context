@@ -1,4 +1,6 @@
-import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
+import type { ImageContent, Message, TextContent } from "@ponythewhite/base-context-ai";
+
+import type { CustomMessage } from "./messages.js";
 
 /** The submitted input before native transforms; absence does not imply an empty submission. */
 export interface NativeSubmittedInput {
@@ -7,7 +9,7 @@ export interface NativeSubmittedInput {
 	images?: ImageContent[];
 }
 
-/** Captured by native admission/control code, outside arbitrary message/custom data. */
+/** Descriptive origin fields. Positive qualification comes from the native writer, never this shape alone. */
 export type NativeEntryOrigin =
 	| {
 			version: 1;
@@ -27,3 +29,14 @@ export type NativeEntryOrigin =
 			submittedText?: string;
 			previousGoalId?: string;
 	  };
+
+/** Internal host binding; not an option on ordinary raw append APIs. */
+export const bindNativeEntryWriter = Symbol("bindNativeEntryWriter");
+
+export type CapturedNativeMessageWrite = (message: Message | CustomMessage) => Promise<string>;
+export type CapturedNativeGoalWrite = (goal: unknown) => Promise<string>;
+
+export interface NativeEntryWriter {
+	captureMessage(origin: Extract<NativeEntryOrigin, { kind: "input" }>): CapturedNativeMessageWrite;
+	captureGoalOperation(origin: Extract<NativeEntryOrigin, { kind: "goal_operation" }>): CapturedNativeGoalWrite;
+}

@@ -58,7 +58,8 @@ if (
 		schemaVersion !== 11 &&
 		schemaVersion !== 12 &&
 		schemaVersion !== 13 &&
-		schemaVersion !== 14)
+		schemaVersion !== 14 &&
+		schemaVersion !== 15)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -71,7 +72,7 @@ db.exec(`
 	CREATE TABLE IF NOT EXISTS source_event (
 		session TEXT NOT NULL, id TEXT NOT NULL, sequence INTEGER NOT NULL,
 		parent_id TEXT, kind TEXT NOT NULL, authority TEXT NOT NULL,
-		locator TEXT NOT NULL, revision TEXT NOT NULL, text TEXT NOT NULL, text_complete INTEGER NOT NULL, retention TEXT,
+		locator TEXT NOT NULL, revision TEXT NOT NULL, text TEXT NOT NULL, text_complete INTEGER NOT NULL, retention TEXT, qualification TEXT,
 		PRIMARY KEY(session,id), UNIQUE(session,sequence)
 	);
 	CREATE TABLE IF NOT EXISTS coverage(session TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
@@ -139,7 +140,7 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 14) {
+	if (schemaVersion !== 15) {
 		if (
 			!db
 				.prepare("PRAGMA table_info(source_event)")
@@ -147,6 +148,13 @@ transaction(() => {
 				.some((column) => column.name === "retention")
 		)
 			db.exec("ALTER TABLE source_event ADD COLUMN retention TEXT");
+		if (
+			!db
+				.prepare("PRAGMA table_info(source_event)")
+				.all()
+				.some((column) => column.name === "qualification")
+		)
+			db.exec("ALTER TABLE source_event ADD COLUMN qualification TEXT");
 		if (
 			!db
 				.prepare("PRAGMA table_info(context_node)")
@@ -206,7 +214,7 @@ transaction(() => {
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=14");
+	db.exec("PRAGMA user_version=15");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -237,6 +245,7 @@ type Row = {
 	text: string;
 	text_complete: number;
 	retention: IndexedSourceEvent["retention"] | null;
+	qualification: IndexedSourceEvent["qualification"] | null;
 };
 function event(row: Row): IndexedSourceEvent {
 	return {
@@ -248,6 +257,7 @@ function event(row: Row): IndexedSourceEvent {
 		locator: JSON.parse(row.locator) as IndexedSourceEvent["locator"],
 		revision: row.revision,
 		...(row.retention === null ? {} : { retention: row.retention }),
+		...(row.qualification === null ? {} : { qualification: row.qualification }),
 		text: row.text,
 		textComplete: row.text_complete === 1,
 	};
@@ -269,7 +279,9 @@ function transaction(action: () => void): void {
 function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 	if (item.retention !== undefined && item.retention !== "retained-import")
 		throw new Error("Unsupported indexed source retention");
-	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
+	if (item.qualification !== undefined && item.qualification !== "native-admission")
+		throw new Error("Unsupported indexed source qualification");
+	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
 		sessionId,
 		item.id,
 		item.sequence,
@@ -281,6 +293,7 @@ function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 		item.text,
 		item.textComplete ? 1 : 0,
 		item.retention ?? null,
+		item.qualification ?? null,
 	);
 	for (const term of terms(item.text)) {
 		insertTerm.run(sessionId, term, item.sequence);
@@ -517,16 +530,17 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			sessionId,
 			snapshot,
 			previous,
-			(entry, sequence, locator, revision, parts, retention) => {
+			(entry, sequence, locator, revision, parts, retention, qualification) => {
 				foldSourceBootstrap(sourceState, entry);
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
 				if (retention !== undefined) item.retention = retention;
+				if (qualification !== undefined) item.qualification = qualification;
 				insertEvent(sessionId, item);
 				const depth = insertAncestry(sessionId, item);
 				insertContext(sessionId, item, entry, depth);
 				insertContextUpdates(sessionId, item, entry);
 				db.prepare("INSERT INTO source_payload VALUES (?,?,?)").run(sessionId, sequence, JSON.stringify(parts));
-				const source = { sessionId, sequence, entry, locator, revision, retention };
+				const source = { sessionId, sequence, entry, locator, revision, retention, qualification };
 				const imported = getTaskStateImportCoverage(source);
 				if (imported)
 					db.prepare("INSERT INTO task_import_loss VALUES (?,?,?)").run(
@@ -612,7 +626,8 @@ function apply(sessionId: string, events: IndexedSourceEvent[], committedThrough
 			}
 			if (item.sequence !== expected) throw new Error("Missing source sequence before index publication");
 			expected++;
-			insertEvent(sessionId, item);
+			// Metadata-only apply cannot mint canonical producer qualification.
+			insertEvent(sessionId, { ...item, qualification: undefined });
 		}
 		if (expected - 1 !== committedThrough) throw new Error("Index cannot advertise unindexed source coverage");
 		db.prepare("INSERT INTO coverage VALUES (?,?) ON CONFLICT(session) DO UPDATE SET sequence=excluded.sequence").run(

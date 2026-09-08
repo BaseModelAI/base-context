@@ -10,7 +10,11 @@ import {
 	type ParentPathCursor,
 } from "../src/core/history-index.js";
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
-import { SESSION_JOURNAL_MAX_FRAME_BYTES, SessionJournalOwner } from "../src/core/session-journal-owner.js";
+import {
+	APPEND_NATIVE_ADMISSION,
+	SESSION_JOURNAL_MAX_FRAME_BYTES,
+	SessionJournalOwner,
+} from "../src/core/session-journal-owner.js";
 import { TASK_STATE_SCHEMA } from "../src/core/task-state.js";
 
 let dir: string;
@@ -66,12 +70,22 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			JSON.stringify({ type: "session", version: 3, id: "canonical", timestamp: "2026-01-01T00:00:00Z", cwd: dir }),
 		);
 		const header = owner.getSnapshot();
-		const entry = (id: string, parentId: string | null, text: string, type = "message") =>
+		const inputOrigin = (id: string) => ({
+			version: 1,
+			kind: "input",
+			actionId: `fixture-action-${id}`,
+			recordId: id,
+			inputSource: "interactive",
+			recordRole: "primary",
+			submitted: { text: `  exact ${id}  ` },
+		});
+		const entry = (id: string, parentId: string | null, text: string, type = "message", nativeOrigin?: unknown) =>
 			JSON.stringify({
 				id,
 				parentId,
 				type,
 				...(type === "message" ? { message: { role: "user", content: text } } : { request: { text } }),
+				...(nativeOrigin === undefined ? {} : { nativeOrigin }),
 			});
 		await index.syncSource("canonical", header);
 		expect(await index.currentSourceBootstrap("canonical", header)).toEqual({
@@ -82,10 +96,12 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			contentPrefix: 0,
 			hasUserContent: false,
 		});
-		await owner.appendJson(entry("root", null, "source root"), "retained-import");
+		await owner[APPEND_NATIVE_ADMISSION](
+			entry("root", null, "source root", "message", inputOrigin("root")),
+			"retained-import",
+		);
 		const first = owner.getSnapshot();
-		const siblingJson =
-			'{ "id":"sibling", "parentId":"root", "type":"message", "message":{"role":"user","content":"sibling only"}, "retention":"retained-import", "lexeme":1e+03 }';
+		const siblingJson = `{ "id":"sibling", "parentId":"root", "type":"message", "message":{"role":"user","content":"sibling only"}, "retention":"retained-import", "lexeme":1e+03, "qualification":"native-admission", "nativeOrigin":${JSON.stringify(inputOrigin("sibling"))} }`;
 		await owner.appendJson(siblingJson);
 		const firstSync = index.syncSource("canonical", first);
 		const child = Reflect.get(index, "child");
@@ -97,6 +113,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		expect(await index.get("canonical", "sibling")).toBeUndefined();
 		const indexed = await index.get("canonical", "root");
 		expect(indexed?.retention).toBe("retained-import");
+		expect(indexed?.qualification).toBe("native-admission");
 		expect(await index.getSource("canonical", "root", 1)).toEqual(indexed);
 		expect(indexed?.locator).toEqual({
 			path: journalPath,
@@ -109,9 +126,11 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			indexed!.locator.offset + indexed!.locator.length,
 		);
 		expect(
-			decodeJournalFrame(frame, { sequence: 1, checksum: header.checksum }, SESSION_JOURNAL_MAX_FRAME_BYTES).payload,
-		).toMatchObject({ id: "root" });
-		await owner.appendJson(entry("chosen", "root", `chosen ${"é".repeat(8192)}`));
+			decodeJournalFrame(frame, { sequence: 1, checksum: header.checksum }, SESSION_JOURNAL_MAX_FRAME_BYTES),
+		).toMatchObject({ payload: { id: "root" }, retention: "retained-import", qualification: "native-admission" });
+		await owner[APPEND_NATIVE_ADMISSION](
+			entry("chosen", "root", `chosen ${"é".repeat(8192)}`, "message", inputOrigin("chosen")),
+		);
 		await owner.appendJson(entry("root-request", "root", "root request", "request"));
 		await owner.appendJson(entry("sibling-request", "sibling", "sibling request", "request"));
 		const latest = owner.getSnapshot();
@@ -128,6 +147,41 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		const sibling = await index.getSource("canonical", "sibling", 5);
 		expect(sibling).toMatchObject({ id: "sibling", sequence: 2 });
 		expect(sibling?.retention).toBeUndefined();
+		expect(sibling?.qualification).toBeUndefined();
+		const nativeInputScope = { leafId: "chosen", through: 5 };
+		const nativeInputs = await index.taskEvidence("canonical", nativeInputScope);
+		expect(nativeInputs.entries).toMatchObject([
+			{
+				projection: {
+					source: {
+						entryId: "root",
+						field: "/nativeOrigin/submitted/text",
+						qualification: "native-admission",
+						retention: "retained-import",
+					},
+					text: "  exact root  ",
+					authority: "unrecorded",
+					attribution: "proposal",
+					claimedAuthority: "user",
+				},
+			},
+			{
+				projection: {
+					source: { entryId: "chosen", field: "/nativeOrigin/submitted/text", qualification: "native-admission" },
+					text: "  exact chosen  ",
+					authority: "user",
+					attribution: "source-backed",
+				},
+			},
+		]);
+		expect((await index.taskEvidence("canonical", { leafId: "sibling", through: 5 })).entries.at(-1)).toMatchObject({
+			projection: {
+				source: { entryId: "sibling" },
+				authority: "unrecorded",
+				attribution: "proposal",
+				claimedAuthority: "user",
+			},
+		});
 		expect((await index.page("canonical", 0, 5, 1)).events).toEqual([indexed]);
 		expect(await index.readSourcePayload("canonical", "sibling", 5)).toMatchObject({
 			text: siblingJson,
@@ -1074,7 +1128,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE context_node DROP COLUMN context_usage_assistant; ALTER TABLE context_node DROP COLUMN latest_git_state; ALTER TABLE context_node DROP COLUMN latest_agent_status; ALTER TABLE source_cursor DROP COLUMN source_leaf; ALTER TABLE source_cursor DROP COLUMN source_session_info; ALTER TABLE source_cursor DROP COLUMN source_session_state; ALTER TABLE source_cursor DROP COLUMN source_compaction_count; ALTER TABLE source_cursor DROP COLUMN source_content_prefix; ALTER TABLE source_cursor DROP COLUMN source_has_user_content; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE context_node DROP COLUMN context_usage_assistant; ALTER TABLE context_node DROP COLUMN latest_git_state; ALTER TABLE context_node DROP COLUMN latest_agent_status; ALTER TABLE source_cursor DROP COLUMN source_leaf; ALTER TABLE source_cursor DROP COLUMN source_session_info; ALTER TABLE source_cursor DROP COLUMN source_session_state; ALTER TABLE source_cursor DROP COLUMN source_compaction_count; ALTER TABLE source_cursor DROP COLUMN source_content_prefix; ALTER TABLE source_cursor DROP COLUMN source_has_user_content; ALTER TABLE source_event DROP COLUMN retention; ALTER TABLE source_event DROP COLUMN qualification; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -1093,6 +1147,10 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		expect((await index.getSource("canonical", "root", taskScope.through))?.retention).toBe("retained-import");
 		expect((await index.taskEvidence("canonical", taskScope, { taskKey })).entries).toHaveLength(16);
 		expect((await index.readPayload("canonical", "huge-task", taskScope))?.text).toBe(payload?.text);
+		expect(await index.taskEvidence("canonical", nativeInputScope)).toEqual({
+			...nativeInputs,
+			indexedThrough: taskScope.through,
+		});
 		const before = readFileSync(journalPath);
 		await index.close();
 		rmSync(join(dir, "index.sqlite"));
@@ -1326,7 +1384,12 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 it("does not advance coverage across a missing source sequence and qualifies incomplete text", async () => {
 	await expect(index.apply("session", [source("missing", 2, "lost")], 2)).rejects.toThrow("Missing source sequence");
 	expect(await index.get("session", "missing")).toBeUndefined();
-	await index.apply("session", [{ ...source("Item", 1, "prefix"), textComplete: false }], 1);
+	await index.apply(
+		"session",
+		[{ ...source("Item", 1, "prefix"), textComplete: false, qualification: "native-admission" }],
+		1,
+	);
+	expect((await index.get("session", "Item"))?.qualification).toBeUndefined();
 	expect((await index.search("session", "not-present", 1)).coverage).toBe("partial");
 	await expect(index.page("session", 0, 1, 129)).rejects.toThrow("page limit");
 	await expect(index.apply("session", [], 2)).rejects.toThrow("unindexed source coverage");

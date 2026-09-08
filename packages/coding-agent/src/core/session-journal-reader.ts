@@ -5,6 +5,7 @@ import {
 	INITIAL_JOURNAL_CURSOR,
 	type JournalCursor,
 	type JournalFrameRetention,
+	type NativeEntryQualification,
 } from "./journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES } from "./session-journal-owner.js";
 
@@ -14,7 +15,14 @@ export class SessionJournalDecoder {
 	private cursor: JournalCursor = INITIAL_JOURNAL_CURSOR;
 	private utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
-	decode(line: Buffer): { json: string; entry: unknown; retention?: JournalFrameRetention } | undefined {
+	decode(line: Buffer):
+		| {
+				json: string;
+				entry: unknown;
+				retention?: JournalFrameRetention;
+				qualification?: NativeEntryQualification;
+		  }
+		| undefined {
 		if (line.length > SESSION_JOURNAL_MAX_FRAME_BYTES) throw new Error("Session journal frame byte limit exceeded");
 		if (line[line.length - 1] !== 0x0a) throw new Error("Incomplete session journal record");
 		const text = this.utf8.decode(line);
@@ -37,13 +45,17 @@ export class SessionJournalDecoder {
 			json: decoded.json,
 			entry: decoded.payload,
 			...(decoded.retention === undefined ? {} : { retention: decoded.retention }),
+			...(decoded.qualification === undefined ? {} : { qualification: decoded.qualification }),
 		};
 	}
 }
 
-export async function* readSessionJournal(
-	filePath: string,
-): AsyncGenerator<{ json: string; entry: unknown; retention?: JournalFrameRetention }> {
+export async function* readSessionJournal(filePath: string): AsyncGenerator<{
+	json: string;
+	entry: unknown;
+	retention?: JournalFrameRetention;
+	qualification?: NativeEntryQualification;
+}> {
 	const decoder = new SessionJournalDecoder();
 	for await (const line of readLinesAsBuffers(filePath, {
 		maxLineBytes: SESSION_JOURNAL_MAX_FRAME_BYTES,

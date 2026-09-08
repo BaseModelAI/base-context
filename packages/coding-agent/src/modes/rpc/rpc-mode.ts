@@ -11,7 +11,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionSessionWatcher,
 } from "../agent-connection/types.js";
-import { DAEMON_PROTOCOL_VERSION } from "../daemon/daemon-protocol.js";
+import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { createRpcExtensionUiBridge } from "./rpc-extension-ui-context.js";
 import type {
@@ -254,6 +254,7 @@ async function runRpcModeWithConnectionInternal(
 				const state = await connection.getState();
 				const rpcState: RpcSessionState = {
 					protocolVersion: DAEMON_PROTOCOL_VERSION,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
 					isStreaming: state.isStreaming,

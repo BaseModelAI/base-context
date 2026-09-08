@@ -10,11 +10,13 @@ import type { JournalFrameRetention } from "./journal-frame.js";
 import type { DeleteSessionFileResult } from "./session-file-removal.js";
 
 export const SESSION_JOURNAL_MAX_RECORD_BYTES = 64 * 1024 * 1024;
-export const SESSION_JOURNAL_MAX_FRAME_BYTES = SESSION_JOURNAL_MAX_RECORD_BYTES + 256;
+export const SESSION_JOURNAL_MAX_FRAME_BYTES = SESSION_JOURNAL_MAX_RECORD_BYTES + 320;
 export const SESSION_JOURNAL_CHUNK_BYTES = 64 * 1024;
 export const SESSION_JOURNAL_MAX_IPC_BYTES = 128 * 1024;
 const MAX_PENDING_IPC_BYTES = 1024 * 1024;
 const MAX_PENDING_OPERATIONS = 32;
+/** @internal Native admission and qualified canonical-copy paths only. */
+export const APPEND_NATIVE_ADMISSION = Symbol("session-journal.native-admission");
 
 export interface SessionJournalOwnerOptions {
 	journalPath: string;
@@ -33,7 +35,7 @@ export interface SessionJournalState {
 }
 
 export type SessionJournalRequest =
-	| { id: number; action: "begin"; bytes: number; retention?: JournalFrameRetention }
+	| { id: number; action: "begin" | "begin-admitted"; bytes: number; retention?: JournalFrameRetention }
 	| { id: number; action: "chunk"; data: string }
 	| { id: number; action: "commit" | "abort" | "flush" | "migrate" | "recover" | "close" };
 
@@ -285,12 +287,25 @@ export class SessionJournalOwner {
 		return task;
 	}
 
-	async appendJson(json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+	appendJson(json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+		return this.uploadJson(json, retention, "begin");
+	}
+
+	/** @internal The caller must bind native admission or a decoded copy to this owner. */
+	[APPEND_NATIVE_ADMISSION](json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+		return this.uploadJson(json, retention, "begin-admitted");
+	}
+
+	private async uploadJson(
+		json: string,
+		retention: JournalFrameRetention | undefined,
+		action: "begin" | "begin-admitted",
+	): Promise<{ sequence: number }> {
 		const bytes = Buffer.byteLength(json);
 		if (bytes === 0 || bytes > SESSION_JOURNAL_MAX_RECORD_BYTES)
 			throw new Error("Session journal record byte limit exceeded");
 		return this.enqueue(bytes, async () => {
-			await this.request({ id: this.nextId++, action: "begin", bytes, retention });
+			await this.request({ id: this.nextId++, action, bytes, retention });
 			try {
 				for (const chunk of sessionJournalUtf8Chunks(json)) {
 					await this.request({ id: this.nextId++, action: "chunk", data: chunk.toString("base64") });

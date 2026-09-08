@@ -24,7 +24,7 @@ import type {
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
-import { DAEMON_PROTOCOL_VERSION } from "../daemon/daemon-protocol.js";
+import { CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY, DAEMON_PROTOCOL_VERSION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import type {
 	RpcCommand,
@@ -137,6 +137,11 @@ export class RpcClient {
 			if (state.protocolVersion !== DAEMON_PROTOCOL_VERSION)
 				throw new Error(
 					`Incompatible RPC protocol: expected ${DAEMON_PROTOCOL_VERSION}, got ${state.protocolVersion ?? "unversioned"}`,
+				);
+			const minimumSchema = CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision;
+			if (!Number.isSafeInteger(state.schemaRevision) || (state.schemaRevision ?? 0) < minimumSchema)
+				throw new Error(
+					`Incompatible RPC schema: expected at least ${minimumSchema}, got ${state.schemaRevision ?? "unversioned"}`,
 				);
 		} catch (error) {
 			try {

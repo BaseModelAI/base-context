@@ -29,6 +29,7 @@ import {
 	INITIAL_JOURNAL_CURSOR,
 	type JournalCursor,
 	type JournalFrameRetention,
+	type NativeEntryQualification,
 } from "./journal-frame.js";
 import { syncJournalDirectory, withJournalDescriptorSync, writeFullySync } from "./journal-io.js";
 import { removeSessionFile } from "./session-file-removal.js";
@@ -55,6 +56,7 @@ interface Upload {
 	expected: number;
 	received: number;
 	retention?: JournalFrameRetention;
+	qualification?: NativeEntryQualification;
 }
 
 function errorText(error: unknown): string {
@@ -296,7 +298,13 @@ async function start(): Promise<void> {
 		closeSync(current.fd);
 		const json = decoder.decode(readFileSync(uploadPath));
 		if (json.includes("\n")) throw new Error("Session JSON must be a single logical line");
-		const encoded = encodeJournalFrameJson(json, state.cursor, SESSION_JOURNAL_MAX_FRAME_BYTES, current.retention);
+		const encoded = encodeJournalFrameJson(
+			json,
+			state.cursor,
+			SESSION_JOURNAL_MAX_FRAME_BYTES,
+			current.retention,
+			current.qualification,
+		);
 		const sequence = state.cursor.sequence;
 		const bytes = Buffer.byteLength(encoded.line);
 		rmSync(uploadPath, { force: true });
@@ -472,7 +480,9 @@ async function start(): Promise<void> {
 				!request ||
 				!Number.isSafeInteger(request.id) ||
 				request.id < 1 ||
-				!["begin", "chunk", "commit", "abort", "flush", "recover", "migrate", "close"].includes(request.action)
+				!["begin", "begin-admitted", "chunk", "commit", "abort", "flush", "recover", "migrate", "close"].includes(
+					request.action,
+				)
 			)
 				throw new Error("Invalid session journal request");
 			bytes = Buffer.byteLength(encoded);
@@ -496,6 +506,7 @@ async function start(): Promise<void> {
 			assertOwner();
 			switch (request.action) {
 				case "begin":
+				case "begin-admitted":
 					requireAppendable();
 					if (upload) throw new Error("Session journal upload already active");
 					if (request.retention !== undefined && request.retention !== "retained-import")
@@ -511,6 +522,7 @@ async function start(): Promise<void> {
 						expected: request.bytes,
 						received: 0,
 						retention: request.retention,
+						qualification: request.action === "begin-admitted" ? "native-admission" : undefined,
 					};
 					return;
 				case "chunk": {
@@ -565,7 +577,12 @@ async function start(): Promise<void> {
 					),
 				(error: unknown) => {
 					try {
-						if (request.action === "begin" || request.action === "chunk" || request.action === "commit")
+						if (
+							request.action === "begin" ||
+							request.action === "begin-admitted" ||
+							request.action === "chunk" ||
+							request.action === "commit"
+						)
 							abortUpload();
 					} catch {
 						/* Keep the failed request's original error. */

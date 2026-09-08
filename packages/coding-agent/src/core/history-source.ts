@@ -6,6 +6,7 @@ import {
 	INITIAL_JOURNAL_CURSOR,
 	type JournalCursor,
 	type JournalFrameRetention,
+	type NativeEntryQualification,
 } from "./journal-frame.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES, type SessionJournalState } from "./session-journal-owner.js";
 
@@ -136,6 +137,7 @@ async function* frames(file: FileHandle, start: number, end: number, initial: Jo
 				yield {
 					payload: decoded.payload,
 					retention: decoded.retention,
+					qualification: decoded.qualification,
 					payloadBytes: frameBytes.subarray(payloadStart, payloadStart + payloadLength),
 					payloadOffset: offset + payloadStart,
 					sequence: cursor.sequence,
@@ -166,6 +168,7 @@ export async function readSessionSource(
 		revision: string,
 		parts: CanonicalPayloadParts,
 		retention?: JournalFrameRetention,
+		qualification?: NativeEntryQualification,
 	) => void,
 ): Promise<SourceIndexCursor> {
 	if (
@@ -238,6 +241,7 @@ export async function readSessionSource(
 						payloadOffset: frame.payloadOffset,
 					}),
 					frame.retention,
+					frame.qualification,
 				);
 			}
 			cursor = { sequence: frame.sequence + 1, checksum: frame.checksum };

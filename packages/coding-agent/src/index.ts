@@ -258,6 +258,8 @@ export {
 	type SkillPythonMetadata,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
+export type { TaskStateView } from "./core/task-state-reader.js";
+export type { ReducedTaskItem, TaskStateReadLimits } from "./core/task-state-reducer.js";
 // Tools
 export {
 	type BashOperations,
