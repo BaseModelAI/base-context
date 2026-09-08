@@ -1208,23 +1208,29 @@ describe("global refinement history", () => {
 		};
 	}
 
-	it("appends and reloads refinement results across calls", () => {
+	it("appends and reloads refinement results across calls", async () => {
 		const dir = makeTempDir();
-		expect(loadGlobalRefinementHistory(dir)).toEqual([]);
+		expect(await loadGlobalRefinementHistory(dir)).toEqual([]);
 
 		const first = sampleResult("refine_1");
 		const second = sampleResult("refine_2");
-		const historyPath = appendGlobalRefinement(dir, first);
-		appendGlobalRefinement(dir, second);
+		const firstSnapshot = { ...first };
+		const firstWrite = appendGlobalRefinement(dir, first);
+		first.summary = "changed after admission";
+		const secondWrite = appendGlobalRefinement(dir, second);
+		const limits = { maxEntries: 2, maxSourceBytes: 64 * 1024 * 1024 };
+		const reading = loadGlobalRefinementHistory(dir, limits);
+		limits.maxEntries = 1;
+		const [historyPath, , history] = await Promise.all([firstWrite, secondWrite, reading]);
 
 		expect(historyPath).toBe(getRefinementHistoryPath(dir));
-		expect(loadGlobalRefinementHistory(dir)).toEqual([
-			{ ...first, scope: "global" },
+		expect(history).toEqual([
+			{ ...firstSnapshot, scope: "global" },
 			{ ...second, scope: "global" },
 		]);
 	});
 
-	it("defaults legacy global history results to global scope", () => {
+	it("defaults legacy global history results to global scope", async () => {
 		const dir = makeTempDir();
 		const legacy = sampleResult("refine_legacy_global", { scope: undefined });
 		appendFileSync(
@@ -1234,10 +1240,13 @@ describe("global refinement history", () => {
 			"utf8",
 		);
 
-		expect(loadGlobalRefinementHistory(dir)[0]).toMatchObject({ id: "refine_legacy_global", scope: "global" });
+		expect((await loadGlobalRefinementHistory(dir))[0]).toMatchObject({
+			id: "refine_legacy_global",
+			scope: "global",
+		});
 	});
 
-	it("writes inferred legacy history scope back onto loaded results", () => {
+	it("writes inferred legacy history scope back onto loaded results", async () => {
 		const dir = makeTempDir();
 		const legacy = sampleResult("refine_legacy_inferred", {
 			scope: undefined,
@@ -1269,7 +1278,7 @@ describe("global refinement history", () => {
 		});
 		appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify(legacy)}\n`, "utf8");
 
-		expect(loadGlobalRefinementHistory(dir)[0]).toMatchObject({
+		expect((await loadGlobalRefinementHistory(dir))[0]).toMatchObject({
 			id: "refine_legacy_inferred",
 			scope: "global",
 		});
@@ -1285,14 +1294,28 @@ describe("global refinement history", () => {
 		expect(merged[0]).toMatchObject({ id: "refine_shared", summary: "session version", scope: "global" });
 	});
 
-	it("skips malformed history lines without throwing", () => {
+	it("skips malformed history lines without throwing", async () => {
 		const dir = makeTempDir();
 		const valid = sampleResult("refine_valid");
-		appendGlobalRefinement(dir, valid);
+		await appendGlobalRefinement(dir, valid);
 		appendFileSync(getRefinementHistoryPath(dir), "not json\n", "utf8");
 		appendFileSync(getRefinementHistoryPath(dir), `${JSON.stringify({ id: "x" })}\n`, "utf8");
+		const unterminated = sampleResult("refine_unterminated");
+		appendFileSync(getRefinementHistoryPath(dir), JSON.stringify(unterminated), "utf8");
 
-		expect(loadGlobalRefinementHistory(dir)).toEqual([{ ...valid, scope: "global" }]);
+		expect(await loadGlobalRefinementHistory(dir)).toEqual([
+			{ ...valid, scope: "global" },
+			{ ...unterminated, scope: "global" },
+		]);
+		await expect(
+			loadGlobalRefinementHistory(dir, { maxEntries: 2, maxSourceBytes: 64 * 1024 * 1024 }),
+		).rejects.toThrow("Global refinement history entry limit exceeded");
+		await expect(loadGlobalRefinementHistory(dir, { maxEntries: 16_384, maxSourceBytes: 1 })).rejects.toThrow(
+			"Global refinement history source byte budget exceeded",
+		);
+		await expect(appendGlobalRefinement(dir, valid, 1)).rejects.toThrow(
+			"Global refinement append byte limit exceeded",
+		);
 	});
 
 	it("merges global and session history, preferring session entries by id", () => {
@@ -1430,14 +1453,14 @@ describe("global refinement history", () => {
 			{ id: "refine_session_a" },
 		);
 		applied.harnessStatePath = saveHarnessState(dir, sessionAState);
-		appendGlobalRefinement(dir, applied);
+		await appendGlobalRefinement(dir, applied);
 
 		// A fresh session loads the global state and the global history (its own session
 		// has no record of refine_session_a) and can still roll it back.
 		const sessionBState = loadHarnessState(dir);
 		expect(sessionBState.entries.memory.session_a_memory).toBeDefined();
 
-		const globalHistory = mergeRefinementHistory(loadGlobalRefinementHistory(dir), getRefinementHistory([]));
+		const globalHistory = mergeRefinementHistory(await loadGlobalRefinementHistory(dir), getRefinementHistory([]));
 		const rollback = await refineHarness([], sessionBState, globalHistory, {} as never, "api-key", {
 			rollbackId: "refine_session_a",
 		});

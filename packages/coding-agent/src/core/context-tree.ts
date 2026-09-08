@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
 import type { RlmChildAgentStatus } from "./agent-session.js";
 import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
+import { exportHistoryLimits, readSessionHistoryFile } from "./export-html/history.js";
 import type { ContextUsage } from "./extensions/index.js";
 import type { ParentPathCursor } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
@@ -10,8 +11,6 @@ import type { SessionHistoryReadLimits } from "./session-history-index.js";
 import {
 	applyChildUsageAttributions,
 	buildSessionContext,
-	type FileEntry,
-	loadEntriesFromFile,
 	type SessionEntry,
 	type SessionManager,
 } from "./session-manager.js";
@@ -194,10 +193,6 @@ function computeContextUsageFromEntries(
 	return { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 };
 }
 
-function sessionEntriesFromFile(file: string): SessionEntry[] {
-	return loadEntriesFromFile(file).filter((entry: FileEntry): entry is SessionEntry => entry.type !== "session");
-}
-
 /**
  * Entries on the current branch, root to leaf, mirroring
  * SessionManager.getBranch(): the leaf is the last appended entry and the
@@ -294,15 +289,18 @@ function listChildSessionDirs(rlmSessionDir: string): string[] {
  * usage is recovered by subtracting the attribution entries. Returns undefined
  * when the dir holds no readable session.
  */
-export function loadContextTreeChildFromDisk(
+async function readContextTreeChildNodeFromDisk(
 	childSessionDir: string,
 	resolveContextWindow: ContextWindowResolver,
-): ContextTreeNode | undefined {
+	limits: SessionHistoryReadLimits,
+): Promise<ContextTreeNode | undefined> {
 	const sessionFile = findSessionFile(childSessionDir);
-	if (!sessionFile) {
+	if (!sessionFile || !existsSync(sessionFile)) {
 		return undefined;
 	}
-	const allEntries = sessionEntriesFromFile(sessionFile);
+	const allEntries = (await readSessionHistoryFile(sessionFile, limits)).filter(
+		(entry): entry is SessionEntry => entry.type !== "session",
+	);
 	const branch = branchEntries(allEntries);
 	if (branch.length === 0) {
 		return undefined;
@@ -337,8 +335,22 @@ export function loadContextTreeChildFromDisk(
 		ownUsage,
 		totalUsage,
 		contextUsage: computeContextUsageFromEntries(allEntries, branch, contextWindow),
-		children: loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow),
+		children: [],
 	};
+}
+
+/** Complete per-file limits; decoded history is reduced before reading descendants. */
+export async function loadContextTreeChildFromDisk(
+	childSessionDir: string,
+	resolveContextWindow: ContextWindowResolver,
+	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+): Promise<ContextTreeNode | undefined> {
+	limits = exportHistoryLimits(limits);
+	const node = await readContextTreeChildNodeFromDisk(childSessionDir, resolveContextWindow, limits);
+	if (node) {
+		node.children = await loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow, undefined, limits);
+	}
+	return node;
 }
 
 /**
@@ -346,20 +358,23 @@ export function loadContextTreeChildFromDisk(
  * dir, recursing into nested sub-* dirs for grandchildren. `skipIds`
  * excludes children that are already represented live.
  */
-export function loadContextTreeChildrenFromDisk(
+export async function loadContextTreeChildrenFromDisk(
 	rlmSessionDir: string | undefined,
 	resolveContextWindow: ContextWindowResolver,
 	skipIds?: ReadonlySet<string>,
-): ContextTreeNode[] {
+	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+): Promise<ContextTreeNode[]> {
+	limits = exportHistoryLimits(limits);
+	const skippedIds = new Set(skipIds);
 	if (!rlmSessionDir || !existsSync(rlmSessionDir)) {
 		return [];
 	}
 	const nodes: ContextTreeNode[] = [];
 	for (const childDir of listChildSessionDirs(rlmSessionDir)) {
-		if (skipIds?.has(basename(childDir))) {
+		if (skippedIds.has(basename(childDir))) {
 			continue;
 		}
-		const node = loadContextTreeChildFromDisk(childDir, resolveContextWindow);
+		const node = await loadContextTreeChildFromDisk(childDir, resolveContextWindow, limits);
 		if (node) {
 			nodes.push(node);
 		}

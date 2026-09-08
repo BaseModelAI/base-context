@@ -589,3 +589,55 @@ Current-invocation Agent collectors, completed-child disk readers and global ref
 history still have separate residency work. Full-operation snapshots remain capped
 materializations. These changes do not establish the declared large-history RSS gates,
 whole-process memory bounds, model billing or the remaining authority/compiler requirements.
+
+### Bounded disk and global refinement history; native storage scale slice (W20)
+
+Completed-child context-tree reads now use fixed, asynchronous file captures capped at
+16,384 non-header records and 64 MiB per file. Ordered usage restoration, off-branch
+attribution subtraction and last-physical-row ancestry remain unchanged. Disk reads still
+ignore incomplete final records, including undecodable tail bytes. HTML keeps its distinct
+whole-image UTF-8 and migration behavior. Each child reduces its history to node metadata
+before descending; AgentSession joins all accepted disk and live reads before returning.
+These are per-file bounds, not a bound on concurrent files, total descendants or tree output.
+
+Global refinement JSONL reads use the same fixed-image I/O with separate parsing rules:
+valid unterminated final rows remain eligible, malformed rows remain skipped, and every
+nonblank source row counts toward the 16,384-row limit before parsing. Complete source
+bytes are capped at 64 MiB. Appends capture JSON before awaiting and use a 32-item/64-MiB
+encoded-byte FIFO in this process. Existing refinement application/disposal now awaits the
+append. No new store or cross-process transaction was added. Serialization's transient
+allocation and the separate synchronous harness_state.json remain outside these bounds.
+
+Nine distinct existing cases passed across separate invocations: disk tree2, native tree1,
+global history2, native refinement2 and HTML2. The native tree and first HTML cases each
+needed a fixture port after indexed Manager activation: malformed imports now refuse at
+startup, and native branch changes must be awaited. Their initial failures and same-case
+retries remain separate evidence. No provider or kernel call was made by these scopes.
+
+The native storage-only measurement used checkpoint 473c85ffcf51d80adf742e5eecebdbd34f8eb53d.
+Each declared 10k/100k/1m source-event fixture has 512-byte user bodies, 10/100/1000 off-branch
+siblings and native compaction markers. These are context-marker epochs, not model calls
+or physical working-set rotations. Each fresh measurement opens/indexes once, then runs
+64 ordinary appends and 64 exact reads capped at 64 KiB; all 64 reads found their targets.
+One warmup append means each resulting source contains its seed count plus 65 events.
+
+| Seed events | Cold open/index s | Append p95 ms | Exact read p95 ms | Sampled group peak MiB | Warm group peak MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 1.217 | 5.073 | 1.456 | 345.53 | 345.53 |
+| 100,000 | 11.524 | 5.946 | 1.018 | 369.35 | 358.32 |
+| 1,000,000 | 120.943 | 11.841 | 1.806 | 404.59 | 365.71 |
+
+Hardware: Linux 7.0.0-30-generic, x64, Intel Core Ultra 9 275HX, 24 logical CPUs,
+202,005,540,864 bytes reported RAM, Node 22.8.0. The 100 ms sampler sums the main process,
+owner/index workers and source-loader processes: six processes at the sampled peaks.
+This is summed RSS, not PSS or a guaranteed absolute peak; observer RSS is separate.
+The larger runs use an immutable source/emitted checkpoint copy so current implementation
+work cannot change their inputs. Timings are descriptive, not latency acceptance thresholds.
+
+Source and index files grow with history: the 1m source was about 884 MB and the SQLite
+index about 5.18 GB, plus 5.21 GB WAL measured before close. Warm operations use indexed
+points and suffix catch-up rather than full-history materialization. Observed storage RSS
+did not grow proportionally to this fixture's retained history. This does not certify the
+whole-harness gate: Agent invocation collectors, daemon/kernel/provider working sets,
+queued/subscriber data and remaining configuration-state residency still need work.
+No numeric RSS/growth/latency pass threshold was invented, and no model benchmark ran.

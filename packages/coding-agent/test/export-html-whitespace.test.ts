@@ -58,7 +58,7 @@ describe("export HTML tool output whitespace", () => {
 		try {
 			const first = await manager.appendMessage({ role: "user", content: "one\n  two", timestamp: 1 });
 			const offBranch = await manager.appendMessage({ role: "user", content: "off branch", timestamp: 2 });
-			manager.branch(first);
+			await manager.branchTo(first);
 			const uncapped = vi.spyOn(manager, "getEntries").mockImplementation(() => {
 				throw new Error("uncapped export read");
 			});
@@ -114,7 +114,7 @@ describe("export HTML tool output whitespace", () => {
 			await manager.appendChildUsageAttribution(assistant, usage, { ...usage, input: 5 });
 			const aggregateUsage: Usage = { ...usage, input: 11, output: 22, totalTokens: 33 };
 			const attributed = await manager.appendChildUsageAttribution(assistant, usage, aggregateUsage);
-			manager.branch(assistant);
+			await manager.branchTo(assistant);
 			const sink = manager.bindRequestSink();
 			try {
 				const source = await sink.source;

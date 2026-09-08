@@ -1,22 +1,16 @@
 import { randomUUID } from "node:crypto";
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	statSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
+import { readSessionHistoryImage } from "../export-html/history.js";
 import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
 import { convertToLlm } from "../messages.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
+import type { SessionHistoryReadLimits } from "../session-history-index.js";
 import type { CustomEntry } from "../session-manager.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
@@ -24,6 +18,16 @@ export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 export const REFINE_SKILL_NAME = "refine";
 const HARNESS_STATE_DIR_NAME = "harness";
 const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
+const GLOBAL_REFINEMENT_HISTORY_LIMITS: SessionHistoryReadLimits = {
+	maxEntries: 16_384,
+	maxSourceBytes: 64 * 1024 * 1024,
+};
+const MAX_GLOBAL_REFINEMENT_APPENDS = 32;
+const MAX_GLOBAL_REFINEMENT_PENDING_BYTES = 64 * 1024 * 1024;
+let globalRefinementAppendTail: Promise<void> = Promise.resolve();
+let pendingGlobalRefinementAppends = 0;
+let pendingGlobalRefinementBytes = 0;
+
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
@@ -372,29 +376,78 @@ function isRefinementResult(data: unknown): data is RefinementResult {
  * rolled back from any session. Local-scope refinements are recorded only in the
  * session JSONL and roll back via their recorded harnessStatePath.
  */
-export function appendGlobalRefinement(harnessStateDir: string, result: RefinementResult): string {
+export async function appendGlobalRefinement(
+	harnessStateDir: string,
+	result: RefinementResult,
+	maxRecordBytes = GLOBAL_REFINEMENT_HISTORY_LIMITS.maxSourceBytes,
+): Promise<string> {
+	if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes <= 0) {
+		throw new Error("Invalid global refinement record byte limit");
+	}
+	if (pendingGlobalRefinementAppends >= MAX_GLOBAL_REFINEMENT_APPENDS) {
+		throw new Error("Global refinement append queue limit exceeded");
+	}
 	const historyPath = getRefinementHistoryPath(harnessStateDir);
-	mkdirSync(harnessStateDir, { recursive: true });
-	appendFileSync(historyPath, `${JSON.stringify(result)}\n`, "utf8");
-	return historyPath;
+	// Preserve JSON.stringify semantics and freeze the caller's value before I/O yields.
+	const serialized = `${JSON.stringify(result)}\n`;
+	const bytes = Buffer.byteLength(serialized);
+	if (bytes > maxRecordBytes || pendingGlobalRefinementBytes + bytes > MAX_GLOBAL_REFINEMENT_PENDING_BYTES) {
+		throw new Error("Global refinement append byte limit exceeded");
+	}
+	pendingGlobalRefinementAppends++;
+	pendingGlobalRefinementBytes += bytes;
+	const write = globalRefinementAppendTail.then(async () => {
+		await mkdir(harnessStateDir, { recursive: true });
+		await appendFile(historyPath, serialized, "utf8");
+		return historyPath;
+	});
+	// Failed appends reject their caller, but do not poison later accepted work.
+	globalRefinementAppendTail = write.then(
+		() => undefined,
+		() => undefined,
+	);
+	try {
+		return await write;
+	} finally {
+		pendingGlobalRefinementAppends--;
+		pendingGlobalRefinementBytes -= bytes;
+	}
 }
 
-export function loadGlobalRefinementHistory(harnessStateDir: string = getGlobalHarnessStateDir()): RefinementResult[] {
-	const historyPath = getRefinementHistoryPath(harnessStateDir);
-	if (!existsSync(historyPath)) {
-		return [];
+export async function loadGlobalRefinementHistory(
+	harnessStateDir: string = getGlobalHarnessStateDir(),
+	limits: SessionHistoryReadLimits = GLOBAL_REFINEMENT_HISTORY_LIMITS,
+): Promise<RefinementResult[]> {
+	const { maxEntries, maxSourceBytes } = limits;
+	if (
+		!Number.isSafeInteger(maxEntries) ||
+		maxEntries <= 0 ||
+		!Number.isSafeInteger(maxSourceBytes) ||
+		maxSourceBytes <= 0
+	) {
+		throw new Error("Invalid global refinement history limits");
 	}
+	const historyPath = getRefinementHistoryPath(harnessStateDir);
+	const priorAppends = globalRefinementAppendTail;
+	await priorAppends;
+	if (!existsSync(historyPath)) return [];
+	const captured = await readSessionHistoryImage(historyPath, maxSourceBytes, "Global refinement history");
+	const text = captured.toString("utf8");
 	const results: RefinementResult[] = [];
-	for (const line of readFileSync(historyPath, "utf8").split("\n")) {
-		const trimmed = line.trim();
+	let start = 0;
+	let records = 0;
+	while (start < text.length) {
+		const newline = text.indexOf("\n", start);
+		const end = newline === -1 ? text.length : newline;
+		const trimmed = text.slice(start, end).trim();
+		start = end + 1;
 		if (!trimmed) continue;
+		if (++records > maxEntries) throw new Error("Global refinement history entry limit exceeded");
 		try {
 			const parsed = JSON.parse(trimmed);
-			if (isRefinementResult(parsed)) {
-				results.push(withDefaultRefinementScope(parsed, "global"));
-			}
+			if (isRefinementResult(parsed)) results.push(withDefaultRefinementScope(parsed, "global"));
 		} catch {
-			// Skip malformed lines so a single bad append cannot break rollback.
+			// Preserve malformed-line skipping, including scope-inference failures.
 		}
 	}
 	return results;

@@ -111,9 +111,9 @@ afterEach(async () => {
 
 describe("loadContextTreeChildrenFromDisk", () => {
 	it("returns no nodes for a missing or empty rlm session dir", async () => {
-		expect(loadContextTreeChildrenFromDisk(undefined, resolveContextWindow)).toEqual([]);
-		expect(loadContextTreeChildrenFromDisk(join(makeTempDir(), "missing"), resolveContextWindow)).toEqual([]);
-		expect(loadContextTreeChildrenFromDisk(makeTempDir(), resolveContextWindow)).toEqual([]);
+		expect(await loadContextTreeChildrenFromDisk(undefined, resolveContextWindow)).toEqual([]);
+		expect(await loadContextTreeChildrenFromDisk(join(makeTempDir(), "missing"), resolveContextWindow)).toEqual([]);
+		expect(await loadContextTreeChildrenFromDisk(makeTempDir(), resolveContextWindow)).toEqual([]);
 	});
 
 	it("builds nodes recursively and separates own usage from attributed child usage", async () => {
@@ -132,7 +132,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		addAssistantUsage(aggregate, grandchildUsage);
 		await child.sessionManager.appendChildUsageAttribution(child.assistantEntryId, grandchildUsage, aggregate);
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes).toHaveLength(1);
 
 		const childNode = nodes[0];
@@ -157,13 +157,25 @@ describe("loadContextTreeChildrenFromDisk", () => {
 
 		// Own usage summed over the tree equals the attributed aggregate.
 		expect(childNode.ownUsage.input + grandchildNode.ownUsage.input).toBe(childNode.totalUsage.input);
+		await expect(
+			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, {
+				maxEntries: 1,
+				maxSourceBytes: 64 * 1024 * 1024,
+			}),
+		).rejects.toThrow("HTML export entry budget exceeded");
+		await expect(
+			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, {
+				maxEntries: 16_384,
+				maxSourceBytes: 1,
+			}),
+		).rejects.toThrow("HTML export source byte budget exceeded");
 	});
 
 	it("reports context usage from the last assistant message and the model context window", async () => {
 		const rlmDir = makeTempDir();
 		await writeChildSession(join(rlmDir, "sub-ctx00001"), "check context", createUsage(1500, 500, 0.02));
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes[0].contextUsage).toEqual({
 			tokens: 2000,
 			contextWindow: 200000,
@@ -171,7 +183,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		});
 
 		// Unknown context window: no context usage at all.
-		const unresolved = loadContextTreeChildrenFromDisk(rlmDir, () => undefined);
+		const unresolved = await loadContextTreeChildrenFromDisk(rlmDir, () => undefined);
 		expect(unresolved[0].contextUsage).toBeUndefined();
 	});
 
@@ -180,7 +192,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		const child = await writeChildSession(join(rlmDir, "sub-comp0001"), "compact me", createUsage(1500, 500, 0.02));
 		await child.sessionManager.appendCompaction("summary", child.assistantEntryId, 2000);
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes[0].contextUsage).toEqual({ tokens: null, contextWindow: 200000, percent: null });
 	});
 
@@ -197,7 +209,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 			stopReason: "aborted",
 		});
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		const byId = new Map(nodes.map((n) => [n.id, n]));
 		expect(byId.get("sub-err00001")?.status).toBe("error");
 		expect(byId.get("sub-abr00001")?.status).toBe("cancelled");
@@ -239,7 +251,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		];
 		writeFileSync(join(childDir, `${header.id}.jsonl`), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes).toHaveLength(1);
 		// Only the leaf branch (u1 -> a2) counts; the abandoned a1 path does not.
 		expect(nodes[0].ownUsage.input).toBe(1000);
@@ -288,9 +300,13 @@ describe("loadContextTreeChildrenFromDisk", () => {
 			},
 			entry("u2", "a1", createUserMessage("forked follow-up")),
 		];
-		writeFileSync(join(childDir, `${header.id}.jsonl`), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+		// Disk reads ignore an incomplete final record, including undecodable bytes.
+		writeFileSync(
+			join(childDir, `${header.id}.jsonl`),
+			Buffer.concat([Buffer.from(`${lines.map((line) => JSON.stringify(line)).join("\n")}\n`), Buffer.from([0xff])]),
+		);
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes).toHaveLength(1);
 		// a1 carries the aggregate (1500) on the branch; own must subtract the
 		// off-branch attribution back out.
@@ -305,7 +321,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 			createUserMessage("a trailing user message that has not reached the model"),
 		);
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		const tokens = nodes[0].contextUsage?.tokens;
 		// Last assistant usage is 2000; the trailing message adds an estimate on top.
 		expect(tokens).toBeGreaterThan(2000);
@@ -316,7 +332,7 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		await writeChildSession(join(rlmDir, "sub-live0001"), "live child", createUsage(100, 10, 0.01));
 		await writeChildSession(join(rlmDir, "sub-done0001"), "done child", createUsage(200, 20, 0.02));
 
-		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, new Set(["sub-live0001"]));
+		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, new Set(["sub-live0001"]));
 		expect(nodes.map((node) => node.id)).toEqual(["sub-done0001"]);
 	});
 });
@@ -351,8 +367,8 @@ describe("AgentSession.getContextTree", () => {
 		return { session, sessionManager };
 	}
 
-	function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
-		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+	async function syncAgentMessages(session: AgentSession): Promise<void> {
+		session.agent.state.messages = (await session.buildSessionContext()).messages;
 	}
 
 	it("returns a root node whose own usage excludes attributed child usage", async () => {
@@ -365,7 +381,7 @@ describe("AgentSession.getContextTree", () => {
 		const childUsage = createUsage(500, 100, 0.05);
 		const aggregate = createUsage(3500, 700, 0.35);
 		await sessionManager.appendChildUsageAttribution(assistantEntryId, childUsage, aggregate);
-		syncAgentMessages(session, sessionManager);
+		await syncAgentMessages(session);
 
 		const tree = await session.getContextTree();
 		expect(tree.id).toBe("root");
@@ -386,7 +402,7 @@ describe("AgentSession.getContextTree", () => {
 			createAssistantMessage("on it", createUsage(3000, 600, 0.3)),
 		);
 		await capturedManager.appendChildUsageAttribution(targetId, childUsage, aggregate);
-		capturedManager.branch(targetId);
+		await capturedManager.branchTo(targetId);
 		const followUpId = await capturedManager.appendMessage(createUserMessage("forked follow-up"));
 		const readEntered = createDeferred();
 		const readGate = createDeferred();
@@ -408,7 +424,7 @@ describe("AgentSession.getContextTree", () => {
 				createUsage(200, 40, 0.02),
 				createUsage(3900, 800, 0.39),
 			);
-			capturedManager.branch(userId);
+			await capturedManager.branchTo(userId);
 			limits.maxEntries = 1;
 			limits.maxSourceBytes = 1;
 			readGate.resolve();
@@ -423,7 +439,7 @@ describe("AgentSession.getContextTree", () => {
 			await reading;
 		}
 		expect((await readContextTreeUsage(capturedManager))?.totalUsage.input).toBe(0);
-		capturedManager.branch(followUpId);
+		await capturedManager.branchTo(followUpId);
 		const current = await readContextTreeUsage(capturedManager);
 		expect(current?.totalUsage.input).toBe(3900);
 		expect(current?.ownUsage.input).toBe(3200);
@@ -451,9 +467,18 @@ describe("AgentSession.getContextTree", () => {
 		const keptId = await sessionManager.appendMessage(createUserMessage("later work"));
 		await sessionManager.appendCompaction("summary of early work", keptId, 6000);
 		await sessionManager.appendMessage(createAssistantMessage("after compaction", createUsage(200, 50, 0.02)));
-		syncAgentMessages(session, sessionManager);
+		await syncAgentMessages(session);
 
+		const child = await writeChildSession(
+			join(sessionManager.getSessionArtifactDir()!, "sub-completed0001"),
+			"completed child",
+			createUsage(400, 50, 0.04),
+		);
+		await child.sessionManager.close();
 		const tree = await session.getContextTree();
+		expect(tree.children).toMatchObject([
+			{ id: "sub-completed0001", label: "completed child", ownUsage: { input: 400 } },
+		]);
 		expect(tree.totalUsage.input).toBe(5200);
 		expect(tree.totalUsage.cost.total).toBeCloseTo(0.52);
 		expect(tree.ownUsage.input).toBe(5200);
@@ -478,13 +503,10 @@ describe("AgentSession.getContextTree", () => {
 				},
 			];
 			writeFileSync(malformedFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
-			const malformed = await SessionManager.importRetainedFrom(
-				malformedFile,
-				process.cwd(),
-				join(malformedDir, "imported"),
-			);
-			managers.push(malformed);
-			await expect(readContextTreeUsage(malformed)).rejects.toThrow("Parent path lineage is unresolved");
+			// Indexed owned startup refuses unresolved lineage before publishing a Manager.
+			await expect(
+				SessionManager.importRetainedFrom(malformedFile, process.cwd(), join(malformedDir, "imported")),
+			).rejects.toThrow("Branch bootstrap branch lineage is unresolved");
 		}
 	});
 });

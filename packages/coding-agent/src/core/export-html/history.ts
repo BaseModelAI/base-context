@@ -3,6 +3,7 @@ import { TextDecoder } from "node:util";
 import type { SessionHistoryReadLimits } from "../session-history-index.js";
 import {
 	CURRENT_SESSION_VERSION,
+	type FileEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
 	resolveSessionRlmDepth,
@@ -45,13 +46,16 @@ export function applyExportUsage(entries: SessionEntry[]): void {
 }
 
 /** Read one fixed, capped source image. A growing path never becomes an uncapped read. */
-export async function readExportHistory(inputPath: string, limits: SessionHistoryReadLimits): Promise<ExportHistory> {
-	limits = { ...limits };
+export async function readSessionHistoryImage(
+	inputPath: string,
+	maxSourceBytes: number,
+	errorContext = "HTML export",
+): Promise<Buffer> {
 	const file = await open(inputPath, "r");
 	let captured: Buffer;
 	try {
 		const before = await file.stat({ bigint: true });
-		if (before.size > BigInt(limits.maxSourceBytes)) throw new Error("HTML export source byte budget exceeded");
+		if (before.size > BigInt(maxSourceBytes)) throw new Error(`${errorContext} source byte budget exceeded`);
 		captured = Buffer.alloc(Number(before.size));
 		let offset = 0;
 		while (offset < captured.length) {
@@ -61,34 +65,58 @@ export async function readExportHistory(inputPath: string, limits: SessionHistor
 				Math.min(64 * 1024, captured.length - offset),
 				offset,
 			);
-			if (count === 0) throw new Error("HTML export source changed during capture");
+			if (count === 0) throw new Error(`${errorContext} source changed during capture`);
 			offset += count;
 		}
 		const after = await file.stat({ bigint: true });
 		if (after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
-			throw new Error("HTML export source changed during capture");
+			throw new Error(`${errorContext} source changed during capture`);
 		}
 	} catch (error) {
 		try {
 			await file.close();
 		} catch (closeError) {
-			throw new AggregateError([error, closeError], "HTML export source read and close failed", { cause: error });
+			throw new AggregateError([error, closeError], `${errorContext} source read and close failed`, {
+				cause: error,
+			});
 		}
 		throw error;
 	}
 	await file.close();
-	const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(captured);
+	return captured;
+}
+
+function parseBoundedSessionEntries(text: string, maxEntries: number): FileEntry[] {
 	// Count complete records on this immutable bounded string BEFORE allocating
 	// parsed entries. Keep the reader's existing incomplete-tail behavior.
 	let records = 0;
 	let start = 0;
 	for (let end = text.indexOf("\n"); end !== -1; end = text.indexOf("\n", start)) {
-		if (text.slice(start, end).trim() && ++records > limits.maxEntries + 1) {
+		if (text.slice(start, end).trim() && ++records > maxEntries + 1) {
 			throw new Error("HTML export entry budget exceeded");
 		}
 		start = end + 1;
 	}
-	const loaded = parseSessionEntries(text);
+	return parseSessionEntries(text);
+}
+
+/** Complete bounded entries with the disk loader's unchanged incomplete-record convention. */
+export async function readSessionHistoryFile(
+	inputPath: string,
+	limits: SessionHistoryReadLimits,
+): Promise<FileEntry[]> {
+	limits = { ...limits };
+	const captured = await readSessionHistoryImage(inputPath, limits.maxSourceBytes);
+	const complete = captured.subarray(0, captured.lastIndexOf(0x0a) + 1);
+	const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(complete);
+	return parseBoundedSessionEntries(text, limits.maxEntries);
+}
+
+export async function readExportHistory(inputPath: string, limits: SessionHistoryReadLimits): Promise<ExportHistory> {
+	limits = { ...limits };
+	const captured = await readSessionHistoryImage(inputPath, limits.maxSourceBytes);
+	const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(captured);
+	const loaded = parseBoundedSessionEntries(text, limits.maxEntries);
 	const header = loaded[0];
 	if (!header || header.type !== "session" || typeof header.id !== "string") {
 		throw new Error(`Session source has no valid header: ${inputPath}`);

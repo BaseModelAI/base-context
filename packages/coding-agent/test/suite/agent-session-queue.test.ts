@@ -1372,7 +1372,7 @@ describe("AgentSession queue characterization", () => {
 			const stored = JSON.parse(readFileSync(getHarnessStatePath(globalDir), "utf8"));
 			expect(stored.entries.memory.legacy_target).toBeUndefined();
 			expect(stored.entries.memory.keep_me.scope).toBe("global");
-			const rollbackRecord = loadGlobalRefinementHistory(globalDir).find(
+			const rollbackRecord = (await loadGlobalRefinementHistory(globalDir)).find(
 				(item) => item.rollbackOf === "refine_legacy",
 			);
 			expect(rollbackRecord).toBeDefined();

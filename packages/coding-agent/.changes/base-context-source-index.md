@@ -21,3 +21,5 @@
 - Replace historical owned Manager arrays/maps with indexed metadata and asynchronous bounded readers, while preserving explicit resident views.
 - Queue native ID/target checks, return the ACKed child aggregate, and restore late-IPython output from captured references instead of a historical map.
 - Port compaction/navigation/refinement and extension history consumers, and capture fork inputs before hooks without holding the reader across hook completion.
+- Bound completed-child and global refinement history reads by source bytes and entries; await disk-tree reads and ordered global appends.
+- Record native 10k/100k/1m storage measurements without claiming whole-harness or provider memory bounds.

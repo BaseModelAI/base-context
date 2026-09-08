@@ -270,6 +270,7 @@ import {
 import { ContextUsageReader } from "./session-context-usage.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
+import type { SessionHistoryReadLimits } from "./session-history-index.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import {
 	applyChildUsageAttributions,
@@ -8591,18 +8592,29 @@ export class AgentSession {
 	}
 
 	private async _loadRefinementHistory(): Promise<RefinementResult[]> {
-		const globalHistory = loadGlobalRefinementHistory(getGlobalHarnessStateDir());
-		const entries = this.sessionManager.isPersisted()
-			? (
-					await this.sessionManager.materializeSourceHistory({
-						maxEntries: 16_384,
-						maxSourceBytes: 64 * 1024 * 1024,
-					})
-				).entries.map(({ entry }) => entry)
-			: this.sessionManager.getEntries();
+		const limits: SessionHistoryReadLimits = {
+			maxEntries: 16_384,
+			maxSourceBytes: 64 * 1024 * 1024,
+		};
+		const residentEntries = this.sessionManager.supportsCapturedHistoryReads()
+			? undefined
+			: this.sessionManager.materializeResidentHistory(limits).entries;
+		const globalHistory = loadGlobalRefinementHistory(getGlobalHarnessStateDir(), limits);
+		const sessionHistory = (async () => {
+			if (residentEntries !== undefined) return residentEntries;
+			return (await this.sessionManager.materializeSourceHistory(limits)).entries.map(({ entry }) => entry);
+		})();
+		const [globalResult, sessionResult] = await Promise.allSettled([globalHistory, sessionHistory]);
+		if (globalResult.status === "rejected") {
+			if (sessionResult.status === "rejected") {
+				throw new AggregateError([globalResult.reason, sessionResult.reason], "Refinement history reads failed");
+			}
+			throw globalResult.reason;
+		}
+		if (sessionResult.status === "rejected") throw sessionResult.reason;
 		return mergeRefinementHistory(
-			globalHistory,
-			getRefinementHistory(entries.filter((entry) => entry.type === "custom")),
+			globalResult.value,
+			getRefinementHistory(sessionResult.value.filter((entry) => entry.type === "custom")),
 		);
 	}
 
@@ -8934,7 +8946,7 @@ export class AgentSession {
 			});
 			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
 			if (targetScope === "global") {
-				appendGlobalRefinement(globalHarnessStateDir, result);
+				await appendGlobalRefinement(globalHarnessStateDir, result);
 			}
 			let refinementAuditAppendError: { error: unknown } | undefined;
 			try {
@@ -12549,11 +12561,12 @@ export class AgentSession {
 			status: "active" as const,
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 		};
-		// Start all live reads before yielding and join every accepted read on failure too.
+		// Join root/live reads and every accepted disk read before surfacing a failure.
 		const results = await Promise.allSettled([
 			this.getContextUsage(),
 			readContextTreeUsage(this.sessionManager),
 			...runs.map((run) => run.session?.getContextTree() ?? Promise.resolve(run.diskNode)),
+			diskChildren,
 		]);
 		const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
 		if (errors.length === 1) throw errors[0];
@@ -12577,7 +12590,7 @@ export class AgentSession {
 			ownUsage: usage.ownUsage,
 			totalUsage: usage.totalUsage,
 			contextUsage,
-			children: [...children, ...diskChildren],
+			children: [...children, ...(results[runs.length + 2] as PromiseFulfilledResult<ContextTreeNode[]>).value],
 		};
 	}
 
