@@ -269,8 +269,14 @@ import { ContextUsageReader } from "./session-context-usage.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
-import type { BranchSummaryEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
-import { getLatestCompactionEntry, SessionManager } from "./session-manager.js";
+import {
+	applyChildUsageAttributions,
+	type BranchSummaryEntry,
+	getLatestCompactionEntry,
+	type SessionContext,
+	SessionManager,
+	type SessionMessageEntry,
+} from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
@@ -12377,20 +12383,49 @@ export class AgentSession {
 		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
 	}
 
-	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
+	private _ownUsageMemo?: {
+		sessionId: string;
+		sessionFile: string | undefined;
+		sourceSequence: number;
+		count: number;
+		sourceBytes: number;
+		usage: SessionUsageSummary | undefined;
+	};
 
-	// Whole-file own spend, identical to the catalog scan so rows never shift at passivation.
-	getOwnUsageSummary(): SessionUsageSummary | undefined {
-		const entries = this.sessionManager.getEntries();
-		const tailId = entries.at(-1)?.id;
-		const memo = this._ownUsageMemo;
-		if (memo && memo.count === entries.length && memo.tailId === tailId) {
-			return memo.usage;
+	// Whole-source own spend, identical to the catalog reduction at passivation.
+	async getOwnUsageSummary(): Promise<SessionUsageSummary | undefined> {
+		if (!this.sessionManager.isPersisted()) {
+			const entries = this.sessionManager.getEntries();
+			return sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 		}
-		const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
-		const usage = sessionUsageSummaryFrom(ownUsage);
-		this._ownUsageMemo = { count: entries.length, tailId, usage };
-		return usage;
+		const limits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 };
+		return this.sessionManager.readSourceHistory(async (history) => {
+			const { sessionId, sessionFile, sourceSequence } = history.source;
+			const memo = this._ownUsageMemo;
+			if (
+				memo &&
+				memo.sessionId === sessionId &&
+				memo.sessionFile === sessionFile &&
+				memo.sourceSequence === sourceSequence &&
+				memo.count <= limits.maxEntries &&
+				memo.sourceBytes <= limits.maxSourceBytes
+			) {
+				return memo.usage ? { ...memo.usage } : undefined;
+			}
+			const materialized = await history.materialize(limits);
+			const entries = materialized.entries.map(({ entry }) => entry);
+			applyChildUsageAttributions(entries);
+			const usage = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
+			this._ownUsageMemo = {
+				sessionId,
+				sessionFile,
+				sourceSequence,
+				count: entries.length,
+				sourceBytes: materialized.sourceBytes,
+				usage,
+			};
+			return usage ? { ...usage } : undefined;
+		});
 	}
 
 	/**

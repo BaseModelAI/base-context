@@ -182,6 +182,7 @@ import {
 	inactiveLifecycleForSession,
 	type SessionSummary,
 	scheduledJobRegistrations,
+	snapshotActiveSessionSummary,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -591,6 +592,7 @@ export class AgentDaemon {
 		snapshotPending: false,
 	};
 	private rosterFlushScheduled = false;
+	private rosterFlushPending = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private rlmJournalOwner?: RlmJournalOwner;
@@ -1458,15 +1460,11 @@ export class AgentDaemon {
 	): Promise<SessionSummary[]> {
 		const passiveByPath = await this.passiveRlmSubagentsByPath(savedSessions);
 		const savedByPath = new Map(savedSessions.map((session) => [resolve(session.path), session]));
+		const passiveOverlays = new Map<string, Partial<SessionSummary>>();
 		for (const [path, passive] of passiveByPath) {
 			savedByPath.set(path, passive.info);
-		}
-		return buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs).map((summary) => {
-			const passive = summary.sessionFile ? passiveByPath.get(resolve(summary.sessionFile)) : undefined;
-			if (!passive || summary.activeSessionId) return summary;
 			const parentEntry = passive.chain.at(-2);
-			return {
-				...summary,
+			passiveOverlays.set(path, {
 				runtimeKind: "subagent",
 				...(passive.chain.length === 1 && passive.rootParentState
 					? { parentActiveSessionId: passive.rootParentState.activeSessionId }
@@ -1481,7 +1479,12 @@ export class AgentDaemon {
 				rlmChildId: passive.entry.childId,
 				rlmParentNodeId: passive.entry.rlmParentNodeId ?? passive.entry.childId,
 				spawnCode: passive.entry.spawnCode,
-			};
+			});
+		}
+		const summaries = await buildSessionList(activeSessions, [...savedByPath.values()], scheduledJobs);
+		return summaries.map((summary) => {
+			const overlay = summary.sessionFile ? passiveOverlays.get(resolve(summary.sessionFile)) : undefined;
+			return overlay && !summary.activeSessionId ? { ...summary, ...overlay } : summary;
 		});
 	}
 
@@ -2128,7 +2131,7 @@ export class AgentDaemon {
 			.filter((job) => isHeartbeatCronJob(job) && (job.status === "active" || job.status === "paused"))
 			.map((job) => {
 				const state = this.sessions.get(job.activeSessionId);
-				const summary = state ? summaryForActiveSession(state) : undefined;
+				const summary = state ? snapshotActiveSessionSummary(state) : undefined;
 				return {
 					job,
 					...(summary?.sessionName ? { sessionName: summary.sessionName } : {}),
@@ -2771,7 +2774,7 @@ export class AgentDaemon {
 		passiveRlmSubagents?: readonly PassiveRlmSubagent[],
 	): Promise<SessionPassivationSnapshot> {
 		const passiveDescendants = passiveRlmSubagents ?? (await this.listPassiveRlmSubagents());
-		const summary = summaryForActiveSession(state);
+		const summary = snapshotActiveSessionSummary(state);
 		const sessionFile = state.runtime.session.sessionFile;
 		const jobs = this.cronStore
 			.list()
@@ -2833,8 +2836,16 @@ export class AgentDaemon {
 			if (
 				this.shuttingDown ||
 				this.updateRestart !== undefined ||
+				this.sessions.get(state.activeSessionId) !== state
+			) {
+				return;
+			}
+			const freshSnapshot = await this.sessionPassivationSnapshot(state);
+			if (
+				this.shuttingDown ||
+				this.updateRestart !== undefined ||
 				this.sessions.get(state.activeSessionId) !== state ||
-				!canPassivateSession(await this.sessionPassivationSnapshot(state), idleEvictionMinutes, now)
+				!canPassivateSession(freshSnapshot, idleEvictionMinutes, now)
 			) {
 				return;
 			}
@@ -3292,7 +3303,7 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		currentState: ActiveSessionState,
 	): AgentObserveAgentSummary {
-		const summary = summaryForActiveSession(state);
+		const summary = snapshotActiveSessionSummary(state);
 		const session = state.runtime.session;
 		const messages = session.messages;
 		const latest = messages.at(-1);
@@ -3819,7 +3830,7 @@ export class AgentDaemon {
 					);
 					state.clients.add(client);
 					client.attachedActiveSessionIds.add(state.activeSessionId);
-					this.write(client, success(command.id, "attach", summaryForActiveSession(state)));
+					this.write(client, success(command.id, "attach", await summaryForActiveSession(state)));
 					return;
 				}
 				case "worker_unsubscribe": {
@@ -4025,7 +4036,7 @@ export class AgentDaemon {
 
 			case "create": {
 				const state = await this.createRuntime(command);
-				return success(command.id, "create", summaryForActiveSession(state));
+				return success(command.id, "create", await summaryForActiveSession(state));
 			}
 
 			case "attach": {
@@ -4172,7 +4183,7 @@ export class AgentDaemon {
 					throw new Error("Session name cannot be empty");
 				}
 				await this.setStateSessionNameForCommand(state, name);
-				return success(command.id, "rename", summaryForActiveSession(state));
+				return success(command.id, "rename", await summaryForActiveSession(state));
 			}
 
 			case "rename_saved_session": {
@@ -4668,7 +4679,7 @@ export class AgentDaemon {
 
 			case "get_state": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(command.id, "get_state", summaryForActiveSession(state));
+				return success(command.id, "get_state", await summaryForActiveSession(state));
 			}
 
 			case "get_connection_state": {
@@ -5265,10 +5276,8 @@ export class AgentDaemon {
 			children = await this.buildRlmChildSnapshotsWithPassiveRlmSubagents(state);
 		}
 		session = state.runtime.session;
-		const connectionState = this.createConnectionState(state);
 		const snapshot = {
 			activeSessionId: state.activeSessionId,
-			summary: summaryForActiveSession(state),
 			messages: [...session.messages],
 			// Omit duplicate heavy payloads from attach. The client can derive render
 			// context from messages + state, and fetch the full session tree lazily
@@ -5281,7 +5290,22 @@ export class AgentDaemon {
 			...(parent ? { parent } : {}),
 			children,
 		};
-		return { ...snapshot, state: await connectionState };
+		const [connectionState, summary] = await Promise.allSettled([
+			this.createConnectionState(state),
+			summaryForActiveSession(state),
+		] as const);
+		if (
+			connectionState.status === "rejected" &&
+			summary.status === "rejected" &&
+			connectionState.reason !== summary.reason
+		) {
+			throw new AggregateError([connectionState.reason, summary.reason], "Session snapshot reads failed", {
+				cause: connectionState.reason,
+			});
+		}
+		if (connectionState.status === "rejected") throw connectionState.reason;
+		if (summary.status === "rejected") throw summary.reason;
+		return { ...snapshot, summary: summary.value, state: connectionState.value };
 	}
 
 	private async streamWorkerSnapshot(
@@ -7019,29 +7043,38 @@ export class AgentDaemon {
 	}
 
 	private scheduleRosterFlush(): void {
-		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
+		if (!this.options.worker || this.shuttingDown) return;
+		this.rosterFlushPending = true;
+		if (this.rosterFlushScheduled) return;
 		this.rosterFlushScheduled = true;
 		setImmediate(() => {
-			this.rosterFlushScheduled = false;
-			try {
-				this.flushRoster();
-			} catch (error) {
-				this.log(`could not publish roster delta: ${String(error)}`);
-			}
+			void this.flushRoster()
+				.catch((error) => this.log(`could not publish roster delta: ${String(error)}`))
+				.finally(() => {
+					this.rosterFlushScheduled = false;
+					if (this.rosterFlushPending) this.scheduleRosterFlush();
+				});
 		});
 	}
 
-	private flushRoster(): void {
+	private async flushRoster(): Promise<void> {
+		this.rosterFlushPending = false;
 		const reporter = this.rosterReporter;
+		const queuedChildren = new Map(reporter.queuedChildren);
+		const removed = new Map(reporter.removedAgentIds);
 		const entries = new Map<string, WorkerRosterEntry>();
 		const scheduledJobs = this.cronStore.list();
-		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
+		const registrations = scheduledJobRegistrations(scheduledJobs);
+		const summaries = await buildSessionList([...this.sessions.values()], [], scheduledJobs);
+		// A change during the read needs a new capture, not a stale roster publication.
+		if (this.rosterFlushPending || this.shuttingDown) return;
+		for (const summary of summaries) {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
-		for (const [agentId, queued] of reporter.queuedChildren) {
+		for (const [agentId, queued] of queuedChildren) {
 			if (entries.has(agentId)) {
-				reporter.queuedChildren.delete(agentId);
+				queuedChildren.delete(agentId);
 				continue;
 			}
 			entries.set(agentId, queued);
@@ -7058,25 +7091,24 @@ export class AgentDaemon {
 			const swapped =
 				previous.summary.activeSessionId !== undefined && composedActiveIds.has(previous.summary.activeSessionId);
 			if (previous.queuedChild === true || swapped) {
-				reporter.removedAgentIds.set(agentId, previous.summary.sessionId);
+				removed.set(agentId, previous.summary.sessionId);
 			}
 		}
-		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
+		for (const [agentId, targetSessionId] of removed) {
 			const composed = entries.get(agentId);
 			// A new incarnation cancels the stale removal, as does a revived resident top-level row
 			// (switch-back, resume-after-archive); a resident subagent row with the removed sessionId
 			// is the mid-teardown race and stays suppressed.
 			const revived = composed?.summary.activeSessionId !== undefined && composed.summary.runtimeKind !== "subagent";
 			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId || revived)) {
-				reporter.removedAgentIds.delete(agentId);
+				removed.delete(agentId);
 				continue;
 			}
 			entries.delete(agentId);
-			reporter.queuedChildren.delete(agentId);
+			queuedChildren.delete(agentId);
 		}
-		const registrations = scheduledJobRegistrations(scheduledJobs);
 		for (const [agentId, previous] of reporter.lastComposed) {
-			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
+			if (!entries.has(agentId) && !removed.has(agentId)) {
 				const file = previous.summary.sessionFile ? resolve(previous.summary.sessionFile) : undefined;
 				entries.set(
 					agentId,
@@ -7094,7 +7126,9 @@ export class AgentDaemon {
 			nextJson.set(entry.agentId, json);
 			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
 		}
-		const removedAgentIds = [...reporter.removedAgentIds.keys()];
+		const removedAgentIds = [...removed.keys()];
+		reporter.queuedChildren = queuedChildren;
+		reporter.removedAgentIds = removed;
 		reporter.lastComposed = new Map(entries);
 		reporter.lastComposedJson = nextJson;
 		if (!this.hasAuthenticatedSupervisorClient()) {

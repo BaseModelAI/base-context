@@ -156,7 +156,33 @@ describe("AgentSession compaction characterization", () => {
 		]);
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
-		const usageBeforeCompaction = harness.session.getOwnUsageSummary();
+		const readOwnUsage = async () => {
+			const eager = vi.spyOn(harness.sessionManager, "getEntries").mockImplementation(() => {
+				throw new Error("Own usage must read captured source history");
+			});
+			try {
+				return await harness.session.getOwnUsageSummary();
+			} finally {
+				eager.mockRestore();
+			}
+		};
+		const usageBeforeCompaction = await readOwnUsage();
+		const repeatedUsage = await readOwnUsage();
+		expect(repeatedUsage).toEqual(usageBeforeCompaction);
+		if (repeatedUsage) repeatedUsage.cost = -1;
+		expect(await readOwnUsage()).toEqual(usageBeforeCompaction);
+		const sourceError = new Error("Own usage source callback failed");
+		const originalSourceRead = harness.sessionManager.readSourceHistory.bind(harness.sessionManager);
+		const sourceRead = vi.spyOn(harness.sessionManager, "readSourceHistory").mockImplementationOnce(() =>
+			originalSourceRead(async () => {
+				throw sourceError;
+			}),
+		);
+		try {
+			await expect(readOwnUsage()).rejects.toBe(sourceError);
+		} finally {
+			sourceRead.mockRestore();
+		}
 
 		const result = await harness.session.compact();
 		const entry = harness.sessionManager.getEntries().find((candidate) => candidate.type === "compaction");
@@ -175,7 +201,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(compactionUsage.input).toBeGreaterThan(0);
 		expect(compactionUsage.output).toBeGreaterThan(0);
 		// Own spend grows by exactly what the compaction entry recorded.
-		const ownUsage = harness.session.getOwnUsageSummary();
+		const ownUsage = await readOwnUsage();
 		expect((ownUsage?.inputTokens ?? 0) - (usageBeforeCompaction?.inputTokens ?? 0)).toBe(
 			compactionUsage.input + compactionUsage.cacheRead + compactionUsage.cacheWrite,
 		);

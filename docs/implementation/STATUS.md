@@ -523,3 +523,18 @@ length, bounded read chunks and change detection. Limits/options are copied befo
 awaiting I/O. Parsing, migration and usage restoration keep their previous behavior.
 Read and close failures are both retained. Native/resident HTML selection and output
 writing are unchanged. Neither change removes the persistent Manager body stores.
+
+## Captured whole-source usage summaries
+
+Native own-usage summaries now read one complete captured source, limited to
+16,384 entries and 64 MiB. The reader restores stored child aggregates and applies
+the existing whole-source subtraction; in-memory behavior remains unchanged.
+The count/tail-ID memo is replaced by one captured source-prefix scalar cache;
+cache hits respect the recorded entry/byte costs and return detached summaries. This is not a pricing change or a bound on the
+Manager's retained stores. The native compaction case passed with an eager-getter
+refusal and an exact source-callback rejection, using committed daemon-source
+overlays. It does not certify the later daemon consumer ports. A separate existing list
+happy/edge invocation passed on the final mode sources. Metadata-only passivation,
+observation and heartbeat views do not read usage. Actual wire/list/roster usage
+reads are awaited, with captured metadata and joined accepted reads. Roster fixture
+await ports are typechecked; the roster suite was not run.

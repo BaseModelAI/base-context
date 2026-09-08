@@ -146,11 +146,11 @@ export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean
 	);
 }
 
-export function buildSessionList(
+export async function buildSessionList(
 	activeSessions: readonly ActiveSessionState[],
 	savedSessions: readonly SessionInfo[],
 	scheduledJobs: readonly AgentCronJob[] = [],
-): SessionSummary[] {
+): Promise<SessionSummary[]> {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
 	const {
 		activeHeartbeatSessionIds: heartbeatSessionIds,
@@ -167,56 +167,89 @@ export function buildSessionList(
 		}
 	}
 
-	const entries: SessionSummary[] = [];
+	const entries: (SessionSummary | Promise<SessionSummary>)[] = [];
 	const seenActiveSessionIds = new Set<string>();
-	for (const savedSession of savedSessions) {
-		const sessionFile = resolve(savedSession.path);
-		const activeSession = activeBySessionFile.get(sessionFile);
-		if (activeSession) {
+	try {
+		for (const savedSession of savedSessions) {
+			const sessionFile = resolve(savedSession.path);
+			const activeSession = activeBySessionFile.get(sessionFile);
+			if (activeSession) {
+				entries.push(
+					summaryForActiveSession(
+						activeSession,
+						savedSession,
+						heartbeatSessionIds.has(activeSession.activeSessionId),
+						registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
+							registeredHeartbeatSessionFiles.has(sessionFile),
+						registeredCronSessionIds.has(activeSession.activeSessionId) ||
+							registeredCronSessionFiles.has(sessionFile),
+					),
+				);
+				seenActiveSessionIds.add(activeSession.activeSessionId);
+				continue;
+			}
 			entries.push(
-				summaryForActiveSession(
-					activeSession,
+				summaryForInactiveSession(
 					savedSession,
-					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
-						registeredHeartbeatSessionFiles.has(sessionFile),
-					registeredCronSessionIds.has(activeSession.activeSessionId) ||
-						registeredCronSessionFiles.has(sessionFile),
+					registeredHeartbeatSessionFiles.has(sessionFile),
+					registeredCronSessionFiles.has(sessionFile),
 				),
 			);
-			seenActiveSessionIds.add(activeSession.activeSessionId);
-			continue;
 		}
-		entries.push(
-			summaryForInactiveSession(
-				savedSession,
-				registeredHeartbeatSessionFiles.has(sessionFile),
-				registeredCronSessionFiles.has(sessionFile),
-			),
-		);
-	}
 
-	for (const activeSession of activeSessions) {
-		if (!seenActiveSessionIds.has(activeSession.activeSessionId)) {
-			const sessionFile = activeSession.runtime.session.sessionFile;
-			const resolvedSessionFile = sessionFile ? resolve(sessionFile) : undefined;
-			entries.push(
-				summaryForActiveSession(
-					activeSession,
-					undefined,
-					heartbeatSessionIds.has(activeSession.activeSessionId),
-					registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
-						(resolvedSessionFile !== undefined && registeredHeartbeatSessionFiles.has(resolvedSessionFile)),
-					registeredCronSessionIds.has(activeSession.activeSessionId) ||
-						(resolvedSessionFile !== undefined && registeredCronSessionFiles.has(resolvedSessionFile)),
-				),
-			);
+		for (const activeSession of activeSessions) {
+			if (!seenActiveSessionIds.has(activeSession.activeSessionId)) {
+				const sessionFile = activeSession.runtime.session.sessionFile;
+				const resolvedSessionFile = sessionFile ? resolve(sessionFile) : undefined;
+				entries.push(
+					summaryForActiveSession(
+						activeSession,
+						undefined,
+						heartbeatSessionIds.has(activeSession.activeSessionId),
+						registeredHeartbeatSessionIds.has(activeSession.activeSessionId) ||
+							(resolvedSessionFile !== undefined && registeredHeartbeatSessionFiles.has(resolvedSessionFile)),
+						registeredCronSessionIds.has(activeSession.activeSessionId) ||
+							(resolvedSessionFile !== undefined && registeredCronSessionFiles.has(resolvedSessionFile)),
+					),
+				);
+			}
 		}
+	} catch (error) {
+		entries.push(Promise.reject(error));
 	}
-	return entries;
+	const results = await Promise.allSettled(entries);
+	const summaries: SessionSummary[] = [];
+	const errors: unknown[] = [];
+	for (const result of results) {
+		if (result.status === "fulfilled") summaries.push(result.value);
+		else if (!errors.includes(result.reason)) errors.push(result.reason);
+	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) {
+		throw new AggregateError(errors, "Session list reads failed", { cause: errors[0] });
+	}
+	return summaries;
 }
 
-export function summaryForActiveSession(
+export async function summaryForActiveSession(
+	activeSession: ActiveSessionState,
+	savedSession?: SessionInfo,
+	hasActiveHeartbeat = false,
+	hasRegisteredHeartbeat = hasActiveHeartbeat,
+	hasRegisteredCronJob = false,
+): Promise<SessionSummary> {
+	const session = activeSession.runtime.session;
+	const summary = snapshotActiveSessionSummary(
+		activeSession,
+		savedSession,
+		hasActiveHeartbeat,
+		hasRegisteredHeartbeat,
+		hasRegisteredCronJob,
+	);
+	return { ...summary, usage: await session.getOwnUsageSummary?.() };
+}
+
+export function snapshotActiveSessionSummary(
 	activeSession: ActiveSessionState,
 	savedSession?: SessionInfo,
 	hasActiveHeartbeat = false,
@@ -260,7 +293,6 @@ export function summaryForActiveSession(
 		isCompacting: session.isCompacting,
 		isBashRunning: session.isBashRunning,
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
-		usage: session.getOwnUsageSummary?.(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
 		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
