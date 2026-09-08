@@ -474,3 +474,18 @@ and uses the same complete, capped source reader as the mode interfaces.
 Persistent Manager body stores, synchronous context-usage scans, late-IPython startup
 history/maps and complete current-invocation Agent output collectors still remain.
 These changes are not a whole-process memory bound or a model/release result.
+
+## Initialization joins graceful teardown
+
+Graceful session disposal now joins an already accepted standalone initialization
+before disposing child, kernel and runtime resources. Initialization keeps reporting
+its own error through its original promise; later disposal does not re-raise an old
+initialization failure. New initialization calls during or after disposal are refused.
+The synchronous disposal surface keeps its existing weaker contract.
+
+Current-version copy/import now reuses the destination entry array while reading the
+journal, instead of retaining a separate source array. Usage restoration and relinking
+through dropped git facts still run after the source read. Legacy migration and row
+retention remain unchanged. The existing single-stream reader has no fixed byte-frontier
+capture guarantee. Destination entries/maps and dropped-parent metadata remain resident;
+this change does not establish a total copy-memory or startup-memory bound.

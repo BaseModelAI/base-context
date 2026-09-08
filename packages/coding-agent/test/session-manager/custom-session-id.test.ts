@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
+import { CURRENT_SESSION_VERSION, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 
 const tempDirs: string[] = [];
 const managers: SessionManager[] = [];
@@ -141,9 +141,11 @@ describe("SessionManager.newSession with custom id", () => {
 			].join("\n")}\n`,
 		);
 
+		const source = readFileSync(sourcePath, "utf8");
 		const forked = await SessionManager.forkFrom(sourcePath, tempDir, tempDir);
 		managers.push(forked);
 		const entries = loadEntriesFromFile(forked.getSessionFile()!);
+		expect(entries[0]).toMatchObject({ version: CURRENT_SESSION_VERSION, parentSession: sourcePath });
 		const messageEntries = entries.filter((entry) => entry.type === "message");
 
 		expect(messageEntries).toHaveLength(1);
@@ -153,5 +155,7 @@ describe("SessionManager.newSession with custom id", () => {
 		});
 		expect(messageEntries[0]!.id).toEqual(expect.any(String));
 		expect(forked.buildSessionContext().messages).toHaveLength(1);
+		expect(forked.getEntryRetention(messageEntries[0]!.id)).toBe("retained-import");
+		expect(readFileSync(sourcePath, "utf8")).toBe(source);
 	});
 });

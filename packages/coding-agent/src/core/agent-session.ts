@@ -1370,6 +1370,8 @@ export class AgentSession {
 
 	/** Finish native bootstrap persistence before publishing this session. */
 	initialize(): Promise<void> {
+		if (this._disposing || this._disposed)
+			return Promise.reject(new Error("Cannot initialize a disposing or disposed session."));
 		this._initialization ??= this._initialize();
 		return this._initialization;
 	}
@@ -4345,6 +4347,9 @@ export class AgentSession {
 				await drain(() => this._cancelRlmChildRun(run, "Parent session disposed"));
 			}
 			await drain(() => this.requests.waitForIdle());
+			// Initialization reports errors through its own promise, like an active Agent run.
+			// Join it before disposing any runtime resources it may still be constructing.
+			if (this._initialization) await Promise.allSettled([this._initialization]);
 			for (const run of [...this._activeRlmChildRuns.values()]) {
 				const childSession = run.session;
 				if (!childSession) continue;

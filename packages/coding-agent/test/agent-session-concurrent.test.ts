@@ -21,6 +21,7 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.js";
+import { createDeferred } from "./suite/scheduling.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -68,15 +69,14 @@ describe("AgentSession concurrent prompt guard", () => {
 	afterEach(async () => {
 		delete (globalThis as typeof globalThis & { testExtensionApi?: unknown }).testExtensionApi;
 		delete (globalThis as typeof globalThis & { testCommandRuns?: unknown }).testCommandRuns;
-		if (session) {
-			session.dispose();
-		}
-		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+		try {
+			if (session) await session.disposeAsync();
+		} finally {
+			if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true });
 		}
 	});
 
-	function createSession() {
+	function createSession(sessionManager = SessionManager.inMemory()) {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
@@ -105,7 +105,6 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		});
 
-		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
@@ -118,33 +117,63 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
+			prewarmIpythonKernel: false,
 		});
 
 		return session;
 	}
 
 	it("awaits asynchronous dispose callbacks during graceful disposal", async () => {
-		createSession();
-		let releaseCallback: () => void = () => {};
-		const callbackGate = new Promise<void>((resolve) => {
-			releaseCallback = resolve;
-		});
+		const manager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
+		createSession(manager);
+		expect(session.extensionRunner).toBeUndefined();
+		const readEntered = createDeferred();
+		const readGate = createDeferred();
+		const readHistory = manager.readBranchHistory.bind(manager);
+		vi.spyOn(manager, "readBranchHistory").mockImplementation((read) =>
+			readHistory(async (view) => {
+				readEntered.resolve();
+				await readGate.promise;
+				return read(view);
+			}),
+		);
+		const callbackGate = createDeferred();
+		const callbackEntered = createDeferred();
 		let callbackStarted = false;
+		let runtimeAtTeardown: AgentSession["extensionRunner"] | undefined;
 		session.registerDisposeCallback(async () => {
 			callbackStarted = true;
-			await callbackGate;
+			runtimeAtTeardown = session.extensionRunner;
+			callbackEntered.resolve();
+			await callbackGate.promise;
 		});
 
+		const initialization = session.initialize();
+		await readEntered.promise;
 		let disposed = false;
 		const disposal = session.disposeAsync().then(() => {
 			disposed = true;
 		});
-		await new Promise<void>((resolve) => setTimeout(resolve, 0));
-		expect(callbackStarted).toBe(true);
-		expect(disposed).toBe(false);
-		releaseCallback();
-		await disposal;
-		expect(disposed).toBe(true);
+		try {
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			expect(callbackStarted).toBe(false);
+			expect(disposed).toBe(false);
+			expect(session.extensionRunner).toBeUndefined();
+			readGate.resolve();
+			await initialization;
+			await callbackEntered.promise;
+			expect(runtimeAtTeardown).toBeDefined();
+			expect(disposed).toBe(false);
+			callbackGate.resolve();
+			await disposal;
+			expect(disposed).toBe(true);
+			expect(session.extensionRunner).toBe(runtimeAtTeardown);
+			await expect(session.initialize()).rejects.toThrow("Cannot initialize a disposing or disposed session.");
+		} finally {
+			readGate.resolve();
+			callbackGate.resolve();
+			await Promise.all([initialization, disposal]);
+		}
 	});
 
 	it("awaits dispose callbacks when synchronous disposal wins during the refinement drain", async () => {
@@ -186,6 +215,28 @@ describe("AgentSession concurrent prompt guard", () => {
 		releaseCallback();
 		await disposal;
 		expect(disposed).toBe(true);
+		await expect(session.initialize()).rejects.toThrow("Cannot initialize a disposing or disposed session.");
+
+		const failedManager = await SessionManager.create(tempDir, join(tempDir, "failed-sessions"));
+		createSession(failedManager);
+		const readFailure = new Error("Initialization read failed");
+		const readHistory = failedManager.readBranchHistory.bind(failedManager);
+		const capturedRead = vi.spyOn(failedManager, "readBranchHistory").mockImplementation((read) =>
+			readHistory(async (view) => {
+				await read(view);
+				throw readFailure;
+			}),
+		);
+		const initialization = session.initialize();
+		await expect(initialization).rejects.toBe(readFailure);
+		expect(capturedRead).toHaveBeenCalledOnce();
+		expect(session.extensionRunner).toBeUndefined();
+		const disposedAfterFailure = vi.fn();
+		session.registerDisposeCallback(disposedAfterFailure);
+		await expect(session.disposeAsync()).resolves.toBeUndefined();
+		expect(disposedAfterFailure).toHaveBeenCalledOnce();
+		expect(session.extensionRunner).toBeUndefined();
+		await expect(session.initialize()).rejects.toThrow("Cannot initialize a disposing or disposed session.");
 	});
 
 	it("forwards kernelSnapshot: false to the kernel provisioner during disposal", async () => {

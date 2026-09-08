@@ -2677,29 +2677,54 @@ export class SessionManager {
 		sessionDir?: string,
 		retention?: JournalFrameRetention,
 	): Promise<SessionManager> {
-		const sourceEntries = await loadEntriesFromFileAsync(sourcePath);
-		const sourceHeader = sourceEntries[0];
-		if (!sourceHeader || sourceHeader.type !== "session")
-			throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
-		migrateToCurrentVersion(sourceEntries);
+		let sourceHeader: SessionHeader | undefined;
+		let legacyEntries: FileEntry[] | undefined;
+		// This becomes the target's resident array; current-version copies do not retain a second source array.
+		const targetEntries: FileEntry[] = [];
+		const dropped = new Map<string, string | null>();
+		const keep = (entry: FileEntry) => {
+			if (entry.type === "session") return;
+			if (entry.type === "git_state") dropped.set(entry.id, entry.parentId);
+			else targetEntries.push(withEntryRetention(entry, retention ?? entryRetentions.get(entry)));
+		};
+		if (existsSync(sourcePath)) {
+			let bytesSinceYield = 0;
+			for await (const record of readSessionJournal(sourcePath)) {
+				const entry = sessionFileEntry(record.entry, record.retention);
+				if (!sourceHeader) {
+					if (entry.type !== "session" || typeof entry.id !== "string")
+						throw new Error("Session source has no valid header");
+					sourceHeader = entry;
+					if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
+				} else if (legacyEntries) legacyEntries.push(entry);
+				else keep(entry);
+				bytesSinceYield += Buffer.byteLength(record.json);
+				if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
+					bytesSinceYield = 0;
+					await new Promise<void>((resolve) => setImmediate(resolve));
+				}
+			}
+		}
+		if (!sourceHeader) throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
+		if (legacyEntries) {
+			finalizeLoadedEntries(legacyEntries);
+			migrateToCurrentVersion(legacyEntries);
+			for (const entry of legacyEntries) keep(entry);
+		} else applyChildUsageAttributions(targetEntries);
 		const manager = new SessionManager(targetCwd, sessionDir ?? getDefaultSessionDir(targetCwd), true, {
 			parentSession: sourcePath,
 			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
 		});
-		// Git facts describe the source workspace; preserve other entry IDs and relink their parents.
-		const dropped = new Map<string, string | null>();
-		for (const entry of sourceEntries) if (entry.type === "git_state") dropped.set(entry.id, entry.parentId);
-		for (const entry of sourceEntries) {
-			if (entry.type === "session" || entry.type === "git_state") continue;
+		// Relink after reading so even forward references through dropped git facts keep their old meaning.
+		for (let index = 0; index < targetEntries.length; index++) {
+			const entry = targetEntries[index] as SessionEntry;
 			let parentId = entry.parentId;
 			while (parentId !== null && dropped.has(parentId)) parentId = dropped.get(parentId) ?? null;
-			manager.fileEntries.push(
-				withEntryRetention(
-					parentId === entry.parentId ? entry : { ...entry, parentId },
-					retention ?? entryRetentions.get(entry),
-				),
-			);
+			if (parentId !== entry.parentId)
+				targetEntries[index] = withEntryRetention({ ...entry, parentId }, entryRetentions.get(entry));
 		}
+		targetEntries.unshift(manager.fileEntries[0]);
+		manager.fileEntries = targetEntries;
 		manager._buildIndex();
 		await manager._openNew();
 		return manager;

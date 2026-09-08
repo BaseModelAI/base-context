@@ -14,3 +14,4 @@
 - Added exact captured parent-path pages, bounded complete tree reads, and asynchronous source-backed context rebuilds for native sessions and connection snapshots.
 - Restored native RLM controls through captured bootstrap, added an early Agent initialization owner, streamed native JSONL branch export, and bounded complete fork-picker reads.
 - Read native compaction boundaries from captured source references, await streaming JSONL output I/O without moving its captured view, and make the public fork picker asynchronous and bounded.
+- Join accepted standalone initialization before graceful runtime teardown and reuse the destination entry array during current-version journal copy/import.
