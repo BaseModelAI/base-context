@@ -24,3 +24,5 @@
 - Bound completed-child and global refinement history reads by source bytes and entries; await disk-tree reads and ordered global appends.
 - Record native 10k/100k/1m storage measurements without claiming whole-harness or provider memory bounds.
 - Bound persisted harness_state.json reads/writes in the host and owned Python runtime without trimming state or hiding size refusal as an empty store.
+- Enable bounded complete native invocation outputs with finalized callback values, explicit refusal, and accepted-effect drain.
+- Fence refusal-unaware clients with daemon protocol11/schema30 and explicit RPC protocol-version startup checks.

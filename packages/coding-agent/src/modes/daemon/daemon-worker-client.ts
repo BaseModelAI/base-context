@@ -46,7 +46,7 @@ export class DaemonWorkerAuthenticationError extends Error {}
 export class DaemonWorkerCompatibilityError extends Error {
 	constructor(hello: DaemonHello) {
 		super(
-			`Daemon worker ${hello.protocol.name} protocol ${hello.protocol.version} cannot provide canonical session ownership and native inference ownership. Keep its live owner intact; update or stop it with its own runtime before recovery.`,
+			`Daemon worker ${hello.protocol.name} protocol ${hello.protocol.version} cannot provide canonical session ownership, native inference ownership, and bounded invocation output. Keep its live owner intact; update or stop it with its own runtime before recovery.`,
 		);
 		this.name = "DaemonWorkerCompatibilityError";
 	}

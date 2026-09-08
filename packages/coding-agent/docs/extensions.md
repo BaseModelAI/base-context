@@ -542,9 +542,19 @@ Fired once per user prompt.
 pi.on("agent_start", async (_event, ctx) => {});
 
 pi.on("agent_end", async (event, ctx) => {
-  // event.messages - messages from this prompt
+  if (event.refusal) {
+    // Do not mark work complete or advance a plan. No messages bundle is supplied.
+    return;
+  }
+  // event.messages - complete finalized messages from this prompt
 });
 ```
+
+Owned persistent sessions wait for each `message_end` handler and its canonical append
+before collecting the finalized value. In-callback mutation and replacement still work.
+Do not wait for a future turn from such a handler. Ordinary `ctx.abort()` remains
+request-only. Goal budget accounting can still progress before a delayed handler returns.
+See `invocationOutput` in [settings](settings.md) for complete-or-refuse limits.
 
 #### turn_start / turn_end
 

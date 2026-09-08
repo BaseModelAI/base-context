@@ -399,6 +399,18 @@ describe("herdrAgentStateExtension", () => {
 		await waitForRequests(3);
 		expect(requests.map((r) => r.params.state)).toEqual(["idle", "working", "blocked"]);
 		expect(requests.at(-1)?.params.message).toContain("unexpected provider failure");
+		handlers.get("agent_start")?.[0]?.({ type: "agent_start" }, ctx);
+		await waitForRequests(4);
+		handlers.get("agent_end")?.[0]?.(
+			{
+				type: "agent_end",
+				refusal: { kind: "output_limit", limit: "messages", maxMessages: 2, maxSourceBytes: 1024 },
+			},
+			ctx,
+		);
+		await waitForRequests(5);
+		expect(requests.at(-1)?.params.state).toBe("blocked");
+		expect(requests.at(-1)?.params.message).toBe("Invocation output message limit exceeded");
 	});
 
 	it("sends no reports after quit release", async () => {

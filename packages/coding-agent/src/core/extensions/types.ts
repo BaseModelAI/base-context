@@ -9,6 +9,7 @@
  */
 
 import type {
+	AgentEvent,
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
@@ -650,10 +651,7 @@ export interface AgentStartEvent {
 }
 
 /** Fired when an agent loop ends */
-export interface AgentEndEvent {
-	type: "agent_end";
-	messages: AgentMessage[];
-}
+export type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 
 /** Fired when a continual-harness refinement completes (auto-refine or explicit /refine). */
 export interface RefineCompleteEvent {

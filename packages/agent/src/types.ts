@@ -145,6 +145,27 @@ export interface FinalizedToolExchange extends Omit<ToolInvocation, "executedInp
 	readonly result: ToolResultMessage;
 }
 
+/** Limits on the complete invocation result, not the working context or observer queues. */
+export interface AgentOutputLimits {
+	maxMessages: number;
+	maxSourceBytes: number;
+}
+
+export interface AgentOutputRefusal extends AgentOutputLimits {
+	kind: "output_limit";
+	limit: "messages" | "source_bytes" | "value_encoding";
+}
+
+export interface AgentOutputPolicy {
+	limits: AgentOutputLimits;
+	/** Optional native update feed. Its synchronous refresh never revokes an ACK or throws a quota error. */
+	bindUpdates?(refresh: (message: AgentMessage) => boolean): () => void;
+	/** Close update admission and join the updates already accepted at this terminal boundary. */
+	settleUpdates?(): Promise<void>;
+	/** Copy one finalized value within the supplied JSON-byte budget; undefined means it does not fit. */
+	snapshot(message: AgentMessage, maxSourceBytes: number): { message: AgentMessage; sourceBytes: number } | undefined;
+}
+
 /** Context passed to `shouldStopAfterTurn` and `getContinuationMessages`. */
 export interface ShouldStopAfterTurnContext {
 	/** Assistant message that completed the turn. */
@@ -160,6 +181,8 @@ export interface ShouldStopAfterTurnContext {
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Opt-in bounded finalized results. Native sinks must join their message_end job. */
+	outputPolicy?: AgentOutputPolicy;
 	model: Model<any>;
 
 	/** Native owner barrier before transform/convert. Rejection stops context construction. */
@@ -456,7 +479,8 @@ export interface AgentContext {
 export type AgentEvent =
 	/** Starts and ends one agent run; `agent_end` carries all messages produced by that run. */
 	| { type: "agent_start" }
-	| { type: "agent_end"; messages: AgentMessage[] }
+	| { type: "agent_end"; messages: AgentMessage[]; refusal?: never }
+	| { type: "agent_end"; refusal: AgentOutputRefusal; messages?: never }
 	/** One assistant response and its resulting tool calls. */
 	| { type: "turn_start" }
 	| {

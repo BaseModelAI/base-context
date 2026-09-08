@@ -305,6 +305,24 @@ agent.thinkingBudgets = {
 };
 ```
 
+### Native bounded outputs
+
+A native owner can bind a copied output policy with `agent.bindOutputOwner(...)`.
+The coding-agent SDK enables this for owned persistent sessions. Generic Agents keep
+complete, unbounded invocation arrays unless an owner supplies a policy.
+
+Successful `newMessages`, callback values and `agent_end.messages` remain complete.
+Native values are detached after the actual `message_end` mutation/persistence job.
+Runtime subjects and tool/action identities stay unchanged. Updates accepted before
+terminal settlement are joined once; later canonical updates do not retroactively change
+returned snapshots.
+
+An output refusal emits `agent_end` with `refusal` and no `messages`. Its `kind` is
+`output_limit`; `limit` is `messages`, `source_bytes` or `value_encoding`. The descriptor
+also carries `maxMessages` and `maxSourceBytes`. `AgentOutputLimitError` rejects the raw
+loop, stream `result()` and Agent invocation. It is not a provider retry or a successful
+empty result. Already accepted parallel tools/publications settle before refusal.
+
 ### Control
 
 ```typescript

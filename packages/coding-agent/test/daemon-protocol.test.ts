@@ -105,7 +105,7 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(10);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
 		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
 			minProtocol: 10,
@@ -269,7 +269,7 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
 	});
 
-	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
+	it("keeps refine failure events on the versioned session event channel", () => {
 		const event: DaemonOutbound = {
 			type: "session_event",
 			activeSessionId: "active-1",
@@ -278,7 +278,7 @@ describe("daemon protocol helpers", () => {
 
 		// Refine events remain on the original session-event channel across later schema revisions.
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(6);
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 8 });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(event).toMatchObject({ event: { type: "refine_failed", error: "disk full" } });
 	});
 
@@ -307,7 +307,7 @@ describe("daemon protocol helpers", () => {
 
 		expect(DAEMON_COMMAND_COMPATIBILITY.start_side_question).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(DAEMON_COMMAND_COMPATIBILITY.execute_bash).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 8 });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(oldClientSideQuestion).not.toHaveProperty("previousTurns");
 		expect(oldClientBash).not.toHaveProperty("transient");
 		expect(oldClientBash).not.toHaveProperty("runId");

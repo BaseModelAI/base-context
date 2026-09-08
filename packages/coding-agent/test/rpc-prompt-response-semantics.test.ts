@@ -16,6 +16,7 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createTestResourceLoader } from "./utilities.js";
 
@@ -179,7 +180,7 @@ async function startRpcMode(options: { withAuth: boolean; responseDelayMs: numbe
 	rpcIo.lineHandler = undefined;
 
 	const { runtimeHost, session, cleanup } = createRuntimeHost(options);
-	void runRpcMode(runtimeHost);
+	void runRpcMode(runtimeHost, DAEMON_PROTOCOL_VERSION);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
 	return { lineHandler: rpcIo.lineHandler!, session, cleanup };

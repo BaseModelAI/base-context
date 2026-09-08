@@ -7,8 +7,12 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 ## Starting RPC Mode
 
 ```bash
-prime-agent --mode rpc [options]
+base-context --mode rpc --rpc-protocol-version 11 [options]
 ```
+
+`--rpc-protocol-version 11` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 11 through the existing `get_state` response before use. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
+
+This uses the current Base Context daemon protocol marker, not the package version. Updating only the server cannot make an old client understand a new terminal event.
 
 Common options:
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
@@ -791,7 +795,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | Terminal completion: complete messages on success, or explicit output refusal |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -817,7 +821,7 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted at the terminal boundary. Successful completion contains every finalized message:
 
 ```json
 {
@@ -825,6 +829,24 @@ Emitted when the agent completes. Contains all messages generated during this ru
   "messages": [...]
 }
 ```
+
+Output refusal is terminal failure, not an empty successful run:
+
+```json
+{
+  "type": "agent_end",
+  "refusal": {
+    "kind": "output_limit",
+    "limit": "source_bytes",
+    "maxMessages": 16384,
+    "maxSourceBytes": 67108864
+  }
+}
+```
+
+`messages` is absent on refusal. The prompt response remains an acceptance ACK, not
+completion. `RpcClient.promptAndWait()` rejects refusal; `collectEvents()` preserves the
+terminal descriptor, and `waitForIdle()` only reports that execution became idle.
 
 ### turn_start / turn_end
 
@@ -1368,7 +1390,7 @@ import subprocess
 import json
 
 proc = subprocess.Popen(
-    ["prime-agent", "--mode", "rpc", "--no-session"],
+    ["base-context", "--mode", "rpc", "--rpc-protocol-version", "11", "--no-session"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     text=True
@@ -1393,6 +1415,8 @@ for event in read_events():
             print(delta["delta"], end="", flush=True)
     
     if event.get("type") == "agent_end":
+        if "refusal" in event:
+            raise RuntimeError(f"Invocation output refused: {event['refusal']}")
         print()
         break
 ```

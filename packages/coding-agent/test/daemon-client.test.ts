@@ -321,7 +321,7 @@ describe("DaemonClient", () => {
 		const compatibility = DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission;
 		emitHello(
 			socket,
-			compatibility.minProtocol,
+			DAEMON_PROTOCOL_VERSION,
 			["session_input_admission", "prompt_admission_cancellation"],
 			Math.max(compatibility.minSchemaRevision + 1, DAEMON_SCHEMA_REVISION),
 		);
@@ -938,7 +938,7 @@ describe("DaemonClient", () => {
 		await expect(response).resolves.toMatchObject({ id: firstEnvelope.id, success: true });
 		client.close();
 	});
-	it.each([8, 9])(
+	it.each([8, 9, 10])(
 		"keeps passive Base%s inspection but never sends work, hydration, or graceful cleanup",
 		async (version) => {
 			const client = new DaemonClient("/tmp/base-legacy.sock");
@@ -953,9 +953,10 @@ describe("DaemonClient", () => {
 					"session_input_admission",
 					"client_owned_sessions",
 					"agent_roster",
-					...(version === 9 ? ["native_inference_ownership" as const] : []),
+					...(version >= 9 ? ["native_inference_ownership" as const] : []),
+					...(version === 10 ? ["canonical_session_ownership" as const] : []),
 				],
-				version === 8 ? 27 : 28,
+				version === 8 ? 27 : version === 9 ? 28 : 29,
 			);
 			const refused: DaemonCommand[] = [
 				{ type: "create" },
@@ -1002,7 +1003,7 @@ describe("DaemonClient", () => {
 		},
 	);
 
-	it.each([8, 9])("does not replay native work after a protocol10 to Base%s downgrade", async (version) => {
+	it.each([8, 9])("does not replay native work after a current-protocol to Base%s downgrade", async (version) => {
 		const client = new DaemonClient("/tmp/base-reconnect.sock");
 		client.enableRequestRecovery();
 		const connected = client.connect();

@@ -9,6 +9,8 @@ import {
 	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
+	AgentOutputLimitError,
+	type AgentOutputLimits,
 	type AgentState,
 	type AgentTool,
 	type GetContinuationMessagesContext,
@@ -93,6 +95,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { stringifyBoundedJson } from "./bounded-json.js";
 import { CanonicalContextCompiler, getCanonicalMessageSource } from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -416,6 +419,8 @@ export class CompactionSkippedError extends Error {}
 export class RefineSkippedError extends Error {}
 
 export interface AgentSessionConfig {
+	/** Override native invocationOutput settings; complete finalized values or explicit refusal. */
+	invocationOutputLimits?: AgentOutputLimits;
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
@@ -1070,6 +1075,11 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
+	private readonly _invocationOutputLimits: AgentOutputLimits;
+	private _invocationSuppressedAutonomousContinuation = false;
+	private _refreshInvocationOutput?: (message: AgentMessage) => void;
+	private _invocationOutputUpdateTail?: Promise<void>;
+	private _invocationOutputRefused = false;
 
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
@@ -1228,6 +1238,56 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this._invocationOutputLimits = {
+			...(config.invocationOutputLimits ?? config.settingsManager.getInvocationOutputLimits()),
+		};
+		if (
+			this._invocationOutputLimits &&
+			(!Number.isSafeInteger(this._invocationOutputLimits.maxMessages) ||
+				this._invocationOutputLimits.maxMessages < 1 ||
+				!Number.isSafeInteger(this._invocationOutputLimits.maxSourceBytes) ||
+				this._invocationOutputLimits.maxSourceBytes < 1)
+		)
+			throw new Error("Invalid invocation output limits");
+		this.agent.bindOutputOwner(() => {
+			this._invocationOutputRefused = false;
+			if (!this.sessionManager.supportsCapturedHistoryReads()) return undefined;
+			let registeredUpdate: ((message: AgentMessage) => void) | undefined;
+			return {
+				limits: { ...this._invocationOutputLimits },
+				bindUpdates: (refresh) => {
+					const update = (message: AgentMessage) => {
+						if (!refresh(message)) this._invocationOutputRefused = true;
+					};
+					registeredUpdate = update;
+					this._invocationOutputUpdateTail = undefined;
+					this._refreshInvocationOutput = update;
+					return () => {
+						if (this._refreshInvocationOutput === update) this._refreshInvocationOutput = undefined;
+					};
+				},
+				settleUpdates: async () => {
+					// One fixed accepted boundary; do not wait for future child lifetimes or a later event tail.
+					const lateUpdate = this._invocationOutputUpdateTail;
+					this._invocationOutputUpdateTail = undefined;
+					const childWrites = [...this._childUsageWrites];
+					if (this._refreshInvocationOutput === registeredUpdate) this._refreshInvocationOutput = undefined;
+					const settled = await Promise.allSettled([...(lateUpdate ? [lateUpdate] : []), ...childWrites]);
+					const errors = settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+					if (errors.length === 1) throw errors[0];
+					if (errors.length > 1) throw new AggregateError(errors, "Accepted invocation output updates failed");
+				},
+				snapshot: (message, maxSourceBytes) => {
+					try {
+						const json = stringifyBoundedJson(message, maxSourceBytes);
+						return { message: JSON.parse(json) as AgentMessage, sourceBytes: Buffer.byteLength(json) };
+					} catch (error) {
+						if (error instanceof Error && error.message === "JSON byte limit exceeded") return undefined;
+						throw error;
+					}
+				},
+			};
+		});
 		this.agent.bindInitializationOwner(() => this.initialize());
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
@@ -1692,6 +1752,7 @@ export class AgentSession {
 	private async _applyCanonicalIpythonSentAgentMessages(message: AgentMessage): Promise<void> {
 		if (message.role !== "toolResult" || message.toolName !== "ipython") return;
 		const toolCallId = message.toolCallId;
+		const refreshOutput = this._refreshInvocationOutput;
 		const limits = { ...this.settingsManager.getCanonicalContextLimits() };
 		const sentMessages = await this.sessionManager.readSourceHistory(async (history) => {
 			const messages: KernelSentAgentMessage[] = [];
@@ -1717,9 +1778,11 @@ export class AgentSession {
 			return messages;
 		});
 		for (const sent of sentMessages) appendSentAgentMessageToToolResult(message, toolCallId, sent);
+		refreshOutput?.(message);
 	}
 
 	private _recordLateIpythonSentAgentMessage(toolCallId: string, message: KernelSentAgentMessage): void {
+		const refreshOutput = this._refreshInvocationOutput;
 		const record = async () => {
 			if (this._disposed) return;
 			if (this.sessionManager.supportsCapturedHistoryReads()) {
@@ -1729,7 +1792,10 @@ export class AgentSession {
 				const result = await this.sessionManager.appendIpythonSentAgentMessage({ toolCallId, message: captured });
 				if (!result.appended || sessionId !== this.sessionId || sessionFile !== this.sessionFile) return;
 				for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
-					if (appendSentAgentMessageToToolResult(this.agent.state.messages[index], toolCallId, captured)) break;
+					if (appendSentAgentMessageToToolResult(this.agent.state.messages[index], toolCallId, captured)) {
+						refreshOutput?.(this.agent.state.messages[index]);
+						break;
+					}
 				}
 				this._emit({ type: "ipython_sent_agent_message", toolCallId, message: captured });
 				return;
@@ -1739,6 +1805,7 @@ export class AgentSession {
 			this._emit({ type: "ipython_sent_agent_message", toolCallId, message });
 		};
 		this._agentEventQueue = this._agentEventQueue.then(record, record);
+		if (refreshOutput) this._invocationOutputUpdateTail = this._agentEventQueue;
 		void this._agentEventQueue.catch((error) => this._surfaceSessionInputError(error));
 	}
 
@@ -3383,7 +3450,7 @@ export class AgentSession {
 							});
 						}
 					} else {
-						this._maybeStartSerializedBackgroundPlan();
+						if (!this._invocationOutputRefused) this._maybeStartSerializedBackgroundPlan();
 					}
 				}
 				return {
@@ -3672,7 +3739,9 @@ export class AgentSession {
 		}
 		if (
 			this._autonomousContinuationSuppressionDepth > 0 ||
-			context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message))
+			(this.sessionManager.supportsCapturedHistoryReads()
+				? this._invocationSuppressedAutonomousContinuation
+				: context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message)))
 		) {
 			return [];
 		}
@@ -3780,7 +3849,15 @@ export class AgentSession {
 		};
 	}
 
-	private _handleAgentEvent = (event: AgentEvent): void => {
+	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
+		if (event.type === "agent_end" && event.refusal) this._invocationOutputRefused = true;
+		if (event.type === "agent_start") this._invocationSuppressedAutonomousContinuation = false;
+		if (
+			(event.type === "message_start" || event.type === "message_end") &&
+			this._autonomousContinuationSuppressedMessages.has(event.message)
+		) {
+			this._invocationSuppressedAutonomousContinuation = true;
+		}
 		const nativeOrigin =
 			(event.type === "message_start" || event.type === "message_end") &&
 			(event.message.role === "user" || event.message.role === "custom")
@@ -3822,15 +3899,23 @@ export class AgentSession {
 				if (record) record.started = true;
 			}
 		}
-		this._agentEventQueue = this._agentEventQueue.then(
+		const job = this._agentEventQueue.then(
 			() => this._processAgentEvent(event, nativeOrigin),
 			() => this._processAgentEvent(event, nativeOrigin),
 		);
-		this._agentEventQueue.catch(() => {});
+		this._agentEventQueue = job;
+		job.catch(() => {});
+		// Ordinary extension contexts already expose request-only abort, not command waitForIdle.
+		// Join THIS accepted message job, never a later mutable tail from inside that job.
+		if (
+			this.sessionManager.supportsCapturedHistoryReads() &&
+			(event.type === "message_end" || (event.type === "agent_end" && event.refusal))
+		)
+			return job;
 	};
 
 	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
-		if (event.type !== "agent_end" || this._retryPromise) {
+		if (event.type !== "agent_end" || event.refusal || this._retryPromise) {
 			return;
 		}
 
@@ -3867,7 +3952,7 @@ export class AgentSession {
 		const message =
 			event.type === "message_end" && event.message.role === "assistant"
 				? (event.message as AssistantMessage)
-				: event.type === "agent_end"
+				: event.type === "agent_end" && !event.refusal
 					? this._findLastAssistantInMessages(event.messages)
 					: undefined;
 		if (!message || message.stopReason !== "error" || !message.errorMessage) {
@@ -3919,8 +4004,47 @@ export class AgentSession {
 			}
 		}
 
+		if (event.type === "agent_end" && event.refusal) {
+			// Primary delivery ACKs remain delivered. Only this invocation's completion has failed.
+			this._lastAssistantMessage = undefined;
+			this._clearQueuedGoalContexts();
+			this._clearQueuedAutonomousContinuations();
+			if (this._retryAttempt > 0) {
+				this._emit({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this._retryAttempt,
+					finalError: new AgentOutputLimitError(event.refusal).message,
+				});
+				this._retryAttempt = 0;
+			}
+			this._retryAuthFailureSources = [];
+			this._resolveRetry();
+			await this._emitExtensionEvent(event);
+			this._emit(event);
+			return;
+		}
+
 		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
+		}
+
+		if (
+			this.sessionManager.supportsCapturedHistoryReads() &&
+			event.type === "message_end" &&
+			event.message.role === "assistant"
+		) {
+			// Preserve budget progress while a message_end transformer waits. The same subject WeakSet
+			// deduplicates the post-message and post-turn calls; goal state is published only after its ACK.
+			// Do not run serialized refinement/compaction or stop mandatory tools at this point.
+			if ((await this._accountGoalUsageForAssistantMessage(event.message)) && !this._invocationOutputRefused) {
+				const message = createGoalContextMessage(this._goalState, "budget_limit");
+				const normalized = normalizeMessageContent(message.content);
+				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				});
+			}
 		}
 
 		await this._emitExtensionEvent(event);
@@ -4011,7 +4135,7 @@ export class AgentSession {
 					this._retryAttempt = 0;
 					this._retryAuthFailureSources = [];
 				}
-				if (await this._accountGoalUsageForAssistantMessage(assistantMsg)) {
+				if ((await this._accountGoalUsageForAssistantMessage(assistantMsg)) && !this._invocationOutputRefused) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
 					await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
@@ -4119,10 +4243,7 @@ export class AgentSession {
 		} else if (event.type === "agent_end") {
 			// Also capture at end of turn so commits made during the run (e.g. via a bash tool) land.
 			await this.sessionManager.recordGitStateIfChanged();
-			await this._extensionRunner.emit({
-				type: "agent_end",
-				messages: event.messages,
-			});
+			await this._extensionRunner.emit(event);
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -11258,6 +11379,7 @@ export class AgentSession {
 												: "agent_message"
 											: "direct_user";
 									const text = compactRlmText(readAssistantText(assistant));
+									const refreshOutput = this._refreshInvocationOutput;
 									const write = this.sessionManager
 										.appendChildUsageAttributionWithAggregate(
 											parentEntryId,
@@ -11267,6 +11389,7 @@ export class AgentSession {
 										)
 										.then(({ aggregateUsage }) => {
 											parentAssistantForUsage.usage = structuredClone(aggregateUsage);
+											refreshOutput?.(parentAssistantForUsage);
 											if (text) run.answerPreview = text;
 											emitChildUpdate();
 										});

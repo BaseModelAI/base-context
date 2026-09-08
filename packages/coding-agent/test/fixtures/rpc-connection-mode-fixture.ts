@@ -1,4 +1,5 @@
 import type { AgentConnection, AgentConnectionEventListener } from "../../src/modes/agent-connection/types.js";
+import { DAEMON_PROTOCOL_VERSION } from "../../src/modes/daemon/daemon-protocol.js";
 import { runRpcModeWithConnection } from "../../src/modes/rpc/rpc-mode.js";
 
 let listener: AgentConnectionEventListener = () => {};
@@ -120,4 +121,4 @@ const connection = {
 	async dispose() {},
 } as unknown as AgentConnection;
 
-await runRpcModeWithConnection(connection);
+await runRpcModeWithConnection(connection, DAEMON_PROTOCOL_VERSION);

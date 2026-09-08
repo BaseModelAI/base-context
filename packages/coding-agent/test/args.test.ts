@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "../src/cli/args.js";
+import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -186,8 +187,18 @@ describe("parseArgs", () => {
 		});
 
 		test("parses --mode rpc", () => {
-			const result = parseArgs(["--mode", "rpc"]);
+			const result = parseArgs(["--mode", "rpc", "--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION)]);
 			expect(result.mode).toBe("rpc");
+			expect(result.rpcProtocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
+			expect(result.diagnostics).toEqual([]);
+			for (const marker of [[], ["--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION - 1)]]) {
+				expect(parseArgs(["--mode", "rpc", ...marker]).diagnostics).toEqual([
+					{
+						type: "error",
+						message: expect.stringContaining(`requires --rpc-protocol-version ${DAEMON_PROTOCOL_VERSION}`),
+					},
+				]);
+			}
 		});
 
 		test("parses --fork", () => {

@@ -509,7 +509,7 @@ export class DaemonClient {
 						);
 						continue;
 					}
-					// Only passive reads survive a downgrade to Base8/Base9; retain identity and negotiate the envelope.
+					// Only passive reads survive a downgrade to Base8/Base9/Base10; retain identity and negotiate the envelope.
 					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
 					if (wire.type === "command" && wire.protocol.version !== message.protocol.version) {
 						wire.protocol.version = message.protocol.version;

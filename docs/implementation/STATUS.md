@@ -671,3 +671,44 @@ These are per-store accepted image/item bounds, not a whole-process memory resul
 parsing, serialization/asdict transients, Python in-memory stores, public container mutation,
 merged store copies and the aggregate Python path cache remain outside this slice. The APIs
 accept explicit higher positive limits; no new CLI setting or retention policy was added.
+
+### Native invocation output and refusal-aware compatibility (W22)
+
+Owned persistent sessions now collect complete detached finalized invocation values under
+constructor-copied invocationOutput settings: 16,384 messages and 64 MiB UTF-8 JSON array
+by default, with an explicit SDK override. Generic Agents and explicit resident Managers
+keep their previous behavior. Source-frame/context limits remain separate.
+
+The native listener joins its exact message_end mutation/persistence job. Original runtime,
+action and ACK subjects remain in place. Goal usage accounting still progresses before a
+delayed extension returns. Current-invocation child-usage/IPython updates are charged and
+one accepted terminal boundary is drained; future child lifetimes are not awaited. Update
+admission closes and slot ownership detaches at termination. Returned snapshots are not
+retroactively changed by later canonical updates.
+
+Over-limit completion emits a small agent_end refusal without messages and rejects the
+raw loop, stream result and Agent invocation. It does not return a truncated/empty success,
+fabricate a replacement assistant bundle, retry the provider or revoke known delivery/tool
+ACKs. Accepted parallel tools/publications settle; unstarted sequential calls stop. Native
+consumers report failure rather than advancing plans or treating idle as success.
+
+The existing daemon/worker fence advances to protocol11/schema30; Base8/9/10 remain
+passive-only. RPC additionally requires --rpc-protocol-version 11 before startup and RpcClient checks protocolVersion in get_state before work.
+This explicitly breaks unversioned RPC launch/server-entry calls. It preserves prompt
+acceptance ACK semantics; promptAndWait rejects later refusal. The fence covers shipped
+clients, not a custom client that falsely declares the new contract. Reverse RPC startup
+mismatch cleanup has source inspection only, not a physical-client test claim.
+
+Sixteen distinct cases passed across five separate invocations: existing generic2,
+owned core2, native default/goal2, settings2/Herdr1, new minimal RPC completion2 and
+existing compatibility5. Core transport data and RPC completion events are synthetic;
+Herdr uses a local Unix fixture. Native cases use module-owned local faux. No physical
+provider, kernel, installed-client or whole-memory campaign ran. An unsupported findLast
+TypeScript library use was corrected without changing the configured library. An external
+fixture hunk accidentally removed adjacent parameterized cases; Root preserved their exact
+original block before applying/running it. The loop file still instantiates35 cases.
+
+These bounds cover owned invocation result values, not EventStream/RPC/subscriber queues,
+provider partials, all tool-batch intermediates, caller-retained values or process RSS. The
+separate whole context-tree request draft is not part of this checkpoint. Task authority,
+explicit task reduction, ViewUnits/token budgets/epochs and release gates remain open.

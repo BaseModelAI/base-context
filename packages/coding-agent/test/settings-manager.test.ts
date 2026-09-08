@@ -296,15 +296,31 @@ describe("SettingsManager", () => {
 			];
 
 			for (const [globalSettings, projectSettings, expected] of cases) {
-				writeFileSync(join(agentDir, "settings.json"), JSON.stringify(globalSettings));
-				writeFileSync(join(projectDir, ".base-context", "settings.json"), JSON.stringify(projectSettings));
+				writeFileSync(
+					join(agentDir, "settings.json"),
+					JSON.stringify({
+						...globalSettings,
+						invocationOutput: globalSettings.canonicalContext,
+					}),
+				);
+				writeFileSync(
+					join(projectDir, ".base-context", "settings.json"),
+					JSON.stringify({
+						...projectSettings,
+						invocationOutput: projectSettings.canonicalContext,
+					}),
+				);
 				const manager = SettingsManager.create(projectDir, agentDir);
-				const limits = manager.getCanonicalContextLimits();
-
-				expect(limits).toEqual(expected);
-				limits.maxMessages = 1;
-				limits.maxSourceBytes = 1;
-				expect(manager.getCanonicalContextLimits()).toEqual(expected);
+				for (const readLimits of [
+					() => manager.getCanonicalContextLimits(),
+					() => manager.getInvocationOutputLimits(),
+				]) {
+					const limits = readLimits();
+					expect(limits).toEqual(expected);
+					limits.maxMessages = 1;
+					limits.maxSourceBytes = 1;
+					expect(readLimits()).toEqual(expected);
+				}
 			}
 		});
 
@@ -318,6 +334,12 @@ describe("SettingsManager", () => {
 			expect(() => SettingsManager.create(projectDir, agentDir).getCanonicalContextLimits()).toThrow(
 				/canonicalContext\.maxSourceBytes.*positive safe integer/,
 			);
+			for (const configured of [{ maxMessages: 0 }, { maxSourceBytes: null }]) {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ invocationOutput: configured }));
+				expect(() => SettingsManager.create(projectDir, agentDir).getInvocationOutputLimits()).toThrow(
+					/invocationOutput\.(maxMessages|maxSourceBytes).*positive safe integer/,
+				);
+			}
 		});
 	});
 

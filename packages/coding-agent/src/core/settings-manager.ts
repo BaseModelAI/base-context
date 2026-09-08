@@ -144,6 +144,8 @@ export interface Settings {
 	theme?: string;
 	/** Resource caps on complete canonical reconstruction, not model/token/heap limits. */
 	canonicalContext?: { maxMessages?: number; maxSourceBytes?: number };
+	/** Complete native invocation output, separate from the working context. */
+	invocationOutput?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
@@ -842,6 +844,24 @@ export class SettingsManager {
 		for (const [field, value] of Object.entries(limits)) {
 			if (!Number.isSafeInteger(value) || value <= 0)
 				throw new Error(`canonicalContext.${field} must be a positive safe integer`);
+		}
+		return limits;
+	}
+
+	getInvocationOutputLimits(): { maxMessages: number; maxSourceBytes: number } {
+		const configured = this.settings.invocationOutput;
+		if (
+			configured !== undefined &&
+			(typeof configured !== "object" || configured === null || Array.isArray(configured))
+		)
+			throw new Error("invocationOutput must be an object");
+		const limits = {
+			maxMessages: configured?.maxMessages === undefined ? 16384 : configured.maxMessages,
+			maxSourceBytes: configured?.maxSourceBytes === undefined ? 64 * 1024 * 1024 : configured.maxSourceBytes,
+		};
+		for (const [field, value] of Object.entries(limits)) {
+			if (!Number.isSafeInteger(value) || value <= 0)
+				throw new Error(`invocationOutput.${field} must be a positive safe integer`);
 		}
 		return limits;
 	}

@@ -11,6 +11,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionSessionWatcher,
 } from "../agent-connection/types.js";
+import { DAEMON_PROTOCOL_VERSION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { createRpcExtensionUiBridge } from "./rpc-extension-ui-context.js";
 import type {
@@ -38,14 +39,21 @@ interface RpcModeConnectionOptions {
 	}) => Promise<void>;
 }
 
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(runtimeHost: AgentSessionRuntime, clientProtocolVersion: number): Promise<never> {
+	if (clientProtocolVersion !== DAEMON_PROTOCOL_VERSION)
+		throw new Error(`RPC client must support protocol ${DAEMON_PROTOCOL_VERSION}, including refusal-only agent_end`);
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runRpcModeWithConnectionInternal(connection, {
 		bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
 	});
 }
 
-export async function runRpcModeWithConnection(connection: AgentConnection): Promise<never> {
+export async function runRpcModeWithConnection(
+	connection: AgentConnection,
+	clientProtocolVersion: number,
+): Promise<never> {
+	if (clientProtocolVersion !== DAEMON_PROTOCOL_VERSION)
+		throw new Error(`RPC client must support protocol ${DAEMON_PROTOCOL_VERSION}, including refusal-only agent_end`);
 	return runRpcModeWithConnectionInternal(connection);
 }
 
@@ -245,6 +253,7 @@ async function runRpcModeWithConnectionInternal(
 			case "get_state": {
 				const state = await connection.getState();
 				const rpcState: RpcSessionState = {
+					protocolVersion: DAEMON_PROTOCOL_VERSION,
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
 					isStreaming: state.isStreaming,

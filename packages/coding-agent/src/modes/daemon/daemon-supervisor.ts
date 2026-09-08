@@ -1727,7 +1727,7 @@ export class DaemonSupervisor {
 			!isLegacyDaemonInspection(command)
 		) {
 			throw new Error(
-				"Native daemon commands require protocol 10 canonical session ownership; only passive inspection is available",
+				`Native daemon commands require protocol ${CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol} canonical session ownership and bounded invocation output; only passive inspection is available`,
 			);
 		}
 		let admission: SupervisorPromptAdmission | undefined;

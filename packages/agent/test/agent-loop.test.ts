@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -7,8 +10,11 @@ import {
 	type UserMessage,
 } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { stringifyBoundedJson } from "../../coding-agent/src/core/bounded-json.js";
+import { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
+import { AgentOutputLimitError } from "../src/index.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -1339,7 +1345,6 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executionOrder[0]).toBe("slow:a");
 		expect(executionOrder).toContain("fast:b");
 	});
-
 	it("should allow parallel execution when all tools have executionMode=parallel", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		let firstResolved = false;
@@ -1348,6 +1353,23 @@ describe("agentLoop with AgentMessage", () => {
 		const firstDone = new Promise<void>((resolve) => {
 			releaseFirst = resolve;
 		});
+		const directory = mkdtempSync(join(tmpdir(), "agent-owned-output-refusal-"));
+		let manager: SessionManager | undefined;
+		let completion: Promise<{ messages: AgentMessage[] } | { error: unknown }> | undefined;
+		onTestFinished(async () => {
+			releaseFirst?.();
+			await completion;
+			try {
+				await manager?.close();
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		});
+		const owned = await SessionManager.create(directory, directory);
+		manager = owned;
+		expect(owned.supportsCapturedHistoryReads()).toBe(true);
+		const effects: string[] = [];
+		const acknowledged: Array<{ executionId: string; toolCallId: string; entryId: string }> = [];
 
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
@@ -1360,59 +1382,125 @@ describe("agentLoop with AgentMessage", () => {
 					await firstDone;
 					firstResolved = true;
 				}
-				if (params.value === "second" && !firstResolved) {
-					parallelObserved = true;
-				}
-				return {
-					content: [{ type: "text", text: `echoed: ${params.value}` }],
-					details: { value: params.value },
-				};
+				if (params.value === "second" && !firstResolved) parallelObserved = true;
+				effects.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
 			},
 		};
-
-		const context: AgentContext = {
-			systemPrompt: "",
-			messages: [],
-			tools: [tool],
-		};
-
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
 		const userPrompt: AgentMessage = createUserMessage("echo both");
+		const assistant = createAssistantMessage(
+			[
+				{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
+				{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
+			],
+			"toolUse",
+		);
+		// Actual local journal ACKs for synthetic core fixture data, not physical provider receipts.
+		await owned.appendMessage(userPrompt);
+		const maxSourceBytes = Buffer.byteLength(JSON.stringify([userPrompt, assistant])) + 32;
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
+			outputPolicy: {
+				limits: { maxMessages: 4, maxSourceBytes },
+				snapshot(message, remaining) {
+					try {
+						const json = stringifyBoundedJson(message, remaining);
+						return { message: JSON.parse(json) as AgentMessage, sourceBytes: Buffer.byteLength(json) };
+					} catch (error) {
+						if (error instanceof Error && error.message === "JSON byte limit exceeded") return undefined;
+						throw error;
+					}
+				},
+			},
+			onToolInvocationStarting: async (invocation) => {
+				await owned.appendToolInvocation(invocation);
+			},
+			onToolExchangeFinalized: async (exchange) => {
+				const entryId = await owned.appendToolExchange(exchange);
+				acknowledged.push({ executionId: exchange.executionId, toolCallId: exchange.toolCallId, entryId });
+			},
 		};
-
 		let callIndex = 0;
 		const stream = agentLoop([userPrompt], context, config, undefined, () => {
 			const mockStream = new MockAssistantStream();
 			queueMicrotask(() => {
-				if (callIndex === 0) {
-					const message = createAssistantMessage(
-						[
-							{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } },
-							{ type: "toolCall", id: "tool-2", name: "echo", arguments: { value: "second" } },
-						],
-						"toolUse",
-					);
-					mockStream.push({ type: "done", reason: "toolUse", message });
-					setTimeout(() => releaseFirst?.(), 20);
-				} else {
-					const message = createAssistantMessage([{ type: "text", text: "done" }]);
-					mockStream.push({ type: "done", reason: "stop", message });
-				}
+				const message = callIndex === 0 ? assistant : createAssistantMessage([{ type: "text", text: "done" }]);
 				callIndex++;
+				void owned.appendMessage(message).then(
+					() =>
+						mockStream.push({
+							type: "done",
+							reason: message.stopReason === "toolUse" ? "toolUse" : "stop",
+							message,
+						}),
+					(error) => mockStream.fail(error),
+				);
 			});
 			return mockStream;
 		});
-
+		let resultSettled = false;
+		const outcome = stream.result().then(
+			(messages) => {
+				resultSettled = true;
+				return { messages };
+			},
+			(error: unknown) => {
+				resultSettled = true;
+				return { error };
+			},
+		);
+		completion = outcome;
 		const events: AgentEvent[] = [];
 		for await (const event of stream) {
 			events.push(event);
+			if (event.type === "tool_execution_end" && event.toolCallId === "tool-2") {
+				expect(firstResolved).toBe(false);
+				expect(resultSettled).toBe(false);
+				const second = acknowledged.find((entry) => entry.toolCallId === "tool-2");
+				if (!second) throw new Error("second tool was published before its owner ACK");
+				expect(await owned.readToolExchange(second.executionId)).toMatchObject({
+					toolCallId: "tool-2",
+					result: { content: [{ type: "text", text: "echoed: second" }] },
+				});
+				releaseFirst?.();
+			}
 		}
-
 		expect(parallelObserved).toBe(true);
+		expect(firstResolved).toBe(true);
+		expect(effects).toEqual(["second", "first"]);
+		expect(acknowledged.map((entry) => entry.toolCallId)).toEqual(["tool-2", "tool-1"]);
+		expect(
+			events.flatMap((event) =>
+				event.type === "message_end" && event.message.role === "toolResult" ? [event.message.toolCallId] : [],
+			),
+		).toEqual(["tool-1", "tool-2"]);
+		for (const ack of acknowledged) {
+			expect(ack.entryId).toBe(ack.executionId);
+			expect(await owned.readToolExchange(ack.executionId)).toMatchObject({
+				executionId: ack.executionId,
+				toolCallId: ack.toolCallId,
+				result: { isError: false },
+			});
+		}
+		const terminal = events.at(-1);
+		expect(terminal).toEqual({
+			type: "agent_end",
+			refusal: {
+				kind: "output_limit",
+				limit: "source_bytes",
+				maxMessages: 4,
+				maxSourceBytes,
+			},
+		});
+		expect(terminal).not.toHaveProperty("messages");
+		const result = await outcome;
+		if (!("error" in result) || !(result.error instanceof AgentOutputLimitError))
+			throw new Error("output refusal resolved a successful result");
+		expect(result.error.refusal).toEqual(terminal?.type === "agent_end" ? terminal.refusal : undefined);
+		expect(callIndex).toBe(1);
 	});
-
 	const naturalCompletionCases: Array<{
 		name: string;
 		stopBefore: "always" | "afterTurn" | "never";

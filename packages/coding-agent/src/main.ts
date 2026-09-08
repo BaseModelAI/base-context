@@ -1620,7 +1620,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		if (appMode === "rpc") {
-			return await runRpcModeWithConnection(connection);
+			return await runRpcModeWithConnection(connection, parsed.rpcProtocolVersion!);
 		}
 		if (appMode === "acp") {
 			return await runAcpModeWithConnection(connection);
@@ -1700,7 +1700,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		await runRpcMode(runtime, parsed.rpcProtocolVersion!);
 	} else if (appMode === "acp") {
 		printTimings();
 		await runAcpMode(runtime);

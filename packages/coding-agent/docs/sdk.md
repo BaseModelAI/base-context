@@ -304,7 +304,12 @@ session.subscribe((event) => {
       // Agent started processing prompt
       break;
     case "agent_end":
-      // Agent finished (event.messages contains new messages)
+      if (event.refusal) {
+        // Completion failed. No successful/partial message bundle is supplied.
+        console.error("Invocation output refused", event.refusal);
+        break;
+      }
+      // Successful completion: event.messages contains all new messages
       break;
     
     // Turn lifecycle (one LLM response + tool calls)
@@ -542,7 +547,24 @@ Custom tools passed via `customTools` are combined with extension-registered too
 
 > See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
 
-### Extensions
+### Native invocation output
+
+Owned persistent sessions use the `invocationOutput` settings by default (16,384 messages,
+64 MiB UTF-8 JSON array). An SDK override is copied when the session is constructed:
+
+```typescript
+const { session } = await createAgentSession({
+  invocationOutputLimits: { maxMessages: 4096, maxSourceBytes: 16 * 1024 * 1024 },
+});
+```
+
+Successful results contain all finalized invocation messages. A refused run rejects with
+`AgentOutputLimitError` and emits an `agent_end` refusal descriptor instead of a message
+bundle. This does not revoke delivery ACKs or completed tools. Limits are not model token
+budgets or whole-process memory bounds. Explicit resident Managers keep their existing
+behavior. See [settings](settings.md#native-invocation-output).
+
+## Extensions
 
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.
 

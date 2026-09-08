@@ -188,7 +188,7 @@ describe("supervisor compatibility refusal", () => {
 		},
 	);
 
-	it.each([8, 9])("refuses protocol%s public work before registering admission", (version) => {
+	it.each([8, 9, 10])("refuses protocol%s public work before registering admission", (version) => {
 		for (const prototype of [DaemonSupervisor.prototype, AgentDaemon.prototype]) {
 			const admissions = new Map();
 			const admissionStore = vi.fn(() => admissions);
@@ -207,7 +207,7 @@ describe("supervisor compatibility refusal", () => {
 			] satisfies DaemonCommand[]) {
 				const envelope = createDaemonCommandEnvelope(command, "command", "legacy-client", version);
 				expect(() => parser.parseCommandAndRegisterPromptAdmission(client, JSON.stringify(envelope))).toThrow(
-					"protocol 10 canonical session ownership",
+					"protocol 11 canonical session ownership and bounded invocation output",
 				);
 			}
 			expect(admissions.size).toBe(0);

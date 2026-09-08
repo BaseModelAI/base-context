@@ -10,6 +10,7 @@ import {
 	type Transport,
 } from "@ponythewhite/base-context-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import { AgentOutputLimitError } from "./invocation-output.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -18,6 +19,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentOutputPolicy,
 	AgentOwnedStreamFn,
 	AgentState,
 	AgentTool,
@@ -202,6 +204,14 @@ export class Agent {
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	private initializationOwner?: () => Promise<void>;
 	private contextOwner?: () => Promise<AgentContextBuildResult>;
+	private outputOwner?: () => AgentOutputPolicy | undefined;
+	private activeOutputPolicy?: AgentOutputPolicy;
+
+	/** Native sinks join finalized message values; configuration is captured once per invocation. */
+	bindOutputOwner(owner: () => AgentOutputPolicy | undefined): void {
+		if (this.outputOwner) throw new Error("Agent output owner is already bound");
+		this.outputOwner = owner;
+	}
 
 	/** Finish native initialization before capturing context or emitting loop events. */
 	bindInitializationOwner(owner: () => Promise<void>): void {
@@ -522,6 +532,7 @@ export class Agent {
 		const onToolInvocationStarting = this.onToolInvocationStarting;
 		const onToolExchangeFinalized = this.onToolExchangeFinalized;
 		return {
+			outputPolicy: this.activeOutputPolicy,
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
@@ -582,12 +593,25 @@ export class Agent {
 		this._state.errorMessage = undefined;
 
 		try {
+			const outputPolicy = this.outputOwner?.();
+			this.activeOutputPolicy = outputPolicy
+				? {
+						limits: { ...outputPolicy.limits },
+						snapshot: outputPolicy.snapshot.bind(outputPolicy),
+						bindUpdates: outputPolicy.bindUpdates?.bind(outputPolicy),
+						settleUpdates: outputPolicy.settleUpdates?.bind(outputPolicy),
+					}
+				: undefined;
 			if (this.initializationOwner) {
 				await this.initializationOwner();
 				abortController.signal.throwIfAborted();
 			}
 			await executor(abortController.signal);
 		} catch (error) {
+			if (error instanceof AgentOutputLimitError) {
+				this._state.errorMessage = error.message;
+				throw error;
+			}
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
 			this.finishRun();
@@ -616,6 +640,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this.activeOutputPolicy = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -667,6 +692,7 @@ export class Agent {
 
 			case "agent_end":
 				this._state.streamingMessage = undefined;
+				if (event.refusal) this._state.errorMessage = new AgentOutputLimitError(event.refusal).message;
 				break;
 		}
 

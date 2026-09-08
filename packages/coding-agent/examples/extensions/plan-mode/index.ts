@@ -218,6 +218,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 
 	// Handle plan completion and plan mode UI
 	pi.on("agent_end", async (event, ctx) => {
+		if (event.refusal) return;
 		// Check if execution is complete
 		if (executionMode && todoItems.length > 0) {
 			if (todoItems.every((t) => t.completed)) {

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -5,11 +8,14 @@ import {
 	getModel,
 } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { stringifyBoundedJson } from "../../coding-agent/src/core/bounded-json.js";
+import { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import {
 	Agent,
 	type AgentContext,
 	type AgentContextProjection,
+	type AgentEvent,
 	type AgentLoopConfig,
 	type AgentMessage,
 	type AgentTool,
@@ -140,6 +146,30 @@ describe("Agent", () => {
 
 	it("should await async subscribers before prompt resolves", async () => {
 		const barrier = createDeferred();
+		let notifyEnd!: (event: Extract<AgentEvent, { type: "agent_end" }>) => void;
+		const endEntered = new Promise<Extract<AgentEvent, { type: "agent_end" }>>((resolve) => {
+			notifyEnd = resolve;
+		});
+		const messageEndEntered = createDeferred();
+		const releaseMessageEnd = createDeferred();
+		const directory = mkdtempSync(join(tmpdir(), "agent-owned-output-"));
+		let manager: SessionManager | undefined;
+		let promptSettled: Promise<void> | undefined;
+		onTestFinished(async () => {
+			releaseMessageEnd.resolve();
+			barrier.resolve();
+			await promptSettled;
+			try {
+				await manager?.close();
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		});
+		const owned = await SessionManager.create(directory, directory);
+		manager = owned;
+		expect(owned.supportsCapturedHistoryReads()).toBe(true);
+		const limits = { maxMessages: 2, maxSourceBytes: 8192 };
+		const finalizedSubjects: AgentMessage[] = [];
 		const agent = new Agent({
 			streamFn: () => {
 				const stream = new MockAssistantStream();
@@ -149,10 +179,50 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		agent.bindOutputOwner(() => ({
+			limits,
+			snapshot(message, maxSourceBytes) {
+				try {
+					const json = stringifyBoundedJson(message, maxSourceBytes);
+					return { message: JSON.parse(json) as AgentMessage, sourceBytes: Buffer.byteLength(json) };
+				} catch (error) {
+					if (error instanceof Error && error.message === "JSON byte limit exceeded") return undefined;
+					throw error;
+				}
+			},
+		}));
+		agent.subscribe(async (event) => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "assistant") {
+				messageEndEntered.resolve();
+				await releaseMessageEnd.promise;
+				event.message.content = [{ type: "text", text: "finalized ok" }];
+			}
+			if (event.message.role !== "user" && event.message.role !== "assistant")
+				throw new Error("unexpected core fixture message");
+			await owned.appendMessage(event.message);
+			finalizedSubjects.push(event.message);
+		});
+		agent.shouldStopAfterTurn = ({ message, newMessages }) => {
+			expect(newMessages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+			expect(newMessages[1]).toEqual(message);
+			expect(newMessages[1]).not.toBe(message);
+			if (newMessages[1].role !== "assistant") throw new Error("missing finalized assistant");
+			newMessages[1].content = [{ type: "text", text: "callback copy only" }];
+			newMessages.length = 0;
+			return false;
+		};
+		agent.getContinuationMessages = async ({ newMessages }) => {
+			expect(newMessages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+			expect(newMessages[1]).toMatchObject({ content: [{ type: "text", text: "finalized ok" }] });
+			newMessages.length = 0;
+			return [];
+		};
 
 		let listenerFinished = false;
 		agent.subscribe(async (event) => {
 			if (event.type === "agent_end") {
+				notifyEnd(event);
 				await barrier.promise;
 				listenerFinished = true;
 			}
@@ -162,20 +232,45 @@ describe("Agent", () => {
 		const promptPromise = agent.prompt("hello").then(() => {
 			promptResolved = true;
 		});
-
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		promptSettled = promptPromise.then(
+			() => undefined,
+			() => undefined,
+		);
+		// The admitted policy values, not this caller's later edits, govern the open invocation.
+		limits.maxMessages = 1;
+		limits.maxSourceBytes = 2;
+		await Promise.race([messageEndEntered.promise, promptPromise]);
+		expect(promptResolved).toBe(false);
+		releaseMessageEnd.resolve();
+		const event = await Promise.race([
+			endEntered,
+			promptPromise.then(() => {
+				throw new Error("prompt settled before agent_end");
+			}),
+		]);
+		if (event.refusal) throw new Error("unexpected output refusal");
+		expect(event.messages).toEqual(finalizedSubjects);
+		expect(event.messages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+		expect(event.messages[1]).not.toBe(finalizedSubjects[1]);
+		if (event.messages[1].role !== "assistant" || finalizedSubjects[1].role !== "assistant")
+			throw new Error("missing finalized assistant output");
+		expect(event.messages[1].content).not.toBe(finalizedSubjects[1].content);
 		expect(promptResolved).toBe(false);
 		expect(listenerFinished).toBe(false);
 		expect(agent.state.isStreaming).toBe(true);
+		const storedMessages = (await owned.readEntries()).flatMap((entry) =>
+			entry.type === "message" ? [entry.message] : [],
+		);
+		expect(storedMessages).toEqual(finalizedSubjects);
+		expect(agent.state.messages[0]).toBe(finalizedSubjects[0]);
+		expect(agent.state.messages[1]).toBe(finalizedSubjects[1]);
 
 		barrier.resolve();
 		await promptPromise;
-
 		expect(listenerFinished).toBe(true);
 		expect(promptResolved).toBe(true);
 		expect(agent.state.isStreaming).toBe(false);
 	});
-
 	it("can commit only a prefix of a prompt batch when a listener fails", async () => {
 		const agent = new Agent();
 		const first: AgentMessage = {

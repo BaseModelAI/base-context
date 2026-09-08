@@ -152,6 +152,22 @@ Explicit in-memory SDK sessions retain their nonpersistent context path.
 }
 ```
 
+### Native invocation output
+
+Owned persistent sessions return complete finalized invocation values or refuse the run.
+These limits are separate from `canonicalContext`, model tokens and process memory.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `invocationOutput.maxMessages` | integer | `16384` | Maximum messages in one complete invocation result |
+| `invocationOutput.maxSourceBytes` | integer | `67108864` | UTF-8 JSON bytes of that result array, including brackets and separators |
+
+Values must be positive safe integers. Settings are captured when the session is created;
+the SDK `invocationOutputLimits` option can override them. A limit refuses completion,
+not a silent tail or empty result. Already accepted effects still settle. Explicit resident
+sessions and generic Agents keep their existing behavior. Observer queues, provider
+partials and caller-retained allocations are not bounded by these settings.
+
 ### Branch Summary
 
 | Setting | Type | Default | Description |

@@ -5,6 +5,7 @@
 import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
 import { APP_NAME } from "../config.js";
 import { THINKING_LEVELS } from "../core/thinking-levels.js";
+import { DAEMON_PROTOCOL_VERSION } from "../modes/daemon/daemon-protocol.js";
 
 export type Mode = "text" | "json" | "rpc" | "acp" | "daemon";
 
@@ -21,6 +22,8 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	/** RPC clients must understand this event protocol, including refusal-only agent_end. */
+	rpcProtocolVersion?: number;
 	daemonSocket?: string;
 	noSession?: boolean;
 	fork?: string;
@@ -104,6 +107,8 @@ export function parseArgs(args: string[]): Args {
 			if (mode === "text" || mode === "json" || mode === "rpc" || mode === "acp" || mode === "daemon") {
 				result.mode = mode;
 			}
+		} else if (arg === "--rpc-protocol-version") {
+			if (hasRequiredOptionValue(args, i, arg, result)) result.rpcProtocolVersion = Number(args[++i]);
 		} else if (arg === "--daemon-socket" && i + 1 < args.length) {
 			result.daemonSocket = args[++i];
 		} else if (arg === "--continue" || arg === "-c") {
@@ -321,6 +326,18 @@ export function parseArgs(args: string[]): Args {
 		result.diagnostics.push({
 			type: "error",
 			message: "--goal-token-budget requires --goal",
+		});
+	}
+
+	if (
+		result.mode === "rpc" &&
+		!result.help &&
+		!result.version &&
+		result.rpcProtocolVersion !== DAEMON_PROTOCOL_VERSION
+	) {
+		result.diagnostics.push({
+			type: "error",
+			message: `RPC mode requires --rpc-protocol-version ${DAEMON_PROTOCOL_VERSION}; the client must handle refusal-only agent_end as failed completion`,
 		});
 	}
 

@@ -9,6 +9,7 @@ import { ENV_AGENT_DIR } from "../../../src/config.js";
 import type { AutonomousRuntimeState } from "../../../src/core/autonomous.js";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { DAEMON_PROTOCOL_VERSION } from "../../../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
@@ -263,7 +264,11 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		const cases = [
 			{ name: "print", args: ["--print"], stdin: "" },
 			{ name: "json", args: ["--mode", "json"], stdin: "" },
-			{ name: "rpc", args: ["--mode", "rpc"], stdin: '{"id":"state","type":"get_state"}\n' },
+			{
+				name: "rpc",
+				args: ["--mode", "rpc", "--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION)],
+				stdin: '{"id":"state","type":"get_state"}\n',
+			},
 			{ name: "piped stdin", args: [], stdin: "   \n" },
 			{ name: "no-session", args: ["--print", "--no-session"], stdin: "" },
 		];
@@ -382,6 +387,8 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			[
 				"--mode",
 				"rpc",
+				"--rpc-protocol-version",
+				String(DAEMON_PROTOCOL_VERSION),
 				"--no-session",
 				"--daemon-socket",
 				socketPath,

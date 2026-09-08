@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@ponythewhite/base-context-agent";
+import { Agent, type AgentMessage, type AgentOutputLimits, type ThinkingLevel } from "@ponythewhite/base-context-agent";
 import { clampThinkingLevel, type Message, type Model, supportsFastMode } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
@@ -68,6 +68,8 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Session manager. Default: SessionManager.create(cwd) */
 	sessionManager?: SessionManager;
 
+	/** Override complete native invocation output limits from settings. */
+	invocationOutputLimits?: AgentOutputLimits;
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
@@ -355,6 +357,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		session = new AgentSession({
+			invocationOutputLimits: options.invocationOutputLimits,
 			agent,
 			sessionManager,
 			settingsManager,

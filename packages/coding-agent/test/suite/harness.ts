@@ -16,7 +16,12 @@ import type {
 import { registerFauxProvider } from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageController } from "../../src/core/agent-messages.js";
 import type { AgentObserveController } from "../../src/core/agent-observe.js";
-import { AgentSession, type AgentSessionEvent, type AutoRefineReviewer } from "../../src/core/agent-session.js";
+import {
+	AgentSession,
+	type AgentSessionConfig,
+	type AgentSessionEvent,
+	type AutoRefineReviewer,
+} from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { AgentAutonomousConfig } from "../../src/core/autonomous.js";
 import type { ExtensionRunner } from "../../src/core/extensions/index.js";
@@ -78,6 +83,7 @@ export interface HarnessOptions {
 	agentMessageController?: AgentSessionMessageController;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	persistSession?: boolean;
+	invocationOutputLimits?: AgentSessionConfig["invocationOutputLimits"];
 	sessionManager?: SessionManager;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
@@ -211,6 +217,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		...(options.invocationOutputLimits === undefined
+			? {}
+			: { invocationOutputLimits: options.invocationOutputLimits }),
 	});
 
 	await session.initialize();

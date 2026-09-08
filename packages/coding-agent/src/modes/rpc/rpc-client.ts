@@ -5,7 +5,12 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import {
+	type AgentEvent,
+	type AgentMessage,
+	AgentOutputLimitError,
+	type ThinkingLevel,
+} from "@ponythewhite/base-context-agent";
 import type { ImageContent } from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
@@ -19,6 +24,7 @@ import type {
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
+import { DAEMON_PROTOCOL_VERSION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import type {
 	RpcCommand,
@@ -91,7 +97,7 @@ export class RpcClient {
 		}
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
-		const args = ["--mode", "rpc"];
+		const args = ["--mode", "rpc", "--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION)];
 
 		if (this.options.provider) {
 			args.push("--provider", this.options.provider);
@@ -125,6 +131,20 @@ export class RpcClient {
 
 		if (this.process.exitCode !== null) {
 			throw new Error(`Agent process exited immediately with code ${this.process.exitCode}. Stderr: ${this.stderr}`);
+		}
+		try {
+			const state = await this.getState();
+			if (state.protocolVersion !== DAEMON_PROTOCOL_VERSION)
+				throw new Error(
+					`Incompatible RPC protocol: expected ${DAEMON_PROTOCOL_VERSION}, got ${state.protocolVersion ?? "unversioned"}`,
+				);
+		} catch (error) {
+			try {
+				await this.stop();
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "RPC startup and cleanup failed", { cause: error });
+			}
+			throw error;
 		}
 	}
 
@@ -585,7 +605,10 @@ export class RpcClient {
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
 		await this.prompt(message, images);
-		return eventsPromise;
+		const events = await eventsPromise;
+		const terminal = events.find((event) => event.type === "agent_end");
+		if (terminal?.type === "agent_end" && terminal.refusal) throw new AgentOutputLimitError(terminal.refusal);
+		return events;
 	}
 
 	// =========================================================================

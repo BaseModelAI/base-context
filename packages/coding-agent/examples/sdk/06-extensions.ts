@@ -62,7 +62,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async (event) => {
-		console.log(\`[Extension] Done, \${event.messages.length} messages\`);
+		if (event.refusal) console.error("[Extension] Invocation output refused", event.refusal);
+		else console.log(\`[Extension] Done, \${event.messages.length} messages\`);
 	});
 
 	// Register a custom tool

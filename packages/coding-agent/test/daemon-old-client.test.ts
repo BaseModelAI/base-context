@@ -9,15 +9,14 @@ vi.mock("node:net", async (importOriginal) => ({
 	createConnection: () => transport.socket,
 }));
 
-// Freeze the shipped Base8 handshake policy: only the exact product/version pair was accepted.
-// Equal current/inspection versions retain that old equality rule in the shared parser.
+// Freeze the shipped protocol10 policy, including its actual legacy-inspection allowlist.
 vi.mock("../src/modes/daemon/daemon-protocol.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
-	DAEMON_PROTOCOL_VERSION: 8,
-	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSION: 8,
+	DAEMON_PROTOCOL_VERSION: 10,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: [8, 9],
 }));
 
-it("rejects a native9 server hello under the old Base8 client policy before sending any command", async () => {
+it("rejects a refusal-aware protocol11 hello under the old protocol10 client policy before sending any command", async () => {
 	const socket = new Socket(); // Unconnected; createConnection is fully mocked.
 	transport.socket = socket;
 	const write = vi.spyOn(socket, "write").mockReturnValue(true);
@@ -29,14 +28,14 @@ it("rejects a native9 server hello under the old Base8 client policy before send
 		"data",
 		`${JSON.stringify({
 			type: "daemon_hello",
-			protocol: { name: "base-context.daemon", version: 9 },
-			schemaRevision: 28,
+			protocol: { name: "base-context.daemon", version: 11 },
+			schemaRevision: 30,
 			clientId: "new-server",
-			serverCapabilities: ["native_inference_ownership", "finalized_tool_exchanges"],
+			serverCapabilities: ["native_inference_ownership", "canonical_session_ownership", "finalized_tool_exchanges"],
 		})}\n`,
 	);
 	await expect(client.waitForHello()).rejects.toThrow("incompatible daemon");
-	await expect(client.request({ type: "create" })).rejects.toThrow("expected base-context.daemon protocol 8");
+	await expect(client.request({ type: "create" })).rejects.toThrow("expected base-context.daemon protocol 10");
 	expect(write).not.toHaveBeenCalled();
 	client.close();
 	vi.restoreAllMocks();

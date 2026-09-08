@@ -762,8 +762,13 @@ describe("AgentSession goals", () => {
 				}
 			});
 		};
-		const harness = await createHarness({ extensionFactories: [extension] });
+		const harness = await createHarness({
+			persistSession: true,
+			invocationOutputLimits: { maxMessages: 64, maxSourceBytes: 2 * 1024 * 1024 },
+			extensionFactories: [extension],
+		});
 		harnesses.push(harness);
+		expect(harness.sessionManager.supportsCapturedHistoryReads()).toBe(true);
 		harness.setResponses([
 			assistantWithUsage("Spent the budget.", { input: 6, output: 5, totalTokens: 11 }),
 			fauxAssistantMessage("Wrapping up."),
@@ -772,7 +777,8 @@ describe("AgentSession goals", () => {
 
 		const promptPromise = harness.session.prompt("/goal --budget 10 do work");
 		try {
-			await waitForCondition(() => harness.session.goalState.status === "budget_limited");
+			await waitForCondition(() => didBlock && harness.session.goalState.status === "budget_limited");
+			expect(harness.session.agent.state.isStreaming).toBe(true);
 		} finally {
 			releaseMessageEnd?.();
 		}
@@ -782,6 +788,16 @@ describe("AgentSession goals", () => {
 
 		expect(visibleAssistantTexts(harness)).toEqual(["Spent the budget.", "Wrapping up."]);
 		expect(harness.getPendingResponseCount()).toBe(1);
+		const completedOutputs = harness.eventsOfType("agent_end").flatMap((event) => {
+			if (event.refusal) throw new Error("goal budget handling refused its native output");
+			return event.messages;
+		});
+		expect(
+			completedOutputs
+				.filter((message) => message.role === "assistant")
+				.map(getMessageText)
+				.filter(Boolean),
+		).toEqual(["Spent the budget.", "Wrapping up."]);
 		expect(harness.session.goalState).toMatchObject({
 			active: false,
 			status: "budget_limited",

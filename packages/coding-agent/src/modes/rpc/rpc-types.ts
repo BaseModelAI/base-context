@@ -136,6 +136,8 @@ export interface RpcSlashCommand {
 // ============================================================================
 
 export interface RpcSessionState {
+	/** Missing on older unversioned RPC servers; the client must refuse them before work. */
+	protocolVersion?: number;
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;

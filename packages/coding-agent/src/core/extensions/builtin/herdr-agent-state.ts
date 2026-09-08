@@ -18,6 +18,7 @@
 
 import { createConnection } from "node:net";
 import { basename } from "node:path";
+import { AgentOutputLimitError } from "@ponythewhite/base-context-agent";
 import { PRODUCT } from "../../../product-identity.js";
 import type { ExtensionAPI, ExtensionFactory } from "../types.js";
 
@@ -417,6 +418,14 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		}
 
 		agentActive = false;
+		if (event.refusal) {
+			clearPendingTimers();
+			retryHoldActive = false;
+			failureBlocked = true;
+			failureMessage = new AgentOutputLimitError(event.refusal).message;
+			publishState();
+			return;
+		}
 
 		const holdMessage = errorHoldMessage(event);
 		if (holdMessage) {

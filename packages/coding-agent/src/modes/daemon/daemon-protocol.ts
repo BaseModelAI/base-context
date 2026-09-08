@@ -55,8 +55,8 @@ import type { RlmLedgerMutation } from "./rlm-ledger-mutations.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = PRODUCT.daemonService;
-export const DAEMON_PROTOCOL_VERSION = 10;
-export const DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: readonly number[] = [8, 9];
+export const DAEMON_PROTOCOL_VERSION = 11;
+export const DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: readonly number[] = [8, 9, 10];
 export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
 // Revision 10 publishes persisted RLM spawn depth on all session catalog rows.
@@ -78,8 +78,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 27 starts the incompatible, product-isolated Base Context command plane.
 // Revision 28 requires native inference ownership for work and exposes optional finalized tool evidence.
 // Revision 29 requires canonical session ownership, framed readers, and fenced persistence ACKs.
-export const DAEMON_SCHEMA_REVISION = 29;
-export const DAEMON_SCHEMA_ID = "protocol-10-schema-29-37e5213f9781";
+// Revision 30 requires bounded invocation output and agent_end refusal without successful messages.
+export const DAEMON_SCHEMA_REVISION = 30;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-30-37e5213f9781";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -716,8 +717,8 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 } as const satisfies DaemonCommandCompatibility;
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
-	minProtocol: 10,
-	minSchemaRevision: 29,
+	minProtocol: 11,
+	minSchemaRevision: 30,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 
@@ -1263,7 +1264,8 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	daemon_closing: LEGACY_DAEMON_COMMAND,
 	heartbeats_changed: { minProtocol: 8, capability: "heartbeat_catalog" },
 	roster_update: { minProtocol: 8, capability: "agent_roster" },
-	session_event: LEGACY_DAEMON_COMMAND,
+	// agent_end refusal omits messages; attached readers must understand that terminal variant.
+	session_event: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,
 	session_replaced: LEGACY_DAEMON_COMMAND,
