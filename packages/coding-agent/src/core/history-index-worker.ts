@@ -985,6 +985,7 @@ function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch
 		serviceTier: reference(state?.latest_service_tier),
 		goalState: reference(state?.latest_goal),
 		rlmMaxDepth: reference(state?.latest_rlm_max_depth),
+		latestCompaction: reference(state?.latest_compaction),
 		hasBranchMessage: state?.has_branch_message === 1,
 		hasContextMessages: !!state && (state.has_session_message === 1 || state.latest_compaction !== null),
 		goalSeedable: !state || state.goal_seedable === 1,

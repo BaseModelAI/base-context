@@ -25,6 +25,7 @@ type SessionWithCompactionInternals = {
 	) => Promise<void>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	_thresholdCompactionNeeded: (context: ShouldStopAfterTurnContext) => Promise<boolean>;
 	_persistCompactionOutcome: (
 		reason: "overflow" | "threshold" | "requested",
 		outcome: "skipped" | "cancelled" | "failed",
@@ -755,7 +756,7 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ persistSession: true, settings: { compaction: { enabled: true } } });
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const staleTimestamp = Date.now() - 10_000;
@@ -765,13 +766,12 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: staleTimestamp,
 		});
 
-		await harness.sessionManager.appendMessage({
+		const firstKeptEntryId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: staleTimestamp - 1000,
 		});
 		await harness.sessionManager.appendMessage(staleAssistant);
-		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
 		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
@@ -789,6 +789,16 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		const originalLimits = harness.settingsManager.getCanonicalContextLimits();
+		harness.settingsManager.applyOverrides({ canonicalContext: { ...originalLimits, maxSourceBytes: 1 } });
+		try {
+			await expect(sessionInternals._checkCompaction(staleAssistant, false)).rejects.toThrow(
+				"Compaction bootstrap source byte budget exceeded",
+			);
+		} finally {
+			harness.settingsManager.applyOverrides({ canonicalContext: originalLimits });
+		}
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
@@ -1409,7 +1419,7 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("does not trigger threshold compaction when only kept pre-compaction usage exists", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ persistSession: true, settings: { compaction: { enabled: true } } });
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const preCompactionTimestamp = Date.now() - 10_000;
@@ -1419,14 +1429,13 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: preCompactionTimestamp,
 		});
 
-		await harness.sessionManager.appendMessage({
+		const firstKeptEntryId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: preCompactionTimestamp - 1000,
 		});
 		await harness.sessionManager.appendMessage(keptAssistant);
-		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		await harness.sessionManager.appendCompaction(
+		const compactionId = await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			keptAssistant.usage.totalTokens,
@@ -1434,21 +1443,34 @@ describe("AgentSession compaction characterization", () => {
 			false,
 		);
 
+		const compactionTimestamp = new Date(harness.sessionManager.getEntry(compactionId)!.timestamp).getTime();
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
 			errorMessage: "529 overloaded",
-			timestamp: Date.now(),
+			timestamp: compactionTimestamp + 2,
 		});
 		harness.session.agent.state.messages = [
 			{ role: "user", content: [{ type: "text", text: "kept user" }], timestamp: preCompactionTimestamp - 1000 },
 			keptAssistant,
-			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
+			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: compactionTimestamp + 1 },
 			errorAssistant,
 		];
 
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
 
 		await sessionInternals._checkCompaction(errorAssistant);
+		expect(
+			await sessionInternals._thresholdCompactionNeeded({
+				message: errorAssistant,
+				toolResults: [],
+				context: {
+					systemPrompt: harness.session.systemPrompt,
+					messages: harness.session.agent.state.messages,
+					tools: [],
+				},
+				newMessages: [errorAssistant],
+			}),
+		).toBe(false);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});

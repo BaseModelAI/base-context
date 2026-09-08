@@ -107,7 +107,7 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 		},
 	});
 	const canonicalOnly = { role: "user" as const, content: "Canonical-only ACKed history", timestamp: Date.now() };
-	await manager.appendMessage(canonicalOnly);
+	const canonicalOnlyId = await manager.appendMessage(canonicalOnly);
 	expect(
 		owner.agent.state.messages.some(
 			(message) => message.role === "user" && message.content === canonicalOnly.content,
@@ -157,6 +157,18 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 	for (const executionId of executionIds) expect(journal).toContain(executionId);
 	const exported = await owner.exportToJsonl(join(dir, "native-export.jsonl"));
 	for (const executionId of executionIds) expect(readFileSync(exported, "utf8")).toContain(executionId);
+	const eagerEntries = vi.spyOn(manager, "getEntries").mockImplementation(() => {
+		throw new Error("Unbounded fork-picker entry read");
+	});
+	try {
+		expect(await owner.getUserMessagesForForking()).toContainEqual({
+			entryId: canonicalOnlyId,
+			text: canonicalOnly.content,
+		});
+		expect(eagerEntries).not.toHaveBeenCalled();
+	} finally {
+		eagerEntries.mockRestore();
+	}
 });
 
 it("follows the session owner after a source-history switch", async () => {

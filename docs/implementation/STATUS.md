@@ -453,3 +453,24 @@ The 16,384-entry/64 MiB defaults count all source entries before filtering, incl
 branches. Text order, whitespace and joined text-part behavior remain unchanged.
 The synchronous AgentSession picker API, other branch/control scans, late-IPython startup
 map, persistent Manager stores and current-invocation Agent output collectors remain.
+
+
+## Captured compaction boundaries and asynchronous JSONL output
+
+The existing schema12 bootstrap exposes the latest actual parent-path compaction
+reference. The two asynchronous native compaction checks hydrate its timestamp in the
+same captured read instead of scanning the resident branch. A single revision-keyed
+scalar cache retains no entry bodies. The selected frame-byte cap also applies to cache
+hits. Retained compactions and invalid-date behavior keep their existing semantics.
+
+JSONL export now awaits directory creation, exclusive output creation, each bounded
+record write, close and failed-output removal. Native source capture or the bounded
+resident snapshot happens before output I/O can yield. It keeps the original source,
+record ordering, backpressure and primary/cleanup errors. No whole output is buffered.
+
+The public `AgentSession.getUserMessagesForForking()` method now returns a Promise
+and uses the same complete, capped source reader as the mode interfaces.
+
+Persistent Manager body stores, synchronous context-usage scans, late-IPython startup
+history/maps and complete current-invocation Agent output collectors still remain.
+These changes are not a whole-process memory bound or a model/release result.

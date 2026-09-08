@@ -1,7 +1,8 @@
-import * as fs from "node:fs";
+import type { FileHandle } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import type { Usage } from "@ponythewhite/base-context-ai";
 import type { Component } from "@ponythewhite/base-context-tui";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, existsSync, fstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it, vi } from "vitest";
@@ -10,7 +11,6 @@ import { exportFromFile, exportSessionToHtml } from "../src/core/export-html/ind
 import { createToolHtmlRenderer } from "../src/core/export-html/tool-renderer.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
-import * as journalIo from "../src/core/journal-io.js";
 import { exportSessionBranchToJsonl } from "../src/core/session-jsonl-export.js";
 import {
 	CURRENT_SESSION_VERSION,
@@ -20,13 +20,9 @@ import {
 } from "../src/core/session-manager.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
 
-vi.mock("node:fs", async (importOriginal) => {
+vi.mock("node:fs/promises", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
-	return { ...original, closeSync: vi.fn(original.closeSync), unlinkSync: vi.fn(original.unlinkSync) };
-});
-vi.mock("../src/core/journal-io.js", async (importOriginal) => {
-	const original = await importOriginal<typeof journalIo>();
-	return { ...original, writeFullySync: vi.fn(original.writeFullySync) };
+	return { ...original, open: vi.fn(original.open), unlink: vi.fn(original.unlink) };
 });
 
 function exportedHistory(path: string): { entries: SessionEntry[]; leafId: string | null; header: { id: string } } {
@@ -341,12 +337,12 @@ describe("export HTML tool output whitespace", () => {
 				expect(jsonl.entries).toEqual(records.slice(1));
 				expect(uncappedBranch).not.toHaveBeenCalled();
 				const originalJsonl = readFileSync(jsonlPath);
-				vi.mocked(fs.unlinkSync).mockClear();
+				vi.mocked(fs.unlink).mockClear();
 				await expect(exportSessionBranchToJsonl(readonly, jsonlPath, { residentLimits })).rejects.toThrow(
 					`Export output already exists; choose a new filename: ${jsonlPath}`,
 				);
 				expect(readFileSync(jsonlPath)).toEqual(originalJsonl);
-				expect(fs.unlinkSync).not.toHaveBeenCalled();
+				expect(fs.unlink).not.toHaveBeenCalled();
 				const refusedJsonl = join(root, "readonly-refused.jsonl");
 				await expect(
 					exportSessionBranchToJsonl(readonly, refusedJsonl, {
@@ -366,28 +362,29 @@ describe("export HTML tool output whitespace", () => {
 				const primary = new Error("JSONL write failed");
 				const closeError = new Error("JSONL close failed");
 				const unlinkError = new Error("JSONL unlink failed");
-				const realFs = await vi.importActual<typeof fs>("node:fs");
-				const realJournalIo = await vi.importActual<typeof journalIo>("../src/core/journal-io.js");
+				const realFs = await vi.importActual<typeof fs>("node:fs/promises");
 				for (const cleanupFails of [false, true]) {
 					const failedPath = join(root, `failed-${cleanupFails}.jsonl`);
+					const output: { handle?: FileHandle } = {};
 					let outputFd: number | undefined;
-					vi.mocked(journalIo.writeFullySync)
-						.mockImplementationOnce(realJournalIo.writeFullySync)
-						.mockImplementationOnce((fd) => {
-							outputFd = fd;
-							throw primary;
-						});
-					vi.mocked(fs.closeSync).mockClear();
-					vi.mocked(fs.unlinkSync).mockClear();
-					if (cleanupFails) {
-						vi.mocked(fs.closeSync).mockImplementationOnce((fd) => {
-							realFs.closeSync(fd);
-							throw closeError;
-						});
-						vi.mocked(fs.unlinkSync).mockImplementationOnce(() => {
-							throw unlinkError;
-						});
-					}
+					vi.mocked(fs.open).mockImplementationOnce(async (...args) => {
+						const handle = await realFs.open(...args);
+						output.handle = handle;
+						outputFd = handle.fd;
+						const writeFile = handle.writeFile.bind(handle);
+						vi.spyOn(handle, "writeFile").mockImplementationOnce(writeFile).mockRejectedValueOnce(primary);
+						const close = handle.close.bind(handle);
+						const closeSpy = vi.spyOn(handle, "close");
+						if (cleanupFails) {
+							closeSpy.mockImplementationOnce(async () => {
+								await close();
+								throw closeError;
+							});
+						}
+						return handle;
+					});
+					vi.mocked(fs.unlink).mockClear();
+					if (cleanupFails) vi.mocked(fs.unlink).mockRejectedValueOnce(unlinkError);
 					try {
 						const failed = exportSessionBranchToJsonl(readonly, failedPath, { residentLimits });
 						if (cleanupFails) {
@@ -397,14 +394,13 @@ describe("export HTML tool output whitespace", () => {
 							await expect(failed).rejects.toBe(primary);
 						}
 						expect(outputFd).toBeDefined();
-						expect(fs.closeSync).toHaveBeenCalledExactlyOnceWith(outputFd);
-						expect(() => realFs.fstatSync(outputFd!)).toThrow();
-						expect(fs.unlinkSync).toHaveBeenCalledExactlyOnceWith(failedPath);
+						expect(output.handle!.close).toHaveBeenCalledExactlyOnceWith();
+						expect(() => fstatSync(outputFd!)).toThrow();
+						expect(fs.unlink).toHaveBeenCalledExactlyOnceWith(failedPath);
 						expect(existsSync(failedPath)).toBe(cleanupFails);
 					} finally {
-						vi.mocked(journalIo.writeFullySync).mockReset();
-						vi.mocked(fs.closeSync).mockReset();
-						vi.mocked(fs.unlinkSync).mockReset();
+						vi.mocked(fs.open).mockReset();
+						vi.mocked(fs.unlink).mockReset();
 					}
 				}
 			} finally {

@@ -1,9 +1,8 @@
-import { closeSync, mkdirSync, openSync, unlinkSync } from "node:fs";
+import { type FileHandle, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import { MAX_CANONICAL_PAYLOAD_PART_BYTES } from "./canonical-payload-parts.js";
 import type { ContextUpdateRef, ContextUpdateTarget, ParentPathCursor } from "./history-index.js";
-import { writeFullySync } from "./journal-io.js";
 import type { SessionHistoryReadLimits, SessionHistoryReadScope } from "./session-history-index.js";
 import { SESSION_JOURNAL_MAX_FRAME_BYTES, SESSION_JOURNAL_MAX_RECORD_BYTES } from "./session-journal-owner.js";
 import {
@@ -114,29 +113,31 @@ export async function exportSessionBranchToJsonl(
 		timestamp: new Date().toISOString(),
 		cwd: manager.getCwd(),
 	};
-	mkdirSync(dirname(filePath), { recursive: true });
-	let fd: number;
-	try {
-		fd = openSync(filePath, "wx");
-	} catch (error) {
-		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
-			throw new Error(`Export output already exists; choose a new filename: ${filePath}`);
-		}
-		throw error;
-	}
+	const output: { file?: FileHandle } = {};
 	const errors: unknown[] = [];
-	const writeRecord = (record: SessionHeader | SessionEntry) => {
-		writeFullySync(fd, Buffer.from(`${stringifyBoundedJson(record, maxRecordBytes)}\n`, "utf8"));
-	};
 	const writeBranch = async (entries: AsyncIterable<SessionEntry> | Iterable<SessionEntry>) => {
-		writeRecord(header);
+		await mkdir(dirname(filePath), { recursive: true });
+		let file: FileHandle;
+		try {
+			file = await open(filePath, "wx");
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+				throw new Error(`Export output already exists; choose a new filename: ${filePath}`);
+			}
+			throw error;
+		}
+		output.file = file;
+		const writeRecord = (record: SessionHeader | SessionEntry) =>
+			file.writeFile(Buffer.from(`${stringifyBoundedJson(record, maxRecordBytes)}\n`, "utf8"));
+		await writeRecord(header);
 		let previousId: string | null = null;
 		for await (const entry of entries) {
-			writeRecord({ ...entry, parentId: previousId });
+			await writeRecord({ ...entry, parentId: previousId });
 			previousId = entry.id;
 		}
 	};
 	try {
+		// Capture before mkdir/open can yield, so output I/O cannot move the selected view.
 		if (manager.supportsCapturedHistoryReads()) {
 			await manager.readBranchHistory(async (view) => {
 				if (view.source.sessionId !== sourceId || view.source.sessionFile !== sourceFile)
@@ -150,19 +151,21 @@ export async function exportSessionBranchToJsonl(
 	} catch (error) {
 		errors.push(error);
 	}
-	try {
-		closeSync(fd);
-	} catch (error) {
-		errors.push(error);
-	}
-	if (errors.length > 0) {
+	if (output.file) {
 		try {
-			unlinkSync(filePath);
+			await output.file.close();
 		} catch (error) {
 			errors.push(error);
 		}
-		if (errors.length === 1) throw errors[0];
-		throw new AggregateError(errors, "JSONL export or cleanup failed", { cause: errors[0] });
+		if (errors.length > 0) {
+			try {
+				await unlink(filePath);
+			} catch (error) {
+				errors.push(error);
+			}
+		}
 	}
+	if (errors.length === 1) throw errors[0];
+	if (errors.length > 1) throw new AggregateError(errors, "JSONL export or cleanup failed", { cause: errors[0] });
 	return filePath;
 }

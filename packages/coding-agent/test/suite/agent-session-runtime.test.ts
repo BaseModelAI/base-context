@@ -747,7 +747,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		events.length = 0;
 		await runtime.session.prompt("hello");
-		const userMessage = runtime.session.getUserMessagesForForking()[0]!;
+		const userMessage = (await runtime.session.getUserMessagesForForking())[0]!;
 		const previousSessionFile = runtime.session.sessionFile;
 
 		const successResult = await runtime.fork(userMessage.entryId);
@@ -778,7 +778,7 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.prompt("Say one");
 		await runtime.session.prompt("Say two");
 		await runtime.session.prompt("Say three");
-		const userMessages = runtime.session.getUserMessagesForForking();
+		const userMessages = await runtime.session.getUserMessagesForForking();
 		expect(userMessages.map((message) => message.text)).toEqual(["Say one", "Say two", "Say three"]);
 
 		const result = await runtime.fork(userMessages[1]!.entryId);
@@ -802,7 +802,7 @@ describe("AgentSessionRuntime characterization", () => {
 	it("forks before the first prompt in-memory and preserves its selection metadata", async () => {
 		const { runtime } = await createRuntimeForTest(() => {}, { inMemory: true });
 		await runtime.session.prompt("Say one");
-		const userMessages = runtime.session.getUserMessagesForForking();
+		const userMessages = await runtime.session.getUserMessagesForForking();
 
 		const result = await runtime.fork(userMessages[0]!.entryId);
 

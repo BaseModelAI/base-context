@@ -40,6 +40,7 @@ describe("session write isolation", () => {
 			serviceTier: null,
 			goalState: null,
 			rlmMaxDepth: null,
+			latestCompaction: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -328,10 +329,30 @@ describe("session write isolation", () => {
 				entry: { data: { maxDepth: 0 } },
 			});
 		});
+		const compactionId = await copied.appendCompaction("Exact compacted context", "Imported-User", 1200);
+		const compactionTimestamp = copied.getEntry(compactionId)!.timestamp;
+		await copied.readBranchHistory(async (history) => {
+			const bootstrap = await history.branchBootstrap();
+			expect(bootstrap.latestCompaction?.id).toBe(compactionId);
+			expect(await history.hydrateEntry(bootstrap.latestCompaction!.id, 64 * 1024)).toMatchObject({
+				entry: {
+					type: "compaction",
+					summary: "Exact compacted context",
+					tokensBefore: 1200,
+					timestamp: compactionTimestamp,
+				},
+			});
+		});
+		copied.branch(depthId);
+		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			latestCompaction: null,
+		});
+		copied.branch(compactionId);
 		const retainedDepth = await SessionManager.importRetainedFrom(copied.getSessionFile()!, dir, ownedDir);
 		managers.push(retainedDepth);
 		expect(await retainedDepth.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			rlmMaxDepth: { id: depthId, retention: "retained-import" },
+			latestCompaction: { id: compactionId, retention: "retained-import" },
 			goalState: null,
 			hasBranchMessage: true,
 		});
@@ -365,6 +386,7 @@ describe("session write isolation", () => {
 				hasContextMessages: false,
 				hasBranchMessage: false,
 				rlmMaxDepth: null,
+				latestCompaction: null,
 				goalSeedable: false,
 				model: { id: rootModelId },
 			});

@@ -265,6 +265,7 @@ import {
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
 import type { NativeEntryOrigin, NativeSubmittedInput } from "./session-entry-origin.js";
+import { readUserMessagesForForking } from "./session-fork-messages.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import type { BranchSummaryEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
 import { getLatestCompactionEntry, SessionManager } from "./session-manager.js";
@@ -1003,6 +1004,13 @@ export class AgentSession {
 	readonly requests: InferenceCoordinator;
 	readonly runtimeServices: SessionRuntimeServices;
 	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private _compactionBoundaryCache?: {
+		sessionId: string;
+		sessionFile: string | undefined;
+		entryId: string;
+		revision: string;
+		timestamp: number;
+	};
 	private _contextOmissions?: { sessionId: string; sessionFile: string | undefined; ids: Set<string> };
 	private _serviceTierPreference: ServiceTier;
 
@@ -2930,13 +2938,49 @@ export class AgentSession {
 		}
 	}
 
+	private async _getLatestCompactionTimestamp(): Promise<number | undefined> {
+		if (!this.sessionManager.isPersisted()) {
+			const entry = getLatestCompactionEntry(this.sessionManager.getBranch());
+			return entry ? new Date(entry.timestamp).getTime() : undefined;
+		}
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return this.sessionManager.readBranchHistory(async (view) => {
+			const ref = (await view.branchBootstrap()).latestCompaction;
+			if (!ref) {
+				this._compactionBoundaryCache = undefined;
+				return undefined;
+			}
+			if (ref.locator.length > maxSourceBytes) throw new Error("Compaction bootstrap source byte budget exceeded");
+			const cached = this._compactionBoundaryCache;
+			if (
+				cached &&
+				cached.sessionId === view.source.sessionId &&
+				cached.sessionFile === view.source.sessionFile &&
+				cached.entryId === ref.id &&
+				cached.revision === ref.revision
+			)
+				return cached.timestamp;
+			const hydrated = await view.hydrateEntry(ref.id, maxSourceBytes);
+			if (!hydrated || hydrated.entry.type !== "compaction")
+				throw new Error("Compaction bootstrap source is unavailable");
+			const timestamp = new Date(hydrated.entry.timestamp).getTime();
+			this._compactionBoundaryCache = {
+				sessionId: view.source.sessionId,
+				sessionFile: view.source.sessionFile,
+				entryId: ref.id,
+				revision: ref.revision,
+				timestamp,
+			};
+			return timestamp;
+		});
+	}
+
 	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
 		const contextWindow = this.model?.contextWindow ?? 0;
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = await this._getLatestCompactionTimestamp();
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
 			return false;
 		}
@@ -8928,8 +8972,7 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = await this._getLatestCompactionTimestamp();
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
 
@@ -12236,21 +12279,8 @@ export class AgentSession {
 		}
 	}
 
-	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
-		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = this._extractUserMessageText(entry.message.content);
-			if (text) {
-				result.push({ entryId: entry.id, text });
-			}
-		}
-
-		return result;
+	getUserMessagesForForking(): Promise<Array<{ entryId: string; text: string }>> {
+		return readUserMessagesForForking(this.sessionManager);
 	}
 
 	private _extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
