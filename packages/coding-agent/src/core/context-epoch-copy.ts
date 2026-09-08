@@ -68,7 +68,9 @@ export async function rebuildCopiedContextEpoch(
 	history: SessionHistoryReadScope,
 	copied: CapturedEpochCopy,
 	limits: SessionHistoryReadLimits,
-): Promise<{ checkpoint: ContextEpochCheckpoint; tokensBefore: number; summary?: ContextEpochSummary } | undefined> {
+): Promise<
+	{ checkpoint: ContextEpochCheckpoint; tokensBefore: number | null; summary?: ContextEpochSummary } | undefined
+> {
 	const view = history.branchContext;
 	const manifest = await view.contextManifest({ limit: 1 });
 	if (manifest.selection !== "known") throw new Error("Copied context selection is unavailable");

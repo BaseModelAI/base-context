@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { stringifyBoundedJson } from "./bounded-json.js";
 import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
@@ -84,12 +85,77 @@ interface CompiledEpochContext {
 	readonly taskFrame?: CompiledTaskFrame;
 	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
+	/** Uncommitted public candidate plan; never a fabricated accepted checkpoint. */
+	readonly continuation?: ContextEpochCheckpoint["continuation"];
 }
 const compiledEpochContexts = new WeakMap<readonly AgentMessage[], CompiledEpochContext>();
 
 export function getCanonicalEpochContext(messages: readonly AgentMessage[]): CompiledEpochContext | undefined {
 	const context = compiledEpochContexts.get(messages);
 	return context ? structuredClone(context) : undefined;
+}
+
+/** Detach the request view while keeping its existing captured rendering metadata. */
+export function captureCanonicalRequestMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+	const views = compiledViewUnits.get(messages);
+	const epoch = compiledEpochContexts.get(messages);
+	if (!views || !epoch || views.units.length !== messages.length || epoch.references.length !== messages.length)
+		throw new Error("Request view boundary requires compiled canonical messages");
+	const captured = structuredClone([...messages]);
+	compiledViewUnits.set(captured, structuredClone(views));
+	compiledEpochContexts.set(captured, structuredClone(epoch));
+	for (const [index, message] of messages.entries()) {
+		const source = messageSources.get(message);
+		if (source) messageSources.set(captured[index], { ...source });
+	}
+	return captured;
+}
+
+/** Deterministic public data only. The actual adapter must permit and accept this candidate. */
+export function preparePublicContextWindow(messages: readonly AgentMessage[]):
+	| {
+			messages: AgentMessage[];
+			replacements: readonly { messageIndex: number; text: string }[];
+	  }
+	| undefined {
+	const captured = captureCanonicalRequestMessages(messages);
+	const views = compiledViewUnits.get(captured)!;
+	const epoch = compiledEpochContexts.get(captured)!;
+	const maxBytes = views.selection.limits.maxMetadataBytes;
+	const references = [...epoch.references];
+	const replacements: { messageIndex: number; text: string }[] = [];
+	for (const [index, message] of captured.entries()) {
+		if (message.role !== "assistant" && message.role !== "toolResult") continue;
+		// Public v1 has no media representation. Do not disturb an otherwise valid native request.
+		if (message.content.some((part) => !["text", "toolCall", "thinking"].includes(part.type))) return;
+		const reference = references[index];
+		if (!reference) throw new Error("Public request view requires its captured source");
+		const rendered = renderPublicHistory(message, reference.ref.entryId, maxBytes);
+		if (rendered.role !== "custom" || typeof rendered.content !== "string")
+			throw new Error("Public request view has no standalone text");
+		const source = messageSources.get(message);
+		if (source) messageSources.set(rendered, source);
+		captured[index] = rendered;
+		references[index] = { ...reference, rendering: PUBLIC_CONTEXT_RENDERER };
+		replacements.push({ messageIndex: index, text: rendered.content });
+	}
+	if (!replacements.length) return;
+	stringifyBoundedJson(captured, maxBytes);
+	const publicIndices = new Set(replacements.map((replacement) => replacement.messageIndex));
+	const renderedUnit = (unit: ViewUnit, index: number): ViewUnit =>
+		publicIndices.has(index)
+			? { ...unit, sourceRevision: JSON.stringify([unit.sourceRevision, PUBLIC_CONTEXT_RENDERER]) }
+			: unit;
+	compiledViewUnits.set(captured, {
+		units: views.units.map(renderedUnit),
+		selection: { ...views.selection, units: views.selection.units.map(renderedUnit) },
+	});
+	compiledEpochContexts.set(captured, {
+		...epoch,
+		references,
+		continuation: { kind: "portable-checkpoint", publicTailThrough: epoch.source },
+	});
+	return { messages: captured, replacements };
 }
 
 /** A candidate only. The caller must ACK the canonical checkpoint before adoption or send. */
@@ -128,13 +194,15 @@ export function prepareCanonicalEpoch(
 	return {
 		checkpoint: snapshotContextEpoch(
 			{
-				version: 3,
+				version: 4,
 				renderer: CONTEXT_EPOCH_RENDERER,
 				source: context.source,
 				representation,
 				replayContract,
 				...(publicWindow ? { publicWindow: true as const } : {}),
-				...(context.checkpoint?.continuation ? { continuation: context.checkpoint.continuation } : {}),
+				...((context.continuation ?? context.checkpoint?.continuation)
+					? { continuation: context.continuation ?? context.checkpoint?.continuation }
+					: {}),
 				views,
 				taskFrame: context.taskFrame,
 				resourceRevision: context.resourceRevision,
@@ -212,7 +280,7 @@ export function prepareRecoveryCompaction(
 	if (!views.length && !publicWindow) return;
 	return snapshotContextEpoch(
 		{
-			version: 3,
+			version: 4,
 			renderer: CONTEXT_EPOCH_RENDERER,
 			source: context.source,
 			representation: null,
@@ -560,7 +628,7 @@ export class CanonicalContextCompiler {
 				if (
 					pinned.rendering !== undefined &&
 					(pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
-						checkpoint.version !== 3 ||
+						(checkpoint.version !== 3 && checkpoint.version !== 4) ||
 						pinned.ref.kind === "compaction")
 				)
 					throw new Error("Unsupported context epoch view rendering");

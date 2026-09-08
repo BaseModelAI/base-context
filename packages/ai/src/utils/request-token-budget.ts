@@ -51,6 +51,12 @@ export interface ProviderRequestProjection {
 	readonly replayContract?: "complete-context" | "message-groups";
 	/** Actual native request can begin a fresh stateless public window after its closed replay group. */
 	readonly publicWindow?: true;
+	/** Completed source groups from the existing native converter traversal; not route permission. */
+	readonly publicMessageGroups?: readonly (readonly number[])[];
+	/** Bound to this actual full native request. Undefined refuses an unsupported/partial public replacement. */
+	readonly encodePublicWindow?: (
+		replacements: readonly ProviderRequestPublicMessage[],
+	) => ProviderRequestPublicWindow | undefined;
 	/** A null item is fixed request context (for example the system prompt). */
 	readonly messageIndices: readonly (number | null)[];
 	/** Only these whole plain assistant messages may be considered for omission. */
@@ -59,7 +65,17 @@ export interface ProviderRequestProjection {
 	readonly generatedMessageIndices?: readonly number[];
 }
 
-/** Actual serialized request. No model text, schema, replay unit or prefix is modified. */
+export interface ProviderRequestPublicMessage {
+	readonly messageIndex: number;
+	readonly text: string;
+}
+
+export interface ProviderRequestPublicWindow {
+	readonly request: ProviderRequestRepresentation;
+	readonly projection: ProviderRequestProjection;
+}
+
+/** Exact serialized request presented for measurement and admission. */
 export interface ProviderRequestRepresentation {
 	readonly api: Api;
 	readonly provider: Provider;
@@ -67,6 +83,37 @@ export interface ProviderRequestRepresentation {
 	readonly body: string | undefined;
 	/** Only the owned exact-match WebSocket continuation path may supply this prefix. */
 	readonly retainedPrefix?: RetainedContextTokens & { readonly inputItems: number };
+}
+
+/** Keep owned prefix credit only when a replacement preserves its exact input prefix and configuration. */
+export function withRequestBody(
+	request: ProviderRequestRepresentation,
+	body: string | undefined,
+): ProviderRequestRepresentation {
+	const { retainedPrefix, ...uncredited } = request;
+	if (!retainedPrefix || body === request.body) return { ...request, body };
+	if (request.body !== undefined && body !== undefined) {
+		try {
+			const { input: previousInput, ...previousFields } = JSON.parse(request.body);
+			const { input: nextInput, ...nextFields } = JSON.parse(body);
+			const count = retainedPrefix.inputItems;
+			if (
+				Number.isSafeInteger(count) &&
+				count >= 0 &&
+				Array.isArray(previousInput) &&
+				Array.isArray(nextInput) &&
+				previousInput.length >= count &&
+				nextInput.length >= count &&
+				JSON.stringify(previousFields) === JSON.stringify(nextFields) &&
+				JSON.stringify(previousInput.slice(0, count)) === JSON.stringify(nextInput.slice(0, count))
+			) {
+				return { ...request, body };
+			}
+		} catch {
+			// The actual meter still reports malformed/unsupported input; it receives no old credit.
+		}
+	}
+	return { ...uncredited, body };
 }
 
 export interface RequestTokenCalibration {

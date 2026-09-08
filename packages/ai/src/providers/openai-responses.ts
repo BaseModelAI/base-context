@@ -25,7 +25,12 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import {
+	bindResponsesPublicWindow,
+	convertResponsesMessages,
+	convertResponsesTools,
+	processResponsesStream,
+} from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
@@ -136,7 +141,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 					(options?.transport === undefined || options.transport === "sse" || options.transport === "auto") &&
 					JSON.stringify({ ...serialized, input: undefined }) === nativeWindow
 				) {
-					requestProjection = { ...requestProjection, publicWindow: true };
+					requestProjection = bindResponsesPublicWindow(
+						{ api: model.api, provider: model.provider, url: requestUrl, body },
+						requestProjection,
+					);
 				}
 				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection);
 				params = JSON.parse(selected!) as ResponseCreateParamsStreaming;

@@ -102,7 +102,8 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
-	tokensBefore: number;
+	/** Prior-context estimate; null when the original context is not measurable. */
+	tokensBefore: number | null;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** What the summarization call(s) billed; persisted on the compaction entry. */

@@ -1456,6 +1456,7 @@ export class AgentSession {
 								representation,
 								replayContract,
 								publicWindow,
+								candidate.publicMessages !== undefined,
 								candidate.selectedUnitIds,
 							]);
 							if (accepted !== undefined) {
@@ -1464,6 +1465,7 @@ export class AgentSession {
 								return;
 							}
 							if (
+								!candidate.publicMessages &&
 								committed?.representation === representation &&
 								committed.replayContract === replayContract &&
 								(committed.publicWindow === true) === publicWindow &&
@@ -1476,7 +1478,7 @@ export class AgentSession {
 								return;
 							}
 							const prepared = prepareCanonicalEpoch(
-								messages,
+								candidate.publicMessages ?? messages,
 								candidate.selectedUnitIds,
 								representation,
 								limits.maxSourceBytes,
@@ -1486,7 +1488,6 @@ export class AgentSession {
 							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
 								throw new Error("Context epoch candidate does not match its captured source");
 							const tokensBefore = candidate.originalAssessment.estimatedInputTokens;
-							if (tokensBefore === null) throw new Error("Context epoch input estimate is unavailable");
 							const result: CompactionResult = {
 								summary: "",
 								firstKeptEntryId: prepared.checkpoint.literalTailId,
@@ -8478,7 +8479,7 @@ export class AgentSession {
 		let compactionSettled = false;
 		let summary: string;
 		let firstKeptEntryId: string;
-		let tokensBefore: number;
+		let tokensBefore: number | null;
 		let details: CompactionResult["details"];
 		let usage: CompactionResult["usage"];
 		let savedCompactionId: string;

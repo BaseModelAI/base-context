@@ -47,6 +47,7 @@ import {
 	RequestTokenBudgetError,
 } from "../utils/request-token-budget.js";
 import {
+	bindResponsesPublicWindow,
 	convertResponsesMessages,
 	convertResponsesTools,
 	observeResponsesEvent,
@@ -200,6 +201,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				JSON.stringify({ ...body, input: undefined }) === nativeWindow;
 			let prepared = false;
 			const prepareBody = async (url: string, retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"]) => {
+				const request = { url, body: bodyJson, ...(retainedPrefix ? { retainedPrefix } : {}) };
 				let requestProjection = prepared ? undefined : projection;
 				if (
 					requestProjection &&
@@ -208,16 +210,12 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						url === "wss://chatgpt.com/backend-api/codex/responses")
 				) {
 					// Use the actual reused connection URL. Prefix loss sends full context without old credit.
-					requestProjection = { ...requestProjection, publicWindow: true };
+					requestProjection = bindResponsesPublicWindow(
+						{ ...request, api: model.api, provider: model.provider },
+						requestProjection,
+					);
 				}
-				const selected = await attempts.prepareRequest(
-					{
-						url,
-						body: bodyJson,
-						...(retainedPrefix ? { retainedPrefix } : {}),
-					},
-					requestProjection,
-				);
+				const selected = await attempts.prepareRequest(request, requestProjection);
 				if (selected !== undefined) {
 					bodyJson = selected;
 					body = JSON.parse(selected) as RequestBody;

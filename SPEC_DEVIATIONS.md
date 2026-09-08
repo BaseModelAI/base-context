@@ -440,6 +440,43 @@ that source continuation path before opening the five-feature benchmark gate; do
 unauthorized readiness/auth/model probes for implementation. Broader job/artifact/scheduler
 freshness, full portable/native modes and deployment certification remain separate backlog.
 
+## Current prerequisite implementation — W32
+
+W32 implements request-time public fallback for supported official Responses/Codex requests.
+When ordinary selection cannot admit the native body, the actual adapter may encode whole
+completed groups as standalone public data. The same captured source recipes supply the
+candidate, final budget, existing canonical ACK and adopted messages. Original users and
+policy items remain unchanged. Canonical opaque originals remain archived. The normal
+converter and payload hook are not replayed, and no summary model call is added.
+
+V4 records this as a `portable-checkpoint`, not a fabricated summary. Its fixed public-tail
+cutoff does not convert later native messages. Native fork/import rebuilds destination refs
+and permission remains request-local. Null original input estimates stay null in the same
+compaction control and copies; ordinary summary estimates/usage remain unchanged. Direct
+prior-token displays label unknown explicitly. Schema35/protocol11 fences these readers.
+
+Fourteen existing cases and type checking pass on their first W32 invocations: separate
+compiler2/services2/selector2/native-Python2/compaction4/RPC2 scopes. The service path includes
+new opaque output plus genuine recovery, actual request fallback, exact adopted public text,
+null original estimate, close/reopen and native fork/import. It uses seven main fake responses
+and one ordinary summary. The separate AI-only Codex phase checks every post-callback budget
+measurement and the physical fake send for stale credit; its offline acceptance callback is
+not claimed as a canonical ACK. Root's service case supplies that actual ownership path.
+
+The five benchmark prerequisites now have working source paths: TaskFrame injection (W26),
+closed ViewUnit selection (W29/W30), actual-request conservative model budgets (W27/W32),
+stable source-backed epochs (W29/W31/W32), and native selective recovery (W28–W32). After this
+coherent source change is committed and built, proceed to the authorized benchmark phase:
+all 30 isolated tasks at LOW effort, then MEDIUM, using this session's same existing ChatGPT
+subscription and exact `gpt-5.6-sol` / `gpt-6-astra` routes. No early samples or readiness/auth/
+model probes are needed. The remaining audit findings are now the post-prerequisite backlog,
+not reasons to reopen settled feature work or repeat D/S setup.
+
+Unsupported routes, open groups, media and candidates that still exceed the budget may refuse
+explicitly; this is not a promise that every representation can fit. Source/fake-transport checks
+do not certify provider behavior, cache hits, tokenizer accuracy, installed platforms or the
+full remaining spec. No live benchmark, publication or goal-completion claim is made here.
+
 ## Completed D/S setup handoff — setup only
 
 The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.

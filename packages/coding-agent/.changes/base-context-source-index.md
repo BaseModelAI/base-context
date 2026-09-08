@@ -57,3 +57,7 @@
 - Capture owned kernel instance/generation/state in bounded native provider context, require new epoch acceptance on change, and refuse stale held snapshots without probing or claiming variable survival.
 - Drop copied resource acceptance and resnapshot on native destination/reopen paths; keep the ordinary no-budget/no-epoch baseline unchanged.
 - Require ownership/RPC schema34 for public-window and resource-aware managed epoch readers.
+- Select source-backed v4 public checkpoints at the actual native request boundary, without another summary call or hook/converter replay; adopt the exact accepted public view only after its canonical ACK.
+- Drop stale retained-prefix credit at both public candidate assessment and final physical admission.
+- Preserve unknown original input estimates as null in the existing compaction control, copy/rebuild and direct displays; do not change ordinary summary usage.
+- Require ownership/RPC schema35 for public-request and nullable-token readers.

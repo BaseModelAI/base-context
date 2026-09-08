@@ -148,13 +148,13 @@ export interface BoundCompactionSink extends BoundSessionRequestSink {
 	readBranch(): Promise<SessionEntry[]>;
 	[appendContextEpoch](
 		checkpoint: ContextEpochCheckpoint,
-		tokensBefore: number,
+		tokensBefore: number | null,
 		summary?: ContextEpochSummary,
 	): Promise<string>;
 	appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
-		tokensBefore: number,
+		tokensBefore: number | null,
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,
@@ -223,7 +223,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
 	firstKeptEntryId: string;
-	tokensBefore: number;
+	/** Prior-context estimate; null when the original context is not measurable. */
+	tokensBefore: number | null;
 	details?: T;
 	fromHook?: boolean;
 	customInstructions?: string;
@@ -2357,7 +2358,7 @@ export class SessionManager {
 		const appendCaptured = async (
 			summary: string,
 			firstKeptEntryId: string,
-			tokensBefore: number,
+			tokensBefore: number | null,
 			details?: unknown,
 			fromHook?: boolean,
 			instructions?: string,
@@ -2812,7 +2813,7 @@ export class SessionManager {
 	async appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
-		tokensBefore: number,
+		tokensBefore: number | null,
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,
@@ -2834,7 +2835,7 @@ export class SessionManager {
 	private async _appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,
-		tokensBefore: number,
+		tokensBefore: number | null,
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,

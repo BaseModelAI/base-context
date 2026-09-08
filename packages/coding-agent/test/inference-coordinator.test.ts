@@ -13,6 +13,7 @@ import {
 	InferenceCoordinator,
 } from "../src/core/inference-coordinator.js";
 import { convertToLlm } from "../src/core/messages.js";
+import { renderPublicHistory } from "../src/core/public-context.js";
 import type {
 	BoundRequestSink,
 	NativeRequestEvent,
@@ -592,6 +593,7 @@ describe("native inference coordination", () => {
 			expect(candidate.projection.replayContract).toBe("message-groups");
 			// This hook added a non-native field: selection still works, but fresh-window permission is absent.
 			expect(candidate.projection.publicWindow).toBeUndefined();
+			expect(candidate.projection.encodePublicWindow).toBeUndefined();
 			for (const entryId of [history.callId, history.resultId]) {
 				expect(candidate.selectedUnitIds).toContain(
 					fullUnits.find((unit) => unit.exactSources.includes(entryId))!.id,
@@ -672,10 +674,22 @@ describe("native inference coordination", () => {
 		const codexPayload = vi.fn();
 		codex.agent.onPayload = codexPayload;
 		let codexReplies = 0;
-		const socket = installNativeCodexSocket(() => {
+		let offlinePublic: ai.ProviderRequestPublicWindow | undefined;
+		let publicMeasurements: readonly [ai.ProviderRequestRepresentation][] = [];
+		const socket = installNativeCodexSocket((actualBody) => {
 			expect(codex.facts.at(-1)).toMatchObject({ type: "attempt_admitted" });
 			const turn = ++codexReplies;
-			expect(codexOffers).toHaveLength(turn);
+			if (offlinePublic) {
+				expect(turn).toBe(4);
+				expect(codexOffers).toHaveLength(3);
+				expect(actualBody).toEqual({ type: "response.create", ...JSON.parse(offlinePublic.request.body!) });
+				expect(actualBody.previous_response_id).toBeUndefined();
+				expect(codex.facts.at(-1)).toMatchObject({
+					descriptor: { kind: "initial", requestBudget: { retainedInputTokens: 0 } },
+				});
+				expect(publicMeasurements.length).toBeGreaterThanOrEqual(2);
+				for (const [measured] of publicMeasurements) expect(measured.retainedPrefix).toBeUndefined();
+			} else expect(codexOffers).toHaveLength(turn);
 			const text = {
 				type: "message",
 				id: `msg_codex_${turn}`,
@@ -798,6 +812,94 @@ describe("native inference coordination", () => {
 			expect(codex.facts[4]).toMatchObject({ type: "attempt_admitted", descriptor: { kind: "initial" } });
 			expect(codex.facts[5]).toMatchObject({ type: "attempt_settled", receipt: { kind: "initial" } });
 			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
+
+			// AI-only callback acceptance, not a canonical epoch ACK. Real measure/admit/settle remain installed.
+			let releaseOfflineAcceptance!: () => void;
+			const acceptanceGate = new Promise<void>((resolve) => {
+				releaseOfflineAcceptance = resolve;
+			});
+			let announceOfflineAcceptance!: () => void;
+			const acceptanceReady = new Promise<void>((resolve) => {
+				announceOfflineAcceptance = resolve;
+			});
+			const offlineAcceptance = vi.fn(async () => {
+				announceOfflineAcceptance();
+				await acceptanceGate;
+			});
+			let restorePublicMeter: (() => void) | undefined;
+			codex.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => {
+				const observer = options?.attempts;
+				if (!observer?.prepareRequest || !observer.measureRequest)
+					throw new Error("Expected actual native observer");
+				const meter = vi.spyOn(observer, "measureRequest");
+				publicMeasurements = meter.mock.calls;
+				restorePublicMeter = () => meter.mockRestore();
+				observer.prepareRequest = async (request, projection) => {
+					expect(request.retainedPrefix).toMatchObject({ inputTokens: 5, outputTokens: 3 });
+					expect(projection.publicWindow).toBe(true);
+					const messages = codex.viewMessages!;
+					const units = getCanonicalViewUnits(messages)!;
+					const replacements = projection.publicMessageGroups!.flatMap((group) =>
+						group.map((messageIndex) => {
+							const rendered = renderPublicHistory(
+								messages[messageIndex],
+								units[messageIndex].exactSources[0],
+								128 * 1024,
+							);
+							if (rendered.role !== "custom" || typeof rendered.content !== "string") {
+								throw new Error("Expected actual public source data");
+							}
+							return { messageIndex, text: rendered.content };
+						}),
+					);
+					const encoded = projection.encodePublicWindow?.(replacements);
+					if (!encoded) throw new Error("Expected actual public request encoding");
+					offlinePublic = encoded;
+					expect(encoded.projection.publicWindow).toBe(true);
+					expect(encoded.projection.encodePublicWindow).toBeUndefined();
+					expect(encoded.request.retainedPrefix).toBeUndefined();
+					const assessment = observer.measureRequest!(encoded.request);
+					expect(assessment).toMatchObject({ status: "within-estimate", retainedInputTokens: 0 });
+					const before = JSON.parse(request.body!);
+					const after = JSON.parse(encoded.request.body!);
+					expect({ ...after, input: undefined }).toEqual({ ...before, input: undefined });
+					for (const [itemIndex, messageIndex] of projection.messageIndices.entries()) {
+						if (messageIndex !== null && replacements.some((entry) => entry.messageIndex === messageIndex))
+							continue;
+						expect(after.input).toContainEqual(before.input[itemIndex]);
+					}
+					for (const replacement of replacements) {
+						const itemIndex = encoded.projection.messageIndices.indexOf(replacement.messageIndex);
+						expect(after.input[itemIndex]).toEqual({
+							role: "user",
+							content: [{ type: "input_text", text: replacement.text }],
+						});
+					}
+					await offlineAcceptance();
+					return encoded.request.body;
+				};
+				return { ...options, transport: "websocket-cached", sessionId: codexSession };
+			});
+			const publicRun = codex.agent.prompt("Actual public encoding through the native tracker");
+			try {
+				await Promise.race([acceptanceReady, publicRun]);
+				expect(offlineAcceptance).toHaveBeenCalledTimes(1);
+				expect(socket.sent).toHaveLength(3);
+				expect(codex.facts).toHaveLength(6);
+				releaseOfflineAcceptance();
+				await publicRun;
+				expect(socket.sent).toHaveLength(4);
+				expect(codexPayload).toHaveBeenCalledTimes(4);
+				expect(codex.facts).toHaveLength(8);
+				expect(codex.facts[7]).toMatchObject({
+					receipt: { kind: "initial", requestBudget: { retainedInputTokens: 0 } },
+				});
+				expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
+			} finally {
+				releaseOfflineAcceptance();
+				await publicRun.catch(() => undefined);
+				restorePublicMeter?.();
+			}
 		} finally {
 			await codex.requests.dispose();
 			ai.cleanupSessionResources(codexSession);
@@ -1370,6 +1472,21 @@ describe("native inference coordination", () => {
 			// This route is official. Permission does not bypass a local checkpoint refusal.
 			expect(candidate.projection.replayContract).toBe("message-groups");
 			expect(candidate.projection.publicWindow).toBe(true);
+			if (candidate.originalAssessment.status === "unknown") {
+				expect(candidate.originalAssessment).toMatchObject({ estimatedInputTokens: null, retainedInputTokens: 0 });
+				expect(candidate.assessment).toMatchObject({ status: "within-estimate", retainedInputTokens: 0 });
+				expect(candidate.projection.encodePublicWindow).toBeUndefined();
+				expect(candidate.request.body).toContain("retained final item");
+				expect(candidate.request.body).not.toContain("unobserved-opaque");
+			} else {
+				expect(candidate.originalAssessment.status).toBe("within-estimate");
+				expect(candidate.projection.encodePublicWindow).toBeTypeOf("function");
+				const group = candidate.projection.publicMessageGroups!.find((indices) => indices.length > 1)!;
+				expect(group).toHaveLength(2);
+				expect(
+					candidate.projection.encodePublicWindow!([{ messageIndex: group[0], text: "partial group" }]),
+				).toBeUndefined();
+			}
 			throw codexSentinel;
 		});
 		const codexEdge = createBudgetAgent(codexEdgeManager, 8192, undefined, rejectCodex, undefined, {
@@ -1397,7 +1514,7 @@ describe("native inference coordination", () => {
 			expect(refusedSocket.sent).toEqual([]);
 			expect(offlineFetch).not.toHaveBeenCalled();
 
-			// No owned response/receipt prefix exists. Opaque reasoning stays unknown, not byte-estimated.
+			// No owned prefix exists. The opaque estimate stays unknown; the actual public candidate reaches acceptance.
 			await codexEdgeManager.appendMessage({
 				...output(),
 				api: codexModel.api,
@@ -1419,18 +1536,14 @@ describe("native inference coordination", () => {
 			});
 			const opaqueRefusal = await codexEdge.agent.prompt("Codex opaque current input").then(
 				() => {
-					throw new Error("Expected an actual unknown-token refusal");
+					throw new Error("Expected the actual public-candidate acceptance refusal");
 				},
 				(error: unknown) => error,
 			);
-			expect(opaqueRefusal).toBeInstanceOf(ai.RequestTokenBudgetError);
+			expect(opaqueRefusal).toBe(codexSentinel);
 			await expect(codexEdge.events.result()).rejects.toBe(opaqueRefusal);
-			expect((opaqueRefusal as ai.RequestTokenBudgetError).assessment).toMatchObject({
-				status: "unknown",
-				estimatedInputTokens: null,
-				retainedInputTokens: 0,
-			});
-			expect(rejectCodex).toHaveBeenCalledTimes(1);
+			expect(rejectCodex).toHaveBeenCalledTimes(2);
+			expect(rejectCodex.mock.calls[1][0].originalAssessment.status).toBe("unknown");
 			expect(codexEdgePayload).toHaveBeenCalledTimes(2);
 			expect(codexEdge.inputAcks).toHaveLength(2);
 			expect(codexEdge.facts).toEqual([]);
@@ -1464,6 +1577,7 @@ describe("native inference coordination", () => {
 				const [stateRequest, stateProjection] = preparation.mock.calls[0];
 				expect(stateProjection?.replayContract).toBe("message-groups");
 				expect(stateProjection?.publicWindow).toBeUndefined();
+				expect(stateProjection?.encodePublicWindow).toBeUndefined();
 				expect(JSON.parse(stateRequest.body!)).toMatchObject({
 					previous_response_id: "resp_external",
 					conversation: "conversation_external",

@@ -17,14 +17,17 @@ export class CompactionSummaryMessageComponent extends ExpandableCustomMessageBo
 	protected updateDisplay(): void {
 		this.clear();
 
-		const tokenStr = this.message.tokensBefore.toLocaleString();
+		const description =
+			this.message.tokensBefore === null
+				? "Compacted (prior token estimate unknown)"
+				: `Compacted from ${this.message.tokensBefore.toLocaleString()} tokens`;
 		const label = customMessageLabel("compaction");
 		this.addChild(new Text(label, 0, 0));
 		this.addChild(new Spacer(1));
 
 		const instructions = this.message.customInstructions;
 		if (this.expanded) {
-			let header = `**Compacted from ${tokenStr} tokens**\n\n`;
+			let header = `**${description}**\n\n`;
 			if (instructions) {
 				header += `**Focus:** ${instructions}\n\n`;
 			}
@@ -37,7 +40,7 @@ export class CompactionSummaryMessageComponent extends ExpandableCustomMessageBo
 			const focus = instructions ? ` · focus: ${instructions}` : "";
 			this.addChild(
 				new Text(
-					`${theme.fg("customMessageText", `Compacted from ${tokenStr} tokens${focus}`)} ${expandCollapseHint("app.tools.expand", false)}`,
+					`${theme.fg("customMessageText", `${description}${focus}`)} ${expandCollapseHint("app.tools.expand", false)}`,
 					0,
 					0,
 				),

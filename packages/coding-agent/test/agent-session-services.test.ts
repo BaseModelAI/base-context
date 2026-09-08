@@ -192,24 +192,28 @@ describe("createAgentSessionFromServices", () => {
 			else epochsAtSend.push(epochs.at(-1)!);
 			expect(typeof init?.body).toBe("string");
 			(summarizing ? summaryBodies : bodies).push(init!.body as string);
+			const requestRecovery = !summarizing && bodies.length === 4;
 			const firstInput =
-				bodies.length === 1
+				bodies.length === 1 || requestRecovery
 					? (await epochManager.readBranch()).find(
-							(entry) => entry.type === "message" && entry.message.role === "user",
+							(entry) =>
+								entry.type === "message" &&
+								entry.message.role === "user" &&
+								(!requestRecovery || JSON.stringify(entry.message.content).includes("Also preserve Bar.txt.")),
 						)
 					: undefined;
 			const item = firstInput
 				? {
 						type: "function_call",
-						id: "fc_epoch_recovery",
-						call_id: "call_epoch_recovery",
+						id: requestRecovery ? "fc_request_recovery" : "fc_epoch_recovery",
+						call_id: requestRecovery ? "call_request_recovery" : "call_epoch_recovery",
 						name: "prime_context",
 						status: "completed",
 						arguments: JSON.stringify({
 							action: "recover",
 							ref: firstInput.id,
 							field: "/nativeOrigin/submitted/text",
-							need: "Preserve Foo.txt.",
+							need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
 						}),
 					}
 				: {
@@ -219,12 +223,12 @@ describe("createAgentSessionFromServices", () => {
 						status: "completed",
 						content: [{ type: "output_text", text: "OK", annotations: [] }],
 					};
-			const opaqueTail = !summarizing && bodies.length === 3;
+			const opaqueTail = !summarizing && (bodies.length === 3 || requestRecovery);
 			const reasoning = {
 				type: "reasoning",
-				id: "rs_opaque_tail",
+				id: requestRecovery ? "rs_opaque_request" : "rs_opaque_tail",
 				summary: [],
-				encrypted_content: "OPAQUE_TAIL_CANONICAL_ONLY",
+				encrypted_content: requestRecovery ? "OPAQUE_REQUEST_CANONICAL_ONLY" : "OPAQUE_TAIL_CANONICAL_ONLY",
 			};
 			const sse = [
 				...(opaqueTail
@@ -376,9 +380,9 @@ describe("createAgentSessionFromServices", () => {
 			expect(summaryBodies[0]).toContain("Preserve Foo.txt.");
 			expect(summaryBodies[0]).not.toContain("OPTIONAL_PRIOR_LITERAL");
 			await epochSession.prompt("Continue with both files.");
-			expect(epochsAtSend).toHaveLength(4);
+			expect(epochsAtSend).toHaveLength(5);
 			expect(epochsAtSend[3]).not.toBe(epochsAtSend[2]);
-			expect(bodies).toHaveLength(4);
+			expect(bodies).toHaveLength(5);
 			expect(bodies[3]).toContain("Foo.txt.");
 			expect(bodies[3]).toContain("Bar.txt.");
 			expect(bodies[3]).toContain("call_epoch_recovery");
@@ -398,6 +402,71 @@ describe("createAgentSessionFromServices", () => {
 						item.role === "user" && JSON.stringify(item.content).includes("Also preserve Bar.txt."),
 				),
 			).toBe(true);
+			// A new opaque/tool response has no accepted recovery prefix. The actual next request
+			// switches to public data without another summarizer call, before ACK/adoption/send.
+			expect(epochsAtSend[4]).not.toBe(epochsAtSend[3]);
+			expect(bodies[4]).toContain("call_request_recovery");
+			expect(bodies[4]).toContain("Also preserve Bar.txt.");
+			expect(bodies[4]).not.toContain("OPAQUE_REQUEST_CANONICAL_ONLY");
+			const portableBody = JSON.parse(bodies[4]);
+			expect(
+				portableBody.input.some((item: { type?: string }) =>
+					["reasoning", "function_call", "function_call_output"].includes(item.type ?? ""),
+				),
+			).toBe(false);
+			const portableEntries = await epochManager.readBranch();
+			const portableControl = portableEntries.find((entry) => entry.id === epochsAtSend[4]);
+			expect(portableControl).toMatchObject({ type: "compaction", tokensBefore: null });
+			if (portableControl?.type !== "compaction") throw new Error("Expected public request epoch");
+			expect(portableControl.usage).toBeUndefined();
+			expect(readContextEpoch(portableControl.details, 2 * 1024 * 1024)?.continuation?.kind).toBe(
+				"portable-checkpoint",
+			);
+			const requestedRecovery = portableEntries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId.includes("call_request_recovery"),
+			);
+			expect(requestedRecovery?.type).toBe("message");
+			if (
+				requestedRecovery?.type !== "message" ||
+				requestedRecovery.message.role !== "toolResult" ||
+				requestedRecovery.message.content[0]?.type !== "text"
+			)
+				throw new Error("Expected new native recovery");
+			expect(JSON.parse(requestedRecovery.message.content[0].text).results[0].records[0].text).toBe(
+				"Also preserve Bar.txt.",
+			);
+			expect(JSON.stringify(portableEntries)).toContain("OPAQUE_REQUEST_CANONICAL_ONLY");
+			const publicRequestMessages = epochSession.messages.filter(
+				(message) => message.role === "custom" && message.customType === PUBLIC_CONTEXT_RENDERER,
+			);
+			for (const message of publicRequestMessages) {
+				if (message.role !== "custom") throw new Error("Expected adopted public history");
+				expect(
+					portableBody.input.some(
+						(item: { content?: unknown }) =>
+							JSON.stringify(item.content) === JSON.stringify([{ type: "input_text", text: message.content }]),
+					),
+				).toBe(true);
+			}
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.open(epochFile);
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				sessionManager: epochManager,
+			}));
+			const reopenedPublic = await epochManager.readBranchHistory((history) =>
+				new CanonicalContextCompiler().compile(
+					history.branchContext,
+					epochSession!.settingsManager.getCanonicalContextLimits(),
+				),
+			);
+			for (const message of publicRequestMessages) expect(reopenedPublic).toContainEqual(message);
+			expect(getCanonicalEpochContext(reopenedPublic)?.checkpoint?.continuation?.kind).toBe("portable-checkpoint");
+			expect(summaryBodies).toHaveLength(1);
 			// Native fork and retained import must rebuild the public cutoff and recipes in the destination.
 			const sourceManager = epochManager;
 			for (const retained of [false, true]) {
@@ -421,6 +490,11 @@ describe("createAgentSessionFromServices", () => {
 					);
 					const checkpoint = getCanonicalEpochContext(copied)!.checkpoint!;
 					expect(checkpoint.publicWindow).toBeUndefined();
+					expect(checkpoint.continuation?.kind).toBe("portable-checkpoint");
+					const copiedControls = (await destination.readBranch()).filter((entry) => entry.type === "compaction");
+					expect(copiedControls.at(-1)?.tokensBefore).toBeNull();
+					expect(copiedControls.at(-1)?.usage).toBeUndefined();
+					for (const message of publicRequestMessages) expect(copied).toContainEqual(message);
 					expect(checkpoint.continuation?.publicTailThrough).toMatchObject({
 						sessionId: destination.getSessionId(),
 						sessionFile: destination.getSessionFile(),
@@ -432,7 +506,7 @@ describe("createAgentSessionFromServices", () => {
 					}
 					expect(copied).toContainEqual(publicRecovery);
 					expect(getCanonicalViewUnits(copied)?.filter((unit) => unit.kind === "recovery")).toHaveLength(
-						retained ? 0 : 1,
+						retained ? 0 : 2,
 					);
 					expect(JSON.stringify(await destination.readBranch())).toContain("OPAQUE_TAIL_CANONICAL_ONLY");
 					({ session: copiedSession } = await createAgentSessionFromServices({
@@ -452,7 +526,7 @@ describe("createAgentSessionFromServices", () => {
 					}
 				}
 			}
-			expect(bodies).toHaveLength(6);
+			expect(bodies).toHaveLength(7);
 			expect(summaryBodies).toHaveLength(1);
 		} finally {
 			try {

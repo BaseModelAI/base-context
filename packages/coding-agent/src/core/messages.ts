@@ -193,7 +193,8 @@ export interface BranchSummaryMessage {
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
 	summary: string;
-	tokensBefore: number;
+	/** Prior-context estimate; null when it is unavailable. */
+	tokensBefore: number | null;
 	/** Number of retained messages that precede this summary in transcript presentation. */
 	retainedMessageCount?: number;
 	/** User instructions that guided the summary (from `/compact <instructions>`) */
@@ -259,7 +260,7 @@ export function createBranchSummaryMessage(summary: string, fromId: string, time
 
 export function createCompactionSummaryMessage(
 	summary: string,
-	tokensBefore: number,
+	tokensBefore: number | null,
 	timestamp: string,
 	customInstructions?: string,
 	retainedMessageCount?: number,

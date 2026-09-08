@@ -118,7 +118,7 @@ export interface PrimeAgentSessionMeta {
 	sessionId?: string;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
-	compaction?: { tokensBefore?: number; summary?: string };
+	compaction?: { tokensBefore?: number | null; summary?: string };
 	subagents?: PrimeAgentSubagentMeta[];
 	autonomous?: PrimeAgentAutonomousMeta;
 	/** Observed subagent and autonomous-continuation counts at completion. */

@@ -6,7 +6,12 @@ import type {
 	RequestTokenAssessment,
 	RequestTokenBudgetEvaluator,
 } from "@ponythewhite/base-context-ai";
-import { type CanonicalViewSelectionSource, getCanonicalViewSelectionSource } from "./canonical-context.js";
+import {
+	type CanonicalViewSelectionSource,
+	captureCanonicalRequestMessages,
+	getCanonicalViewSelectionSource,
+	preparePublicContextWindow,
+} from "./canonical-context.js";
 import { convertToLlm } from "./messages.js";
 import type { SourceSnapshotRef } from "./request-events.js";
 import { bindMessageReplayUnits, closeViewSelection } from "./view-units.js";
@@ -18,6 +23,8 @@ export interface RequestViewCandidate {
 	readonly projection: ProviderRequestProjection;
 	readonly assessment: RequestTokenAssessment;
 	readonly originalAssessment: RequestTokenAssessment;
+	/** Exact public messages represented by the accepted candidate, with captured source recipes. */
+	readonly publicMessages?: readonly AgentMessage[];
 }
 
 /** Root resolves only after its canonical epoch checkpoint ACK. This module owns no epoch state. */
@@ -40,7 +47,7 @@ export function captureRequestViewBoundary(
 ): CapturedRequestViewBoundary {
 	const source = getCanonicalViewSelectionSource(messages);
 	if (!source) throw new Error("Request view boundary requires compiled canonical messages");
-	return { ...source, messages: structuredClone(messages), commit, validate };
+	return { ...source, messages: captureCanonicalRequestMessages(messages), commit, validate };
 }
 
 export function matchesRequestView(
@@ -95,6 +102,7 @@ export async function selectRequestView(
 		candidateRequest: ProviderRequestRepresentation,
 		candidateProjection: ProviderRequestProjection,
 		assessment: RequestTokenAssessment,
+		publicMessages?: readonly AgentMessage[],
 	) =>
 		boundary.commit(
 			Object.freeze({
@@ -118,8 +126,37 @@ export async function selectRequestView(
 				}),
 				assessment,
 				originalAssessment: full,
+				...(publicMessages ? { publicMessages } : {}),
 			}),
 		);
+	const offerPublicWindow = async (): Promise<string | undefined> => {
+		if (
+			!allowShrink ||
+			replayContract !== "message-groups" ||
+			!projection.publicWindow ||
+			!projection.encodePublicWindow
+		)
+			return;
+		const closed = closeViewSelection(
+			units,
+			units.map((unit) => unit.id),
+			boundary.limits,
+		);
+		const publicView = preparePublicContextWindow(boundary.messages);
+		if (!publicView) return;
+		const encoded = projection.encodePublicWindow(publicView.replacements);
+		if (!encoded) return;
+		const assessment = budget.measure(encoded.request);
+		if (assessment.status !== "within-estimate") return;
+		await offer(
+			closed.map((unit) => unit.id),
+			encoded.request,
+			encoded.projection,
+			assessment,
+			publicView.messages,
+		);
+		return encoded.request.body;
+	};
 	if (full.status === "within-estimate") {
 		const closed = closeViewSelection(
 			units,
@@ -134,7 +171,8 @@ export async function selectRequestView(
 		);
 		return request.body;
 	}
-	if (!allowShrink || full.status !== "over-budget" || replayContract !== "message-groups") return;
+	if (!allowShrink || replayContract !== "message-groups") return;
+	if (full.status !== "over-budget") return offerPublicWindow();
 	let latestAssistant = -1;
 	for (const [index, message] of boundary.messages.entries())
 		if (message.role === "assistant") latestAssistant = index;
@@ -208,5 +246,5 @@ export async function selectRequestView(
 		);
 		return body;
 	}
-	return;
+	return offerPublicWindow();
 }

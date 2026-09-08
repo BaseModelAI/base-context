@@ -760,6 +760,20 @@ does not preserve hidden reasoning. Open groups and unsupported media refuse bef
 model call. The existing summary ACK commits the source-backed rendering plan; the next native
 request must still pass its actual final-body budget, projection and epoch boundary.
 
+The current v4 request controller can also select a `portable-checkpoint` without a summary
+call when an unknown or over-budget native request cannot use ordinary selection. Only the
+actual official adapter's closed-group encoder can admit this transition. It preserves original
+user/system/developer items and configuration, measures the exact public body, and commits its
+source recipes before adopting those same public messages and sending. Hooks and the normal
+converter are not replayed. Unsupported groups/media/routes and a public candidate that still
+does not fit remain explicit refusals.
+
+The old prefix receives token credit only when its input and configuration are unchanged.
+Candidate assessment and final physical admission both enforce this. An unknown original input
+estimate remains `tokensBefore: null` on the existing compaction control and on copy/rebuild;
+it is not replaced with the new public estimate or zero. Ordinary summary estimates and usage
+accounting are unchanged. Prior-token displays label null as unknown.
+
 Forks and imports rebuild public source recipes and the exact tail cutoff on the destination.
 They do not inherit permission for a new native-to-public transition. No new body store or
 extra summary call is used.
@@ -773,7 +787,7 @@ acceptance metadata. Reopen and destination sessions capture their current owner
 Managed summaries skip the old namespace probe and survival message. The ordinary no-budget,
 no-epoch path stays unchanged.
 
-Ownership/RPC schema34 fences these v3 readers. This is not live deployment, tokenizer,
+Ownership/RPC schema35 fences v4 public-request and nullable-token readers; v1/v2/v3 epochs remain readable. This is not live deployment, tokenizer,
 provider cache-hit, whole-process memory or hidden-state continuity certification.
 
 

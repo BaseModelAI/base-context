@@ -601,8 +601,10 @@
             }
             return labelHtml + `<span class="tree-muted">[${escapeHtml(msg.role)}]</span>`;
           }
-          case 'compaction':
-            return labelHtml + `<span class="tree-compaction">[compaction: ${Math.round(entry.tokensBefore/1000)}k tokens]</span>`;
+          case 'compaction': {
+            const tokens = entry.tokensBefore === null ? 'prior token estimate unknown' : `${Math.round(entry.tokensBefore/1000)}k tokens`;
+            return labelHtml + `<span class="tree-compaction">[compaction: ${tokens}]</span>`;
+          }
           case 'branch_summary': {
             const summary = truncate(normalize(entry.summary || ''));
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
@@ -1178,10 +1180,11 @@
         }
 
         if (entry.type === 'compaction') {
+          const description = entry.tokensBefore === null ? 'Compacted (prior token estimate unknown)' : `Compacted from ${entry.tokensBefore.toLocaleString()} tokens`;
           return `<div class="compaction" id="${entryDomId}" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
             <div class="compaction-label">[compaction]</div>
-            <div class="compaction-collapsed">Compacted from ${entry.tokensBefore.toLocaleString()} tokens</div>
-            <div class="compaction-content"><strong>Compacted from ${entry.tokensBefore.toLocaleString()} tokens</strong>\n\n${escapeHtml(entry.summary)}</div>
+            <div class="compaction-collapsed">${description}</div>
+            <div class="compaction-content"><strong>${description}</strong>\n\n${escapeHtml(entry.summary)}</div>
           </div>`;
         }
 

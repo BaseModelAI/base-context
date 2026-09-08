@@ -31,7 +31,11 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import type { ProviderAttemptTracker } from "../utils/provider-attempts.js";
-import type { ProviderRequestProjection } from "../utils/request-token-budget.js";
+import {
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	withRequestBody,
+} from "../utils/request-token-budget.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -156,8 +160,12 @@ function captureResponsesProjection<TApi extends Api>(
 	const optionalMessageIndices: number[] = [];
 	const generatedMessageIndices: number[] = [];
 	const pending = new Map<string, { wireId: string; seen: boolean }>();
+	const publicMessageGroups: number[][] = [];
+	let publicGroup: number[] | undefined;
 	const closeCalls = () => {
 		const complete = [...pending.values()].every((call) => call.seen);
+		if (complete && publicGroup) publicMessageGroups.push(publicGroup);
+		publicGroup = undefined;
 		pending.clear();
 		return complete;
 	};
@@ -168,6 +176,7 @@ function captureResponsesProjection<TApi extends Api>(
 			if (!closeCalls()) return;
 		}
 		if (message.role === "assistant") {
+			publicGroup = message.stopReason === "stop" || message.stopReason === "toolUse" ? [index] : undefined;
 			if (
 				message.api !== model.api ||
 				message.provider !== model.provider ||
@@ -211,6 +220,8 @@ function captureResponsesProjection<TApi extends Api>(
 			const item = rendered[0];
 			if (!call || rendered.length !== 1 || item.type !== "function_call_output" || item.call_id !== call.wireId)
 				return;
+			if (call.seen || message.content.some((part) => part.type !== "text")) publicGroup = undefined;
+			publicGroup?.push(index);
 			call.seen = true;
 		} else if (rendered.length !== 1) return;
 	}
@@ -223,6 +234,71 @@ function captureResponsesProjection<TApi extends Api>(
 		messageIndices,
 		optionalMessageIndices,
 		generatedMessageIndices,
+		publicMessageGroups,
+	};
+}
+
+/** Called only at the actual official-route native public-window gate. */
+export function bindResponsesPublicWindow(
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+): ProviderRequestProjection {
+	return {
+		...projection,
+		publicWindow: true,
+		encodePublicWindow(replacements) {
+			if (
+				!request.body ||
+				!replacements.length ||
+				replacements.length > projection.messageIndices.length ||
+				!projection.publicMessageGroups
+			)
+				return;
+			const texts = new Map<number, string>();
+			for (const replacement of replacements) {
+				if (
+					!Number.isSafeInteger(replacement.messageIndex) ||
+					typeof replacement.text !== "string" ||
+					texts.has(replacement.messageIndex)
+				)
+					return;
+				texts.set(replacement.messageIndex, replacement.text);
+			}
+			const covered = new Set<number>();
+			for (const group of projection.publicMessageGroups) {
+				if (!group.some((index) => texts.has(index))) continue;
+				if (!group.every((index) => texts.has(index))) return;
+				for (const index of group) covered.add(index);
+			}
+			if (covered.size !== texts.size) return;
+			const body = JSON.parse(request.body) as { input: ResponseInput };
+			if (body.input.length !== projection.messageIndices.length) return;
+			const input: ResponseInput = [];
+			const messageIndices: Array<number | null> = [];
+			const emitted = new Set<number>();
+			for (const [itemIndex, messageIndex] of projection.messageIndices.entries()) {
+				if (messageIndex !== null && texts.has(messageIndex)) {
+					if (emitted.has(messageIndex)) continue;
+					emitted.add(messageIndex);
+					input.push({
+						role: "user",
+						content: [{ type: "input_text", text: sanitizeSurrogates(texts.get(messageIndex)!) }],
+					});
+				} else input.push(body.input[itemIndex]);
+				messageIndices.push(messageIndex);
+			}
+			return {
+				request: withRequestBody(request, JSON.stringify({ ...body, input })),
+				projection: {
+					kind: projection.kind,
+					replayContract: projection.replayContract,
+					publicWindow: true,
+					messageIndices,
+					optionalMessageIndices: projection.optionalMessageIndices,
+					generatedMessageIndices: projection.generatedMessageIndices,
+				},
+			};
+		},
 	};
 }
 

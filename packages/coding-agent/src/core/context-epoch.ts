@@ -8,7 +8,7 @@ import type { CompiledTaskFrame } from "./task-frame.js";
 export const CONTEXT_EPOCH_DETAIL = "baseContextEpoch";
 /** Internal admission, not a field accepted by ordinary appendCompaction callers. */
 export const appendContextEpoch = Symbol("appendContextEpoch");
-export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/3";
+export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/4";
 export type ContextReplayContract = "complete-context" | "message-groups";
 
 /** An ordinary summary and its retained source recipes share the existing compaction ACK. */
@@ -31,8 +31,12 @@ export interface EpochViewReference {
 }
 
 export interface ContextEpochCheckpoint {
-	readonly version: 1 | 2 | 3;
-	readonly renderer: "native-canonical-epoch/1" | "native-canonical-epoch/2" | typeof CONTEXT_EPOCH_RENDERER;
+	readonly version: 1 | 2 | 3 | 4;
+	readonly renderer:
+		| "native-canonical-epoch/1"
+		| "native-canonical-epoch/2"
+		| "native-canonical-epoch/3"
+		| typeof CONTEXT_EPOCH_RENDERER;
 	readonly source: SourceSnapshotRef;
 	/** Null only for an ordinary summary, which is not a measured provider request. */
 	readonly representation: string | null;
@@ -41,8 +45,11 @@ export interface ContextEpochCheckpoint {
 	readonly replayContract?: ContextReplayContract;
 	/** Actual adapter permission to leave completed native groups for a fresh public window. */
 	readonly publicWindow?: true;
-	/** Frozen summary transition. Later native messages are not silently converted. */
-	readonly continuation?: { readonly kind: "harness-summary"; readonly publicTailThrough: SourceSnapshotRef };
+	/** Frozen public transition. Later native messages are not silently converted. */
+	readonly continuation?: {
+		readonly kind: "harness-summary" | "portable-checkpoint";
+		readonly publicTailThrough: SourceSnapshotRef;
+	};
 	readonly views: readonly EpochViewReference[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
 	readonly taskFrame?: CompiledTaskFrame;
@@ -67,7 +74,8 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!(
 			(value.version === 1 && value.renderer === "native-canonical-epoch/1") ||
 			(value.version === 2 && value.renderer === "native-canonical-epoch/2") ||
-			(value.version === 3 && value.renderer === CONTEXT_EPOCH_RENDERER)
+			(value.version === 3 && value.renderer === "native-canonical-epoch/3") ||
+			(value.version === 4 && value.renderer === CONTEXT_EPOCH_RENDERER)
 		) ||
 		!("source" in value) ||
 		!value.source ||
@@ -78,13 +86,13 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!("representation" in value) ||
 		!(
 			typeof value.representation === "string" ||
-			((value.version === 2 || value.version === 3) &&
+			((value.version === 2 || value.version === 3 || value.version === 4) &&
 				value.representation === null &&
 				"includeSummary" in value &&
 				value.includeSummary === true)
 		) ||
 		("includeSummary" in value &&
-			((value.version !== 2 && value.version !== 3) ||
+			((value.version !== 2 && value.version !== 3 && value.version !== 4) ||
 				value.includeSummary !== true ||
 				value.representation !== null)) ||
 		("replayContract" in value &&
@@ -93,13 +101,14 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		("resourceRevision" in value &&
 			(typeof value.resourceRevision !== "string" ||
 				Buffer.byteLength(value.resourceRevision, "utf8") > MAX_RESOURCE_REVISION_BYTES)) ||
-		("publicWindow" in value && (value.version !== 3 || value.publicWindow !== true)) ||
+		("publicWindow" in value && ((value.version !== 3 && value.version !== 4) || value.publicWindow !== true)) ||
 		("continuation" in value &&
-			(value.version !== 3 ||
+			((value.version !== 3 && value.version !== 4) ||
 				!value.continuation ||
 				typeof value.continuation !== "object" ||
 				!("kind" in value.continuation) ||
-				value.continuation.kind !== "harness-summary" ||
+				(value.continuation.kind !== "harness-summary" &&
+					(value.version !== 4 || value.continuation.kind !== "portable-checkpoint")) ||
 				!("publicTailThrough" in value.continuation) ||
 				!value.continuation.publicTailThrough))
 	)

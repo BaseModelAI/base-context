@@ -1009,3 +1009,29 @@ all100 acceptance IDs, with source/evidence limits and prioritized TODOs. Later 
 explicitly separate. ViewUnit allocation, complete committed epochs, native selective
 recovery, scheduler/recovery durability and remaining whole-harness/release work are open.
 No live benchmark may start until all five required context features are complete.
+
+## W32 request-time public continuation
+
+The actual supported native request can use an adapter-encoded, source-backed public checkpoint
+without another summary call or converter/hook replay. Exact public messages are adopted after
+the existing ACK. Unknown original input estimates remain null, including copy/rebuild and
+direct displays; ordinary summary usage is unchanged. V4 distinguishes portable checkpoints
+from harness summaries, freezes the public-tail cutoff and keeps older epochs readable.
+Schema35/protocol11 fences these readers. Candidate and final physical measurements independently
+drop credit when the old prefix/configuration is not preserved.
+
+All 14 existing cases pass on their first W32 invocations across separate compiler2/services2/
+selector2/native-Python2/compaction4/RPC2 scopes, and types pass. The native service case covers
+new opaque output plus genuine recovery -> public candidate -> qualified ACK -> exact adoption
+and send -> close/reopen -> native fork/import. Seven main fake responses and one ordinary
+summary are used. The separate AI-only Codex phase verifies every post-callback measurement
+and actual physical fake send; its offline acceptance is not a canonical ACK claim. All jobs
+have drained and the empty temporary runtime mount was removed. W31 receipts remain settled.
+
+The five source prerequisites now work on the supported paths. After commit and clean build,
+move to the authorized all-30 isolated LOW campaign, then MEDIUM, with this session's existing
+ChatGPT subscription and exact `gpt-5.6-sol` / `gpt-6-astra`. No samples, readiness/auth/model
+probes, D/S setup repetition or further feature-audit loop is required first. Remaining spec
+findings are post-prerequisite backlog. Unsupported layouts and candidates that cannot fit
+still refuse explicitly. Offline evidence is not provider/tokenizer/cache/pricing/installed/
+whole-process certification. Benchmarks, publication and goal completion have not occurred.

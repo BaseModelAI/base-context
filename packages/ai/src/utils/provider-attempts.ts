@@ -11,12 +11,13 @@ import type {
 	StreamOptions,
 } from "../types.js";
 import type { AssistantMessageEventStream } from "./event-stream.js";
-import type {
-	ContextTokenObservation,
-	ProviderRequestProjection,
-	ProviderRequestRepresentation,
-	RequestTokenAssessment,
-	RetainedContextTokens,
+import {
+	type ContextTokenObservation,
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	type RequestTokenAssessment,
+	type RetainedContextTokens,
+	withRequestBody,
 } from "./request-token-budget.js";
 
 const localPreparationErrors = new WeakSet<object>();
@@ -123,7 +124,9 @@ export class ProviderAttemptTracker {
 			}
 		}
 		const body = selectedBody ?? request.body;
-		await this.measureRequest({ ...request, body });
+		await this.measureRequest(
+			withRequestBody({ ...request, api: this.model.api, provider: this.model.provider }, body),
+		);
 		return body;
 	}
 
