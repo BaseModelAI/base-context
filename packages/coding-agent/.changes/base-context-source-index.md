@@ -16,3 +16,4 @@
 - Read native compaction boundaries from captured source references, await streaming JSONL output I/O without moving its captured view, and make the public fork picker asynchronous and bounded.
 - Join accepted standalone initialization before graceful runtime teardown and reuse the destination entry array during current-version journal copy/import.
 - Read context-usage availability from captured assistant/update references and make native stats/tree, compact-host, extension and mode usage reads asynchronous.
+- Capture complete bounded native context-tree usage and read standalone HTML input through awaited file-handle I/O.

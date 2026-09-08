@@ -4,16 +4,21 @@ import { join } from "node:path";
 import { Agent } from "@ponythewhite/base-context-agent";
 import { type AssistantMessage, getModel, type Usage } from "@ponythewhite/base-context-ai";
 import stripAnsi from "strip-ansi";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { type ContextTreeNode, loadContextTreeChildrenFromDisk } from "../src/core/context-tree.js";
+import {
+	type ContextTreeNode,
+	loadContextTreeChildrenFromDisk,
+	readContextTreeUsage,
+} from "../src/core/context-tree.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage } from "../src/core/usage.js";
 import { formatContextTree } from "../src/modes/interactive/components/context-tree-format.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { createDeferred } from "./suite/scheduling.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -317,9 +322,11 @@ describe("loadContextTreeChildrenFromDisk", () => {
 });
 
 describe("AgentSession.getContextTree", () => {
-	async function createSession() {
+	async function createSession(persist = false) {
 		const settingsManager = SettingsManager.inMemory();
-		const sessionManager = SessionManager.inMemory();
+		const sessionManager = persist
+			? await SessionManager.create(process.cwd(), join(makeTempDir(), "sessions"))
+			: SessionManager.inMemory();
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const session = new AgentSession({
@@ -337,6 +344,7 @@ describe("AgentSession.getContextTree", () => {
 			cwd: process.cwd(),
 			modelRegistry: ModelRegistry.inMemory(authStorage),
 			resourceLoader: createTestResourceLoader(),
+			prewarmIpythonKernel: false,
 		});
 		sessions.push(session);
 		await session.initialize();
@@ -369,13 +377,75 @@ describe("AgentSession.getContextTree", () => {
 		expect(tree.ownUsage.cost.total).toBeCloseTo(0.3);
 		// In-memory session, no rlm dir: completed children cannot be discovered.
 		expect(tree.children).toEqual([]);
+		expect(await readContextTreeUsage(sessionManager)).toBeUndefined();
+
+		const capturedManager = await SessionManager.create(process.cwd(), join(makeTempDir(), "sessions"));
+		managers.push(capturedManager);
+		const userId = await capturedManager.appendMessage(createUserMessage("captured work"));
+		const targetId = await capturedManager.appendMessage(
+			createAssistantMessage("on it", createUsage(3000, 600, 0.3)),
+		);
+		await capturedManager.appendChildUsageAttribution(targetId, childUsage, aggregate);
+		capturedManager.branch(targetId);
+		const followUpId = await capturedManager.appendMessage(createUserMessage("forked follow-up"));
+		const readEntered = createDeferred();
+		const readGate = createDeferred();
+		const originalRead = capturedManager.readSourceHistory.bind(capturedManager);
+		const readSource = vi.spyOn(capturedManager, "readSourceHistory").mockImplementation((read) =>
+			originalRead(async (history) => {
+				readEntered.resolve();
+				await readGate.promise;
+				return read(history);
+			}),
+		);
+		const limits = { maxEntries: 16384, maxSourceBytes: 64 * 1024 * 1024 };
+		const reading = readContextTreeUsage(capturedManager, limits);
+		await readEntered.promise;
+		try {
+			// Use the stored aggregate, not a recomputed sum of the original message and children.
+			await capturedManager.appendChildUsageAttribution(
+				targetId,
+				createUsage(200, 40, 0.02),
+				createUsage(3900, 800, 0.39),
+			);
+			capturedManager.branch(userId);
+			limits.maxEntries = 1;
+			limits.maxSourceBytes = 1;
+			readGate.resolve();
+			const captured = await reading;
+			expect(readSource).toHaveBeenCalledOnce();
+			expect(captured?.source.leafId).toBe(followUpId);
+			expect(captured?.totalUsage.input).toBe(3500);
+			expect(captured?.ownUsage.input).toBe(3000);
+		} finally {
+			readGate.resolve();
+			readSource.mockRestore();
+			await reading;
+		}
+		expect((await readContextTreeUsage(capturedManager))?.totalUsage.input).toBe(0);
+		capturedManager.branch(followUpId);
+		const current = await readContextTreeUsage(capturedManager);
+		expect(current?.totalUsage.input).toBe(3900);
+		expect(current?.ownUsage.input).toBe(3200);
+		expect(current?.ownUsage.cost.total).toBeCloseTo(0.32);
+		const retained = await SessionManager.importRetainedFrom(
+			capturedManager.getSessionFile()!,
+			process.cwd(),
+			join(makeTempDir(), "retained"),
+		);
+		managers.push(retained);
+		expect(await readContextTreeUsage(retained)).toMatchObject({
+			source: { sessionId: retained.getSessionId() },
+			ownUsage: current!.ownUsage,
+			totalUsage: current!.totalUsage,
+		});
 	});
 
 	it("keeps pre-compaction spend in the totals after compaction", async () => {
 		// Intentional: /context reports cumulative session spend. Compaction
 		// shrinks the model-facing context, but tokens already paid for must not
 		// vanish from the totals (the old /usage undercounted here).
-		const { session, sessionManager } = await createSession();
+		const { session, sessionManager } = await createSession(true);
 		await sessionManager.appendMessage(createUserMessage("expensive early work"));
 		await sessionManager.appendMessage(createAssistantMessage("done", createUsage(5000, 1000, 0.5)));
 		const keptId = await sessionManager.appendMessage(createUserMessage("later work"));
@@ -387,6 +457,35 @@ describe("AgentSession.getContextTree", () => {
 		expect(tree.totalUsage.input).toBe(5200);
 		expect(tree.totalUsage.cost.total).toBeCloseTo(0.52);
 		expect(tree.ownUsage.input).toBe(5200);
+		await expect(
+			readContextTreeUsage(sessionManager, { maxEntries: 1, maxSourceBytes: 64 * 1024 * 1024 }),
+		).rejects.toThrow("History entry budget exceeded");
+		await expect(readContextTreeUsage(sessionManager, { maxEntries: 16384, maxSourceBytes: 1 })).rejects.toThrow(
+			"History source byte budget exceeded",
+		);
+
+		for (const parentId of ["missing-parent", "bad-leaf"]) {
+			const malformedDir = makeTempDir();
+			const malformedFile = join(malformedDir, "unresolved.jsonl");
+			const entries = [
+				sessionManager.getHeader(),
+				{
+					type: "message",
+					id: "bad-leaf",
+					parentId,
+					timestamp: new Date().toISOString(),
+					message: createUserMessage("unresolved ancestry"),
+				},
+			];
+			writeFileSync(malformedFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+			const malformed = await SessionManager.importRetainedFrom(
+				malformedFile,
+				process.cwd(),
+				join(malformedDir, "imported"),
+			);
+			managers.push(malformed);
+			await expect(readContextTreeUsage(malformed)).rejects.toThrow("Parent path lineage is unresolved");
+		}
 	});
 });
 

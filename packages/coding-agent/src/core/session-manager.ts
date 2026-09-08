@@ -440,7 +440,7 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return finalizeLoadedEntries(parseEntriesFromBuffer(Buffer.from(content)));
 }
 
-function applyChildUsageAttributions(entries: FileEntry[]): void {
+export function applyChildUsageAttributions(entries: FileEntry[]): void {
 	const assistantEntriesById = new Map<string, AssistantSessionMessageEntry>();
 	for (const entry of entries) {
 		if (entry.type === "message" && entry.message.role === "assistant") {

@@ -286,6 +286,37 @@ describe("export HTML tool output whitespace", () => {
 				).rejects.toThrow("HTML export source byte budget exceeded");
 				expect(existsSync(refused)).toBe(false);
 			}
+			const input = join(root, "raw.jsonl");
+			const failedOutput = join(root, "failed-input.html");
+			const inputFs = await vi.importActual<typeof fs>("node:fs/promises");
+			const inputHandle = await inputFs.open(input, "r");
+			const inputFd = inputHandle.fd;
+			const readError = new Error("HTML input read failed");
+			const closeError = new Error("HTML input close failed");
+			const read = vi.spyOn(inputHandle, "read").mockRejectedValueOnce(readError);
+			const close = inputHandle.close.bind(inputHandle);
+			const closed = vi.spyOn(inputHandle, "close").mockImplementationOnce(async () => {
+				await close();
+				throw closeError;
+			});
+			vi.mocked(fs.open).mockResolvedValueOnce(inputHandle);
+			vi.mocked(fs.unlink).mockClear();
+			try {
+				const failed = exportFromFile(input, { outputPath: failedOutput });
+				await expect(failed).rejects.toBeInstanceOf(AggregateError);
+				await expect(failed).rejects.toMatchObject({ errors: [readError, closeError] });
+				expect(read).toHaveBeenCalledExactlyOnceWith(expect.any(Buffer), 0, Buffer.byteLength(raw), 0);
+				expect(closed).toHaveBeenCalledExactlyOnceWith();
+				expect(() => fstatSync(inputFd)).toThrow();
+				expect(fs.unlink).not.toHaveBeenCalled();
+				expect(readFileSync(input, "utf8")).toBe(raw);
+				expect(existsSync(failedOutput)).toBe(false);
+			} finally {
+				read.mockRestore();
+				closed.mockRestore();
+				vi.mocked(fs.open).mockReset();
+			}
+
 			const readonly = await SessionManager.openReadOnly(join(root, "raw.jsonl"));
 			try {
 				appendFileSync(

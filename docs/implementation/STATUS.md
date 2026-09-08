@@ -508,3 +508,18 @@ synchronous and refreshes its usage outside render.
 
 Context-tree spend and completed-child loading still use their existing eager readers.
 Persistent Manager stores and current-invocation Agent collectors are not removed here.
+
+## Bounded context-tree usage and asynchronous standalone HTML input
+
+Persistent native context trees now obtain own/total usage from one captured, complete
+source materialization and its exact parent path. The default limits are 16,384 source
+entries and 64 MiB. Existing ordered usage restoration and subtraction are reused.
+The native adapter starts this read with context availability and live-child reads,
+then joins all accepted work. Explicit in-memory behavior remains unchanged.
+Completed-child disk reads and whole-file own-usage summaries still use eager readers.
+
+Standalone HTML input uses awaited file-handle reads while keeping its fixed initial
+length, bounded read chunks and change detection. Limits/options are copied before
+awaiting I/O. Parsing, migration and usage restoration keep their previous behavior.
+Read and close failures are both retained. Native/resident HTML selection and output
+writing are unchanged. Neither change removes the persistent Manager body stores.

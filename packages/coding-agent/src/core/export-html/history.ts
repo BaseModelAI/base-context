@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { TextDecoder } from "node:util";
 import type { SessionHistoryReadLimits } from "../session-history-index.js";
 import {
@@ -45,26 +45,38 @@ export function applyExportUsage(entries: SessionEntry[]): void {
 }
 
 /** Read one fixed, capped source image. A growing path never becomes an uncapped read. */
-export function readExportHistory(inputPath: string, limits: SessionHistoryReadLimits): ExportHistory {
-	const fd = openSync(inputPath, "r");
+export async function readExportHistory(inputPath: string, limits: SessionHistoryReadLimits): Promise<ExportHistory> {
+	limits = { ...limits };
+	const file = await open(inputPath, "r");
 	let captured: Buffer;
 	try {
-		const before = fstatSync(fd, { bigint: true });
+		const before = await file.stat({ bigint: true });
 		if (before.size > BigInt(limits.maxSourceBytes)) throw new Error("HTML export source byte budget exceeded");
 		captured = Buffer.alloc(Number(before.size));
 		let offset = 0;
 		while (offset < captured.length) {
-			const count = readSync(fd, captured, offset, Math.min(64 * 1024, captured.length - offset), offset);
+			const { bytesRead: count } = await file.read(
+				captured,
+				offset,
+				Math.min(64 * 1024, captured.length - offset),
+				offset,
+			);
 			if (count === 0) throw new Error("HTML export source changed during capture");
 			offset += count;
 		}
-		const after = fstatSync(fd, { bigint: true });
+		const after = await file.stat({ bigint: true });
 		if (after.size !== before.size || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) {
 			throw new Error("HTML export source changed during capture");
 		}
-	} finally {
-		closeSync(fd);
+	} catch (error) {
+		try {
+			await file.close();
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "HTML export source read and close failed", { cause: error });
+		}
+		throw error;
 	}
+	await file.close();
 	const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(captured);
 	// Count complete records on this immutable bounded string BEFORE allocating
 	// parsed entries. Keep the reader's existing incomplete-tail behavior.

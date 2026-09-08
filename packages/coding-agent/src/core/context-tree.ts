@@ -4,7 +4,17 @@ import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
 import type { RlmChildAgentStatus } from "./agent-session.js";
 import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
 import type { ContextUsage } from "./extensions/index.js";
-import { buildSessionContext, type FileEntry, loadEntriesFromFile, type SessionEntry } from "./session-manager.js";
+import type { ParentPathCursor } from "./history-index.js";
+import type { SourceSnapshotRef } from "./request-events.js";
+import type { SessionHistoryReadLimits } from "./session-history-index.js";
+import {
+	applyChildUsageAttributions,
+	buildSessionContext,
+	type FileEntry,
+	loadEntriesFromFile,
+	type SessionEntry,
+	type SessionManager,
+} from "./session-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage, subtractAssistantUsage } from "./usage.js";
 
 /** Resolves a model's context window so disk-only nodes can report utilization. */
@@ -94,6 +104,33 @@ export function computeOwnAndTotalUsage(
 		}
 	}
 	return { ownUsage, totalUsage };
+}
+
+/** Detached, complete source usage and its exact captured parent branch. */
+export async function readContextTreeUsage(
+	manager: SessionManager,
+	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+): Promise<{ source: SourceSnapshotRef; ownUsage: Usage; totalUsage: Usage } | undefined> {
+	if (!manager.isPersisted()) return undefined;
+	const capturedLimits = { maxEntries: limits.maxEntries, maxSourceBytes: limits.maxSourceBytes };
+	return manager.readSourceHistory(async (history) => {
+		const materialized = await history.materialize(capturedLimits);
+		const allEntries = materialized.entries.map(({ entry }) => entry);
+		applyChildUsageAttributions(allEntries);
+		const byId = new Map(allEntries.map((entry) => [entry.id, entry]));
+		const branch: SessionEntry[] = [];
+		let cursor: ParentPathCursor | undefined;
+		do {
+			const page = await history.parentPath({ cursor });
+			for (const reference of page.events) {
+				const entry = byId.get(reference.id);
+				if (!entry) throw new Error("Context-tree parent-path entry source is unavailable");
+				branch.push(entry);
+			}
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		return { source: history.source, ...computeOwnAndTotalUsage(branch, allEntries) };
+	});
 }
 
 /**

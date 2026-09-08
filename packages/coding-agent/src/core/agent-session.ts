@@ -112,6 +112,7 @@ import {
 	computeOwnAndTotalUsage,
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
+	readContextTreeUsage,
 } from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
@@ -12400,10 +12401,9 @@ export class AgentSession {
 	 */
 	async getContextTree(): Promise<ContextTreeNode> {
 		const resolveContextWindow = this._contextWindowResolver();
-		const { ownUsage, totalUsage } = computeOwnAndTotalUsage(
-			this.sessionManager.getBranch(),
-			this.sessionManager.getEntries(),
-		);
+		const residentUsage = this.sessionManager.isPersisted()
+			? undefined
+			: computeOwnAndTotalUsage(this.sessionManager.getBranch(), this.sessionManager.getEntries());
 		const runs = [...this._activeRlmChildRuns.values()].map((run) => ({
 			id: run.id,
 			label: rlmChildLabel(run.prompt),
@@ -12422,20 +12422,23 @@ export class AgentSession {
 			label: this.sessionName ?? "main agent",
 			status: "active" as const,
 			model: model ? { provider: model.provider, id: model.id } : undefined,
-			ownUsage,
-			totalUsage,
 		};
 		// Start all live reads before yielding and join every accepted read on failure too.
 		const results = await Promise.allSettled([
 			this.getContextUsage(),
+			readContextTreeUsage(this.sessionManager),
 			...runs.map((run) => run.session?.getContextTree() ?? Promise.resolve(run.diskNode)),
 		]);
 		const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
 		if (errors.length === 1) throw errors[0];
 		if (errors.length > 1) throw new AggregateError(errors, "Context tree reads failed");
 		const contextUsage = (results[0] as PromiseFulfilledResult<ContextUsage | undefined>).value;
+		const usage =
+			(results[1] as PromiseFulfilledResult<Awaited<ReturnType<typeof readContextTreeUsage>>>).value ??
+			residentUsage;
+		if (!usage) throw new Error("Context tree usage source is unavailable");
 		const children = runs.map((run, index) => {
-			const node = (results[index + 1] as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
+			const node = (results[index + 2] as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
 			return {
 				...(node ?? { ownUsage: emptyUsage(), totalUsage: emptyUsage(), children: [] }),
 				id: run.id,
@@ -12443,7 +12446,13 @@ export class AgentSession {
 				status: run.status,
 			};
 		});
-		return { ...rootNode, contextUsage, children: [...children, ...diskChildren] };
+		return {
+			...rootNode,
+			ownUsage: usage.ownUsage,
+			totalUsage: usage.totalUsage,
+			contextUsage,
+			children: [...children, ...diskChildren],
+		};
 	}
 
 	/**

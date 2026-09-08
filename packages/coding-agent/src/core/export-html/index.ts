@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import type { AgentState } from "@ponythewhite/base-context-agent";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
@@ -304,13 +305,15 @@ export async function exportSessionToHtml(
  * Used by CLI for exporting arbitrary session files.
  */
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
-	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
+	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : { ...options };
 
-	if (!existsSync(inputPath)) {
+	try {
+		await access(inputPath);
+	} catch {
 		throw new Error(`File not found: ${inputPath}`);
 	}
 
-	const history = readExportHistory(inputPath, exportHistoryLimits(opts));
+	const history = await readExportHistory(inputPath, exportHistoryLimits(opts));
 
 	const sessionData: SessionData = {
 		...history,
