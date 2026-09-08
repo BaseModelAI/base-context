@@ -636,6 +636,28 @@ remain true: a complete structured view is not exhaustive natural-language extra
 This read does not activate a goal or change canonical state. Explicit resident Managers
 are outside this new captured-native API.
 
+### Native TaskFrame and working-view metadata
+
+The native SDK compiler now renders a selective source-backed task frame alongside the
+complete retained context. Defaults are16KiB for all retained frame messages,32 displayed
+references and2KiB of exact clause text. Oversized clauses remain exact references, not
+truncated instructions. These limits are bytes/items, not model tokens.
+
+The stable base stays at the front. Material updates add sparse revisions near current
+input; earlier text and insertion positions stay fixed until the existing source/branch/
+compaction boundary changes. Rendering does not append canonical messages or emit message
+events. A frame is descriptive data, not a new instruction or proof that a resource is live.
+
+The default native SDK uses the coding-agent `convertToLlm` renderer for custom context.
+Direct/custom embeddings must preserve that native custom-message rendering contract;
+the generic Agent converter intentionally drops custom roles and is not silently replaced.
+
+Compiled ViewUnit metadata records source/update revisions and replay/delta dependencies.
+Closure helpers preserve complete units or refuse, including conservative whole-context
+replay when the adapter has not authorized narrower groups. Model-aware token estimates,
+provider-budget enforcement and the complete stable-epoch/recovery pipeline remain open.
+
+
 ## Extensions
 
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.

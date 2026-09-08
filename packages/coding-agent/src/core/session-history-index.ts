@@ -132,6 +132,39 @@ function positiveLimit(value: number): boolean {
 	return Number.isSafeInteger(value) && value > 0;
 }
 
+/** Reuse the same bounded payload/identity hydration for a captured branch adapter. */
+export async function hydrateCapturedHistoryEntry(
+	metadata: IndexedSourceEvent,
+	maxSourceBytes: number,
+	readPayload: SessionHistoryReadView["readPayload"],
+): Promise<HydratedSessionHistoryEntry> {
+	if (metadata.locator.length > maxSourceBytes) throw new Error("History entry source byte budget exceeded");
+	const chunks: string[] = [];
+	let bytes = 0;
+	let cursor: CanonicalPayloadCursor | undefined;
+	do {
+		const fragment = await readPayload(metadata.id, {
+			cursor,
+			maxBytes: Math.min(MAX_CANONICAL_PAYLOAD_PART_BYTES, maxSourceBytes - bytes),
+		});
+		if (!fragment) throw new Error("Captured history entry payload is unavailable");
+		bytes += fragment.byteLength;
+		if (bytes > maxSourceBytes) throw new Error("History entry source byte budget exceeded");
+		chunks.push(fragment.text);
+		cursor = fragment.nextCursor ?? undefined;
+	} while (cursor);
+	const entry = JSON.parse(chunks.join("")) as SessionEntry;
+	if (
+		!entry ||
+		typeof entry !== "object" ||
+		entry.id !== metadata.id ||
+		entry.type !== metadata.kind ||
+		entry.parentId !== metadata.parentId
+	)
+		throw new Error("Canonical history entry does not match indexed identity");
+	return { entry, source: metadata };
+}
+
 /** Source access is selected explicitly, never by widening a coordinator's branch view. */
 export function createSessionHistoryReadScope(
 	index: HistoryIndex,
@@ -154,36 +187,8 @@ export function createSessionHistoryReadScope(
 				: index.readSourcePayload(sessionId, id, source.sourceSequence, options),
 		);
 
-	const hydrate = async (
-		metadata: IndexedSourceEvent,
-		maxSourceBytes: number,
-	): Promise<HydratedSessionHistoryEntry> => {
-		if (metadata.locator.length > maxSourceBytes) throw new Error("History entry source byte budget exceeded");
-		const chunks: string[] = [];
-		let bytes = 0;
-		let cursor: CanonicalPayloadCursor | undefined;
-		do {
-			const fragment = await readPayload(metadata.id, {
-				cursor,
-				maxBytes: Math.min(MAX_CANONICAL_PAYLOAD_PART_BYTES, maxSourceBytes - bytes),
-			});
-			if (!fragment) throw new Error("Captured history entry payload is unavailable");
-			bytes += fragment.byteLength;
-			if (bytes > maxSourceBytes) throw new Error("History entry source byte budget exceeded");
-			chunks.push(fragment.text);
-			cursor = fragment.nextCursor ?? undefined;
-		} while (cursor);
-		const entry = JSON.parse(chunks.join("")) as SessionEntry;
-		if (
-			!entry ||
-			typeof entry !== "object" ||
-			entry.id !== metadata.id ||
-			entry.type !== metadata.kind ||
-			entry.parentId !== metadata.parentId
-		)
-			throw new Error("Canonical history entry does not match indexed identity");
-		return { entry, source: metadata };
-	};
+	const hydrate = (metadata: IndexedSourceEvent, maxSourceBytes: number) =>
+		hydrateCapturedHistoryEntry(metadata, maxSourceBytes, readPayload);
 
 	async function* iterateEntries(limits: SessionHistoryReadLimits): AsyncGenerator<HydratedSessionHistoryEntry> {
 		const { maxEntries, maxSourceBytes } = limits;

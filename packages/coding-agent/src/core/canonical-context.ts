@@ -15,7 +15,10 @@ import {
 } from "./session-context-updates.js";
 import type { SessionHistoryReadView } from "./session-history-index.js";
 import type { SessionEntry } from "./session-manager.js";
+import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
+import { readTaskStateFromView } from "./task-state-reader.js";
 import { cloneUsage } from "./usage.js";
+import { bindMessageReplayUnits, type ViewUnit } from "./view-units.js";
 
 export interface CanonicalContextLimits {
 	maxMessages: number;
@@ -30,6 +33,13 @@ interface CanonicalMessageSource {
 }
 
 const messageSources = new WeakMap<AgentMessage, CanonicalMessageSource>();
+const compiledViewUnits = new WeakMap<readonly AgentMessage[], readonly ViewUnit[]>();
+
+/** Detached rendering metadata only; reading it never changes a compiler or epoch. */
+export function getCanonicalViewUnits(messages: readonly AgentMessage[]): readonly ViewUnit[] | undefined {
+	const units = compiledViewUnits.get(messages);
+	return units ? structuredClone(units) : undefined;
+}
 
 /** Correlate a detached compiled message with its captured source, without retaining its body. */
 export function getCanonicalMessageSource(message: AgentMessage): CanonicalMessageSource | undefined {
@@ -50,6 +60,8 @@ export class CanonicalContextCompiler {
 	private entries = new Map<string, CachedEntry>();
 	private sourceBytes = 0;
 	private messageCount = 0;
+	private taskFrame?: CompiledTaskFrame;
+	private taskBoundary?: string;
 
 	/** Membership in the last successful active-source cache, including explicitly omitted responses. */
 	hasActiveEntry(entryId: string): boolean {
@@ -60,7 +72,12 @@ export class CanonicalContextCompiler {
 		view: SessionHistoryReadView,
 		limits: CanonicalContextLimits,
 		omittedAssistantIds: ReadonlySet<string> = new Set(),
+		frameOptions: Partial<TaskFrameLimits> = {},
 	): Promise<AgentMessage[]> {
+		const frameLimits = taskFrameLimits(frameOptions);
+		const previousSource = this.source;
+		const previousFrame = this.taskFrame;
+		const previousBoundary = this.taskBoundary;
 		const omitted = new Set(omittedAssistantIds);
 		const { maxMessages, maxSourceBytes } = limits;
 		if (
@@ -85,6 +102,7 @@ export class CanonicalContextCompiler {
 		let expected = 0;
 		let sourceBytes = 0;
 		const refs: ContextRef[] = [];
+		const sourceOrder = new Map<string, number>();
 		const countBytes = (ref: Pick<ContextRef, "locator">) => {
 			sourceBytes += ref.locator.length;
 			if (sourceBytes > maxSourceBytes) throw new Error("Canonical context source byte budget exceeded");
@@ -111,6 +129,7 @@ export class CanonicalContextCompiler {
 				if (ref.ordinal !== expected++) throw new Error("Canonical context manifest skipped an active message");
 				countBytes(ref);
 				refs.push(ref);
+				sourceOrder.set(ref.entryId, ref.ordinal);
 			}
 			if (!page.nextCursor) break;
 			if (!page.refs.length || page.nextCursor.nextOrdinal !== expected)
@@ -118,6 +137,30 @@ export class CanonicalContextCompiler {
 			cursor = page.nextCursor;
 		}
 		if (refs.length !== first.activeMessageCount) throw new Error("Canonical context manifest is incomplete");
+
+		const boundary = JSON.stringify([first.summaryRef?.entryId ?? null, first.summaryRef?.revision ?? null]);
+		let resetFrame =
+			previousSource?.sessionId !== view.source.sessionId ||
+			previousSource?.sessionFile !== view.source.sessionFile ||
+			previousBoundary !== boundary ||
+			(previousSource !== undefined && previousSource.sourceSequence > view.source.sourceSequence);
+		if (!resetFrame && previousFrame && previousSource?.leafId && previousSource.leafId !== view.source.leafId)
+			resetFrame = !(await view.get(previousSource.leafId));
+		const tasks = await readTaskStateFromView(view, {
+			maxItems: maxMessages,
+			maxSourceBytes,
+			maxViewBytes: maxSourceBytes,
+		});
+		let taskSequence = -1;
+		for (const { event } of tasks.items) {
+			if (event.source.sequence === taskSequence) continue;
+			taskSequence = event.source.sequence;
+			// The task reader has already required an exact locator for every represented frame.
+			countBytes({ locator: event.source.locator! });
+		}
+		let taskFrame = compileTaskFrame(tasks, frameLimits, resetFrame ? undefined : previousFrame);
+		const messageCount = first.activeMessageCount + (first.summaryRef ? 1 : 0) + (taskFrame?.messages.length ?? 0);
+		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
 
 		const next = new Map<string, CachedEntry>();
 		const hydrate = async (
@@ -160,18 +203,39 @@ export class CanonicalContextCompiler {
 			return entry;
 		};
 		const messages: AgentMessage[] = [];
+		const literalSources = new Map<AgentMessage, string>();
+		const unitSources = new Map<AgentMessage, ViewUnit>();
+		const sourceUnit = (ref: ContextRef, kind: ViewUnit["kind"]): ViewUnit => ({
+			id: JSON.stringify([view.source.sessionId, view.source.sessionFile, ref.entryId]),
+			sourceRevision: ref.revision,
+			kind,
+			exactSources: [ref.entryId],
+			requiredVisibleDependencies: [],
+			authority:
+				ref.authority === "user"
+					? "user"
+					: ref.authority === "assistant"
+						? "assistant-public"
+						: ref.authority === "runtime"
+							? "tool-data"
+							: "unrecorded",
+			tokenEstimate: null,
+			immutableWithinEpoch: true,
+		});
 		if (first.summaryRef) {
 			const summary = await hydrate(first.summaryRef);
 			if (summary.type !== "compaction") throw new Error("Canonical context summary has the wrong source kind");
-			messages.push(
-				createCompactionSummaryMessage(
-					summary.summary,
-					summary.tokensBefore,
-					summary.timestamp,
-					summary.customInstructions,
-					first.retainedMessageCount,
-				),
+			const message = createCompactionSummaryMessage(
+				summary.summary,
+				summary.tokensBefore,
+				summary.timestamp,
+				summary.customInstructions,
+				first.retainedMessageCount,
 			);
+			messages.push(message);
+			literalSources.set(message, first.summaryRef.entryId);
+			unitSources.set(message, sourceUnit(first.summaryRef, "fixed-view"));
+			sourceOrder.set(first.summaryRef.entryId, first.activeBase);
 		}
 		for (const ref of refs) {
 			const original = sessionEntryMessage(await hydrate(ref));
@@ -180,11 +244,15 @@ export class CanonicalContextCompiler {
 			if (original.role === "assistant" && omitted.has(ref.entryId)) continue;
 			// Neither canonical updates nor replaceable transforms may mutate cached source entries.
 			const message = structuredClone(original);
+			const revisions = [ref.revision];
+			const exactSources = [ref.entryId];
 			if (message.role === "assistant") {
 				const target: ContextUpdateTarget = { kind: "assistant-usage", targetId: ref.entryId };
 				for (const update of (await view.contextUpdates(target)).refs) {
 					countBytes(update);
 					const entry = await hydrate(update, target);
+					revisions.push(update.revision);
+					exactSources.push(update.entryId);
 					if (entry.type !== "child_usage_attributed") throw new Error("Canonical usage update kind mismatch");
 					message.usage = cloneUsage(entry.aggregateUsage);
 				}
@@ -193,6 +261,8 @@ export class CanonicalContextCompiler {
 				for (const update of (await view.contextUpdates(target)).refs) {
 					countBytes(update); // Charge each application, even when the source record is cached.
 					const entry = await hydrate(update, target);
+					revisions.push(update.revision);
+					exactSources.push(update.entryId);
 					const sent = entry.type === "custom" ? parsePersistedIpythonSentAgentMessage(entry.data) : undefined;
 					if (!sent || sent.toolCallId !== message.toolCallId)
 						throw new Error("Canonical sent-message update mismatch");
@@ -206,12 +276,93 @@ export class CanonicalContextCompiler {
 					entryId: ref.entryId,
 				});
 			messages.push(message);
+			literalSources.set(message, ref.entryId);
+			unitSources.set(message, {
+				...sourceUnit(
+					ref,
+					message.role === "toolResult" ||
+						(message.role === "assistant" && message.content.some((part) => part.type === "toolCall"))
+						? "replay-group"
+						: "literal",
+				),
+				sourceRevision: JSON.stringify(revisions),
+				exactSources,
+			});
 		}
 		orderContextToolResults(messages);
+		if (taskFrame) {
+			if (!resetFrame && previousFrame && taskFrame !== previousFrame) {
+				const last = messages.at(-1);
+				const anchor = last
+					? {
+							entryId: literalSources.get(last)!,
+							side: last.role === "user" || last.role === "custom" ? ("before" as const) : ("after" as const),
+						}
+					: null;
+				taskFrame = { ...taskFrame, anchors: [...taskFrame.anchors.slice(0, -1), anchor] };
+			}
+			const [base, ...revisions] = structuredClone(taskFrame.messages);
+			const frames = [base, ...revisions];
+			const frameIds = frames.map((_, index) => JSON.stringify(["task-frame", taskFrame!.origins[index], index]));
+			for (const [index, frame] of frames.entries()) {
+				unitSources.set(frame, {
+					id: frameIds[index],
+					sourceRevision: frameIds[index],
+					kind: "task-frame",
+					exactSources: [JSON.stringify(taskFrame.origins[index])],
+					requiredVisibleDependencies: index ? [frameIds[index - 1]] : [],
+					authority: "tool-data",
+					tokenEstimate: null,
+					immutableWithinEpoch: true,
+				});
+			}
+			const positions = new Map(messages.map((message, index) => [literalSources.get(message)!, index]));
+			const slots = new Map<number, AgentMessage[]>();
+			for (const [index, revision] of revisions.entries()) {
+				const anchor = taskFrame.anchors[index];
+				let at = 0;
+				if (anchor) {
+					const position = positions.get(anchor.entryId);
+					if (position !== undefined) at = position + (anchor.side === "after" ? 1 : 0);
+					else {
+						// A later retry may omit that assistant. Keep its source slot, not the newest input slot.
+						const ordinal = sourceOrder.get(anchor.entryId);
+						if (ordinal === undefined) throw new Error("Task frame insertion source is unavailable");
+						at = messages.findIndex((message) => sourceOrder.get(literalSources.get(message)!)! > ordinal);
+						if (at < 0) at = messages.length;
+					}
+				}
+				const group = slots.get(at) ?? [];
+				group.push(revision);
+				slots.set(at, group);
+			}
+			const literal = messages.splice(0);
+			messages.push(base);
+			for (let at = 0; at <= literal.length; at++) {
+				messages.push(...(slots.get(at) ?? []));
+				if (at < literal.length) messages.push(literal[at]);
+			}
+		}
+		const units = bindMessageReplayUnits(
+			messages,
+			messages.map((message) => {
+				const unit = unitSources.get(message);
+				if (!unit) throw new Error("Compiled view unit has no captured source");
+				return unit;
+			}),
+			{
+				maxUnits: maxMessages,
+				maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
+				maxMetadataBytes: maxSourceBytes,
+			},
+		);
+		compiledViewUnits.set(messages, units);
 		this.entries = next;
+		this.taskFrame = taskFrame;
+		this.taskBoundary = boundary;
 		this.source = view.source;
 		this.sourceBytes = sourceBytes;
-		this.messageCount = first.activeMessageCount + (first.summaryRef ? 1 : 0);
+		this.messageCount = messageCount;
 		return messages;
 	}
 }

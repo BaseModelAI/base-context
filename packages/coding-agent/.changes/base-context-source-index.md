@@ -31,3 +31,5 @@
 - Require native ownership/RPC schema31 while retaining protocol11 and existing cleanup policy.
 - Support read-only existing OpenAI Codex subscriptions without enabling login or refresh.
 - Isolate benchmark candidate services/judges and distinguish legacy observations from physical usage.
+- Render bounded source-backed TaskFrames with stable revision positions in native provider context.
+- Build revision-aware ViewUnit metadata and complete replay/delta dependency closure helpers.

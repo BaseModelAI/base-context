@@ -1,6 +1,10 @@
 import type { TaskEvidenceCursor } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
-import type { SessionHistoryReadScope } from "./session-history-index.js";
+import {
+	hydrateCapturedHistoryEntry,
+	type SessionHistoryReadScope,
+	type SessionHistoryReadView,
+} from "./session-history-index.js";
 import { projectTaskStateSource, type TaskStateProjection } from "./task-state.js";
 import { type ReducedTaskItem, type TaskStateReadLimits, TaskStateReducer } from "./task-state-reducer.js";
 
@@ -15,7 +19,7 @@ export interface TaskStateView {
 
 /** Consume this complete-or-refuse view inside its existing captured-history callback. */
 export async function readTaskStateFromHistory(
-	history: SessionHistoryReadScope,
+	history: Pick<SessionHistoryReadScope, "source" | "branchContext" | "hydrateEntry">,
 	limits: Partial<TaskStateReadLimits> = {},
 ): Promise<TaskStateView> {
 	const reducer = new TaskStateReducer(limits);
@@ -73,4 +77,26 @@ export async function readTaskStateFromHistory(
 		structuredOnly: true as const,
 		selective: true as const,
 	});
+}
+
+/** Adapt the existing branch-only inference view; never recapture through its Manager. */
+export function readTaskStateFromView(
+	view: SessionHistoryReadView,
+	limits: Partial<TaskStateReadLimits> = {},
+): Promise<TaskStateView> {
+	return readTaskStateFromHistory(
+		{
+			source: view.source,
+			branchContext: view,
+			hydrateEntry: async (id, maxSourceBytes) => {
+				const source = await view.get(id);
+				return source
+					? hydrateCapturedHistoryEntry(source, maxSourceBytes, (entryId, options) =>
+							view.readPayload(entryId, options),
+						)
+					: undefined;
+			},
+		},
+		limits,
+	);
 }

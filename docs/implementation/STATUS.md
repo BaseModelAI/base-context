@@ -828,3 +828,44 @@ real nested sandbox. No real credentials, provider calls, installed SDK/RPC star
 kernel ran. The benchmark directory is excluded from Biome; its two new JS scripts passed
 Node syntax checks, not runtime tests. Frozen D/S adapter drafts remain external and
 unexecuted. Actual subscription freshness/entitlement and all campaigns remain untested.
+
+### TaskFrame provider rendering and ViewUnit metadata (W26)
+
+The native canonical compiler now reads structured task state through its existing
+captured branch view. It reuses bounded source hydration without Manager recapture or
+whole-source widening. Exact qualified requirements, recorded facts and recovery roots
+produce a selective task frame; raw claims are not promoted. Missing information and
+resource liveness are not invented. Rendered user text stays unrecorded because callbacks
+can expand it; the separately captured original submitted clause retains its authority.
+
+Task-frame defaults are16KiB complete rendered messages,32 displayed references and2KiB
+exact-clause text. Large clauses remain referenced, not sliced. These are byte/item caps,
+not model-token budgets. Task evidence is additionally source-byte charged and its read
+item limit follows the copied canonical message limit. A failed read or exhausted frame
+budget refuses rather than using cached authority or silently dropping literal history.
+
+The base and prior revisions retain their text and source-entry insertion positions.
+New material changes append sparse revisions near the current input. Actual omitted
+assistant IDs are excluded when choosing anchors; later omissions use the prior source
+gap. Existing source/branch/compaction boundaries rebuild the frame. This supports stable
+prefix layout, but is not the full policy/model/tool-schema epoch transaction yet.
+
+The native SDK converter renders hidden task_frame custom messages as user-role data,
+without canonical append or message events. Generic/custom converters are unchanged;
+direct embeddings must support native custom-message rendering, as for compaction data.
+
+Source-backed ViewUnits carry exact source/update revisions, source classification and
+explicit visible dependencies. Whole-message tool exchanges, delta baselines and default
+whole-context opaque replay remain intact. Closure resolves completely or refuses missing
+sources/replay and item/dependency/metadata-byte overflow. A linear star avoids quadratic
+whole-context edges. The compiler exposes detached metadata without retaining another
+canonical body store. Token estimates remain unknown. Actual provider-budget/epoch
+selection enforcement is still unfinished; this does not close the ViewUnit prerequisite.
+
+Seven distinct focused cases passed across separate invocations and a corrected repeat:
+ViewUnit2, existing index2/compiler2 and native SDK input1. The real native converter,
+stable positions across two material changes, held captures, original callback/ACK values
+and omission behavior are covered. One Root fixture wrongly expected expanded user text
+to have user authority; the expectation was corrected to unrecorded, not the production
+rule. No provider, real credentials, kernel or live benchmark ran. Model-aware budgets,
+full stable epochs, selective recovery and remaining whole-harness requirements stay open.

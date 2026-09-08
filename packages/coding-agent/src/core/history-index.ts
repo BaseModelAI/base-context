@@ -112,6 +112,8 @@ export interface ContextManifestCursor {
 export interface ContextRef {
 	entryId: string;
 	sequence: number;
+	/** Source classification, not authority inferred from rendered message text. */
+	authority?: IndexedSourceEvent["authority"];
 	kind: "message" | "custom_message" | "branch_summary" | "compaction";
 	locator: IndexedSourceEvent["locator"];
 	revision: string;

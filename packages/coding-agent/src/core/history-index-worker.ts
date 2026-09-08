@@ -989,9 +989,9 @@ function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evid
 	return page;
 }
 
-type ContextNode = BranchNode & ContextState & Pick<Row, "sequence" | "kind" | "locator" | "revision">;
+type ContextNode = BranchNode & ContextState & Pick<Row, "sequence" | "kind" | "locator" | "revision" | "authority">;
 const manifestNode =
-	db.prepare(`SELECT e.id,e.parent_id,e.sequence,e.kind,e.locator,e.revision,a.depth,c.visible_head,c.previous_visible,c.visible_count,c.latest_compaction,c.first_kept_id
+	db.prepare(`SELECT e.id,e.parent_id,e.sequence,e.kind,e.locator,e.revision,e.authority,a.depth,c.visible_head,c.previous_visible,c.visible_count,c.latest_compaction,c.first_kept_id
  FROM source_event e JOIN context_node c ON c.session=e.session AND c.id=e.id
  LEFT JOIN source_ancestry a ON a.session=e.session AND a.id=e.id
  WHERE e.session=? AND e.id=? AND e.sequence<=?`);
@@ -1002,6 +1002,7 @@ function contextRef(node: ContextNode): ContextRef {
 	return {
 		entryId: node.id,
 		sequence: node.sequence,
+		authority: node.authority,
 		kind: node.kind as ContextRef["kind"],
 		locator: JSON.parse(node.locator) as ContextRef["locator"],
 		revision: node.revision,
