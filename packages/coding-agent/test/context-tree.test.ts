@@ -9,9 +9,12 @@ import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import {
 	type ContextTreeNode,
+	ContextTreeRequest,
+	type ContextTreeRequestLimits,
 	loadContextTreeChildrenFromDisk,
 	readContextTreeUsage,
 } from "../src/core/context-tree.js";
+import * as contextTreeHistory from "../src/core/export-html/history.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -132,7 +135,22 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		addAssistantUsage(aggregate, grandchildUsage);
 		await child.sessionManager.appendChildUsageAttribution(child.assistantEntryId, grandchildUsage, aggregate);
 
-		const nodes = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		const limits: ContextTreeRequestLimits = {
+			maxEntries: 16_384,
+			maxSourceBytes: 64 * 1024 * 1024,
+			maxNodes: 2,
+			maxMetadataBytes: 4 * 1024 * 1024,
+			maxDirectoryEntries: 16_384,
+		};
+		const reading = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, limits);
+		Object.assign(limits, {
+			maxEntries: 1,
+			maxSourceBytes: 1,
+			maxNodes: 1,
+			maxMetadataBytes: 1,
+			maxDirectoryEntries: 1,
+		});
+		const nodes = await reading;
 		expect(nodes).toHaveLength(1);
 
 		const childNode = nodes[0];
@@ -169,6 +187,15 @@ describe("loadContextTreeChildrenFromDisk", () => {
 				maxSourceBytes: 1,
 			}),
 		).rejects.toThrow("HTML export source byte budget exceeded");
+		await expect(
+			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, { maxNodes: 1 }),
+		).rejects.toThrow("Context tree node budget exceeded");
+		await expect(
+			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, { maxMetadataBytes: 1 }),
+		).rejects.toThrow("Context tree metadata byte budget exceeded");
+		await expect(
+			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, { maxDirectoryEntries: 1 }),
+		).rejects.toThrow("Context tree directory entry budget exceeded");
 	});
 
 	it("reports context usage from the last assistant message and the model context window", async () => {
@@ -475,19 +502,139 @@ describe("AgentSession.getContextTree", () => {
 			createUsage(400, 50, 0.04),
 		);
 		await child.sessionManager.close();
-		const tree = await session.getContextTree();
+		const readSource = vi.spyOn(sessionManager, "readSourceHistory");
+		let tree: ContextTreeNode;
+		try {
+			tree = await session.getContextTree();
+			expect(readSource).toHaveBeenCalledOnce();
+		} finally {
+			readSource.mockRestore();
+		}
 		expect(tree.children).toMatchObject([
 			{ id: "sub-completed0001", label: "completed child", ownUsage: { input: 400 } },
 		]);
 		expect(tree.totalUsage.input).toBe(5200);
 		expect(tree.totalUsage.cost.total).toBeCloseTo(0.52);
 		expect(tree.ownUsage.input).toBe(5200);
+		await expect(session.getContextTree({ maxNodes: 1 })).rejects.toThrow("Context tree node budget exceeded");
+		await expect(session.getContextTree({ maxMetadataBytes: 1 })).rejects.toThrow(
+			"Context tree metadata byte budget exceeded",
+		);
 		await expect(
 			readContextTreeUsage(sessionManager, { maxEntries: 1, maxSourceBytes: 64 * 1024 * 1024 }),
 		).rejects.toThrow("History entry budget exceeded");
 		await expect(readContextTreeUsage(sessionManager, { maxEntries: 16384, maxSourceBytes: 1 })).rejects.toThrow(
 			"History source byte budget exceeded",
 		);
+
+		// Shared helper reads capture immediately, but retain only one decoded source at a time.
+		// This joins helper reads directly; AgentSession's failure drain is a separate boundary.
+		const request = new ContextTreeRequest();
+		const bothCaptured = createDeferred();
+		const decodedHeld = createDeferred();
+		const releaseRead = createDeferred();
+		const readError = new Error("gated context-tree parent path failed");
+		let acceptedReads = 0;
+		let capturedReads = 0;
+		let materializations = 0;
+		let finishedReads = 0;
+		const originalRead = sessionManager.readSourceHistory.bind(sessionManager);
+		const schedulingReadSource = vi.spyOn(sessionManager, "readSourceHistory").mockImplementation((read) => {
+			const first = acceptedReads++ === 0;
+			return originalRead(async (history) => {
+				try {
+					const reading = read({
+						...history,
+						materialize: async (limits) => {
+							materializations++;
+							return history.materialize(limits);
+						},
+						parentPath: async (options) => {
+							const page = await history.parentPath(options);
+							if (first) {
+								decodedHeld.resolve();
+								await releaseRead.promise;
+								throw readError;
+							}
+							return page;
+						},
+					});
+					if (++capturedReads === 2) bothCaptured.resolve();
+					return await reading;
+				} finally {
+					finishedReads++;
+				}
+			});
+		});
+		const reading = Promise.allSettled([
+			readContextTreeUsage(sessionManager, undefined, request),
+			readContextTreeUsage(sessionManager, undefined, request),
+		]);
+		try {
+			await Promise.all([bothCaptured.promise, decodedHeld.promise]);
+			expect(materializations).toBe(1);
+			releaseRead.resolve();
+			const results = await reading;
+			expect(results[0].status).toBe("rejected");
+			if (results[0].status === "rejected") expect(results[0].reason).toBe(readError);
+			expect(results[1]).toMatchObject({ status: "fulfilled", value: { ownUsage: { input: 5200 } } });
+			expect(materializations).toBe(2);
+			expect(finishedReads).toBe(2);
+		} finally {
+			releaseRead.resolve();
+			await reading;
+			schedulingReadSource.mockRestore();
+		}
+
+		// AgentSession must drain an accepted disk read before surfacing a root-source failure.
+		const diskEntered = createDeferred();
+		const rootFailed = createDeferred();
+		const releaseDisk = createDeferred();
+		const drainError = new Error("context-tree root source failed");
+		let diskFinished = false;
+		let treeSettled = false;
+		const originalDiskRead = contextTreeHistory.readSessionHistoryFile;
+		const drainDiskRead = vi
+			.spyOn(contextTreeHistory, "readSessionHistoryFile")
+			.mockImplementation(async (...args) => {
+				diskEntered.resolve();
+				try {
+					await releaseDisk.promise;
+					return await originalDiskRead(...args);
+				} finally {
+					diskFinished = true;
+				}
+			});
+		const drainRootRead = vi.spyOn(sessionManager, "readSourceHistory").mockImplementation(() =>
+			originalRead(async () => {
+				rootFailed.resolve();
+				throw drainError;
+			}),
+		);
+		const treeRead = session.getContextTree();
+		const treeOutcome = treeRead.then(
+			() => {
+				treeSettled = true;
+				return undefined;
+			},
+			(error: unknown) => {
+				treeSettled = true;
+				return error;
+			},
+		);
+		try {
+			await Promise.all([rootFailed.promise, diskEntered.promise]);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(treeSettled).toBe(false);
+			releaseDisk.resolve();
+			expect(await treeOutcome).toBe(drainError);
+			expect(diskFinished).toBe(true);
+		} finally {
+			releaseDisk.resolve();
+			await treeOutcome;
+			drainRootRead.mockRestore();
+			drainDiskRead.mockRestore();
+		}
 
 		for (const parentId of ["missing-parent", "bad-leaf"]) {
 			const malformedDir = makeTempDir();

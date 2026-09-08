@@ -111,6 +111,8 @@ import {
 } from "./compaction/index.js";
 import {
 	type ContextTreeNode,
+	ContextTreeRequest,
+	type ContextTreeRequestLimits,
 	type ContextWindowResolver,
 	computeOwnAndTotalUsage,
 	loadContextTreeChildFromDisk,
@@ -300,7 +302,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
-import { emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
+import { type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
 
 export type { GoalState, GoalStatus } from "./goals.js";
@@ -12660,60 +12662,80 @@ export class AgentSession {
 	 * from their live sessions; completed children from their persisted session
 	 * dirs, so the tree survives child disposal and session resume.
 	 */
-	async getContextTree(): Promise<ContextTreeNode> {
-		const resolveContextWindow = this._contextWindowResolver();
-		const residentUsage = this.sessionManager.supportsCapturedHistoryReads()
-			? undefined
-			: readResidentContextTreeUsage(this.sessionManager);
-		const runs = [...this._activeRlmChildRuns.values()].map((run) => ({
-			id: run.id,
-			label: rlmChildLabel(run.prompt),
-			status: run.status,
-			session: run.session,
-			diskNode: run.session ? undefined : loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow),
-		}));
-		const diskChildren = loadContextTreeChildrenFromDisk(
-			this._rlmSessionDirForReading(),
-			resolveContextWindow,
-			new Set(runs.map((run) => run.id)),
-		);
+	async getContextTree(limits: Partial<ContextTreeRequestLimits> = {}): Promise<ContextTreeNode> {
+		return this._getContextTree(new ContextTreeRequest(limits));
+	}
+
+	private async _getContextTree(
+		request: ContextTreeRequest,
+		identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
+	): Promise<ContextTreeNode> {
+		// Live descendants enter synchronously before any queued native/disk reduction.
+		// Their parent already admitted the run identity and one node slot.
+		if (!identity) request.admitNode();
 		const model = this.model;
 		const rootNode = {
-			id: "root",
-			label: this.sessionName ?? "main agent",
-			status: "active" as const,
+			...(identity ?? { id: "root", label: this.sessionName ?? "main agent", status: "active" as const }),
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 		};
-		// Join root/live reads and every accepted disk read before surfacing a failure.
-		const results = await Promise.allSettled([
-			this.getContextUsage(),
-			readContextTreeUsage(this.sessionManager),
-			...runs.map((run) => run.session?.getContextTree() ?? Promise.resolve(run.diskNode)),
-			diskChildren,
-		]);
+		request.retainMetadata(identity ? { model: rootNode.model } : rootNode);
+		const contextWindow = model?.contextWindow ?? 0;
+		const estimate = model && !(contextWindow <= 0) ? estimateContextTokens(this.messages) : undefined;
+		const availabilityBytes = estimate ? this.settingsManager.getCanonicalContextLimits().maxSourceBytes : undefined;
+		const resolveContextWindow = this._contextWindowResolver();
+		const rlmSessionDir = this._rlmSessionDirForReading();
+		const residentUsage = this.sessionManager.supportsCapturedHistoryReads()
+			? undefined
+			: readResidentContextTreeUsage(this.sessionManager, request.limits, availabilityBytes);
+		if (residentUsage) request.retainMetadata(residentUsage);
+		const usageRead = residentUsage
+			? Promise.resolve(residentUsage)
+			: readContextTreeUsage(this.sessionManager, request.limits, request, availabilityBytes);
+		const children: Promise<ContextTreeNode | undefined>[] = [];
+		const skipIds = new Set<string>();
+		let diskChildren: Promise<ContextTreeNode[]> = Promise.resolve([]);
+		try {
+			// Admit while iterating: do not first clone an unbounded run Map.
+			for (const run of this._activeRlmChildRuns.values()) {
+				request.admitNode();
+				const childIdentity = { id: run.id, label: rlmChildLabel(run.prompt), status: run.status };
+				request.retainMetadata(childIdentity);
+				skipIds.add(childIdentity.id);
+				const child = run.session;
+				children.push(
+					child
+						? child._getContextTree(request, childIdentity)
+						: loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow, request, childIdentity),
+				);
+			}
+			diskChildren = loadContextTreeChildrenFromDisk(rlmSessionDir, resolveContextWindow, skipIds, request);
+		} catch (error) {
+			// Admission failure does not abandon any earlier captured/accepted read.
+			children.push(Promise.reject(error));
+		}
+		const results = await Promise.allSettled([usageRead, ...children, diskChildren]);
 		const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
 		if (errors.length === 1) throw errors[0];
 		if (errors.length > 1) throw new AggregateError(errors, "Context tree reads failed");
-		const contextUsage = (results[0] as PromiseFulfilledResult<ContextUsage | undefined>).value;
-		const usage =
-			(results[1] as PromiseFulfilledResult<Awaited<ReturnType<typeof readContextTreeUsage>>>).value ??
-			residentUsage;
+		const usage = (results[0] as PromiseFulfilledResult<Awaited<typeof usageRead>>).value;
 		if (!usage) throw new Error("Context tree usage source is unavailable");
-		const children = runs.map((run, index) => {
-			const node = (results[index + 2] as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
-			return {
-				...(node ?? { ownUsage: emptyUsage(), totalUsage: emptyUsage(), children: [] }),
-				id: run.id,
-				label: run.label,
-				status: run.status,
-			};
-		});
+		const contextUsage = estimate
+			? usage.hasPostCompactionUsage
+				? { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 }
+				: { tokens: null, contextWindow, percent: null }
+			: undefined;
+		const usageMetadata = { ownUsage: usage.ownUsage, totalUsage: usage.totalUsage, contextUsage };
+		request.retainMetadata({ contextUsage });
 		return {
 			...rootNode,
-			ownUsage: usage.ownUsage,
-			totalUsage: usage.totalUsage,
-			contextUsage,
-			children: [...children, ...(results[runs.length + 2] as PromiseFulfilledResult<ContextTreeNode[]>).value],
+			...usageMetadata,
+			children: [
+				...results.slice(1, children.length + 1).flatMap((result) => {
+					const node = (result as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
+					return node ? [node] : [];
+				}),
+				...(results[children.length + 1] as PromiseFulfilledResult<ContextTreeNode[]>).value,
+			],
 		};
 	}
 

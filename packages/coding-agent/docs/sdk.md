@@ -564,6 +564,31 @@ bundle. This does not revoke delivery ACKs or completed tools. Limits are not mo
 budgets or whole-process memory bounds. Explicit resident Managers keep their existing
 behavior. See [settings](settings.md#native-invocation-output).
 
+### Context-tree request limits
+
+`getContextTree()` returns the complete live and saved-child overview or rejects. The
+limits below are copied for one request and shared by every descendant:
+
+```typescript
+const tree = await session.getContextTree({
+  maxNodes: 256,
+  maxMetadataBytes: 4 * 1024 * 1024,
+  maxDirectoryEntries: 16_384,
+  maxEntries: 16_384,
+  maxSourceBytes: 64 * 1024 * 1024,
+});
+```
+
+These are the defaults. Node admission includes readable header-only histories even
+when they produce no output node. Directory admission counts all visited names.
+Metadata bytes cover admitted encoded node/source/usage fields, paths and skip IDs.
+The entry and source-byte limits apply to each complete history.
+
+Full history reductions run one at a time within this request. Native source frontiers
+bind before that wait; disk file-image capture starts when its reduction runs. Accepted
+reads finish before a failure is returned. Limits do not bound concurrent requests,
+provider or kernel memory, transient decoding, or process RSS.
+
 ## Extensions
 
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.

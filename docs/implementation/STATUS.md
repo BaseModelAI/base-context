@@ -712,3 +712,36 @@ These bounds cover owned invocation result values, not EventStream/RPC/subscribe
 provider partials, all tool-batch intermediates, caller-retained values or process RSS. The
 separate whole context-tree request draft is not part of this checkpoint. Task authority,
 explicit task reduction, ViewUnits/token budgets/epochs and release gates remain open.
+
+### Whole context-tree request bounds (W23)
+
+One copied request now admits at most256 nodes,4MiB of encoded metadata and16,384
+visited directory entries by default. Per-history16,384-entry/64MiB limits remain.
+Node admission counts readable header-only candidates even when no node is returned;
+registered no-history runs retain their placeholders. All visited directory names count,
+including irrelevant names. Paths, skip IDs and admitted node/source/usage metadata
+are charged before retention. Directory enumeration streams names and preserves the
+previous lexical/mtime order. Oversize requests refuse rather than returning a prefix.
+
+Native source captures enter immediately; one request-local slot covers complete
+materialization, ordered attribution projection, parent-path pages and scalar reduction.
+Resident snapshots reduce synchronously during the pre-await live walk. Disk image
+capture starts inside the slot after file-path selection. The slot releases before
+recursion. Root/live/disk accepted reads drain on admission or read failure, preserving
+single-error identity and ordered multiple errors. Tree availability uses the same
+captured reduction and keeps the selected canonical-context byte admission; public
+getContextUsage remains unchanged.
+
+Two existing cases passed in one isolated invocation (PID3130728,5.038266504s): recursive
+disk usage/copied limits/refusals, and native pre-compaction totals with a completed disk
+child, same-source availability, shared full-reduction scheduling and accepted-read drain.
+The scheduling phase enters two real native captures while only one materialization has
+started and decoded entries remain held inside parentPath. A separate actual AS phase
+holds accepted disk work while the root read fails; rejection waits for disk completion.
+No live-run Map injection, prompt/provider/kernel call or process-memory measurement ran.
+Typecheck3130733 passed. Initial targeted formatter3130576 formatted3files but refused one
+unused emptyUsage import; Root removed that import after source-reading jobs settled.
+
+These are per-request encoded/work limits, not exact serialized tree size, transient
+JSON/heap bounds, concurrent-request limits, index-sync limits or whole-process bounds.
+Task authority/reduction, ViewUnits/token budgets/epochs and release gates remain open.

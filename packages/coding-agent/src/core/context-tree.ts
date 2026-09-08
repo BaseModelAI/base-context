@@ -1,7 +1,8 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, opendirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
 import type { RlmChildAgentStatus } from "./agent-session.js";
+import { stringifyBoundedJson } from "./bounded-json.js";
 import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
 import { exportHistoryLimits, readSessionHistoryFile } from "./export-html/history.js";
 import type { ContextUsage } from "./extensions/index.js";
@@ -33,6 +34,77 @@ export interface ContextTreeNode {
 	totalUsage: Usage;
 	contextUsage?: ContextUsage;
 	children: ContextTreeNode[];
+}
+
+/** Shared by one overview request, not by concurrent requests or the process. */
+export interface ContextTreeRequestLimits extends SessionHistoryReadLimits {
+	maxNodes: number;
+	maxMetadataBytes: number;
+	maxDirectoryEntries: number;
+}
+
+class ContextTreeLimitError extends Error {}
+
+/** Small request-local counters and one full-history reduction tail. */
+export class ContextTreeRequest {
+	readonly limits: Readonly<ContextTreeRequestLimits>;
+	private nodes = 0;
+	private metadataBytes = 0;
+	private directoryEntries = 0;
+	private readTail: Promise<void> = Promise.resolve();
+
+	constructor(limits: Partial<ContextTreeRequestLimits> = {}) {
+		this.limits = Object.freeze({
+			...exportHistoryLimits(limits),
+			maxNodes: limits.maxNodes ?? 256,
+			maxMetadataBytes: limits.maxMetadataBytes ?? 4 * 1024 * 1024,
+			maxDirectoryEntries: limits.maxDirectoryEntries ?? 16_384,
+		});
+		if (!Object.values(this.limits).every((value) => Number.isSafeInteger(value) && value > 0))
+			throw new Error("Invalid context tree request limits");
+	}
+
+	admitNode(): void {
+		if (this.nodes >= this.limits.maxNodes) throw new ContextTreeLimitError("Context tree node budget exceeded");
+		this.nodes++;
+	}
+
+	retainMetadata(value: unknown): number {
+		let json: string;
+		try {
+			json = stringifyBoundedJson(value, this.limits.maxMetadataBytes - this.metadataBytes);
+		} catch (error) {
+			if (error instanceof Error && error.message === "JSON byte limit exceeded")
+				throw new ContextTreeLimitError("Context tree metadata byte budget exceeded", { cause: error });
+			throw error;
+		}
+		const bytes = Buffer.byteLength(json);
+		this.metadataBytes += bytes;
+		return bytes;
+	}
+
+	releaseMetadata(bytes: number): void {
+		this.metadataBytes -= bytes;
+	}
+
+	directoryEntry(): void {
+		if (this.directoryEntries >= this.limits.maxDirectoryEntries)
+			throw new ContextTreeLimitError("Context tree directory entry budget exceeded");
+		this.directoryEntries++;
+	}
+
+	read<T>(read: () => Promise<T>): Promise<T> {
+		const result = this.readTail.then(read);
+		this.readTail = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	}
+}
+
+function treeRequest(limits: Partial<ContextTreeRequestLimits> | ContextTreeRequest): ContextTreeRequest {
+	return limits instanceof ContextTreeRequest ? limits : new ContextTreeRequest(limits);
 }
 
 function isAssistantEntry(entry: SessionEntry): entry is SessionEntry & {
@@ -105,40 +177,110 @@ export function computeOwnAndTotalUsage(
 	return { ownUsage, totalUsage };
 }
 
-/** Complete bounded snapshot of an explicitly resident Manager, never an index-error fallback. */
+/** Complete bounded snapshot of an explicitly resident Manager, never an index-error fallback.
+ * This synchronous reduction runs in the pre-await live-tree capture walk. It never
+ * retains a decoded resident snapshot while native/disk work waits for a slot.
+ */
 export function readResidentContextTreeUsage(
 	manager: SessionManager,
 	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
-): { ownUsage: Usage; totalUsage: Usage } {
+	availabilityMaxSourceBytes?: number,
+): { ownUsage: Usage; totalUsage: Usage; hasPostCompactionUsage?: boolean } {
 	const snapshot = manager.materializeResidentHistory(limits);
-	return computeOwnAndTotalUsage(branchEntries(snapshot.entries, snapshot.leafId), snapshot.entries);
+	const branch = branchEntries(snapshot.entries, snapshot.leafId, availabilityMaxSourceBytes !== undefined);
+	if (availabilityMaxSourceBytes !== undefined) {
+		if (!Number.isSafeInteger(availabilityMaxSourceBytes) || availabilityMaxSourceBytes <= 0)
+			throw new Error("Invalid parent-path materialization limits");
+		if (branch.length > 16_384) throw new Error("Parent-path entry budget exceeded");
+		let bytes = 0;
+		for (const entry of branch) {
+			bytes += Buffer.byteLength(stringifyBoundedJson(entry, availabilityMaxSourceBytes - bytes));
+		}
+	}
+	return {
+		...computeOwnAndTotalUsage(branch, snapshot.entries),
+		...(availabilityMaxSourceBytes === undefined ? {} : { hasPostCompactionUsage: hasPostCompactionUsage(branch) }),
+	};
 }
 
 /** Detached, complete source usage and its exact captured parent branch. */
 export async function readContextTreeUsage(
 	manager: SessionManager,
 	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
-): Promise<{ source: SourceSnapshotRef; ownUsage: Usage; totalUsage: Usage } | undefined> {
+	request?: ContextTreeRequest,
+	availabilityMaxSourceBytes?: number,
+): Promise<
+	{ source: SourceSnapshotRef; ownUsage: Usage; totalUsage: Usage; hasPostCompactionUsage?: boolean } | undefined
+> {
 	if (!manager.supportsCapturedHistoryReads()) return undefined;
-	const capturedLimits = { maxEntries: limits.maxEntries, maxSourceBytes: limits.maxSourceBytes };
-	return manager.readSourceHistory(async (history) => {
-		const materialized = await history.materialize(capturedLimits);
-		const allEntries = materialized.entries.map(({ entry }) => entry);
-		applyChildUsageAttributions(allEntries);
-		const byId = new Map(allEntries.map((entry) => [entry.id, entry]));
-		const branch: SessionEntry[] = [];
-		let cursor: ParentPathCursor | undefined;
-		do {
-			const page = await history.parentPath({ cursor });
-			for (const reference of page.events) {
-				const entry = byId.get(reference.id);
-				if (!entry) throw new Error("Context-tree parent-path entry source is unavailable");
-				branch.push(entry);
+	const sourceLimits = request?.limits ?? limits;
+	const capturedLimits = { maxEntries: sourceLimits.maxEntries, maxSourceBytes: sourceLimits.maxSourceBytes };
+	// The actual source frontier binds NOW, never after waiting for the reduction slot.
+	return manager.readSourceHistory((history) => {
+		request?.retainMetadata(history.source);
+		const reduce = async () => {
+			const materialized = await history.materialize(capturedLimits);
+			const allEntries = materialized.entries.map(({ entry }) => entry);
+			applyChildUsageAttributions(allEntries);
+			const byId = new Map(allEntries.map((entry) => [entry.id, entry]));
+			const branch: SessionEntry[] = [];
+			let cursor: ParentPathCursor | undefined;
+			do {
+				const page = await history.parentPath({ cursor });
+				for (const reference of page.events) {
+					const entry = byId.get(reference.id);
+					if (!entry) throw new Error("Context-tree parent-path entry source is unavailable");
+					branch.push(entry);
+				}
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor);
+			let available: boolean | undefined;
+			if (availabilityMaxSourceBytes !== undefined) {
+				const bootstrap = await history.branchBootstrap();
+				available = !bootstrap.latestCompaction;
+				const reference = bootstrap.contextUsageAssistant;
+				if (bootstrap.latestCompaction && reference) {
+					const updates = await history.branchContext.contextUpdates({
+						kind: "assistant-usage",
+						targetId: reference.id,
+					});
+					const bytes =
+						reference.locator.length + updates.refs.reduce((sum, update) => sum + update.locator.length, 0);
+					if (bytes > availabilityMaxSourceBytes) throw new Error("Context usage source byte budget exceeded");
+					const assistant = byId.get(reference.id);
+					if (!assistant || !isAssistantEntry(assistant))
+						throw new Error("Context usage assistant source is unavailable");
+					// Full-source ordered projection above includes off-branch attributions.
+					available = calculateContextTokens(assistant.message.usage) > 0;
+				}
 			}
-			cursor = page.nextCursor ?? undefined;
-		} while (cursor);
-		return { source: history.source, ...computeOwnAndTotalUsage(branch, allEntries) };
+			const usage = {
+				...computeOwnAndTotalUsage(branch, allEntries),
+				...(available === undefined ? {} : { hasPostCompactionUsage: available }),
+			};
+			request?.retainMetadata(usage);
+			return { source: history.source, ...usage };
+		};
+		return request ? request.read(reduce) : reduce();
 	});
+}
+
+function hasPostCompactionUsage(branch: SessionEntry[]): boolean {
+	let boundary = -1;
+	for (let index = branch.length - 1; index >= 0; index--) {
+		if (branch[index].type === "compaction") {
+			boundary = index;
+			break;
+		}
+	}
+	if (boundary < 0) return true;
+	for (let index = branch.length - 1; index > boundary; index--) {
+		const entry = branch[index];
+		if (!isAssistantEntry(entry)) continue;
+		if (entry.message.stopReason !== "aborted" && entry.message.stopReason !== "error")
+			return calculateContextTokens(entry.message.usage) > 0;
+	}
+	return false;
 }
 
 /**
@@ -157,33 +299,8 @@ function computeContextUsageFromEntries(
 		return undefined;
 	}
 
-	let latestCompactionIndex = -1;
-	for (let i = branch.length - 1; i >= 0; i--) {
-		if (branch[i].type === "compaction") {
-			latestCompactionIndex = i;
-			break;
-		}
-	}
-
-	if (latestCompactionIndex >= 0) {
-		let hasPostCompactionUsage = false;
-		for (let i = branch.length - 1; i > latestCompactionIndex; i--) {
-			const entry = branch[i];
-			if (!isAssistantEntry(entry)) {
-				continue;
-			}
-			const assistant = entry.message;
-			if (assistant.stopReason === "aborted" || assistant.stopReason === "error") {
-				continue;
-			}
-			if (calculateContextTokens(assistant.usage) > 0) {
-				hasPostCompactionUsage = true;
-			}
-			break;
-		}
-		if (!hasPostCompactionUsage) {
-			return { tokens: null, contextWindow, percent: null };
-		}
+	if (!hasPostCompactionUsage(branch)) {
+		return { tokens: null, contextWindow, percent: null };
 	}
 
 	const estimate = estimateContextTokens(buildSessionContext(allEntries).messages);
@@ -199,8 +316,9 @@ function computeContextUsageFromEntries(
  * branch is its parentId chain. Keeps forked/abandoned paths out of usage
  * sums so disk nodes match what a live session would report.
  */
-function branchEntries(entries: SessionEntry[], leafId?: string | null): SessionEntry[] {
+function branchEntries(entries: SessionEntry[], leafId?: string | null, strict = false): SessionEntry[] {
 	if (entries.length === 0) {
+		if (strict && leafId !== undefined && leafId !== null) throw new Error("Parent path lineage is unresolved");
 		return [];
 	}
 	const byId = new Map(entries.map((entry) => [entry.id, entry]));
@@ -208,11 +326,17 @@ function branchEntries(entries: SessionEntry[], leafId?: string | null): Session
 	const seen = new Set<string>();
 	let current: SessionEntry | undefined =
 		leafId === undefined ? entries[entries.length - 1] : leafId === null ? undefined : byId.get(leafId);
+	if (strict && leafId !== undefined && leafId !== null && !current)
+		throw new Error("Parent path lineage is unresolved");
 	while (current && !seen.has(current.id)) {
 		seen.add(current.id);
 		branch.push(current);
-		current = current.parentId ? byId.get(current.parentId) : undefined;
+		const parentId = current.parentId;
+		const hasParent = strict ? parentId !== null : !!parentId;
+		current = hasParent ? byId.get(parentId!) : undefined;
+		if (strict && hasParent && !current) throw new Error("Parent path lineage is unresolved");
 	}
+	if (strict && current) throw new Error("Parent path lineage is unresolved");
 	return branch.reverse();
 }
 
@@ -237,49 +361,84 @@ function statusFromBranch(entries: SessionEntry[]): "done" | "error" | "cancelle
 	return "done";
 }
 
-function findSessionFile(dir: string): string | undefined {
-	let newest: { path: string; mtime: number } | undefined;
-	for (const name of readdirSync(dir)) {
-		if (!name.endsWith(".jsonl")) {
-			continue;
+/** Stream names; opening/reading errors keep the caller's existing policy. */
+function visitDirectory(dirPath: string, request: ContextTreeRequest, visit: (name: string) => void): void {
+	const dir = opendirSync(dirPath);
+	try {
+		for (let entry = dir.readSync(); entry !== null; entry = dir.readSync()) {
+			request.directoryEntry();
+			visit(entry.name);
 		}
-		const path = join(dir, name);
+	} catch (error) {
 		try {
-			const mtime = statSync(path).mtime.getTime();
-			if (!newest || mtime > newest.mtime) {
-				newest = { path, mtime };
-			}
-		} catch {
-			// Skip unreadable files.
+			dir.closeSync();
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "Context tree directory read and close failed");
 		}
+		throw error;
 	}
-	return newest?.path;
+	dir.closeSync();
 }
 
-function listChildSessionDirs(rlmSessionDir: string): string[] {
-	let names: string[];
+// readdirSync used UTF8 lexical order; retain its stable mtime-tie ordering.
+function comparePaths(a: string, b: string): number {
+	return Buffer.compare(Buffer.from(a), Buffer.from(b));
+}
+
+function findSessionFile(dir: string, request: ContextTreeRequest): { path: string; bytes: number } | undefined {
+	let newest: { path: string; mtime: number; bytes: number } | undefined;
 	try {
-		names = readdirSync(rlmSessionDir);
-	} catch {
-		return [];
-	}
-	return names
-		.filter((name) => name.startsWith("sub-"))
-		.map((name) => join(rlmSessionDir, name))
-		.filter((path) => {
+		visitDirectory(dir, request, (name) => {
+			if (!name.endsWith(".jsonl")) return;
+			const path = join(dir, name);
+			let mtime: number;
 			try {
-				return statSync(path).isDirectory();
+				mtime = statSync(path).mtime.getTime();
 			} catch {
-				return false;
+				return; // Skip unreadable files.
 			}
-		})
-		.sort((a, b) => {
-			try {
-				return statSync(a).mtime.getTime() - statSync(b).mtime.getTime();
-			} catch {
-				return 0;
+			if (!newest || mtime > newest.mtime || (mtime === newest.mtime && comparePaths(path, newest.path) < 0)) {
+				if (newest) request.releaseMetadata(newest.bytes);
+				newest = undefined;
+				const bytes = request.retainMetadata(path);
+				newest = { path, mtime, bytes };
 			}
 		});
+		return newest;
+	} catch (error) {
+		if (newest) request.releaseMetadata(newest.bytes);
+		throw error;
+	}
+}
+
+function listChildSessionDirs(rlmSessionDir: string, request: ContextTreeRequest): { paths: string[]; bytes: number } {
+	const paths: string[] = [];
+	let bytes = 0;
+	try {
+		visitDirectory(rlmSessionDir, request, (name) => {
+			if (!name.startsWith("sub-")) return;
+			const path = join(rlmSessionDir, name);
+			try {
+				if (!statSync(path).isDirectory()) return;
+			} catch {
+				return;
+			}
+			bytes += request.retainMetadata(path);
+			paths.push(path);
+		});
+	} catch (error) {
+		request.releaseMetadata(bytes);
+		if (error instanceof ContextTreeLimitError || error instanceof AggregateError) throw error;
+		return { paths: [], bytes: 0 };
+	}
+	paths.sort(comparePaths).sort((a, b) => {
+		try {
+			return statSync(a).mtime.getTime() - statSync(b).mtime.getTime();
+		} catch {
+			return 0;
+		}
+	});
+	return { paths, bytes };
 }
 
 /**
@@ -291,14 +450,12 @@ function listChildSessionDirs(rlmSessionDir: string): string[] {
  */
 async function readContextTreeChildNodeFromDisk(
 	childSessionDir: string,
+	sessionFile: string,
 	resolveContextWindow: ContextWindowResolver,
-	limits: SessionHistoryReadLimits,
+	request: ContextTreeRequest,
+	identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
 ): Promise<ContextTreeNode | undefined> {
-	const sessionFile = findSessionFile(childSessionDir);
-	if (!sessionFile || !existsSync(sessionFile)) {
-		return undefined;
-	}
-	const allEntries = (await readSessionHistoryFile(sessionFile, limits)).filter(
+	const allEntries = (await readSessionHistoryFile(sessionFile, request.limits)).filter(
 		(entry): entry is SessionEntry => entry.type !== "session",
 	);
 	const branch = branchEntries(allEntries);
@@ -327,57 +484,95 @@ async function readContextTreeChildNodeFromDisk(
 
 	const contextWindow = model ? resolveContextWindow(model.provider, model.id) : undefined;
 
-	return {
-		id: basename(childSessionDir),
-		label: label || "child agent",
-		status: statusFromBranch(branch),
+	const metadata = {
+		...(identity ?? {
+			id: basename(childSessionDir),
+			label: label || "child agent",
+			status: statusFromBranch(branch),
+		}),
 		model,
 		ownUsage,
 		totalUsage,
 		contextUsage: computeContextUsageFromEntries(allEntries, branch, contextWindow),
-		children: [],
 	};
+	// A registered run's identity was already admitted by its live parent.
+	request.retainMetadata(identity ? { model, ownUsage, totalUsage, contextUsage: metadata.contextUsage } : metadata);
+	return { ...metadata, children: [] };
 }
 
-/** Complete per-file limits; decoded history is reduced before reading descendants. */
+/** Complete or refuse, sharing the request's slot and counters with descendants.
+ * Internal identity is an already-admitted registered run, including its empty placeholder.
+ */
 export async function loadContextTreeChildFromDisk(
 	childSessionDir: string,
 	resolveContextWindow: ContextWindowResolver,
-	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+	limits: Partial<ContextTreeRequestLimits> | ContextTreeRequest = {},
+	identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
 ): Promise<ContextTreeNode | undefined> {
-	limits = exportHistoryLimits(limits);
-	const node = await readContextTreeChildNodeFromDisk(childSessionDir, resolveContextWindow, limits);
+	const request = treeRequest(limits);
+	const directoryBytes = request.retainMetadata(childSessionDir);
+	let sessionFile: { path: string; bytes: number } | undefined;
+	let node: ContextTreeNode | undefined;
+	try {
+		sessionFile = findSessionFile(childSessionDir, request);
+		if (sessionFile && existsSync(sessionFile.path)) {
+			// A header-only history still consumes one bounded source admission.
+			if (!identity) request.admitNode();
+			node = await request.read(() =>
+				readContextTreeChildNodeFromDisk(
+					childSessionDir,
+					sessionFile!.path,
+					resolveContextWindow,
+					request,
+					identity,
+				),
+			);
+		}
+	} finally {
+		if (sessionFile) request.releaseMetadata(sessionFile.bytes);
+		request.releaseMetadata(directoryBytes);
+	}
 	if (node) {
-		node.children = await loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow, undefined, limits);
+		// The full source has been reduced and the serial slot released before recursion.
+		node.children = await loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow, undefined, request);
+	} else if (identity) {
+		const usage = { ownUsage: emptyUsage(), totalUsage: emptyUsage() };
+		request.retainMetadata(usage);
+		node = { ...identity, ...usage, children: [] };
 	}
 	return node;
 }
 
-/**
- * Build context nodes for all persisted RLM children under an RLM session
- * dir, recursing into nested sub-* dirs for grandchildren. `skipIds`
- * excludes children that are already represented live.
- */
+/** Persisted children, in existing directory order, excluding already represented live IDs. */
 export async function loadContextTreeChildrenFromDisk(
 	rlmSessionDir: string | undefined,
 	resolveContextWindow: ContextWindowResolver,
 	skipIds?: ReadonlySet<string>,
-	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+	limits: Partial<ContextTreeRequestLimits> | ContextTreeRequest = {},
 ): Promise<ContextTreeNode[]> {
-	limits = exportHistoryLimits(limits);
-	const skippedIds = new Set(skipIds);
-	if (!rlmSessionDir || !existsSync(rlmSessionDir)) {
-		return [];
-	}
-	const nodes: ContextTreeNode[] = [];
-	for (const childDir of listChildSessionDirs(rlmSessionDir)) {
-		if (skippedIds.has(basename(childDir))) {
-			continue;
+	const request = treeRequest(limits);
+	const skippedIds = new Set<string>();
+	let metadataBytes = 0;
+	try {
+		// A caller-provided skip set is bounded before copying, too.
+		if (skipIds && skipIds.size > request.limits.maxDirectoryEntries)
+			throw new ContextTreeLimitError("Context tree directory entry budget exceeded");
+		for (const id of skipIds ?? []) {
+			metadataBytes += request.retainMetadata(id);
+			skippedIds.add(id);
 		}
-		const node = await loadContextTreeChildFromDisk(childDir, resolveContextWindow, limits);
-		if (node) {
-			nodes.push(node);
+		if (!rlmSessionDir || !existsSync(rlmSessionDir)) return [];
+		metadataBytes += request.retainMetadata(rlmSessionDir);
+		const directories = listChildSessionDirs(rlmSessionDir, request);
+		metadataBytes += directories.bytes;
+		const nodes: ContextTreeNode[] = [];
+		for (const childDir of directories.paths) {
+			if (skippedIds.has(basename(childDir))) continue;
+			const node = await loadContextTreeChildFromDisk(childDir, resolveContextWindow, request);
+			if (node) nodes.push(node);
 		}
+		return nodes;
+	} finally {
+		request.releaseMetadata(metadataBytes);
 	}
-	return nodes;
 }
