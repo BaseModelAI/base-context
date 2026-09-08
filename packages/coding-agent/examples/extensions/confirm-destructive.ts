@@ -25,10 +25,16 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		// reason === "resume" - check if there are unsaved changes (messages since last assistant response)
-		const entries = ctx.sessionManager.getEntries();
-		const hasUnsavedWork = entries.some(
-			(e): e is SessionMessageEntry => e.type === "message" && e.message.role === "user",
-		);
+		let hasUnsavedWork: boolean;
+		try {
+			const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
+			hasUnsavedWork = entries.some(
+				(e): e is SessionMessageEntry => e.type === "message" && e.message.role === "user",
+			);
+		} catch {
+			ctx.ui.notify("History unavailable; session switch cancelled", "warning");
+			return { cancel: true };
+		}
 
 		if (hasUnsavedWork) {
 			const confirmed = await ctx.ui.confirm(

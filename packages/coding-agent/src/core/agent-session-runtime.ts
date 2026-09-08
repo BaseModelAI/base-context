@@ -185,10 +185,10 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	private async emitBeforeFork(
+		runner: AgentSession["extensionRunner"],
 		entryId: string,
 		options: { position: "before" | "at" },
 	): Promise<{ cancelled: boolean }> {
-		const runner = this.session.extensionRunner;
 		if (!runner.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
 		}
@@ -278,7 +278,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			if (setup) {
 				await setup(sessionManager);
 				await sessionManager.flushNow();
-				result.session.agent.state.messages = sessionManager.buildSessionContext().messages;
+				result.session.agent.state.messages = (await result.session.buildSessionContext()).messages;
 			}
 			if (this.session !== source.session) throw new Error("Session changed during replacement");
 			this.apply(result);
@@ -506,29 +506,34 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		const rlmDepth = source.session.rlmDepth;
 		const withSession = options?.withSession;
 		const position = options?.position ?? "before";
-		const beforeResult = await this.emitBeforeFork(entryId, { position });
-		if (beforeResult.cancelled) {
+		const runner = source.session.extensionRunner;
+		const preparation = Promise.allSettled([
+			source.session.sessionManager.prepareFork(entryId, { position, rlmDepth }),
+		]);
+		const [beforeResult] = await Promise.allSettled([
+			this.emitBeforeFork(runner, entryId, { position }),
+			preparation,
+		]);
+		// Join the independent source read before handling hook failure or cancellation.
+		if (beforeResult.status === "rejected") throw beforeResult.reason;
+		if (beforeResult.value.cancelled) {
 			return { cancelled: true };
 		}
-		let targetLeafId: string | null;
+		const [preparedResult] = await preparation;
+		if (preparedResult.status === "rejected") throw preparedResult.reason;
+		const prepared = preparedResult.value;
+		if (this.session !== source.session) throw new Error("Session changed before replacement");
+
 		let selectedText: string | undefined;
-
-		const selectedEntry = source.session.sessionManager.getEntry(entryId);
-		if (!selectedEntry) {
-			throw new Error("Invalid entry ID for forking");
-		}
-
-		if (position === "at") {
-			targetLeafId = selectedEntry.id;
-		} else {
+		if (position === "before") {
+			const selectedEntry = prepared.selectedEntry;
 			if (selectedEntry.type !== "message" || selectedEntry.message.role !== "user") {
 				throw new Error("Invalid entry ID for forking");
 			}
-			targetLeafId = selectedEntry.parentId;
 			selectedText = extractUserMessageText(selectedEntry.message.content);
 		}
 
-		const sessionManager = await source.session.sessionManager.forkBranch(targetLeafId, { rlmDepth });
+		const sessionManager = await prepared.create();
 		await this.replaceWithManager(sessionManager, source, "fork");
 		await this.finishSessionReplacement(withSession);
 		return { cancelled: false, selectedText };

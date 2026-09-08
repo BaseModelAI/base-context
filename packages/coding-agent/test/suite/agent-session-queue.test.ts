@@ -693,6 +693,7 @@ describe("AgentSession queue characterization", () => {
 		const treeEventReached = createDeferred();
 		const treeEventGate = createDeferred();
 		const harness = await createHarness({
+			persistSession: true,
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_tree", async () => {
@@ -705,7 +706,7 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
 		await harness.session.prompt("one");
-		const target = harness.sessionManager.getEntries().find((entry) => entry.type === "message");
+		const target = (await harness.sessionManager.readEntries()).find((entry) => entry.type === "message");
 		expect(target).toBeDefined();
 		await harness.session.prompt("two");
 

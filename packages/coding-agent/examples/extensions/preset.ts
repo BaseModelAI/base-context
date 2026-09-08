@@ -404,7 +404,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		}
 
 		// Restore preset from session state
-		const entries = ctx.sessionManager.getEntries();
+		const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 		const presetEntry = entries
 			.filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "preset-state")
 			.pop() as { data?: { name: string } } | undefined;

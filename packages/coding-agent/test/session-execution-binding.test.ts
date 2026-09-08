@@ -96,13 +96,13 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 	const calls: string[] = [];
 	const executionIds: string[] = [];
 	const owner = await createSession(manager, {
-		onToolInvocationStarting: (intent) => {
-			expect(manager.getEntry(`${intent.executionId}:intent`)?.type).toBe("tool_intent");
+		onToolInvocationStarting: async (intent) => {
+			expect((await manager.readEntry(`${intent.executionId}:intent`))?.type).toBe("tool_intent");
 			executionIds.push(intent.executionId);
 			calls.push("caller-intent");
 		},
-		onToolExchangeFinalized: (finalized) => {
-			expect(manager.getToolExchange(finalized.executionId)).toEqual(finalized);
+		onToolExchangeFinalized: async (finalized) => {
+			expect(await manager.readToolExchange(finalized.executionId)).toEqual(finalized);
 			calls.push("caller-final");
 		},
 	});
@@ -140,13 +140,13 @@ it("binds direct AgentSession construction and persists before caller hooks", as
 	expect(sawCanonicalOnly).toBe(true);
 	expect(owner.agent.state.errorMessage).toBeUndefined();
 	expect(() => owner.agent.bindContextOwner(async () => {})).toThrow("Agent context owner is already bound");
-	owner.agent.onToolInvocationStarting = (intent) => {
-		expect(manager.getEntry(`${intent.executionId}:intent`)?.type).toBe("tool_intent");
+	owner.agent.onToolInvocationStarting = async (intent) => {
+		expect((await manager.readEntry(`${intent.executionId}:intent`))?.type).toBe("tool_intent");
 		executionIds.push(intent.executionId);
 		calls.push("replacement-intent");
 	};
-	owner.agent.onToolExchangeFinalized = (finalized) => {
-		expect(manager.getToolExchange(finalized.executionId)).toEqual(finalized);
+	owner.agent.onToolExchangeFinalized = async (finalized) => {
+		expect(await manager.readToolExchange(finalized.executionId)).toEqual(finalized);
 		calls.push("replacement-final");
 	};
 	await owner.agent.prompt("Exercise replacement hooks with local faux");
@@ -175,12 +175,12 @@ it("follows the session owner after a source-history switch", async () => {
 	const manager = await SessionManager.create(dir, join(dir, "sessions"));
 	const executionIds: string[] = [];
 	const owner = await createSession(manager, {
-		onToolInvocationStarting: (intent) => {
-			expect(manager.getEntry(`${intent.executionId}:intent`)?.type).toBe("tool_intent");
+		onToolInvocationStarting: async (intent) => {
+			expect((await manager.readEntry(`${intent.executionId}:intent`))?.type).toBe("tool_intent");
 			executionIds.push(intent.executionId);
 		},
-		onToolExchangeFinalized: (finalized) => {
-			expect(manager.getToolExchange(finalized.executionId)).toEqual(finalized);
+		onToolExchangeFinalized: async (finalized) => {
+			expect(await manager.readToolExchange(finalized.executionId)).toEqual(finalized);
 		},
 	});
 	await manager.appendSessionInfo("previous");
@@ -212,15 +212,20 @@ it("follows the session owner after a source-history switch", async () => {
 		},
 	});
 	const indexPath = join(freshManager.getSessionArtifactDir()!, "history.sqlite");
-	expect(existsSync(indexPath)).toBe(false);
-	mkdirSync(indexPath, { recursive: true });
+	const freshPath = freshManager.getSessionFile()!;
+	const freshSource = readFileSync(freshPath, "utf8");
+	expect(existsSync(indexPath)).toBe(true);
+	await freshOwner.disposeAsync();
+	// Indexed startup needs its derived metadata before it can publish a Manager.
+	// Replace only the closed cache, never an owned database or the canonical source.
+	rmSync(indexPath);
+	mkdirSync(indexPath);
 	faux.setResponses([fauxAssistantMessage("Must not be consumed.")]);
 	const beforeCalls = faux.state.callCount;
 	const beforeResponses = faux.getPendingResponseCount();
 	try {
-		await freshOwner.agent.prompt("Refuse indexed history failure without fallback");
-		expect(freshOwner.agent.state.errorMessage).toBeTruthy();
-		expect(freshOwner.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+		await expect(SessionManager.open(freshPath)).rejects.toThrow();
+		expect(readFileSync(freshPath, "utf8")).toBe(freshSource);
 		expect(faux.state.callCount).toBe(beforeCalls);
 		expect(faux.getPendingResponseCount()).toBe(beforeResponses);
 		expect(refusedCalls).toEqual([]);

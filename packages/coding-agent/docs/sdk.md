@@ -739,29 +739,31 @@ await runtime.fork("entry-id", { position: "at" });
 **SessionManager tree API:**
 
 ```typescript
-const sm = SessionManager.open("/path/to/session.jsonl");
+const sm = await SessionManager.open("/path/to/session.jsonl");
 
 // Session listing
 const currentProjectSessions = await SessionManager.list(process.cwd());
 const allSessions = await SessionManager.listAll();
 
-// Tree traversal
-const entries = sm.getEntries();        // All entries (excludes header)
-const tree = sm.getTree();              // Full tree structure
-const path = sm.getPath();              // Path from root to current leaf
-const leaf = sm.getLeafEntry();         // Current leaf entry
-const entry = sm.getEntry(id);          // Get entry by ID
-const children = sm.getChildren(id);    // Direct children of entry
+// Complete, bounded reads from captured source history
+const entries = await sm.readEntries(); // All entries (excludes header)
+const tree = await sm.readTree();       // Full tree structure
+const path = await sm.readBranch();     // Root-to-leaf parent path
+const leaf = await sm.readLeafEntry();  // Current leaf entry
+const entry = await sm.readEntry(id);   // Entry by ID
+const children = entries.filter((entry) => entry.parentId === id);
 
 // Labels
-const label = sm.getLabel(id);          // Get label for entry
-sm.appendLabelChange(id, "checkpoint"); // Set label
+const label = await sm.readLabel(id);
+await sm.appendLabelChange(id, "checkpoint");
 
 // Branching
-sm.branch(entryId);                     // Move leaf to earlier entry
-sm.branchWithSummary(id, "Summary...");  // Branch with context summary
-sm.createBranchedSession(leafId);       // Extract path to new file
+await sm.branchTo(entryId);
+await sm.branchWithSummary(id, "Summary...");
+await sm.createBranchedSession(leafId);
 ```
+
+Owned sessions keep indexed metadata rather than historical message arrays. Complete reads default to 16,384 source entries and 64 MiB of source data; they fail when the limit is exceeded instead of returning a truncated result. Pass explicit limits when needed. Use `readBranches()` for multiple parent paths from one capture. Synchronous body getters remain available only on explicit resident views such as `inMemory()` and `openReadOnly()`.
 
 > See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [Session Format](session-format.md)
 

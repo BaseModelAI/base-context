@@ -61,6 +61,7 @@ import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
+import { readSessionBootstrap } from "./core/session-bootstrap.js";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -843,17 +844,18 @@ async function prepareRuntimeServices(options: {
 	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
 	const scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+	const hasExistingSession = sessionManager.supportsCapturedHistoryReads()
+		? await sessionManager.readBranchHistory(async (view) => (await view.branchBootstrap()).hasContextMessages)
+		: (
+				await readSessionBootstrap(sessionManager, settingsManager.getCanonicalContextLimits(), {
+					includeMessages: false,
+				})
+			).hasExistingSession;
 	const {
 		options: sessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
-	} = buildSessionOptions(
-		config,
-		scopedModels,
-		sessionManager.buildSessionContext().messages.length > 0,
-		modelRegistry,
-		settingsManager,
-	);
+	} = buildSessionOptions(config, scopedModels, hasExistingSession, modelRegistry, settingsManager);
 	diagnostics.push(...sessionOptionDiagnostics);
 
 	const effectiveSessionModel = options.sessionOptionsOverride?.model ?? sessionOptions.model;
@@ -883,8 +885,11 @@ async function resolvePreparedStartupModel(options: {
 }): Promise<{ model: Model<Api> | undefined; modelFallbackMessage: string | undefined }> {
 	const { prepared, sessionManager } = options;
 	const { modelRegistry, settingsManager } = prepared.services;
-	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
+	const { context: existingSession, hasExistingSession } = await readSessionBootstrap(
+		sessionManager,
+		settingsManager.getCanonicalContextLimits(),
+		{ includeMessages: false },
+	);
 
 	let model = prepared.sessionOptions.model;
 	let modelFallbackMessage: string | undefined;

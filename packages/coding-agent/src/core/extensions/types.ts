@@ -160,7 +160,8 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Token stats, model info,
-	 * etc. are available via ctx.sessionManager and ctx.model.
+	 * etc. can be loaded through ctx.sessionManager and ctx.model in async event handlers.
+	 * Keep only small display state in the component; render() must not read history.
 	 */
 	setFooter(
 		factory:
@@ -286,7 +287,14 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
+	/**
+	 * Read-only session scalars and captured asynchronous history reads.
+	 * Use readEntry/readLabel for exact source lookup, readEntries for the whole source,
+	 * and readBranch for a complete, capped parent path. Reads return detached results
+	 * and refuse over-budget history; raw captured branch scopes may also include
+	 * attached request evidence, which is not part of the parent path.
+	 * Synchronous history-body getters belong only to explicitly resident views.
+	 */
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;

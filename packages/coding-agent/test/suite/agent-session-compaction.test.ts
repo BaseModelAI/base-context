@@ -143,7 +143,7 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			persistSession: true,
 		});
 		harnesses.push(harness);
@@ -185,7 +185,7 @@ describe("AgentSession compaction characterization", () => {
 		}
 
 		const result = await harness.session.compact();
-		const entry = harness.sessionManager.getEntries().find((candidate) => candidate.type === "compaction");
+		const entry = (await harness.sessionManager.readEntries()).find((candidate) => candidate.type === "compaction");
 
 		expect(result.summary).toContain("model-generated summary");
 		expect(result.tokensBefore).toBeGreaterThan(0);
@@ -222,6 +222,7 @@ describe("AgentSession compaction characterization", () => {
 		]);
 
 		await harness.session.prompt("after compaction");
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "text", text: "still usable" }],

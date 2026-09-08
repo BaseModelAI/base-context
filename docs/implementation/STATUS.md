@@ -538,3 +538,54 @@ happy/edge invocation passed on the final mode sources. Metadata-only passivatio
 observation and heartbeat views do not read usage. Actual wire/list/roster usage
 reads are awaited, with captured metadata and joined accepted reads. Roster fixture
 await ports are typechecked; the roster suite was not run.
+
+
+## Indexed owned Manager and native history consumers
+
+Current-version framed owned Managers now retain header/source metadata and ACK scalars,
+not the historical entry array or ID/label maps. Startup, reopen, recovery, migration and
+copy destinations activate the indexed path. Explicit in-memory and read-only views remain
+resident. Native-facing extension types expose asynchronous entry, branch, source, tree,
+label and tool-exchange readers. Complete reads use explicit entry/source-byte limits and
+refuse oversized or unresolved results instead of returning a tail. The index remains
+derived state, not a second authoritative message store.
+
+Writes allocate/check IDs and resolve parents/targets in their captured queue position.
+Child-attribution callers receive the aggregate from the same acknowledged append.
+Metadata is prepared before the write and folded after ACK; disposable index refresh
+does not turn a known ACK into an unknown outcome. Concurrent identical request phases
+are checked inside their queue, and status getters return detached metadata. Header
+read/close failures retain both errors.
+Native late-IPython delivery uses exact captured parent-path references, including the
+period before a tool result exists, and an atomic first-ID append. Working-message updates
+and delivery events follow the append ACK; native startup no longer restores a historical
+late-message map. Raw history hydration and imported authority classification are unchanged.
+
+Native compaction, navigation and refinement use captured readers. Navigation reads both
+parent paths from one capture and keeps the read in its existing cancellation/disposal
+lifetime. Retry and child-usage correlation uses acknowledged IDs or scalar correlations on
+actual compiled assistant objects, not historical object identity. These correlations do
+not grant source authority. Startup can request settings/presence without compiling bodies.
+Prepared forks bind one source before hooks and release the reader before preparation
+settles; hook failure/cancellation takes precedence and creation never recaptures history.
+Footer rendering stays synchronous and uses post-ACK lifecycle refreshes.
+
+Sixteen distinct existing cases passed across separate source invocations: index2,
+Manager2, runtime2, compiler2, native binding2, late-IPython1, compaction1, navigation2 and
+refinement2. The compiler cases first used an immutable W18 Manager overlay, then repeated
+against the activated backend; these are not four distinct cases. The native compaction
+case initially failed, then two same-case diagnostics showed that automatic refinement
+consumed its fifth queued faux response. The manual-compaction fixture now explicitly
+disables that unrelated background feature. Its original assertions and the subsequent
+prompt pass; production refinement behavior was not disabled. A later Manager repeat
+passed its edge case but failed a new fixture assertion that incorrectly expected
+physical-attempt receipts from genuine local-faux simulation. The correction uses a
+clearly labelled offline admission fixture through the real bound source and owner;
+it does not claim a provider send or settlement. That same happy case passed after
+the correction, separately from the earlier edge pass. All failure logs remain.
+No external-provider, kernel, emitted-artifact or whole-memory campaign was run here.
+
+Current-invocation Agent collectors, completed-child disk readers and global refinement
+history still have separate residency work. Full-operation snapshots remain capped
+materializations. These changes do not establish the declared large-history RSS gates,
+whole-process memory bounds, model billing or the remaining authority/compiler requirements.

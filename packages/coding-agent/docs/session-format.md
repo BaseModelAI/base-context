@@ -432,20 +432,25 @@ Key methods for working with sessions programmatically.
 - `appendLabelChange(targetId, label)` - Set/clear label
 
 ### Instance Methods - Tree Navigation
-- `getLeafId()` - Current position
-- `getLeafEntry()` - Get current leaf entry
-- `getEntry(id)` - Get entry by ID
-- `getBranch(fromId?)` - Walk from entry to root
-- `getTree()` - Get full tree structure
-- `getChildren(parentId)` - Get direct children
-- `getLabel(id)` - Get label for entry
-- `branch(entryId)` - Move leaf to earlier entry
-- `resetLeaf()` - Reset leaf to null (before any entries)
+
+Use `await` for historical reads and mutations on owned sessions. Complete reads default to 16,384 source entries and 64 MiB of source data. They return the complete requested result or raise a limit error. Each read captures its source; `readBranches()` shares one capture across multiple paths.
+
+- `getLeafId()` - Current position (synchronous metadata)
+- `readLeafEntry(maxSourceBytes?)` - Current leaf entry
+- `readEntry(id, maxSourceBytes?)` - Detached entry by ID
+- `readBranch(fromId?, limits?)` - Complete root-to-leaf parent path
+- `readBranches(leafIds, limits?)` - Multiple paths with shared source-entry accounting
+- `readTree(limits?)` - Complete tree structure
+- `readLabel(id, maxSourceBytes?)` - Label for an entry
+- `branchTo(entryId)` - Move the leaf; pass null for the position before any entries
 - `branchWithSummary(entryId, summary, details?, fromHook?)` - Branch with context summary
 
+Synchronous body getters such as `getEntry()`, `getBranch()`, `getEntries()`, and `buildSessionContext()` are resident-view APIs only. They reject indexed owned sessions. Explicit `inMemory()` and `openReadOnly()` views retain their resident behavior. Use `AgentSession.buildSessionContext()` for the native asynchronous working-context rebuild.
+
 ### Instance Methods - Context & Info
-- `buildSessionContext()` - Get messages, thinkingLevel, and model for LLM
-- `getEntries()` - All entries (excluding header)
+- `readEntries(limits?)` - Complete detached entries (excluding header)
+- `readEntryRetention(id)` - Source qualification; absence does not establish authorship
+- `supportsCapturedHistoryReads()` - Whether this Manager supports owned captured reads
 - `getHeader()` - Session header metadata
 - `getSessionName()` - Get display name from latest session_info entry
 - `getCwd()` - Working directory

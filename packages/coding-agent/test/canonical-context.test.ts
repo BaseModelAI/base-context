@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { expect, it, vi } from "vitest";
-import { CanonicalContextCompiler } from "../src/core/canonical-context.js";
+import { CanonicalContextCompiler, getCanonicalMessageSource } from "../src/core/canonical-context.js";
 import { HistoryIndex } from "../src/core/history-index.js";
 import { InferenceCoordinator } from "../src/core/inference-coordinator.js";
 import {
 	appendSentAgentMessageToToolResult,
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
 } from "../src/core/session-context-updates.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { buildSessionContext, SessionManager } from "../src/core/session-manager.js";
 
 it("reconstructs the whole retained context across pages and caches immutable source entries", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "base-context-compile-"));
@@ -89,8 +89,8 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			cost: { ...assistant.usage.cost, input: 0.5, total: 0.5 },
 		};
 		await manager.appendChildUsageAttribution(assistantId, aggregate, aggregate);
-		manager.branch(leaf);
-		const expected = structuredClone(manager.buildSessionContext().messages);
+		await manager.branchTo(leaf);
+		const expected = buildSessionContext(await manager.readBranch()).messages;
 		for (const message of expected) appendSentAgentMessageToToolResult(message, "a", sentMessage);
 		capture = requests.capture();
 		const compiler = new CanonicalContextCompiler();
@@ -98,6 +98,18 @@ it("reconstructs the whole retained context across pages and caches immutable so
 		const relatedReads = vi.spyOn(HistoryIndex.prototype, "readContextUpdatePayload");
 		const limits = { maxMessages: 130, maxSourceBytes: 2 * 1024 * 1024 };
 		const first = await capture.readHistory((view) => compiler.compile(view, limits));
+		const compiledAssistant = first.find((message) => message.role === "assistant");
+		if (!compiledAssistant) throw new Error("fixture expected an assistant");
+		const source = getCanonicalMessageSource(compiledAssistant);
+		const expectedSource = {
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			entryId: assistantId,
+		};
+		expect(source).toEqual(expectedSource);
+		expect(getCanonicalMessageSource(structuredClone(compiledAssistant))).toBeUndefined();
+		Object.assign(source!, { entryId: "caller-modified" });
+		expect(getCanonicalMessageSource(compiledAssistant)).toEqual(expectedSource);
 		expect(first).toEqual(expected);
 		expect(first[0]).toMatchObject({ role: "compactionSummary", retainedMessageCount: 128 });
 		expect(
@@ -115,6 +127,9 @@ it("reconstructs the whole retained context across pages and caches immutable so
 		if (user?.role !== "user") throw new Error("fixture expected retained user input");
 		user.content = "changed by a replaceable transform";
 		const second = await capture.readHistory((view) => compiler.compile(view, limits));
+		expect(getCanonicalMessageSource(second.find((message) => message.role === "assistant")!)).toEqual(
+			expectedSource,
+		);
 		expect(second).toEqual(expected);
 		expect(reads).toHaveBeenCalledTimes(readCount);
 		expect(relatedReads).toHaveBeenCalledTimes(relatedCount);

@@ -813,7 +813,7 @@ ctx.ui.setFooter((tui, theme, footerData) => ({
 ctx.ui.setFooter(undefined); // restore default
 ```
 
-Token stats available via `ctx.sessionManager.getBranch()` and `ctx.model`.
+Read branch usage with `await ctx.sessionManager.readBranch()` outside `render()`, then cache the small display totals. Refresh after acknowledged lifecycle events such as `turn_end` and `agent_end`. `message_end` occurs before the append ACK, so it must not publish new durable usage. Rendering stays synchronous and read-free; use `ctx.model` for model metadata.
 
 **Examples:** [custom-footer.ts](../examples/extensions/custom-footer.ts)
 

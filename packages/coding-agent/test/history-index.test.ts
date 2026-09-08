@@ -73,6 +73,15 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 				type,
 				...(type === "message" ? { message: { role: "user", content: text } } : { request: { text } }),
 			});
+		await index.syncSource("canonical", header);
+		expect(await index.currentSourceBootstrap("canonical", header)).toEqual({
+			leaf: null,
+			sessionInfo: null,
+			sessionState: null,
+			compactionCount: 0,
+			contentPrefix: 0,
+			hasUserContent: false,
+		});
 		await owner.appendJson(entry("root", null, "source root"), "retained-import");
 		const first = owner.getSnapshot();
 		const siblingJson =
@@ -107,6 +116,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		await owner.appendJson(entry("sibling-request", "sibling", "sibling request", "request"));
 		const latest = owner.getSnapshot();
 		expect((await index.syncSource("canonical", latest)).indexedThrough).toBe(5);
+		expect((await index.currentSourceBootstrap("canonical", latest)).leaf?.id).toBe("chosen");
+		await expect(index.currentSourceBootstrap("canonical", first)).rejects.toThrow("snapshot mismatch");
 		const scope = { leafId: "chosen" };
 		expect((await index.page("canonical", 0, 5, 64, scope)).events.map((item) => item.id)).toEqual([
 			"root",
@@ -196,6 +207,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			rlmMaxDepth: null,
 			latestCompaction: null,
 			contextUsageAssistant: null,
+			gitState: null,
+			agentStatus: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -511,6 +524,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			rlmMaxDepth: null,
 			latestCompaction: null,
 			contextUsageAssistant: null,
+			gitState: null,
+			agentStatus: null,
 			hasBranchMessage: false,
 			hasContextMessages: false,
 			goalSeedable: true,
@@ -539,6 +554,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			},
 			{ id: "bootstrap-retained-goal", type: "custom", customType: "thread_goal_state", data: bootstrapGoal },
 			{ id: "bootstrap-rlm-depth", type: "custom", customType: "rlm_max_depth_state", data: { maxDepth: 0 } },
+			{ id: "bootstrap-git", type: "git_state", git: { branch: "fixture" } },
+			{ id: "bootstrap-status", type: "agent_status", status: { summary: "fixture" } },
 			{
 				id: "bootstrap-invalid-rlm-depth",
 				type: "custom",
@@ -591,6 +608,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 				JSON.stringify({ ...value, parentId: contextParentId, timestamp: "2026-01-01T00:00:00Z" }),
 				value.id === "bootstrap-retained-goal" ||
 					value.id === "bootstrap-rlm-depth" ||
+					value.id === "bootstrap-git" ||
 					value.id === "context-compact"
 					? "retained-import"
 					: undefined,
@@ -609,6 +627,8 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			rlmMaxDepth: await index.getSource("canonical", "bootstrap-rlm-depth", visibleScope.through),
 			latestCompaction: await index.getSource("canonical", "context-compact", visibleScope.through),
 			contextUsageAssistant: null,
+			gitState: await index.getSource("canonical", "bootstrap-git", visibleScope.through),
+			agentStatus: await index.getSource("canonical", "bootstrap-status", visibleScope.through),
 			hasBranchMessage: true,
 			hasContextMessages: true,
 			goalSeedable: false,
@@ -896,6 +916,45 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		expect((await index.branchBootstrap("canonical", updateScope)).contextUsageAssistant).toBeNull();
 		const latestUsageRefs = await relatedRefs(["usage-latest"]);
 		const sentRefs = await relatedRefs(["sent-before-compaction", "sent-late"]);
+		const sentFirst = await index.ipythonSentMessages("canonical", updateScope, sentTarget.toolCallId, {
+			messageId: "duplicate",
+			limit: 1,
+		});
+		expect(sentFirst.refs.map((ref) => ref.entryId)).toEqual(["sent-before-compaction"]);
+		expect(sentFirst.nextCursor).not.toBeNull();
+		expect(
+			(
+				await index.ipythonSentMessages("canonical", updateScope, sentTarget.toolCallId, {
+					messageId: "duplicate",
+					cursor: sentFirst.nextCursor!,
+				})
+			).refs.map((ref) => ref.entryId),
+		).toEqual(["sent-late"]);
+		expect(
+			(await index.ipythonSentMessages("canonical", updateScope, sentTarget.toolCallId, { messageId: "Duplicate" }))
+				.refs,
+		).toEqual([]);
+		expect(
+			(await index.ipythonSentMessages("canonical", updateScope, "", { messageId: "" })).refs.map(
+				(ref) => ref.entryId,
+			),
+		).toEqual(["sent-empty"]);
+		await expect(
+			index.ipythonSentMessages("canonical", updateScope, sentTarget.toolCallId, {
+				messageId: "other",
+				cursor: sentFirst.nextCursor!,
+			}),
+		).rejects.toThrow("cursor mismatch");
+		expect((await index.sourceAssistantUsage("canonical", usageTarget.targetId, earlyUpdateScope.through))?.id).toBe(
+			"usage-before-assistant",
+		);
+		expect((await index.sourceAssistantUsage("canonical", usageTarget.targetId, updateScope.through))?.id).toBe(
+			"usage-latest",
+		);
+		expect((await index.sourceAssistantUsage("canonical", "root", updateScope.through))?.id).toBe(
+			"usage-nonassistant",
+		);
+
 		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
 			refs: latestUsageRefs,
 			order: "source",
@@ -1015,7 +1074,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 			"--disable-warning=ExperimentalWarning",
 			"--input-type=module",
 			"-e",
-			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE context_node DROP COLUMN context_usage_assistant; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
+			'import { DatabaseSync } from "node:sqlite"; const db = new DatabaseSync(process.argv[1]); try { db.exec("DROP TABLE task_evidence; DROP TABLE task_import_loss; DROP TABLE source_payload; DROP TABLE source_ancestry; DROP TABLE source_jump; ALTER TABLE context_node DROP COLUMN latest_model; ALTER TABLE context_node DROP COLUMN latest_thinking; ALTER TABLE context_node DROP COLUMN latest_service_tier; ALTER TABLE context_node DROP COLUMN latest_goal; ALTER TABLE context_node DROP COLUMN has_session_message; ALTER TABLE context_node DROP COLUMN goal_seedable; ALTER TABLE context_node DROP COLUMN latest_rlm_max_depth; ALTER TABLE context_node DROP COLUMN has_branch_message; ALTER TABLE context_node DROP COLUMN context_usage_assistant; ALTER TABLE context_node DROP COLUMN latest_git_state; ALTER TABLE context_node DROP COLUMN latest_agent_status; ALTER TABLE source_cursor DROP COLUMN source_leaf; ALTER TABLE source_cursor DROP COLUMN source_session_info; ALTER TABLE source_cursor DROP COLUMN source_session_state; ALTER TABLE source_cursor DROP COLUMN source_compaction_count; ALTER TABLE source_cursor DROP COLUMN source_content_prefix; ALTER TABLE source_cursor DROP COLUMN source_has_user_content; ALTER TABLE source_event DROP COLUMN retention; UPDATE source_event SET authority=\'user\'; PRAGMA user_version=7;"); } finally { db.close(); }',
 			join(dir, "index.sqlite"),
 		]);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
@@ -1056,6 +1115,15 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		);
 		await index.syncSource("canonical", updateSnapshot);
 		expect(await index.branchBootstrap("canonical", contextUsageScope)).toEqual(contextUsageBootstrap);
+		expect((await index.currentSourceBootstrap("canonical", updateSnapshot)).leaf?.id).toBe("usage-latest");
+		expect(
+			(
+				await index.ipythonSentMessages("canonical", updateScope, sentTarget.toolCallId, {
+					messageId: "duplicate",
+					limit: 1,
+				})
+			).refs.map((ref) => ref.entryId),
+		).toEqual(["sent-before-compaction"]);
 		expect(await index.contextUpdates("canonical", updateScope, usageTarget)).toEqual({
 			refs: latestUsageRefs,
 			order: "source",
@@ -1082,7 +1150,73 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 					cwd: dir,
 				}),
 			);
+			let seedParent: string | null = null;
+			for (const [id, type, extra] of [
+				["seed-model", "model_change", {}],
+				["seed-git", "git_state", { git: {} }],
+				["seed-thinking", "thinking_level_change", {}],
+				["seed-status", "agent_status", { status: {} }],
+				["seed-tier", "service_tier_change", {}],
+				["seed-state", "session_state", { state: { status: "hidden" } }],
+				["seed-invalid-state", "session_state", { state: { status: "unknown" } }],
+			] as const) {
+				await budgetOwner.appendJson(JSON.stringify({ id, type, parentId: seedParent, ...extra }));
+				seedParent = id;
+			}
+			const seedSnapshot = budgetOwner.getSnapshot();
+			await index.syncSource("query-budget", seedSnapshot);
+			expect(await index.currentSourceBootstrap("query-budget", seedSnapshot)).toEqual({
+				leaf: await index.getSource("query-budget", "seed-invalid-state", seedSnapshot.nextSequence - 1),
+				sessionInfo: null,
+				sessionState: await index.getSource("query-budget", "seed-state", seedSnapshot.nextSequence - 1),
+				compactionCount: 0,
+				contentPrefix: 3,
+				hasUserContent: false,
+			});
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "seed-extra-model", type: "model_change", parentId: seedParent }),
+			);
+			const extraSeedSnapshot = budgetOwner.getSnapshot();
+			await index.syncSource("query-budget", extraSeedSnapshot);
+			expect((await index.currentSourceBootstrap("query-budget", extraSeedSnapshot)).hasUserContent).toBe(true);
 			await budgetOwner.appendJson(entry("root", null, "budget root"));
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "label-set", type: "label", parentId: "root", targetId: "root", label: "old" }),
+			);
+			const labelSnapshot = budgetOwner.getSnapshot();
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "label-clear", type: "label", parentId: "root", targetId: "root", label: "" }),
+				"retained-import",
+			);
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "source-info", type: "session_info", parentId: "root", name: "named" }),
+			);
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "source-info-clear", type: "session_info", parentId: "root" }),
+			);
+			await budgetOwner.appendJson(JSON.stringify({ id: "source-compact", type: "compaction", parentId: "root" }));
+			await budgetOwner.appendJson(
+				JSON.stringify({ id: "source-request", type: "request", parentId: "source-compact" }),
+			);
+			const sourceSnapshot = budgetOwner.getSnapshot();
+			await index.syncSource("query-budget", sourceSnapshot);
+			expect(await index.currentSourceBootstrap("query-budget", sourceSnapshot)).toEqual({
+				leaf: await index.getSource("query-budget", "source-compact", sourceSnapshot.nextSequence - 1),
+				sessionInfo: await index.getSource("query-budget", "source-info-clear", sourceSnapshot.nextSequence - 1),
+				sessionState: await index.getSource("query-budget", "seed-state", sourceSnapshot.nextSequence - 1),
+				compactionCount: 1,
+				contentPrefix: 3,
+				hasUserContent: true,
+			});
+			expect((await index.sourceLabel("query-budget", "root", labelSnapshot.nextSequence - 1))?.id).toBe(
+				"label-set",
+			);
+			expect(await index.sourceLabel("query-budget", "root", sourceSnapshot.nextSequence - 1)).toMatchObject({
+				id: "label-clear",
+				retention: "retained-import",
+			});
+			expect(await index.sourceLabel("query-budget", "ROOT", sourceSnapshot.nextSequence - 1)).toBeUndefined();
+			await expect(index.currentSourceBootstrap("query-budget", seedSnapshot)).rejects.toThrow("snapshot mismatch");
 			const budgetKey = "Budget/Case";
 			const budgetTask = await budgetOwner.appendJson(
 				JSON.stringify({
@@ -1442,6 +1576,19 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 			"candidate budget",
 		);
 		expect((await index.contextUpdates("edge", budgetScope, budgetTarget)).refs).toHaveLength(1);
+		const lateSentScope = { ...exhaustedScope, leafId: "budget-128" };
+		const skippedPage = await index.ipythonSentMessages("edge", lateSentScope, budgetTarget.toolCallId, { limit: 1 });
+		expect(skippedPage.refs).toEqual([]);
+		expect(skippedPage.nextCursor).not.toBeNull();
+		const foundPage = await index.ipythonSentMessages("edge", lateSentScope, budgetTarget.toolCallId, {
+			limit: 1,
+			cursor: skippedPage.nextCursor!,
+		});
+		expect(foundPage.refs.map((ref) => ref.entryId)).toEqual(["budget-128"]);
+		expect(foundPage.nextCursor).toBeNull();
+		await expect(index.ipythonSentMessages("edge", cycleScope, budgetTarget.toolCallId)).rejects.toThrow(
+			"lineage is unresolved",
+		);
 		await owner.close();
 		writeFileSync(`${journalPath}.replacement`, bytes);
 		renameSync(`${journalPath}.replacement`, journalPath);

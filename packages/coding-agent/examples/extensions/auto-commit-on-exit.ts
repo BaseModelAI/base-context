@@ -15,7 +15,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const entries = ctx.sessionManager.getEntries();
+		const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 		let lastAssistantText = "";
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];

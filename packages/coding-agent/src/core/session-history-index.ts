@@ -13,8 +13,11 @@ import {
 	type HistoryIndexPage,
 	type HistoryPayloadReadOptions,
 	type IndexedSourceEvent,
+	type IpythonSentMessagesOptions,
+	type IpythonSentMessagesPage,
 	type ParentPathOptions,
 	type ParentPathPage,
+	type SourceBootstrapState,
 	type TaskEvidenceOptions,
 	type TaskEvidencePage,
 } from "./history-index.js";
@@ -83,6 +86,13 @@ export interface SessionHistoryReadScope {
 	branchBootstrap(): Promise<SessionBranchBootstrapState>;
 	/** Chronological parent chain only; attached request evidence is not an ancestor. */
 	parentPath(options?: ParentPathOptions): Promise<SessionParentPathPage>;
+	/** Source scope only: use another leaf without changing the captured source or branchContext. */
+	parentPathFrom(leafId: string | null, options?: ParentPathOptions): Promise<SessionParentPathPage>;
+	/** Explicit whole-source relations, clipped to this captured prefix. */
+	sourceLabel(targetId: string): Promise<IndexedSourceEvent | undefined>;
+	sourceAssistantUsage(targetId: string): Promise<IndexedSourceEvent | undefined>;
+	/** Exact sent-message refs on the original captured parent branch, even before a tool result. */
+	ipythonSentMessages(toolCallId: string, options?: IpythonSentMessagesOptions): Promise<IpythonSentMessagesPage>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
 	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
 	search(query: string, limit?: number): Promise<HistoryIndexPage>;
@@ -206,6 +216,19 @@ export function createSessionHistoryReadScope(
 		branchBootstrap: () => query(async () => ({ ...(await index.branchBootstrap(sessionId, branch)), source })),
 		parentPath: (options: ParentPathOptions = {}) =>
 			query(async () => ({ ...(await index.parentPath(sessionId, branch, options)), source })),
+		parentPathFrom: (leafId: string | null, options: ParentPathOptions = {}) =>
+			query(async () => {
+				if (scope !== "source") throw new Error("Parent path selection requires a source-scoped history read");
+				return {
+					...(await index.parentPath(sessionId, { leafId, through: source.sourceSequence }, options)),
+					source,
+				};
+			}),
+		sourceLabel: (targetId: string) => query(() => index.sourceLabel(sessionId, targetId, source.sourceSequence)),
+		sourceAssistantUsage: (targetId: string) =>
+			query(() => index.sourceAssistantUsage(sessionId, targetId, source.sourceSequence)),
+		ipythonSentMessages: (toolCallId: string, options: IpythonSentMessagesOptions = {}) =>
+			query(() => index.ipythonSentMessages(sessionId, branch, toolCallId, options)),
 		get,
 		page,
 		search: (text: string, limit = 16) =>
@@ -292,6 +315,13 @@ export class SessionHistoryIndex {
 		}
 		if (!this.index) throw new Error("Session history index is unavailable");
 		return this.index;
+	}
+
+	/** Internal current-owner bootstrap; never substitutes current facts for an older captured prefix. */
+	async currentSourceBootstrap(snapshot: SessionJournalState): Promise<SourceBootstrapState> {
+		const captured = { ...snapshot };
+		const index = await this.synchronize(captured);
+		return index.currentSourceBootstrap(this.sessionId, captured);
 	}
 
 	/** Finish accepted indexing, then wait for the external worker to close. */

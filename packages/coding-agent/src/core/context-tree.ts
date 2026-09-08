@@ -106,12 +106,21 @@ export function computeOwnAndTotalUsage(
 	return { ownUsage, totalUsage };
 }
 
+/** Complete bounded snapshot of an explicitly resident Manager, never an index-error fallback. */
+export function readResidentContextTreeUsage(
+	manager: SessionManager,
+	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
+): { ownUsage: Usage; totalUsage: Usage } {
+	const snapshot = manager.materializeResidentHistory(limits);
+	return computeOwnAndTotalUsage(branchEntries(snapshot.entries, snapshot.leafId), snapshot.entries);
+}
+
 /** Detached, complete source usage and its exact captured parent branch. */
 export async function readContextTreeUsage(
 	manager: SessionManager,
 	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
 ): Promise<{ source: SourceSnapshotRef; ownUsage: Usage; totalUsage: Usage } | undefined> {
-	if (!manager.isPersisted()) return undefined;
+	if (!manager.supportsCapturedHistoryReads()) return undefined;
 	const capturedLimits = { maxEntries: limits.maxEntries, maxSourceBytes: limits.maxSourceBytes };
 	return manager.readSourceHistory(async (history) => {
 		const materialized = await history.materialize(capturedLimits);
@@ -195,14 +204,15 @@ function sessionEntriesFromFile(file: string): SessionEntry[] {
  * branch is its parentId chain. Keeps forked/abandoned paths out of usage
  * sums so disk nodes match what a live session would report.
  */
-function branchEntries(entries: SessionEntry[]): SessionEntry[] {
+function branchEntries(entries: SessionEntry[], leafId?: string | null): SessionEntry[] {
 	if (entries.length === 0) {
 		return [];
 	}
 	const byId = new Map(entries.map((entry) => [entry.id, entry]));
 	const branch: SessionEntry[] = [];
 	const seen = new Set<string>();
-	let current: SessionEntry | undefined = entries[entries.length - 1];
+	let current: SessionEntry | undefined =
+		leafId === undefined ? entries[entries.length - 1] : leafId === null ? undefined : byId.get(leafId);
 	while (current && !seen.has(current.id)) {
 		seen.add(current.id);
 		branch.push(current);

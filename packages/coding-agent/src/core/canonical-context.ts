@@ -23,6 +23,20 @@ export interface CanonicalContextLimits {
 	maxSourceBytes: number;
 }
 
+interface CanonicalMessageSource {
+	readonly sessionId: string;
+	readonly sessionFile: string | undefined;
+	readonly entryId: string;
+}
+
+const messageSources = new WeakMap<AgentMessage, CanonicalMessageSource>();
+
+/** Correlate a detached compiled message with its captured source, without retaining its body. */
+export function getCanonicalMessageSource(message: AgentMessage): CanonicalMessageSource | undefined {
+	const source = messageSources.get(message);
+	return source ? { ...source } : undefined;
+}
+
 interface CachedEntry {
 	revision: string;
 	entry: SessionEntry;
@@ -185,6 +199,12 @@ export class CanonicalContextCompiler {
 					appendSentAgentMessageToToolResult(message, message.toolCallId, sent.message);
 				}
 			}
+			if (message.role === "assistant")
+				messageSources.set(message, {
+					sessionId: view.source.sessionId,
+					sessionFile: view.source.sessionFile,
+					entryId: ref.entryId,
+				});
 			messages.push(message);
 		}
 		orderContextToolResults(messages);

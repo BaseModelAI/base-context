@@ -13,6 +13,7 @@ describe("issue #3688 tree cancellation compaction state", () => {
 
 	it("clears branch summary state when session_before_tree cancels navigation", async () => {
 		const harness = await createHarness({
+			persistSession: true,
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_tree", () => ({ cancel: true }));

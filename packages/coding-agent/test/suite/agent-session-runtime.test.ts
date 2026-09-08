@@ -812,7 +812,11 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("duplicates the current active branch when forking at the current position", async () => {
-		const { runtime } = await createRuntimeForTest(() => {});
+		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_before_fork", async (event) => {
+				await pi.setLabel(event.entryId, "after-capture");
+			});
+		});
 		await runtime.session.prompt("hello");
 		await runtime.session.prompt("again");
 
@@ -835,6 +839,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const result = await runtime.fork(leafId!, { position: "at" });
 		expect(result).toEqual({ cancelled: false, selectedText: undefined });
 		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
+		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
 		expect(
 			runtime.session.messages.map((message) => ({
 				role: message.role,

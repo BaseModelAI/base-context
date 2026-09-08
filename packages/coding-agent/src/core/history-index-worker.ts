@@ -16,8 +16,11 @@ import type {
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
 	IndexedTaskEvidence,
+	IpythonSentMessagesCursor,
+	IpythonSentMessagesPage,
 	ParentPathCursor,
 	ParentPathPage,
+	SourceBootstrapState,
 	TaskEvidencePage,
 } from "./history-index.js";
 import {
@@ -54,7 +57,8 @@ if (
 		schemaVersion !== 10 &&
 		schemaVersion !== 11 &&
 		schemaVersion !== 12 &&
-		schemaVersion !== 13)
+		schemaVersion !== 13 &&
+		schemaVersion !== 14)
 ) {
 	throw new Error("Not a supported Base Context history index");
 }
@@ -72,7 +76,10 @@ db.exec(`
 	);
 	CREATE TABLE IF NOT EXISTS coverage(session TEXT PRIMARY KEY, sequence INTEGER NOT NULL);
 	CREATE TABLE IF NOT EXISTS source_cursor (
-		session TEXT PRIMARY KEY, frontier TEXT NOT NULL, header_bytes INTEGER NOT NULL, header_checksum TEXT NOT NULL
+		session TEXT PRIMARY KEY, frontier TEXT NOT NULL, header_bytes INTEGER NOT NULL, header_checksum TEXT NOT NULL,
+		source_leaf TEXT,source_session_info TEXT,source_session_state TEXT,
+		source_compaction_count INTEGER NOT NULL DEFAULT 0,source_content_prefix INTEGER NOT NULL DEFAULT 0,
+		source_has_user_content INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE TABLE IF NOT EXISTS source_term (
 		session TEXT NOT NULL, term TEXT NOT NULL, sequence INTEGER NOT NULL,
@@ -124,7 +131,7 @@ transaction(() => {
  CREATE TABLE IF NOT EXISTS context_node (
  session TEXT NOT NULL,id TEXT NOT NULL,visible_head TEXT,previous_visible TEXT,visible_count INTEGER,latest_compaction TEXT,first_kept_id TEXT,
  latest_model TEXT,latest_thinking TEXT,latest_service_tier TEXT,latest_goal TEXT,has_session_message INTEGER,goal_seedable INTEGER,
- latest_rlm_max_depth TEXT,has_branch_message INTEGER,context_usage_assistant TEXT,PRIMARY KEY(session,id)
+ latest_rlm_max_depth TEXT,has_branch_message INTEGER,context_usage_assistant TEXT,latest_git_state TEXT,latest_agent_status TEXT,PRIMARY KEY(session,id)
  );
  CREATE TABLE IF NOT EXISTS context_update (
   session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
@@ -132,7 +139,7 @@ transaction(() => {
  );
  CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
 	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 13) {
+	if (schemaVersion !== 14) {
 		if (
 			!db
 				.prepare("PRAGMA table_info(source_event)")
@@ -171,6 +178,26 @@ transaction(() => {
 				.some((column) => column.name === "context_usage_assistant")
 		)
 			db.exec("ALTER TABLE context_node ADD COLUMN context_usage_assistant TEXT");
+		if (
+			!db
+				.prepare("PRAGMA table_info(context_node)")
+				.all()
+				.some((column) => column.name === "latest_git_state")
+		)
+			db.exec(`ALTER TABLE context_node ADD COLUMN latest_git_state TEXT;
+ ALTER TABLE context_node ADD COLUMN latest_agent_status TEXT;`);
+		if (
+			!db
+				.prepare("PRAGMA table_info(source_cursor)")
+				.all()
+				.some((column) => column.name === "source_leaf")
+		)
+			db.exec(`ALTER TABLE source_cursor ADD COLUMN source_leaf TEXT;
+ ALTER TABLE source_cursor ADD COLUMN source_session_info TEXT;
+ ALTER TABLE source_cursor ADD COLUMN source_session_state TEXT;
+ ALTER TABLE source_cursor ADD COLUMN source_compaction_count INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE source_cursor ADD COLUMN source_content_prefix INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE source_cursor ADD COLUMN source_has_user_content INTEGER NOT NULL DEFAULT 0;`);
 		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
 	}
 	db.exec(`
@@ -179,7 +206,7 @@ transaction(() => {
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=13");
+	db.exec("PRAGMA user_version=14");
 });
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
@@ -295,6 +322,8 @@ type BootstrapColumns = {
 	latest_rlm_max_depth: string | null;
 	has_branch_message: number;
 	context_usage_assistant: string | null;
+	latest_git_state: string | null;
+	latest_agent_status: string | null;
 };
 function isPersistedRlmMaxDepthState(value: unknown): boolean {
 	if (typeof value !== "object" || value === null) return false;
@@ -302,7 +331,7 @@ function isPersistedRlmMaxDepthState(value: unknown): boolean {
 	return typeof maxDepth === "number" && Number.isSafeInteger(maxDepth) && maxDepth >= 0;
 }
 const contextParent = db.prepare("SELECT * FROM context_node WHERE session=? AND id=?");
-const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+const insertContextNode = db.prepare("INSERT INTO context_node VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
 function insertContext(
 	sessionId: string,
 	item: IndexedSourceEvent,
@@ -365,6 +394,8 @@ function insertContext(
 		eligibleRlmMaxDepth ? item.id : (parent?.latest_rlm_max_depth ?? null),
 		parent?.has_branch_message === 1 || entry.type === "message" ? 1 : 0,
 		compaction ? null : contextUsageAssistant ? item.id : (parent?.context_usage_assistant ?? null),
+		entry.type === "git_state" ? item.id : (parent?.latest_git_state ?? null),
+		entry.type === "agent_status" ? item.id : (parent?.latest_agent_status ?? null),
 	);
 }
 // Only bounded relation keys and source refs live here; never usage or sent-message bodies.
@@ -381,15 +412,75 @@ function insertContextUpdates(sessionId: string, item: IndexedSourceEvent, entry
 	) {
 		// The source aggregate is intentionally not validated or replaced by an older value.
 		insertUpdate.run(sessionId, item.id, "assistant-usage", entry.targetId, item.sequence);
+	} else if (entry.type === "label" && typeof entry.targetId === "string" && entry.targetId.length <= 512) {
+		insertUpdate.run(sessionId, item.id, "label", entry.targetId, item.sequence);
 	} else if (entry.type === "custom" && entry.customType === IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
 		const parsed = parsePersistedIpythonSentAgentMessage(entry.data);
-		if (parsed && parsed.toolCallId.length <= MAX_CONTEXT_UPDATE_KEY)
+		if (parsed && parsed.toolCallId.length <= MAX_CONTEXT_UPDATE_KEY) {
 			insertUpdate.run(sessionId, item.id, "ipython-sent-message", parsed.toolCallId, item.sequence);
+			if (parsed.message.id.length <= MAX_CONTEXT_UPDATE_KEY)
+				insertUpdate.run(
+					sessionId,
+					item.id,
+					"ipython-sent-message-id",
+					JSON.stringify([parsed.toolCallId, parsed.message.id]),
+					item.sequence,
+				);
+		}
 	}
 }
 
 function clearSession(sessionId: string): void {
 	for (const table of DERIVED_TABLES) db.prepare(`DELETE FROM ${table} WHERE session=?`).run(sessionId);
+}
+interface SourceBootstrapColumns {
+	source_leaf: string | null;
+	source_session_info: string | null;
+	source_session_state: string | null;
+	source_compaction_count: number;
+	source_content_prefix: number;
+	source_has_user_content: number;
+}
+const SOURCE_CONTENT_TYPES = new Set([
+	"message",
+	"custom_message",
+	"custom",
+	"model_change",
+	"thinking_level_change",
+	"service_tier_change",
+	"session_info",
+	"label",
+	"compaction",
+	"branch_summary",
+	"tool_intent",
+	"request",
+]);
+const SOURCE_CREATION_PREFIX = ["model_change", "thinking_level_change", "service_tier_change"];
+function foldSourceBootstrap(state: SourceBootstrapColumns, entry: SessionSourceEntry): void {
+	if (entry.type === "session") return;
+	if (entry.type !== "request") state.source_leaf = entry.id;
+	if (entry.type === "session_info") state.source_session_info = entry.id;
+	if (entry.type === "compaction") state.source_compaction_count++;
+	if (entry.type === "session_state") {
+		const status = (entry.state as { status?: unknown } | null)?.status;
+		if (
+			status === "active" ||
+			status === "archived" ||
+			status === "crash" ||
+			status === "hidden" ||
+			status === "sleep"
+		)
+			state.source_session_state = entry.id;
+	}
+	if (state.source_has_user_content === 0 && SOURCE_CONTENT_TYPES.has(entry.type)) {
+		while (
+			state.source_content_prefix < SOURCE_CREATION_PREFIX.length &&
+			entry.type !== SOURCE_CREATION_PREFIX[state.source_content_prefix]
+		)
+			state.source_content_prefix++;
+		if (state.source_content_prefix < SOURCE_CREATION_PREFIX.length) state.source_content_prefix++;
+		else state.source_has_user_content = 1;
+	}
 }
 async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 	const row = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
@@ -409,6 +500,16 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			previous.frontier.nextSequence > snapshot.nextSequence)
 	)
 		previous = undefined;
+	const sourceState: SourceBootstrapColumns = previous
+		? ({ ...row } as unknown as SourceBootstrapColumns)
+		: {
+				source_leaf: null,
+				source_session_info: null,
+				source_session_state: null,
+				source_compaction_count: 0,
+				source_content_prefix: 0,
+				source_has_user_content: 0,
+			};
 	db.exec("BEGIN IMMEDIATE");
 	try {
 		if (!previous) clearSession(sessionId);
@@ -417,6 +518,7 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			snapshot,
 			previous,
 			(entry, sequence, locator, revision, parts, retention) => {
+				foldSourceBootstrap(sourceState, entry);
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
 				if (retention !== undefined) item.retention = retention;
 				insertEvent(sessionId, item);
@@ -459,8 +561,19 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			indexed.frontier.indexedThrough,
 		);
 		db.prepare(
-			"INSERT INTO source_cursor VALUES (?,?,?,?) ON CONFLICT(session) DO UPDATE SET frontier=excluded.frontier,header_bytes=excluded.header_bytes,header_checksum=excluded.header_checksum",
-		).run(sessionId, JSON.stringify(indexed.frontier), indexed.headerByteLength, indexed.headerChecksum);
+			"INSERT INTO source_cursor VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET frontier=excluded.frontier,header_bytes=excluded.header_bytes,header_checksum=excluded.header_checksum,source_leaf=excluded.source_leaf,source_session_info=excluded.source_session_info,source_session_state=excluded.source_session_state,source_compaction_count=excluded.source_compaction_count,source_content_prefix=excluded.source_content_prefix,source_has_user_content=excluded.source_has_user_content",
+		).run(
+			sessionId,
+			JSON.stringify(indexed.frontier),
+			indexed.headerByteLength,
+			indexed.headerChecksum,
+			sourceState.source_leaf,
+			sourceState.source_session_info,
+			sourceState.source_session_state,
+			sourceState.source_compaction_count,
+			sourceState.source_content_prefix,
+			sourceState.source_has_user_content,
+		);
 		db.exec("COMMIT");
 		return indexed.frontier;
 	} catch (error) {
@@ -967,6 +1080,160 @@ function parentPath(request: Extract<HistoryIndexRequest, { action: "parent_path
 	page.nextCursor = next < count ? { ...anchor, nextDepth: next } : null;
 	return page;
 }
+function ipythonSentMessages(
+	request: Extract<HistoryIndexRequest, { action: "ipython_sent_messages" }>,
+): IpythonSentMessagesPage {
+	const { sessionId, scope, toolCallId, options } = request;
+	const limit = options.limit ?? 64;
+	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128)
+		throw new Error("IPython sent-message limit must be between1 and128");
+	if (
+		typeof toolCallId !== "string" ||
+		toolCallId.length > MAX_CONTEXT_UPDATE_KEY ||
+		(options.messageId !== undefined &&
+			(typeof options.messageId !== "string" || options.messageId.length > MAX_CONTEXT_UPDATE_KEY))
+	)
+		throw new Error("IPython sent-message key limit exceeded");
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("IPython sent-message index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < scope.through)
+		throw new Error("IPython sent-message index has not reached the requested source prefix");
+	const leaf = validateBranchScope(sessionId, scope.through, scope);
+	if (leaf?.depth === null) throw new Error("IPython sent-message branch lineage is unresolved");
+	const revision =
+		scope.through === 0
+			? saved.header_checksum
+			: db.prepare("SELECT revision FROM source_event WHERE session=? AND sequence=?").get(sessionId, scope.through)
+					?.revision;
+	if (typeof revision !== "string") throw new Error("IPython sent-message source prefix is unavailable");
+	const messageId = options.messageId ?? null;
+	const anchor: Omit<IpythonSentMessagesCursor, "after"> = {
+		version: 1,
+		sessionId,
+		journalPath: snapshot.journalPath,
+		dev: snapshot.dev,
+		ino: snapshot.ino,
+		leafId: scope.leafId,
+		through: scope.through,
+		throughRevision: revision,
+		toolCallId,
+		messageId,
+	};
+	const cursor = options.cursor;
+	if (
+		cursor &&
+		(cursor.version !== 1 ||
+			cursor.sessionId !== sessionId ||
+			cursor.journalPath !== snapshot.journalPath ||
+			cursor.dev !== snapshot.dev ||
+			cursor.ino !== snapshot.ino ||
+			cursor.leafId !== scope.leafId ||
+			cursor.through !== scope.through ||
+			cursor.throughRevision !== revision ||
+			cursor.toolCallId !== toolCallId ||
+			cursor.messageId !== messageId)
+	)
+		throw new Error("IPython sent-message cursor mismatch");
+	let after = cursor ? cursor.after : 0;
+	if (!Number.isSafeInteger(after) || after < 0 || after > scope.through)
+		throw new Error("Invalid IPython sent-message cursor position");
+	const page: IpythonSentMessagesPage = { refs: [], nextCursor: null };
+	if (!leaf) return page;
+	const kind = messageId === null ? "ipython-sent-message" : "ipython-sent-message-id";
+	const key = messageId === null ? toolCallId : JSON.stringify([toolCallId, messageId]);
+	const candidates = db
+		.prepare(`SELECT event_id AS id,sequence FROM context_update
+ WHERE session=? AND update_kind=? AND target_key=? AND sequence>? AND sequence<=?
+ ORDER BY sequence LIMIT ?`)
+		.all(sessionId, kind, key, after, scope.through, MAX_CONTEXT_UPDATE_CANDIDATES + 1) as {
+		id: string;
+		sequence: number;
+	}[];
+	let bytes = Buffer.byteLength(
+		JSON.stringify({ ...page, nextCursor: { ...anchor, after: Number.MAX_SAFE_INTEGER } }),
+	);
+	const content = db.prepare(
+		"SELECT id,sequence,kind,locator,revision FROM source_event WHERE session=? AND id=? AND sequence<=?",
+	);
+	for (const candidate of candidates.slice(0, MAX_CONTEXT_UPDATE_CANDIDATES)) {
+		if (page.refs.length >= limit) break;
+		const node = branchNode.get(sessionId, candidate.id, scope.through) as BranchNode | undefined;
+		if (!node) throw new Error("IPython sent-message source metadata is unavailable");
+		if (node.depth !== null && resolvedAncestor(sessionId, leaf, node)) {
+			const row = content.get(sessionId, candidate.id, scope.through) as SourceRefRow | undefined;
+			if (!row) throw new Error("IPython sent-message source metadata is unavailable");
+			const ref = contextUpdateRef(row);
+			const addition = Buffer.byteLength(JSON.stringify(ref)) + (page.refs.length ? 1 : 0);
+			if (bytes + addition > TASK_PAGE_BYTES) {
+				if (page.refs.length === 0) throw new Error("IPython sent-message ref exceeds the page byte limit");
+				break;
+			}
+			page.refs.push(ref);
+			bytes += addition;
+		}
+		after = candidate.sequence;
+	}
+	if (candidates.length > 0 && after < candidates[candidates.length - 1].sequence)
+		page.nextCursor = { ...anchor, after };
+	return page;
+}
+function currentSourceBootstrap(
+	request: Extract<HistoryIndexRequest, { action: "current_source_bootstrap" }>,
+): SourceBootstrapState {
+	const { sessionId, snapshot } = request;
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Current source bootstrap is unavailable; synchronize the source first");
+	const current = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (
+		current.format !== "framed" ||
+		snapshot.format !== "framed" ||
+		current.journalPath !== snapshot.journalPath ||
+		current.dev !== snapshot.dev ||
+		current.ino !== snapshot.ino ||
+		current.byteLength !== snapshot.byteLength ||
+		current.nextSequence !== snapshot.nextSequence ||
+		current.checksum !== snapshot.checksum ||
+		current.indexedThrough !== snapshot.nextSequence - 1
+	)
+		throw new Error("Current source bootstrap snapshot mismatch");
+	const reference = (id: unknown): IndexedSourceEvent | null => {
+		if (id === null) return null;
+		const row = db
+			.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?")
+			.get(sessionId, String(id), current.indexedThrough) as Row | undefined;
+		if (!row) throw new Error("Current source bootstrap metadata is unavailable; rebuild the derived index");
+		return event(row);
+	};
+	return {
+		leaf: reference(saved.source_leaf),
+		sessionInfo: reference(saved.source_session_info),
+		sessionState: reference(saved.source_session_state),
+		compactionCount: Number(saved.source_compaction_count),
+		contentPrefix: Number(saved.source_content_prefix),
+		hasUserContent: saved.source_has_user_content === 1,
+	};
+}
+function sourceRelation(
+	request: Extract<HistoryIndexRequest, { action: "source_label" | "source_assistant_usage" }>,
+): IndexedSourceEvent | undefined {
+	const { sessionId, targetId, through } = request;
+	if (typeof targetId !== "string" || targetId.length > 512) throw new Error("Source relation target limit exceeded");
+	if (!Number.isSafeInteger(through) || through < 0) throw new Error("Invalid history source prefix");
+	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
+	if (!saved) throw new Error("Canonical source index is unavailable; synchronize the source first");
+	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
+	if (snapshot.format !== "framed" || snapshot.indexedThrough < through)
+		throw new Error("Canonical source index has not reached the requested source prefix");
+	const kind = request.action === "source_label" ? "label" : "assistant-usage";
+	const row = db
+		.prepare(`SELECT e.* FROM context_update u JOIN source_event e
+ ON e.session=u.session AND e.id=u.event_id
+ WHERE u.session=? AND u.update_kind=? AND u.target_key=? AND u.sequence<=?
+ ORDER BY u.sequence DESC LIMIT 1`)
+		.get(sessionId, kind, targetId, through) as Row | undefined;
+	return row ? event(row) : undefined;
+}
 function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch_bootstrap" }>): BranchBootstrapState {
 	const { sessionId, scope } = request;
 	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
@@ -1001,6 +1268,8 @@ function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch
 		rlmMaxDepth: reference(state?.latest_rlm_max_depth),
 		latestCompaction: reference(state?.latest_compaction),
 		contextUsageAssistant: reference(state?.context_usage_assistant),
+		gitState: reference(state?.latest_git_state),
+		agentStatus: reference(state?.latest_agent_status),
 		hasBranchMessage: state?.has_branch_message === 1,
 		hasContextMessages: !!state && (state.has_session_message === 1 || state.latest_compaction !== null),
 		goalSeedable: !state || state.goal_seedable === 1,
@@ -1292,6 +1561,13 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 	switch (request.action) {
 		case "sync_source":
 			return syncSource(request.sessionId, request.snapshot);
+		case "ipython_sent_messages":
+			return ipythonSentMessages(request);
+		case "current_source_bootstrap":
+			return currentSourceBootstrap(request);
+		case "source_label":
+		case "source_assistant_usage":
+			return sourceRelation(request);
 		case "task_evidence":
 			return taskEvidence(request);
 		case "read_payload":

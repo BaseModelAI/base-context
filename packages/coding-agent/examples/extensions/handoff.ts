@@ -99,7 +99,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Gather conversation context from current branch. If the branch was compacted,
 			// include the compaction summary plus entries from firstKeptEntryId onward.
-			const messages = getHandoffMessages(ctx.sessionManager.getBranch());
+			const messages = getHandoffMessages(
+				await ctx.sessionManager.readBranch(undefined, { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 }),
+			);
 
 			if (messages.length === 0) {
 				ctx.ui.notify("No conversation to hand off", "error");

@@ -15,7 +15,7 @@ import {
 	createCustomMessage,
 } from "../messages.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
+import type { SessionEntry } from "../session-manager.js";
 import { estimateTokens } from "./compaction.js";
 import {
 	computeFileLists,
@@ -76,47 +76,21 @@ export interface GenerateBranchSummaryOptions {
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
 }
-/**
- * Collect entries that should be summarized when navigating from one position to another.
- *
- * Walks from oldLeafId back to the common ancestor with targetId, collecting entries
- * along the way. Does NOT stop at compaction boundaries - those are included and their
- * summaries become context.
- *
- * @param session - Session manager (read-only access)
- * @param oldLeafId - Current position (where we're navigating from)
- * @param targetId - Target position (where we're navigating to)
- * @returns Entries to summarize and the common ancestor
- */
+/** Collect the abandoned suffix from two complete, captured chronological paths. */
 export function collectEntriesForBranchSummary(
-	session: ReadonlySessionManager,
-	oldLeafId: string | null,
-	targetId: string,
+	oldPath: readonly SessionEntry[],
+	targetPath: readonly SessionEntry[],
 ): CollectEntriesResult {
-	if (!oldLeafId) {
-		return { entries: [], commonAncestorId: null };
-	}
-	const oldPath = new Set(session.getBranch(oldLeafId).map((e) => e.id));
-	const targetPath = session.getBranch(targetId);
+	const oldIds = new Set(oldPath.map((entry) => entry.id));
 	let commonAncestorId: string | null = null;
-	for (let i = targetPath.length - 1; i >= 0; i--) {
-		if (oldPath.has(targetPath[i].id)) {
-			commonAncestorId = targetPath[i].id;
+	for (let index = targetPath.length - 1; index >= 0; index--) {
+		if (oldIds.has(targetPath[index].id)) {
+			commonAncestorId = targetPath[index].id;
 			break;
 		}
 	}
-	const entries: SessionEntry[] = [];
-	let current: string | null = oldLeafId;
-
-	while (current && current !== commonAncestorId) {
-		const entry = session.getEntry(current);
-		if (!entry) break;
-		entries.push(entry);
-		current = entry.parentId;
-	}
-	entries.reverse();
-
-	return { entries, commonAncestorId };
+	const first = commonAncestorId === null ? 0 : oldPath.findIndex((entry) => entry.id === commonAncestorId) + 1;
+	return { entries: oldPath.slice(first), commonAncestorId };
 }
 /**
  * Extract AgentMessage from a session entry.

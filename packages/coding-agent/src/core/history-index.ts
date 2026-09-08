@@ -42,6 +42,17 @@ export interface HistoryIndexScope {
 	leafId: string | null;
 }
 
+/** Whole-source facts for exactly the current indexed owner snapshot, not an older prefix. */
+export interface SourceBootstrapState {
+	leaf: IndexedSourceEvent | null;
+	sessionInfo: IndexedSourceEvent | null;
+	sessionState: IndexedSourceEvent | null;
+	compactionCount: number;
+	/** Position in the optional initial model/thinking/tier content prefix. */
+	contentPrefix: number;
+	hasUserContent: boolean;
+}
+
 /** Captured parent-chain state. Values remain in the referenced canonical payloads. */
 export interface BranchBootstrapState {
 	model: IndexedSourceEvent | null;
@@ -51,6 +62,8 @@ export interface BranchBootstrapState {
 	rlmMaxDepth: IndexedSourceEvent | null;
 	latestCompaction: IndexedSourceEvent | null;
 	contextUsageAssistant: IndexedSourceEvent | null;
+	gitState: IndexedSourceEvent | null;
+	agentStatus: IndexedSourceEvent | null;
 	hasContextMessages: boolean;
 	/** Exact message-entry presence, independent of payload truthiness. */
 	hasBranchMessage: boolean;
@@ -159,12 +172,52 @@ export interface ContextUpdates {
 	order: "source";
 }
 
+export interface IpythonSentMessagesCursor {
+	version: 1;
+	sessionId: string;
+	journalPath: string;
+	dev: number;
+	ino: number;
+	leafId: string | null;
+	through: number;
+	throughRevision: string;
+	toolCallId: string;
+	messageId: string | null;
+	/** Last examined source sequence; empty pages can still make bounded progress. */
+	after: number;
+}
+export interface IpythonSentMessagesOptions {
+	messageId?: string;
+	cursor?: IpythonSentMessagesCursor;
+	limit?: number;
+}
+export interface IpythonSentMessagesPage {
+	refs: ContextUpdateRef[];
+	nextCursor: IpythonSentMessagesCursor | null;
+}
+
 export interface HistoryPayloadReadOptions {
 	cursor?: CanonicalPayloadCursor;
 	maxBytes?: number;
 }
 
 export type HistoryIndexRequest =
+	| {
+			id: number;
+			action: "ipython_sent_messages";
+			sessionId: string;
+			scope: HistoryIndexScope & { through: number };
+			toolCallId: string;
+			options: IpythonSentMessagesOptions;
+	  }
+	| { id: number; action: "current_source_bootstrap"; sessionId: string; snapshot: SessionJournalState }
+	| {
+			id: number;
+			action: "source_label" | "source_assistant_usage";
+			sessionId: string;
+			targetId: string;
+			through: number;
+	  }
 	| {
 			id: number;
 			action: "parent_path";
@@ -369,6 +422,11 @@ export class HistoryIndex {
 				message.action === "read_payload" ||
 				message.action === "read_context_update_payload") &&
 				message.eventId.length > 512) ||
+			((message.action === "source_label" || message.action === "source_assistant_usage") &&
+				message.targetId.length > 512) ||
+			(message.action === "ipython_sent_messages" &&
+				(message.toolCallId.length > 8192 ||
+					(message.options.messageId !== undefined && message.options.messageId.length > 8192))) ||
 			(message.action === "search" && message.query.length > 8192)
 		) {
 			throw new Error("History-index request field limit exceeded");
@@ -453,6 +511,44 @@ export class HistoryIndex {
 			sessionId,
 			snapshot: target,
 		})) as HistoryIndexFrontier;
+	}
+	/** Current whole-source bootstrap; equality with this exact owner snapshot is required. */
+	async currentSourceBootstrap(sessionId: string, snapshot: SessionJournalState): Promise<SourceBootstrapState> {
+		const target: SessionJournalState = {
+			journalPath: snapshot.journalPath,
+			nextSequence: snapshot.nextSequence,
+			format: snapshot.format,
+			byteLength: snapshot.byteLength,
+			checksum: snapshot.checksum,
+			dev: snapshot.dev,
+			ino: snapshot.ino,
+		};
+		return (await this.request({
+			id: this.nextId++,
+			action: "current_source_bootstrap",
+			sessionId,
+			snapshot: target,
+		})) as SourceBootstrapState;
+	}
+	/** Latest label control for this source target, including a clear. */
+	async sourceLabel(sessionId: string, targetId: string, through: number): Promise<IndexedSourceEvent | undefined> {
+		return (await this.request({ id: this.nextId++, action: "source_label", sessionId, targetId, through })) as
+			| IndexedSourceEvent
+			| undefined;
+	}
+	/** Latest stored source aggregate, without validating or replacing its payload. */
+	async sourceAssistantUsage(
+		sessionId: string,
+		targetId: string,
+		through: number,
+	): Promise<IndexedSourceEvent | undefined> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "source_assistant_usage",
+			sessionId,
+			targetId,
+			through,
+		})) as IndexedSourceEvent | undefined;
 	}
 	async get(
 		sessionId: string,
@@ -565,7 +661,44 @@ export class HistoryIndex {
 			},
 		})) as ParentPathPage;
 	}
-	/** At most seven source refs and exact message/goal-seeding facts for the captured branch. */
+	/** Actual parent-path sent-message refs; a tool result need not exist yet. */
+	async ipythonSentMessages(
+		sessionId: string,
+		scope: HistoryIndexScope & { through: number },
+		toolCallId: string,
+		options: IpythonSentMessagesOptions = {},
+	): Promise<IpythonSentMessagesPage> {
+		const cursor = options.cursor;
+		return (await this.request({
+			id: this.nextId++,
+			action: "ipython_sent_messages",
+			sessionId,
+			toolCallId,
+			scope: { leafId: scope.leafId, through: scope.through },
+			options: {
+				...(options.messageId !== undefined ? { messageId: options.messageId } : {}),
+				...(options.limit !== undefined ? { limit: options.limit } : {}),
+				...(cursor
+					? {
+							cursor: {
+								version: cursor.version,
+								sessionId: cursor.sessionId,
+								journalPath: cursor.journalPath,
+								dev: cursor.dev,
+								ino: cursor.ino,
+								leafId: cursor.leafId,
+								through: cursor.through,
+								throughRevision: cursor.throughRevision,
+								toolCallId: cursor.toolCallId,
+								messageId: cursor.messageId,
+								after: cursor.after,
+							},
+						}
+					: {}),
+			},
+		})) as IpythonSentMessagesPage;
+	}
+	/** At most nine source refs and exact message/goal-seeding facts for the captured branch. */
 	async branchBootstrap(
 		sessionId: string,
 		scope: HistoryIndexScope & { through: number },

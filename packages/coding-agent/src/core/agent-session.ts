@@ -93,7 +93,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
-import { CanonicalContextCompiler } from "./canonical-context.js";
+import { CanonicalContextCompiler, getCanonicalMessageSource } from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
@@ -113,6 +113,7 @@ import {
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
 	readContextTreeUsage,
+	readResidentContextTreeUsage,
 } from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
@@ -163,6 +164,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import type { IpythonSentMessagesCursor } from "./history-index.js";
 import { InferenceCoordinator, type SessionRuntimeServices } from "./inference-coordinator.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
@@ -275,7 +277,6 @@ import {
 	getLatestCompactionEntry,
 	type SessionContext,
 	SessionManager,
-	type SessionMessageEntry,
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
@@ -1179,7 +1180,10 @@ export class AgentSession {
 	private _goalResumeOperation: Promise<void> | undefined;
 	private readonly _rlmRunTasks = new Set<Promise<void>>();
 	private readonly _childUsageWrites = new Set<Promise<void>>();
-	private readonly _assistantEntryIds = new WeakMap<AssistantMessage, { sessionId: string; entryId: string }>();
+	private readonly _assistantEntryIds = new WeakMap<
+		AssistantMessage,
+		{ sessionId: string; sessionFile: string | undefined; entryId: string }
+	>();
 
 	private _modelRegistry: ModelRegistry;
 
@@ -1647,6 +1651,8 @@ export class AgentSession {
 
 	private _restoreLateIpythonSentAgentMessages(): void {
 		this._lateIpythonSentAgentMessages.clear();
+		// Native restored outputs come from the compiler; pending outputs use captured relation reads.
+		if (this.sessionManager.supportsCapturedHistoryReads()) return;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
 				continue;
@@ -1682,16 +1688,57 @@ export class AgentSession {
 		}
 	}
 
+	private async _applyCanonicalIpythonSentAgentMessages(message: AgentMessage): Promise<void> {
+		if (message.role !== "toolResult" || message.toolName !== "ipython") return;
+		const toolCallId = message.toolCallId;
+		const limits = { ...this.settingsManager.getCanonicalContextLimits() };
+		const sentMessages = await this.sessionManager.readSourceHistory(async (history) => {
+			const messages: KernelSentAgentMessage[] = [];
+			let cursor: IpythonSentMessagesCursor | undefined;
+			let sourceBytes = 0;
+			do {
+				const page = await history.ipythonSentMessages(toolCallId, { cursor });
+				for (const ref of page.refs) {
+					sourceBytes += ref.locator.length;
+					if (sourceBytes > limits.maxSourceBytes || messages.length >= limits.maxMessages)
+						throw new Error("IPython sent-message history budget exceeded");
+					const hydrated = await history.hydrateEntry(ref.entryId, limits.maxSourceBytes);
+					const sent =
+						hydrated?.entry.type === "custom"
+							? parsePersistedIpythonSentAgentMessage(hydrated.entry.data)
+							: undefined;
+					if (!sent || sent.toolCallId !== toolCallId)
+						throw new Error("IPython sent-message source is unavailable");
+					messages.push(sent.message);
+				}
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor);
+			return messages;
+		});
+		for (const sent of sentMessages) appendSentAgentMessageToToolResult(message, toolCallId, sent);
+	}
+
 	private _recordLateIpythonSentAgentMessage(toolCallId: string, message: KernelSentAgentMessage): void {
 		const record = async () => {
-			if (this._disposed || !this._rememberLateIpythonSentAgentMessage(toolCallId, message)) {
+			if (this._disposed) return;
+			if (this.sessionManager.supportsCapturedHistoryReads()) {
+				const sessionId = this.sessionId;
+				const sessionFile = this.sessionFile;
+				const captured = structuredClone(message);
+				const result = await this.sessionManager.appendIpythonSentAgentMessage({ toolCallId, message: captured });
+				if (!result.appended || sessionId !== this.sessionId || sessionFile !== this.sessionFile) return;
+				for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+					if (appendSentAgentMessageToToolResult(this.agent.state.messages[index], toolCallId, captured)) break;
+				}
+				this._emit({ type: "ipython_sent_agent_message", toolCallId, message: captured });
 				return;
 			}
+			if (!this._rememberLateIpythonSentAgentMessage(toolCallId, message)) return;
 			await this.sessionManager.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, { toolCallId, message });
 			this._emit({ type: "ipython_sent_agent_message", toolCallId, message });
 		};
 		this._agentEventQueue = this._agentEventQueue.then(record, record);
-		this._agentEventQueue.catch(() => {});
+		void this._agentEventQueue.catch((error) => this._surfaceSessionInputError(error));
 	}
 
 	private _emitGoalUpdate(): void {
@@ -3251,12 +3298,20 @@ export class AgentSession {
 						reason: "no active turn; compaction can only be requested while a turn is running",
 					};
 				}
-				const preparation = prepareCompaction(
-					this.sessionManager.getBranch(),
-					this.settingsManager.getCompactionSettings(),
-				);
+				const settings = { ...this.settingsManager.getCompactionSettings() };
+				const sessionId = this.sessionId;
+				const sessionFile = this.sessionFile;
+				const branch = await this.sessionManager.readBranch();
+				if (sessionId !== this.sessionId || sessionFile !== this.sessionFile)
+					throw new Error("Session source changed during compact request");
+				if (!this.isStreaming)
+					return {
+						scheduled: false,
+						reason: "no active turn; compaction can only be requested while a turn is running",
+					};
+				const preparation = prepareCompaction(branch, settings);
 				if (!preparation) {
-					const lastEntry = this.sessionManager.getBranch().at(-1);
+					const lastEntry = branch.at(-1);
 					return {
 						scheduled: false,
 						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
@@ -3826,7 +3881,9 @@ export class AgentSession {
 	private async _processAgentEvent(event: AgentEvent, nativeOrigin?: NativeEntryOrigin): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
-			this._applyLateIpythonSentAgentMessages(event.message);
+			if (this.sessionManager.supportsCapturedHistoryReads())
+				await this._applyCanonicalIpythonSentAgentMessages(event.message);
+			else this._applyLateIpythonSentAgentMessages(event.message);
 		}
 		if (event.type === "message_start" || event.type === "message_end") {
 			const cleared = this._capturingCancelledAction(event.message);
@@ -3894,8 +3951,10 @@ export class AgentSession {
 				event.message.role === "toolResult"
 			) {
 				const sessionId = this.sessionManager.getSessionId();
+				const sessionFile = this.sessionManager.getSessionFile();
 				const entryId = await this.sessionManager.appendMessage(event.message, nativeOrigin);
-				if (event.message.role === "assistant") this._assistantEntryIds.set(event.message, { sessionId, entryId });
+				if (event.message.role === "assistant")
+					this._assistantEntryIds.set(event.message, { sessionId, sessionFile, entryId });
 			}
 			if (event.message.role === "user" || event.message.role === "custom") {
 				for (const action of this._actionStore.actionsForMessage(event.message)) {
@@ -7819,9 +7878,9 @@ export class AgentSession {
 
 			const model = { ...this.model, cost: { ...this.model.cost } };
 			const thinkingLevel = this.thinkingLevel;
-			const pathEntries = structuredClone(this.sessionManager.getBranch());
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			requests = this.requests.capture();
+			const pathEntries = await this.sessionManager.readBranch();
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 			const result = await this._performCompaction({
 				model,
@@ -7904,7 +7963,7 @@ export class AgentSession {
 		signal: AbortSignal;
 		thinkingLevel: ThinkingLevel;
 		requests: InferenceCoordinator;
-		pathEntries: ReturnType<SessionManager["getBranch"]>;
+		pathEntries: Awaited<ReturnType<SessionManager["readBranch"]>>;
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
 	}): Promise<CompactionResult> {
 		const { model, apiKey, headers, customInstructions, signal, thinkingLevel, requests, pathEntries, settings } =
@@ -8036,7 +8095,7 @@ export class AgentSession {
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
-		const savedCompactionEntry = this.sessionManager.getEntry(savedCompactionId);
+		const savedCompactionEntry = await this.sessionManager.readEntry(savedCompactionId);
 		if (savedCompactionEntry?.type === "compaction") {
 			await this._extensionRunner.emit({
 				type: "session_compact",
@@ -8499,11 +8558,11 @@ export class AgentSession {
 		const model = { ...selectedModel, cost: { ...selectedModel.cost } };
 		const messages = structuredClone(this.agent.state.messages);
 		const harnessState = this._loadMergedHarnessState();
-		const history = this._loadRefinementHistory();
 		const thinkingLevel = this.thinkingLevel;
 		const reviewContext = { ...context };
 		const requests = this.requests.capture();
 		try {
+			const history = await this._loadRefinementHistory();
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 			return await reviewAutoRefine(
 				messages,
@@ -8531,10 +8590,19 @@ export class AgentSession {
 		);
 	}
 
-	private _loadRefinementHistory(): RefinementResult[] {
+	private async _loadRefinementHistory(): Promise<RefinementResult[]> {
+		const globalHistory = loadGlobalRefinementHistory(getGlobalHarnessStateDir());
+		const entries = this.sessionManager.isPersisted()
+			? (
+					await this.sessionManager.materializeSourceHistory({
+						maxEntries: 16_384,
+						maxSourceBytes: 64 * 1024 * 1024,
+					})
+				).entries.map(({ entry }) => entry)
+			: this.sessionManager.getEntries();
 		return mergeRefinementHistory(
-			loadGlobalRefinementHistory(getGlobalHarnessStateDir()),
-			getRefinementHistory(this.sessionManager.getEntries().filter((entry) => entry.type === "custom")),
+			globalHistory,
+			getRefinementHistory(entries.filter((entry) => entry.type === "custom")),
 		);
 	}
 
@@ -8705,28 +8773,28 @@ export class AgentSession {
 			requestedScope === "global"
 				? globalPlanningState
 				: mergeHarnessStates(globalPlanningState, localPlanningState);
-		const history = this._loadRefinementHistory();
-		const rollbackTarget = requestOptions.rollbackId
-			? history.find((item) => item.id === requestOptions.rollbackId)
-			: undefined;
-		let baselineScope = rollbackTarget
-			? (inferRefinementResultScope(rollbackTarget) ?? requestedScope)
-			: requestedScope;
-		let baselineHarnessStateDir = baselineScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
-		if (rollbackTarget?.harnessStatePath) {
-			baselineHarnessStateDir = dirname(rollbackTarget.harnessStatePath);
-			baselineScope = resolve(baselineHarnessStateDir) === resolve(globalHarnessStateDir) ? "global" : "local";
-		}
-		if (!baselineHarnessStateDir) {
-			throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
-		}
-		const baselineState = rollbackTarget
-			? loadHarnessState(baselineHarnessStateDir, baselineScope)
-			: baselineScope === "global"
-				? globalPlanningState
-				: localPlanningState!;
 		const requests = this.requests.capture();
 		try {
+			const history = await this._loadRefinementHistory();
+			const rollbackTarget = requestOptions.rollbackId
+				? history.find((item) => item.id === requestOptions.rollbackId)
+				: undefined;
+			let baselineScope = rollbackTarget
+				? (inferRefinementResultScope(rollbackTarget) ?? requestedScope)
+				: requestedScope;
+			let baselineHarnessStateDir = baselineScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
+			if (rollbackTarget?.harnessStatePath) {
+				baselineHarnessStateDir = dirname(rollbackTarget.harnessStatePath);
+				baselineScope = resolve(baselineHarnessStateDir) === resolve(globalHarnessStateDir) ? "global" : "local";
+			}
+			if (!baselineHarnessStateDir) {
+				throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
+			}
+			const baselineState = rollbackTarget
+				? loadHarnessState(baselineHarnessStateDir, baselineScope)
+				: baselineScope === "global"
+					? globalPlanningState
+					: localPlanningState!;
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 			if (!requestOptions.rollbackId && this._extensionRunner.hasHandlers("session_before_refine")) {
 				const result = (await this._extensionRunner.emit({
@@ -8810,13 +8878,14 @@ export class AgentSession {
 		}
 		// The caller has already set _refineInFlight and waited for agent idle.
 		// Disconnect only for the brief apply + save + reconnect critical section.
+		options = { ...options };
 		this._disconnectFromAgent();
 
 		try {
 			const globalHarnessStateDir = getGlobalHarnessStateDir();
 			const localHarnessStateDir = this._localHarnessStateDir();
 			const requestedScope = options.global ? "global" : "local";
-			const history = this._loadRefinementHistory();
+			const history = await this._loadRefinementHistory();
 			const rollbackTarget = options.rollbackId ? history.find((item) => item.id === options.rollbackId) : undefined;
 			let targetScope = plan.rollbackScope ?? requestedScope;
 			let targetHarnessStateDir = targetScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
@@ -9153,9 +9222,9 @@ export class AgentSession {
 			const selectedModel = this.model;
 			const model = selectedModel ? { ...selectedModel, cost: { ...selectedModel.cost } } : undefined;
 			const thinkingLevel = this.thinkingLevel;
-			const pathEntries = structuredClone(this.sessionManager.getBranch());
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			requests = this.requests.capture();
+			const pathEntries = await this.sessionManager.readBranch();
 			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
 			if (!model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
@@ -9996,28 +10065,32 @@ export class AgentSession {
 		const message = messages.at(-1);
 		if (message?.role !== "assistant") return;
 		if (this.sessionManager.isPersisted()) {
-			const entry = this._findAssistantEntryForMessage(message);
-			if (!entry) throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
+			const acknowledged = this._assistantEntryIds.get(message);
+			if (
+				!acknowledged ||
+				acknowledged.sessionId !== this.sessionId ||
+				acknowledged.sessionFile !== this.sessionFile
+			)
+				throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
 			if (
 				this._contextOmissions?.sessionId !== this.sessionId ||
 				this._contextOmissions?.sessionFile !== this.sessionFile
 			)
 				this._contextOmissions = { sessionId: this.sessionId, sessionFile: this.sessionFile, ids: new Set() };
-			this._contextOmissions.ids.add(entry.id);
+			this._contextOmissions.ids.add(acknowledged.entryId);
 		}
 		this.agent.state.messages = messages.slice(0, -1);
 	}
 
-	private _findAssistantEntryForMessage(message: AssistantMessage): SessionMessageEntry | undefined {
-		const acknowledged = this._assistantEntryIds.get(message);
-		if (acknowledged) {
-			if (acknowledged.sessionId !== this.sessionId) return undefined;
-			const entry = this.sessionManager.getEntry(acknowledged.entryId);
-			return entry?.type === "message" && entry.message.role === "assistant" ? entry : undefined;
-		}
-		return this.sessionManager
-			.getEntries()
-			.find((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message === message);
+	private _findAssistantEntryIdForMessage(message: AssistantMessage): string | undefined {
+		const source = this._assistantEntryIds.get(message) ?? getCanonicalMessageSource(message);
+		if (source)
+			return source.sessionId === this.sessionId && source.sessionFile === this.sessionFile
+				? source.entryId
+				: undefined;
+		if (this.sessionManager.isPersisted()) return undefined;
+		return this.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message === message)
+			?.id;
 	}
 
 	private _createRlmSubagentRuntimeOptions(options: {
@@ -11158,8 +11231,8 @@ export class AgentSession {
 						const assistant = event.message as AssistantMessage;
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
 							if (parentAssistantForUsage) {
-								const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
-								if (parentEntry) {
+								const parentEntryId = this._findAssistantEntryIdForMessage(parentAssistantForUsage);
+								if (parentEntryId) {
 									const messages = child.messages;
 									const assistantIndex = messages.lastIndexOf(assistant);
 									const precedingPrompt = messages
@@ -11174,11 +11247,14 @@ export class AgentSession {
 											: "direct_user";
 									const text = compactRlmText(readAssistantText(assistant));
 									const write = this.sessionManager
-										.appendChildUsageAttribution(parentEntry.id, assistant.usage, undefined, origin)
-										.then(() => {
-											if (parentEntry.message.role === "assistant") {
-												parentAssistantForUsage.usage = structuredClone(parentEntry.message.usage);
-											}
+										.appendChildUsageAttributionWithAggregate(
+											parentEntryId,
+											assistant.usage,
+											undefined,
+											origin,
+										)
+										.then(({ aggregateUsage }) => {
+											parentAssistantForUsage.usage = structuredClone(aggregateUsage);
 											if (text) run.answerPreview = text;
 											emitChildUpdate();
 										});
@@ -12045,6 +12121,7 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
+		options = { ...options };
 		const previous = this._branchNavigationQueue;
 		let release = () => {};
 		this._branchNavigationQueue = new Promise<void>((resolve) => {
@@ -12076,19 +12153,23 @@ export class AgentSession {
 			throw new Error("No model available for summarization");
 		}
 
-		const targetEntry = this.sessionManager.getEntry(targetId);
-		if (!targetEntry) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-
+		options = { ...options };
 		const queuedWorkPause = this.acquireQueuedWorkPause();
 		let commitFence: { owner: symbol; release(): void } | undefined;
 		try {
+			const targetSource = { sessionId: this.sessionId, sessionFile: this.sessionFile };
+			const targetEntry = await this.sessionManager.readEntry(targetId);
+			if (targetSource.sessionId !== this.sessionId || targetSource.sessionFile !== this.sessionFile)
+				throw new Error("Session source changed during branch navigation");
+			if (this._disposing || this._disposed) throw new Error("Cannot navigate a disposing or disposed session.");
+			if (!targetEntry) throw new Error(`Entry ${targetId} not found`);
 			// Branch navigation and turn dispatch mutate the same transcript leaf.
 			commitFence = await this._acquireSessionActionCommitFence();
 			return await this._sessionActionCommitContext.run(commitFence.owner, async () => {
 				await this.agent.waitForIdle();
 				await this._agentEventQueue;
+				if (targetSource.sessionId !== this.sessionId || targetSource.sessionFile !== this.sessionFile)
+					throw new Error("Session source changed during branch navigation");
 				return this._navigateTreeUnderPause(targetId, targetEntry, options);
 			});
 		} finally {
@@ -12099,7 +12180,7 @@ export class AgentSession {
 
 	private async _navigateTreeUnderPause(
 		targetId: string,
-		targetEntry: NonNullable<ReturnType<SessionManager["getEntry"]>>,
+		targetEntry: NonNullable<Awaited<ReturnType<SessionManager["readEntry"]>>>,
 		options: {
 			summarize?: boolean;
 			customInstructions?: string;
@@ -12122,27 +12203,7 @@ export class AgentSession {
 		// Do not switch branches while /refine has detached event handling and is
 		// about to persist harness/session entries for the current branch.
 		await this._invalidatePendingAutoRefineForBranchChange();
-
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			targetId,
-		);
-
-		let customInstructions = options.customInstructions;
-		let replaceInstructions = options.replaceInstructions;
-		let label = options.label;
-
-		const preparation: TreePreparation = {
-			targetId,
-			oldLeafId,
-			commonAncestorId,
-			entriesToSummarize,
-			userWantsSummary: options.summarize ?? false,
-			customInstructions,
-			replaceInstructions,
-			label,
-		};
+		if (this._disposing || this._disposed) throw new Error("Cannot navigate a disposing or disposed session.");
 
 		this._branchSummaryAbortController = new AbortController();
 		let resolveBranchSummaryOperation: () => void = () => {};
@@ -12152,6 +12213,34 @@ export class AgentSession {
 		this._branchSummaryOperation = branchSummaryOperation;
 
 		try {
+			const initialSource = { sessionId: this.sessionId, sessionFile: this.sessionFile };
+			const captured = await this.sessionManager.readBranches([oldLeafId, targetId]);
+			const source = captured.source ?? initialSource;
+			const assertSource = () => {
+				if (source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile)
+					throw new Error("Session source changed during branch navigation");
+			};
+			assertSource();
+			if (this._branchSummaryAbortController.signal.aborted) return { cancelled: true, aborted: true };
+			const [oldPath, targetPath] = captured.branches;
+			if (!oldPath || !targetPath) throw new Error("Captured navigation paths are unavailable");
+			const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(oldPath, targetPath);
+
+			let customInstructions = options.customInstructions;
+			let replaceInstructions = options.replaceInstructions;
+			let label = options.label;
+
+			const preparation: TreePreparation = {
+				targetId,
+				oldLeafId,
+				commonAncestorId,
+				entriesToSummarize,
+				userWantsSummary: options.summarize ?? false,
+				customInstructions,
+				replaceInstructions,
+				label,
+			};
+
 			let extensionSummary: { summary: string; details?: unknown } | undefined;
 			let fromExtension = false;
 
@@ -12182,6 +12271,7 @@ export class AgentSession {
 				}
 			}
 
+			assertSource();
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
@@ -12243,6 +12333,7 @@ export class AgentSession {
 			}
 
 			await this.sessionManager.flushNow();
+			assertSource();
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
 				const summaryId = await this.sessionManager.branchWithSummary(
@@ -12252,15 +12343,15 @@ export class AgentSession {
 					fromExtension,
 					summaryUsage,
 				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+				summaryEntry = (await this.sessionManager.readEntry(summaryId)) as BranchSummaryEntry;
 
 				if (label) {
 					await this.sessionManager.appendLabelChange(summaryId, label);
 				}
 			} else if (newLeafId === null) {
-				this.sessionManager.resetLeaf();
+				await this.sessionManager.branchTo(null);
 			} else {
-				this.sessionManager.branch(newLeafId);
+				await this.sessionManager.branchTo(newLeafId);
 			}
 
 			if (label && !summaryText) {
@@ -12394,8 +12485,8 @@ export class AgentSession {
 
 	// Whole-source own spend, identical to the catalog reduction at passivation.
 	async getOwnUsageSummary(): Promise<SessionUsageSummary | undefined> {
-		if (!this.sessionManager.isPersisted()) {
-			const entries = this.sessionManager.getEntries();
+		if (!this.sessionManager.supportsCapturedHistoryReads()) {
+			const entries = await this.sessionManager.readEntries();
 			return sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 		}
 		const limits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 };
@@ -12436,9 +12527,9 @@ export class AgentSession {
 	 */
 	async getContextTree(): Promise<ContextTreeNode> {
 		const resolveContextWindow = this._contextWindowResolver();
-		const residentUsage = this.sessionManager.isPersisted()
+		const residentUsage = this.sessionManager.supportsCapturedHistoryReads()
 			? undefined
-			: computeOwnAndTotalUsage(this.sessionManager.getBranch(), this.sessionManager.getEntries());
+			: readResidentContextTreeUsage(this.sessionManager);
 		const runs = [...this._activeRlmChildRuns.values()].map((run) => ({
 			id: run.id,
 			label: rlmChildLabel(run.prompt),

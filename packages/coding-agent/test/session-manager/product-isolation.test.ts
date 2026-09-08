@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { NativeRequestEvent } from "../../src/core/request-events.js";
+import { readSessionBootstrap } from "../../src/core/session-bootstrap.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 
@@ -27,7 +29,7 @@ describe("session write isolation", () => {
 
 	it("persists owned sessions and permits explicit read/copy from a legacy input", async () => {
 		const ownedDir = join(dir, "owned");
-		const session = await SessionManager.create(dir, ownedDir);
+		let session = await SessionManager.create(dir, ownedDir);
 		managers.push(session);
 		expect(await session.readBranchHistory((history) => history.parentPath())).toMatchObject({
 			events: [],
@@ -49,6 +51,25 @@ describe("session write isolation", () => {
 			source: { sessionId: session.getSessionId(), leafId: null },
 		});
 		const ownedInfoId = await session.appendSessionInfo("owned");
+		expect(() => session.getEntry(ownedInfoId)).toThrow(
+			"Synchronous history access requires a resident session view",
+		);
+		const ownedPath = session.getSessionFile()!;
+		const ownedSessionId = session.getSessionId();
+		await session.close();
+		managers.splice(managers.indexOf(session), 1);
+		session = await SessionManager.open(ownedPath, ownedDir);
+		managers.push(session);
+		expect(session.getSessionId()).toBe(ownedSessionId);
+		expect(session.getLeafId()).toBe(ownedInfoId);
+		expect(() => session.getEntries()).toThrow("Synchronous history access requires a resident session view");
+		expect(await session.readEntry(ownedInfoId)).toMatchObject({
+			id: ownedInfoId,
+			type: "session_info",
+			name: "owned",
+		});
+		expect((await session.readEntries()).map((entry) => entry.id)).toEqual([ownedInfoId]);
+		expect((await session.readBranch()).map((entry) => entry.id)).toEqual([ownedInfoId]);
 		expect(readFileSync(session.getSessionFile()!, "utf8")).toContain("owned");
 		expect(loadEntriesFromFile(legacyFile)[0]).toMatchObject({ id: "legacy", version: 2 });
 		const fork = await SessionManager.forkFrom(legacyFile, dir, ownedDir);
@@ -57,16 +78,60 @@ describe("session write isolation", () => {
 		expect(fork.getSessionFile()).not.toBe(legacyFile);
 		expect(readFileSync(legacyFile, "utf8")).toBe(original);
 
+		await fork.appendSessionState({ status: "archived" });
+		const detachedState = fork.getSessionState()!;
+		detachedState.status = "active";
+		expect(fork.getSessionState()).toEqual({ status: "archived" });
+
+		const requestLeaf = fork.getLeafId();
+		const sink = fork.bindRequestSink();
+		try {
+			const source = await sink.source;
+			// Synthetic offline storage data: this is not evidence of a physical dispatch.
+			const admitted = {
+				type: "attempt_admitted",
+				operationId: "offline-replay-operation",
+				attemptId: "offline-replay-attempt",
+				timestamp: 0,
+				source,
+				owner: { sessionId: source.sessionId },
+				purpose: "native-control",
+				purposeDetail: "offline idempotence fixture; no transport was sent",
+				modelContract: {
+					api: "openai-responses",
+					provider: "fixture",
+					model: "offline-replay-fixture",
+					profile: { id: "fixture", status: "unvalidated" },
+					pricing: { status: "unavailable" },
+				},
+				descriptor: {
+					api: "openai-responses",
+					provider: "fixture",
+					model: "offline-replay-fixture",
+					transport: "http",
+					ordinal: 1,
+					kind: "initial",
+				},
+			} satisfies NativeRequestEvent;
+			await Promise.all([sink.persist(admitted), sink.persist(admitted)]);
+			const requestEntries = (await fork.readEntries()).filter((entry) => entry.type === "request");
+			expect(requestEntries).toHaveLength(1);
+			expect(requestEntries[0].request).toEqual(admitted);
+			expect(fork.getLeafId()).toBe(requestLeaf);
+		} finally {
+			await sink.release();
+		}
+
 		const nativeFork = await session.forkBranch(ownedInfoId, { persist: false });
 		managers.push(nativeFork);
 		expect(nativeFork.getEntryRetention(ownedInfoId)).toBeUndefined();
 		const explicitImport = await SessionManager.importRetainedFrom(session.getSessionFile()!, dir, ownedDir);
 		managers.push(explicitImport);
-		expect(explicitImport.getEntryRetention(ownedInfoId)).toBe("retained-import");
+		expect(await explicitImport.readEntryRetention(ownedInfoId)).toBe("retained-import");
 
 		const branchText = `Full inactive branch: ${"x".repeat(9000)}`;
 		const branchA = await session.appendMessage({ role: "user", content: branchText, timestamp: 1 });
-		session.branch(ownedInfoId);
+		await session.branchTo(ownedInfoId);
 		const branchB = await session.appendMessage({ role: "user", content: "Current branch", timestamp: 2 });
 		const limits = { maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 };
 		const branchHistory = await session.materializeBranchHistory(limits);
@@ -78,11 +143,12 @@ describe("session write isolation", () => {
 		expect(parentHistory.sourceBytes).toBe(
 			parentHistory.entries.reduce((bytes, item) => bytes + item.source.locator.length, 0),
 		);
-		expect(parentHistory.entries[0].entry).not.toBe(session.getEntry(ownedInfoId));
+		expect(parentHistory.entries[0].entry).not.toBe(await session.readEntry(ownedInfoId));
 		expect(branchHistory.scope).toBe("branch");
 		expect(branchHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchB]);
 		expect(sourceHistory.scope).toBe("source");
 		expect(sourceHistory.entries.map((item) => item.entry.id)).toEqual([ownedInfoId, branchA, branchB]);
+		expect((await session.readBranch(branchA, limits)).map((entry) => entry.id)).toEqual([ownedInfoId, branchA]);
 		await session.readSourceHistory(async (history) => {
 			const first = await history.parentPath({ limit: 1 });
 			expect(first.totalEntries).toBe(2);
@@ -96,7 +162,7 @@ describe("session write isolation", () => {
 		expect(await session.getHistoryEntry(branchA)).toBeUndefined();
 		const hydrated = await session.readSourceHistory((history) => history.hydrateEntry(branchA, 64 * 1024));
 		expect(hydrated?.entry).toMatchObject({ id: branchA, message: { role: "user", content: branchText } });
-		expect(hydrated?.entry).not.toBe(session.getEntry(branchA));
+		expect(hydrated?.entry).not.toBe(await session.readEntry(branchA));
 		expect(hydrated?.source.retention).toBeUndefined();
 		const iterated = await session.readSourceHistory(async (history) => {
 			const ids: string[] = [];
@@ -128,10 +194,22 @@ describe("session write isolation", () => {
 			"entry source byte budget exceeded",
 		);
 
-		session.resetLeaf();
+		await session.branchTo(null);
 		const modelId = await session.appendModelChange("openai", "gpt-4.1");
 		const thinkingId = await session.appendThinkingLevelChange("high");
 		const tierId = await session.appendServiceTierChange("priority");
+		const bootstrapLimits = { maxMessages: 64, maxSourceBytes: 2 * 1024 * 1024 };
+		expect(await readSessionBootstrap(session, bootstrapLimits, { includeMessages: false })).toEqual({
+			context: {
+				messages: [],
+				model: { provider: "openai", modelId: "gpt-4.1" },
+				thinkingLevel: "high",
+				serviceTier: "priority",
+			},
+			hasExistingSession: false,
+			hasThinkingEntry: true,
+			hasServiceTierEntry: true,
+		});
 		const capturedBootstrap = await session.readBranchHistory(async (history) => {
 			const firstPath = await history.parentPath({ limit: 1 });
 			expect(firstPath.events.map((entry) => entry.id)).toEqual([modelId]);
@@ -163,7 +241,7 @@ describe("session write isolation", () => {
 		expect((await session.readBranchHistory((history) => history.branchBootstrap())).model?.id).toBe(
 			capturedBootstrap.replacement,
 		);
-		session.branch(branchB);
+		await session.branchTo(branchB);
 		expect(await session.readSourceHistory((history) => history.branchBootstrap())).toMatchObject({
 			model: null,
 			thinkingLevel: null,
@@ -172,7 +250,13 @@ describe("session write isolation", () => {
 			hasBranchMessage: true,
 			goalSeedable: false,
 		});
-		session.resetLeaf();
+		expect(await readSessionBootstrap(session, bootstrapLimits, { includeMessages: false })).toMatchObject({
+			context: { messages: [] },
+			hasExistingSession: true,
+			hasThinkingEntry: false,
+			hasServiceTierEntry: false,
+		});
+		await session.branchTo(null);
 		await session.appendCustomMessageEntry("bootstrap-notice", "Custom context", false);
 		expect(await session.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			hasContextMessages: true,
@@ -266,18 +350,18 @@ describe("session write isolation", () => {
 			},
 		});
 		const newNativeId = await memory.appendSessionInfo("new native entry");
-		expect(memory.getEntryRetention(newNativeId)).toBeUndefined();
+		expect(await memory.readEntryRetention(newNativeId)).toBeUndefined();
 		const copied = await SessionManager.forkFrom(memory.getSessionFile()!, dir, ownedDir);
 		managers.push(copied);
-		expect(copied.getEntryRetention("Imported-User")).toBe("retained-import");
-		expect(copied.getEntryRetention("Imported-Goal")).toBe("retained-import");
-		expect(copied.getEntryRetention(newNativeId)).toBeUndefined();
-		expect(copied.getEntry("Imported-User")?.nativeOrigin).toEqual(inputOrigin);
+		expect(await copied.readEntryRetention("Imported-User")).toBe("retained-import");
+		expect(await copied.readEntryRetention("Imported-Goal")).toBe("retained-import");
+		expect(await copied.readEntryRetention(newNativeId)).toBeUndefined();
+		expect((await copied.readEntry("Imported-User"))?.nativeOrigin).toEqual(inputOrigin);
 		const cold = await copied.readSourceHistory((history) =>
 			history.hydrateEntry("Imported-User", limits.maxSourceBytes),
 		);
 		expect(cold?.entry.nativeOrigin).toEqual(inputOrigin);
-		expect(cold?.entry).not.toBe(copied.getEntry("Imported-User"));
+		expect(cold?.entry).not.toBe(await copied.readEntry("Imported-User"));
 		expect(cold?.source).toMatchObject({ id: "Imported-User", retention: "retained-import" });
 		await copied.readBranchHistory(async (history) => {
 			const path = await history.parentPath();
@@ -352,8 +436,25 @@ describe("session write isolation", () => {
 		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			contextUsageAssistant: { id: preCompactionAssistantId },
 		});
+		const childUsage = { ...usageAssistant.usage, input: 10, totalTokens: 10 };
+		const usageAcknowledgements = await Promise.all([
+			copied.appendChildUsageAttributionWithAggregate(preCompactionAssistantId, childUsage),
+			copied.appendChildUsageAttributionWithAggregate(preCompactionAssistantId, childUsage),
+		]);
+		expect(
+			usageAcknowledgements.map(({ aggregateUsage }) => [aggregateUsage.input, aggregateUsage.totalTokens]),
+		).toEqual([
+			[1010, 1000],
+			[1020, 1000],
+		]);
+		expect((await copied.readEntry(usageAcknowledgements[1].entryId))?.parentId).toBe(
+			usageAcknowledgements[0].entryId,
+		);
+		expect(await copied.readEntry(preCompactionAssistantId)).toMatchObject({
+			message: { usage: { input: 1020, totalTokens: 1000 } },
+		});
 		const compactionId = await copied.appendCompaction("Exact compacted context", "Imported-User", 1200);
-		const compactionTimestamp = copied.getEntry(compactionId)!.timestamp;
+		const compactionTimestamp = (await copied.readEntry(compactionId))!.timestamp;
 		await copied.readBranchHistory(async (history) => {
 			const bootstrap = await history.branchBootstrap();
 			expect(bootstrap.latestCompaction?.id).toBe(compactionId);
@@ -382,12 +483,12 @@ describe("session write isolation", () => {
 				entry: { message: { usage: { input: 0, totalTokens: 0 } } },
 			});
 		});
-		copied.branch(depthId);
+		await copied.branchTo(depthId);
 		expect(await copied.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
 			latestCompaction: null,
 			contextUsageAssistant: null,
 		});
-		copied.branch(abortedUsageId);
+		await copied.branchTo(abortedUsageId);
 		const retainedDepth = await SessionManager.importRetainedFrom(copied.getSessionFile()!, dir, ownedDir);
 		managers.push(retainedDepth);
 		expect(await retainedDepth.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({

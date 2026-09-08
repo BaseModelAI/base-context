@@ -901,13 +901,13 @@ Current working directory.
 
 ### ctx.sessionManager
 
-Read-only access to session state. See [Session Format](session-format.md) for the full SessionManager API and entry types.
+Read-only access to session state. Historical reads are asynchronous and return detached data. Complete reads default to 16,384 entries and 64 MiB of source data; exceeding a limit raises an error, not a partial result. See [Session Format](session-format.md) for the full SessionManager API and entry types.
 
 For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
 ```typescript
-ctx.sessionManager.getEntries()       // All entries
-ctx.sessionManager.getBranch()        // Current branch
+await ctx.sessionManager.readEntries() // All entries, within explicit limits
+await ctx.sessionManager.readBranch()  // Current root-to-leaf parent path
 ctx.sessionManager.getLeafId()        // Current leaf entry ID
 ```
 
@@ -1356,11 +1356,11 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 Persist extension state (does NOT participate in LLM context).
 
 ```typescript
-pi.appendEntry("my-state", { count: 42 });
+await pi.appendEntry("my-state", { count: 42 });
 
 // Restore on reload
 pi.on("session_start", async (_event, ctx) => {
-  for (const entry of ctx.sessionManager.getEntries()) {
+  for (const entry of await ctx.sessionManager.readEntries()) {
     if (entry.type === "custom" && entry.customType === "my-state") {
       // Reconstruct from entry.data
     }
@@ -1373,7 +1373,7 @@ pi.on("session_start", async (_event, ctx) => {
 Set the session display name (shown in session selector instead of first message).
 
 ```typescript
-pi.setSessionName("Refactor auth module");
+await pi.setSessionName("Refactor auth module");
 ```
 
 ### pi.getSessionName()
@@ -1393,13 +1393,13 @@ Set or clear a label on an entry. Labels are user-defined markers for bookmarkin
 
 ```typescript
 // Set a label
-pi.setLabel(entryId, "checkpoint-before-refactor");
+await pi.setLabel(entryId, "checkpoint-before-refactor");
 
 // Clear a label
-pi.setLabel(entryId, undefined);
+await pi.setLabel(entryId, undefined);
 
 // Read labels via sessionManager
-const label = ctx.sessionManager.getLabel(entryId);
+const label = await ctx.sessionManager.readLabel(entryId);
 ```
 
 Labels persist in the session and survive restarts. Use them to mark important points (turns, checkpoints) in the conversation tree.
@@ -1414,7 +1414,7 @@ If multiple extensions register the same command name, Prime Agent keeps them al
 pi.registerCommand("stats", {
   description: "Show session statistics",
   handler: async (args, ctx) => {
-    const count = ctx.sessionManager.getEntries().length;
+    const count = (await ctx.sessionManager.readEntries()).length;
     ctx.ui.notify(`${count} entries`, "info");
   }
 });
@@ -1669,7 +1669,7 @@ export default function (pi: ExtensionAPI) {
   // Reconstruct state from session
   pi.on("session_start", async (_event, ctx) => {
     items = [];
-    for (const entry of ctx.sessionManager.getBranch()) {
+    for (const entry of await ctx.sessionManager.readBranch()) {
       if (entry.type === "message" && entry.message.role === "toolResult") {
         if (entry.message.toolName === "my_tool") {
           items = entry.message.details?.items ?? [];

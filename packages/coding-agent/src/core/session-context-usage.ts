@@ -7,8 +7,8 @@ export class ContextUsageReader {
 	private cache?: { key: string; available: boolean };
 
 	async hasPostCompactionUsage(manager: SessionManager, maxSourceBytes: number): Promise<boolean> {
-		if (!manager.isPersisted()) {
-			const entries = manager.getBranch();
+		if (!manager.supportsCapturedHistoryReads()) {
+			const entries = await manager.readBranch(undefined, { maxEntries: 16_384, maxSourceBytes });
 			const compaction = getLatestCompactionEntry(entries);
 			if (!compaction) return true;
 			const boundary = entries.lastIndexOf(compaction);

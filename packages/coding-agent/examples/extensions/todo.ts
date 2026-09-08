@@ -111,11 +111,15 @@ export default function (pi: ExtensionAPI) {
 	 * Reconstruct state from session entries.
 	 * Scans tool results for this tool and applies them in order.
 	 */
-	const reconstructState = (ctx: ExtensionContext) => {
+	const reconstructState = async (ctx: ExtensionContext) => {
+		const branch = await ctx.sessionManager.readBranch(undefined, {
+			maxEntries: 16_384,
+			maxSourceBytes: 64 * 1024 * 1024,
+		});
 		todos = [];
 		nextId = 1;
 
-		for (const entry of ctx.sessionManager.getBranch()) {
+		for (const entry of branch) {
 			if (entry.type !== "message") continue;
 			const msg = entry.message;
 			if (msg.role !== "toolResult" || msg.toolName !== "todo") continue;

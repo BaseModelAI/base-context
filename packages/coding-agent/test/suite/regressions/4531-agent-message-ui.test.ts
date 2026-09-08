@@ -59,7 +59,7 @@ function render(component: AgentMessageComponent): string {
 type LateSentAgentMessageHost = {
 	_recordLateIpythonSentAgentMessage: (toolCallId: string, message: KernelSentAgentMessage) => void;
 	_agentEventQueue: Promise<void>;
-	_applyLateIpythonSentAgentMessages: (message: AgentMessage) => void;
+	_applyCanonicalIpythonSentAgentMessages: (message: AgentMessage) => Promise<void>;
 	_restoreLateIpythonSentAgentMessages: () => void;
 };
 
@@ -209,16 +209,18 @@ describe("ENG-4531 agent message UI", () => {
 
 		host._recordLateIpythonSentAgentMessage(toolResult.toolCallId, lateMessage);
 		await host._agentEventQueue;
+		host._recordLateIpythonSentAgentMessage(toolResult.toolCallId, lateMessage);
+		await host._agentEventQueue;
 		unsubscribe();
 		const lateEntryId = harness.session.sessionManager.getLeafId()!;
 
 		expect(publishedToolResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
 		expect(
-			harness.session.sessionManager
-				.getEntries()
-				.some((entry) => entry.type === "custom" && entry.customType === "ipython_sent_agent_message"),
+			(await harness.session.sessionManager.readEntries()).some(
+				(entry) => entry.type === "custom" && entry.customType === "ipython_sent_agent_message",
+			),
 		).toBe(true);
-		expect(events).toContain("ipython_sent_agent_message");
+		expect(events.filter((event) => event === "ipython_sent_agent_message")).toHaveLength(1);
 		expect(
 			(await harness.session.buildSessionContext()).messages.find(
 				(message): message is ToolResultMessage =>
@@ -228,18 +230,20 @@ describe("ENG-4531 agent message UI", () => {
 
 		publishedToolResult.details = { status: "ok" };
 		host._restoreLateIpythonSentAgentMessages();
+		expect(publishedToolResult.details).toEqual({ status: "ok" });
+		await host._applyCanonicalIpythonSentAgentMessages(publishedToolResult);
 		expect(publishedToolResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
 
-		harness.session.sessionManager.branch(beforeLateEntryId);
+		await harness.session.sessionManager.branchTo(beforeLateEntryId);
 		host._restoreLateIpythonSentAgentMessages();
 		const staleBranchResult: ToolResultMessage = { ...toolResult, details: { status: "ok" } };
-		host._applyLateIpythonSentAgentMessages(staleBranchResult);
+		await host._applyCanonicalIpythonSentAgentMessages(staleBranchResult);
 		expect(staleBranchResult.details).toEqual({ status: "ok" });
 
-		harness.session.sessionManager.branch(lateEntryId);
+		await harness.session.sessionManager.branchTo(lateEntryId);
 		host._restoreLateIpythonSentAgentMessages();
 		const restoredBranchResult: ToolResultMessage = { ...toolResult, details: { status: "ok" } };
-		host._applyLateIpythonSentAgentMessages(restoredBranchResult);
+		await host._applyCanonicalIpythonSentAgentMessages(restoredBranchResult);
 		expect(restoredBranchResult.details).toMatchObject({ sentAgentMessages: [lateMessage] });
 	});
 

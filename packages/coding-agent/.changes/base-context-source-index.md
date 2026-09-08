@@ -18,3 +18,6 @@
 - Read context-usage availability from captured assistant/update references and make native stats/tree, compact-host, extension and mode usage reads asynchronous.
 - Capture complete bounded native context-tree usage and read standalone HTML input through awaited file-handle I/O.
 - Read native own-usage summaries from capped captured history with a scalar prefix cache, and await daemon usage consumers while keeping metadata-only decisions synchronous.
+- Replace historical owned Manager arrays/maps with indexed metadata and asynchronous bounded readers, while preserving explicit resident views.
+- Queue native ID/target checks, return the ACKed child aggregate, and restore late-IPython output from captured references instead of a historical map.
+- Port compaction/navigation/refinement and extension history consumers, and capture fork inputs before hooks without holding the reader across hook completion.

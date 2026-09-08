@@ -146,7 +146,10 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("summarize", {
 		description: "Summarize the current conversation in a custom UI",
 		handler: async (_args, ctx) => {
-			const branch = ctx.sessionManager.getBranch();
+			const branch = await ctx.sessionManager.readBranch(undefined, {
+				maxEntries: 16_384,
+				maxSourceBytes: 64 * 1024 * 1024,
+			});
 			const conversationText = buildConversationText(branch);
 
 			if (!conversationText.trim()) {

@@ -293,7 +293,7 @@ After completing a step, include a [DONE:n] tag in your response.`,
 			planModeEnabled = true;
 		}
 
-		const entries = ctx.sessionManager.getEntries();
+		const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 
 		// Restore persisted state
 		const planModeEntry = entries

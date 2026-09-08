@@ -10,7 +10,7 @@ import type {
 } from "@ponythewhite/base-context-ai";
 import { randomUUID } from "crypto";
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
-import { stat } from "fs/promises";
+import { open as openFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
@@ -28,10 +28,15 @@ import type {
 	TaskEvidenceOptions,
 	TaskEvidencePage,
 } from "./history-index.js";
-import type { JournalFrameRetention } from "./journal-frame.js";
+import { decodeJournalFrame, INITIAL_JOURNAL_CURSOR, type JournalFrameRetention } from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
+import {
+	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
+	type PersistedIpythonSentAgentMessage,
+	parsePersistedIpythonSentAgentMessage,
+} from "./session-context-updates.js";
 import type { NativeEntryOrigin } from "./session-entry-origin.js";
 import {
 	type BoundHistoryReadSink,
@@ -39,6 +44,7 @@ import {
 	createBranchHistoryReadView,
 	createSessionHistoryReadScope,
 	type HistoryReadQuery,
+	type HydratedSessionHistoryEntry,
 	type MaterializedSessionHistory,
 	SessionHistoryIndex,
 	type SessionHistoryReadLimits,
@@ -47,7 +53,9 @@ import {
 } from "./session-history-index.js";
 import {
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
+	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
+	type SessionJournalState,
 } from "./session-journal-owner.js";
 import { readSessionJournal, readSessionJournalHeader, SessionJournalDecoder } from "./session-journal-reader.js";
 import {
@@ -200,6 +208,31 @@ export interface ChildUsageAttributionEntry extends SessionEntryBase {
 	origin?: "spawn_task" | "agent_message" | "direct_user";
 }
 
+interface CapturedForkInput {
+	source?: SourceSnapshotRef;
+	selectedEntry?: SessionEntry;
+	path: SessionEntry[];
+	labels: { targetId: string; label: string; timestamp: string; retention?: JournalFrameRetention }[];
+	sourceFile?: string;
+	cwd: string;
+	sessionDir: string;
+	persist: boolean;
+	rlmDepth: number | undefined;
+	limits: SessionHistoryReadLimits;
+}
+
+export interface PreparedSessionFork {
+	/** Present only for an owned canonical capture. */
+	source?: SourceSnapshotRef;
+	selectedEntry: SessionEntry;
+	create(): Promise<SessionManager>;
+}
+
+export interface ChildUsageAttributionAcknowledgement {
+	entryId: string;
+	aggregateUsage: Usage;
+}
+
 export interface LabelEntry extends SessionEntryBase {
 	type: "label";
 	targetId: string;
@@ -319,9 +352,16 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionId"
 	| "getSessionFile"
 	| "getLeafId"
-	| "getLeafEntry"
-	| "getEntry"
-	| "getEntryRetention"
+	| "readEntry"
+	| "readLeafEntry"
+	| "readEntryRetention"
+	| "readLabel"
+	| "readBranch"
+	| "readBranches"
+	| "readEntries"
+	| "readFlatTree"
+	| "readTree"
+	| "readToolExchange"
 	| "supportsCapturedHistoryReads"
 	| "materializeResidentHistory"
 	| "readBranchHistory"
@@ -329,12 +369,8 @@ export type ReadonlySessionManager = Pick<
 	| "materializeParentPathHistory"
 	| "materializeBranchHistory"
 	| "materializeSourceHistory"
-	| "getLabel"
-	| "getBranch"
 	| "getHeader"
-	| "getEntries"
 	| "getCompactionCount"
-	| "getTree"
 	| "getSessionName"
 >;
 
@@ -1151,6 +1187,58 @@ async function listSessionsFromDir(
 	return sessions;
 }
 
+const DEFAULT_MANAGER_HISTORY_LIMITS: SessionHistoryReadLimits = {
+	maxEntries: 16_384,
+	maxSourceBytes: 64 * 1024 * 1024,
+};
+
+async function readOwnedSessionHeader(snapshot: SessionJournalState): Promise<SessionHeader> {
+	const handle = await openFile(snapshot.journalPath, "r");
+	let capturedHeader: SessionHeader | undefined;
+	try {
+		const checkIdentity = async () => {
+			const identity = await handle.stat();
+			if (identity.dev !== snapshot.dev || identity.ino !== snapshot.ino || identity.size < snapshot.byteLength)
+				throw new Error("Owned session header source identity changed");
+		};
+		await checkIdentity();
+		const maximum = Math.min(snapshot.byteLength, SESSION_JOURNAL_MAX_FRAME_BYTES);
+		const parts: Buffer[] = [];
+		let offset = 0;
+		while (offset < maximum) {
+			const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, maximum - offset));
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+			if (bytesRead === 0) break;
+			const chunk = buffer.subarray(0, bytesRead);
+			const end = chunk.indexOf(0x0a);
+			parts.push(end < 0 ? chunk : chunk.subarray(0, end + 1));
+			offset += bytesRead;
+			if (end < 0) continue;
+			const frame = decodeJournalFrame(
+				Buffer.concat(parts),
+				INITIAL_JOURNAL_CURSOR,
+				SESSION_JOURNAL_MAX_FRAME_BYTES,
+			);
+			const header = frame.payload as SessionHeader;
+			if (!header || header.type !== "session" || typeof header.id !== "string")
+				throw new Error(`Session source has no valid header: ${snapshot.journalPath}`);
+			await checkIdentity();
+			capturedHeader = header;
+			break;
+		}
+		if (!capturedHeader) throw new Error("Owned session header is incomplete or exceeds the frame byte limit");
+	} catch (error) {
+		try {
+			await handle.close();
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "Owned session header read and close failed", { cause: error });
+		}
+		throw error;
+	}
+	await handle.close();
+	return capturedHeader;
+}
+
 interface SessionWriteState {
 	owner?: SessionJournalOwner;
 	history?: SessionHistoryIndex;
@@ -1166,6 +1254,13 @@ interface SessionWriteState {
 	compactionCount: number;
 	sessionName?: string;
 	sourceVersion: number;
+	header?: SessionHeader;
+	sessionState?: SessionState;
+	hasUserContent?: boolean;
+	contentPrefix?: number;
+	git?: GitContext;
+	agentStatus?: AgentStatus;
+	metadataRefs?: { name?: string; state?: string; git?: string; status?: string };
 	pendingIds: Set<string>;
 	failure?: Error;
 	closing?: Promise<void>;
@@ -1213,6 +1308,8 @@ export class SessionManager {
 	private closing?: Promise<void>;
 
 	private readOnly = false;
+	private indexed = false;
+	private header: SessionHeader | null = null;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, options?: NewSessionOptions) {
 		this.cwd = cwd;
@@ -1296,9 +1393,14 @@ export class SessionManager {
 				);
 				state.sequence = ack.sequence;
 			}
+			await this._activateIndexedSource(this.fileEntries[0] as SessionHeader);
 		} catch (error) {
-			await owner.close().catch(() => undefined);
 			state.closed = true;
+			try {
+				await this._closeSourceActors(state);
+			} catch (cleanup) {
+				throw new AggregateError([error, cleanup], "Session creation and cleanup failed");
+			}
 			throw error;
 		}
 	}
@@ -1315,6 +1417,8 @@ export class SessionManager {
 		this.sessionFile = next.sessionFile;
 		this.sessionDir = next.sessionDir;
 		this.persist = next.persist;
+		this.indexed = next.indexed;
+		this.header = next.header;
 		this.fileEntries = next.fileEntries;
 		this.byId = next.byId;
 		this.labelsById = next.labelsById;
@@ -1322,6 +1426,187 @@ export class SessionManager {
 		this.leafId = next.leafId;
 		this.finalizedToolMessages = next.finalizedToolMessages;
 		this.writeState = next.writeState;
+	}
+
+	private _assertResident(): void {
+		if (this.indexed)
+			throw new Error(
+				"Synchronous history access requires a resident session view; use captured async history reads",
+			);
+	}
+
+	private async _acknowledgedHistory(
+		state: SessionWriteState,
+		snapshot = state.owner!.getSnapshot(),
+	): Promise<SessionHistoryReadScope> {
+		const owner = state.owner;
+		const header = state.header;
+		if (!owner || !header || owner.format !== "framed" || state.sourceVersion !== CURRENT_SESSION_VERSION)
+			throw new Error("An owned canonical session source is required");
+		state.history ??= new SessionHistoryIndex(
+			header.id,
+			join(assertProductStatePath(getSessionArtifactPathForFile(owner.journalPath, header.id)), "history.sqlite"),
+		);
+		const index = await state.history.synchronize(snapshot);
+		return createSessionHistoryReadScope(
+			index,
+			Object.freeze({
+				sessionId: header.id,
+				sessionFile: owner.journalPath,
+				leafId: state.leafId,
+				sourceSequence: snapshot.nextSequence - 1,
+				persistent: true,
+			}),
+			(operation) => operation(),
+			"source",
+		);
+	}
+
+	private async _storedEntry(
+		history: SessionHistoryReadScope,
+		id: string,
+		maxSourceBytes = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes,
+	): Promise<HydratedSessionHistoryEntry | undefined> {
+		const value = await history.hydrateEntry(id, maxSourceBytes);
+		if (!value || value.entry.type !== "message" || value.entry.message.role !== "assistant") return value;
+		const update = await history.sourceAssistantUsage(id);
+		if (!update) return value;
+		if (value.source.locator.length + update.locator.length > maxSourceBytes)
+			throw new Error("Stored assistant source byte budget exceeded");
+		const related = await history.hydrateEntry(update.id, maxSourceBytes - value.source.locator.length);
+		if (!related || related.entry.type !== "child_usage_attributed")
+			throw new Error("Stored assistant aggregate source is unavailable");
+		value.entry.message.usage = cloneUsage(related.entry.aggregateUsage);
+		return value;
+	}
+
+	private async _refreshOwnedMetadata(state: SessionWriteState, startup = false): Promise<void> {
+		const owner = state.owner!;
+		const snapshot = owner.getSnapshot();
+		const history = await this._acknowledgedHistory(state, snapshot);
+		const bootstrap = await state.history!.currentSourceBootstrap(snapshot);
+		const leafId = startup ? (bootstrap.leaf?.id ?? null) : state.leafId;
+		const index = await state.history!.synchronize(snapshot);
+		const branch = await index.branchBootstrap(state.header!.id, {
+			leafId,
+			through: history.source.sourceSequence,
+		});
+		const refs = [bootstrap.sessionInfo, bootstrap.sessionState, branch.gitState, branch.agentStatus];
+		if (
+			refs.reduce((bytes, ref) => bytes + (ref?.locator.length ?? 0), 0) >
+			DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes
+		)
+			throw new Error("Owned session metadata source byte budget exceeded");
+		const previous = state.metadataRefs ?? {};
+		const read = async (ref: IndexedSourceEvent | null) => {
+			if (!ref) return undefined;
+			const value = await history.hydrateEntry(ref.id, DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes);
+			if (!value) throw new Error("Owned session metadata source is unavailable");
+			return value.entry;
+		};
+		if (!state.metadataRefs || previous.name !== bootstrap.sessionInfo?.revision) {
+			const entry = await read(bootstrap.sessionInfo);
+			state.sessionName = entry?.type === "session_info" ? entry.name : undefined;
+		}
+		if (!state.metadataRefs || previous.state !== bootstrap.sessionState?.revision) {
+			const entry = await read(bootstrap.sessionState);
+			const status = entry?.type === "session_state" ? normalizeSessionStateStatus(entry.state.status) : undefined;
+			state.sessionState = status ? { status } : undefined;
+		}
+		if (!state.metadataRefs || previous.git !== branch.gitState?.revision) {
+			const entry = await read(branch.gitState);
+			state.git = entry?.type === "git_state" ? entry.git : state.header?.git;
+		}
+		if (!state.metadataRefs || previous.status !== branch.agentStatus?.revision) {
+			const entry = await read(branch.agentStatus);
+			state.agentStatus = entry?.type === "agent_status" ? { ...entry.status } : undefined;
+		}
+		state.metadataRefs = {
+			name: bootstrap.sessionInfo?.revision,
+			state: bootstrap.sessionState?.revision,
+			git: branch.gitState?.revision,
+			status: branch.agentStatus?.revision,
+		};
+		state.compactionCount = bootstrap.compactionCount;
+		state.hasUserContent = bootstrap.hasUserContent;
+		state.contentPrefix = bootstrap.contentPrefix;
+		state.leafId = leafId;
+		state.reservedLeaf = leafId;
+		if (this.writeState === state) this.leafId = leafId;
+	}
+
+	private async _prepareOwnedMetadata(
+		state: SessionWriteState,
+		entry: SessionEntry,
+		history: SessionHistoryReadScope,
+		advanceLeaf: boolean,
+	): Promise<
+		Pick<
+			SessionWriteState,
+			"compactionCount" | "sessionName" | "sessionState" | "hasUserContent" | "contentPrefix" | "git" | "agentStatus"
+		>
+	> {
+		if (state.hasUserContent === undefined || state.contentPrefix === undefined)
+			throw new Error("Owned session metadata is unavailable");
+		const metadata = {
+			compactionCount: state.compactionCount + (entry.type === "compaction" ? 1 : 0),
+			sessionName: entry.type === "session_info" ? entry.name : state.sessionName,
+			sessionState: state.sessionState,
+			hasUserContent: state.hasUserContent,
+			contentPrefix: state.contentPrefix,
+			git: state.git,
+			agentStatus: state.agentStatus,
+		};
+		if (entry.type === "session_state") {
+			const status = normalizeSessionStateStatus(entry.state?.status);
+			if (status) metadata.sessionState = { status };
+		}
+		if (!metadata.hasUserContent && CONTENT_ENTRY_TYPES.has(entry.type)) {
+			const prefix = ["model_change", "thinking_level_change", "service_tier_change"];
+			while (metadata.contentPrefix < prefix.length && entry.type !== prefix[metadata.contentPrefix])
+				metadata.contentPrefix++;
+			if (metadata.contentPrefix < prefix.length) metadata.contentPrefix++;
+			else metadata.hasUserContent = true;
+		}
+		if (advanceLeaf) {
+			if (entry.parentId !== state.leafId) {
+				const index = await state.history!.synchronize(state.owner!.getSnapshot());
+				const branch = await index.branchBootstrap(state.header!.id, {
+					leafId: entry.parentId,
+					through: history.source.sourceSequence,
+				});
+				let remaining = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes;
+				const read = async (reference: IndexedSourceEvent | null) => {
+					if (!reference) return undefined;
+					const budget = remaining;
+					remaining -= reference.locator.length;
+					if (remaining < 0) throw new Error("Owned session metadata source byte budget exceeded");
+					const hydrated = await history.hydrateEntry(reference.id, budget);
+					if (!hydrated) throw new Error("Owned session metadata source is unavailable");
+					return hydrated.entry;
+				};
+				const git = await read(branch.gitState);
+				const status = await read(branch.agentStatus);
+				metadata.git = git?.type === "git_state" ? git.git : state.header?.git;
+				metadata.agentStatus = status?.type === "agent_status" ? { ...status.status } : undefined;
+			}
+			if (entry.type === "git_state") metadata.git = entry.git;
+			if (entry.type === "agent_status") metadata.agentStatus = { ...entry.status };
+		}
+		return metadata;
+	}
+
+	private async _activateIndexedSource(header: SessionHeader, state = this.writeState): Promise<void> {
+		state.header = header;
+		await this._refreshOwnedMetadata(state, true);
+		this.writeState = state;
+		this.header = header;
+		this.leafId = state.leafId;
+		this.fileEntries = [];
+		this.byId.clear();
+		this.labelsById.clear();
+		this.labelTimestampsById.clear();
+		this.indexed = true;
 	}
 
 	private _assertMutable(): void {
@@ -1449,7 +1734,12 @@ export class SessionManager {
 				parentSession: header?.parentSession,
 				rlmDepth: resolveSessionRlmDepth(header ?? {}, dir),
 			});
-			next.fileEntries.push(...this.getEntries());
+			const captured = this.materializeResidentHistory(DEFAULT_MANAGER_HISTORY_LIMITS);
+			next.fileEntries.push(
+				...captured.entries.map((entry, index) =>
+					withEntryRetention(entry, captured.retentions[index] ?? undefined),
+				),
+			);
 			next._buildIndex();
 			await next._openNew();
 			await this._adopt(next);
@@ -1524,7 +1814,9 @@ export class SessionManager {
 	}
 
 	/** Complete actual parent chain, excluding merely attached request evidence. */
-	async materializeParentPathHistory(
+	private async _materializeParentPath(
+		view: SessionHistoryReadScope,
+		leafId: string | null,
 		limits: SessionHistoryReadLimits,
 	): Promise<Omit<MaterializedSessionHistory, "scope">> {
 		const { maxEntries, maxSourceBytes } = limits;
@@ -1535,25 +1827,32 @@ export class SessionManager {
 			maxSourceBytes <= 0
 		)
 			throw new Error("Invalid parent-path materialization limits");
-		return this.readBranchHistory(async (view) => {
-			const entries: MaterializedSessionHistory["entries"] = [];
-			let sourceBytes = 0;
-			let page = await view.parentPath();
-			for (;;) {
-				if (page.totalEntries > maxEntries) throw new Error("Parent-path entry budget exceeded");
-				for (const ref of page.events) {
-					if (entries.length >= maxEntries) throw new Error("Parent-path entry budget exceeded");
-					const remaining = maxSourceBytes - sourceBytes;
-					sourceBytes += ref.locator.length;
-					if (sourceBytes > maxSourceBytes) throw new Error("Parent-path source byte budget exceeded");
-					const hydrated = await view.hydrateEntry(ref.id, remaining);
-					if (!hydrated) throw new Error("Parent-path entry source is unavailable");
-					entries.push(hydrated);
-				}
-				if (!page.nextCursor) return { source: view.source, entries, sourceBytes };
-				page = await view.parentPath({ cursor: page.nextCursor });
+		const entries: MaterializedSessionHistory["entries"] = [];
+		let sourceBytes = 0;
+		let page = await view.parentPathFrom(leafId);
+		for (;;) {
+			if (page.totalEntries > maxEntries) throw new Error("Parent-path entry budget exceeded");
+			for (const ref of page.events) {
+				if (entries.length >= maxEntries) throw new Error("Parent-path entry budget exceeded");
+				const remaining = maxSourceBytes - sourceBytes;
+				sourceBytes += ref.locator.length;
+				if (sourceBytes > maxSourceBytes) throw new Error("Parent-path source byte budget exceeded");
+				const hydrated = await view.hydrateEntry(ref.id, remaining);
+				if (!hydrated) throw new Error("Parent-path entry source is unavailable");
+				entries.push(hydrated);
 			}
-		});
+			if (!page.nextCursor) return { source: view.source, entries, sourceBytes };
+			page = await view.parentPathFrom(leafId, { cursor: page.nextCursor });
+		}
+	}
+
+	async materializeParentPathHistory(
+		limits: SessionHistoryReadLimits,
+	): Promise<Omit<MaterializedSessionHistory, "scope">> {
+		const capturedLimits = { ...limits };
+		return this.readSourceHistory((history) =>
+			this._materializeParentPath(history, history.source.leafId, capturedLimits),
+		);
 	}
 
 	materializeBranchHistory(limits: SessionHistoryReadLimits): Promise<MaterializedSessionHistory> {
@@ -1626,14 +1925,26 @@ export class SessionManager {
 	async migrateLegacy(): Promise<void> {
 		this._assertMutable();
 		const state = this.writeState;
-		await this._enqueue(state, 0, async () => {
-			if (!state.owner) throw new Error("An owned persistent source is required for migration");
-			if (state.sourceVersion !== CURRENT_SESSION_VERSION)
-				throw new Error("Legacy session payload requires an explicit retained import before writing");
-			await state.owner.migrateLegacy();
-			state.sequence = state.owner.nextSequence - 1;
-			this._publishHistory(state);
-		});
+		if (state.pins > 0) throw new Error("Drain captured requests before migrating session history");
+		this.switching = true;
+		try {
+			await this._enqueue(state, 0, async () => {
+				if (!state.owner) throw new Error("An owned persistent source is required for migration");
+				if (state.sourceVersion !== CURRENT_SESSION_VERSION)
+					throw new Error("Legacy session payload requires an explicit retained import before writing");
+				try {
+					await state.owner.migrateLegacy();
+					state.sequence = state.owner.nextSequence - 1;
+					await this._activateIndexedSource(this.getHeader()!, state);
+					this._publishHistory(state);
+				} catch (error) {
+					state.failure = new Error("Session source migration failed; outcome may be unknown", { cause: error });
+					throw error;
+				}
+			});
+		} finally {
+			this.switching = false;
+		}
 	}
 
 	/** Re-open and replay after explicit exclusive repair; never re-execute an effect. */
@@ -1650,23 +1961,39 @@ export class SessionManager {
 			await this._closeSourceActors(previous);
 			previous.closed = true;
 			const owner = await SessionJournalOwner.open({ journalPath: this.sessionFile });
+			const state = newSessionWriteState();
+			state.owner = owner;
 			try {
 				await owner.recover();
-				const entries = await loadEntriesFromFileAsync(this.sessionFile);
-				const header = entries[0];
-				if (!header || header.type !== "session" || header.id !== this.sessionId)
-					throw new Error("Recovered source identity does not match this session");
-				const state = newSessionWriteState();
-				state.owner = owner;
+				let residentEntries: FileEntry[] | undefined;
+				let header: SessionHeader;
+				if (owner.format === "framed") header = await readOwnedSessionHeader(owner.getSnapshot());
+				else {
+					residentEntries = await loadEntriesFromFileAsync(owner.journalPath);
+					const first = residentEntries[0];
+					if (!first || first.type !== "session") throw new Error("Recovered source has no valid header");
+					header = first;
+				}
+				if (header.id !== this.sessionId) throw new Error("Recovered source identity does not match this session");
 				state.sequence = owner.nextSequence - 1;
 				state.sourceVersion = header.version ?? 1;
-				migrateToCurrentVersion(entries);
-				this.fileEntries = entries;
-				this.writeState = state;
+				if (owner.format === "framed" && state.sourceVersion === CURRENT_SESSION_VERSION)
+					await this._activateIndexedSource(header, state);
+				else {
+					const entries = residentEntries ?? (await loadEntriesFromFileAsync(owner.journalPath));
+					migrateToCurrentVersion(entries);
+					this.indexed = false;
+					this.fileEntries = entries;
+					this.writeState = state;
+					this._buildIndex();
+				}
 				this.finalizedToolMessages = new WeakMap();
-				this._buildIndex();
 			} catch (error) {
-				await owner.close().catch(() => undefined);
+				try {
+					await this._closeSourceActors(state);
+				} catch (cleanup) {
+					throw new AggregateError([error, cleanup], "Session recovery and cleanup failed");
+				}
 				throw error;
 			}
 		} finally {
@@ -1697,12 +2024,95 @@ export class SessionManager {
 		return result;
 	}
 
+	private async _appendIndexedEntry(
+		state: SessionWriteState,
+		entry: SessionEntry,
+		explicitParent = false,
+		prepare?: (snapshot: SessionEntry) => void | Promise<void>,
+		onDuplicate?: (entry: SessionEntry) => SessionEntry,
+		advanceLeaf = true,
+		deduplicate?: (history: SessionHistoryReadScope) => Promise<SessionEntry | undefined>,
+	): Promise<SessionEntry> {
+		if (state.failure) throw state.failure;
+		const generated = entry.id === "";
+		const initial = { ...entry, parentId: explicitParent ? entry.parentId : null };
+		const snapshot = withEntryRetention(
+			JSON.parse(stringifyBoundedJson(initial, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
+			entryRetentions.get(entry),
+		);
+		const ownsPendingId = !generated && !state.pendingIds.has(snapshot.id);
+		if (!generated && !ownsPendingId && !onDuplicate) throw new Error(`Duplicate session entry: ${snapshot.id}`);
+		const idBytes = (id: string) => Buffer.byteLength(JSON.stringify(id));
+		const parentBytes = explicitParent
+			? 0
+			: Math.max(38, idBytes(state.leafId ?? ""), ...Array.from(state.pendingIds, idBytes));
+		const admittedBytes =
+			Buffer.byteLength(stringifyBoundedJson(snapshot, MAX_SESSION_RECORD_BYTES)) +
+			parentBytes +
+			(generated ? 36 : 0) +
+			(prepare ? 16 * 1024 : 0);
+		if (state.pending >= MAX_SESSION_PENDING_OPERATIONS || state.bytes + admittedBytes > MAX_SESSION_PENDING_BYTES)
+			throw new Error("Session source queue limit exceeded");
+		if (ownsPendingId) state.pendingIds.add(snapshot.id);
+		try {
+			return await this._enqueue(state, admittedBytes, async () => {
+				const history = await this._acknowledgedHistory(state);
+				const duplicate = await deduplicate?.(history);
+				if (duplicate) return duplicate;
+				if (generated) {
+					for (let attempt = 0; ; attempt++) {
+						const id = attempt < 100 ? randomUUID().slice(0, 8) : randomUUID();
+						if (state.pendingIds.has(id) || (await history.get(id))) {
+							if (attempt >= 100) throw new Error(`Duplicate session entry: ${id}`);
+							continue;
+						}
+						snapshot.id = id;
+						state.pendingIds.add(id);
+						break;
+					}
+				} else {
+					const reference = await history.get(snapshot.id);
+					if (reference) {
+						if (!onDuplicate) throw new Error(`Duplicate session entry: ${snapshot.id}`);
+						const existing = await history.hydrateEntry(reference.id, MAX_SESSION_RECORD_BYTES);
+						if (!existing) throw new Error("Duplicate entry source is unavailable");
+						return onDuplicate(existing.entry);
+					}
+				}
+				if (!explicitParent) snapshot.parentId = state.leafId;
+				if (prepare) await prepare(snapshot);
+				const metadata = await this._prepareOwnedMetadata(state, snapshot, history, advanceLeaf);
+				const json = stringifyBoundedJson(snapshot, Math.min(admittedBytes, MAX_SESSION_RECORD_BYTES));
+				try {
+					const ack = await state.owner!.appendJson(json, entryRetentions.get(snapshot));
+					state.sequence = ack.sequence;
+				} catch (error) {
+					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
+					throw error;
+				}
+				Object.assign(state, metadata);
+				state.metadataRefs = undefined;
+				if (advanceLeaf) state.leafId = snapshot.id;
+				state.reservedLeaf = state.leafId;
+				if (this.writeState === state) this.leafId = state.leafId;
+				this._publishHistory(state);
+				entry.id = snapshot.id;
+				if (this.writeState === state) this._notifyPersistListeners();
+				return snapshot;
+			});
+		} finally {
+			if (generated || ownsPendingId) state.pendingIds.delete(snapshot.id);
+		}
+	}
+
 	private async _appendEntry(
 		entry: SessionEntry,
 		explicitParent = false,
-		prepare?: (snapshot: SessionEntry) => void,
-	): Promise<void> {
+		prepare?: (snapshot: SessionEntry) => void | Promise<void>,
+		onDuplicate?: (entry: SessionEntry) => SessionEntry,
+	): Promise<SessionEntry> {
 		this._assertMutable();
+		if (this.indexed) return this._appendIndexedEntry(this.writeState, entry, explicitParent, prepare, onDuplicate);
 		const state = this.writeState;
 		if (state.failure) throw state.failure;
 		if (state.owner?.format === "legacy") throw new Error("Session journal requires explicit legacy migration");
@@ -1726,7 +2136,7 @@ export class SessionManager {
 			await this._enqueue(state, admittedBytes, async () => {
 				try {
 					if (prepare) {
-						prepare(snapshot);
+						await prepare(snapshot);
 						json = stringifyBoundedJson(snapshot, admittedBytes);
 					}
 					if (state.owner) {
@@ -1767,6 +2177,7 @@ export class SessionManager {
 		} finally {
 			state.pendingIds.delete(snapshot.id);
 		}
+		return snapshot;
 	}
 
 	private async _closeRetired(state: SessionWriteState): Promise<void> {
@@ -1816,6 +2227,7 @@ export class SessionManager {
 			state.owner?.journalPath ?? (this.sessionFile ? realpathIfPresent(resolve(this.sessionFile)) : undefined);
 		const sessionId = this.sessionId;
 		const persistent = this.persist;
+		const indexed = this.indexed;
 		const entries = this.fileEntries;
 		const byId = this.byId;
 		let held = false;
@@ -1898,6 +2310,21 @@ export class SessionManager {
 					request,
 				};
 				const json = stringifyBoundedJson(entry, 1024 * 1024 - 1);
+				if (indexed) {
+					await this._appendIndexedEntry(
+						state,
+						entry,
+						true,
+						undefined,
+						(existing) => {
+							if (existing.type !== "request" || !isDeepStrictEqual(existing.request, request))
+								throw new Error(`Conflicting request event: ${id}`);
+							return existing;
+						},
+						false,
+					);
+					return;
+				}
 				await this._enqueue(state, Buffer.byteLength(json), async () => {
 					const existing = byId.get(id);
 					if (existing) {
@@ -1923,7 +2350,8 @@ export class SessionManager {
 
 	async appendToolInvocation(invocation: ToolInvocation): Promise<string> {
 		const id = `${invocation.executionId}:intent`;
-		if (this.byId.has(id)) throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
+		if (!this.indexed && this.byId.has(id))
+			throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
 		const entry: ToolIntentEntry = {
 			type: "tool_intent",
 			id,
@@ -1931,21 +2359,60 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			invocation: structuredClone(invocation),
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(entry, false, undefined, () => {
+			throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
+		});
 		return entry.id;
 	}
 
 	appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
-		const pending = this.pendingToolExchanges.get(exchange.executionId);
+		const executionId = exchange.executionId;
+		const pending = this.pendingToolExchanges.get(executionId);
 		if (pending) return pending;
 		const result = this._appendToolExchange(exchange).finally(() => {
-			this.pendingToolExchanges.delete(exchange.executionId);
+			this.pendingToolExchanges.delete(executionId);
 		});
-		this.pendingToolExchanges.set(exchange.executionId, result);
+		this.pendingToolExchanges.set(executionId, result);
 		return result;
 	}
 
 	private async _appendToolExchange(exchange: FinalizedToolExchange): Promise<string> {
+		if (this.indexed) {
+			const state = this.writeState;
+			const executionId = exchange.executionId;
+			const { result, originalInput, executedInput, ...rest } = exchange;
+			const outcome = structuredClone(rest);
+			const entry: SessionMessageEntry = {
+				type: "message",
+				id: executionId,
+				parentId: this.leafId,
+				timestamp: new Date().toISOString(),
+				message: structuredClone(result),
+				execution: structuredClone({
+					...outcome,
+					originalInput,
+					...(exchange.executionOutcome === "not_started" ? {} : { executedInput }),
+				}),
+			};
+			const acknowledged = await this._appendEntry(
+				entry,
+				false,
+				async (snapshot) => {
+					const invocationId = `${executionId}:intent`;
+					const history = await this._acknowledgedHistory(state);
+					if (await history.get(invocationId))
+						(snapshot as SessionMessageEntry).execution = { ...outcome, invocationId };
+				},
+				(existing) => {
+					if (existing.type !== "message" || existing.execution?.executionId !== executionId)
+						throw new Error(`Conflicting tool execution ID: ${executionId}`);
+					return existing;
+				},
+			);
+			this.finalizedToolMessages.set(result, acknowledged.id);
+			return acknowledged.id;
+		}
+
 		const existing = this.byId.get(exchange.executionId);
 		if (existing?.type === "message" && existing.execution?.executionId === exchange.executionId) {
 			this.finalizedToolMessages.set(exchange.result, existing.id);
@@ -1972,6 +2439,7 @@ export class SessionManager {
 	}
 
 	getToolExchange(executionId: string): FinalizedToolExchange | undefined {
+		this._assertResident();
 		const entry = this.byId.get(executionId);
 		if (entry?.type !== "message" || entry.message.role !== "toolResult" || !entry.execution) return undefined;
 		if ("invocationId" in entry.execution) {
@@ -1997,7 +2465,7 @@ export class SessionManager {
 		if (finalized) return finalized;
 		const entry: SessionMessageEntry = {
 			type: "message",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
@@ -2010,7 +2478,7 @@ export class SessionManager {
 	async appendThinkingLevelChange(thinkingLevel: string): Promise<string> {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			thinkingLevel,
@@ -2022,7 +2490,7 @@ export class SessionManager {
 	async appendServiceTierChange(serviceTier: ServiceTier): Promise<string> {
 		const entry: ServiceTierChangeEntry = {
 			type: "service_tier_change",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			serviceTier,
@@ -2034,7 +2502,7 @@ export class SessionManager {
 	async appendModelChange(provider: string, modelId: string): Promise<string> {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			provider,
@@ -2055,7 +2523,7 @@ export class SessionManager {
 	): Promise<string> {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			summary,
@@ -2076,12 +2544,57 @@ export class SessionManager {
 			customType,
 			data,
 			...(nativeOrigin ? { nativeOrigin } : {}),
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
 		await this._appendEntry(entry);
 		return entry.id;
+	}
+
+	async appendIpythonSentAgentMessage(
+		data: PersistedIpythonSentAgentMessage,
+	): Promise<{ entryId: string; appended: boolean }> {
+		this._assertMutable();
+		if (!this.indexed) throw new Error("Atomic IPython message append requires an indexed owned source");
+		const captured = parsePersistedIpythonSentAgentMessage(structuredClone(data));
+		if (!captured) throw new Error("Invalid persisted IPython sent message");
+		const state = this.writeState;
+		const entry: CustomEntry<PersistedIpythonSentAgentMessage> = {
+			type: "custom",
+			id: "",
+			parentId: state.leafId,
+			timestamp: new Date().toISOString(),
+			customType: IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
+			data: captured,
+		};
+		let appended = true;
+		const acknowledged = await this._appendIndexedEntry(
+			state,
+			entry,
+			false,
+			undefined,
+			undefined,
+			true,
+			async (history) => {
+				let page = await history.ipythonSentMessages(captured.toolCallId, { messageId: captured.message.id });
+				for (;;) {
+					const reference = page.refs[0];
+					if (reference) {
+						const value = await history.hydrateEntry(reference.entryId, MAX_SESSION_RECORD_BYTES);
+						if (!value) throw new Error("IPython sent message source is unavailable");
+						appended = false;
+						return value.entry;
+					}
+					if (!page.nextCursor) return undefined;
+					page = await history.ipythonSentMessages(captured.toolCallId, {
+						messageId: captured.message.id,
+						cursor: page.nextCursor,
+					});
+				}
+			},
+		);
+		return { entryId: acknowledged.id, appended };
 	}
 
 	async appendCustomEntryWithRollback(customType: string, data?: unknown): Promise<string> {
@@ -2094,44 +2607,69 @@ export class SessionManager {
 		aggregateUsage?: Usage,
 		origin?: ChildUsageAttributionEntry["origin"],
 	): Promise<string> {
-		const target = this.byId.get(targetId);
-		if (target?.type !== "message" || target.message.role !== "assistant") {
-			throw new Error(`Assistant message entry ${targetId} not found`);
-		}
+		return (await this.appendChildUsageAttributionWithAggregate(targetId, childUsage, aggregateUsage, origin))
+			.entryId;
+	}
 
-		const targetMessage = target.message;
+	async appendChildUsageAttributionWithAggregate(
+		targetId: string,
+		childUsage: Usage,
+		aggregateUsage?: Usage,
+		origin?: ChildUsageAttributionEntry["origin"],
+	): Promise<ChildUsageAttributionAcknowledgement> {
+		const state = this.writeState;
+		const indexed = this.indexed;
+		const residentTarget = indexed ? undefined : this.byId.get(targetId);
+		if (!indexed && (residentTarget?.type !== "message" || residentTarget.message.role !== "assistant"))
+			throw new Error(`Assistant message entry ${targetId} not found`);
 		const entry: ChildUsageAttributionEntry = {
 			type: "child_usage_attributed",
-			id: generateId(this.byId),
+			id: indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			targetId,
 			childUsage: cloneUsage(childUsage),
-			aggregateUsage: cloneUsage(aggregateUsage ?? targetMessage.usage),
+			aggregateUsage: cloneUsage(aggregateUsage ?? emptyUsage()),
 			...(origin ? { origin } : {}),
 		};
-		await this._appendEntry(
-			entry,
-			false,
-			aggregateUsage === undefined
-				? (snapshot) => {
-						if (snapshot.type !== "child_usage_attributed") throw new Error("Expected child usage projection");
-						const total = cloneUsage(targetMessage.usage);
-						const contextTokens =
-							total.totalTokens || total.input + total.output + total.cacheRead + total.cacheWrite;
-						addAssistantUsage(total, snapshot.childUsage);
-						total.totalTokens = contextTokens;
-						snapshot.aggregateUsage = total;
+		const acknowledged = await this._appendEntry(entry, false, async (snapshot) => {
+			if (snapshot.type !== "child_usage_attributed") throw new Error("Expected child usage projection");
+			let target = residentTarget;
+			let history: SessionHistoryReadScope | undefined;
+			if (indexed) {
+				history = await this._acknowledgedHistory(state);
+				target = (await history.hydrateEntry(targetId, MAX_SESSION_RECORD_BYTES))?.entry;
+			}
+			if (target?.type !== "message" || target.message.role !== "assistant")
+				throw new Error(`Assistant message entry ${targetId} not found`);
+			if (aggregateUsage === undefined) {
+				let usage = target.message.usage;
+				if (history) {
+					const reference = await history.sourceAssistantUsage(targetId);
+					if (reference) {
+						const aggregate = await history.hydrateEntry(reference.id, MAX_SESSION_RECORD_BYTES);
+						if (!aggregate || aggregate.entry.type !== "child_usage_attributed")
+							throw new Error("Stored assistant aggregate source is unavailable");
+						usage = cloneUsage(aggregate.entry.aggregateUsage);
 					}
-				: undefined,
-		);
-		return entry.id;
+				}
+				const total = cloneUsage(usage);
+				const contextTokens = total.totalTokens || total.input + total.output + total.cacheRead + total.cacheWrite;
+				addAssistantUsage(total, snapshot.childUsage);
+				total.totalTokens = contextTokens;
+				snapshot.aggregateUsage = total;
+			}
+		});
+		return {
+			entryId: acknowledged.id,
+			aggregateUsage: cloneUsage((acknowledged as ChildUsageAttributionEntry).aggregateUsage),
+		};
 	}
 
 	async appendSessionInfo(name: string): Promise<string> {
 		const entry: SessionInfoEntry = {
 			type: "session_info",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			name: name.trim(),
@@ -2143,7 +2681,7 @@ export class SessionManager {
 	async appendSessionState(state: SessionState): Promise<string> {
 		const entry: SessionStateEntry = {
 			type: "session_state",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			state: { status: state.status },
@@ -2157,6 +2695,10 @@ export class SessionManager {
 	}
 
 	getSessionState(): SessionState | undefined {
+		if (this.indexed) {
+			const state = this.writeState.sessionState;
+			return state ? { ...state } : undefined;
+		}
 		const entries = this.getEntries();
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];
@@ -2182,6 +2724,10 @@ export class SessionManager {
 	 * prefix is skipped; anything beyond it is user content.
 	 */
 	hasUserContent(): boolean {
+		if (this.indexed) {
+			if (this.writeState.hasUserContent === undefined) throw new Error("Owned session metadata is unavailable");
+			return this.writeState.hasUserContent;
+		}
 		const contentEntries = this.getEntries().filter((entry) => CONTENT_ENTRY_TYPES.has(entry.type));
 		let start = 0;
 		if (contentEntries[start]?.type === "model_change") {
@@ -2199,7 +2745,7 @@ export class SessionManager {
 	async appendAgentStatus(status: AgentStatus): Promise<string> {
 		const entry: AgentStatusEntry = {
 			type: "agent_status",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			status: {
@@ -2215,7 +2761,7 @@ export class SessionManager {
 	async appendGitState(git: GitContext): Promise<string> {
 		const entry: GitStateEntry = {
 			type: "git_state",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			git,
@@ -2234,6 +2780,7 @@ export class SessionManager {
 	}
 
 	private getActiveGitContext(): GitContext | undefined {
+		if (this.indexed) return this.writeState.git;
 		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
 		while (current) {
 			if (current.type === "git_state") return current.git;
@@ -2244,6 +2791,7 @@ export class SessionManager {
 	}
 
 	getLatestAgentStatus(): AgentStatus | undefined {
+		if (this.indexed) return this.writeState.agentStatus ? { ...this.writeState.agentStatus } : undefined;
 		// Walk the current leaf to root so we only read status on the active branch,
 		// not a sibling branch's status that happens to sit later in the file.
 		let current = this.leafId ? this.byId.get(this.leafId) : undefined;
@@ -2270,7 +2818,7 @@ export class SessionManager {
 			display,
 			details,
 			...(nativeOrigin ? { nativeOrigin } : {}),
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
@@ -2291,19 +2839,237 @@ export class SessionManager {
 		return this.appendCustomMessageEntry(customType, content, display, details);
 	}
 
+	async readEntry(
+		id: string,
+		maxSourceBytes = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes,
+	): Promise<SessionEntry | undefined> {
+		if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0)
+			throw new Error("Invalid history entry source byte budget");
+		if (!this.indexed) {
+			const entry = this.getEntry(id);
+			return entry
+				? withEntryRetention(
+						JSON.parse(stringifyBoundedJson(entry, maxSourceBytes)) as SessionEntry,
+						entryRetentions.get(entry),
+					)
+				: undefined;
+		}
+		return this.readSourceHistory(async (history) => {
+			const value = await this._storedEntry(history, id, maxSourceBytes);
+			return value ? withEntryRetention(value.entry, value.source.retention) : undefined;
+		});
+	}
+
+	async readLeafEntry(
+		maxSourceBytes = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes,
+	): Promise<SessionEntry | undefined> {
+		if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0)
+			throw new Error("Invalid history entry source byte budget");
+		if (!this.indexed) return this.leafId ? this.readEntry(this.leafId, maxSourceBytes) : undefined;
+		return this.readSourceHistory(async (history) => {
+			if (history.source.leafId === null) return undefined;
+			const value = await this._storedEntry(history, history.source.leafId, maxSourceBytes);
+			return value ? withEntryRetention(value.entry, value.source.retention) : undefined;
+		});
+	}
+
+	async readEntryRetention(id: string): Promise<JournalFrameRetention | undefined> {
+		if (!this.indexed) return this.getEntryRetention(id);
+		return this.readSourceHistory(async (history) => (await history.get(id))?.retention);
+	}
+
+	async readLabel(
+		id: string,
+		maxSourceBytes = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes,
+	): Promise<string | undefined> {
+		if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0)
+			throw new Error("Invalid history entry source byte budget");
+		if (!this.indexed) {
+			const label = this.getLabel(id);
+			return label === undefined ? undefined : (JSON.parse(stringifyBoundedJson(label, maxSourceBytes)) as string);
+		}
+		return this.readSourceHistory(async (history) => {
+			const reference = await history.sourceLabel(id);
+			if (!reference) return undefined;
+			const value = await history.hydrateEntry(reference.id, maxSourceBytes);
+			if (!value || value.entry.type !== "label") throw new Error("Label source is unavailable");
+			return value.entry.label || undefined;
+		});
+	}
+
+	async readEntries(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): Promise<SessionEntry[]> {
+		const capturedLimits = { ...limits };
+		if (!this.indexed) {
+			const resident = this.materializeResidentHistory(capturedLimits);
+			return resident.entries.map((entry, index) =>
+				withEntryRetention(entry, resident.retentions[index] ?? undefined),
+			);
+		}
+		return this.readSourceHistory(async (history) => {
+			const result = await history.materialize(capturedLimits);
+			const entries = result.entries.map(({ entry, source }) => withEntryRetention(entry, source.retention));
+			applyChildUsageAttributions(entries);
+			return entries;
+		});
+	}
+
+	private async _readBranchesAt(
+		history: SessionHistoryReadScope,
+		leafIds: readonly (string | null)[],
+		limits: SessionHistoryReadLimits,
+	): Promise<{ source: SourceSnapshotRef; branches: SessionEntry[][]; sourceBytes: number }> {
+		const { maxEntries, maxSourceBytes } = limits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid parent-path materialization limits");
+		const loaded = new Map<string, SessionEntry>();
+		let sourceBytes = 0;
+		const load = async (reference: IndexedSourceEvent) => {
+			const existing = loaded.get(reference.id);
+			if (existing) return existing;
+			if (loaded.size >= maxEntries) throw new Error("Parent-path entry budget exceeded");
+			const remaining = maxSourceBytes - sourceBytes;
+			sourceBytes += reference.locator.length;
+			if (sourceBytes > maxSourceBytes) throw new Error("Parent-path source byte budget exceeded");
+			const value = await history.hydrateEntry(reference.id, remaining);
+			if (!value) throw new Error("Parent-path entry source is unavailable");
+			const entry = withEntryRetention(value.entry, value.source.retention);
+			loaded.set(entry.id, entry);
+			return entry;
+		};
+		const branches: SessionEntry[][] = [];
+		for (const leafId of leafIds) {
+			const branch: SessionEntry[] = [];
+			let page = await history.parentPathFrom(leafId);
+			for (;;) {
+				if (page.totalEntries > maxEntries) throw new Error("Parent-path entry budget exceeded");
+				for (const reference of page.events) branch.push(await load(reference));
+				if (!page.nextCursor) break;
+				page = await history.parentPathFrom(leafId, { cursor: page.nextCursor });
+			}
+			branches.push(branch);
+		}
+		for (const entry of loaded.values()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const reference = await history.sourceAssistantUsage(entry.id);
+			if (!reference) continue;
+			const aggregate = await load(reference);
+			if (aggregate.type !== "child_usage_attributed")
+				throw new Error("Stored assistant aggregate source is unavailable");
+			entry.message.usage = cloneUsage(aggregate.aggregateUsage);
+		}
+		return { source: history.source, branches, sourceBytes };
+	}
+
+	private _residentParentPath(id: string | null): SessionEntry[] {
+		const entries: SessionEntry[] = [];
+		const seen = new Set<string>();
+		let current = id;
+		while (current !== null) {
+			if (seen.has(current)) throw new Error("Parent path lineage is unresolved");
+			seen.add(current);
+			const entry = this.byId.get(current);
+			if (!entry) throw new Error("Parent path lineage is unresolved");
+			entries.push(entry);
+			current = entry.parentId;
+		}
+		return entries.reverse();
+	}
+
+	async readBranches(
+		leafIds: readonly (string | null)[],
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+	): Promise<{ source?: SourceSnapshotRef; branches: SessionEntry[][]; sourceBytes: number }> {
+		const ids = [...leafIds];
+		const capturedLimits = { ...limits };
+		if (this.indexed) return this.readSourceHistory((history) => this._readBranchesAt(history, ids, capturedLimits));
+		const { maxEntries, maxSourceBytes } = capturedLimits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid parent-path materialization limits");
+		const cloned = new Map<string, SessionEntry>();
+		let sourceBytes = 0;
+		const branches = ids.map((id) =>
+			this._residentParentPath(id).map((entry) => {
+				const existing = cloned.get(entry.id);
+				if (existing) return existing;
+				if (cloned.size >= maxEntries) throw new Error("Parent-path entry budget exceeded");
+				const json = stringifyBoundedJson(entry, maxSourceBytes - sourceBytes);
+				sourceBytes += Buffer.byteLength(json);
+				const copy = withEntryRetention(JSON.parse(json) as SessionEntry, entryRetentions.get(entry));
+				cloned.set(copy.id, copy);
+				return copy;
+			}),
+		);
+		return { branches, sourceBytes };
+	}
+
+	async readBranch(
+		fromId?: string | null,
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+	): Promise<SessionEntry[]> {
+		const capturedLimits = { ...limits };
+		if (!this.indexed)
+			return (await this.readBranches([fromId === undefined ? this.leafId : fromId], capturedLimits)).branches[0];
+		return this.readSourceHistory(
+			async (history) =>
+				(
+					await this._readBranchesAt(
+						history,
+						[fromId === undefined ? history.source.leafId : fromId],
+						capturedLimits,
+					)
+				).branches[0],
+		);
+	}
+
+	async branchTo(id: string | null): Promise<void> {
+		this._assertMutable();
+		if (!this.indexed) {
+			if (id === null) this.resetLeaf();
+			else this.branch(id);
+			return;
+		}
+		const state = this.writeState;
+		if (state.pending > 0) throw new Error("Drain session writes before changing the branch");
+		await this._enqueue(state, 0, async () => {
+			const history = await this._acknowledgedHistory(state);
+			if (id !== null && !(await history.get(id))) throw new Error(`Entry ${id} not found`);
+			const previous = state.leafId;
+			state.leafId = id;
+			try {
+				await this._refreshOwnedMetadata(state);
+			} catch (error) {
+				state.leafId = previous;
+				throw error;
+			}
+		});
+	}
+
 	getLeafId(): string | null {
 		return this.leafId;
 	}
 
 	getLeafEntry(): SessionEntry | undefined {
+		this._assertResident();
 		return this.leafId ? this.byId.get(this.leafId) : undefined;
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
+		this._assertResident();
 		return this.byId.get(id);
 	}
 
 	getChildren(parentId: string): SessionEntry[] {
+		this._assertResident();
 		const children: SessionEntry[] = [];
 		for (const entry of this.byId.values()) {
 			if (entry.parentId === parentId) {
@@ -2314,27 +3080,39 @@ export class SessionManager {
 	}
 
 	getLabel(id: string): string | undefined {
+		this._assertResident();
 		return this.labelsById.get(id);
 	}
 
 	async appendLabelChange(targetId: string, label: string | undefined): Promise<string> {
-		if (!this.byId.has(targetId)) {
+		const state = this.writeState;
+		if (!this.indexed && !this.byId.has(targetId)) {
 			throw new Error(`Entry ${targetId} not found`);
 		}
 		const entry: LabelEntry = {
 			type: "label",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			targetId,
 			label,
 		};
-		await this._appendEntry(entry);
+		await this._appendEntry(
+			entry,
+			false,
+			this.indexed
+				? async () => {
+						const history = await this._acknowledgedHistory(state);
+						if (!(await history.get(targetId))) throw new Error(`Entry ${targetId} not found`);
+					}
+				: undefined,
+		);
 
 		return entry.id;
 	}
 
 	getBranch(fromId?: string): SessionEntry[] {
+		this._assertResident();
 		// push+reverse, not unshift-per-entry: unshift is O(n), which makes this O(n^2) on long sessions.
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
@@ -2348,6 +3126,7 @@ export class SessionManager {
 	}
 
 	buildSessionContext(): SessionContext {
+		this._assertResident();
 		// Pass fileEntries directly rather than getEntries(): the resolved context
 		// is computed from the leaf-to-root walk over byId (which already excludes
 		// the header), so the entries argument is only a fallback for an undefined
@@ -2357,12 +3136,14 @@ export class SessionManager {
 	}
 
 	getHeader(): SessionHeader | null {
-		const h = this.fileEntries.find((e) => e.type === "session");
-		return h ? (h as SessionHeader) : null;
+		if (this.indexed) return this.header;
+		const header = this.fileEntries.find((entry) => entry.type === "session");
+		return header ? (header as SessionHeader) : null;
 	}
 
 	/** A lowering-only source qualification; absence does not establish native authorship. */
 	getEntryRetention(entryId: string): JournalFrameRetention | undefined {
+		this._assertResident();
 		const entry = this.byId.get(entryId);
 		return entry ? entryRetentions.get(entry) : undefined;
 	}
@@ -2374,6 +3155,7 @@ export class SessionManager {
 
 	/** Complete detached snapshot of this resident view, including readonly and in-memory views. */
 	materializeResidentHistory(limits: SessionHistoryReadLimits): ResidentSessionHistory {
+		this._assertResident();
 		const { maxEntries, maxSourceBytes } = limits;
 		if (
 			!Number.isSafeInteger(maxEntries) ||
@@ -2403,10 +3185,109 @@ export class SessionManager {
 	}
 
 	getEntries(): SessionEntry[] {
+		this._assertResident();
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
 	}
 
+	async readFlatTree(
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+	): Promise<SessionTreeFlatNode[]> {
+		const entries = await this.readEntries({ ...limits });
+		const byId = new Map(entries.map((entry) => [entry.id, entry]));
+		const labels = new Map<string, { value: string; timestamp: string }>();
+		for (const entry of entries) {
+			if (entry.type !== "label") continue;
+			if (entry.label) labels.set(entry.targetId, { value: entry.label, timestamp: entry.timestamp });
+			else labels.delete(entry.targetId);
+		}
+		return entries
+			.filter(
+				(entry): entry is Exclude<SessionEntry, PrivateSessionEntry> =>
+					entry.type !== "tool_intent" && entry.type !== "request",
+			)
+			.map((entry) => {
+				let parentId = entry.parentId;
+				let parent = parentId ? byId.get(parentId) : undefined;
+				const seen = new Set<string>();
+				while (parent?.type === "tool_intent" || parent?.type === "request") {
+					if (seen.has(parent.id)) throw new Error("Session tree private ancestry is unresolved");
+					seen.add(parent.id);
+					parentId = parent.parentId;
+					parent = parentId ? byId.get(parentId) : undefined;
+				}
+				const label = labels.get(entry.id);
+				return {
+					entry:
+						parentId === entry.parentId
+							? entry
+							: withEntryRetention({ ...entry, parentId }, entryRetentions.get(entry)),
+					label: label?.value,
+					labelTimestamp: label?.timestamp,
+				};
+			});
+	}
+
+	async readTree(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): Promise<SessionTreeNode[]> {
+		const entries = await this.readFlatTree({ ...limits });
+		const nodes = new Map<string, SessionTreeNode>();
+		const roots: SessionTreeNode[] = [];
+		for (const entry of entries) nodes.set(entry.entry.id, { ...entry, children: [] });
+		for (const flat of entries) {
+			const node = nodes.get(flat.entry.id)!;
+			const parent =
+				flat.entry.parentId === null || flat.entry.parentId === flat.entry.id
+					? undefined
+					: nodes.get(flat.entry.parentId);
+			if (parent) parent.children.push(node);
+			else roots.push(node);
+		}
+		const stack = [...roots];
+		while (stack.length) {
+			const node = stack.pop()!;
+			node.children.sort(
+				(left, right) => new Date(left.entry.timestamp).getTime() - new Date(right.entry.timestamp).getTime(),
+			);
+			stack.push(...node.children);
+		}
+		return roots;
+	}
+
+	async readToolExchange(
+		executionId: string,
+		maxSourceBytes = DEFAULT_MANAGER_HISTORY_LIMITS.maxSourceBytes,
+	): Promise<FinalizedToolExchange | undefined> {
+		if (!Number.isSafeInteger(maxSourceBytes) || maxSourceBytes <= 0)
+			throw new Error("Invalid history entry source byte budget");
+		if (!this.indexed) {
+			const exchange = this.getToolExchange(executionId);
+			return exchange
+				? (JSON.parse(stringifyBoundedJson(exchange, maxSourceBytes)) as FinalizedToolExchange)
+				: undefined;
+		}
+		return this.readSourceHistory(async (history) => {
+			const value = await history.hydrateEntry(executionId, maxSourceBytes);
+			const entry = value?.entry;
+			if (entry?.type !== "message" || entry.message.role !== "toolResult" || !entry.execution) return undefined;
+			if (!("invocationId" in entry.execution)) return { ...entry.execution, result: entry.message };
+			const intentValue = await history.hydrateEntry(
+				entry.execution.invocationId,
+				maxSourceBytes - value!.source.locator.length,
+			);
+			if (intentValue?.entry.type !== "tool_intent")
+				throw new Error(`Missing invocation for tool execution ${executionId}`);
+			const { invocationId: _invocationId, ...outcome } = entry.execution;
+			const { executedInput, ...invocation } = intentValue.entry.invocation;
+			return {
+				...invocation,
+				...outcome,
+				...(outcome.executionOutcome === "not_started" ? {} : { executedInput }),
+				result: entry.message,
+			};
+		});
+	}
+
 	getFlatTree(): SessionTreeFlatNode[] {
+		this._assertResident();
 		return this.getEntries()
 			.filter(
 				(entry): entry is Exclude<SessionEntry, PrivateSessionEntry> =>
@@ -2465,6 +3346,7 @@ export class SessionManager {
 	}
 
 	branch(branchFromId: string): void {
+		this._assertResident();
 		if (!this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -2475,6 +3357,7 @@ export class SessionManager {
 	}
 
 	resetLeaf(): void {
+		this._assertResident();
 		if (this.writeState.pending > 0) throw new Error("Drain session writes before changing the branch");
 		this.leafId = null;
 		this.writeState.leafId = null;
@@ -2488,12 +3371,13 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 	): Promise<string> {
-		if (branchFromId !== null && !this.byId.has(branchFromId)) {
+		const state = this.writeState;
+		if (!this.indexed && branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
-			id: generateId(this.byId),
+			id: this.indexed ? "" : generateId(this.byId),
 			parentId: branchFromId,
 			timestamp: new Date().toISOString(),
 			fromId: branchFromId ?? "root",
@@ -2502,60 +3386,176 @@ export class SessionManager {
 			fromHook,
 			usage,
 		};
-		await this._appendEntry(entry, true);
+		await this._appendEntry(
+			entry,
+			true,
+			this.indexed
+				? async () => {
+						const history = await this._acknowledgedHistory(state);
+						if (branchFromId !== null) {
+							if (!(await history.get(branchFromId))) throw new Error(`Entry ${branchFromId} not found`);
+							await history.parentPathFrom(branchFromId, { limit: 1 });
+						}
+					}
+				: undefined,
+		);
 		return entry.id;
+	}
+
+	private async _captureForkInput(
+		target: { leafId: string | null } | { entryId: string; position: "before" | "at" },
+		options: { persist?: boolean; sessionDir?: string; rlmDepth?: number; limits?: SessionHistoryReadLimits },
+	): Promise<CapturedForkInput> {
+		const limits = { ...(options.limits ?? DEFAULT_MANAGER_HISTORY_LIMITS) };
+		const sourceFile = this.sessionFile;
+		const header = JSON.parse(stringifyBoundedJson(this.getHeader(), limits.maxSourceBytes)) as SessionHeader | null;
+		const settings = {
+			sourceFile,
+			cwd: this.cwd,
+			sessionDir: options.sessionDir ?? this.sessionDir,
+			persist: options.persist ?? this.persist,
+			rlmDepth: options.rlmDepth ?? resolveSessionRlmDepth(header ?? {}, sourceFile ?? ""),
+			limits,
+		};
+		const finish = async (entries: SessionEntry[], history?: SessionHistoryReadScope): Promise<CapturedForkInput> => {
+			const byId = new Map(entries.map((entry) => [entry.id, entry]));
+			const selectedEntry = "entryId" in target ? byId.get(target.entryId) : undefined;
+			let leafId: string | null;
+			if ("entryId" in target) {
+				if (!selectedEntry) throw new Error("Invalid entry ID for forking");
+				if (
+					target.position === "before" &&
+					(selectedEntry.type !== "message" || selectedEntry.message.role !== "user")
+				)
+					throw new Error("Invalid entry ID for forking");
+				leafId = target.position === "at" ? selectedEntry.id : selectedEntry.parentId;
+			} else leafId = target.leafId;
+			const path: SessionEntry[] = [];
+			if (history) {
+				let page = await history.parentPathFrom(leafId);
+				for (;;) {
+					for (const reference of page.events) {
+						const entry = byId.get(reference.id);
+						if (!entry) throw new Error("Fork path source is unavailable");
+						path.push(entry);
+					}
+					if (!page.nextCursor) break;
+					page = await history.parentPathFrom(leafId, { cursor: page.nextCursor });
+				}
+			} else {
+				const seen = new Set<string>();
+				let id = leafId;
+				while (id !== null) {
+					const entry = byId.get(id);
+					if (!entry || seen.has(id)) throw new Error("Parent path lineage is unresolved");
+					seen.add(id);
+					path.push(entry);
+					id = entry.parentId;
+				}
+				path.reverse();
+			}
+			const copied = path.filter((entry) => entry.type !== "label");
+			const ids = new Set(copied.map((entry) => entry.id));
+			const activeLabels = new Map<string, CapturedForkInput["labels"][number]>();
+			for (const entry of entries) {
+				if (entry.type !== "label") continue;
+				if (entry.label)
+					activeLabels.set(entry.targetId, {
+						targetId: entry.targetId,
+						label: entry.label,
+						timestamp: entry.timestamp,
+						retention: entryRetentions.get(entry),
+					});
+				else activeLabels.delete(entry.targetId);
+			}
+			return {
+				...settings,
+				source: history?.source,
+				selectedEntry: selectedEntry
+					? withEntryRetention(
+							JSON.parse(stringifyBoundedJson(selectedEntry, limits.maxSourceBytes)) as SessionEntry,
+							entryRetentions.get(selectedEntry),
+						)
+					: undefined,
+				path: copied,
+				labels: [...activeLabels.values()].filter((label) => ids.has(label.targetId)),
+			};
+		};
+		if (!this.indexed) {
+			const resident = this.materializeResidentHistory(limits);
+			return finish(
+				resident.entries.map((entry, index) => withEntryRetention(entry, resident.retentions[index] ?? undefined)),
+			);
+		}
+		const headerBytes = Buffer.byteLength(stringifyBoundedJson(header, limits.maxSourceBytes));
+		if (headerBytes >= limits.maxSourceBytes) throw new Error("Fork source byte budget exceeded");
+		return this.readSourceHistory(async (history) => {
+			const materialized = await history.materialize({
+				...limits,
+				maxSourceBytes: limits.maxSourceBytes - headerBytes,
+			});
+			const entries = materialized.entries.map(({ entry, source }) => withEntryRetention(entry, source.retention));
+			applyChildUsageAttributions(entries);
+			return finish(entries, history);
+		});
+	}
+
+	private static async _createCapturedFork(input: CapturedForkInput): Promise<SessionManager> {
+		const next = new SessionManager(input.cwd, input.sessionDir, input.persist, {
+			parentSession: input.sourceFile,
+			rlmDepth: input.rlmDepth,
+		});
+		let bytes = Buffer.byteLength(stringifyBoundedJson(next.fileEntries[0], input.limits.maxSourceBytes));
+		const append = (entry: SessionEntry, retention?: JournalFrameRetention) => {
+			if (next.fileEntries.length - 1 >= input.limits.maxEntries) throw new Error("Fork entry budget exceeded");
+			const json = stringifyBoundedJson(entry, input.limits.maxSourceBytes - bytes);
+			bytes += Buffer.byteLength(json);
+			next.fileEntries.push(withEntryRetention(JSON.parse(json) as SessionEntry, retention));
+		};
+		for (const entry of input.path) append(entry, entryRetentions.get(entry));
+		const ids = new Set(input.path.map((entry) => entry.id));
+		let parentId = input.path.at(-1)?.id ?? null;
+		for (const label of input.labels) {
+			const id = generateId(ids);
+			ids.add(id);
+			append(
+				{ type: "label", id, parentId, timestamp: label.timestamp, targetId: label.targetId, label: label.label },
+				label.retention,
+			);
+			parentId = id;
+		}
+		next._buildIndex();
+		if (input.persist) await next._openNew();
+		else next.writeState.sequence = next.fileEntries.length - 1;
+		return next;
+	}
+
+	async prepareFork(
+		entryId: string,
+		options: {
+			position?: "before" | "at";
+			persist?: boolean;
+			sessionDir?: string;
+			rlmDepth?: number;
+			limits?: SessionHistoryReadLimits;
+		} = {},
+	): Promise<PreparedSessionFork> {
+		const captured = await this._captureForkInput(
+			{ entryId, position: options.position ?? "before" },
+			{ ...options },
+		);
+		return {
+			source: captured.source,
+			selectedEntry: captured.selectedEntry!,
+			create: () => SessionManager._createCapturedFork(captured),
+		};
 	}
 
 	async forkBranch(
 		leafId: string | null,
-		options: { persist?: boolean; sessionDir?: string; rlmDepth?: number } = {},
+		options: { persist?: boolean; sessionDir?: string; rlmDepth?: number; limits?: SessionHistoryReadLimits } = {},
 	): Promise<SessionManager> {
-		const sourceFile = this.sessionFile;
-		const sourceHeader = this.getHeader();
-		const persistent = options.persist ?? this.persist;
-		const cwd = this.cwd;
-		const sessionDir = options.sessionDir ?? this.sessionDir;
-		const rlmDepth = options.rlmDepth ?? resolveSessionRlmDepth(sourceHeader ?? {}, sourceFile ?? "");
-		const path =
-			leafId === null
-				? []
-				: this.getBranch(leafId).map((entry) =>
-						withEntryRetention(
-							JSON.parse(stringifyBoundedJson(entry, MAX_SESSION_RECORD_BYTES)) as SessionEntry,
-							entryRetentions.get(entry),
-						),
-					);
-		if (leafId !== null && path.length === 0) throw new Error(`Entry ${leafId} not found`);
-		const labels = new Map(this.labelsById);
-		const labelTimes = new Map(this.labelTimestampsById);
-		const labelRetentions = new Map<string, JournalFrameRetention | undefined>();
-		for (const entry of this.fileEntries) {
-			if (entry.type === "label") labelRetentions.set(entry.targetId, entryRetentions.get(entry));
-		}
-		await this.flushNow();
-		const next = new SessionManager(cwd, sessionDir, persistent, { parentSession: sourceFile, rlmDepth });
-		const copied = path.filter((entry) => entry.type !== "label");
-		next.fileEntries.push(...copied);
-		const ids = new Set(copied.map((entry) => entry.id));
-		let parentId = copied[copied.length - 1]?.id ?? null;
-		for (const [targetId, label] of labels) {
-			if (!ids.has(targetId)) continue;
-			const entry: LabelEntry = {
-				type: "label",
-				id: generateId(ids),
-				parentId,
-				timestamp: labelTimes.get(targetId)!,
-				targetId,
-				label,
-			};
-			ids.add(entry.id);
-			next.fileEntries.push(withEntryRetention(entry, labelRetentions.get(targetId)));
-			parentId = entry.id;
-		}
-		next._buildIndex();
-		if (persistent) await next._openNew();
-		else next.writeState.sequence = next.fileEntries.length - 1;
-		return next;
+		return SessionManager._createCapturedFork(await this._captureForkInput({ leafId }, { ...options }));
 	}
 
 	async createBranchedSession(leafId: string): Promise<string | undefined> {
@@ -2587,32 +3587,49 @@ export class SessionManager {
 			return manager;
 		}
 		const owner = await SessionJournalOwner.open({ journalPath: target });
+		let manager: SessionManager | undefined;
 		try {
-			const entries = await loadEntriesFromFileAsync(owner.journalPath);
-			const header = entries[0];
-			if (!header || header.type !== "session" || typeof header.id !== "string")
-				throw new Error(`Session source has no valid header: ${target}`);
+			let entries: FileEntry[] | undefined;
+			let header: SessionHeader;
+			if (owner.format === "framed") header = await readOwnedSessionHeader(owner.getSnapshot());
+			else {
+				entries = await loadEntriesFromFileAsync(owner.journalPath);
+				const first = entries[0];
+				if (!first || first.type !== "session" || typeof first.id !== "string")
+					throw new Error(`Session source has no valid header: ${target}`);
+				header = first;
+			}
 			const sourceVersion = header.version ?? 1;
 			if (sourceVersion > CURRENT_SESSION_VERSION) throw new Error(`Unsupported session version: ${sourceVersion}`);
-			migrateToCurrentVersion(entries);
 			if (header.parentSession && !isValidRlmDepth(header.rlmDepth))
 				header.rlmDepth = resolveSessionRlmDepth(header, owner.journalPath);
-			const manager = new SessionManager(
+			manager = new SessionManager(
 				cwdOverride ?? header.cwd ?? process.cwd(),
 				sessionDir ?? dirname(owner.journalPath),
 				false,
 			);
-			manager.writeState.sourceVersion = sourceVersion;
 			manager.persist = true;
 			manager.sessionId = header.id;
 			manager.sessionFile = owner.journalPath;
-			manager.fileEntries = entries;
 			manager.writeState.owner = owner;
 			manager.writeState.sequence = owner.nextSequence - 1;
-			manager._buildIndex();
+			manager.writeState.sourceVersion = sourceVersion;
+			if (owner.format === "framed" && sourceVersion === CURRENT_SESSION_VERSION) {
+				await manager._activateIndexedSource(header);
+			} else {
+				entries ??= await loadEntriesFromFileAsync(owner.journalPath);
+				migrateToCurrentVersion(entries);
+				manager.fileEntries = entries;
+				manager._buildIndex();
+			}
 			return manager;
 		} catch (error) {
-			await owner.close().catch(() => undefined);
+			try {
+				if (manager) await manager._closeSourceActors(manager.writeState);
+				else await owner.close();
+			} catch (cleanup) {
+				throw new AggregateError([error, cleanup], "Session open and cleanup failed");
+			}
 			throw error;
 		}
 	}
@@ -2658,8 +3675,13 @@ export class SessionManager {
 		return new SessionManager(cwd, sessionDir, false, options);
 	}
 
-	static async forkFrom(sourcePath: string, targetCwd: string, sessionDir?: string): Promise<SessionManager> {
-		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir);
+	static async forkFrom(
+		sourcePath: string,
+		targetCwd: string,
+		sessionDir?: string,
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+	): Promise<SessionManager> {
+		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, undefined, { ...limits });
 	}
 
 	/** Explicit external import: copied payload claims cannot establish native source authority. */
@@ -2667,8 +3689,9 @@ export class SessionManager {
 		sourcePath: string,
 		targetCwd: string,
 		sessionDir?: string,
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
 	): Promise<SessionManager> {
-		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, "retained-import");
+		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, "retained-import", { ...limits });
 	}
 
 	private static async _copyFrom(
@@ -2676,7 +3699,18 @@ export class SessionManager {
 		targetCwd: string,
 		sessionDir?: string,
 		retention?: JournalFrameRetention,
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
 	): Promise<SessionManager> {
+		const { maxEntries, maxSourceBytes } = limits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid copied history limits");
+		let entriesRead = 0;
+		let sourceBytes = 0;
 		let sourceHeader: SessionHeader | undefined;
 		let legacyEntries: FileEntry[] | undefined;
 		// This becomes the target's resident array; current-version copies do not retain a second source array.
@@ -2690,14 +3724,19 @@ export class SessionManager {
 		if (existsSync(sourcePath)) {
 			let bytesSinceYield = 0;
 			for await (const record of readSessionJournal(sourcePath)) {
+				sourceBytes += Buffer.byteLength(record.json);
+				if (sourceBytes > maxSourceBytes) throw new Error("Copied history JSON byte budget exceeded");
 				const entry = sessionFileEntry(record.entry, record.retention);
 				if (!sourceHeader) {
 					if (entry.type !== "session" || typeof entry.id !== "string")
 						throw new Error("Session source has no valid header");
 					sourceHeader = entry;
 					if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
-				} else if (legacyEntries) legacyEntries.push(entry);
-				else keep(entry);
+				} else {
+					if (++entriesRead > maxEntries) throw new Error("Copied history entry budget exceeded");
+					if (legacyEntries) legacyEntries.push(entry);
+					else keep(entry);
+				}
 				bytesSinceYield += Buffer.byteLength(record.json);
 				if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
 					bytesSinceYield = 0;
@@ -2719,7 +3758,12 @@ export class SessionManager {
 		for (let index = 0; index < targetEntries.length; index++) {
 			const entry = targetEntries[index] as SessionEntry;
 			let parentId = entry.parentId;
-			while (parentId !== null && dropped.has(parentId)) parentId = dropped.get(parentId) ?? null;
+			const seen = new Set<string>();
+			while (parentId !== null && dropped.has(parentId)) {
+				if (seen.has(parentId)) throw new Error("Copied session git ancestry is unresolved");
+				seen.add(parentId);
+				parentId = dropped.get(parentId) ?? null;
+			}
 			if (parentId !== entry.parentId)
 				targetEntries[index] = withEntryRetention({ ...entry, parentId }, entryRetentions.get(entry));
 		}
