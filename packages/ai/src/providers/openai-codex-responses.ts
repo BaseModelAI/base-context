@@ -41,6 +41,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import { RequestTokenBudgetError } from "../utils/request-token-budget.js";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
@@ -168,6 +169,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				websocketRequestId,
 			);
 			const bodyJson = JSON.stringify(body);
+			if (attempts.hasRequestBudget) body = JSON.parse(bodyJson) as RequestBody;
 			const transport = options?.transport || "auto";
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
 			let websocketFallback = websocketDisabledForSession;
@@ -229,6 +231,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					throw new Error("Request was aborted");
 				}
 
+				const budgetUrl = attempts.hasRequestBudget ? resolveCodexUrl(model.baseUrl) : undefined;
+				if (budgetUrl !== undefined) await attempts.measureRequest({ url: budgetUrl, body: bodyJson });
 				await attempts.begin("http", {
 					kind:
 						attempt > 0
@@ -241,7 +245,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				});
 				try {
 					attempts.sent();
-					response = await fetch(resolveCodexUrl(model.baseUrl), {
+					response = await fetch(budgetUrl ?? resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
 						body: bodyJson,
@@ -268,6 +272,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						throw new Error(info.friendlyMessage || info.message);
 					}
 				} catch (error) {
+					if (error instanceof RequestTokenBudgetError) throw error;
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -478,7 +483,9 @@ class CodexProtocolError extends Error {
 }
 
 function isCodexNonTransportError(error: unknown): boolean {
-	return error instanceof CodexApiError || error instanceof CodexProtocolError;
+	return (
+		error instanceof CodexApiError || error instanceof CodexProtocolError || error instanceof RequestTokenBudgetError
+	);
 }
 
 async function* mapCodexEvents(
@@ -596,10 +603,12 @@ interface CachedWebSocketContinuationState {
 	lastRequestBody: RequestBody;
 	lastResponseId: string;
 	lastResponseItems: ResponseInput;
+	contextTokenObservation?: ProviderAttemptTracker["contextTokenObservation"];
 }
 
 interface CachedWebSocketConnection {
 	socket: WebSocketLike;
+	url: string;
 	busy: boolean;
 	idleTimer?: ReturnType<typeof setTimeout>;
 	continuation?: CachedWebSocketContinuationState;
@@ -884,7 +893,7 @@ async function acquireWebSocket(
 	}
 
 	const socket = await connectWebSocket(url, headers, signal);
-	const entry: CachedWebSocketConnection = { socket, busy: true };
+	const entry: CachedWebSocketConnection = { socket, url, busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
 		socket,
@@ -1149,26 +1158,49 @@ async function processWebSocketStream(
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const fullBody = body;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
-	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
-	if (stats) {
-		stats.requests++;
-		if (reused) stats.connectionsReused++;
-		else stats.connectionsCreated++;
-		if (useCachedContext) stats.cachedContextRequests++;
-		if (requestBody.store === true) stats.storeTrueRequests++;
-		stats.lastInputItems = requestBody.input?.length ?? 0;
-		if (requestBody.previous_response_id) {
-			stats.deltaRequests++;
-			stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
-			stats.lastPreviousResponseId = requestBody.previous_response_id;
-		} else {
-			stats.fullContextRequests++;
-			stats.lastDeltaInputItems = undefined;
-			stats.lastPreviousResponseId = undefined;
-		}
-	}
 	try {
+		if (attempts.hasRequestBudget) {
+			const continuation = useCachedContext ? entry?.continuation : undefined;
+			const observation = continuation?.contextTokenObservation?.value;
+			const retainedPrefix =
+				continuation &&
+				observation &&
+				continuation.lastResponseId &&
+				fullBody.previous_response_id === undefined &&
+				getCachedWebSocketInputDelta(fullBody, continuation) !== undefined
+					? {
+							inputItems:
+								(continuation.lastRequestBody.input?.length ?? 0) + continuation.lastResponseItems.length,
+							inputTokens: observation.inputTokens,
+							outputTokens: observation.outputTokens,
+							...(observation.responseModel === undefined ? {} : { responseModel: observation.responseModel }),
+						}
+					: undefined;
+			await attempts.measureRequest({
+				url: entry?.url ?? url,
+				body: JSON.stringify(fullBody),
+				...(retainedPrefix ? { retainedPrefix } : {}),
+			});
+		}
+		const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+		const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
+		if (stats) {
+			stats.requests++;
+			if (reused) stats.connectionsReused++;
+			else stats.connectionsCreated++;
+			if (useCachedContext) stats.cachedContextRequests++;
+			if (requestBody.store === true) stats.storeTrueRequests++;
+			stats.lastInputItems = requestBody.input?.length ?? 0;
+			if (requestBody.previous_response_id) {
+				stats.deltaRequests++;
+				stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
+				stats.lastPreviousResponseId = requestBody.previous_response_id;
+			} else {
+				stats.fullContextRequests++;
+				stats.lastDeltaInputItems = undefined;
+				stats.lastPreviousResponseId = undefined;
+			}
+		}
 		const requestJson = JSON.stringify({ type: "response.create", ...requestBody });
 		await attempts.begin("websocket", {
 			kind: requestBody.previous_response_id ? "transport-continuation" : "initial",
@@ -1200,17 +1232,19 @@ async function processWebSocketStream(
 			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
 				includeSystemPrompt: false,
 			}).filter((item) => item.type !== "function_call_output");
+			const contextTokenObservation = attempts.contextTokenObservation;
 			entry.continuation = {
 				lastRequestBody: fullBody,
 				lastResponseId: output.responseId,
 				lastResponseItems: responseItems,
+				...(contextTokenObservation ? { contextTokenObservation } : {}),
 			};
 		}
 	} catch (error) {
-		if (entry) {
-			entry.continuation = undefined;
+		if (!(error instanceof RequestTokenBudgetError)) {
+			if (entry) entry.continuation = undefined;
+			keepConnection = false;
 		}
-		keepConnection = false;
 		throw error;
 	} finally {
 		release({ keep: keepConnection });

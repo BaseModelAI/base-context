@@ -869,3 +869,53 @@ and omission behavior are covered. One Root fixture wrongly expected expanded us
 to have user authority; the expectation was corrected to unrecorded, not the production
 rule. No provider, real credentials, kernel or live benchmark ran. Model-aware budgets,
 full stable epochs, selective recovery and remaining whole-harness requirements stay open.
+
+### Explicit request budgets and audit corrections (W27)
+
+The native SDK/direct AgentSession and existing inference coordinator accept opt-in
+observe/enforce request budgets with explicit deployment profiles. Profiles name the exact
+endpoint/final serialized model and declared context/output/template/replay contract; model
+catalog defaults and configured auth labels are not provider authorization or confirmed
+limits. The three instrumented OpenAI adapters use post-hook request serialization. Native
+admission refuses an enforced unknown budget when another adapter supplies no measurement,
+instead of bypassing the gate. Observe mode retains unknown admission metadata.
+
+Counts are conservative configured UTF8 estimates, not bytes/4, a local tokenizer or a
+proven future bound. Reasoning is included in output only for the matched supported profile;
+unsupported semantics remain unknown. Codex reserves the explicit output ceiling, not an
+ignored generic maxTokens option. Ordinary complete usage updates observed error samples
+only after settlement ACK; it never certifies calibration or aggressive packing. Existing
+canonical request records remain the only durable observation store.
+
+Codex uses the actual cached connection endpoint and full logical context. Only its owned
+exact-match continuation can use previously ACKed input/output observations plus the new
+suffix. Missing observations, media, opaque suffixes and external references remain unknown.
+Local refusal preserves healthy cached replay without a send, cache mutation or fallback.
+Counters and profile state stay outside prompts; no cache-warming or calibration call runs.
+
+An initial source-only handoff incorrectly stopped at the Agent loop: the outer Agent
+lifecycle would still synthesize an assistant after the local refusal. The actual outer
+boundary now recognizes direct or primary-first aggregate budget errors and rethrows the
+original whole error. Distinct cleanup failures remain attached; accepted input storage ACKs
+remain valid. Generic non-budget failure behavior is unchanged.
+
+Nine distinct focused cases have passing outcomes across separate invocations: existing
+initial/update summary prompts2, AI retry table2+usage edge1, real Agent/Coordinator2 and
+Codex cached/auto2. The native pair was repeated after adding the unmetered-admission guard;
+that repeat is not another two cases. Native fixtures preserve actual source ACKs and error
+identity, with no synthetic assistant or physical attempt on local refusal. All transport
+responses/keys are offline fixtures. This is not real provider, tokenizer, installed SDK/CLI,
+AgentSession budget-option, Completions budget-path, kernel or whole-harness certification.
+
+The summary prompt no longer promises Python runtime survival or loss. It preserves useful
+names and their last observed state/uncertainty and refers to current runtime reports. This
+removes a false assertion; it does not implement authoritative resource generations.
+README now gives the owned pre-release branch/source-build entrypoint, not an upstream
+installer or a nonexistent published package. Security/contribution links target this fork;
+no report endpoint, installer or release operation was exercised.
+
+SPEC_DEVIATIONS.md records the immutable W26 audit:119 numbered subsections, W0–W13 and
+all100 acceptance IDs, with source/evidence limits and prioritized TODOs. Later work is
+explicitly separate. ViewUnit allocation, complete committed epochs, native selective
+recovery, scheduler/recovery durability and remaining whole-harness/release work are open.
+No live benchmark may start until all five required context features are complete.

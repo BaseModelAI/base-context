@@ -10,6 +10,11 @@ import type {
 	StreamOptions,
 } from "../types.js";
 import type { AssistantMessageEventStream } from "./event-stream.js";
+import type {
+	ContextTokenObservation,
+	ProviderRequestRepresentation,
+	RetainedContextTokens,
+} from "./request-token-budget.js";
 
 interface ActiveAttempt {
 	info: ProviderAttemptInfo;
@@ -34,7 +39,9 @@ interface ActiveAttempt {
 	invalidUsage?: boolean;
 }
 
-type AttemptDetails = Partial<Pick<ProviderAttemptInfo, "kind" | "previousResponseId" | "effort" | "serviceTier">>;
+type AttemptDetails = Partial<
+	Pick<ProviderAttemptInfo, "kind" | "previousResponseId" | "effort" | "serviceTier" | "requestBudget">
+>;
 type ResponseDetails = Pick<
 	ProviderAttemptReceipt,
 	"providerRequestId" | "providerResponseId" | "responseModel" | "effectiveEffort" | "effectiveServiceTier"
@@ -46,6 +53,8 @@ export class ProviderAttemptTracker {
 	private active?: ActiveAttempt;
 	private persistenceError?: unknown;
 	private details: AttemptDetails = {};
+	private budgetError?: unknown;
+	private contextObservation: { value?: RetainedContextTokens } = {};
 
 	constructor(
 		private readonly model: Pick<Model<Api>, "api" | "provider" | "id">,
@@ -54,6 +63,32 @@ export class ProviderAttemptTracker {
 
 	get enabled(): boolean {
 		return this.options?.attempts !== undefined;
+	}
+
+	get hasRequestBudget(): boolean {
+		return this.options?.attempts?.measureRequest !== undefined;
+	}
+
+	get contextTokenObservation(): ContextTokenObservation {
+		return this.contextObservation;
+	}
+
+	async measureRequest(request: Omit<ProviderRequestRepresentation, "api" | "provider">): Promise<void> {
+		if (this.budgetError !== undefined) throw this.budgetError;
+		const measure = this.options?.attempts?.measureRequest;
+		if (!measure) return;
+		try {
+			this.configure({
+				requestBudget: measure.call(this.options?.attempts, {
+					...request,
+					api: this.model.api,
+					provider: this.model.provider,
+				}),
+			});
+		} catch (error) {
+			this.budgetError = error;
+			throw error;
+		}
 	}
 
 	configure(details: AttemptDetails): void {
@@ -84,6 +119,7 @@ export class ProviderAttemptTracker {
 			this.persistenceError = error;
 			throw error;
 		}
+		this.contextObservation = {};
 		this.active = { info, id, queuedAt, admittedAt: Date.now(), rawUsage: [], usage: {}, usageCompleteness: "none" };
 	}
 
@@ -207,6 +243,22 @@ export class ProviderAttemptTracker {
 	): (...args: TArgs) => Promise<Response> {
 		if (!this.enabled) return send;
 		return async (...args) => {
+			if (this.hasRequestBudget) {
+				const target = args[0];
+				const init = args[1] as { body?: unknown } | undefined;
+				const body = typeof init?.body === "string" ? init.body : undefined;
+				const url =
+					typeof target === "string"
+						? target
+						: target instanceof URL
+							? target.href
+							: typeof Request !== "undefined" && target instanceof Request
+								? target.url
+								: "";
+				// Pin the exact SDK serialization across the awaited admission callback.
+				if (init && body !== undefined) args[1] = { ...init, body };
+				await this.measureRequest({ url, body });
+			}
 			await this.begin("http");
 			this.sent();
 			let response: Response;
@@ -234,6 +286,7 @@ export class ProviderAttemptTracker {
 		const attempt = this.active;
 		if (!attempt) return;
 		this.active = undefined;
+		const observation = this.contextObservation;
 		const receipt: ProviderAttemptReceipt = {
 			...attempt.info,
 			attemptId: attempt.id,
@@ -262,6 +315,22 @@ export class ProviderAttemptTracker {
 		};
 		try {
 			await this.options!.attempts!.settle(receipt);
+			const { inputTotal, output } = receipt.usage;
+			if (
+				receipt.outcome === "completed" &&
+				!receipt.capacityConfirmed &&
+				receipt.usageCompleteness === "complete" &&
+				Number.isSafeInteger(inputTotal) &&
+				inputTotal! >= 0 &&
+				Number.isSafeInteger(output) &&
+				output! >= 0
+			) {
+				observation.value = Object.freeze({
+					inputTokens: inputTotal!,
+					outputTokens: output!,
+					responseModel: receipt.responseModel,
+				});
+			}
 		} catch (error) {
 			this.persistenceError = error;
 			throw error;

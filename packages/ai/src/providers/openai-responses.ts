@@ -105,6 +105,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
 			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
+			if (attempts.hasRequestBudget) {
+				const body = JSON.stringify(params);
+				params = JSON.parse(body) as ResponseCreateParamsStreaming;
+				await attempts.measureRequest({ url: `${client.baseURL.replace(/\/$/, "")}/responses`, body });
+			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),

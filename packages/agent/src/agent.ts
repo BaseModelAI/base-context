@@ -3,6 +3,7 @@ import {
 	type ImageContent,
 	type Message,
 	type Model,
+	RequestTokenBudgetError,
 	type SimpleStreamOptions,
 	streamSimple,
 	type TextContent,
@@ -32,6 +33,14 @@ import type {
 	ToolExecutionMode,
 	ToolInvocation,
 } from "./types.js";
+
+/** Preserve a local budget refusal and any secondary cleanup errors without inventing an assistant. */
+function isRequestTokenBudgetFailure(error: unknown): error is Error {
+	return (
+		error instanceof RequestTokenBudgetError ||
+		(error instanceof AggregateError && isRequestTokenBudgetFailure(error.errors[0]))
+	);
+}
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
@@ -608,7 +617,7 @@ export class Agent {
 			}
 			await executor(abortController.signal);
 		} catch (error) {
-			if (error instanceof AgentOutputLimitError) {
+			if (error instanceof AgentOutputLimitError || isRequestTokenBudgetFailure(error)) {
 				this._state.errorMessage = error.message;
 				throw error;
 			}

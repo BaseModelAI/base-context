@@ -1,5 +1,6 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
+import type { ProviderRequestRepresentation, RequestTokenAssessment } from "./utils/request-token-budget.js";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.js";
 
@@ -92,6 +93,8 @@ export interface ProviderAttemptInfo {
 	readonly previousResponseId?: string;
 	readonly effort?: string;
 	readonly serviceTier?: string | null;
+	/** Request-local budget facts, never provider prompt content. */
+	readonly requestBudget?: RequestTokenAssessment;
 }
 
 /** Only observed or derivable token fields are present. Missing fields are not zero. */
@@ -140,6 +143,8 @@ export interface ProviderAttemptReceipt extends ProviderAttemptInfo {
 
 /** Optional for SDK embeddings. Built-in adapters await both callbacks in their producer lifecycle. */
 export interface ProviderAttemptObserver {
+	/** Optional native pre-send budget gate. It does not admit a physical attempt. */
+	measureRequest?(request: ProviderRequestRepresentation): RequestTokenAssessment;
 	/** Persist admission and return its local ID before the physical transport sends. */
 	admit(info: ProviderAttemptInfo): Promise<string>;
 	/** Persist settlement even when the assistant stream has no remaining listener. */

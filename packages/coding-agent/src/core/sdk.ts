@@ -1,6 +1,12 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type AgentOutputLimits, type ThinkingLevel } from "@ponythewhite/base-context-agent";
-import { clampThinkingLevel, type Message, type Model, supportsFastMode } from "@ponythewhite/base-context-ai";
+import {
+	clampThinkingLevel,
+	type Message,
+	type Model,
+	type RequestTokenBudgetOptions,
+	supportsFastMode,
+} from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import type { AgentSessionCreationOptions } from "./agent-session-services.js";
@@ -23,6 +29,8 @@ import { time } from "./timings.js";
 import { createBashTool, createEditTool, createIpythonTool, withFileMutationQueue } from "./tools/index.js";
 
 export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
+	/** Explicit native request-budget rollout. No catalog/default limit inference. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.base-context */
@@ -151,6 +159,8 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	if (options.requestTokenBudget)
+		options = { ...options, requestTokenBudget: structuredClone(options.requestTokenBudget) };
 	const cwd = options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd();
 	const agentDir = options.agentDir ?? getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
@@ -362,6 +372,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		session = new AgentSession({
 			invocationOutputLimits: options.invocationOutputLimits,
+			requestTokenBudget: options.requestTokenBudget,
 			agent,
 			sessionManager,
 			settingsManager,

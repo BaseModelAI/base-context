@@ -22,6 +22,7 @@ import type {
 	AssistantMessage,
 	ImageContent,
 	Model,
+	RequestTokenBudgetOptions,
 	ServiceTier,
 	TextContent,
 	Usage,
@@ -428,6 +429,8 @@ export class CompactionSkippedError extends Error {}
 export class RefineSkippedError extends Error {}
 
 export interface AgentSessionConfig {
+	/** Explicit request budget profiles; absent preserves control behavior. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
 	/** Override native invocationOutput settings; complete finalized values or explicit refusal. */
 	invocationOutputLimits?: AgentOutputLimits;
 	agent: Agent;
@@ -1405,6 +1408,7 @@ export class AgentSession {
 		this.requests = new InferenceCoordinator(
 			() => this.sessionManager.bindRequestSink(),
 			() => ({ parentSessionId: config.semanticParentSessionId }),
+			config.requestTokenBudget,
 		);
 		this.runtimeServices = { requests: this.requests };
 		this.requests.onActivityChange(() => this._notifySessionInputCheckpointChange());

@@ -658,6 +658,52 @@ replay when the adapter has not authorized narrower groups. Model-aware token es
 provider-budget enforcement and the complete stable-epoch/recovery pipeline remain open.
 
 
+### Explicit request-token budget profiles
+
+The native SDK and direct `AgentSessionConfig` accept optional `requestTokenBudget`.
+Supply application-owned `RequestTokenProfile[]` from the AI package, rather than treating
+catalog defaults or a model label as confirmed deployment limits:
+
+```typescript
+await createAgentSession({
+  requestTokenBudget: {
+    mode: "enforce",
+    profiles: explicitDeploymentProfiles,
+  },
+});
+```
+
+Each profile names the exact API/provider/endpoint/final request model, profile/template/
+replay revisions, declared auth mode, total context limit, output ceiling and conservative
+estimate parameters. `contextTokens` means the combined input/output allowance; do not
+substitute an input-only limit without checking its semantics. Auth mode is descriptive
+configuration, not authorization or proof of the live login. Normal auth rules still apply.
+
+`observe` preserves control thresholds. `enforce` refuses unknown or over-budget requests
+before sending; neither mode removes replay items or selects a smaller transcript. Without
+this option, the budget gate is absent. Direct Responses, Completions and Codex paths assess
+the post-hook serialization, including instructions and tool schemas. Codex reserves its
+explicit route output ceiling because it does not serialize the generic `maxTokens` option.
+Reasoning is included in output for these adapters and is not reserved twice.
+
+The counter is a configured conservative UTF8-based estimate, not bytes/4, an exact tokenizer
+or a proven future bound. Ordinary complete physical usage can add observed error samples
+only after its existing settlement ACK. Cold/config-changed state stays unknown until an
+observation; observed errors are not calibrated confidence. Counter/profile data stays in
+descriptors/receipts, outside the prompt and stable KV prefix. No warming request is made.
+
+Media, opaque replay and external retained-state references remain unknown. Only the owned
+exact-match Codex continuation path can use its previously ACKed input/output observation
+plus the actual new suffix; a small wire suffix alone is not the complete input budget.
+Actual cached endpoints are retained. A local quota refusal does not authorize clearing
+healthy replay state or falling back to a different transport. Native Coordinator failures
+propagate without inventing an assistant or physical-attempt receipt; the generic direct
+AI stream still follows its existing error-result contract.
+
+This is complete-or-refuse admission, not a ViewUnit packer. Allocation, full stable epochs,
+selective recovery and supported deployment-profile validation remain separate work.
+
+
 ## Extensions
 
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.

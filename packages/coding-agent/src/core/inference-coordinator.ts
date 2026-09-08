@@ -9,6 +9,8 @@ import {
 	isLocalFauxStream,
 	type Model,
 	type ProviderAttemptObserver,
+	RequestTokenBudget,
+	type RequestTokenBudgetOptions,
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@ponythewhite/base-context-ai";
@@ -125,6 +127,7 @@ export class InferenceCoordinator {
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
+		budget: undefined as RequestTokenBudget | undefined,
 	};
 
 	get hasPending(): boolean {
@@ -171,7 +174,10 @@ export class InferenceCoordinator {
 	constructor(
 		private readonly bindSink: () => BoundRequestSink,
 		private readonly owner: () => Omit<RequestOwnerRef, "sessionId"> = () => ({}),
-	) {}
+		requestTokenBudget?: RequestTokenBudgetOptions,
+	) {
+		if (requestTokenBudget) this.work.budget = new RequestTokenBudget(requestTokenBudget);
+	}
 
 	private assertAdmission(): void {
 		if (this.disposed || !this.work.admissionOpen) throw new Error("Inference owner is closing");
@@ -321,6 +327,7 @@ export class InferenceCoordinator {
 		const receiptWrites: Promise<void>[] = [];
 		let activeUser = false;
 		let localSimulation = false;
+		let budgetFailure: unknown;
 		const settle = async (result: Promise<AssistantMessage>): Promise<InferenceSettlement> => {
 			const failures: unknown[] = [];
 			let message: AssistantMessage | undefined;
@@ -329,6 +336,7 @@ export class InferenceCoordinator {
 			} catch (error) {
 				failures.push(error);
 			}
+			if (budgetFailure !== undefined && !failures.includes(budgetFailure)) failures.push(budgetFailure);
 			await this.finishSink(operation.binding, receiptWrites, activeUser, failures);
 			return {
 				message: message!,
@@ -345,6 +353,19 @@ export class InferenceCoordinator {
 			activeUser = true;
 			this.releaseCapture();
 			this.finishCapturePending?.();
+			// Capture the opted-in budgeted invocation before source/auth waits. Callbacks and signals stay live handles.
+			if (this.work.budget) {
+				model = structuredClone(model);
+				context = structuredClone(context);
+				options = options
+					? {
+							...options,
+							headers: options.headers ? { ...options.headers } : undefined,
+							thinkingBudgets: options.thinkingBudgets ? { ...options.thinkingBudgets } : undefined,
+							metadata: options.metadata ? structuredClone(options.metadata) : undefined,
+						}
+					: undefined;
+			}
 			const source = Object.freeze({ ...(await operation.binding.sink.source) });
 			const metadata: NativeRequestMetadata = {
 				...operation.metadata,
@@ -358,9 +379,35 @@ export class InferenceCoordinator {
 			}
 			assertBuiltInAttemptSupport(model.api);
 			if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
+			const budget = this.work.budget;
+			const measureRequest: ProviderAttemptObserver["measureRequest"] = budget
+				? (representation) => {
+						const assessment = budget.measure(representation);
+						try {
+							budget.assert(assessment);
+						} catch (error) {
+							budgetFailure = error;
+							throw error;
+						}
+						return assessment;
+					}
+				: undefined;
 			const attempts: ProviderAttemptObserver = {
+				...(measureRequest ? { measureRequest } : {}),
 				admit: async (descriptor) => {
 					if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
+					// An adapter without a serializer meter must not bypass an enforced budget.
+					if (measureRequest && !descriptor.requestBudget) {
+						descriptor = {
+							...descriptor,
+							requestBudget: measureRequest({
+								api: descriptor.api,
+								provider: descriptor.provider,
+								url: "",
+								body: undefined,
+							}),
+						};
+					}
 					const attemptId = randomUUID();
 					const write = operation.binding.sink.persist({
 						...metadata,
@@ -384,6 +431,7 @@ export class InferenceCoordinator {
 					});
 					receiptWrites.push(write);
 					await write;
+					budget?.observe(receipt);
 				},
 			};
 			const signal = options?.signal

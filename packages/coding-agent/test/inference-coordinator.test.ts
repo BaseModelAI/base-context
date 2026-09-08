@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent, type StreamFn } from "@ponythewhite/base-context-agent";
+import { Agent, type AgentEvent, type StreamFn } from "@ponythewhite/base-context-agent";
 import * as ai from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
@@ -93,6 +93,75 @@ function fakeTransport(sent: () => void | Promise<void>, gate?: Promise<void>): 
 	};
 }
 
+function createBudgetAgent(manager: SessionManager, contextTokens: number, releaseError?: Error) {
+	const facts: NativeRequestEvent[] = [];
+	const requests = new InferenceCoordinator(
+		() => {
+			const sink = manager.bindRequestSink();
+			return {
+				source: sink.source,
+				retain: () => sink.retain(),
+				async release() {
+					await sink.release();
+					if (releaseError) throw releaseError;
+				},
+				async persist(event) {
+					await sink.persist(event);
+					facts.push(event);
+				},
+			};
+		},
+		undefined,
+		{
+			mode: "enforce",
+			profiles: [
+				{
+					id: "offline-native-responses",
+					revision: "1",
+					api: model.api,
+					provider: model.provider,
+					url: `${model.baseUrl}/responses`,
+					model: model.id,
+					authMode: "api-key",
+					templateRevision: "offline-responses-1",
+					replayFamily: "responses",
+					contextTokens,
+					outputCeilingTokens: 20,
+					estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 0 },
+				},
+			],
+		},
+	);
+	const agent = new Agent({ initialState: { model }, getApiKey: () => "not-receipt-key" });
+	let events: Awaited<ReturnType<StreamFn>> | undefined;
+	agent.bindStreamOwner((streamFn) => {
+		const owned = requests.bindStream(streamFn, { purpose: "main" });
+		return async (...args) => {
+			events = await owned(...args);
+			return events;
+		};
+	});
+	const lifecycle: AgentEvent[] = [];
+	const inputAcks: string[] = [];
+	agent.subscribe(async (event) => {
+		lifecycle.push(event);
+		if (event.type === "message_end" && (event.message.role === "user" || event.message.role === "assistant")) {
+			const id = await manager.appendMessage(event.message);
+			if (event.message.role === "user") inputAcks.push(id);
+		}
+	});
+	return {
+		agent,
+		requests,
+		facts,
+		lifecycle,
+		inputAcks,
+		get events() {
+			return events!;
+		},
+	};
+}
+
 const fixtureDirs: string[] = [];
 const managers: SessionManager[] = [];
 afterEach(async () => {
@@ -134,6 +203,7 @@ describe("native inference coordination", () => {
 		};
 		const requests = new InferenceCoordinator(() => sink);
 		let sends = 0;
+		const nativeStreamSimple = ai.streamSimple;
 		vi.spyOn(ai, "streamSimple").mockImplementation(
 			fakeTransport(async () => {
 				expect(facts.at(-1)?.type).toBe("attempt_admitted");
@@ -163,6 +233,82 @@ describe("native inference coordination", () => {
 		await requests.dispose();
 		expect(manager.getLeafId()).toBe(initialLeaf);
 		expect(JSON.stringify(facts)).not.toContain("not-receipt");
+
+		// Offline transport only; native serialization, admission and source persistence remain real.
+		vi.mocked(ai.streamSimple).mockImplementation(nativeStreamSimple);
+		const budgeted = createBudgetAgent(manager, 4096);
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			expect(budgeted.inputAcks).toHaveLength(1);
+			expect(budgeted.facts).toHaveLength(1);
+			expect((await diskRecords()).at(-1)).toMatchObject({
+				request: {
+					type: "attempt_admitted",
+					descriptor: { requestBudget: { status: "within-estimate", limitSource: "explicit-profile" } },
+				},
+			});
+			const item = {
+				type: "message",
+				id: "msg_offline",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "OK", annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_offline",
+						model: model.id,
+						status: "completed",
+						usage: {
+							input_tokens: 10,
+							output_tokens: 1,
+							total_tokens: 11,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		try {
+			await budgeted.agent.prompt("offline budget happy input");
+			expect(await budgeted.events.result()).toMatchObject({
+				stopReason: "stop",
+				content: [{ type: "text", text: "OK" }],
+			});
+			expect(offlineFetch).toHaveBeenCalledTimes(1);
+			expect(budgeted.facts.map((fact) => fact.type)).toEqual(["attempt_admitted", "attempt_settled"]);
+			expect(budgeted.facts[0]).toMatchObject({ source: { leafId: budgeted.inputAcks[0], persistent: true } });
+			expect(budgeted.facts[1]).toMatchObject({
+				receipt: { outcome: "completed", usage: { inputTotal: 10, output: 1 } },
+			});
+			const records = await diskRecords();
+			expect(records.find((entry) => entry.id === budgeted.inputAcks[0])).toMatchObject({
+				type: "message",
+				message: { role: "user", content: [{ text: "offline budget happy input" }] },
+			});
+			expect(records.at(-1)).toMatchObject({ type: "message", message: { role: "assistant", stopReason: "stop" } });
+			expect(
+				budgeted.lifecycle
+					.filter(
+						(event) =>
+							(event.type === "message_start" || event.type === "message_end") &&
+							event.message.role === "assistant",
+					)
+					.map((event) => event.type),
+			).toEqual(["message_start", "message_end"]);
+		} finally {
+			await budgeted.requests.dispose();
+		}
 	});
 
 	it("keeps late settlement and semantic retries on their captured source and rebinds children", async () => {
@@ -433,6 +579,95 @@ describe("native inference coordination", () => {
 		} finally {
 			faux.unregister();
 			await requests.dispose();
+		}
+
+		// Expected native refusal semantics; requires the outer Agent boundary to preserve budget errors.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			throw new Error("Local budget refusal reached offline transport");
+		});
+		const cleanupError = new Error("offline source release failed");
+		for (const releaseError of [undefined, cleanupError]) {
+			const dir = mkdtempSync(join(tmpdir(), "base-context-budget-refusal-"));
+			fixtureDirs.push(dir);
+			const manager = await SessionManager.create(dir, dir);
+			managers.push(manager);
+			const budgeted = createBudgetAgent(manager, 1, releaseError);
+			try {
+				const promptFailure = await budgeted.agent.prompt("offline budget refused input").then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				const resultFailure = await budgeted.events.result().then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+				const refusal = resultFailure instanceof AggregateError ? resultFailure.errors[0] : resultFailure;
+				expect(refusal).toBeInstanceOf(ai.RequestTokenBudgetError);
+				expect(refusal).toMatchObject({ assessment: { status: "over-budget", limitSource: "explicit-profile" } });
+				if (releaseError) {
+					expect(resultFailure).toBeInstanceOf(AggregateError);
+					if (resultFailure instanceof AggregateError) {
+						expect(resultFailure.errors).toHaveLength(2);
+						expect(resultFailure.errors[0]).toBe(refusal);
+						expect(resultFailure.errors[1]).toBe(releaseError);
+					}
+				} else {
+					expect(resultFailure).toBe(refusal);
+				}
+				expect(promptFailure).toBe(resultFailure);
+				expect(
+					budgeted.lifecycle.filter(
+						(event) =>
+							(event.type === "message_start" || event.type === "message_end") &&
+							event.message.role === "assistant",
+					),
+				).toEqual([]);
+				expect(budgeted.agent.state.messages.filter((message) => message.role === "assistant")).toEqual([]);
+				expect(budgeted.inputAcks).toHaveLength(1); // Storage ACK, not frontend authenticity.
+				expect(manager.getLeafId()).toBe(budgeted.inputAcks[0]);
+				const records: Array<SessionEntry | SessionHeader> = [];
+				for await (const record of readSessionJournal(manager.getSessionFile()!)) {
+					records.push(record.entry as SessionEntry | SessionHeader);
+				}
+				expect(records.find((entry) => entry.id === budgeted.inputAcks[0])).toMatchObject({
+					type: "message",
+					message: { role: "user", content: [{ text: "offline budget refused input" }] },
+				});
+				expect(records.filter((entry) => entry.type === "message" && entry.message.role === "assistant")).toEqual(
+					[],
+				);
+				expect(records.filter((entry) => entry.type === "request")).toEqual([]);
+				expect(budgeted.facts).toEqual([]);
+				expect(offlineFetch).not.toHaveBeenCalled();
+				expect(budgeted.requests.hasPending).toBe(false);
+			} finally {
+				await budgeted.requests.dispose();
+			}
+		}
+
+		// An unmetered adapter must not bypass enforced admission. This remains an offline fake transport.
+		const unmeteredSend = vi.fn();
+		vi.spyOn(ai, "streamSimple").mockImplementation(fakeTransport(unmeteredSend));
+		const unmeteredDir = mkdtempSync(join(tmpdir(), "base-context-budget-unmetered-"));
+		fixtureDirs.push(unmeteredDir);
+		const unmeteredManager = await SessionManager.create(unmeteredDir, unmeteredDir);
+		managers.push(unmeteredManager);
+		const unmetered = createBudgetAgent(unmeteredManager, 4096);
+		try {
+			await expect(unmetered.agent.prompt("offline unmetered input")).rejects.toMatchObject({
+				name: "RequestTokenBudgetError",
+				assessment: { status: "unknown", limitSource: "unknown", reasoningReservation: "unknown" },
+			});
+			expect(unmeteredSend).not.toHaveBeenCalled();
+			expect(unmetered.facts).toEqual([]);
+			expect(unmetered.inputAcks).toHaveLength(1);
+			expect(
+				(await unmeteredManager.readEntries()).filter(
+					(entry) => entry.type === "request" || (entry.type === "message" && entry.message.role === "assistant"),
+				),
+			).toEqual([]);
+		} finally {
+			await unmetered.requests.dispose();
 		}
 	});
 });

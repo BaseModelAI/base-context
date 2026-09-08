@@ -191,6 +191,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				effort: typeof wireEffort === "string" ? wireEffort : undefined,
 				serviceTier: params.service_tier,
 			});
+			if (attempts.hasRequestBudget) {
+				const body = JSON.stringify(params);
+				params = JSON.parse(body) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+				await attempts.measureRequest({ url: `${client.baseURL.replace(/\/$/, "")}/chat/completions`, body });
+			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),

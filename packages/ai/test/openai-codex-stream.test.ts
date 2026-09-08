@@ -9,7 +9,19 @@ import {
 	streamOpenAICodexResponses,
 	streamSimpleOpenAICodexResponses,
 } from "../src/providers/openai-codex-responses.js";
-import type { Context, Model, ProviderAttemptObserver, ProviderAttemptReceipt } from "../src/types.js";
+import type {
+	AssistantMessage,
+	Context,
+	Model,
+	ProviderAttemptObserver,
+	ProviderAttemptReceipt,
+} from "../src/types.js";
+import {
+	type ProviderRequestRepresentation,
+	type RequestTokenAssessment,
+	RequestTokenBudget,
+	RequestTokenBudgetError,
+} from "../src/utils/request-token-budget.js";
 
 const originalFetch = global.fetch;
 const originalWebSocket = globalThis.WebSocket;
@@ -34,6 +46,30 @@ function mockToken(): string {
 		"utf8",
 	).toString("base64");
 	return `aaa.${payload}.bbb`;
+}
+
+// Synthetic configured estimates and existing mock usage, not Codex tokenizer accuracy.
+function cachedRequestBudget() {
+	return new RequestTokenBudget({
+		mode: "enforce",
+		profiles: [
+			{
+				id: "fixture-codex",
+				revision: "fixture-v1",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				url: "https://chatgpt.com/backend-api/codex/responses",
+				model: "gpt-5.1-codex",
+				authMode: "fixture-subscription",
+				templateRevision: "fixture-template",
+				replayFamily: "fixture-responses",
+				responseModels: ["gpt-5.1-codex-snapshot"],
+				contextTokens: 4096,
+				outputCeilingTokens: 64,
+				estimate: { tokensPerUtf8Byte: 1, templateTokens: 9, marginTokens: 17 },
+			},
+		],
+	});
 }
 
 function buildSSEPayload({
@@ -859,20 +895,97 @@ describe("openai-codex streaming", () => {
 			cachedContextRequests: 1,
 			fullContextRequests: 1,
 		});
+
+		// The original unconfigured response has no acknowledged attempt or response ID.
+		const budget = cachedRequestBudget();
+		let measured: ProviderRequestRepresentation | undefined;
+		let refusal: unknown;
+		const admit = vi.fn(async () => {
+			throw new Error("Local budget refusal reached admission");
+		});
+		const close = vi.spyOn(MockWebSocket.prototype, "close");
+		const beforeRefusal = getOpenAICodexWebSocketDebugStats("session-auto");
+		const refused = await streamSimpleOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId: "session-auto",
+			transport: "auto",
+			onPayload(payload) {
+				return {
+					...(payload as object),
+					input: [{ type: "reasoning", encrypted_content: "fixture-opaque", summary: [] }],
+				};
+			},
+			attempts: {
+				measureRequest(request) {
+					measured = request;
+					const assessment = budget.measure(request);
+					expect(assessment).toMatchObject({ status: "unknown", aggressivePacking: false });
+					try {
+						budget.assert(assessment);
+					} catch (error) {
+						refusal = error;
+						throw error;
+					}
+					return assessment;
+				},
+				admit,
+				async settle() {
+					throw new Error("Local budget refusal reached settlement");
+				},
+			},
+		}).result();
+		expect(refused.stopReason).toBe("error");
+		expect(refusal).toBeInstanceOf(RequestTokenBudgetError);
+		expect(measured?.url).toBe("wss://chatgpt.com/backend-api/codex/responses");
+		expect(measured?.retainedPrefix).toBeUndefined();
+		expect(admit).not.toHaveBeenCalled();
+		expect(close).not.toHaveBeenCalled();
+		expect(sentBodies).toHaveLength(1);
+		expect(global.fetch).not.toHaveBeenCalled();
+		expect(getOpenAICodexWebSocketDebugStats("session-auto")).toEqual(beforeRefusal);
 	});
 
 	it("sends only response input deltas in websocket-cached mode", async () => {
 		const token = mockToken();
 		const sentBodies: unknown[] = [];
 		const receipts: ProviderAttemptReceipt[] = [];
+		const budget = cachedRequestBudget();
+		const measured: ProviderRequestRepresentation[] = [];
+		const assessments: RequestTokenAssessment[] = [];
+		const refusals: unknown[] = [];
+		let pendingBody: unknown;
+		let releaseFirstAck!: () => void;
+		let firstSettlementStarted!: () => void;
+		const firstAck = new Promise<void>((resolve) => {
+			releaseFirstAck = resolve;
+		});
+		const settlementStarted = new Promise<void>((resolve) => {
+			firstSettlementStarted = resolve;
+		});
 		let admitted = 0;
 		const attempts: ProviderAttemptObserver = {
+			measureRequest(request) {
+				measured.push(request);
+				const assessment = budget.measure(request);
+				assessments.push(assessment);
+				try {
+					budget.assert(assessment);
+				} catch (error) {
+					refusals.push(error);
+					throw error;
+				}
+				return assessment;
+			},
 			async admit() {
 				await Promise.resolve();
 				return `attempt_${++admitted}`;
 			},
 			async settle(receipt) {
 				receipts.push(receipt);
+				if (receipts.length === 1) {
+					firstSettlementStarted();
+					await firstAck;
+				}
 			},
 		};
 		global.fetch = vi.fn(async () => {
@@ -988,14 +1101,64 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
 		};
 
-		const first = await streamOpenAICodexResponses(model, firstContext, {
+		const firstStream = streamOpenAICodexResponses(model, firstContext, {
 			attempts,
 			reasoningEffort: "high",
 			serviceTier: "priority",
 			apiKey: token,
 			sessionId: "session-1",
 			transport: "websocket-cached",
-		}).result();
+		});
+
+		const firstEvents = firstStream[Symbol.asyncIterator]();
+		let first!: AssistantMessage;
+		try {
+			const started = await firstEvents.next();
+			if (started.done || started.value.type !== "start")
+				throw new Error("Expected the existing first response start");
+			await settlementStarted;
+			// This is the actual completed streamed object, while its ordinary receipt ACK is still pending.
+			const pendingContext: Context = {
+				...firstContext,
+				messages: [
+					...firstContext.messages,
+					started.value.partial,
+					{ role: "user", content: "Now finish", timestamp: 2 },
+				],
+			};
+			const beforeRefusal = getOpenAICodexWebSocketDebugStats("session-1");
+			const pending = await streamOpenAICodexResponses(model, pendingContext, {
+				attempts,
+				reasoningEffort: "high",
+				serviceTier: "priority",
+				apiKey: token,
+				sessionId: "session-1",
+				transport: "websocket-cached",
+				onPayload(payload) {
+					const body = payload as { input: unknown[] };
+					return {
+						...body,
+						input: [...body.input, { type: "reasoning", encrypted_content: "fixture-opaque", summary: [] }],
+					};
+				},
+			}).result();
+			expect(pending.stopReason).toBe("error");
+			expect(pending.errorMessage).toContain("Request token budget unknown");
+			expect(refusals).toHaveLength(1);
+			expect(refusals[0]).toBeInstanceOf(RequestTokenBudgetError);
+			expect(measured.at(-1)?.retainedPrefix).toBeUndefined();
+			pendingBody = JSON.parse(measured.at(-1)!.body!);
+			expect(assessments.at(-1)).toMatchObject({ status: "unknown", aggressivePacking: false });
+			expect(admitted).toBe(1);
+			expect(sentBodies).toHaveLength(1);
+			expect(receipts).toHaveLength(1);
+			expect(global.fetch).not.toHaveBeenCalled();
+			expect(getOpenAICodexWebSocketDebugStats("session-1")).toEqual(beforeRefusal);
+		} finally {
+			releaseFirstAck();
+			first = await firstStream.result();
+			await firstEvents.return?.();
+		}
 
 		const secondContext: Context = {
 			systemPrompt: "You are a helpful assistant.",
@@ -1068,6 +1231,35 @@ describe("openai-codex streaming", () => {
 			lastDeltaInputItems: 1,
 			lastPreviousResponseId: "resp_1",
 		});
+		const fullRequest = measured.at(-1)!;
+		const fullBody = JSON.parse(fullRequest.body!);
+		expect(fullRequest.url).toBe("wss://chatgpt.com/backend-api/codex/responses");
+		expect(measured[0].retainedPrefix).toBeUndefined();
+		expect(fullRequest.retainedPrefix).toEqual({
+			inputItems: 2,
+			inputTokens: 5,
+			outputTokens: 3,
+			responseModel: "gpt-5.1-codex-snapshot",
+		});
+		expect(fullBody.previous_response_id).toBeUndefined();
+		expect(fullBody.input).toHaveLength(3);
+		expect(fullBody.input[0]).toEqual(firstBody.input[0]);
+		expect(fullBody.input[2]).toEqual(secondBody.input[0]);
+		expect(pendingBody).toEqual({
+			...fullBody,
+			input: [...fullBody.input, { type: "reasoning", encrypted_content: "fixture-opaque", summary: [] }],
+		}); // The same exact logical prefix was present before ACK; only its observation was unknown.
+		expect(assessments.at(-1)).toMatchObject({
+			status: "within-estimate",
+			limitSource: "explicit-profile",
+			contextTokens: 4096,
+			retainedInputTokens: 8,
+			outputReserveTokens: 64,
+			reasoningReservation: "included-in-output",
+			serializedBytes: new TextEncoder().encode(fullRequest.body!).byteLength,
+			aggressivePacking: false,
+		});
+		expect(refusals).toHaveLength(1);
 	});
 
 	it("settles physical websocket fallback and SSE retry attempts without a stream listener", async () => {

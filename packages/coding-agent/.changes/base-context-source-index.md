@@ -33,3 +33,7 @@
 - Isolate benchmark candidate services/judges and distinguish legacy observations from physical usage.
 - Render bounded source-backed TaskFrames with stable revision positions in native provider context.
 - Build revision-aware ViewUnit metadata and complete replay/delta dependency closure helpers.
+- Add explicit profile-based request token budgets, unknown-adapter admission refusal, and native error propagation.
+- Preserve cached Codex context on local budget refusal and account for acknowledged retained context.
+- Remove unsupported kernel-survival assertions and correct fork installation and support documentation.
+- Map canonical specification coverage, deviations, evidence limits, and remaining work in SPEC_DEVIATIONS.md.

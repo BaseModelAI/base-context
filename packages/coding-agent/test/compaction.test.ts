@@ -180,8 +180,9 @@ describe("buildSummarizationPrompt", () => {
 		const prompt = buildSummarizationPrompt();
 		expect(prompt).not.toContain("<user-instructions>");
 		expect(prompt).toContain("## Goal");
-		// The kernel keeps running across compaction — the note must not claim a wipe.
-		expect(prompt).toContain("Python kernel keeps running");
+		expect(prompt).toContain("does not establish whether a Python kernel is live");
+		expect(prompt).toContain("do not infer either survival or loss from compaction");
+		expect(prompt).not.toContain("Python kernel keeps running");
 		expect(prompt).not.toMatch(/wiped|restarted/);
 	});
 
@@ -199,6 +200,10 @@ describe("buildSummarizationPrompt", () => {
 		expect(initial).not.toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("<user-instructions>");
+		expect(update).toContain("Preserve useful names and their last observed state, including uncertainty");
+		expect(update).toContain("Use current runtime reports before relying on them");
+		expect(update).not.toContain("every Python variable");
+		expect(update.slice(update.indexOf("Runtime note:"))).toBe(initial.slice(initial.indexOf("Runtime note:")));
 	});
 });
 
