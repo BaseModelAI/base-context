@@ -3,8 +3,9 @@ import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import * as sessionJournalReader from "../src/core/session-journal-reader.js";
 import type { SessionHeader } from "../src/core/session-manager.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const managers: SessionManager[] = [];
@@ -87,5 +88,37 @@ describe("SessionInfo.modified", () => {
 		expect(s).toBeDefined();
 		expect(s!.modified.getTime()).toBe(msgTime);
 		expect(s!.modified.getTime()).not.toBe(before.mtime.getTime());
+
+		const expected = structuredClone(s!);
+		const scans = vi.spyOn(sessionJournalReader, "readSessionJournal");
+		s!.name = "caller-only name";
+		s!.created.setTime(42);
+		s!.modified.setTime(0);
+		const cached = await readSessionInfo(filePath);
+		expect(cached).toEqual(expected);
+		expect(cached!.created).toBeInstanceOf(Date);
+		expect(cached!.modified).toBeInstanceOf(Date);
+		cached!.modified.setTime(1);
+		expect((await SessionManager.list("/tmp", dirname(filePath))).find((item) => item.path === filePath)).toEqual(
+			expected,
+		);
+		expect(scans).not.toHaveBeenCalled();
+
+		// Empty readable files retain null metadata too. Fill the real item bound,
+		// without inserting cache records or changing/resetting its limits.
+		let lastEmpty = "";
+		for (let index = 0; index < 256; index++) {
+			lastEmpty = join(dir, `cache-empty-${index}.jsonl`);
+			writeFileSync(lastEmpty, "");
+			expect(await readSessionInfo(lastEmpty)).toBeNull();
+		}
+		const beforeNullHit = scans.mock.calls.length;
+		expect(await readSessionInfo(lastEmpty)).toBeNull();
+		expect(scans).toHaveBeenCalledTimes(beforeNullHit);
+		const beforeSessionRescan = scans.mock.calls.filter(([path]) => path === filePath).length;
+		expect((await SessionManager.list("/tmp", dirname(filePath))).find((item) => item.path === filePath)).toEqual(
+			expected,
+		);
+		expect(scans.mock.calls.filter(([path]) => path === filePath)).toHaveLength(beforeSessionRescan + 1);
 	});
 });

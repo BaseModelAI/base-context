@@ -794,3 +794,40 @@ The same two doctor cases retain owned paths, credential-value exclusion and
 invalid legacy-root refusal. The happy case additionally observes native epoch
 metadata and the real text formatter. No installed CLI, deployment or whole G13
 certification is implied by this local metadata correction.
+
+## W52 update — native benchmark capacity authority
+
+The selected host package identity is cross-checked against the existing admitted
+package metadata. Native capacity invalidation requires an existing parsed settled
+physical receipt with `capacityConfirmed: true`; RPC-only or legacy assistant
+markers cannot exempt a native attempt. Missing native accounting does not restore
+RPC authority or imply zero work. H/legacy retains its prior RPC-or-aggregate rule.
+
+RPC markers remain explicit `rpc_capacity_observed` observations with their errors.
+An exceptional attempt with no returned RPC observation records null. Existing
+judging, retained attempts, first-valid-primary selection, retry allowances, time
+and known/unknown costs stay on their original paths. No completed output or
+frozen H/D/S host, layout or external runner is rewritten or reclassified.
+
+This closes the native runner's capacity-authority seam, not all G17 metadata or
+receipt coverage. Selected-host metadata checking is source wiring; the two
+existing cases use mocked selected hosts/RPC/judges and actual native receipt
+parsing through the runner/attempt/case path. They do not establish live provider
+receipt production, installed artifact identity, billing or publication readiness.
+
+## W53 update — bounded retained session-info cache
+
+The existing derived `sessionInfoCache` Map now retains at most 256 entries and
+4MiB encoded key/stat/info metadata. Null results count too. Encoding is bounded
+before retention cloning; the byte metric projects created/modified Date values
+to ISO strings, while the stored and returned metadata retains real Date/types.
+This is not a heap/RSS limit. Hits become recent; only oldest derived cache entries
+evict. Byte usage is summed from this bounded Map, preserving the existing stale
+file deletion path without another accounting store.
+
+Actual reads detach retained metadata from callers. A hit-copy failure removes
+cache ownership before returning the complete old value. Oversized, unencodable
+or uncloneable successful scans return unchanged and uncached, never clipped or
+replaced by an empty list. Missing/stat/null behavior and the existing size/mtime
+snapshot rule remain. Same-size/mtime edits, scans, paging, IPC/output, other
+caches, transient/caller-held values and full G08 remain outside this local bound.

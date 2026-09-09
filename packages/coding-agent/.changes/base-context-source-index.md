@@ -98,3 +98,7 @@
 - Refuse private release manifests that omit the active package identity. The existing producer already supplies it; owned npm registry lookup is unchanged. This is metadata admission, not artifact or updater activation certification.
 
 - Doctor now reports the actual native request/policy epoch renderer identifiers instead of saying native context is unimplemented. This remains local schema metadata, not runtime or model readiness.
+
+- Native benchmark capacity invalidation now requires an existing parsed settled physical receipt. RPC markers remain observations; generic H behavior, first-valid-primary retention and unknown costs remain unchanged. Selected host identity is checked through existing manifest metadata admission. Frozen hosts/runners and past results are not rewritten.
+
+- Optional session-info caching now retains at most256 entries/4MiB encoded key/stat/info metadata in the same Map. Caller copies stay detached with Date/types preserved; oversized complete results bypass caching. Scans, paging, IPC/output and global heap remain outside this bound.

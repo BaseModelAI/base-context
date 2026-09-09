@@ -128,7 +128,8 @@ class HarnessComparisonTests(unittest.TestCase):
             workspace = root / "workspace"
             workspace.mkdir()
             node = Path("/usr/bin/node")
-            host = {"package_root": str(root / "image/unpacked/base-context/package"), "argv": [str(node), "/frozen/cli.js"]}
+            host = {"package_name": benchmark.NATIVE_PACKAGE, "package_root": str(root / "image/unpacked/base-context/package"),
+                    "argv": [str(node), "/frozen/cli.js"]}
             args = argparse.Namespace(
                 host_openai_codex_auth_file=root / "host-auth.json", model="gpt-5.6-sol", thinking="medium",
                 bwrap="/usr/bin/bwrap", timeout_seconds=10, hosts={"current": host},
@@ -178,6 +179,41 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertNotIn(["--bind", "/", "/"], [isolated[index:index + 3] for index in range(len(isolated) - 2)])
             self.assertIn("BASE_CONTEXT_HOME", environment)
             self.assertFalse((root / "config/auth.json").exists())
+
+            # Existing native receipt parser -> real runner/attempt/case retention.
+            # Only the RPC process and judge are mocked; no provider call is made.
+            receipt_scenario = {**scenario, "id": 1, "slug": "receipt-capacity", "pressure": "N",
+                                "stages": [{"id": "initial"}]}
+            args.retry_failed = 0
+            receipt_dir = root / "task-01-receipt-capacity/current/attempt-1/sessions"
+            receipt_dir.mkdir(parents=True)
+            native_journal(receipt_dir / "session.jsonl", incomplete=True)
+            processes = []
+            for index in range(2):
+                child = Mock(pid=1300 + index, stdout=io.StringIO(json.dumps({"type": "agent_end"}) + "\n"))
+                child.wait.return_value = child.poll.return_value = 0
+                processes.append(child)
+            with patch.object(benchmark.subprocess, "Popen", side_effect=processes), \
+                    patch.object(benchmark, "inject_stage"), patch.object(benchmark, "stop_process"), \
+                    patch.object(benchmark, "stop_attempt_processes"), \
+                    patch.object(benchmark, "prepare_workspace", side_effect=lambda _task, _scenario, path: path.mkdir()), \
+                    patch.object(benchmark, "run_judge", return_value=(attempt(wall=1, cost=None)["judge"], 0.0, "fixture")) as judge:
+                receipt_case = benchmark.run_case("current", root, receipt_scenario, root, args)
+            self.assertEqual(receipt_case["capacity_invalid_attempts"], 1)
+            self.assertEqual(receipt_case["valid_attempts"], 1)
+            self.assertEqual(receipt_case["primary_attempt"], 1)
+            self.assertEqual(len(receipt_case["attempts"]), 2)
+            first = receipt_case["attempts"][0]
+            self.assertTrue(first["capacity_invalid"])
+            self.assertFalse(first["rpc_capacity_observed"])
+            self.assertEqual(first["judge"]["status"], "invalid")
+            self.assertEqual(len(first["metrics"]["physical_attempts"]), 1)
+            self.assertIsNone(first["metrics"]["api_cost"]["total"])
+            self.assertIsNone(receipt_case["attempts"][1]["metrics"]["all_model_calls"])
+            judge.assert_called_once()
+            saved = json.loads((root / "task-01-receipt-capacity/current/case.json").read_text())
+            self.assertEqual(saved["primary_attempt"], 1)
+            self.assertEqual(saved["attempts"][0]["rpc_capacity_observed"], False)
 
         # Actual candidate Python mount/PID isolation, separate from mocked RPC above.
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
@@ -292,6 +328,73 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertEqual(legacy["observed_provider_usage"]["totalTokens"], 145)
             self.assertEqual(legacy["assistant_usage_observations"][0]["usage"], [observed_usage])
             self.assertTrue(legacy["provider_capacity_confirmed"])
+
+            # Native host selection remains authoritative when no native receipts exist,
+            # even if both RPC and a legacy assistant observation say capacity.
+            node = Path("/usr/bin/node")
+            native_host = {"package_name": benchmark.NATIVE_PACKAGE,
+                           "package_root": str(root / "image/unpacked/base-context/package"),
+                           "argv": [str(node), "/frozen/cli.js"]}
+            legacy_host = {**native_host, "package_name": "@earendil-works/pi-coding-agent",
+                           "package_root": str(root / "legacy-package")}
+            hosts = {"current": native_host, "vanilla": legacy_host}
+            args = argparse.Namespace(
+                host_openai_codex_auth_file=root / "host-auth.json", model="gpt-5.6-sol", thinking="medium",
+                bwrap="/usr/bin/bwrap", timeout_seconds=10, retry_failed=1, hosts=hosts,
+                host_manifest={"node_executable": str(node), "dependency_root": str(root / "dependencies"), "hosts": hosts},
+            )
+            rpc_scenario = {"id": 3, "slug": "rpc-only", "pressure": "N", "initial_prompt": "initial",
+                            "timeout_seconds": 10, "editable_paths": [], "stages": [{"id": "initial"}]}
+            sessions = root / "task-03-rpc-only/current/attempt-1/sessions"
+            sessions.mkdir(parents=True)
+            (sessions / "legacy.jsonl").write_text(legacy_path.read_text())
+            processes = []
+            for index, event in enumerate([exact_error, {"type": "agent_end"}, exact_error]):
+                child = Mock(pid=1400 + index, stdout=io.StringIO(json.dumps(event) + "\n"))
+                child.wait.return_value = child.poll.return_value = 0
+                processes.append(child)
+            with patch.object(benchmark.subprocess, "Popen", side_effect=processes), \
+                    patch.object(benchmark, "inject_stage"), patch.object(benchmark, "stop_process"), \
+                    patch.object(benchmark, "stop_attempt_processes"), \
+                    patch.object(benchmark, "prepare_workspace", side_effect=lambda _task, _scenario, path: path.mkdir()), \
+                    patch.object(benchmark, "run_judge", side_effect=[
+                        (attempt(wall=1, cost=None, progress=3)["judge"], 0.0, "fixture failure"),
+                        (attempt(wall=1, cost=None)["judge"], 0.0, "fixture pass"),
+                    ]) as judge:
+                rpc_case = benchmark.run_case("current", root, rpc_scenario, root, args)
+                legacy_attempt = benchmark.run_attempt("vanilla", root, rpc_scenario, root / "legacy-rpc", args)
+            self.assertEqual(rpc_case["primary_attempt"], 0)
+            self.assertEqual(rpc_case["capacity_invalid_attempts"], 0)
+            self.assertEqual(rpc_case["valid_attempts"], 2)
+            self.assertEqual(rpc_case["retry_triggers"], [{"attempt": 2, "reasons": ["strict_failure"]}])
+            first = rpc_case["attempts"][0]
+            self.assertFalse(first["capacity_invalid"])
+            self.assertTrue(first["rpc_capacity_observed"])
+            self.assertEqual(first["error"], "AgentError: Selected model is at capacity.")
+            self.assertEqual(first["judge"]["status"], "fail")
+            self.assertTrue(first["metrics"]["provider_capacity_confirmed"])
+            self.assertEqual(first["metrics"]["physical_attempts"], [])
+            self.assertIsNone(first["metrics"]["all_model_calls"])
+            self.assertIsNone(first["metrics"]["api_cost"]["total"])
+            self.assertIsInstance(first["agent_wall_seconds"], float)
+            self.assertEqual(benchmark.primary_attempt(rpc_case), first)
+            self.assertTrue(legacy_attempt["capacity_invalid"])
+            self.assertTrue(legacy_attempt["rpc_capacity_observed"])
+            self.assertEqual(judge.call_count, 2)
+            saved = json.loads((root / "task-03-rpc-only/current/case.json").read_text())
+            self.assertEqual(saved["primary_attempt"], 0)
+            self.assertEqual(len(saved["attempts"]), 2)
+            self.assertTrue(saved["attempts"][0]["rpc_capacity_observed"])
+
+            fallback_dir = root / "rpc-fallback"
+            (fallback_dir / "sessions").mkdir(parents=True)
+            (fallback_dir / "sessions/legacy.jsonl").write_text(legacy_path.read_text())
+            with patch.object(benchmark, "run_attempt", side_effect=RuntimeError("fixture setup failed")):
+                fallback = benchmark.safe_run_attempt("current", root, rpc_scenario, fallback_dir, args)
+            self.assertFalse(fallback["capacity_invalid"])
+            self.assertIsNone(fallback["rpc_capacity_observed"])
+            self.assertEqual(fallback["error"], "RuntimeError: fixture setup failed")
+            self.assertIsNone(fallback["metrics"]["api_cost"]["total"])
             current = result("current", attempt(wall=8, cost=None))
             summary = benchmark.comprehensive_summary([vanilla, current])
             self.assertIsNone(summary["matched_strict_pass_comparisons"][0]["api_cost_delta_current_minus_baseline"])

@@ -1535,3 +1535,105 @@ TypeScript, installer and browser checks. Expected controlled pre-fetch refusal
 logs in W48 and a Python asyncio slow-task diagnostic accompanied passing tests;
 neither indicates a provider request or failed case. Original failures/logs are
 retained. No broad suite, live provider probe, installation or publication ran.
+
+### W52 — receipt-owned native capacity invalidation
+
+The native runner now grants a capacity exemption only from a parsed settled
+physical receipt. The selected host's package name is checked against the actual
+package metadata during existing manifest admission. RPC and legacy assistant
+capacity messages remain observations, not native exemption authority. H keeps
+its previous behavior. No receipt means no established exemption, not zero work.
+
+Validation passed on first run: the same two benchmark harness cases exercise real parsing,
+runner/attempt/case classification and saved primary retention with mocked RPC
+processes/judges. Receipt-confirmed capacity retains the invalid attempt before
+the next valid primary; RPC-only native failure remains primary despite a later
+diagnostic pass. Legacy compatibility and exceptional unknown observations remain.
+The first case's existing Python/process-isolation phase is unchanged. No live
+provider/judge call, frozen-host change or retrospective result reclassification
+is part of the new phases. Broader G17 metadata and billing evidence remain open.
+
+### W53 — bounded optional session-list metadata caching
+
+The existing session-info cache is capped at 256 entries/4MiB encoded key/stat/info
+metadata. The same Map owns entries and derived byte counts; oldest entries evict
+and hits become recent. Bounded encoding precedes retained cloning. Cache copies
+preserve Date/types and do not share mutable nested metadata with callers.
+Oversized successful results still return completely, without being cached.
+
+Validation passed on first run: two existing cases retain their original timestamp and
+large-message list assertions, then exercise actual reads/lists, caller detachment,
+null/item eviction, combined UTF-8 byte capacity and complete oversized list
+results. Read spies call through; no cache injection/reset or artificial quota
+override is used. IPC/resolve and unusual copy-failure branches are source wiring.
+This is retained derived-cache admission, not bounded scans, paging, outgoing
+results, caller values or whole-process heap/RSS evidence.
+
+### H/native Astra MEDIUM — frozen W32 comparison completed
+
+The invocation exited normally after 3428.637s.
+All60 immutable primaries and63 retained attempts remain: native29/30 judges
+(31 attempts), H28/30 (32 attempts), zero capacity-invalid attempts. Native17
+failed main4/5 with edgeTrue/no runtime error. H17 failed main0/5/edgeFalse
+with WebSocket1006; H27 failed main2/5/edgeFalse with WebSocket1006. Each failed
+primary has one retained diagnostic, never substituted for the first valid primary.
+
+Five runtime errors occur across all retained attempts: primary H17/H27
+WebSocket1006, primary native27 EOF-drain error, primary native30 WebSocket1012,
+and diagnostic H27 EOF-drain error. Native27/native30 passed their judges despite
+their runtime errors. H30 passed runtime-clean. Judge pass is not runtime-clean.
+
+The28 matched passing primary pairs took native
+5335.872s/H5142.587s
+(+3.759%),8 faster/20 slower. The27 runtime-clean pairs, excluding30, took
+4769.394s/H4465.427s
+(+6.807%),7 faster/20 slower. That supplement does not replace the full
+matched result. Higher native correctness comes with slower conditional timing;
+usage/billed cost remain incomplete/null, so no overall native gain is established.
+All-retained agent6250.571s/6208.781s is not paired speed evidence.
+
+Same28 solver observations, native/H: model calls
+309/313, tools
+248/251, recovery0/0; input including cache
+3020169/2725563, uncached
+522377/557371, cache-read
+2497792/2168192, output
+150957/146407. These are solver observations, not complete
+comparable physical accounting, billing, or latency-cause evidence. MEDIUM has no
+publication-protocol blocker, but publication readiness remains false and no
+publication approval is granted. Older LOW flags remain unchanged.
+
+Read-only native17 LOW/MEDIUM primary comparison found identical saved clause
+and missing CSVs but different comparison-report labels/grouping. LOW renders
+human-readable liability labels and repeats values; MEDIUM retains normalized
+labels and citation-only members. The actual values and inspected public inputs
+were present. The judge does not define check4 or expose failing fresh output.
+This is a supported representation difference, not a confirmed wrong-value bug,
+missing-context finding, optimizer/effort causation or exhaustive sole cause.
+The failed MEDIUM primary remains failed; no solver/corpus patch or feedback ran.
+
+The earlier Sol MEDIUM native25 primary's actual public recovery search returned
+two source records containing the report-freshness clause. Its status/coverage
+remained partial (`unsupported_public_shape`). This is a working partial public
+search, not complete recovery or causal correctness/time/cost gain.
+
+This invocation used unchanged frozen W32 H/native, not the later source. D Sol
+MEDIUM is next on its separately frozen runner/hosts after this source gap. No
+completed output, frozen host or candidate is rewritten, repacked or replaced.
+
+### W52–W53 source-gap validation outcome
+
+Four distinct existing cases passed on their first run in three focused commands:
+two native Python benchmark cases and one case each for session timestamp/cache
+and flat-storage cache behavior. The required `npm run check` passed:1038 files
+with no fixes, TypeScript, installer and browser checks. Only the three changed
+TypeScript files were formatted beforehand (two format fixes). No new suite,
+provider probe, inference, installation or publication was run. W46–W51 and
+previously completed campaigns/checks were not replayed.
+
+Capacity coverage is actual parser/runner/attempt/case flow with mocked RPC/judge
+and selected-host fixtures, plus the existing isolation subprocess phase. Cache
+coverage uses real persisted metadata, full list/read paths and call-through read
+spies without injected cache entries or quota resets. These scoped paths do not
+establish manifest/artifact/provider certification, bounded catalog scans, all
+IPC/resolve/copy-failure branches, global heap, billing or release readiness.

@@ -1063,14 +1063,18 @@ function extractOversizedMessageSummary(line: string): {
 	};
 }
 
+const SESSION_INFO_CACHE_MAX_ENTRIES = 256;
+const SESSION_INFO_CACHE_MAX_BYTES = 4 * 1024 * 1024;
+
 interface SessionInfoCacheEntry {
 	size: number;
 	mtimeMs: number;
 	info: SessionInfo | null;
+	encodedBytes: number;
 }
 
-// Session files are append-only, so an unchanged (size, mtimeMs) means identical
-// content: cache list metadata and rescan only files that changed.
+// Optional derived metadata using the existing size/mtime snapshot. The byte
+// limit covers encoded key/stat/info data, not scan allocations or process heap.
 const sessionInfoCache = new Map<string, SessionInfoCacheEntry>();
 
 export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
@@ -1082,10 +1086,57 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 	}
 	const cached = sessionInfoCache.get(filePath);
 	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
-		return cached.info;
+		try {
+			const info = structuredClone(cached.info);
+			sessionInfoCache.delete(filePath);
+			sessionInfoCache.set(filePath, cached);
+			return info;
+		} catch {
+			// Give up cache ownership rather than lose a complete successful result.
+			sessionInfoCache.delete(filePath);
+			return cached.info;
+		}
 	}
 	const info = await scanSessionInfo(filePath, stats);
-	sessionInfoCache.set(filePath, { size: stats.size, mtimeMs: stats.mtimeMs, info });
+	sessionInfoCache.delete(filePath);
+	try {
+		const encoded = stringifyBoundedJson(
+			{
+				filePath,
+				size: stats.size,
+				mtimeMs: stats.mtimeMs,
+				info:
+					info === null
+						? null
+						: {
+								...info,
+								created: info.created.toISOString(),
+								modified: info.modified.toISOString(),
+							},
+			},
+			SESSION_INFO_CACHE_MAX_BYTES,
+		);
+		const entry: SessionInfoCacheEntry = {
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+			info: structuredClone(info),
+			encodedBytes: Buffer.byteLength(encoded),
+		};
+		let retainedBytes = 0;
+		for (const retained of sessionInfoCache.values()) retainedBytes += retained.encodedBytes;
+		while (
+			sessionInfoCache.size >= SESSION_INFO_CACHE_MAX_ENTRIES ||
+			retainedBytes + entry.encodedBytes > SESSION_INFO_CACHE_MAX_BYTES
+		) {
+			const oldest = sessionInfoCache.entries().next().value;
+			if (!oldest) return info;
+			sessionInfoCache.delete(oldest[0]);
+			retainedBytes -= oldest[1].encodedBytes;
+		}
+		sessionInfoCache.set(filePath, entry);
+	} catch {
+		// Cache admission is optional. Return the complete scan result unchanged.
+	}
 	return info;
 }
 

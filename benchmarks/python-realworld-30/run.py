@@ -88,6 +88,20 @@ def provider_capacity_error(event: dict[str, Any]) -> bool:
     )
 
 
+def capacity_invalid(
+    host: dict[str, Any], metrics: dict[str, Any], rpc_capacity_observed: bool = False,
+) -> bool:
+    # package_name is checked against the selected package by apply_hosts_manifest.
+    # Missing native accounting does not restore authority to RPC/legacy markers.
+    if host["package_name"] == NATIVE_PACKAGE:
+        return any(
+            request.get("type") == "attempt_settled"
+            and (request.get("receipt") or {}).get("capacityConfirmed") is True
+            for request in metrics.get("physical_attempts", [])
+        )
+    return rpc_capacity_observed or metrics.get("provider_capacity_confirmed") is True
+
+
 def message_end_error(event: dict[str, Any]) -> str | None:
     message = event.get("message")
     if not isinstance(message, dict) or message.get("stopReason") != "error":
@@ -621,6 +635,7 @@ def run_rpc(
     run_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    host = args.hosts[variant]
     roots = prepare_agent_home(run_dir, args)
     environment = clean_environment(
         roots["config"], roots["home"], variant=variant,
@@ -632,7 +647,7 @@ def run_rpc(
     stderr_path = run_dir / "rpc-stderr.txt"
     transcript_path = run_dir / "transcript.jsonl"
     q: queue.Queue[str | None] = queue.Queue()
-    command = isolated_agent_command(agent_command(variant, workspace, roots, args), args.hosts[variant], run_dir, args)
+    command = isolated_agent_command(agent_command(variant, workspace, roots, args), host, run_dir, args)
     services: list[Service] = []
     service_events: list[dict[str, Any]] = []
     fixture = scenario.get("fixture_service")
@@ -680,7 +695,7 @@ def run_rpc(
         compaction_request_id: str | None = None
         done = False
         error: str | None = None
-        capacity_confirmed = False
+        rpc_capacity_observed = False
         peak_provider_bound: int | None = None
 
         def send(kind: str, label: str, message: str | None = None) -> str:
@@ -789,7 +804,7 @@ def run_rpc(
                     continue
                 kind = event.get("type")
                 if provider_capacity_error(event):
-                    capacity_confirmed = True
+                    rpc_capacity_observed = True
                     error = "AgentError: Selected model is at capacity."
                     done = True
                     continue
@@ -856,7 +871,7 @@ def run_rpc(
                     break
                 if trailing is not None:
                     event = record(trailing)
-                    capacity_confirmed = capacity_confirmed or (event is not None and provider_capacity_error(event))
+                    rpc_capacity_observed = rpc_capacity_observed or (event is not None and provider_capacity_error(event))
                     if event is not None and error is None:
                         error = message_end_error(event)
                         if event.get("type") == "response" and event.get("success") is False:
@@ -877,7 +892,8 @@ def run_rpc(
     })
     return {
         "agent_wall_seconds": agent_wall,
-        "capacity_invalid": capacity_confirmed or metrics.get("provider_capacity_confirmed") is True,
+        "capacity_invalid": capacity_invalid(host, metrics, rpc_capacity_observed),
+        "rpc_capacity_observed": rpc_capacity_observed,
         "rpc_process": {"pid": process.pid, "exit_code": process.poll()},
         "error": error,
         "command": command,
@@ -963,7 +979,8 @@ def safe_run_attempt(
             "agent_wall_seconds": None,
             "judge_seconds": None,
             "lifecycle_wall_seconds": time.monotonic() - started,
-            "capacity_invalid": metrics.get("provider_capacity_confirmed") is True,
+            "capacity_invalid": capacity_invalid(args.hosts[variant], metrics),
+            "rpc_capacity_observed": None,
             "judge": {
                 "status": "error",
                 "progress_level": 0,
@@ -1384,7 +1401,8 @@ def apply_hosts_manifest(args: argparse.Namespace) -> dict[str, Any]:
         package = Path(host["package_root"]).resolve(strict=True)
         metadata = json.loads((package / "package.json").read_text())
         expected_name = "@earendil-works/pi-coding-agent" if variant == "vanilla" else NATIVE_PACKAGE
-        if metadata.get("name") != expected_name or metadata.get("version") != host.get("version"):
+        if (metadata.get("name") != expected_name or host.get("package_name") != metadata.get("name")
+                or metadata.get("version") != host.get("version")):
             raise ValueError(f"{variant} host package metadata mismatch")
         if variant == "vanilla" and metadata["version"] != H_VERSION:
             raise ValueError(f"vanilla requires pinned local H{H_VERSION}")

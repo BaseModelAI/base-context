@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.js";
+import { describe, expect, it, vi } from "vitest";
+import * as sessionJournalReader from "../../src/core/session-journal-reader.js";
+import { readSessionInfo, SessionManager } from "../../src/core/session-manager.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
 const managers: SessionManager[] = [];
@@ -45,6 +46,7 @@ describe("SessionManager flat storage", () => {
 
 	it("lists sessions without loading large message bodies into search text", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-large-list-"));
+		const scans = vi.spyOn(sessionJournalReader, "readSessionJournal");
 		try {
 			const sessionDir = join(tempDir, "sessions");
 			const cwd = join(tempDir, "project");
@@ -63,7 +65,44 @@ describe("SessionManager flat storage", () => {
 			expect(sessions[0].messageCount).toBe(2);
 			expect(sessions[0].firstMessage).toBe("small prompt");
 			expect(sessions[0].allMessagesText).toBe("small prompt");
+
+			// Each metadata row remains below the existing scanner's character limit.
+			// UTF-8 makes two retained summaries exceed 4MiB well before 256 entries.
+			const largeMetadata = "界".repeat(720_000);
+			const sessionPath = session.getSessionFile()!;
+			const scansFor = (path: string) => scans.mock.calls.filter(([source]) => source === path).length;
+			await session.appendAgentStatus({ summary: largeMetadata, taskState: "completed", basedOnMessageCount: 2 });
+			const initial = await readSessionInfo(sessionPath);
+			expect(initial!.agentStatus!.summary).toBe(largeMetadata);
+			const complete = structuredClone(initial);
+			initial!.agentStatus!.summary = "caller-only summary";
+			initial!.state!.status = "archived";
+			const beforeHit = scansFor(sessionPath);
+			expect((await SessionManager.list(cwd, sessionDir))[0]).toEqual(complete);
+			expect(scansFor(sessionPath)).toBe(beforeHit);
+
+			const peer = await createPersistedSession(cwd, sessionDir, "byte-budget peer");
+			await peer.appendAgentStatus({ summary: largeMetadata, basedOnMessageCount: 2 });
+			expect((await readSessionInfo(peer.getSessionFile()!))!.agentStatus!.summary).toBe(largeMetadata);
+			const beforeEvictedRead = scansFor(sessionPath);
+			expect(await readSessionInfo(sessionPath)).toEqual(complete);
+			expect(scansFor(sessionPath)).toBe(beforeEvictedRead + 1);
+
+			// A complete single result can exceed the cache budget. It still appears
+			// unchanged in actual list results, and another read must rescan it.
+			await session.appendSessionInfo(largeMetadata);
+			const beforeOversizedRead = scansFor(sessionPath);
+			const uncached = await readSessionInfo(sessionPath);
+			expect(uncached!.name).toBe(largeMetadata);
+			expect(uncached!.agentStatus!.summary).toBe(largeMetadata);
+			expect(uncached!.messageCount).toBe(2);
+			expect(uncached!.firstMessage).toBe("small prompt");
+			const completeList = await SessionManager.listAll(undefined, sessionDir);
+			expect(completeList).toHaveLength(2);
+			expect(completeList.find((item) => item.id === session.getSessionId())).toEqual(uncached);
+			expect(scansFor(sessionPath)).toBe(beforeOversizedRead + 2);
 		} finally {
+			scans.mockRestore();
 			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}
