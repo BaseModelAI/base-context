@@ -78,6 +78,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	private subagentRuntimeHost?: SubagentRuntimeHost;
 	private subagentRuntimes = new Map<string, AgentSessionRuntime>();
 	private disposePromise?: Promise<void>;
+	private autoRefineAdmissionClosed = false;
 
 	constructor(
 		private _session: AgentSession,
@@ -218,7 +219,14 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		await this.disposeHostedSubagentRuntimes();
 	}
 
+	/** Native EOF closes new opportunistic work, including a session replaced by an already accepted command. */
+	closeAutoRefineAdmission(): void {
+		this.autoRefineAdmissionClosed = true;
+		this._session.closeAutoRefineAdmission();
+	}
+
 	private bindRuntimeHost(): void {
+		if (this.autoRefineAdmissionClosed) this._session.closeAutoRefineAdmission();
 		this._session.setSubagentRuntimeHost(this.subagentRuntimeHost ?? this);
 	}
 

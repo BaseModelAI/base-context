@@ -1380,3 +1380,15 @@ type Tool
 ```
 
 For extension types, see [extensions.md](extensions.md) for the full API.
+
+
+### Refinement during shutdown
+
+`session.closeAutoRefineAdmission()` synchronously and permanently stops new automatic
+refinement for that session. It does not disable model-visible skills, cancel accepted
+calls, or discard an explicitly queued `refine.run`. Native RPC closes this gate before
+waiting for accepted commands; its runtime carries closure across an already accepted
+session replacement. `disposeAsync()` also closes the gate and drains accepted work
+without starting automatic reviews/plans or retrying failed background plans.
+
+The gate does not impose a shutdown deadline. Already accepted work can still be slow.

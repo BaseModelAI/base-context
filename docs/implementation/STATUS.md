@@ -1087,3 +1087,44 @@ This is bounded local evidence, not all daemon fault paths, synthetic/unlimited-
 fixtures, platform durability, a full scheduler, or whole-process certification. No timed
 benchmark ran during W34 source integration/checks. Its frozen W32 packages and runners
 are unchanged. Publication and goal completion remain pending.
+
+
+## W33 — Astra LOW H/native complete
+
+The frozen W32 comparison completed all30 tasks per arm for exact `gpt-6-astra` LOW
+using the same existing subscription. PID3387431 exited0 after3544.648932s. Native
+passed30/30 judges; H passed29/30. H17's primary failed at progress3; its diagnostic
+does not replace it. Native27 and H27/30 passed their judges but recorded
+`RPC host did not drain after stdin EOF`. Judge pass is not runtime-clean completion.
+
+Native was faster on15 and slower on14 of29 matched judge-pass pairs; their agent-time
+deltas sum to-155.824390s, including the errored pairs. Neither arm has complete
+usage/cost, so cost remains unknown. Native retained30 attempts and H31, with zero
+capacity-invalidated attempts. Raw `thinking must be medium` publication policy remains
+separate from the user's LOW execution override. Full D/S LOW for both models precedes
+any MEDIUM comparison. Source fixes do not replace frozen W32 during this campaign.
+
+## W35 — stop new automatic refinement during shutdown
+
+The native runtime closes automatic-refinement admission synchronously at EOF before
+pending RPC handlers and `waitForIdle`. The gate survives an already accepted session
+replacement. Disposal drains accepted main/refinement work and explicit queued
+`refine.run`, but starts no new automatic review/plan and does not recreate a failed
+background plan for a disposal-only retry. Existing error handling, child cancellation
+and capacity rules remain unchanged. Model-visible eligibility and Sol's custom prompt
+are unchanged. Accepted slow work can still exceed30s; neither Sol30 nor Astra27 is
+uniquely attributed to a particular admission call site by the captured evidence.
+
+Eight existing cases passed on their first W35 invocations: serialized-refine6
+(PID3407475,5.888393s) and RPC2
+(PID3407480,6.909701s). The initial required check
+failed with TS2353 for an unsupported fixture services `model` option. Removing that
+extra option preserved explicit model selection in the session factory. The corrected
+required check passed (PID3408293,4.267737s;
+1038 files/no fixes, types, installer and browser smoke). No runtime cases were rerun.
+Logs: `.work/logs/w35-native-eof-*.log`. No new test suite, provider run, or physical-receipt
+claim is added by the local-faux fixture.
+
+For Astra, the27 judge-pass pairs with no recorded runtime error have native4334.047s
+versus H4135.403s (+4.8%), with native slower on14. This supplement does not replace the
+29-pair primary report. Overall efficiency and billed-cost gains are not established.

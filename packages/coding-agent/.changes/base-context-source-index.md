@@ -64,3 +64,5 @@
 - Use checked command/worker recovery writes, preserve uncertain outcomes and close errors, refuse malformed records and torn-tail mutation, and propagate persistence failures without a conflicting result retry.
 - Reserve one resident child per live parent before native spawn or passive hydration setup. Keep completed residents and uncertain cleanup charged; join partial setup during parent disposal.
 - Refuse child-runtime new/switch/fork/import replacement until it can retain owned admission. Main/root replacement is unchanged; full tree-wide scheduling remains deferred.
+
+- Closed new automatic-refinement admission at native RPC EOF before draining accepted work. Disposal no longer creates automatic review/planning or retries failed background plans; explicit queued requests and accepted operations still drain. Sol's custom prompt and model-visible skills are unchanged.

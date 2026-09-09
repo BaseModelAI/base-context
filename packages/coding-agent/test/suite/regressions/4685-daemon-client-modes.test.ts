@@ -113,9 +113,14 @@ async function runCli(
 
 async function runRpc(
 	commands: unknown[],
-	options: { trailingNewline?: boolean } = {},
+	options: { trailingNewline?: boolean; nativeRefineEof?: "main" | "review" } = {},
 ): Promise<{ stdout: object[]; stderr: string }> {
-	const child = spawn(process.execPath, [tsxPath, fixturePath], {
+	const nativeRoot = options.nativeRefineEof
+		? mkdtempSync(join(tmpdir(), "prime-agent-native-refine-eof-"))
+		: undefined;
+	if (nativeRoot) tempRoots.add(nativeRoot);
+	const args = [tsxPath, fixturePath, ...(nativeRoot ? [options.nativeRefineEof!, nativeRoot] : [])];
+	const child = spawn(process.execPath, args, {
 		env: { ...process.env, TSX_TSCONFIG_PATH: repoTsconfigPath },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
@@ -366,6 +371,11 @@ describe("ENG-4685 daemon-backed client modes", () => {
 				data: { models: [] },
 			},
 		]);
+		// Native owner: an already accepted review drains, but its approval cannot start a new plan at EOF.
+		const native = await runRpc([{ id: "state", type: "get_state" }], { nativeRefineEof: "review" });
+		expect(native.stderr).toBe("");
+		expect(native.stdout).toContainEqual({ type: "fixture_native_eof", calls: 2 });
+		expect(native.stdout.at(-1)).toEqual({ type: "fixture_native_disposed", calls: 2, acceptedAborted: false });
 	});
 
 	it("drains accepted RPC prompt work before EOF releases the connection", async () => {
@@ -376,6 +386,14 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			{ type: "agent_start" },
 			{ type: "agent_end", messages: [] },
 		]);
+		// The accepted native main request is held until the REAL EOF gate, then completes without cancellation.
+		const native = await runRpc([{ id: "native", type: "prompt", message: "finish accepted main" }], {
+			nativeRefineEof: "main",
+		});
+		expect(native.stderr).toBe("");
+		expect(native.stdout).toContainEqual(expect.objectContaining({ id: "native", type: "response", success: true }));
+		expect(native.stdout).toContainEqual(expect.objectContaining({ type: "agent_end" }));
+		expect(native.stdout.at(-1)).toEqual({ type: "fixture_native_disposed", calls: 1, acceptedAborted: false });
 	});
 
 	it("drains accepted daemon RPC prompt work before EOF", async () => {

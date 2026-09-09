@@ -214,16 +214,13 @@ describe("Serialized auto-refine checkpoint", () => {
 		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
 	});
 
-	it("final agent_end pending refine completes before dispose", async () => {
+	it("does not start due auto-refine during disposal", async () => {
+		const reviewer = vi.fn(async () => ({ shouldRefine: true, rationale: "test", instructions: "test" }));
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
 			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
-			autoRefineReviewer: vi.fn(async () => ({
-				shouldRefine: true,
-				rationale: "test",
-				instructions: "test",
-			})),
+			autoRefineReviewer: reviewer,
 		});
 		harnesses.push(harness);
 		const { applyRefine } = mockSerializedRefine(harness);
@@ -233,8 +230,9 @@ describe("Serialized auto-refine checkpoint", () => {
 
 		await harness.session.disposeAsync();
 
-		// The drain path ran the serialized checkpoint which called _applyRefine.
-		expect(applyRefine).toHaveBeenCalled();
+		// An interval being due is not accepted planning work. Disposal does not turn it into inference.
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(applyRefine).not.toHaveBeenCalled();
 		expect(internals._disposed).toBe(true);
 	});
 
@@ -1436,7 +1434,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("defers serialized compaction refinement even when no continuation was scheduled", async () => {
+	it("does not promote deferred compaction refinement during disposal", async () => {
 		const reviewer = vi.fn(async () => ({
 			shouldRefine: true,
 			rationale: "terminal compaction lesson",
@@ -1458,8 +1456,8 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(interactiveSpy).not.toHaveBeenCalled();
 		await internals._drainPendingRefinementForDisposal();
 
-		expect(reviewer).toHaveBeenCalledWith(expect.objectContaining({ reason: "compact" }), expect.any(AbortSignal));
-		expect(applyRefine).toHaveBeenCalledTimes(1);
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(applyRefine).not.toHaveBeenCalled();
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
@@ -1523,7 +1521,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("continues to the interval drain after a compact trigger hits cooldown", async () => {
+	it("does not start interval refinement from a compact cooldown during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1543,7 +1541,7 @@ describe("Serialized refine review-fix regressions", () => {
 		await internals._drainPendingRefinementForDisposal();
 
 		expect(internals._compactAutoRefinePending).toBe(false);
-		expect(checkpoint).toHaveBeenCalledOnce();
+		expect(checkpoint).not.toHaveBeenCalled();
 	});
 
 	it("falls back to an interval review when compact-triggered refinement is disabled", async () => {
@@ -1595,7 +1593,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("does not let a compact review failure block disposal", async () => {
+	it("does not start a compact review during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1608,11 +1606,12 @@ describe("Serialized refine review-fix regressions", () => {
 			new Error("unexpected compact review failure"),
 		);
 
-		await expect(internals._drainPendingRefinementForDisposal()).rejects.toThrow("unexpected compact review failure");
+		await expect(internals._drainPendingRefinementForDisposal()).resolves.toBeUndefined();
+		expect(internals._runSerializedAutoRefineReview).not.toHaveBeenCalled();
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("retries a failed explicit background plan during disposal", async () => {
+	it("does not retry a failed explicit background plan during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1631,8 +1630,7 @@ describe("Serialized refine review-fix regressions", () => {
 
 		await internals._drainPendingRefinementForDisposal();
 
-		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy).toHaveBeenCalledWith(options);
+		expect(runSpy).not.toHaveBeenCalled();
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 	});
 });
@@ -2534,7 +2532,7 @@ describe("P0 concurrency regressions", () => {
 		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
 	});
 
-	it("drains a due interactive auto-refine without waiting for agent idle", async () => {
+	it("does not start a due interactive auto-refine during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
@@ -2548,7 +2546,7 @@ describe("P0 concurrency regressions", () => {
 		await internals._drainPendingRefinementForDisposal();
 
 		expect(waitForIdle).not.toHaveBeenCalled();
-		expect(maybeAutoRefine).toHaveBeenCalledWith("turn_interval");
+		expect(maybeAutoRefine).not.toHaveBeenCalled();
 	});
 
 	it("waits for an interactive auto-refine operation before disposal drain continues", async () => {

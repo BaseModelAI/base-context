@@ -33,6 +33,8 @@ export type {
 } from "./rpc-types.js";
 
 interface RpcModeConnectionOptions {
+	/** Native runtime ownership only; generic connections keep their existing lifecycle contract. */
+	closeAutoRefineAdmission?: () => void;
 	bindHeadlessExtensions?: (options: {
 		uiContext: ReturnType<typeof createRpcExtensionUiBridge>["uiContext"];
 		shutdownHandler: () => void;
@@ -44,6 +46,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, clientProtoco
 		throw new Error(`RPC client must support protocol ${DAEMON_PROTOCOL_VERSION}, including refusal-only agent_end`);
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runRpcModeWithConnectionInternal(connection, {
+		closeAutoRefineAdmission: () => runtimeHost.closeAutoRefineAdmission(),
 		bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
 	});
 }
@@ -195,6 +198,7 @@ async function runRpcModeWithConnectionInternal(
 			process.exit(exitCode);
 		}
 		shuttingDown = true;
+		options.closeAutoRefineAdmission?.();
 		await cancelPendingExtensionUi();
 		for (const cleanup of signalCleanupHandlers) cleanup();
 		unsubscribe();
@@ -538,6 +542,7 @@ async function runRpcModeWithConnectionInternal(
 	};
 	const onInputEnd = () => {
 		inputEnded = true;
+		options.closeAutoRefineAdmission?.();
 		detachInput();
 		process.stdin.pause();
 		queueMicrotask(() => {

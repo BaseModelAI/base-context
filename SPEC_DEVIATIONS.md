@@ -527,3 +527,20 @@ Each uses private dependency copies, its unchanged frozen patcher and its own sa
 5. Only after the user's five-feature gate and relevant implementation gates, obtain the specifically missing installed/platform/provider/control/accuracy evidence. Keep valid failures, unknown costs and all physical attempts visible. Publication remains separately approval-gated.
 
 These are bounded product tasks, not permission for new audit rounds, proof frameworks, extra artifacts, benchmark samples or speculative provider calls. The functional first-release definition and aggressive optimization promotion gates are **not met at W26**.
+
+
+## W35 update — native EOF refinement admission
+
+Native RPC EOF closes new opportunistic refinement before pending handlers and idle
+drain. Its runtime retains the closed gate across an already accepted session replacement.
+Disposal drains accepted refinement and genuine queued explicit `refine.run` requests;
+it no longer creates interval/compact reviews, promotes an approved review into new
+planning after closure, or recreates a failed background plan for disposal-only retry.
+The gate is separate from model-visible skills and explicit refinement eligibility.
+
+This closes the bounded G07 shutdown-admission path, not the full optimizer-off backlog.
+Accepted work can still exceed the runner's 30-second grace. No cancellation policy,
+generic AgentConnection protocol, model prompt, frozen control or result is changed.
+Sol's custom anti-overengineering prompt remains intact. The existing RPC happy/edge
+use local-faux native lifecycle phases; six directly contradictory legacy disposal
+expectations are aligned. Validation results are recorded in implementation STATUS.
