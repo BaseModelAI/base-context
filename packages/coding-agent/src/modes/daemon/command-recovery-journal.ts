@@ -1,6 +1,8 @@
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { fchmodSync, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, readSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
+import { writeFullySync } from "../../core/journal-io.js";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
+import { syncRecoveryDirectory, withRecoveryDescriptor } from "./recovery-journal-io.js";
 
 interface ReceivedRecord {
 	version: 1;
@@ -53,6 +55,8 @@ export function createCommandIdempotencyKey(clientId: DaemonClientId, commandId:
 export class CommandRecoveryJournal {
 	private readonly entries = new Map<string, JournalEntry>();
 	private recordCount = 0;
+	private incompleteTail = false;
+	private writeFailure?: { error: unknown };
 
 	constructor(private readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -74,6 +78,7 @@ export class CommandRecoveryJournal {
 		const key = createCommandIdempotencyKey(clientId, commandId);
 		const existing = this.lookup(clientId, commandId);
 		if (existing) return existing;
+		this.assertWritable();
 		const received: ReceivedRecord = {
 			version: 1,
 			type: "received",
@@ -89,6 +94,7 @@ export class CommandRecoveryJournal {
 	}
 
 	recordResult(clientId: DaemonClientId, commandId: DaemonCommandId, response: DaemonResponse): void {
+		this.assertWritable();
 		const key = createCommandIdempotencyKey(clientId, commandId);
 		const entry = this.entries.get(key);
 		if (!entry) {
@@ -109,6 +115,7 @@ export class CommandRecoveryJournal {
 	}
 
 	acknowledge(clientId: DaemonClientId, commandId: DaemonCommandId): void {
+		this.assertWritable();
 		const key = createCommandIdempotencyKey(clientId, commandId);
 		if (!this.entries.has(key)) {
 			return;
@@ -135,51 +142,82 @@ export class CommandRecoveryJournal {
 			}
 			throw error;
 		}
-		for (const line of contents.split("\n")) {
-			if (!line) {
-				continue;
-			}
+		const lines = contents.split("\n");
+		this.incompleteTail = lines.pop() !== "";
+		for (const [index, line] of lines.entries()) {
+			if (!line) continue;
 			let record: JournalRecord;
 			try {
 				record = JSON.parse(line) as JournalRecord;
-			} catch {
-				// A crash may leave only the final append truncated.
-				continue;
+			} catch (error) {
+				throw new Error(`Corrupt command recovery journal record at line ${index + 1}`, { cause: error });
 			}
-			if (record.version !== 1 || typeof record.key !== "string") {
-				continue;
+			if (
+				!record ||
+				typeof record !== "object" ||
+				record.version !== 1 ||
+				typeof record.key !== "string" ||
+				typeof record.recordedAt !== "string"
+			) {
+				throw new Error(`Invalid command recovery journal record at line ${index + 1}`);
 			}
-			this.recordCount++;
 			if (record.type === "received") {
 				if (
-					typeof record.clientId === "string" &&
-					typeof record.commandId === "string" &&
-					typeof record.commandType === "string"
+					typeof record.clientId !== "string" ||
+					typeof record.commandId !== "string" ||
+					typeof record.commandType !== "string" ||
+					this.entries.has(record.key) ||
+					record.key !== createCommandIdempotencyKey(record.clientId, record.commandId)
 				) {
-					this.entries.set(record.key, { received: record });
+					throw new Error(`Invalid command receipt at line ${index + 1}`);
 				}
-				continue;
-			}
-			if (record.type === "acknowledged") {
-				this.entries.delete(record.key);
-				continue;
-			}
-			const entry = this.entries.get(record.key);
-			if (entry && record.response?.type === "response") {
+				this.entries.set(record.key, { received: record });
+			} else if (record.type === "acknowledged") {
+				if (!this.entries.delete(record.key))
+					throw new Error(`Unknown command acknowledgement at line ${index + 1}`);
+			} else if (record.type === "result") {
+				const entry = this.entries.get(record.key);
+				if (
+					!entry ||
+					record.response?.type !== "response" ||
+					typeof record.response.success !== "boolean" ||
+					record.response.id !== entry.received.commandId ||
+					typeof record.response.command !== "string"
+				) {
+					throw new Error(`Invalid command result at line ${index + 1}`);
+				}
 				entry.response = record.response;
-			}
+			} else throw new Error(`Unknown command recovery record at line ${index + 1}`);
+			this.recordCount++;
 		}
 	}
 
+	private assertWritable(): void {
+		if (this.writeFailure) throw this.writeFailure.error;
+		if (this.incompleteTail)
+			throw new Error("Command recovery journal tail requires external recovery before another write");
+	}
+
 	private append(record: JournalRecord): void {
-		const descriptor = openSync(this.path, "a", 0o600);
+		const payload = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
 		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
+			let created = false;
+			withRecoveryDescriptor(openSync(this.path, "a+", 0o600), (fd) => {
+				const size = fstatSync(fd).size;
+				created = size === 0;
+				const last = Buffer.alloc(1);
+				if (size > 0 && (readSync(fd, last, 0, 1, size - 1) !== 1 || last[0] !== 0x0a)) {
+					throw new Error("Command recovery journal tail requires external recovery before another write");
+				}
+				fchmodSync(fd, 0o600);
+				writeFullySync(fd, payload);
+				fsyncSync(fd);
+			});
+			if (created) syncRecoveryDirectory(dirname(this.path));
+		} catch (error) {
+			this.writeFailure = { error };
+			throw error;
 		}
-		chmodSync(this.path, 0o600);
 		this.recordCount++;
 	}
 
@@ -198,19 +236,18 @@ export class CommandRecoveryJournal {
 				});
 			}
 		}
-		const descriptor = openSync(tempPath, "w", 0o600);
+		const payload = Buffer.from(`${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
 		try {
-			writeSync(descriptor, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-		renameSync(tempPath, this.path);
-		const directoryDescriptor = openSync(dirname(this.path), "r");
-		try {
-			fsyncSync(directoryDescriptor);
-		} finally {
-			closeSync(directoryDescriptor);
+			withRecoveryDescriptor(openSync(tempPath, "w", 0o600), (fd) => {
+				fchmodSync(fd, 0o600);
+				writeFullySync(fd, payload);
+				fsyncSync(fd);
+			});
+			renameSync(tempPath, this.path);
+			syncRecoveryDirectory(dirname(this.path));
+		} catch (error) {
+			this.writeFailure = { error };
+			throw error;
 		}
 		this.recordCount = records.length;
 	}

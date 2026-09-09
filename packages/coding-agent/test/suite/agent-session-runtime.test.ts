@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "../../src/core/agent-session.js";
+import { AgentSession } from "../../src/core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../src/core/agent-session-config.js";
 import {
 	AgentSessionRuntime,
@@ -15,7 +15,7 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "../../src/core/goals.js";
-import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
+import type { RlmChildAdmission, SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import {
 	deriveSemanticEdges,
 	readSemanticEdgeLedger,
@@ -31,6 +31,9 @@ import type {
 	SessionStartEvent,
 } from "../../src/index.js";
 import { createDefaultRuntimeFactory } from "../../src/main.js";
+import type { ActiveSessionState } from "../../src/modes/daemon/active-session-state.js";
+import { AgentDaemon } from "../../src/modes/daemon/daemon-mode.js";
+import type { DaemonCommand } from "../../src/modes/daemon/daemon-protocol.js";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -385,16 +388,80 @@ describe("AgentSessionRuntime characterization", () => {
 	it("releases a failed child run from the inline runtime host", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		const deleteRlmSubagentRuntime = vi.spyOn(runtime, "deleteRlmSubagentRuntime");
+		let failedChild!: AgentSession;
+		let restoreDisposal!: () => void;
 		vi.spyOn(runtime, "createRlmSubagentRuntime").mockImplementationOnce(async (options) => {
 			const childRuntime = await AgentSessionRuntime.prototype.createRlmSubagentRuntime.call(runtime, options);
-			vi.spyOn(childRuntime.session, "promptAndWait").mockRejectedValue(new Error("child run failed"));
+			failedChild = childRuntime.session;
+			vi.spyOn(failedChild, "promptAndWait").mockRejectedValue(new Error("child run failed"));
+			const disposal = vi.spyOn(failedChild, "disposeAsync").mockRejectedValue(new Error("cleanup unconfirmed"));
+			restoreDisposal = () => disposal.mockRestore();
 			return childRuntime;
 		});
+		cleanups.push(() => restoreDisposal?.());
 
-		await runtime.session.runRlmChild("fail after startup");
-
+		const failed = await runtime.session.runRlmChild("fail after startup", { name: "failed-child" });
 		await vi.waitFor(() => expect(deleteRlmSubagentRuntime).toHaveBeenCalledOnce());
 		expect(runtime.listSubagentRuntimes()).toEqual([]);
+		await expect(runtime.session.runRlmChild("must not reuse uncertain cleanup")).rejects.toThrow(
+			"resident child limit",
+		);
+		restoreDisposal();
+		await failedChild.disposeAsync();
+		// The exited object is still historical, but no longer consumes resident capacity.
+		expect(runtime.session.getRlmChildSession(failed.rlm_child_id)).toBe(failedChild);
+		const next = await runtime.session.runRlmChild("admitted after confirmed cleanup", { name: "next-child" });
+		await vi.waitFor(() => expect(runtime.session.hasRunningRlmChildren()).toBe(false));
+		await runtime.session.getRlmChildSession(next.rlm_child_id)!.disposeAsync();
+
+		let releaseInitialization!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			releaseInitialization = resolve;
+		});
+		let initializationStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			initializationStarted = resolve;
+		});
+		let partialChild!: AgentSession;
+		let childDisposalStarted = false;
+		const initialize = AgentSession.prototype.initialize;
+		const initialization = vi.spyOn(AgentSession.prototype, "initialize").mockImplementationOnce(async function (
+			this: AgentSession,
+		) {
+			partialChild = this;
+			const dispose = this.disposeAsync.bind(this);
+			vi.spyOn(this, "disposeAsync").mockImplementation((options) => {
+				childDisposalStarted = true;
+				return dispose(options);
+			});
+			initializationStarted();
+			await gate;
+			await initialize.call(this);
+		});
+		cleanups.push(() => {
+			releaseInitialization();
+			initialization.mockRestore();
+		});
+		await runtime.session.runRlmChild("cancel before initialization", { name: "partial-child" });
+		await started;
+		const aborting = runtime.session.abort();
+		let disposalFinished = false;
+		const disposing = runtime.session.disposeAsync().then(() => {
+			disposalFinished = true;
+		});
+		await vi.waitFor(() => expect(childDisposalStarted).toBe(true));
+		expect(partialChild).toBeInstanceOf(AgentSession);
+		expect(disposalFinished).toBe(false);
+		await expect(runtime.session.runRlmChild("late start")).rejects.toThrow("disposed");
+		releaseInitialization();
+		await Promise.all([aborting, disposing]);
+		initialization.mockRestore();
+
+		const { runtime: unknownStart } = await createRuntimeForTest(() => {});
+		vi.spyOn(unknownStart, "createRlmSubagentRuntime").mockRejectedValueOnce(new Error("start outcome unavailable"));
+		await unknownStart.session.runRlmChild("unknown factory outcome", { name: "unknown-child" });
+		await vi.waitFor(() => expect(unknownStart.session.hasRunningRlmChildren()).toBe(false));
+		await expect(unknownStart.session.runRlmChild("unknown is not disposed")).rejects.toThrow("resident child limit");
 	});
 
 	it("plumbs the parent agent identity into runtime-created child prompts", async () => {
@@ -533,6 +600,123 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(edges.filter((edge) => edge.type === "subagent_call")).toMatchObject([
 			{ source_request_id: spawnedByRequestId },
 		]);
+
+		// The same concrete parent owns ordinary daemon spawn and passive hydration.
+		let nativeAdmission: RlmChildAdmission | undefined;
+		const daemon = new AgentDaemon(join(tempDir, "resident-cap.sock"), {
+			defaultSessionConfig: {
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionDir: join(tempDir, "sessions"),
+				noTools: true,
+			},
+			createRuntime: async (options) => {
+				nativeAdmission = options.sessionOptions?.rlmChildAdmission;
+				return factory(options);
+			},
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			openRlmJournalOwner(): Promise<void>;
+			closeRlmJournal(): Promise<void>;
+			createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void>;
+			passivateSession(state: ActiveSessionState, minutes: 90, now: number): Promise<boolean>;
+		};
+		await internals.openRlmJournalOwner();
+		cleanups.push(async () => {
+			for (const state of [...internals.sessions.values()].reverse())
+				await internals.closeSession(state, "shutdown");
+			await internals.closeRlmJournal();
+		});
+		const manager = await SessionManager.create(tempDir, join(tempDir, "resident-parent"));
+		await manager.appendModelChange(faux.getModel().provider, faux.getModel().id);
+		const parentFile = manager.getSessionFile()!;
+		await manager.close();
+		const parent = await internals.createRuntime({ type: "create", sessionPath: parentFile });
+		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("done")]);
+		const firstStart = parent.runtime.session.runRlmChild("first resident", { name: "resident-one" });
+		// Neither name/model selection nor the factory has completed its first await.
+		await expect(parent.runtime.session.runRlmChild("overlapping startup")).rejects.toThrow("resident child limit");
+		const first = await firstStart;
+		await vi.waitFor(() => expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false));
+		const firstState = [...internals.sessions.values()].find(
+			(state) => state.runtime.metadata.rlmChildId === first.rlm_child_id,
+		)!;
+		const firstFile = firstState.runtime.session.sessionFile!;
+		await expect(firstState.runtime.newSession()).rejects.toThrow("Owned child-runtime replacement is unavailable");
+		await expect(firstState.runtime.switchSession(firstFile)).rejects.toThrow(
+			"Owned child-runtime replacement is unavailable",
+		);
+		await expect(firstState.runtime.fork("not-a-real-entry")).rejects.toThrow(
+			"Owned child-runtime replacement is unavailable",
+		);
+		await expect(firstState.runtime.importFromJsonl("not-a-real-file.jsonl")).rejects.toThrow(
+			"Owned child-runtime replacement is unavailable",
+		);
+		await expect(parent.runtime.session.runRlmChild("completed but resident")).rejects.toThrow(
+			"resident child limit",
+		);
+		await vi.waitFor(async () =>
+			expect(await internals.passivateSession(firstState, 90, Date.now() + 86_400_000)).toBe(true),
+		);
+		const second = await parent.runtime.session.runRlmChild("historical first child is not resident", {
+			name: "resident-two",
+		});
+		await vi.waitFor(() => expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false));
+		const secondState = [...internals.sessions.values()].find(
+			(state) => state.runtime.metadata.rlmChildId === second.rlm_child_id,
+		)!;
+		await expect(internals.createRuntime({ type: "create", sessionPath: firstFile })).rejects.toThrow(
+			"resident child limit",
+		);
+		await vi.waitFor(async () =>
+			expect(await internals.passivateSession(secondState, 90, Date.now() + 86_400_000)).toBe(true),
+		);
+
+		let releaseHydration!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			releaseHydration = resolve;
+		});
+		let hydrationStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			hydrationStarted = resolve;
+		});
+		const initialize = AgentSession.prototype.initialize;
+		let initializingChild: AgentSession | undefined;
+		const initialization = vi.spyOn(AgentSession.prototype, "initialize").mockImplementationOnce(async function (
+			this: AgentSession,
+		) {
+			initializingChild = this;
+			hydrationStarted();
+			await gate;
+			await initialize.call(this);
+		});
+		cleanups.push(() => {
+			releaseHydration();
+			initialization.mockRestore();
+		});
+		const hydration = internals.createRuntime({ type: "create", sessionPath: firstFile });
+		await started;
+		// Checks the real constructor through the production main whitelist, before initialize awaits.
+		expect(nativeAdmission?.parent).toBe(parent.runtime.session);
+		expect(nativeAdmission?.session).toBe(initializingChild);
+		const joined = internals.createRuntime({ type: "create", sessionPath: firstFile });
+		await expect(parent.runtime.session.runRlmChild("overlap passive hydration")).rejects.toThrow(
+			"resident child limit",
+		);
+		releaseHydration();
+		const [hydrated, same] = await Promise.all([hydration, joined]);
+		initialization.mockRestore();
+		expect(same).toBe(hydrated);
+		expect(hydrated.runtime.session).not.toBe(firstState.runtime.session);
+		expect(parent.runtime.session.getRlmChildSession(first.rlm_child_id)).toBe(hydrated.runtime.session);
+		await expect(parent.runtime.session.runRlmChild("hydrated completion is resident")).rejects.toThrow(
+			"resident child limit",
+		);
+		await vi.waitFor(async () =>
+			expect(await internals.passivateSession(hydrated, 90, Date.now() + 86_400_000)).toBe(true),
+		);
 	});
 
 	it("disposes hosted RLM children during session replacement", async () => {

@@ -477,6 +477,38 @@ explicitly; this is not a promise that every representation can fit. Source/fake
 do not certify provider behavior, cache hits, tokenizer accuracy, installed platforms or the
 full remaining spec. No live benchmark, publication or goal-completion claim is made here.
 
+## Post-prerequisite implementation — W34
+
+The W26 audit above remains immutable. These changes address bounded parts of G01
+and G02 after the five supported benchmark prerequisites were completed.
+
+- **G01, command/worker recovery journals:** checked UTF8 writes reuse `writeFullySync`.
+  File sync precedes replacement and directory sync follows creation/replacement.
+  JSONL v1 remains unchanged. Malformed complete records refuse; a torn final fragment
+  exposes only its valid prefix and blocks later mutation until external recovery.
+  Uncertain writes retain their original failure. The recovery-local descriptor helper
+  retains distinct close errors without changing the canonical helper. Supervisor
+  receipt failure prevents dispatch; uncertain result persistence is not retried as a
+  conflicting result. Worker checkpoint failures propagate through existing cleanup.
+  The ready checkpoint is inside runtime binding cleanup. Orphan journals remain open.
+- **G02, conservative resident admission:** one actual live parent owns one pending
+  setup or resident child. Native spawn, direct factories and passive hydration reserve
+  before awaits and bind the actual constructor. Completed residency still counts;
+  successful `disposeAsync` plus setup settlement can release capacity. Unknown startup
+  or cleanup does not prove release. Parent disposal joins accepted setup and partial
+  children. Same-target hydration joins remain. No copied parent ID grants ownership.
+- Child runtime `newSession`, `switchSession`, `fork` and `importFromJsonl` refuse before
+  setup until owned replacement is implemented. Main/root replacement is unchanged.
+  This is not the full tree-wide/cross-worker scheduler, persistent reservation recovery,
+  separate resource budgets or fairness required by §19.2/W10.
+
+Four existing journal cases and two existing real runtime cases with the faux provider
+passed in separate first W34 invocations. The required full check passed after correcting
+three test-mock overload declarations; no focused case was rerun. These checks do not
+certify all daemon fault paths, historical
+synthetic/unlimited-sibling fixtures, platform durability or whole-process bounds.
+Frozen benchmark packages and runner scripts are unchanged by this source work.
+
 ## Completed D/S setup handoff — setup only
 
 The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.

@@ -61,3 +61,6 @@
 - Drop stale retained-prefix credit at both public candidate assessment and final physical admission.
 - Preserve unknown original input estimates as null in the existing compaction control, copy/rebuild and direct displays; do not change ordinary summary usage.
 - Require ownership/RPC schema35 for public-request and nullable-token readers.
+- Use checked command/worker recovery writes, preserve uncertain outcomes and close errors, refuse malformed records and torn-tail mutation, and propagate persistence failures without a conflicting result retry.
+- Reserve one resident child per live parent before native spawn or passive hydration setup. Keep completed residents and uncertain cleanup charged; join partial setup during parent disposal.
+- Refuse child-runtime new/switch/fork/import replacement until it can retain owned admission. Main/root replacement is unchanged; full tree-wide scheduling remains deferred.

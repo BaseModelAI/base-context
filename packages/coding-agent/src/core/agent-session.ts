@@ -248,6 +248,7 @@ import {
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmChildAdmission,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -534,6 +535,7 @@ export interface AgentSessionConfig {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	rlmChildAdmission?: RlmChildAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -1230,6 +1232,10 @@ export class AgentSession {
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
+	private _rlmChildAdmission?: RlmChildAdmission & { cancel(reason: string): boolean };
+	private _rlmParentAdmission?: RlmChildAdmission;
+	private _rlmResidentDisposalComplete = false;
+	private _releaseRlmResidentCapacity?: () => void;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
@@ -1306,6 +1312,8 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		this._rlmParentAdmission = config.rlmChildAdmission;
+		this._rlmParentAdmission?.bind(this);
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this._invocationOutputLimits = {
@@ -1676,6 +1684,7 @@ export class AgentSession {
 	}
 
 	private async _initialize(): Promise<void> {
+		this._rlmParentAdmission?.assertCurrent();
 		let goalSeedable = false;
 		if (this.sessionManager.isPersisted()) {
 			const bootstrap = await this._readRuntimeBootstrap();
@@ -4628,6 +4637,7 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
+		this._rlmChildAdmission?.cancel("Parent session disposed");
 		if (this._disposeAsyncPromise) return this._disposeAsyncPromise;
 		const kernelSnapshot = options?.kernelSnapshot ?? true;
 		this._disposeAsyncPromise = (async () => {
@@ -4646,6 +4656,8 @@ export class AgentSession {
 			}
 			if (errors.length === 1) throw errors[0];
 			if (errors.length > 1) throw new AggregateError(errors, "Session disposal failed");
+			this._rlmResidentDisposalComplete = true;
+			this._releaseRlmResidentCapacity?.();
 		})();
 		return this._disposeAsyncPromise;
 	}
@@ -4797,6 +4809,7 @@ export class AgentSession {
 	}
 
 	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
+		const admission = this._rlmChildAdmission;
 		const errors: unknown[] = [];
 		const drain = async (operation: () => unknown | Promise<unknown>): Promise<void> => {
 			try {
@@ -4815,6 +4828,9 @@ export class AgentSession {
 			// Initialization reports errors through its own promise, like an active Agent run.
 			// Join it before disposing any runtime resources it may still be constructing.
 			if (this._initialization) await Promise.allSettled([this._initialization]);
+			const admittedChild = admission?.session;
+			// Includes a native child constructed but not yet published by its factory.
+			if (admittedChild) await drain(() => admittedChild.disposeAsync());
 			for (const run of [...this._activeRlmChildRuns.values()]) {
 				const childSession = run.session;
 				if (!childSession) continue;
@@ -4838,6 +4854,10 @@ export class AgentSession {
 			await drain(() => this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot }));
 			while (this._rlmRunTasks.size > 0) {
 				for (const task of [...this._rlmRunTasks]) await drain(() => task);
+			}
+			await drain(() => admission?.settlement);
+			if (admission?.session && admission.session !== admittedChild) {
+				await drain(() => admission.session?.disposeAsync());
 			}
 			await drain(() => this.agent.waitForIdle());
 			await drain(() => this._compactionOperation);
@@ -10766,7 +10786,95 @@ export class AgentSession {
 			?.id;
 	}
 
+	get hasRlmParentAdmission(): boolean {
+		return this._releaseRlmResidentCapacity !== undefined;
+	}
+
+	/** Reserve before setup awaits. The concrete parent lifetime owns this one slot. */
+	reserveRlmChildAdmission(): RlmChildAdmission {
+		if (this._disposed || this._disposing || this._disposeAsyncPromise) {
+			throw new Error("Cannot spawn a subagent after its parent was disposed");
+		}
+		if (this._rlmChildAdmission) {
+			throw new Error(
+				"RLM resident child limit reached (one child per parent); dispose or passivate the existing child first",
+			);
+		}
+		const controller = new AbortController();
+		const settlement = createAgentMessageDeferred();
+		let child: AgentSession | undefined;
+		let settled = false;
+		let factoryClaimed = false;
+		let unboundCleanupComplete = true;
+		const release = () => {
+			if (!settled || (child ? !child._rlmResidentDisposalComplete : !unboundCleanupComplete)) return;
+			if (this._rlmChildAdmission === admission) this._rlmChildAdmission = undefined;
+			if (child?._releaseRlmResidentCapacity === release) child._releaseRlmResidentCapacity = undefined;
+			if (child?._rlmParentAdmission === admission) child._rlmParentAdmission = undefined;
+		};
+		const admission: RlmChildAdmission & { cancel(reason: string): boolean } = {
+			parent: this,
+			get session() {
+				return child;
+			},
+			settlement: settlement.promise,
+			get pending() {
+				return !settled;
+			},
+			assertCurrent: () => {
+				controller.signal.throwIfAborted();
+				if (
+					this._disposed ||
+					this._disposing ||
+					this._disposeAsyncPromise ||
+					this._rlmChildAdmission !== admission
+				) {
+					throw new Error("RLM child admission is no longer current");
+				}
+			},
+			bind: (session) => {
+				if (this._rlmChildAdmission !== admission) throw new Error("RLM child admission is no longer current");
+				if (
+					(child && child !== session) ||
+					(session._releaseRlmResidentCapacity && session._releaseRlmResidentCapacity !== release)
+				) {
+					throw new Error("RLM child already belongs to another resident admission");
+				}
+				child = session;
+				session._releaseRlmResidentCapacity = release;
+				release();
+			},
+			beginSetup: () => {
+				if (settled || child) throw new Error("RLM child admission already started a child");
+				unboundCleanupComplete = false;
+			},
+			claimFactory: () => {
+				if (factoryClaimed) throw new Error("RLM child admission already started a factory");
+				admission.beginSetup();
+				factoryClaimed = true;
+			},
+			confirmUnboundCleanup: () => {
+				unboundCleanupComplete = true;
+				release();
+			},
+			settle: () => {
+				settled = true;
+				settlement.resolve();
+				release();
+			},
+			cancel: (reason) => {
+				if (settled || controller.signal.aborted) return false;
+				controller.abort(new Error(reason));
+				void child?.abort();
+				return true;
+			},
+		};
+		this._rlmChildAdmission = admission;
+		return admission;
+	}
+
 	private _createRlmSubagentRuntimeOptions(options: {
+		admission: RlmChildAdmission;
 		id: string;
 		prompt: string;
 		sessionName: string;
@@ -10775,9 +10883,10 @@ export class AgentSession {
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
 		spawnedByRequestId?: string;
-	}): CreateRlmSubagentRuntimeOptions {
+	}): CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission } {
 		return {
 			parentSession: this,
+			admission: options.admission,
 			id: options.id,
 			prompt: options.prompt,
 			sessionName: options.sessionName,
@@ -10801,7 +10910,11 @@ export class AgentSession {
 		};
 	}
 
-	private async _createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+	private async _createRlmSubagentRuntime(
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
+	): Promise<RlmSubagentRuntime> {
+		options.admission.assertCurrent();
+		options.admission.beginSetup();
 		if (this._subagentRuntimeHost) {
 			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
 		}
@@ -10810,8 +10923,9 @@ export class AgentSession {
 	}
 
 	private async _createInlineRlmSubagentRuntime(
-		options: CreateRlmSubagentRuntimeOptions,
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
 	): Promise<RlmSubagentRuntime> {
+		options.admission.claimFactory();
 		const parentSessionFile = options.parentSession.sessionFile;
 		const parentSessionId = options.parentSession.sessionId;
 		const parentAgent = options.parentSession.sessionName ?? parentSessionId;
@@ -10821,6 +10935,7 @@ export class AgentSession {
 		});
 		let child: AgentSession | undefined;
 		try {
+			options.admission.assertCurrent();
 			await childSessionManager.appendModelChange(options.model.provider, options.model.id);
 			await childSessionManager.appendThinkingLevelChange(options.thinkingLevel);
 			await childSessionManager.appendServiceTierChange(options.serviceTier);
@@ -10867,6 +10982,7 @@ export class AgentSession {
 				rlmSessionDir: options.sessionDir,
 				rlmParentNodeId: options.rlmParentNodeId,
 				rlmParentAgent: parentAgent,
+				rlmChildAdmission: options.admission,
 				semanticParentSessionId: parentSessionId,
 				semanticSpawnedByRequestId: options.spawnedByRequestId,
 				sessionStartEvent: { type: "session_start", reason: "startup" },
@@ -10879,8 +10995,18 @@ export class AgentSession {
 
 			return { session: child };
 		} catch (error) {
-			if (child) await child.disposeAsync();
-			else await childSessionManager.close();
+			try {
+				const failedChild = child ?? options.admission.session;
+				if (failedChild) await failedChild.disposeAsync();
+				else {
+					await childSessionManager.close();
+					options.admission.confirmUnboundCleanup();
+				}
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "RLM startup and cleanup failed");
+			}
 			throw error;
 		}
 	}
@@ -10895,6 +11021,7 @@ export class AgentSession {
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
+		this._rlmChildAdmission?.cancel(reason);
 		for (const run of this._activeRlmChildRuns.values()) {
 			this._cancelRlmChildRun(run, reason);
 		}
@@ -11367,6 +11494,17 @@ export class AgentSession {
 			await session.disposeAsync();
 			return false;
 		}
+		if (!session._rlmResidentDisposalComplete) {
+			if (this._rlmChildAdmission) this._rlmChildAdmission.bind(session);
+			else {
+				const admission = this.reserveRlmChildAdmission();
+				try {
+					admission.bind(session);
+				} finally {
+					admission.settle();
+				}
+			}
+		}
 		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
@@ -11497,6 +11635,7 @@ export class AgentSession {
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const session of this._rlmSubtreeSessions()) {
+			if (session._rlmChildAdmission?.pending) return true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (run.status === "running" || run.status === "queued") {
 					return true;
@@ -11644,6 +11783,7 @@ export class AgentSession {
 	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
 		let cancelled = false;
 		for (const session of this._rlmSubtreeSessions()) {
+			if (session._rlmChildAdmission?.cancel(reason)) cancelled = true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
 			}
@@ -11734,6 +11874,7 @@ export class AgentSession {
 
 	private async _startRlmChildRun(
 		prompt: string,
+		admission: RlmChildAdmission,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
@@ -11769,6 +11910,7 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		admission.assertCurrent();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
 			if (!supported.includes(requestedThinkingLevel)) {
@@ -11783,6 +11925,7 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		admission.assertCurrent();
 		const startedAt = Date.now();
 		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
@@ -11826,8 +11969,9 @@ export class AgentSession {
 			// blocked and run.abort was still a no-op.
 			if (run.status === "cancelled") run.abort();
 		};
-		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
+		const subagentOptions: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission } = {
 			...this._createRlmSubagentRuntimeOptions({
+				admission,
 				id: childNodeId,
 				prompt,
 				sessionName,
@@ -11881,7 +12025,13 @@ export class AgentSession {
 		const task = (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
-				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				try {
+					childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+					admission.bind(childRuntime.session);
+				} finally {
+					admission.settle();
+				}
+				admission.assertCurrent();
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 				if (child.sessionName !== sessionName) await child.setSessionName(sessionName);
@@ -12036,6 +12186,11 @@ export class AgentSession {
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));
 				run.publication.reject(runError);
+				// A native constructor can fail before publication, but still owns a real child.
+				if (!childSession && admission.session) {
+					childSession = admission.session;
+					run.session = childSession;
+				}
 				if (run.status !== "cancelled") {
 					run.status = "error";
 					run.error = runError.message;
@@ -12170,7 +12325,22 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		return this._startRlmChildRun(prompt, kwargs, spawnCode);
+		const admission = this.reserveRlmChildAdmission();
+		const start = this._startRlmChildRun(prompt, admission, kwargs, spawnCode);
+		// Join pre-runtime name/model work during disposal as well as the detached task.
+		const pending = start.then(
+			() => undefined,
+			() => undefined,
+		);
+		this._rlmRunTasks.add(pending);
+		try {
+			return await start;
+		} catch (error) {
+			admission.settle();
+			throw error;
+		} finally {
+			this._rlmRunTasks.delete(pending);
+		}
 	}
 
 	private _isRetryableError(message: AssistantMessage): boolean {

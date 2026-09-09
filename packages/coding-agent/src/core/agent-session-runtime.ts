@@ -10,7 +10,12 @@ import type {
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
-import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmChildAdmission,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "./rlm-runtime.js";
 import type { CreateAgentSessionResult } from "./sdk.js";
 import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";
@@ -332,6 +337,22 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		const admission = options.admission ?? options.parentSession.reserveRlmChildAdmission();
+		try {
+			if (admission.parent !== options.parentSession)
+				throw new Error("RLM child admission belongs to another parent");
+			admission.assertCurrent();
+			admission.claimFactory();
+			return await this.createAdmittedRlmSubagentRuntime({ ...options, admission });
+		} finally {
+			if (!options.admission) admission.settle();
+		}
+	}
+
+	private async createAdmittedRlmSubagentRuntime(
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
+	): Promise<RlmSubagentRuntime> {
+		options.admission.assertCurrent();
 		const parent = options.parentSession;
 		const parentSessionFile = parent.sessionFile;
 		const parentSessionId = parent.sessionId;
@@ -342,7 +363,10 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			rlmDepth: options.rlmDepth,
 		});
 		let runtime: AgentSessionRuntime;
+		let factoryStarted = false;
 		try {
+			options.admission.assertCurrent();
+			factoryStarted = true;
 			runtime = await this.scopedBuild(() =>
 				createAgentSessionRuntime(this.createRuntime, {
 					cwd: sessionManager.getCwd(),
@@ -365,6 +389,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 						rlmSessionDir: options.sessionDir,
 						rlmParentNodeId: options.rlmParentNodeId,
 						rlmParentAgent: parentAgent,
+						rlmChildAdmission: options.admission,
 						semanticParentSessionId: parentSessionId,
 						semanticSpawnedByRequestId: options.spawnedByRequestId,
 					},
@@ -382,7 +407,14 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 				}),
 			);
 		} catch (error) {
-			await sessionManager.close();
+			try {
+				await sessionManager.close();
+				if (!factoryStarted) options.admission.confirmUnboundCleanup();
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "RLM startup and cleanup failed");
+			}
 			throw error;
 		}
 		this.subagentRuntimes.set(options.id, runtime);
@@ -397,10 +429,18 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			if (parent.getRlmChildRunStatus(options.id) === "cancelled") {
 				throw new Error("RLM subagent startup was cancelled");
 			}
+			options.admission.bind(runtime.session);
+			options.admission.assertCurrent();
 			options.onSessionPublished?.(runtime.session);
 		} catch (error) {
 			this.subagentRuntimes.delete(options.id);
-			await runtime.dispose();
+			try {
+				await runtime.dispose();
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "RLM startup and cleanup failed");
+			}
 			throw error;
 		}
 		return runtime;
@@ -435,10 +475,17 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 	}
 
+	private assertCanReplaceSession(): void {
+		if (this.metadata.kind === "subagent" || this.session.hasRlmParentAdmission) {
+			throw new Error("Owned child-runtime replacement is unavailable; dispose or passivate the child instead");
+		}
+	}
+
 	async switchSession(
 		sessionPath: string,
 		options?: { cwdOverride?: string; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }> {
+		this.assertCanReplaceSession();
 		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
 		const fallbackCwd = this.cwd;
 		const cwdOverride = options?.cwdOverride;
@@ -476,6 +523,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }> {
+		this.assertCanReplaceSession();
 		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
 		const cwd = this.cwd;
 		const sessionDir = source.session.sessionManager.getSessionDir();
@@ -502,6 +550,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		},
 	): Promise<{ cancelled: boolean; selectedText?: string }> {
+		this.assertCanReplaceSession();
 		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
 		const rlmDepth = source.session.rlmDepth;
 		const withSession = options?.withSession;
@@ -547,6 +596,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
 	 */
 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
+		this.assertCanReplaceSession();
 		const resolvedPath = resolve(inputPath);
 		if (!existsSync(resolvedPath)) throw new SessionImportFileNotFoundError(resolvedPath);
 		const source = { session: this.session, sessionFile: this.session.sessionFile, agentDir: this.services.agentDir };
@@ -645,13 +695,24 @@ export async function createAgentSessionRuntime(
 			lease,
 		);
 	} catch (error) {
+		const errors: unknown[] = error instanceof AggregateError ? [...error.errors] : [error];
+		const initialErrorCount = errors.length;
 		try {
-			if (result) await result.session.disposeAsync();
+			const admitted = runtimeOptions.sessionOptions?.rlmChildAdmission?.session;
+			const failedSession =
+				result?.session ?? (admitted?.sessionManager === runtimeOptions.sessionManager ? admitted : undefined);
+			if (failedSession) await failedSession.disposeAsync();
 			else await runtimeOptions.sessionManager.close();
-		} finally {
-			lease?.release();
+		} catch (cleanupError) {
+			if (!errors.includes(cleanupError)) errors.push(cleanupError);
 		}
-		throw error;
+		try {
+			lease?.release();
+		} catch (cleanupError) {
+			if (!errors.includes(cleanupError)) errors.push(cleanupError);
+		}
+		if (errors.length === initialErrorCount) throw error;
+		throw new AggregateError(errors, "Runtime creation and cleanup failed");
 	}
 }
 

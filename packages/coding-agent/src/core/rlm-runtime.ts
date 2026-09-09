@@ -211,12 +211,28 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 	};
 }
 
+/** One live parent's pending setup or resident child. Not a tree-wide reservation. */
+export interface RlmChildAdmission {
+	readonly parent: AgentSession;
+	readonly session: AgentSession | undefined;
+	readonly settlement: Promise<void>;
+	readonly pending: boolean;
+	assertCurrent(): void;
+	bind(session: AgentSession): void;
+	beginSetup(): void;
+	claimFactory(): void;
+	confirmUnboundCleanup(): void;
+	settle(): void;
+}
+
 export interface RlmSubagentRuntime {
 	session: AgentSession;
 }
 
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
+	/** The same live parent owns this setup. Native factories reserve it when omitted. */
+	admission?: RlmChildAdmission;
 	id: string;
 	prompt: string;
 	sessionName: string;

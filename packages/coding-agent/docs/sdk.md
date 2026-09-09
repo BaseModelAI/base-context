@@ -170,6 +170,14 @@ Important behavior:
 - creation returns diagnostics on `runtime.diagnostics`
 - if runtime creation or replacement fails, the method throws and the caller decides how to handle it
 
+Native child creation and passive hydration share one resident-child slot per live
+parent. Reserve admission before asynchronous setup. A completed but resident child
+still occupies that slot; confirmed asynchronous disposal or passivation frees it.
+Uncertain startup or cleanup does not establish release. This is not a tree-wide
+scheduler. Child-runtime `newSession()`, `switchSession()`, `fork()` and `importFromJsonl()`
+currently refuse before setup because replacement cannot retain their owned admission.
+Main/root replacement is unchanged.
+
 ```typescript
 let session = runtime.session;
 let unsubscribe = session.subscribe(() => {});

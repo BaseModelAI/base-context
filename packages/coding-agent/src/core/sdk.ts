@@ -111,7 +111,12 @@ export type {
 	ToolDefinition,
 } from "./extensions/index.js";
 export type { PromptTemplate } from "./prompt-templates.js";
-export type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+export type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmChildAdmission,
+	RlmSubagentRuntime,
+	SubagentRuntimeHost,
+} from "./rlm-runtime.js";
 export type { Skill } from "./skills.js";
 export type { Tool } from "./tools/index.js";
 
@@ -397,6 +402,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rlmSessionDir: options.rlmSessionDir,
 			rlmParentNodeId: options.rlmParentNodeId,
 			rlmParentAgent: options.rlmParentAgent,
+			rlmChildAdmission: options.rlmChildAdmission,
 			semanticParentSessionId: options.semanticParentSessionId,
 			semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 			subagentRuntimeHost: options.subagentRuntimeHost,
@@ -415,8 +421,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelFallbackMessage,
 		};
 	} catch (error) {
-		if (session) await session.disposeAsync();
-		else await sessionManager.close();
+		try {
+			const admitted = options.rlmChildAdmission?.session;
+			const failedSession = session ?? (admitted?.sessionManager === sessionManager ? admitted : undefined);
+			if (failedSession) await failedSession.disposeAsync();
+			else {
+				await sessionManager.close();
+				options.rlmChildAdmission?.confirmUnboundCleanup();
+			}
+		} catch (cleanupError) {
+			if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+				throw error;
+			throw new AggregateError([error, cleanupError], "Session creation and cleanup failed");
+		}
 		throw error;
 	}
 }

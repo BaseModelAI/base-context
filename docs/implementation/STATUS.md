@@ -3,11 +3,13 @@
 Base Context is being implemented from Prime Agent **v0.9.3**, commit
 `915c78f42c248b08238dd27fcd4bcab32c60beab`. This is not a certified release.
 
-## Current focus: five benchmark prerequisites
+## Current focus: full benchmarks and remaining spec details
 
-Scope is frozen to TaskFrame injection, ViewUnit dependency closure, model-aware
-token budgets, stable epochs and selective recovery. `SPEC_DEVIATIONS.md` is the
-backlog. Other findings are deferred unless they block these features.
+The five benchmark prerequisites work on the supported source paths. Scope is now
+open to the remaining `SPEC_DEVIATIONS.md` backlog. Full isolated LOW comparisons
+for exact `gpt-5.6-sol` and `gpt-6-astra` use the existing ChatGPT subscription before
+any MEDIUM comparisons. Timed runs keep their frozen packages and scripts; source
+integration, checks and builds happen between runner invocations.
 
 W28 added native/Python recovery, complete compiler dependency closure, same-source
 compaction commits and service budget forwarding. W29 adds actual plain-text Responses
@@ -1035,3 +1037,53 @@ probes, D/S setup repetition or further feature-audit loop is required first. Re
 findings are post-prerequisite backlog. Unsupported layouts and candidates that cannot fit
 still refuse explicitly. Offline evidence is not provider/tokenizer/cache/pricing/installed/
 whole-process certification. Benchmarks, publication and goal completion have not occurred.
+
+
+## W33 — first full live LOW comparison
+
+The isolated H0.9.3/native comparison completed all 30 tasks for exact `gpt-5.6-sol`
+at LOW, using the existing read-only ChatGPT subscription. The candidate is frozen
+W32 `7ce5c2b561809f5767984cd464cbe3dccc3b556a`, not the later W34 source. PID3359129
+exited 0 after 5339.732378s. Results are in
+`.work/w33-all30-campaigns-nl4qyrva/H-native-gpt-5.6-sol-low/`.
+
+- First capacity-valid primaries: native 28/30 judges passed, H 26/30. Native wins
+  on tasks13/14/16/26; native losses on23/29. Both native losses recorded WebSocket1006.
+  H13 also failed with that error. H3 passed its judge with a WebSocket1006 error;
+  native30 passed its judge but the RPC host did not drain after stdin EOF.
+- Native was slower on18 of24 matched judge-pass tasks. These results do not establish
+  efficiency gains. Total retained times include diagnostics and are not paired speed wins.
+- Native retained32 attempts and H34; neither had a capacity-invalidated attempt.
+  Diagnostics never replace primary results. Usage/cost completeness remains false;
+  billed cost and complete comparable cost are unknown, not zero. H usage is observational.
+- The report retains the legacy `thinking must be medium` publication blocker. LOW
+  execution is authorized by the user's override; no publication claim follows.
+  Astra LOW and the separate D/S LOW comparisons remain before any MEDIUM campaign.
+
+## W34 — recovery writes and conservative child residency
+
+Command/worker recovery journals use checked writes and explicit incomplete-tail refusal.
+Persistence failures propagate; uncertain command result persistence cannot trigger a
+conflicting second result. The ready checkpoint now uses existing runtime binding cleanup.
+The canonical descriptor helper and JSONL v1 format are unchanged.
+
+One concrete live parent owns a pending or resident child admission across native spawn,
+direct factories and passive hydration. Constructor binding captures partial setup.
+Completed residency still consumes capacity; successful asynchronous disposal and setup
+settlement release it. Unknown startup/cleanup cannot establish release. Child runtime
+new/switch/fork/import replacement refuses before setup; main/root replacement is unchanged.
+Full tree scheduling, persistent reservations and owned child replacement remain backlog.
+
+Four existing journal cases passed (PID3381057,1.368502s). Two existing real SDK/runtime/
+daemon cases with the faux provider passed (PID3381062,8.151430s). These are two separate
+invocations and six distinct cases, all passing on their first W34 run. Initial required
+`npm run check` PID3381068 failed with three TS2554 mock-overload declarations. Those
+three declarations now use `typeof fs.writeSync`; runtime operations were unchanged.
+The corrected required check PID3382020 passed in3.734085s:1038 files/no fixes, types,
+installer and browser smoke. No focused cases were rerun. Logs are under
+`.work/logs/w34-recovery-resident-*.log` in this workspace.
+
+This is bounded local evidence, not all daemon fault paths, synthetic/unlimited-sibling
+fixtures, platform durability, a full scheduler, or whole-process certification. No timed
+benchmark ran during W34 source integration/checks. Its frozen W32 packages and runners
+are unchanged. Publication and goal completion remain pending.

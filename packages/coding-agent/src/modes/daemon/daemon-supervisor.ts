@@ -78,7 +78,11 @@ import {
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "./agent-roster.js";
-import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
+import {
+	type CommandJournalBeginResult,
+	CommandRecoveryJournal,
+	createCommandIdempotencyKey,
+} from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
@@ -1886,7 +1890,14 @@ export class DaemonSupervisor {
 			}
 		}
 		if (journalIdentity) {
-			const admitted = this.commandJournal.begin(journalIdentity.clientId, journalIdentity.commandId, command.type);
+			let admitted: CommandJournalBeginResult;
+			try {
+				admitted = this.commandJournal.begin(journalIdentity.clientId, journalIdentity.commandId, command.type);
+			} catch (error) {
+				if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+				this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+				return;
+			}
 			if (admitted.status === "complete") {
 				if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 				this.write(client, admitted.response);
@@ -1909,8 +1920,10 @@ export class DaemonSupervisor {
 		// the race, attach fails cleanly with "Session worker is not connected" and
 		// the client retries through the saved-session path instead of mutating state.
 		if (mutation) this.mutationDrain.begin();
+		let commandCompleted = false;
 		try {
 			const response = await this.handleCommand(client, command, cancellationAdmission);
+			commandCompleted = true;
 			if (response) {
 				if (journalIdentity) {
 					await this.assertCurrentOwnership();
@@ -1921,12 +1934,20 @@ export class DaemonSupervisor {
 		} catch (error) {
 			this.log(`Supervisor command ${command.type} failed: ${error instanceof Error ? error.stack : String(error)}`);
 			let response = failure(command.id, command.type, error, serializeDaemonError(error));
-			if (journalIdentity && !isSupervisorGenerationStale(error)) {
+			// A completed command must not get a conflicting failure result after uncertain result persistence.
+			if (journalIdentity && !commandCompleted && !isSupervisorGenerationStale(error)) {
 				try {
 					await this.assertCurrentOwnership();
 					this.commandJournal.recordResult(journalIdentity.clientId, journalIdentity.commandId, response);
-				} catch (ownershipError) {
-					response = failure(command.id, command.type, ownershipError, serializeDaemonError(ownershipError));
+				} catch (persistenceError) {
+					const failureError =
+						persistenceError === error
+							? error
+							: new AggregateError(
+									[error, persistenceError],
+									"Supervisor command and result persistence failed",
+								);
+					response = failure(command.id, command.type, failureError, serializeDaemonError(failureError));
 				}
 			}
 			this.write(client, response);

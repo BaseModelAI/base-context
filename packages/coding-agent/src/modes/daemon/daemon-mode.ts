@@ -90,7 +90,11 @@ import {
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { RlmJournalOwner } from "../../core/rlm-journal-owner.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmChildAdmission,
+	SubagentRuntimeHost,
+} from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
 	type IdleEvictionMinutes,
@@ -1560,6 +1564,7 @@ export class AgentDaemon {
 				}
 			}
 			await onStateBound?.(state);
+			this.recordWorkerRecoveryState(state, "ready");
 			this.scheduleRosterFlush();
 		} catch (error) {
 			state.unsubscribe?.();
@@ -1585,7 +1590,6 @@ export class AgentDaemon {
 		}
 		// Restore the last persisted status so it shows before the first sweep.
 		this.summarizer.seed(state);
-		this.recordWorkerRecoveryState(state, "ready");
 		return state;
 	}
 
@@ -2613,6 +2617,28 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
+		const admission = options.admission ?? options.parentSession.reserveRlmChildAdmission();
+		try {
+			if (
+				admission.parent !== options.parentSession ||
+				parentState.runtime.session !== admission.parent ||
+				this.sessions.get(parentState.activeSessionId) !== parentState
+			) {
+				throw new RuntimeOpenCancelledError();
+			}
+			admission.assertCurrent();
+			admission.claimFactory();
+			return await this.createAdmittedRlmSubagentRuntime(parentState, { ...options, admission });
+		} finally {
+			if (!options.admission) admission.settle();
+		}
+	}
+
+	private async createAdmittedRlmSubagentRuntime(
+		parentState: ActiveSessionState,
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
+	): Promise<AgentSessionRuntime> {
+		options.admission.assertCurrent();
 		const parentSession = options.parentSession;
 		const parentSource = {
 			cwd: parentSession.sessionManager.getCwd(),
@@ -2626,7 +2652,10 @@ export class AgentDaemon {
 		});
 		let stateRef: ActiveSessionState | undefined;
 		let runtime: AgentSessionRuntime;
+		let factoryStarted = false;
 		try {
+			options.admission.assertCurrent();
+			factoryStarted = true;
 			// Subagents inherit the parent's client env (e.g. herdr pane identity).
 			runtime = await withClientEnv(parentState.clientEnv, () =>
 				createAgentSessionRuntime(this.options.createRuntime, {
@@ -2678,6 +2707,7 @@ export class AgentDaemon {
 						rlmSessionDir: options.sessionDir,
 						rlmParentNodeId: options.rlmParentNodeId,
 						rlmParentAgent: parentSource.sessionName ?? parentSource.sessionId,
+						rlmChildAdmission: options.admission,
 						semanticParentSessionId: parentSource.sessionId,
 						semanticSpawnedByRequestId: options.spawnedByRequestId,
 					},
@@ -2696,7 +2726,14 @@ export class AgentDaemon {
 				}),
 			);
 		} catch (error) {
-			await sessionManager.close();
+			try {
+				await sessionManager.close();
+				if (!factoryStarted) options.admission.confirmUnboundCleanup();
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "RLM startup and cleanup failed");
+			}
 			throw error;
 		}
 		let state: ActiveSessionState;
@@ -2735,6 +2772,8 @@ export class AgentDaemon {
 							createdAt: runtime.metadata.createdAt,
 						});
 					}
+					options.admission.bind(runtime.session);
+					options.admission.assertCurrent();
 					options.onSessionPublished?.(runtime.session);
 				},
 			);
@@ -3011,11 +3050,26 @@ export class AgentDaemon {
 		if (existing?.runtime.metadata.kind === "subagent" && existing.runtime.metadata.rlmChildId === entry.childId) {
 			return this.waitForBoundSession(existing);
 		}
+		if (
+			this.sessions.get(parentState.activeSessionId) !== parentState ||
+			this.closingSessions.has(parentState.activeSessionId)
+		) {
+			throw new RuntimeOpenCancelledError();
+		}
+		const admission = parentState.runtime.session.reserveRlmChildAdmission();
 		const hydration = (async () => {
-			if (existing) {
-				await this.closeSession(existing, "replaced");
+			try {
+				if (existing) await this.closeSession(existing, "replaced");
+				return await this.rehydrateCompletedRlmSubagentOnce(
+					parentState,
+					entry,
+					admission,
+					restoreActiveSessionId,
+					clientEnv,
+				);
+			} finally {
+				admission.settle();
 			}
-			return this.rehydrateCompletedRlmSubagentOnce(parentState, entry, restoreActiveSessionId, clientEnv);
 		})();
 		// Explicit opens and all lazy triggers share this path-keyed publication,
 		// so no caller can acquire a second lease/runtime while hydration binds.
@@ -3046,18 +3100,33 @@ export class AgentDaemon {
 	private async rehydrateCompletedRlmSubagentOnce(
 		parentState: ActiveSessionState,
 		entry: PassiveRlmSubagentEntry,
+		admission: RlmChildAdmission,
 		restoreActiveSessionId?: string,
 		clientEnv?: Record<string, string>,
 	): Promise<ActiveSessionState> {
 		const hydrationEnv = parentState.clientEnv ?? clientEnv;
+		const assertAdmission = () => {
+			admission.assertCurrent();
+			if (
+				this.sessions.get(parentState.activeSessionId) !== parentState ||
+				parentState.runtime.session !== admission.parent ||
+				this.closingSessions.has(parentState.activeSessionId)
+			) {
+				throw new RuntimeOpenCancelledError();
+			}
+		};
 		let stateRef: ActiveSessionState | undefined;
 		let runtime: AgentSessionRuntime | undefined;
+		let factoryStarted = false;
 		let sessionManager: SessionManager | undefined;
 		let sessionLease: SessionLease | undefined;
 		try {
+			assertAdmission();
+			admission.beginSetup();
 			sessionLease = acquireSessionLease(entry.sessionFile, parentState.runtime.services.agentDir);
 			const openedManager = await SessionManager.openAsync(entry.sessionFile, entry.sessionDir);
 			sessionManager = openedManager;
+			assertAdmission();
 			const modelRegistry = parentState.runtime.services.modelRegistry;
 			let rehydratedModel: Model<Api> | undefined;
 			if (entry.model) {
@@ -3066,6 +3135,9 @@ export class AgentDaemon {
 					rehydratedModel = resolved;
 				}
 			}
+			assertAdmission();
+			admission.claimFactory();
+			factoryStarted = true;
 			runtime = await withClientEnv(hydrationEnv, () =>
 				createAgentSessionRuntime(this.options.createRuntime, {
 					cwd: openedManager.getCwd(),
@@ -3105,6 +3177,7 @@ export class AgentDaemon {
 							},
 						},
 						rlmSessionDir: entry.sessionDir,
+						rlmChildAdmission: admission,
 						// Registry depth is authoritative (written at spawn); for legacy entries
 						// without it, the shared accessor resolves persisted header depth or the
 						// session file's sub- path before the depth-1 default.
@@ -3133,6 +3206,8 @@ export class AgentDaemon {
 					},
 				}),
 			);
+			admission.bind(runtime.session);
+			assertAdmission();
 			const state = await this.addRuntime(
 				runtime,
 				undefined,
@@ -3140,8 +3215,11 @@ export class AgentDaemon {
 				(createdState) => {
 					stateRef = createdState;
 				},
-				undefined,
-				undefined,
+				() => {
+					assertAdmission();
+					return true;
+				},
+				async () => assertAdmission(),
 				restoreActiveSessionId,
 			);
 			// The session transcript is authoritative for mutable metadata such as a
@@ -3166,17 +3244,27 @@ export class AgentDaemon {
 			}
 			return state;
 		} catch (error) {
+			const errors: unknown[] = error instanceof AggregateError ? [...error.errors] : [error];
+			const initialErrorCount = errors.length;
+			const drain = async (operation: () => unknown | Promise<unknown>) => {
+				try {
+					await operation();
+				} catch (cleanupError) {
+					if (!errors.includes(cleanupError)) errors.push(cleanupError);
+				}
+			};
 			if (stateRef && this.sessions.get(stateRef.activeSessionId) === stateRef) {
-				await this.closeSession(stateRef, "completed").catch(() => undefined);
-			} else {
-				await runtime?.dispose().catch(() => undefined);
+				await drain(() => this.closeSession(stateRef!, "completed"));
+			} else if (runtime) {
+				await drain(() => runtime?.dispose());
+			} else if (admission.session) {
+				await drain(() => admission.session?.disposeAsync());
 			}
-			try {
-				await sessionManager?.close();
-			} finally {
-				sessionLease?.release();
-			}
-			throw error;
+			await drain(() => sessionManager?.close());
+			await drain(() => sessionLease?.release());
+			if (!factoryStarted && errors.length === initialErrorCount) admission.confirmUnboundCleanup();
+			if (errors.length === initialErrorCount) throw error;
+			throw new AggregateError(errors, "RLM hydration and cleanup failed");
 		}
 	}
 
@@ -6732,7 +6820,12 @@ export class AgentDaemon {
 		} else if (reason === "shutdown" || reason === "replaced") {
 			await state.runtime.session.abort().catch(() => undefined);
 		}
-		this.recordWorkerRecoveryState(state, `closed:${reason}`, false);
+		let recoveryError: unknown;
+		try {
+			this.recordWorkerRecoveryState(state, `closed:${reason}`, false);
+		} catch (error) {
+			recoveryError = error;
+		}
 		state.unsubscribe?.();
 		let disposeError: unknown;
 		try {
@@ -6761,6 +6854,20 @@ export class AgentDaemon {
 			if (sessionFile) {
 				await deleteSessionFile(sessionFile).catch(() => undefined);
 			}
+		}
+		if (recoveryError !== undefined) {
+			const failures = [
+				...new Set(
+					[
+						...(!keepsResumeEntry && reason !== "completed" ? [cascadeError, persistError] : []),
+						recoveryError,
+						disposeError,
+					].filter((error) => error !== undefined),
+				),
+			];
+			throw failures.length === 1
+				? failures[0]
+				: new AggregateError(failures, "Worker recovery checkpoint and cleanup failed");
 		}
 		if (disposeError) {
 			throw disposeError;
@@ -7190,17 +7297,13 @@ export class AgentDaemon {
 		const session = state.runtime.session;
 		const busy =
 			busyOverride ?? (hasLiveSessionWork(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
-		try {
-			this.recoveryJournal.record({
-				activeSessionId: state.activeSessionId,
-				sessionId: session.sessionId,
-				...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
-				busy,
-				operation,
-			});
-		} catch (error) {
-			this.log(`could not checkpoint worker operation state: ${String(error)}`);
-		}
+		this.recoveryJournal.record({
+			activeSessionId: state.activeSessionId,
+			sessionId: session.sessionId,
+			...(session.sessionFile ? { sessionFile: session.sessionFile } : {}),
+			busy,
+			operation,
+		});
 	}
 
 	private catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void> {
