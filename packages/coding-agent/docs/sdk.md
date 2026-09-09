@@ -1392,3 +1392,12 @@ session replacement. `disposeAsync()` also closes the gate and drains accepted w
 without starting automatic reviews/plans or retrying failed background plans.
 
 The gate does not impose a shutdown deadline. Already accepted work can still be slow.
+
+
+### Provider-facing task coordinates
+
+New TaskFrame source metadata includes `sessionId`, `entryId`, `field`, and available
+`revision`; its captured horizon includes `sessionId`, `leafId`, and `sourceSequence`.
+Use these exact identities for `prime_context`, not internal filesystem locators. Full
+internal source objects remain available to the compiler. Previously frozen text is
+not rewritten, and omitted metadata does not mean missing source or current liveness.

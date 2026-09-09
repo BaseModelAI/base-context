@@ -17,6 +17,7 @@ import { PUBLIC_CONTEXT_RENDERER } from "../src/core/public-context.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import type { TaskStateSourceRef } from "../src/core/task-state.js";
 import { emptyUsage } from "../src/core/usage.js";
 
 describe("createAgentSessionFromServices", () => {
@@ -175,6 +176,7 @@ describe("createAgentSessionFromServices", () => {
 		const bodies: string[] = [];
 		const summaryBodies: string[] = [];
 		let summarizing = false;
+		type DisplaySource = Pick<TaskStateSourceRef, "sessionId" | "entryId" | "field" | "revision">;
 		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
 			const epochs = await epochManager.readBranchHistory(async (history) => {
 				const ids: string[] = [];
@@ -202,6 +204,39 @@ describe("createAgentSessionFromServices", () => {
 								(!requestRecovery || JSON.stringify(entry.message.content).includes("Also preserve Bar.txt.")),
 						)
 					: undefined;
+			// The model selects recovery coordinates from the actual provider-facing frame.
+			const providerBody = JSON.parse(init!.body as string) as {
+				input: Array<{ content?: Array<{ type: string; text?: string }> }>;
+			};
+			const displayedSources: DisplaySource[] = [];
+			for (const input of providerBody.input) {
+				for (const part of input.content ?? []) {
+					if (part.type !== "input_text" || !part.text?.startsWith("Recorded task context.")) continue;
+					const frame = JSON.parse(part.text.slice(part.text.indexOf("\n") + 1)) as {
+						rows?: Array<{ source: DisplaySource }>;
+						changed?: Array<{ source: DisplaySource }>;
+					};
+					displayedSources.push(...[...(frame.rows ?? []), ...(frame.changed ?? [])].map((row) => row.source));
+					expect(part.text).not.toContain('"locator"');
+					expect(part.text).not.toContain('"sessionFile"');
+				}
+			}
+			const displayed = firstInput ? displayedSources.find((source) => source.entryId === firstInput.id) : undefined;
+			if (firstInput)
+				expect(displayed).toEqual({
+					sessionId: epochManager.getSessionId(),
+					entryId: firstInput.id,
+					field: "/nativeOrigin/submitted/text",
+					revision: expect.any(String),
+				});
+			const recoveryRequest = {
+				action: "recover",
+				ref: displayed?.entryId,
+				sourceSessionId: displayed?.sessionId,
+				field: displayed?.field,
+				revision: displayed?.revision,
+				need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
+			};
 			const item = firstInput
 				? {
 						type: "function_call",
@@ -210,10 +245,8 @@ describe("createAgentSessionFromServices", () => {
 						name: "prime_context",
 						status: "completed",
 						arguments: JSON.stringify({
-							action: "recover",
-							ref: firstInput.id,
-							field: "/nativeOrigin/submitted/text",
-							need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
+							action: "batch",
+							requests: [recoveryRequest, { ...recoveryRequest, revision: "not-the-recorded-revision" }],
 						}),
 					}
 				: {
@@ -306,6 +339,24 @@ describe("createAgentSessionFromServices", () => {
 			expect(bodies[1]).toContain("OPTIONAL_PRIOR_LITERAL");
 			expect(bodies[2]).not.toContain("OPTIONAL_PRIOR_LITERAL");
 			const firstBody = JSON.parse(bodies[0]);
+			expect(firstBody.tools).toContainEqual(
+				expect.objectContaining({
+					name: "prime_context",
+					parameters: expect.objectContaining({
+						type: "object",
+						properties: expect.objectContaining({
+							action: { type: "string", enum: ["read", "search", "recover", "batch"] },
+							requests: expect.objectContaining({
+								items: expect.objectContaining({
+									properties: expect.objectContaining({
+										action: { type: "string", enum: ["read", "search", "recover"] },
+									}),
+								}),
+							}),
+						}),
+					}),
+				}),
+			);
 			const secondBody = JSON.parse(bodies[1]);
 			// The acknowledged prefix stays literal during the same-task tool continuation.
 			expect(secondBody.input.slice(0, firstBody.input.length)).toEqual(firstBody.input);
@@ -320,6 +371,11 @@ describe("createAgentSessionFromServices", () => {
 			expect(originalRecovery.isError).toBe(false);
 			expect(JSON.parse(originalRecovery.content[0].text).results[0].records[0]).toMatchObject({
 				text: "Preserve Foo.txt.",
+			});
+			expect(JSON.parse(originalRecovery.content[0].text).results[1]).toMatchObject({
+				status: "unavailable",
+				reason: "revision_mismatch",
+				records: [],
 			});
 			const summary = await epochSession.compact();
 			summarizing = false;

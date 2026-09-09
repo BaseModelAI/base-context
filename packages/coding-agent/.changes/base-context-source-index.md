@@ -66,3 +66,5 @@
 - Refuse child-runtime new/switch/fork/import replacement until it can retain owned admission. Main/root replacement is unchanged; full tree-wide scheduling remains deferred.
 
 - Closed new automatic-refinement admission at native RPC EOF before draining accepted work. Disposal no longer creates automatic review/planning or retries failed background plans; explicit queued requests and accepted operations still drain. Sol's custom prompt and model-visible skills are unchanged.
+
+- Reduced redundant provider-facing TaskFrame source metadata and recovery action schemas while retaining exact recovery coordinates, full internal source state, frozen text and destination rebuilding. Sol's custom prompt and all behavioral text remain unchanged.

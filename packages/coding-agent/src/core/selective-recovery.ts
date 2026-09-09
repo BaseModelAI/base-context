@@ -1,3 +1,4 @@
+import { StringEnum } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { stringifyBoundedJson } from "./bounded-json.js";
@@ -51,17 +52,17 @@ export const nativeRecoveryInputSchema = Type.Union([
 		{ additionalProperties: false },
 	),
 ]);
+const providerOperationSchema = Type.Object(
+	{ ...operationSchema.properties, action: StringEnum(["read", "search", "recover"] as const) },
+	{ additionalProperties: false },
+);
+
 /** Provider-facing tools require an object root; execute still applies the strict union above. */
 export const nativeRecoveryToolSchema = Type.Object(
 	{
-		...operationSchema.properties,
-		action: Type.Union([
-			Type.Literal("read"),
-			Type.Literal("search"),
-			Type.Literal("recover"),
-			Type.Literal("batch"),
-		]),
-		requests: Type.Optional(Type.Array(operationSchema, { minItems: 1, maxItems: 8 })),
+		...providerOperationSchema.properties,
+		action: StringEnum(["read", "search", "recover", "batch"] as const),
+		requests: Type.Optional(Type.Array(providerOperationSchema, { minItems: 1, maxItems: 8 })),
 	},
 	{ additionalProperties: false },
 );

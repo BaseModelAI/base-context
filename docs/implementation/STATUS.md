@@ -1128,3 +1128,29 @@ claim is added by the local-faux fixture.
 For Astra, the27 judge-pass pairs with no recorded runtime error have native4334.047s
 versus H4135.403s (+4.8%), with native slower on14. This supplement does not replace the
 29-pair primary report. Overall efficiency and billed-cost gains are not established.
+
+
+## W36 — reduce redundant provider metadata
+
+The Sol first-response observations showed roughly998 extra native input tokens before
+solution trajectories diverged. This is a prompt-overhead lead, not attribution to one
+component or a billed-cost/latency result. Newly rendered TaskFrames now omit physical
+locators, journal paths and internal source-control labels while retaining exact public
+recovery coordinates and the captured horizon. Internal rows/material/origins and all
+requirements, relations, authority, coverage and capture remain unchanged. Old frozen
+text is reused verbatim when material matches. Destination rebuilding is unchanged.
+
+Recovery advertises equivalent string enums; strict input validation and behavior are
+unchanged. Sol/custom/behavior prompts and explanatory text are preserved verbatim.
+On existing recorded data only, fresh-render-equivalent TaskFrame text changes from
+1240–1280 to734 UTF-8 bytes; tool-parameter JSON changes from1623 to1471 bytes. These
+are separate static representations, not executed-renderer measurements, token counts,
+a serialized-request delta, or a live efficiency result. Frozen W32 is not rewritten.
+
+Three existing cases passed on their first W36 invocations: compiler happy/edge2
+(PID3413270,7.563883s) and the real services/recovery case1
+(PID3413275,5.937469s). Exact displayed coordinates and stale-revision
+refusal use the existing fake-SSE flow without added provider calls. Expected profile/
+epoch refusals remain in passing stderr. Required check passed on its first invocation
+(PID3413281,4.319638s;1038 files/no fixes, types, installer and browser smoke).
+No case/check rerun was needed. Logs: `.work/logs/w36-provider-metadata-*.log`.

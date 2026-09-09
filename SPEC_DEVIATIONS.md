@@ -544,3 +544,17 @@ generic AgentConnection protocol, model prompt, frozen control or result is chan
 Sol's custom anti-overengineering prompt remains intact. The existing RPC happy/edge
 use local-faux native lifecycle phases; six directly contradictory legacy disposal
 expectations are aligned. Validation results are recorded in implementation STATUS.
+
+
+## W36 update — compact provider metadata
+
+New TaskFrame text exposes exact session/entry/field/revision coordinates and the
+captured horizon, without internal physical locators or journal paths. Full internal
+rows/material/origins, requirements/relations/authority/coverage and source capture
+remain unchanged. Matching material reuses frozen text verbatim; destination frames
+still rebuild through the destination reducer. Row selection and byte limits are unchanged.
+
+Recovery's provider-facing action unions use equivalent string enums. The strict
+input/parser, recovery semantics and canonical ACK path are unchanged. Sol's custom
+anti-overengineering prompt and all behavioral text are preserved verbatim. This is
+a bounded representation reduction, not a token, speed, cost or new benchmark claim.

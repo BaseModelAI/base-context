@@ -53,7 +53,7 @@ export interface TaskFrameAnchor {
 	side: "before" | "after";
 }
 
-/** Bounded rendered rows/text only. Canonical reduction is rebuilt from the captured reader. */
+/** Bounded internal selected rows and frozen provider text. Reduction is rebuilt from the captured reader. */
 export interface CompiledTaskFrame {
 	readonly material: string;
 	readonly rows: readonly TaskFrameRow[];
@@ -93,6 +93,28 @@ function row(item: ReducedTaskItem): TaskFrameRow {
 		...(item.changedBy === undefined ? {} : { changedBy: item.changedBy }),
 		unresolved: item.unresolved,
 	};
+}
+
+/** Provider recovery addresses exact public fields by identity, never by physical locator. */
+function displaySource(source: TaskStateSourceRef) {
+	return {
+		sessionId: source.sessionId,
+		entryId: source.entryId,
+		field: source.field,
+		...(source.revision === undefined ? {} : { revision: source.revision }),
+	};
+}
+
+function displayRow(selected: TaskFrameRow) {
+	return {
+		...selected,
+		source: displaySource(selected.source),
+		...(selected.changedBy === undefined ? {} : { changedBy: displaySource(selected.changedBy) }),
+	};
+}
+
+function displayRecovery(source: SourceSnapshotRef) {
+	return { sessionId: source.sessionId, leafId: source.leafId, sourceSequence: source.sourceSequence };
 }
 
 function encode(value: unknown, maxBytes: number): string {
@@ -168,7 +190,12 @@ export function compileTaskFrame(
 	}
 	let messages: CustomMessage[];
 	if (!previous) {
-		messages = [message({ type: "base", ...selection, recovery: view.source }, limits.maxBytes)];
+		messages = [
+			message(
+				{ type: "base", ...selection, rows: rows.map(displayRow), recovery: displayRecovery(view.source) },
+				limits.maxBytes,
+			),
+		];
 	} else {
 		const old = new Map(previous.rows.map((item) => [key(item.source), JSON.stringify(item)]));
 		const current = new Set(rows.map((item) => key(item.source)));
@@ -178,8 +205,10 @@ export function compileTaskFrame(
 			.map((item) => {
 				const actual = view.items.find((candidate) => key(candidate.event.source) === key(item.source));
 				return {
-					source: item.source,
-					...(actual ? { state: actual.state, changedBy: actual.changedBy } : {}),
+					source: displaySource(item.source),
+					...(actual
+						? { state: actual.state, changedBy: actual.changedBy && displaySource(actual.changedBy) }
+						: {}),
 					// Omission from this display is never itself completion, supersession or deletion.
 					selectionOnly: true,
 				};
@@ -194,9 +223,9 @@ export function compileTaskFrame(
 					selective: true,
 					eligible: eligible.length,
 					indexed: rows.length,
-					changed,
+					changed: changed.map(displayRow),
 					noLongerSelected,
-					recovery: view.source,
+					recovery: displayRecovery(view.source),
 				},
 				limits.maxBytes,
 			),

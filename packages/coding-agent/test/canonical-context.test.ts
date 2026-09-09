@@ -26,8 +26,9 @@ import {
 import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
 import { buildSessionContext, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { compileTaskFrame, taskFrameLimits } from "../src/core/task-frame.js";
+import { type CompiledTaskFrame, compileTaskFrame, taskFrameLimits } from "../src/core/task-frame.js";
 import { TASK_STATE_CUSTOM_TYPE, TASK_STATE_SCHEMA } from "../src/core/task-state.js";
+import { readTaskStateFromView } from "../src/core/task-state-reader.js";
 import { closeViewSelection } from "../src/core/view-units.js";
 
 async function createCopySession(manager: SessionManager, model: Model<string>) {
@@ -262,7 +263,7 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			indexed: 1,
 			rows: [
 				{
-					source: { entryId: goalEntryId, field: "/data", qualification: "native-admission" },
+					source: { entryId: goalEntryId, field: "/data" },
 					kind: "user_goal_revision",
 					authority: "user",
 					state: "active",
@@ -272,6 +273,44 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			],
 			recovery: { sessionId: manager.getSessionId(), leafId: proposalEntryId },
 		});
+		const frameTasks = await capture.readHistory((view) => readTaskStateFromView(view));
+		const fullFrame = compileTaskFrame(frameTasks, taskFrameLimits())!;
+		const fullSource = fullFrame.rows[0].source;
+		expect(fullSource).toMatchObject({
+			entryId: goalEntryId,
+			qualification: "native-admission",
+			revision: expect.any(String),
+			sequence: expect.any(Number),
+			locator: { path: manager.getSessionFile() },
+		});
+		expect(base.rows[0].source).toEqual({
+			sessionId: fullSource.sessionId,
+			entryId: fullSource.entryId,
+			field: fullSource.field,
+			revision: fullSource.revision,
+		});
+		expect(base.recovery).toEqual({
+			sessionId: frameTasks.source.sessionId,
+			leafId: frameTasks.source.leafId,
+			sourceSequence: frameTasks.source.sourceSequence,
+		});
+		expect(fullFrame.origins[0]).toEqual(frameTasks.source);
+		expect(fullFrame.material).toContain(manager.getSessionFile()!);
+		expect(baseText).not.toContain(manager.getSessionFile()!);
+		// A prior full-metadata render remains frozen when the owned material is unchanged.
+		const frozenFrame: CompiledTaskFrame = {
+			...fullFrame,
+			messages: [
+				{
+					...fullFrame.messages[0],
+					content:
+						baseText.slice(0, baseText.indexOf("\n") + 1) +
+						JSON.stringify({ type: "base", ...JSON.parse(fullFrame.material), recovery: frameTasks.source }),
+				},
+			],
+		};
+		expect(compileTaskFrame(frameTasks, taskFrameLimits(), frozenFrame)).toBe(frozenFrame);
+		expect(frozenFrame.messages[0].content).toContain(manager.getSessionFile()!);
 		expect(baseText).not.toContain("Raw proposal to remove Foo.ts");
 		expect(convertToLlm([baseFrames[0]])).toEqual([
 			{ role: "user", content: [{ type: "text", text: baseText }], timestamp: baseFrames[0].timestamp },
@@ -308,6 +347,7 @@ it("reconstructs the whole retained context across pages and caches immutable so
 		expect(frameText(frames[0])).toBe(baseText);
 		const revisionText = frameText(frames[1]);
 		const revision = JSON.parse(revisionText.slice(revisionText.indexOf("\n") + 1));
+		expect(revisionText).not.toContain(manager.getSessionFile()!);
 		expect(revision).toMatchObject({
 			type: "revision",
 			structuredOnly: true,
@@ -585,6 +625,9 @@ it("reconstructs the whole retained context across pages and caches immutable so
 							expect(
 								copiedEpoch.taskFrame.rows.every((row) => row.source.sessionId === destination.getSessionId()),
 							).toBe(true);
+							expect(copiedEpoch.taskFrame.messages.map(frameText).join("\n")).not.toContain(
+								destination.getSessionFile()!,
+							);
 						}
 						if (retained) {
 							expect(tasks.items.some((item) => item.event.authority === "user")).toBe(false);
