@@ -420,7 +420,7 @@ export interface OpenAICompletionsCompat {
 export interface OpenAIResponsesCompat {
 	/** Whether to send the OpenAI `session_id` cache-affinity header from `options.sessionId` when caching is enabled. Default: true. */
 	sendSessionIdHeader?: boolean;
-	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */
+	/** Whether the provider supports `prompt_cache_retention: "24h"`. Defaults on for the resolved official OpenAI Responses endpoint, off for other routes. Explicit values override this default. */
 	supportsLongCacheRetention?: boolean;
 }
 

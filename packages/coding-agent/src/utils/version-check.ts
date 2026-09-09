@@ -146,7 +146,7 @@ export async function getLatestPiRelease(
 			: typeof data.packageName === "string" && data.packageName.trim()
 				? data.packageName.trim()
 				: undefined;
-	if (packageName && packageName !== PRODUCT.packageName) return undefined;
+	if ((baseUrl || packageName) && packageName !== PRODUCT.packageName) return undefined;
 	const installSpec =
 		baseUrl && typeof data.tarball === "string" ? resolveReleaseUrl(baseUrl, data.tarball) : undefined;
 	if (baseUrl && installSpec && new URL(installSpec).origin !== new URL(baseUrl).origin) return undefined;

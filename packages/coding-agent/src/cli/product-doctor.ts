@@ -9,6 +9,7 @@ import {
 	getPackageJsonPath,
 	VERSION,
 } from "../config.js";
+import { CONTEXT_EPOCH_RENDERER, CONTEXT_POLICY_EPOCH_RENDERER } from "../core/context-epoch.js";
 import { getKernelVenvDir, runtimeCandidateDirs } from "../core/kernel/bootstrap.js";
 import { BUILT_IN_PROVIDER_AUTH_CONTRACTS, getProviderAuthContract } from "../core/provider-contracts.js";
 import { CURRENT_SESSION_VERSION } from "../core/session-manager.js";
@@ -43,7 +44,7 @@ export function getProductDiagnostics() {
 			daemon: DAEMON_PROTOCOL_INFO,
 			daemonSchema: DAEMON_SCHEMA_ID,
 			session: CURRENT_SESSION_VERSION,
-			nativeContext: "not implemented",
+			nativeContext: `${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy)`,
 		},
 		paths: {
 			...paths,

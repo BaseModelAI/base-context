@@ -86,3 +86,15 @@
 - Added session-local, acknowledged `context.mode` on/off transitions. Off preserves retained continuation, explicit recovery and native safety while stopping new optimization. Fresh off sessions accept one actual native compatibility contract; Sol/custom prompt text stays unchanged.
 
 - Added optional `autoRefine.model` provider/model/effort selection for the actual reviewer and planner. Invalid explicit selection refuses before auth without fallback. Unconfigured requests retain the main model and omitted effort; ownership, budgets, off-mode gates and protected prompts stay unchanged.
+
+- Root npm publication now checks before one source build and disables workspace lifecycle scripts for both normal/dry publication. Standalone package publishing and the private R2 stage are unchanged; this does not establish exact tested-tarball or live publication evidence.
+
+- Bound daemon catalog pending request admission before startup/queue waits (32 ordinary requests/1 MiB encoded payload per owner). A coalesced reserved shutdown control follows accepted work without competing for ordinary capacity. Catalog scans/output/global memory and failure-time drainage remain outside this local bound.
+
+- Responses long-retention defaults now follow the resolved official request URL; unknown routes need explicit compatibility opt-in. Official-route behavior and explicit opt-out remain. This does not certify live cache retention or alter other provider defaults.
+
+- Limit per-kernel Python Bash admission to 32 live or unresolved handles before setup. Healthy owned settlement recycles capacity; uncertain cleanup can retain a slot until kernel exit. Completed results remain readable. This is not a global process/memory or shutdown guarantee.
+
+- Refuse private release manifests that omit the active package identity. The existing producer already supplies it; owned npm registry lookup is unchanged. This is metadata admission, not artifact or updater activation certification.
+
+- Doctor now reports the actual native request/policy epoch renderer identifiers instead of saying native context is unimplemented. This remains local schema metadata, not runtime or model readiness.

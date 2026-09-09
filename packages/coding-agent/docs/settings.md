@@ -62,7 +62,7 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 }
 ```
 
-`version` is required. `package` is optional and may also be named `packageName`; it defaults to the current package name. `tarball` is optional; when present, Base Context installs that tarball instead of the package name. Relative tarball paths resolve against `BASE_CONTEXT_DOWNLOAD_BASE_URL`. Manifests naming another product are refused.
+Private download manifests require `version` and `package` (or `packageName`) set to the active package name. Version-only manifests and manifests naming another product are refused. `tarball` is optional; when present, Base Context installs that tarball instead of the package name. Relative tarball paths resolve against `BASE_CONTEXT_DOWNLOAD_BASE_URL`. The default owned npm registry lookup is unchanged.
 
 ### Pseudonymous usage analytics
 

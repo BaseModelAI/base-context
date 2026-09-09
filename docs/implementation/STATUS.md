@@ -1382,3 +1382,156 @@ snapshot now preserve their actual return subtype; no fixture casts, runtime
 validation changes or weakened v5 null rules were added. Four distinct cases pass
 after these corrections. Required `npm run check` passes: 1038 files without
 formatter fixes, TypeScript, installer and browser-smoke checks.
+
+### W46 — root publication without repeated workspace builds
+
+The root `prepublishOnly` sequence checks source before one `build:source` step.
+Both `publish` and `publish:dry` then pass `--ignore-scripts` to the workspace npm
+command. Standalone package hooks, version/commit/tag workflow and the R2 packer
+are unchanged. This is not a new tested-tarball staging workflow.
+
+Validation passed in the same two package-command-path cases. Their self-update
+success/installer-failure phases now use current owned paths and metadata, then
+observe actual root script routing through controlled commands. Normal/dry routes request check, one build and intercepted publication;
+a failed-check phase stops before build/publication. No real npm CLI, lifecycle,
+registry, build or publish effects are exercised by those added phases.
+Publication and installed/platform evidence still need their separate approvals
+and work.
+
+### W47 — bounded pending catalog requests
+
+Catalog requests use the existing pending map/FIFO owner with local limits of
+32 ordinary requests and 1 MiB combined encoded UTF-8 payload, captured before
+startup or queue waits. A single reserved 128-byte shutdown control closes new
+admission and follows accepted work even at ordinary capacity. Settlements, not
+send/progress notifications, release admission.
+
+Validation passed (two existing cases): the same dedicated-IPC case now fills ordinary capacity with
+31 resolves and one rename, stops, and reads the persisted result. The same cold
+startup case checks pre-start/send refusal, detached input and combined byte
+admission using its existing mocked process boundary. No extra fault matrix.
+Inbound rejection and failure/restart paths are source-only. Existing timeout and
+transport-error behavior does not certify successful drainage after failure.
+Saved catalog paging/scans/cache/output and global memory bounds remain open.
+
+### W48 — unknown Responses routes do not inherit long retention
+
+Long-retention defaults now use the resolved client's request URL rather than
+assuming every Responses-compatible route supports the field. Official OpenAI
+Responses keeps its previous default; explicit true/false compatibility settings
+still override it. Final post-hook request measurement is unchanged.
+
+Validation passed (two existing cases): two existing Responses cases stop at onPayload, confirm that
+fetch was not called, and observe unknown-route omission, official-route default
+and explicit compatibility overrides. Other cache tests are not selected or run.
+This is pre-fetch request construction, not live provider/cache/billing evidence.
+Other providers, headers and broader G05 work remain outside this change.
+
+### W49 — bounded live Python Bash admissions
+
+Each kernel admits 32 live or unresolved Bash handles through its existing owner
+set before setup effects. Healthy owner/reader settlement and observed group/job
+absence release capacity. Unknown cleanup may retain a slot until kernel exit;
+results, leader death or kill delivery alone do not release it. No new reaper or
+registry was added. Caller-owned completed results remain usable.
+
+Validation passed (two existing cases): the same result case adds 33 healthy completions with actual
+capacity reuse. The same wake-pipe failure case keeps its original close checks
+and adds 32 real handles held at existing worker exit, pre-effect excess refusal,
+and settlement/reuse. No quota reset or fabricated owner entries.
+
+A private shutdown-gate correction preserves original cleanup after a process
+has signal authority even while construction finishes. Tests are unchanged by
+that correction. Windows, cancellation, thread-start/uncertain-cleanup and
+shutdown behavior remain source-only, not runtime-certified. G01 journal writes
+and enrollment, global memory/process limits and caller-retained output remain
+outside this local bound.
+
+### W50 — require identity on private release metadata
+
+Private download manifests without the active package identity are now refused.
+Existing `package`/`packageName` fields and the producer's current manifest shape
+remain; the owned npm registry path is unchanged.
+
+Validation passed (two existing cases): the same two release-manifest cases retain their previous
+phases and add refusal of a same-origin tarball manifest without package identity.
+The new source behavior is not a replay of settled W43 checks for reassurance.
+Controlled metadata lookup is not tarball-content, installed-update, rollback or
+platform evidence. Other G14 work remains open.
+
+### W51 — correct local doctor schema reporting
+
+Doctor now reports the owned request and policy epoch renderer identifiers from
+their existing source constants, instead of `not implemented`. The field remains
+a string; the existing JSON/text reporting paths and credential handling stay.
+These identifiers describe local schemas, not session, provider or model health.
+
+Validation passed (two existing cases): the same two doctor cases retain their original owned-path,
+credential exclusion and legacy-root refusal checks; the happy case also reads
+the native metadata and real text formatter. No provider/auth probe or installed
+CLI run is part of those cases. The isolation document now reflects current
+protocol 11/schema 36; frozen W32 schema-35 benchmark artifacts remain unchanged.
+
+### H/native Sol MEDIUM — frozen W32 comparison completed
+
+The first MEDIUM invocation exited normally after 8694.473s.
+All 60 immutable primaries and 63 retained attempts remain: native 28/30 judges
+(32 attempts), H 29/30 (31 attempts), zero capacity-invalid attempts. Native4
+failed with WebSocket1006; native28 failed main0/5 with edgeTrue and no runtime
+error. H13 failed main3/5 with edgeTrue and no runtime error. Each failed primary
+has one diagnostic, which does not replace it. H4/H7 passed their judges with
+WebSocket1006 errors. These three primary WebSocket errors are the only runtime
+errors across all retained attempts. Both27 and both30 passed runtime-clean.
+
+The 27 matched passing pairs took native 11125.386s
+versus H 11132.330s (-0.062%),
+12 faster and 15 slower. The 26 runtime-clean matched pairs, excluding H7, took
+10926.102s/10996.081s
+(-0.636%). This supplement does not replace the full matched result.
+Lower native correctness and effectively even conditional timing do not establish
+an overall native gain. All-attempt time is not matched-pair speed evidence.
+
+Same27 solver observations (native/H): 388/374 model calls, 357/334 tool calls,
+1/0 recovery calls; input including cache 6547793/6134645, uncached981585/953205,
+cache-read5566208/5181440, output315647/317743. The recovery call was native25's
+primary; a call count alone is not successful recovery evidence. These are solver
+observations, not complete comparable physical accounting or billed cost. Usage
+and cost remain incomplete/null. MEDIUM has no publication-protocol flag, but
+publication readiness remains false and no publication approval is granted.
+
+Read-only task28 comparison found native's explicit correction-batch import
+routing versus H's nested discovery on root imports. Native rehearsed root then
+batch; H rehearsed root twice. Supplied docs/data were present. The fresh-grading
+clause does not specify the second operand, and saved fresh grader commands/CSVs
+were unavailable. This is a supported semantic difference, not identified context
+loss, sole-cause attribution or a reason to reclassify the failed primary.
+
+This invocation used frozen W32 H/native, not the later shipped source. D/S remain
+separately frozen controls. H/native Astra MEDIUM is next after the source gap;
+no candidate repacking, runner swap or new readiness probe is part of that step.
+
+### W46–W51 source-gap validation outcome
+
+Twelve distinct existing cases passed in seven focused commands. W47 catalog
+entry/startup, W48 Responses-only cache cases, W49 native Python Bash cases, W50
+manifest cases and W51 doctor cases passed on their first run. The two W46
+command-path cases initially failed before the added publication-routing phases:
+one expected a tarball without configuring its private manifest origin/identity;
+the other expected a foreign-package rename even though owned lookup refuses it.
+The first error was the missing tarball argument at line265. The second was
+`release lookup is unavailable` rather than the intended installer exit23.
+
+Root aligned only those two fixtures with the actual owned product contract:
+owned installed/project paths, explicit same-origin manifest with package identity,
+and an owned-package installer failure. The obsolete rename/uninstall expectation
+was removed; the case is now named `fails self-update when owned npm package
+installation fails`. It still requires the actual controlled installer exit23,
+exact install call, failed outcome and no success output. The added normal/dry
+routing and failed-check phases remain. No production refusal was weakened.
+Only that affected pair reran and passed; the ten passing cases were not replayed.
+
+Initial and corrected required `npm run check` passed: 1038 files, no fixes,
+TypeScript, installer and browser checks. Expected controlled pre-fetch refusal
+logs in W48 and a Python asyncio slow-task diagnostic accompanied passing tests;
+neither indicates a provider request or failed case. Original failures/logs are
+retained. No broad suite, live provider probe, installation or publication ran.

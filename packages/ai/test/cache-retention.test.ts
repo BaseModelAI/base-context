@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
+import { streamOpenAIResponses } from "../src/providers/openai-responses.js";
 import { stream } from "../src/stream.js";
 import type { Context, Model } from "../src/types.js";
 
@@ -253,36 +254,33 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			},
 		);
 
-		it("should set prompt_cache_retention for non-api.openai.com baseUrl by default", async () => {
+		it("should omit prompt_cache_retention for unknown routes unless explicitly supported", async () => {
 			process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
-
 			const baseModel = getModel("openai", "gpt-4o-mini");
-			const proxyModel = {
-				...baseModel,
-				baseUrl: "https://my-proxy.example.com/v1",
-			};
-
-			let capturedPayload: any = null;
-
-			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
-
+			const proxyModel = { ...baseModel, baseUrl: "https://my-proxy.example.com/v1" };
+			const payloads: Array<Record<string, unknown>> = [];
+			const stop = new Error("cache retention payload captured");
+			const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected provider fetch"));
 			try {
-				const s = streamOpenAIResponses(proxyModel, context, {
-					apiKey: "fake-key",
-					onPayload: (payload) => {
-						capturedPayload = payload;
-					},
-				});
-
-				for await (const event of s) {
-					if (event.type === "error") break;
+				for (const model of [
+					proxyModel,
+					baseModel,
+					{ ...proxyModel, compat: { supportsLongCacheRetention: true } },
+				]) {
+					const response = await streamOpenAIResponses(model, context, {
+						apiKey: "fake-key",
+						onPayload: (payload) => {
+							payloads.push(payload as Record<string, unknown>);
+							throw stop;
+						},
+					}).result();
+					expect(response.errorMessage).toContain(stop.message);
 				}
-			} catch {
-				// The fake proxy request fails after the payload capture used by this assertion.
+				expect(payloads.map((payload) => payload.prompt_cache_retention)).toEqual([undefined, "24h", "24h"]);
+				expect(fetch).not.toHaveBeenCalled();
+			} finally {
+				fetch.mockRestore();
 			}
-
-			expect(capturedPayload).not.toBeNull();
-			expect(capturedPayload.prompt_cache_retention).toBe("24h");
 		});
 
 		it("should omit prompt_cache_retention when supportsLongCacheRetention is false", async () => {
@@ -290,29 +288,27 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 				...getModel("openai", "gpt-4o-mini"),
 				compat: { supportsLongCacheRetention: false },
 			};
-			let capturedPayload: any = null;
-
-			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
-
+			const payloads: Array<Record<string, unknown>> = [];
+			const stop = new Error("cache retention opt-out captured");
+			const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected provider fetch"));
 			try {
-				const s = streamOpenAIResponses(model, context, {
+				const response = await streamOpenAIResponses(model, context, {
 					apiKey: "fake-key",
 					cacheRetention: "long",
 					sessionId: "session-compat-false",
 					onPayload: (payload) => {
-						capturedPayload = payload;
+						payloads.push(payload as Record<string, unknown>);
+						throw stop;
 					},
-				});
-
-				for await (const event of s) {
-					if (event.type === "error") break;
-				}
-			} catch {
-				// The fake proxy request fails after the payload capture used by this assertion.
+				}).result();
+				expect(response.errorMessage).toContain(stop.message);
+				expect(payloads).toHaveLength(1);
+				expect(payloads[0].prompt_cache_retention).toBeUndefined();
+				expect(payloads[0].prompt_cache_key).toBe("session-compat-false");
+				expect(fetch).not.toHaveBeenCalled();
+			} finally {
+				fetch.mockRestore();
 			}
-
-			expect(capturedPayload).not.toBeNull();
-			expect(capturedPayload.prompt_cache_retention).toBeUndefined();
 		});
 
 		it("should omit prompt_cache_key when cacheRetention is none", async () => {

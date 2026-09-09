@@ -1,8 +1,16 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_NAME, ENV_AGENT_DIR, PACKAGE_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV, VERSION } from "../src/config.js";
+import {
+	APP_NAME,
+	CONFIG_DIR_NAME,
+	ENV_AGENT_DIR,
+	PACKAGE_NAME,
+	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
+	VERSION,
+} from "../src/config.js";
 import { main } from "../src/main.js";
 
 function restoreEnv(name: string, value: string | undefined): void {
@@ -35,6 +43,43 @@ describe("package commands", () => {
 	let originalTmpDir: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
+
+	// Controlled shell routing/flag forwarding, not npm lifecycle or registry evidence.
+	function runRootPublishScript(
+		fakeNpmPath: string,
+		recordPath: string,
+		scriptName: "publish" | "publish:dry",
+		failCheck = false,
+	) {
+		const root = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf-8")) as {
+			scripts: Record<string, string>;
+		};
+		const scripts = Object.fromEntries(
+			["prepublishOnly", "publish", "publish:dry"].map((name) => [name, root.scripts[name]]),
+		);
+		writeFileSync(recordPath, "");
+		writeFileSync(
+			fakeNpmPath,
+			String.raw`const fs=require("node:fs"),{spawnSync}=require("node:child_process"),args=process.argv.slice(2);
+const scripts=${JSON.stringify(scripts)};
+fs.appendFileSync(${JSON.stringify(recordPath)},JSON.stringify(args)+"\n");
+if(args[0]==="run" && Object.hasOwn(scripts,args[1])) {
+ const executable=JSON.stringify(process.execPath)+" "+JSON.stringify(__filename);
+ const command=scripts[args[1]].replace(/\bnpm\b/g,()=>executable);
+ process.exit(spawnSync(command,{shell:true,stdio:"inherit"}).status ?? 1);
+}
+if(args.join(" ")==="run check") process.exit(${failCheck ? 23 : 0});
+if(args.join(" ")==="run build:source" || args[0]==="publish") process.exit(0);
+process.exit(99);
+`,
+		);
+		const result = spawnSync(originalExecPath, [fakeNpmPath, "run", scriptName], { encoding: "utf-8" });
+		const calls = readFileSync(recordPath, "utf-8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as string[]);
+		return { status: result.status, calls };
+	}
 
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
@@ -184,12 +229,12 @@ describe("package commands", () => {
 	it("uses global npmCommand and the release manifest install spec for forced self updates", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const projectPrefix = join(tempDir, "project-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", ...PACKAGE_NAME.split("/"));
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
 		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-current.tgz";
 		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, CONFIG_DIR_NAME), { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
 			`const fs=require("node:fs"),path=require("node:path"),args=process.argv.slice(2),prefix=args[args.indexOf("--prefix")+1];
@@ -202,7 +247,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", globalPrefix] }, null, 2),
 		);
 		writeFileSync(
-			join(projectDir, ".prime", "agent", "settings.json"),
+			join(projectDir, CONFIG_DIR_NAME, "settings.json"),
 			JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath, "--prefix", projectPrefix] }, null, 2),
 		);
 		process.env.BASE_CONTEXT_PACKAGE_DIR = selfPackageDir;
@@ -210,7 +255,10 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const fetchMock = vi.fn(async () => Response.json({ tarball: tarballUrl, version: VERSION }));
+		process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL = new URL(tarballUrl).origin;
+		const fetchMock = vi.fn(async () =>
+			Response.json({ package: PACKAGE_NAME, tarball: tarballUrl, version: VERSION }),
+		);
 		vi.stubGlobal("fetch", fetchMock);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -226,6 +274,25 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			expect(recordedArgs).toContain(globalPrefix);
 			expect(recordedArgs).toContain(tarballUrl);
 			expect(recordedArgs).not.toContain(projectPrefix);
+
+			for (const scriptName of ["publish", "publish:dry"] as const) {
+				const routed = runRootPublishScript(fakeNpmPath, recordPath, scriptName);
+				expect(routed.status).toBe(0);
+				expect(routed.calls).toEqual([
+					["run", scriptName],
+					["run", "prepublishOnly"],
+					["run", "check"],
+					["run", "build:source"],
+					[
+						"publish",
+						"-ws",
+						"--access",
+						"public",
+						"--ignore-scripts",
+						...(scriptName === "publish:dry" ? ["--dry-run"] : []),
+					],
+				]);
+			}
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
@@ -429,9 +496,9 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		}
 	});
 
-	it("fails self-update when renamed npm package installation fails", async () => {
+	it("fails self-update when owned npm package installation fails", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", ...PACKAGE_NAME.split("/"));
 		const fakeNpmPath = join(tempDir, "fake-npm-fail.cjs");
 		const recordPath = join(tempDir, "self-update-fail.json");
 		mkdirSync(selfPackageDir, { recursive: true });
@@ -457,10 +524,10 @@ if(args.includes("install")) process.exit(23);
 			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
-		const activePackageName = PACKAGE_NAME === "@new-scope/pi" ? "@newer-scope/pi" : "@new-scope/pi";
+		const activePackageName = PACKAGE_NAME;
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ packageName: activePackageName, version: "0.73.0" })),
+			vi.fn(async () => Response.json({ packageName: activePackageName, version: getNewerPatchVersion() })),
 		);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -472,12 +539,17 @@ if(args.includes("install")) process.exit(23);
 			expect(process.exitCode).toBe(1);
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).not.toContain(`Updated pi`);
+			expect(stdout).not.toContain(`Updated ${APP_NAME}`);
 			expect(stderr).toContain("exited with code 23");
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", activePackageName]),
+			expect(recordedCalls).toEqual([expect.arrayContaining(["install", "-g", activePackageName])]);
+
+			const routed = runRootPublishScript(fakeNpmPath, recordPath, "publish", true);
+			expect(routed.status).toBe(23);
+			expect(routed.calls).toEqual([
+				["run", "publish"],
+				["run", "prepublishOnly"],
+				["run", "check"],
 			]);
 		} finally {
 			logSpy.mockRestore();

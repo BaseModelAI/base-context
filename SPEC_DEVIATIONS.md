@@ -695,3 +695,102 @@ unknown; it does not establish no reasoning or a cost benefit.
 This does not supply independent learning budgets, bridge/semantic configuration,
 deployment/entitlement/pricing facts, or complete §18.4/G07. Configured effort
 validation is not deployment certification.
+
+## W46 update — root npm publication routing
+
+The root release/publication route checks before one `build:source`, then passes
+`--ignore-scripts` to workspace publication. Normal and dry publication routes
+match; a failed check stops before build/publication. Standalone workspace
+`prepublishOnly` hooks and the R2/private-distribution packer are unchanged.
+
+This closes the root route's redundant lifecycle rebuild seam, not exact tested
+tarball staging or installed/platform/publication evidence. The R2 stage rewrites
+dependencies to download URLs and is not treated as a registry npm stage.
+The two existing command-path cases observe controlled shell routing and flags,
+not real npm lifecycle internals, artifact identity or live publication. G15's
+remaining release work and publication approval stay open.
+
+## W47 update — daemon catalog request admission
+
+The existing client pending map and worker FIFO now admit at most 32 ordinary
+requests and 1 MiB of combined encoded UTF-8 request payload each. Requests are
+captured and charged before startup/queue waits; the same detached data is sent.
+Admission remains held until response/error/timeout/close or worker-handler
+settlement, not merely successful send or progress.
+
+One coalesced 128-byte shutdown control follows accepted work without competing
+for ordinary capacity. Stop closes new ordinary admission while it drains; its
+existing transport-failure policy and unknown-write outcomes are not converted
+into a successful-drain or rollback promise.
+
+This is local encoded REQUEST admission, not whole-catalog paging, scans, cache,
+response/progress/IPC buffers, caller memory, heap/RSS or a global aggregate bound.
+Those G08 gaps remain open. Two existing cases cover healthy real IPC/full-capacity
+shutdown drainage and the real client boundary with mocked startup transport.
+Inbound overflow/control and failure/restart branches remain source wiring.
+
+## W48 update — Responses long-retention route default
+
+The Responses request builder now defaults optional `prompt_cache_retention` on
+only for the resolved SDK client's exact official OpenAI Responses request URL.
+Other routes require explicit `compat.supportsLongCacheRetention: true`; explicit
+false still wins on the official route. Provider labels do not establish support.
+The existing post-onPayload final request URL/budget checks remain unchanged.
+
+The same two Responses cache cases use controlled pre-fetch stops and a rejecting
+fetch stub, instead of sending fake credentials to a proxy. They cover unknown
+default omission, retained official-route behavior, explicit opt-in and opt-out.
+These are request-builder observations, not live retention/cache-hit/tariff or
+deployment certification. Completions/Anthropic defaults, affinity headers and
+the remaining G05 profiles/replay/capability gaps are unchanged.
+
+## W49 update — per-kernel Bash handle admission
+
+The existing Python `_live_handles` set and lock now admit at most 32 live or
+unresolved Bash handles before shutdown-hook, pipe, process or worker setup.
+Normal release uses actual group/job absence and existing watcher, reader and
+worker settlement. Returned results, leader exit and delivered kill requests do
+not release capacity. Completed caller-owned results remain readable.
+
+Uncertain cleanup can retain admission until kernel exit. No reset, extra
+registry, polling process or reaper was added. Shutdown skips records without
+current signal authority, but keeps its original post-spawn cleanup while a
+constructor finishes. G01 journal writers/enrollment and the pre-execution gate
+are unchanged. This is a local handle-admission limit, not a descendant-process,
+caller-retained output, heap/RSS or successful-shutdown bound.
+
+Two existing cases retain their original phases and add 33 healthy completions
+with real reuse, and 32 real handles held at existing worker exit with excess
+refused before setup effects, followed by genuine settlement/reuse. Windows and
+cancellation/failure/shutdown branches remain source-only; no extra fault matrix
+or full G08/G01 closure is claimed.
+
+## W50 update — explicit release manifests require package identity
+
+A configured private download manifest must name the active package through its
+existing `package`/`packageName` field. Missing identity now makes the whole
+release unavailable before choosing its tarball; it is not treated as the current
+product. The existing release producer already writes `package`, so its manifest
+format is unchanged. The owned npm registry lookup keeps its existing behavior.
+
+The same manifest happy/refusal cases cover the new missing-identity refusal
+while retaining relative/absolute same-origin, registry, wrong-product, redirect
+and cross-origin phases. This is metadata admission through a controlled fetch,
+not artifact-content, schema/platform compatibility, activation/rollback or full
+G14 certification. No new integrity mechanism was added.
+
+## W51 update — doctor reports owned native epoch metadata
+
+The local doctor report no longer says native context is unimplemented. Its
+existing string field now uses the actual exported request/policy epoch renderer
+identifiers, and the existing text formatter shows the same metadata. This does
+not query a model, load credentials or establish session/runtime readiness.
+
+The product-isolation checkpoint now names the actual current protocol 11/schema
+36 contract, rather than its old protocol 9/schema 28 checkpoint. Frozen W32
+benchmark artifacts still use their own schema 35; they are not changed.
+
+The same two doctor cases retain owned paths, credential-value exclusion and
+invalid legacy-root refusal. The happy case additionally observes native epoch
+metadata and the real text formatter. No installed CLI, deployment or whole G13
+certification is implied by this local metadata correction.

@@ -55,6 +55,21 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
 
+        # More than a lifetime total of 32 commands, with real owner/reader settlement.
+        for _ in range(33):
+            completed = bash("printf recycled")
+            self.assertEqual((await completed).output, "recycled")
+            deadline = time.monotonic() + 5
+            while True:
+                with bash_module._live_lock:
+                    retired = completed not in bash_module._live_handles
+                if retired:
+                    break
+                self.assertLess(time.monotonic(), deadline, "healthy admission did not retire")
+                await asyncio.sleep(0.01)
+        self.assertEqual(handle.poll(), awaited)
+        self.assertIn("hi", result.output)
+
     async def test_status_pipe_survives_high_fds_and_strict_posix_shell(self):
         # Regression: dash rejects multi-digit fds in redirections at parse
         # time, so the script must never reference the raw status-pipe fd.
@@ -352,7 +367,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(proc.returncode, 127)
             self.assertFalse(os.path.exists(marker))
 
-    def test_status_socket_closed_when_wake_pipe_fails(self):
+    async def test_status_socket_closed_when_wake_pipe_fails(self):
         if not bash_module._IS_POSIX:
             self.skipTest("POSIX-only fds")
         acquired: list[int] = []
@@ -377,6 +392,48 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acquired), 2)
         for fd in acquired:
             self.assertIn(fd, closed)
+
+        # The failed setup above must not consume a slot. Hold actual pump exits,
+        # not results or fabricated set entries, to fill the live owner boundary.
+        release_readers = threading.Event()
+        original_pump = bash_module.BashHandle._pump
+        handles = []
+
+        def held_pump(handle_self):
+            original_pump(handle_self)
+            release_readers.wait()
+
+        try:
+            with mock.patch.object(bash_module.BashHandle, "_pump", held_pump):
+                for _ in range(32):
+                    handles.append(bash("printf retained"))
+                results = await asyncio.wait_for(asyncio.gather(*handles), timeout=10)
+                self.assertTrue(all(result.exit_code == 0 for result in results))
+                self.assertTrue(all(result.output == "retained" for result in results))
+                with (
+                    mock.patch.object(bash_module, "_install_shutdown_hook") as hook,
+                    mock.patch.object(bash_module.socket, "socketpair") as pair,
+                    mock.patch.object(bash_module.os, "pipe") as pipe,
+                    mock.patch.object(bash_module.subprocess, "Popen") as spawn,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, r"live handle limit exceeded \(32\)"):
+                        bash("echo excess")
+                    hook.assert_not_called()
+                    pair.assert_not_called()
+                    pipe.assert_not_called()
+                    spawn.assert_not_called()
+        finally:
+            release_readers.set()
+            deadline = time.monotonic() + 5
+            while True:
+                with bash_module._live_lock:
+                    retired = all(handle not in bash_module._live_handles for handle in handles)
+                if retired:
+                    break
+                self.assertLess(time.monotonic(), deadline, "reader ownership did not settle")
+                await asyncio.sleep(0.01)
+        recovered = bash("printf after-settlement")
+        self.assertEqual((await recovered).output, "after-settlement")
 
     def test_windows_process_start_id(self):
         completed = mock.Mock(stdout="638000000000000000\n")

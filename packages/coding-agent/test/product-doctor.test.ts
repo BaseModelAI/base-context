@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import { getProductDiagnostics } from "../src/cli/product-doctor.js";
+import { formatProductDiagnostics, getProductDiagnostics } from "../src/cli/product-doctor.js";
+import { CONTEXT_EPOCH_RENDERER, CONTEXT_POLICY_EPOCH_RENDERER } from "../src/core/context-epoch.js";
 
 let home: string | undefined;
 afterEach(() => {
@@ -20,6 +21,12 @@ test("reports owned product paths and unavailable auth contracts without credent
 	expect(report.paths.auth).toBe(join(home, "auth.json"));
 	expect(report.paths.settings).toBe(join(home, "settings.json"));
 	expect(report.schemas.daemon.name).toBe("base-context.daemon");
+	expect(report.schemas.nativeContext).toBe(
+		`${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy)`,
+	);
+	const formatted = formatProductDiagnostics(report);
+	expect(formatted).toContain(`native context: ${report.schemas.nativeContext}`);
+	expect(formatted).not.toContain("private-export-credential");
 	expect(report.providerContracts.every((contract) => contract.oauth !== "validated")).toBe(true);
 	expect(JSON.stringify(report)).not.toContain("private-export-credential");
 });

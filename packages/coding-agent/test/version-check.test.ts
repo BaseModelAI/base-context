@@ -128,6 +128,11 @@ describe("version checks", () => {
 		);
 		await expect(getLatestPiRelease("0.1.0")).resolves.toBeUndefined();
 
+		fetchMock.mockResolvedValueOnce(
+			Response.json({ tarball: "releases/v9.9.9/base-context-9.9.9.tgz", version: "9.9.9" }),
+		);
+		await expect(getLatestPiRelease("0.1.0")).resolves.toBeUndefined();
+
 		const redirectError = new TypeError("manifest redirect refused");
 		fetchMock.mockRejectedValueOnce(redirectError);
 		await expect(getLatestPiRelease("0.1.0")).rejects.toBe(redirectError);

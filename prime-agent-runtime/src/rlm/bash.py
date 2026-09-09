@@ -45,6 +45,7 @@ _COMPLETION_SUFFIX = b"\x1f"
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
 
+_MAX_LIVE_HANDLES = 32
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
 _hook_installed = False
@@ -117,6 +118,25 @@ class BashHandle:
     """
 
     def __init__(self, command: str) -> None:
+        self._constructing = True
+        self._setup_resources = False
+        self._group_absent = False
+        self._watch_settled = False
+        self._workers_pending = 0
+        self._signal_ready = False
+        with _live_lock:
+            if len(_live_handles) >= _MAX_LIVE_HANDLES:
+                raise RuntimeError("bash(): live handle limit exceeded (32)")
+            _live_handles.add(self)
+        try:
+            _install_shutdown_hook()
+            self._start(command)
+        finally:
+            with _live_lock:
+                self._constructing = False
+                self._retire_admission_locked()
+
+    def _start(self, command: str) -> None:
         self.command = command
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
@@ -152,13 +172,17 @@ class BashHandle:
             # pid is journaled, so a kernel kill in that window cannot leak an
             # unjournaled command (parent death closes the socket -> child exits).
             parent_sock, child_sock = socket.socketpair()
+            self._setup_resources = True
             self._status_read = parent_sock.detach()
             status_write = child_sock.detach()
             try:
                 self._wake_read, self._wake_write = os.pipe()
             except BaseException:
                 os.close(self._status_read)
+                self._status_read = -1
                 os.close(status_write)
+                status_write = -1
+                self._setup_resources = False
                 raise
             completion_token = secrets.token_hex(32)
             # Halves stop passive echoes; a deliberate forgery freezes only this call while later bytes stay live.
@@ -178,6 +202,8 @@ class BashHandle:
             if self._job is None:
                 # Nothing spawned yet, so nothing can leak: refuse to start.
                 raise RuntimeError("bash(): Windows job containment could not be established")
+            self._setup_resources = True
+        setup_closed = False
         try:
             self._proc: subprocess.Popen[bytes] | _winjob.JobProcess
             if _IS_POSIX:
@@ -201,14 +227,16 @@ class BashHandle:
             if self._job is not None:
                 job, self._job = self._job, None
                 _winjob.close(job)
+            setup_closed = True
             raise
         finally:
             if status_write >= 0:
                 os.close(status_write)
+            if setup_closed:
+                self._setup_resources = False
         self._pid: int = self._proc.pid
         self._released = False
-        with _live_lock:
-            _live_handles.add(self)
+        self._signal_ready = True
         enrolled = _record_journal(self._pid, active=True)
         if not enrolled:
             # Fail closed: a configured journal that cannot enroll the pid must
@@ -233,9 +261,45 @@ class BashHandle:
             if not cast("_winjob.JobProcess", self._proc).resume():
                 self._abort_spawn()
                 raise RuntimeError("bash(): Windows job containment could not be established")
-        threading.Thread(target=self._pump, daemon=True).start()
-        threading.Thread(target=self._report, daemon=True).start()
-        threading.Thread(target=self._watch, daemon=True).start()
+        # Reserve all existing workers before any can exit. A failed thread start
+        # leaves its unresolved ownership charged; no new confirmer is created.
+        with _live_lock:
+            self._workers_pending = 3
+        for worker in (self._pump, self._report, self._watch):
+            threading.Thread(target=self._run_worker, args=(worker,), daemon=True).start()
+
+    def _retire_admission_locked(self) -> None:
+        if self._constructing or self._workers_pending:
+            return
+        if not self._setup_resources or (
+            self._watch_settled
+            and self._group_absent
+            and self._eof.is_set()
+            and self._status_read < 0
+            and self._wake_read < 0
+            and self._wake_write < 0
+            and self._proc.stdout is not None
+            and self._proc.stdout.closed
+        ):
+            _live_handles.discard(self)
+
+    def _observe_group_absence(self) -> None:
+        with _live_lock:
+            self._group_absent = True
+            self._retire_admission_locked()
+
+    def _run_worker(self, worker: Callable[[], None]) -> None:
+        try:
+            worker()
+        except BaseException:
+            if worker == self._watch:
+                with self._kill_lock:
+                    self._signal_ready = False
+            raise
+        finally:
+            with _live_lock:
+                self._workers_pending -= 1
+                self._retire_admission_locked()
 
     @property
     def pid(self) -> int:
@@ -395,6 +459,7 @@ class BashHandle:
             except OSError:
                 pass
             os.close(self._wake_write)
+            self._wake_write = -1
         # _report always sets _status_known (try/finally), so wait indefinitely:
         # a slow reporter can never lose a delivered status to wait()'s code.
         self._status_known.wait()
@@ -412,8 +477,7 @@ class BashHandle:
                 cast("_winjob.JobProcess", self._proc).close()
         if delivered:
             _record_journal(self._pid, active=False)
-        with _live_lock:
-            _live_handles.discard(self)
+        self._watch_settled = True
 
     def _reap_group(self) -> bool:
         # Group liveness, not leader death, gates the inactive record: members
@@ -425,12 +489,15 @@ class BashHandle:
             delivered = False
             if self._job is not None:
                 delivered = _winjob.terminate(self._job)
+                if _winjob.is_empty(self._job) is True:
+                    self._observe_group_absence()
                 job, self._job = self._job, None
                 _winjob.close(job)
             return delivered or _taskkill_tree(self._pid)
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
+            self._observe_group_absence()
             return True  # group already gone
         except PermissionError:
             pass
@@ -461,7 +528,9 @@ class BashHandle:
             return None
         finally:
             os.close(self._status_read)
+            self._status_read = -1
             os.close(self._wake_read)
+            self._wake_read = -1
 
     def _drain_grace(self) -> None:
         # Best-effort fallback when process exit/EOF arrives without a sentinel.
@@ -572,11 +641,14 @@ class BashHandle:
                 # Job accounting sees detached descendants a dead leader hides.
                 empty = _winjob.is_empty(job)
                 if empty is not None:
+                    if empty:
+                        self._observe_group_absence()
                     return not empty
             return self._proc.poll() is None
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
+            self._observe_group_absence()
             return False
         except PermissionError:
             pass
@@ -594,13 +666,14 @@ class BashHandle:
         # Enrollment or containment failed before the gate opened (POSIX) or
         # while the child is still suspended, before resume (Windows): kill
         # the child and unwind the handle before threads start.
+        cleanup_known = True
         if _IS_POSIX:
             for fd in (self._status_read, self._wake_read, self._wake_write):
                 if fd >= 0:
                     try:
                         os.close(fd)
                     except OSError:
-                        pass
+                        cleanup_known = False
             self._status_read = self._wake_read = self._wake_write = -1
             delivered = _signal_group(self._pid, signal.SIGKILL)
         else:
@@ -608,6 +681,8 @@ class BashHandle:
                 delivered = False
                 if self._job is not None:
                     delivered = _winjob.terminate(self._job)
+                    if _winjob.is_empty(self._job) is True:
+                        self._observe_group_absence()
                     job, self._job = self._job, None
                     _winjob.close(job)
                 if not delivered:
@@ -622,19 +697,31 @@ class BashHandle:
             self._proc.stdout.close()
         # The blocking wait stays outside the lock: hProcess is still open, so a
         # concurrent raw-pid fallback stays pinned to the right process.
+        waited = False
         try:
             self._proc.wait(timeout=5)
+            waited = True
         except (OSError, subprocess.SubprocessError):
             pass
+        if waited and _IS_POSIX:
+            try:
+                self._group_alive()  # Actual absence, not delivery of the earlier kill.
+            except OSError:
+                pass  # An unavailable observation cannot release admission.
         with self._kill_lock:
             self._reaped = True
             if not _IS_POSIX:
                 # Reaped commits before close: later lock holders skip raw-pid fallbacks.
                 cast("_winjob.JobProcess", self._proc).close()
-        with _live_lock:
-            _live_handles.discard(self)
         if delivered:
             _record_journal(self._pid, active=False)
+        if (
+            waited
+            and cleanup_known
+            and self._group_absent
+            and (self._proc.stdout is None or self._proc.stdout.closed)
+        ):
+            self._setup_resources = False
 
     def __await__(self) -> Generator[Any, None, BashResult]:
         # A handle awaited before any other API use is a one-shot command tied
@@ -667,7 +754,6 @@ def bash(command: str) -> BashHandle:
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
-    _install_shutdown_hook()
     return BashHandle(command)
 
 
@@ -863,12 +949,14 @@ def _kill_live_handles() -> None:
     with _live_lock:
         handles = list(_live_handles)
     for handle in handles:
-        if _IS_POSIX:
-            delivered = _signal_group(handle._pid, signal.SIGKILL)
-        else:
-            with handle._kill_lock:
-                if handle._reaped:
-                    continue
+        if not handle._signal_ready:
+            continue
+        with handle._kill_lock:
+            if handle._reaped or not handle._signal_ready:
+                continue
+            if _IS_POSIX:
+                delivered = _signal_group(handle._pid, signal.SIGKILL)
+            else:
                 delivered = handle._job is not None and _winjob.terminate(handle._job)
                 if not delivered:
                     delivered = _taskkill_tree(handle._pid)

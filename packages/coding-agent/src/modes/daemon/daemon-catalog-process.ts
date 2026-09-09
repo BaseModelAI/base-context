@@ -6,12 +6,16 @@ import { join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import { getPackageDir, isBunBinary } from "../../config.js";
+import { stringifyBoundedJson } from "../../core/bounded-json.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_CATALOG";
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
+const DAEMON_CATALOG_MAX_PENDING_REQUESTS = 32;
+const DAEMON_CATALOG_MAX_PENDING_BYTES = 1024 * 1024;
+const DAEMON_CATALOG_MAX_SHUTDOWN_BYTES = 128;
 
 export function isDaemonCatalogSourcePath(modulePath: string, packageDir: string): boolean {
 	return modulePath.startsWith(`${join(packageDir, "src")}${sep}`);
@@ -50,6 +54,11 @@ type CatalogRequest =
 			operations: string[];
 	  }
 	| { type: "request"; id: string; command: "shutdown" };
+
+function captureCatalogRequest(request: CatalogRequest, maxBytes: number): { request: CatalogRequest; bytes: number } {
+	const encoded = stringifyBoundedJson(request, maxBytes);
+	return { request: JSON.parse(encoded) as CatalogRequest, bytes: Buffer.byteLength(encoded) };
+}
 
 type CatalogOutbound =
 	| { type: "ready" }
@@ -134,6 +143,8 @@ export async function runDaemonCatalogProcess(): Promise<never> {
 	// Shutdown shares this queue, so admitted writes close their owner before process exit.
 	let requests = Promise.resolve();
 	let shuttingDown = false;
+	let pendingRequests = 0;
+	let pendingBytes = 0;
 	process.on("disconnect", () => process.exit(0));
 	process.on("message", (value: unknown) => {
 		if (!isCatalogRequest(value)) {
@@ -148,8 +159,35 @@ export async function runDaemonCatalogProcess(): Promise<never> {
 			});
 			return;
 		}
-		if (value.command === "shutdown") shuttingDown = true;
-		requests = requests.then(() => handleCatalogRequest(value));
+		try {
+			const shutdown = value.command === "shutdown";
+			if (!shutdown && pendingRequests >= DAEMON_CATALOG_MAX_PENDING_REQUESTS)
+				throw new Error("Daemon catalog pending request limit exceeded (32)");
+			const captured = captureCatalogRequest(
+				value,
+				shutdown ? DAEMON_CATALOG_MAX_SHUTDOWN_BYTES : DAEMON_CATALOG_MAX_PENDING_BYTES - pendingBytes,
+			);
+			if (shutdown) shuttingDown = true;
+			else {
+				pendingRequests++;
+				pendingBytes += captured.bytes;
+			}
+			requests = requests
+				.then(() => handleCatalogRequest(captured.request))
+				.finally(() => {
+					if (!shutdown) {
+						pendingRequests--;
+						pendingBytes -= captured.bytes;
+					}
+				});
+		} catch (error) {
+			sendCatalogMessage({
+				type: "response",
+				id: value.id,
+				success: false,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	});
 	sendCatalogMessage({ type: "ready" });
 	return new Promise(() => {});
@@ -288,25 +326,30 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 export class DaemonCatalogClient {
 	private child?: ChildProcess;
 	private starting?: Promise<void>;
+	private stopping?: Promise<void>;
 	private readonly pending = new Map<
 		string,
 		{
 			resolve: (data: unknown) => void;
 			reject: (error: Error) => void;
 			callbacks?: CatalogListCallbacks;
-			timeout: ReturnType<typeof setTimeout>;
+			request: CatalogRequest;
+			bytes: number;
+			sent: boolean;
+			timeout?: ReturnType<typeof setTimeout>;
 		}
 	>();
 
 	constructor(private readonly onDiagnostic: (message: string) => void) {}
 
 	async start(): Promise<void> {
-		if (this.child?.connected) {
-			return;
-		}
 		if (this.starting) {
 			return this.starting;
 		}
+		if (this.child?.connected) {
+			return;
+		}
+		if (this.stopping) throw new Error("Daemon catalog is shutting down");
 		this.starting = this.spawnCatalog().finally(() => {
 			this.starting = undefined;
 		});
@@ -363,14 +406,21 @@ export class DaemonCatalogClient {
 		});
 	}
 
-	async stop(): Promise<void> {
-		const child = this.child;
-		if (!child) {
-			return;
-		}
-		await this.request({ type: "request", id: randomUUID(), command: "shutdown" }).catch(() => undefined);
-		child.disconnect();
-		this.child = undefined;
+	stop(): Promise<void> {
+		if (this.stopping) return this.stopping;
+		// Close ordinary admission now; one reserved control follows all admitted entries.
+		this.stopping = Promise.resolve()
+			.then(async () => {
+				const child = this.child;
+				if (!child && !this.starting) return;
+				await this.request({ type: "request", id: randomUUID(), command: "shutdown" }).catch(() => undefined);
+				if (child?.connected) child.disconnect();
+				if (this.child === child) this.child = undefined;
+			})
+			.finally(() => {
+				this.stopping = undefined;
+			});
+		return this.stopping;
 	}
 
 	private async spawnCatalog(): Promise<void> {
@@ -439,40 +489,83 @@ export class DaemonCatalogClient {
 	}
 
 	private async request<T = void>(request: CatalogRequest, callbacks?: CatalogListCallbacks): Promise<T> {
-		await this.start();
-		const child = this.child;
-		if (!child?.connected) {
-			throw new Error("Daemon catalog is not connected");
+		const shutdown = request.command === "shutdown";
+		if (!shutdown && this.stopping) throw new Error("Daemon catalog is shutting down");
+		let count = 0;
+		let bytes = 0;
+		for (const pending of this.pending.values()) {
+			if (pending.request.command === "shutdown") continue;
+			count++;
+			bytes += pending.bytes;
 		}
+		if (!shutdown && count >= DAEMON_CATALOG_MAX_PENDING_REQUESTS)
+			throw new Error("Daemon catalog pending request limit exceeded (32)");
+		const captured = captureCatalogRequest(
+			request,
+			shutdown ? DAEMON_CATALOG_MAX_SHUTDOWN_BYTES : DAEMON_CATALOG_MAX_PENDING_BYTES - bytes,
+		);
 		return new Promise<T>((resolveRequest, rejectRequest) => {
-			const timeout = setTimeout(
-				() => {
-					if (!this.pending.delete(request.id)) {
-						return;
-					}
-					child.kill("SIGKILL");
-					rejectRequest(new Error(`Timed out waiting for daemon catalog ${request.command}`));
-				},
-				5 * 60 * 1000,
-			);
-			this.pending.set(request.id, {
+			this.pending.set(captured.request.id, {
 				resolve: (data) => resolveRequest(data as T),
 				reject: rejectRequest,
 				callbacks,
-				timeout,
+				request: captured.request,
+				bytes: captured.bytes,
+				sent: false,
 			});
-			child.send(request, (error) => {
-				if (!error) {
-					return;
-				}
-				const pending = this.pending.get(request.id);
-				if (pending) {
-					clearTimeout(pending.timeout);
-					this.pending.delete(request.id);
-				}
-				rejectRequest(error);
-			});
+			const starting = this.start();
+			const child = this.child;
+			void starting.then(
+				() => {
+					if (!child || this.child !== child) {
+						this.removePending(captured.request.id)?.reject(new Error("Daemon catalog is not connected"));
+						return;
+					}
+					this.sendPending(child);
+				},
+				(error: Error) => this.removePending(captured.request.id)?.reject(error),
+			);
 		});
+	}
+
+	private sendPending(child: ChildProcess): void {
+		if (!child.connected) {
+			for (const id of this.pending.keys())
+				this.removePending(id)?.reject(new Error("Daemon catalog is not connected"));
+			return;
+		}
+		// The existing map is the FIFO, including entries admitted during startup.
+		for (const pending of this.pending.values()) {
+			if (this.child !== child) return;
+			if (pending.sent) continue;
+			pending.sent = true;
+			const request = pending.request;
+			pending.timeout = setTimeout(
+				() => {
+					const expired = this.removePending(request.id);
+					if (!expired) return;
+					child.kill("SIGKILL");
+					expired.reject(new Error(`Timed out waiting for daemon catalog ${request.command}`));
+				},
+				5 * 60 * 1000,
+			);
+			try {
+				child.send(request, (error) => {
+					if (error) this.removePending(request.id)?.reject(error);
+				});
+			} catch (error) {
+				this.removePending(request.id)?.reject(error instanceof Error ? error : new Error(String(error)));
+			}
+		}
+	}
+
+	private removePending(id: string) {
+		const pending = this.pending.get(id);
+		if (pending) {
+			this.pending.delete(id);
+			clearTimeout(pending.timeout);
+		}
+		return pending;
 	}
 
 	private handleMessage(value: unknown): void {
@@ -491,8 +584,7 @@ export class DaemonCatalogClient {
 			pending.callbacks?.onSession?.(deserializeSessionInfo(value.session));
 			return;
 		}
-		this.pending.delete(value.id);
-		clearTimeout(pending.timeout);
+		this.removePending(value.id);
 		if (value.success) {
 			pending.resolve(value.data);
 		} else {
@@ -505,11 +597,7 @@ export class DaemonCatalogClient {
 			return;
 		}
 		this.child = undefined;
+		for (const id of this.pending.keys()) this.removePending(id)?.reject(error);
 		this.onDiagnostic(error.message);
-		for (const [id, pending] of this.pending) {
-			clearTimeout(pending.timeout);
-			pending.reject(error);
-			this.pending.delete(id);
-		}
 	}
 }

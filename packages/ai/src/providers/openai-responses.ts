@@ -49,10 +49,11 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 	return "short";
 }
 
-function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
+function getCompat(model: Model<"openai-responses">, requestUrl?: string): Required<OpenAIResponsesCompat> {
 	return {
 		sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
-		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
+		supportsLongCacheRetention:
+			model.compat?.supportsLongCacheRetention ?? requestUrl === "https://api.openai.com/v1/responses",
 	};
 }
 
@@ -109,6 +110,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			let params = buildParams(
 				model,
 				context,
+				`${client.baseURL.replace(/\/$/, "")}/responses`,
 				options,
 				options?.attempts?.prepareRequest
 					? (value) => {
@@ -272,13 +274,14 @@ function createClient(
 function buildParams(
 	model: Model<"openai-responses">,
 	context: Context,
+	requestUrl: string,
 	options?: OpenAIResponsesOptions,
 	onProjection?: (projection: ProviderRequestProjection) => void,
 ) {
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { onProjection });
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
-	const compat = getCompat(model);
+	const compat = getCompat(model, requestUrl);
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		input: messages,
