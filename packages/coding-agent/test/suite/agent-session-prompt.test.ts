@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
+import { loadSkillsFromDir, SKILL_FILE_MAX_BYTES } from "../../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -302,37 +303,29 @@ describe("AgentSession prompt characterization", () => {
 
 	it("expands skill commands before sending the prompt", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(tempDir, { recursive: true });
+		const skillDir = join(tempDir, "test");
+		mkdirSync(skillDir, { recursive: true });
 		tempDirs.push(tempDir);
-		const skillPath = join(tempDir, "test-skill.md");
-		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
-
+		const skillPath = join(skillDir, "SKILL.md");
+		const frontmatter = "---\r\nname: test\rdescription: Test skill\r\n---";
+		// The existing parser accepts a closing --- prefix without a following newline.
+		const body = "# Test Skill\r\n\r\nUse the skill body. [Reference](./reference.md)";
+		writeFileSync(skillPath, frontmatter + body);
+		const discovered = loadSkillsFromDir({ dir: skillDir, source: "test" });
+		expect(discovered.skills).toHaveLength(1);
+		expect(discovered.diagnostics).toEqual([]);
 		const resourceLoader = {
 			...createTestResourceLoader(),
-			getSkills: () => ({
-				skills: [
-					{
-						name: "test",
-						description: "Test skill",
-						filePath: skillPath,
-						disableModelInvocation: false,
-						kind: "markdown" as const,
-						baseDir: tempDir,
-						sourceInfo: createSyntheticSourceInfo(skillPath, {
-							source: "local",
-							scope: "project",
-							origin: "top-level",
-							baseDir: tempDir,
-						}),
-					},
-				],
-				diagnostics: [],
-			}),
+			getSkills: () => discovered,
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
+		const expansionErrors: string[] = [];
+		await harness.session.bindExtensions({ onError: (error) => expansionErrors.push(error.error) });
 		let expandedPrompt = "";
-
+		const unsubscribe = harness.session.agent.subscribe((event) => {
+			if (event.type === "agent_start") writeFileSync(skillPath, `${frontmatter}Changed after capture.`);
+		});
 		harness.setResponses([
 			(context) => {
 				const user = context.messages.find((message) => message.role === "user");
@@ -342,10 +335,40 @@ describe("AgentSession prompt characterization", () => {
 		]);
 
 		await harness.session.prompt("/skill:test explain this");
+		unsubscribe();
+		const expected = `<skill name="test" location="${skillPath}">\nReferences are relative to ${skillDir}.\n\n${body.replace(/\r\n/g, "\n")}\n</skill>\n\nexplain this`;
+		expect(expandedPrompt).toBe(expected);
+		const userEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toMatchObject({
+			message: { role: "user" },
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "/skill:test explain this" },
+			},
+		});
 
-		expect(expandedPrompt).toContain('<skill name="test" location="');
-		expect(expandedPrompt).toContain("Use the skill body.");
-		expect(expandedPrompt).toContain("explain this");
+		expect(getMessageText(userEntry?.type === "message" ? userEntry.message : undefined)).toBe(expected);
+
+		// Discovery keeps only bounded metadata even when the unselected body is too large.
+		const oversized = frontmatter + "é".repeat(SKILL_FILE_MAX_BYTES / 2);
+		expect(oversized.length).toBeLessThan(SKILL_FILE_MAX_BYTES);
+		expect(Buffer.byteLength(oversized)).toBeGreaterThan(SKILL_FILE_MAX_BYTES);
+		writeFileSync(skillPath, oversized);
+		const rediscovered = loadSkillsFromDir({ dir: skillDir, source: "test" });
+		expect(rediscovered.skills).toMatchObject([{ name: "test", description: "Test skill", filePath: skillPath }]);
+		expect(rediscovered.diagnostics).toEqual([]);
+		harness.setResponses([fauxAssistantMessage("must not be consumed")]);
+		await expect(harness.session.prompt("/skill:test oversized")).rejects.toThrow("Skill file byte limit exceeded");
+		expect(expansionErrors).toEqual(["Skill file byte limit exceeded"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(getUserTexts(harness)).toEqual([expected]);
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {

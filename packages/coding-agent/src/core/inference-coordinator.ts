@@ -193,6 +193,11 @@ export class InferenceCoordinator {
 		}
 	}
 
+	/** Copy the configured policy, not this owner's learned request observations. */
+	getRequestTokenBudgetOptions(): RequestTokenBudgetOptions | undefined {
+		return this.work.budget?.getOptions();
+	}
+
 	private assertAdmission(): void {
 		if (this.disposed || !this.work.admissionOpen) throw new Error("Inference owner is closing");
 	}

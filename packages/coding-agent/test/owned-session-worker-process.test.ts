@@ -1,8 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
 
 const fixturePath = resolve(__dirname, "fixtures/owned-session-worker-fixture.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -153,7 +154,10 @@ describe("owned session worker processes", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-test-"));
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
-		const frontend = spawnFrontend(["--mode", "rpc"], pidPath);
+		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "valid",
+		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString("utf8");
@@ -168,6 +172,12 @@ describe("owned session worker processes", () => {
 			`${JSON.stringify({ id: "request-1", type: "response", command: "get_state", success: true })}\n`,
 		);
 		await waitForProcessGone(workerPid);
+		const paths = JSON.parse(readFileSync(`${pidPath}.tracking`, "utf8")) as {
+			journalPath: string;
+			recoveryDescriptorPath: string;
+		};
+		expect(existsSync(paths.journalPath)).toBe(false);
+		expect(existsSync(paths.recoveryDescriptorPath)).toBe(false);
 	});
 
 	it("correlates overlapping anonymous RPC commands without exposing internal ids", async () => {
@@ -250,8 +260,14 @@ describe("owned session worker processes", () => {
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
 			BASE_CONTEXT_TEST_CRASH_ON_COMMAND: "get_state",
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "corrupt",
 		});
 		let stdout = "";
+		let stderr = "";
+		frontend.stderr?.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString("utf8");
+		});
 		frontend.stdout?.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString("utf8");
 		});
@@ -271,6 +287,25 @@ describe("owned session worker processes", () => {
 			})}\n`,
 		);
 		await waitForProcessGone(workerPid);
+		expect(stderr).toContain("tracking is unknown");
+		const paths = JSON.parse(readFileSync(`${pidPath}.tracking`, "utf8")) as {
+			journalPath: string;
+			recoveryDescriptorPath: string;
+		};
+		expect(existsSync(paths.recoveryDescriptorPath)).toBe(true);
+		const corrupt = readFileSync(paths.journalPath, "utf8");
+		expect(corrupt.endsWith("{\n")).toBe(true);
+		expect(() => readActiveOrphanProcesses(paths.journalPath, workerPid)).toThrow(
+			"Malformed orphan process journal record",
+		);
+		expect(readFileSync(paths.journalPath, "utf8")).toBe(corrupt);
+		// An incomplete tail is also unknown, not a complete empty result; reading never repairs it.
+		const incompletePath = join(root, "incomplete.jsonl");
+		writeFileSync(incompletePath, "{");
+		expect(() => readActiveOrphanProcesses(incompletePath, workerPid)).toThrow(
+			"Incomplete orphan process journal tail",
+		);
+		expect(readFileSync(incompletePath, "utf8")).toBe("{");
 	});
 
 	it("fails pending RPC commands when the worker exits successfully without responding", async () => {

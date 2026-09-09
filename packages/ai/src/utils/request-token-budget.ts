@@ -278,6 +278,11 @@ export class RequestTokenBudget {
 		}
 	}
 
+	/** Detached explicit configuration only; observations and retained credit never propagate to another owner. */
+	getOptions(): RequestTokenBudgetOptions {
+		return structuredClone(this.options);
+	}
+
 	/** Freeze measurement parameters at the first actual body; settlements still belong to this budget. */
 	capture(): RequestTokenBudgetEvaluator {
 		let captured: CapturedRequestCalibration | undefined;

@@ -1401,3 +1401,23 @@ New TaskFrame source metadata includes `sessionId`, `entryId`, `field`, and avai
 Use these exact identities for `prime_context`, not internal filesystem locators. Full
 internal source objects remain available to the compiler. Previously frozen text is
 not rewritten, and omitted metadata does not mean missing source or current liveness.
+
+
+### Child request-budget configuration
+
+Owned native RLM children inherit a detached copy of their live parent's explicit
+`requestTokenBudget` configuration unless a trusted creation caller supplies a defined
+override. Passive hydration uses that live parent, not retained session metadata.
+`session.requests.getRequestTokenBudgetOptions()` returns the detached configuration.
+Absence stays absent; no child model profile is inferred. Enforced unknown profiles
+still refuse before transport. Calibration, observations and retained prefix credit
+are not shared between parent and child budget instances.
+
+### Skill text limits
+
+Skill discovery admits up to 16 KiB of raw frontmatter, including delimiters, with
+bounded chunk read-ahead. Explicit selection admits up to 1 MiB for the entire
+SKILL.md. A known selected-file read or limit failure emits `skill_expansion` and
+rejects the prompt. Unknown skill commands still pass through. The actual returned
+capture drives the unchanged expansion and canonical input. These limits do not
+bound the aggregate catalog or certify a snapshot against same-size in-place writes.

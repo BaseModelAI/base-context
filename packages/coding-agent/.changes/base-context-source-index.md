@@ -68,3 +68,9 @@
 - Closed new automatic-refinement admission at native RPC EOF before draining accepted work. Disposal no longer creates automatic review/planning or retries failed background plans; explicit queued requests and accepted operations still drain. Sol's custom prompt and model-visible skills are unchanged.
 
 - Reduced redundant provider-facing TaskFrame source metadata and recovery action schemas while retaining exact recovery coordinates, full internal source state, frozen text and destination rebuilding. Sol's custom prompt and all behavioral text remain unchanged.
+
+- Carried explicit parent request-budget configuration through owned child spawn, inline/runtime/daemon creation, passive hydration and the production factory. Child meters remain separate; trusted overrides and absent-policy behavior are preserved without inferred profiles or inherited request observations.
+
+- Bounded skill discovery to 16 KiB of frontmatter and selected SKILL.md captures to 1 MiB. Known selected-file read failures now reject the prompt instead of sending an unexpanded command; existing parsing and submitted-input attribution remain unchanged.
+
+- Rejected malformed or incomplete orphan tracking without deleting the unknown journal or its recovery descriptor. Pending RPC uncertainty reporting survives a read failure; valid cleanup and process identity/signal policy remain unchanged. Shared-writer enrollment is still outside this change.

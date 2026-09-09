@@ -1,5 +1,5 @@
 import { getLogger } from "@ponythewhite/base-context-ai";
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "fs";
 import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
@@ -10,6 +10,76 @@ import type { ResourceDiagnostic } from "./diagnostics.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 
 const log = getLogger("coding-agent.skills");
+
+/** Raw UTF-8 byte admission limits, not token or model-fit estimates. */
+export const SKILL_METADATA_MAX_BYTES = 16 * 1024;
+export const SKILL_FILE_MAX_BYTES = 1024 * 1024;
+
+function captureSkillText(filePath: string, metadataOnly: boolean): string {
+	const fd = openSync(filePath, "r");
+	let captured: string;
+	try {
+		const size = fstatSync(fd, { bigint: true }).size;
+		const maxBytes = metadataOnly ? SKILL_METADATA_MAX_BYTES : SKILL_FILE_MAX_BYTES;
+		if (!metadataOnly && size > BigInt(maxBytes)) throw new Error("Skill file byte limit exceeded");
+		const buffer = Buffer.alloc(Number(size < BigInt(maxBytes) ? size : BigInt(maxBytes)));
+		let offset = 0;
+		let metadataEnd: number | undefined;
+		while (offset < buffer.length) {
+			const count = readSync(
+				fd,
+				buffer,
+				offset,
+				Math.min(metadataOnly ? 1024 : 64 * 1024, buffer.length - offset),
+				offset,
+			);
+			if (count === 0) throw new Error("Skill file changed during read");
+			offset += count;
+			if (metadataOnly) {
+				const prefix = buffer.subarray(0, offset);
+				if (offset >= 3 && (prefix[0] !== 45 || prefix[1] !== 45 || prefix[2] !== 45)) {
+					metadataEnd = 0;
+					break;
+				}
+				// Match parseFrontmatter's first normalized newline + --- prefix,
+				// including CRLF/bare CR and a closing marker with trailing text.
+				const lf = prefix.indexOf("\n---", 3);
+				const cr = prefix.indexOf("\r---", 3);
+				const end = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
+				if (end >= 0) {
+					metadataEnd = end + 4;
+					break;
+				}
+			}
+		}
+		if (metadataOnly) {
+			if (metadataEnd === undefined && size > BigInt(maxBytes))
+				throw new Error("Skill frontmatter byte limit exceeded");
+			// At most one 1 KiB chunk reads ahead. Discard body bytes, not metadata.
+			captured = buffer.subarray(0, metadataEnd ?? offset).toString("utf8");
+		} else {
+			const after = fstatSync(fd, { bigint: true }).size;
+			if (after > BigInt(maxBytes)) throw new Error("Skill file byte limit exceeded");
+			if (after !== size) throw new Error("Skill file changed during read");
+			captured = buffer.toString("utf8");
+		}
+	} catch (error) {
+		try {
+			closeSync(fd);
+		} catch (closeError) {
+			if (closeError === error) throw error;
+			throw new AggregateError([error, closeError], "Skill file read and close failed", { cause: error });
+		}
+		throw error;
+	}
+	closeSync(fd);
+	return captured;
+}
+
+/** Read one complete bounded capture for an explicitly selected skill. */
+export function readSkillFile(filePath: string): string {
+	return captureSkillText(filePath, false);
+}
 
 /** Max name length per spec */
 const MAX_NAME_LENGTH = 64;
@@ -390,7 +460,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
+		const rawContent = captureSkillText(filePath, true);
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);

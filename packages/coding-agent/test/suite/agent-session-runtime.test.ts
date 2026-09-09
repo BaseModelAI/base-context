@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
+import type { Model, RequestTokenBudgetOptions } from "@ponythewhite/base-context-ai";
+import { fauxAssistantMessage, RequestTokenBudgetError, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../src/core/agent-session-config.js";
@@ -491,7 +492,8 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("plumbs semantic-edge ancestry into runtime-created child ledgers", async () => {
-		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+		const requestTokenBudget: RequestTokenBudgetOptions = { mode: "observe", profiles: [] };
+		const { runtime, tempDir } = await createRuntimeForTest(() => {}, { sessionOptions: { requestTokenBudget } });
 		const spawnedByRequestId = "a".repeat(32);
 		const sessionDir = join(tempDir, "lineage-child");
 		const childRuntime = await runtime.createRlmSubagentRuntime({
@@ -519,7 +521,23 @@ describe("AgentSessionRuntime characterization", () => {
 			parent_session_id: runtime.session.sessionId,
 			spawned_by_request_id: spawnedByRequestId,
 		});
+		// Faux is simulated copy-path evidence; it does not meter physical requests.
+		expect(childRuntime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
+		await childRuntime.session.prompt("execute the policy-inheriting child");
+		expect(childRuntime.session.messages.some((message) => message.role === "assistant")).toBe(true);
 		await runtime.deleteRlmSubagentRuntime("lineage-child", childRuntime.session);
+
+		// The AgentSession-owned inline path must carry the same policy without a runtime host.
+		runtime.session.setSubagentRuntimeHost(undefined);
+		const inline = await runtime.session.runRlmChild("execute the inline child", { name: "policy-inline" });
+		await vi.waitFor(() =>
+			expect(runtime.session.getRlmChildSnapshots().find((child) => child.id === inline.rlm_child_id)?.status).toBe(
+				"done",
+			),
+		);
+		const inlineChild = runtime.session.getRlmChildSession(inline.rlm_child_id)!;
+		expect(inlineChild.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
+		expect(inlineChild.messages.some((message) => message.role === "assistant")).toBe(true);
 	});
 
 	it("keeps semantic spawn lineage through the production runtime factory", async () => {
@@ -528,6 +546,19 @@ describe("AgentSessionRuntime characterization", () => {
 		cleanups.push(() => rmSync(tempDir, { recursive: true, force: true }));
 		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 		cleanups.push(() => faux.unregister());
+		const requestTokenBudget: RequestTokenBudgetOptions = { mode: "enforce", profiles: [] };
+		const nativeModel: Model<"openai-responses"> = {
+			id: "child-budget-fixture",
+			name: "Child budget fixture",
+			api: "openai-responses",
+			provider: "child-budget-fixture",
+			baseUrl: "https://child-budget.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16384,
+		};
 
 		// The PRODUCTION factory (daemon workers and runtime hosts create every
 		// session through it), not a test factory that forwards all options: the
@@ -546,6 +577,23 @@ describe("AgentSessionRuntime characterization", () => {
 			},
 			[
 				(pi: ExtensionAPI) => {
+					pi.registerProvider(nativeModel.provider, {
+						api: nativeModel.api,
+						apiKey: "offline-fixture",
+						baseUrl: nativeModel.baseUrl,
+						models: [
+							{
+								id: nativeModel.id,
+								name: nativeModel.name,
+								api: nativeModel.api,
+								reasoning: nativeModel.reasoning,
+								input: nativeModel.input,
+								cost: nativeModel.cost,
+								contextWindow: nativeModel.contextWindow,
+								maxTokens: nativeModel.maxTokens,
+							},
+						],
+					});
 					pi.registerProvider(faux.getModel().provider, {
 						baseUrl: faux.getModel().baseUrl,
 						apiKey: "faux-key",
@@ -573,6 +621,7 @@ describe("AgentSessionRuntime characterization", () => {
 			sessionManager: await SessionManager.create(tempDir, childSessionDir),
 			sessionStartEvent: { type: "session_start", reason: "startup" },
 			sessionOptions: {
+				requestTokenBudget,
 				model: faux.getModel(),
 				thinkingLevel: "off",
 				rlmDepth: 1,
@@ -601,6 +650,8 @@ describe("AgentSessionRuntime characterization", () => {
 			{ source_request_id: spawnedByRequestId },
 		]);
 
+		expect(created.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
+
 		// The same concrete parent owns ordinary daemon spawn and passive hydration.
 		let nativeAdmission: RlmChildAdmission | undefined;
 		const daemon = new AgentDaemon(join(tempDir, "resident-cap.sock"), {
@@ -612,7 +663,15 @@ describe("AgentSessionRuntime characterization", () => {
 			},
 			createRuntime: async (options) => {
 				nativeAdmission = options.sessionOptions?.rlmChildAdmission;
-				return factory(options);
+				// Configure ONLY the actual root here. Native child/hydration options must carry their own inheritance.
+				return factory(
+					nativeAdmission
+						? options
+						: {
+								...options,
+								sessionOptions: { ...options.sessionOptions, model: faux.getModel(), requestTokenBudget },
+							},
+				);
 			},
 		});
 		const internals = daemon as unknown as {
@@ -644,6 +703,7 @@ describe("AgentSessionRuntime characterization", () => {
 			(state) => state.runtime.metadata.rlmChildId === first.rlm_child_id,
 		)!;
 		const firstFile = firstState.runtime.session.sessionFile!;
+		expect(firstState.runtime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
 		await expect(firstState.runtime.newSession()).rejects.toThrow("Owned child-runtime replacement is unavailable");
 		await expect(firstState.runtime.switchSession(firstFile)).rejects.toThrow(
 			"Owned child-runtime replacement is unavailable",
@@ -717,6 +777,19 @@ describe("AgentSessionRuntime characterization", () => {
 		await vi.waitFor(async () =>
 			expect(await internals.passivateSession(hydrated, 90, Date.now() + 86_400_000)).toBe(true),
 		);
+
+		const enforcingChild = await internals.createRuntime({ type: "create", sessionPath: firstFile });
+		// Actual native preparation after genuine passive hydration must enforce the inherited unknown policy.
+		// No inferred child profile and no transport: the offline endpoint is guarded even if propagation regresses.
+		expect(enforcingChild.runtime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected offline native fetch"));
+		cleanups.push(() => fetch.mockRestore());
+		enforcingChild.runtime.services.authStorage.setRuntimeApiKey(nativeModel.provider, "offline-fixture");
+		await enforcingChild.runtime.session.setModel(nativeModel);
+		const refused = enforcingChild.runtime.session.prompt("unprofiled native child must refuse before transport");
+		await expect(refused).rejects.toBeInstanceOf(RequestTokenBudgetError);
+		await expect(refused).rejects.toMatchObject({ assessment: { status: "unknown" } });
+		expect(fetch).not.toHaveBeenCalled();
 	});
 
 	it("disposes hosted RLM children during session replacement", async () => {

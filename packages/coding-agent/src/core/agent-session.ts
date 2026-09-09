@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -319,7 +319,7 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+import { getPythonSkillRuntimeInfo, readSkillFile, type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
@@ -5848,7 +5848,7 @@ export class AgentSession {
 	/**
 	 * Expand skill commands (/skill:name args) to their full content.
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
-	 * Emits errors via extension runner if file read fails.
+	 * Emits errors via extension runner and rejects if the selected file cannot be read completely.
 	 */
 	private _expandSkillCommand(text: string): string {
 		if (!text.startsWith("/skill:")) return text;
@@ -5862,7 +5862,7 @@ export class AgentSession {
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
-			const content = readFileSync(skill.filePath, "utf-8");
+			const content = readSkillFile(skill.filePath);
 			const body = stripFrontmatter(content).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
@@ -5872,7 +5872,7 @@ export class AgentSession {
 				event: "skill_expansion",
 				error: err instanceof Error ? err.message : String(err),
 			});
-			return text; // Return original on error
+			throw err;
 		}
 	}
 
@@ -10846,8 +10846,10 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 		spawnedByRequestId?: string;
 	}): CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission } {
+		const requestTokenBudget = this.requests.getRequestTokenBudgetOptions();
 		return {
 			parentSession: this,
+			...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
 			admission: options.admission,
 			id: options.id,
 			prompt: options.prompt,
@@ -10927,6 +10929,7 @@ export class AgentSession {
 
 			child = new AgentSession({
 				agent: childAgent,
+				requestTokenBudget: options.requestTokenBudget,
 				sessionManager: childSessionManager,
 				settingsManager: this.settingsManager,
 				cwd: this._cwd,

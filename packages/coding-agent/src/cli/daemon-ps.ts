@@ -1045,6 +1045,7 @@ async function forceStopTrackedWorkers(
 			try {
 				orphans = readActiveOrphanProcesses(descriptor.orphanProcessJournalPath, descriptor.pid);
 			} catch (error) {
+				cleanupWorkerRecords = false;
 				failures.push(`could not read child process records for worker ${descriptor.workerId}: ${String(error)}`);
 			}
 			for (const orphan of orphans) {

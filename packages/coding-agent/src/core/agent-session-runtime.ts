@@ -345,6 +345,11 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		const requestTokenBudget =
+			options.requestTokenBudget === undefined
+				? options.parentSession.requests.getRequestTokenBudgetOptions()
+				: structuredClone(options.requestTokenBudget);
+		if (requestTokenBudget !== undefined) options = { ...options, requestTokenBudget };
 		const admission = options.admission ?? options.parentSession.reserveRlmChildAdmission();
 		try {
 			if (admission.parent !== options.parentSession)
@@ -383,6 +388,9 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 					sessionStartEvent: { type: "session_start", reason: "startup" },
 					sessionConfig: this.sessionConfig,
 					sessionOptions: {
+						...(options.requestTokenBudget === undefined
+							? {}
+							: { requestTokenBudget: options.requestTokenBudget }),
 						model: options.model,
 						thinkingLevel: options.thinkingLevel,
 						serviceTier: options.serviceTier,

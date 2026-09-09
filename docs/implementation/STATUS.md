@@ -1154,3 +1154,65 @@ refusal use the existing fake-SSE flow without added provider calls. Expected pr
 epoch refusals remain in passing stderr. Required check passed on its first invocation
 (PID3413281,4.319638s;1038 files/no fixes, types, installer and browser smoke).
 No case/check rerun was needed. Logs: `.work/logs/w36-provider-metadata-*.log`.
+
+
+## W37 — keep explicit request budgets in owned child paths
+
+The existing budget exposes a detached copy of explicit configuration through its
+Coordinator. Native spawn, inline construction, runtime/daemon factories, genuine
+passive hydration and the production creation whitelist carry that snapshot before
+setup/service waits. Defined trusted overrides retain priority; no policy stays absent.
+No profile/catalog guess, durable policy field, learned calibration, retained credit,
+body or resource ownership is copied. Each child uses its own ordinary budget instance.
+W34 lifetime/capacity and W35 EOF behavior remain unchanged. Sol's custom prompt is intact.
+
+The two existing runtime cases passed after two fixture corrections: retained child
+snapshots use status `done`, and the root fixture explicitly selects its intended faux
+model. The initial two failures remain in `w37-child-budget-runtime.log`; the corrected
+scope is `w37-child-budget-runtime-corrected.log` (PID3452065, 7.176s). No production
+correction was needed. The happy path is local-faux execution/configuration evidence.
+The real passive-hydration edge uses a genuine offline-configured openai-responses
+adapter and refuses unknown budget before fetch. Expected passivation/refusal stderr
+is retained. No physical receipt, tokenizer, pricing, live-provider or complete
+tree-budget claim follows.
+
+D Sol LOW completed on the separately frozen D/stock 0.9.1 controls: 27/30 primary
+judge passes in each arm, 33 retained attempts per arm, and no recorded runtime
+errors or capacity-invalid attempts. Stock failed 3/21/28; D failed 5/13/28.
+Diagnostics remain separate from immutable first-valid primaries. Across 25 matched
+passing pairs D took 5657.014s versus stock 6221.697s (-9.1%), faster on 16 pairs.
+This is D evidence, not the current native Base Context candidate. Physical usage
+and billed cost remain incomplete/unknown. The raw LOW publication blocker remains.
+
+### W38 — bounded skill text loading
+
+Discovery uses bounded frontmatter reads (16 KiB including delimiters, with up to
+one 1 KiB chunk of discarded read-ahead). Selection reads one complete held-file
+capture up to 1 MiB. Oversized or incomplete selected reads reject before a user
+prompt is appended or sent. Existing expansion and raw submission attribution stay
+intact. Aggregate catalog/module/version and global memory bounds remain open.
+
+Both existing cases passed on their first invocation: metadata (PID3451402, 1.150s)
+and selected expansion (PID3451407, 3.448s), in `w38-skill-metadata.log` and
+`w38-selected-skill.log`. A template-literal style suggestion was corrected without
+changing behavior. No live provider, atomic same-size file snapshot or model-fit
+claim follows.
+
+### W39 — retain unknown orphan tracking
+
+Strict orphan-journal read failures now retain the journal and recovery descriptor.
+The owned frontend still reports pending RPC uncertainty before it stops; it does
+not launch a replacement worker on an unknown read. Cleanup is attempted at its
+original location, and distinct cleanup/reporting failures remain ordered.
+Daemon cleanup disables associated-file deletion after its read-error diagnostic.
+
+The same two real owned-worker EOF/crash cases passed on their first invocation
+(PID3451413, 1.313s), in `w39-orphan-retention.log`. The daemon-ps flag is source/type
+scope, not behavior-covered by unrelated planning tests. Shared writer enrollment,
+Python writer fixtures and global durability remain unresolved.
+
+W37–W39 ship as one source gap. The initial W37 required check passed, and the
+combined required `npm run check` passed after the fixture corrections
+(PID3452070, 4.025s, 1038 files, one formatting fix, types/installer/browser checks).
+Six distinct focused cases passed; corrected reruns are not additional cases.
+All logs are under `.work/logs/`. No benchmark ran during these source checks.

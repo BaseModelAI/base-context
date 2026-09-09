@@ -705,6 +705,7 @@ export function resolveRuntimeSessionOptions(
 	runtimeSessionOptions?: CreateAgentSessionOptions,
 ): CreateAgentSessionOptions {
 	return {
+		requestTokenBudget: runtimeSessionOptions?.requestTokenBudget ?? sessionOptions.requestTokenBudget,
 		model: runtimeSessionOptions?.model ?? sessionOptions.model,
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
@@ -748,6 +749,12 @@ export function createDefaultRuntimeFactory(
 		sessionConfig,
 		sessionOptions: runtimeSessionOptions,
 	}) => {
+		if (runtimeSessionOptions?.requestTokenBudget) {
+			runtimeSessionOptions = {
+				...runtimeSessionOptions,
+				requestTokenBudget: structuredClone(runtimeSessionOptions.requestTokenBudget),
+			};
+		}
 		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
 		const prepared = await prepareRuntimeServices({
 			config,

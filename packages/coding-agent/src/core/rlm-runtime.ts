@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
-import type { Api, Model, ServiceTier } from "@ponythewhite/base-context-ai";
+import type { Api, Model, RequestTokenBudgetOptions, ServiceTier } from "@ponythewhite/base-context-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -231,6 +231,8 @@ export interface RlmSubagentRuntime {
 
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
+	/** Defined trusted creation options override the inherited explicit parent policy. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
 	/** The same live parent owns this setup. Native factories reserve it when omitted. */
 	admission?: RlmChildAdmission;
 	id: string;

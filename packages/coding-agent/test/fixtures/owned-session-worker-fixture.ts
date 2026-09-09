@@ -17,6 +17,31 @@ if (process.env.BASE_CONTEXT_INTERNAL_OWNED_WORKER === "1") {
 	if (pidPath) {
 		writeFileSync(`${pidPath}.ppid`, `${process.ppid}\n`);
 		writeFileSync(`${pidPath}.profile`, `${process.env.BASE_CONTEXT_INTERNAL_OWNED_PROFILE ?? ""}\n`);
+		const tracking = process.env.BASE_CONTEXT_TEST_ORPHAN_TRACKING;
+		const journalPath = process.env.BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL;
+		const recoveryDescriptorPath = process.env.BASE_CONTEXT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR;
+		if (tracking && journalPath && recoveryDescriptorPath) {
+			const record = {
+				version: 1,
+				pid: process.pid,
+				ownerPid: process.pid,
+				active: false,
+				recordedAt: new Date().toISOString(),
+			};
+			writeFileSync(journalPath, `${JSON.stringify(record)}\n${tracking === "corrupt" ? "{\n" : ""}`);
+			writeFileSync(
+				recoveryDescriptorPath,
+				JSON.stringify({
+					version: 1,
+					profile: "rpc",
+					sessionId: "fixture-session",
+					sessionFile: `${pidPath}.jsonl`,
+					cwd: process.cwd(),
+					updatedAt: new Date().toISOString(),
+				}),
+			);
+			writeFileSync(`${pidPath}.tracking`, JSON.stringify({ journalPath, recoveryDescriptorPath }));
+		}
 		writeFileSync(pidPath, `${process.pid}\n`);
 		process.once("SIGTERM", () => {
 			writeFileSync(`${pidPath}.terminated`, "terminated\n");

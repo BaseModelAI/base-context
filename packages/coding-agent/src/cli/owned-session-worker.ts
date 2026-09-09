@@ -208,6 +208,7 @@ export async function runOwnedSessionWorkerFrontend(
 		`${PRODUCT.command}-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`,
 	);
 	const orphanProcessJournalPath = `${recoveryDescriptorPath}.orphans.jsonl`;
+	let retainOrphanTracking = false;
 	let currentChild: ChildProcess | undefined;
 	let terminating = false;
 	let terminationSignal: NodeJS.Signals | undefined;
@@ -301,7 +302,14 @@ export async function runOwnedSessionWorkerFrontend(
 				// The worker process group may already be fully reaped.
 			}
 		}
-		for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, workerPid)) {
+		let orphans: ReturnType<typeof readActiveOrphanProcesses>;
+		try {
+			orphans = readActiveOrphanProcesses(orphanProcessJournalPath, workerPid);
+		} catch (error) {
+			retainOrphanTracking = true;
+			throw error;
+		}
+		for (const orphan of orphans) {
 			if (!shouldReapOrphanProcess(orphan)) {
 				continue;
 			}
@@ -433,7 +441,12 @@ export async function runOwnedSessionWorkerFrontend(
 			if (child.connected) {
 				child.disconnect();
 			}
-			reapWorkerResources(workerPid);
+			const cleanupErrors: unknown[] = [];
+			try {
+				reapWorkerResources(workerPid);
+			} catch (error) {
+				cleanupErrors.push(error);
+			}
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
@@ -442,9 +455,14 @@ export async function runOwnedSessionWorkerFrontend(
 			if (Date.now() - workerStartedAt >= 60_000) {
 				recoveryAttempt = 0;
 			}
-			if (rpcCrashed) {
-				failPendingRpcCommands();
+			try {
+				if (rpcCrashed) failPendingRpcCommands();
+			} catch (error) {
+				if (!cleanupErrors.includes(error)) cleanupErrors.push(error);
 			}
+			if (cleanupErrors.length > 1)
+				throw new AggregateError(cleanupErrors, "Worker resource cleanup and RPC uncertainty reporting failed");
+			if (cleanupErrors.length > 0) throw cleanupErrors[0];
 			const shouldRecover = rpcCrashed && !stdinEnded && recoveryAttempt < 3;
 			if (!shouldRecover) {
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
@@ -467,8 +485,10 @@ export async function runOwnedSessionWorkerFrontend(
 		}
 		detachRpcInput?.();
 		detachRpcOutput?.();
-		rmSync(recoveryDescriptorPath, { force: true });
-		clearOrphanProcessJournal(orphanProcessJournalPath);
+		if (!retainOrphanTracking) {
+			rmSync(recoveryDescriptorPath, { force: true });
+			clearOrphanProcessJournal(orphanProcessJournalPath);
+		}
 	}
 }
 

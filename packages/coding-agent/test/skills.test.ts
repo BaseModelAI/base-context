@@ -8,6 +8,7 @@ import {
 	getPythonSkillRuntimeInfo,
 	loadSkills,
 	loadSkillsFromDir,
+	SKILL_METADATA_MAX_BYTES,
 	type Skill,
 	type SkillPythonMetadata,
 } from "../src/core/skills.js";
@@ -179,6 +180,25 @@ describe("skills", () => {
 
 			expect(skills).toHaveLength(0);
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("at line"))).toBe(true);
+
+			const tempDir = mkdtempSync(join(tmpdir(), "skill-frontmatter-limit-"));
+			try {
+				writeFileSync(
+					join(tempDir, "SKILL.md"),
+					`---\nname: oversized\ndescription: ${"é".repeat(SKILL_METADATA_MAX_BYTES / 2)}\n---\nBody.`,
+				);
+				const oversized = loadSkillsFromDir({ dir: tempDir, source: "test" });
+				expect(oversized.skills).toEqual([]);
+				expect(oversized.diagnostics).toEqual([
+					{
+						type: "warning",
+						message: "Skill frontmatter byte limit exceeded",
+						path: join(tempDir, "SKILL.md"),
+					},
+				]);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
 		});
 
 		it("should preserve multiline descriptions from YAML", () => {

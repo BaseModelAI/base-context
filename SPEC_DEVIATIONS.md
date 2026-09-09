@@ -558,3 +558,44 @@ Recovery's provider-facing action unions use equivalent string enums. The strict
 input/parser, recovery semantics and canonical ACK path are unchanged. Sol's custom
 anti-overengineering prompt and all behavioral text are preserved verbatim. This is
 a bounded representation reduction, not a token, speed, cost or new benchmark claim.
+
+
+## W37 update — explicit request budgets in owned children
+
+Owned native child creation and passive hydration copy the actual parent's explicit
+request-budget configuration through existing runtime/daemon factories and the main
+creation whitelist. Defined trusted child options retain priority; absence remains
+absence. Each child has its own ordinary budget instance. Parent calibration, request
+observations, ACK-prefix credit, bodies, resource facts and authority are not inherited.
+
+This is request-policy forwarding, not tree-wide spend scheduling or profile synthesis.
+An unprofiled child model remains unknown under enforcement. W34 residency and W35
+shutdown admission remain unchanged. Validation scope is recorded in STATUS.
+
+## W38 update — selected skill text admission
+
+Skill discovery now reads at most 16 KiB of raw frontmatter with bounded 1 KiB
+read-ahead. Explicit selection captures at most 1 MiB of the complete SKILL.md,
+including frontmatter, or rejects. Known selected-file failures emit the existing
+skill error and stop the prompt; unknown commands still pass through. The parser,
+raw submitted clause, wrapper and actual captured input remain unchanged.
+
+These are local byte limits for §18.3, not complete G09 closure. Aggregate catalog
+size, directory traversal, Python module/version lifecycle and global heap/model-fit
+bounds remain open. No file-version store or same-size concurrent-write snapshot
+guarantee was added. Sol's custom prompt remains unchanged.
+
+## W39 update — retain unreadable orphan tracking
+
+Malformed complete records and incomplete orphan-journal tails now reject the read
+as unknown tracking, before owner filtering. The owned frontend retains the journal
+and recovery descriptor, attempts its existing uncertain-RPC replies, then rethrows
+before any replacement-worker decision. Reaping stays at its original location;
+distinct cleanup and reporting errors retain their order. Daemon cleanup also keeps
+associated records after a read error. Valid cleanup and signal/identity policy stay
+unchanged.
+
+G01 remains open: shared host/kernel writers still lack record-level serialization.
+No writer, Python enrollment gate, repair, format or ownership change is included.
+The reader remains unbounded in bytes. Detection and retention are not global
+durability or complete enrollment guarantees.

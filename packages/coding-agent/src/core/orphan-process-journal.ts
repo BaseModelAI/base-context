@@ -60,26 +60,38 @@ export function readActiveOrphanProcesses(path: string, ownerPid: number): Activ
 		}
 		throw error;
 	}
+	if (contents && !contents.endsWith("\n")) {
+		throw new Error("Incomplete orphan process journal tail; tracking is unknown");
+	}
 	const latest = new Map<number, OrphanProcessRecord>();
-	for (const line of contents.split("\n")) {
-		if (!line) {
-			continue;
-		}
+	const lines = contents.split("\n");
+	lines.pop();
+	for (const [index, line] of lines.entries()) {
+		let record: Partial<OrphanProcessRecord> | null;
 		try {
-			const record = JSON.parse(line) as Partial<OrphanProcessRecord>;
-			if (
-				record.version === 1 &&
-				Number.isInteger(record.pid) &&
-				(record.pid ?? 0) > 0 &&
-				record.ownerPid === ownerPid &&
-				typeof record.active === "boolean" &&
-				typeof record.recordedAt === "string"
-			) {
-				latest.set(record.pid!, record as OrphanProcessRecord);
-			}
-		} catch {
-			// A crash can truncate only the final append.
+			record = JSON.parse(line) as Partial<OrphanProcessRecord> | null;
+		} catch (error) {
+			throw new Error(`Malformed orphan process journal record at line ${index + 1}; tracking is unknown`, {
+				cause: error,
+			});
 		}
+		if (
+			!record ||
+			typeof record !== "object" ||
+			Array.isArray(record) ||
+			record.version !== 1 ||
+			!Number.isInteger(record.pid) ||
+			(record.pid ?? 0) <= 0 ||
+			!Number.isInteger(record.ownerPid) ||
+			(record.ownerPid ?? 0) <= 0 ||
+			typeof record.active !== "boolean" ||
+			typeof record.recordedAt !== "string" ||
+			(record.processStartId !== undefined && typeof record.processStartId !== "string") ||
+			(record.kernelPid !== undefined && (!Number.isInteger(record.kernelPid) || record.kernelPid <= 0))
+		) {
+			throw new Error(`Invalid orphan process journal record at line ${index + 1}; tracking is unknown`);
+		}
+		if (record.ownerPid === ownerPid) latest.set(record.pid!, record as OrphanProcessRecord);
 	}
 	// Pid-only actives (no processStartId) still surface from old journals or
 	// host writes whose start-id query failed; reapers decide per-platform.
