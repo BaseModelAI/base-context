@@ -378,3 +378,9 @@ Project settings (`.base-context/settings.json`) override global settings. Neste
   "compaction": { "enabled": true, "reserveTokens": 8192 }
 }
 ```
+
+Release metadata lookup does not follow redirects. With `BASE_CONTEXT_DOWNLOAD_BASE_URL`,
+a resolved advertised tarball must have the same URL origin as that configured base.
+A different origin makes the release unavailable; it does not trigger a fallback
+package install. Same-origin relative and absolute tarballs remain supported. This
+metadata rule does not control redirects performed by npm or artifact downloads.

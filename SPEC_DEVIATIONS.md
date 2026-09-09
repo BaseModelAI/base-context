@@ -639,3 +639,15 @@ claim is made.
 
 This closes the G14 lookup-failure fallthrough only. Origin/product/schema policy,
 artifact validation and staged CLI/runtime activation or rollback remain open.
+
+## W43 update — release metadata origin boundary
+
+Release metadata fetches now refuse redirects. A configured-base manifest that
+advertises a resolved tarball on another origin is unavailable as a whole; the
+tarball is not stripped to permit a fallback package install. Existing relative
+resolution, same-origin absolute URLs and the normal owned registry path remain.
+The current publisher already advertises a relative tarball.
+
+This is only the metadata/advertised-URL boundary. It does not control npm or
+artifact-download redirects, add product/schema/integrity validation, or stage, activate
+or roll back a CLI/runtime pair. Other G14 requirements remain open.

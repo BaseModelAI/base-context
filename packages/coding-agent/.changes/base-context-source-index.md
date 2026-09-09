@@ -80,3 +80,5 @@
 - Removed the unimplemented `./hooks` package export and its stale TypeScript source aliases. Fixed the missing exact owned AI `/mcp` alias needed by the supported root import, without changing native AI root sharing or actual ExtensionAPI lifecycle handlers.
 
 - Stopped self-update after unavailable or failed release lookup, including forced updates. Known-release updates remain supported, and earlier accepted extension-update effects are not rolled back or hidden.
+
+- Refused release-metadata redirects and whole manifests advertising a tarball on another configured-base origin, without falling back to a package install. Existing same-origin and owned-registry lookup behavior remains supported.

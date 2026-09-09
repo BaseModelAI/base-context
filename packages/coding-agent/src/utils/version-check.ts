@@ -126,6 +126,7 @@ export async function getLatestPiRelease(
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",
 		},
+		redirect: "error",
 		signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_VERSION_CHECK_TIMEOUT_MS),
 	});
 	if (!response.ok) return undefined;
@@ -148,6 +149,7 @@ export async function getLatestPiRelease(
 	if (packageName && packageName !== PRODUCT.packageName) return undefined;
 	const installSpec =
 		baseUrl && typeof data.tarball === "string" ? resolveReleaseUrl(baseUrl, data.tarball) : undefined;
+	if (baseUrl && installSpec && new URL(installSpec).origin !== new URL(baseUrl).origin) return undefined;
 	const release: LatestPiRelease = { version: normalizeReleaseVersion(data.version) };
 	if (packageName) {
 		release.packageName = packageName;

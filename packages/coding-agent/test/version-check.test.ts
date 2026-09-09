@@ -87,14 +87,54 @@ describe("version checks", () => {
 			packageName: PRODUCT.packageName,
 			version: "1.2.4",
 		});
+		expect(fetchMock).toHaveBeenLastCalledWith(
+			`${privateDownloadBaseUrl}/latest.json`,
+			expect.objectContaining({ redirect: "error" }),
+		);
+
+		const absoluteTarball = "https://downloads.example.com/artifacts/base-context-1.2.4.tgz";
+		fetchMock.mockResolvedValueOnce(
+			Response.json({ package: PRODUCT.packageName, tarball: absoluteTarball, version: "v1.2.4" }),
+		);
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			installSpec: absoluteTarball,
+			packageName: PRODUCT.packageName,
+			version: "1.2.4",
+		});
+
+		delete process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL;
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({
+			packageName: PRODUCT.packageName,
+			version: "1.2.4",
+		});
+		expect(fetchMock).toHaveBeenLastCalledWith(
+			`${registryPackageUrl}/latest`,
+			expect.objectContaining({ redirect: "error" }),
+		);
 	});
 
 	it("ignores a release manifest for another product", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () => Response.json({ package: "prime-agent", version: "9.9.9" })),
+		const fetchMock = vi.fn(async () => Response.json({ package: "prime-agent", version: "9.9.9" }));
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(getLatestPiRelease("0.1.0")).resolves.toBeUndefined();
+
+		process.env.BASE_CONTEXT_DOWNLOAD_BASE_URL = privateDownloadBaseUrl;
+		fetchMock.mockResolvedValueOnce(
+			Response.json({
+				package: PRODUCT.packageName,
+				tarball: "https://other.example.com/base-context-9.9.9.tgz",
+				version: "9.9.9",
+			}),
 		);
 		await expect(getLatestPiRelease("0.1.0")).resolves.toBeUndefined();
+
+		const redirectError = new TypeError("manifest redirect refused");
+		fetchMock.mockRejectedValueOnce(redirectError);
+		await expect(getLatestPiRelease("0.1.0")).rejects.toBe(redirectError);
+		expect(fetchMock).toHaveBeenLastCalledWith(
+			`${privateDownloadBaseUrl}/latest.json`,
+			expect.objectContaining({ redirect: "error" }),
+		);
 	});
 
 	it("skips api calls when version checks are disabled", async () => {

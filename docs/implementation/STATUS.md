@@ -1280,3 +1280,36 @@ corrected runs are not additional cases. The initial required check passed
 again (PID3473450, 3.995s, 1038 files, no fixes, types/installer/browser checks).
 All initial formatting/runtime diagnostics remain under `.work/logs/`. No benchmark
 ran during integration or checks. Sol/custom/behavioral instructions are unchanged.
+
+### W43 — release metadata redirects and advertised origins
+
+Metadata lookup uses native fetch `redirect: "error"`. An advertised resolved
+tarball outside the captured configured-base origin makes the whole release
+unavailable, so W42's existing refusal applies without a package-install fallback.
+Same-origin relative/absolute results and the owned registry route stay unchanged.
+
+The same two explicit-manifest and wrong-product release-lookup cases passed.
+`npm run check` passed (Biome, types, installer and browser smoke).
+Fetch is stubbed; this is the real lookup's option/error contract, not a live
+redirected-server test. Download redirects, activation and wider G14 remain outside
+this change. Sol/custom/behavioral instructions are untouched.
+
+### S Sol LOW — frozen control result
+
+The frozen S/stock `gpt-5.6-sol` LOW invocation finished with 60 immutable primary
+comparisons: modified S passed 29/30 judges and stock passed 28/30. S task 24
+failed at progress 3 (main 3/5, edge true); stock task 21 failed at progress 3
+(main 3/5, edge false), and stock task 27 at progress 4 (main 5/5, edge false).
+Each has a retained diagnostic attempt, not a replacement primary. All 63 retained
+attempts are runtime-clean; there are no capacity-invalid attempts.
+
+The 27 matched passing pairs took 6053.428 s for S versus 6709.881 s for stock
+(9.783% less); S was faster on 21 pairs and slower on 6. On those same pairs,
+solver-message observations were 295/305 model calls, 270/251 tool calls,
+2672191/3490798 input tokens including cache, 595263/763374 uncached input,
+and 152386/171479 output tokens (S/stock). These are frozen-control timing and
+solver observations, not current native gains, complete physical accounting,
+billed cost, or latency causality. Usage/cost completeness is false and API-cost
+totals are null. The raw `thinking must be medium` publication flag remains.
+
+All LOW invocations must finish before any MEDIUM; S Astra LOW is next.
