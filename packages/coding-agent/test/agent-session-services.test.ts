@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Model, RequestTokenBudgetError, registerFauxProvider } from "@ponythewhite/base-context-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SKILL_NAME, type AgentSessionMessageController } from "../src/core/agent-messages.js";
 import { AGENT_OBSERVE_SKILL_NAME, type AgentObserveController } from "../src/core/agent-observe.js";
@@ -176,17 +177,16 @@ describe("createAgentSessionFromServices", () => {
 		const bodies: string[] = [];
 		const summaryBodies: string[] = [];
 		let summarizing = false;
+		let freshOff = false;
 		type DisplaySource = Pick<TaskStateSourceRef, "sessionId" | "entryId" | "field" | "revision">;
 		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
 			const epochs = await epochManager.readBranchHistory(async (history) => {
 				const ids: string[] = [];
 				for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 2 * 1024 * 1024 }))
-					if (
-						item.source.qualification === "native-context-epoch" &&
-						item.entry.type === "compaction" &&
-						readContextEpoch(item.entry.details, 2 * 1024 * 1024)?.representation
-					)
-						ids.push(item.source.id);
+					if (item.source.qualification === "native-context-epoch" && item.entry.type === "compaction") {
+						const checkpoint = readContextEpoch(item.entry.details, 2 * 1024 * 1024);
+						if (checkpoint?.representation || checkpoint?.requestContract) ids.push(item.source.id);
+					}
 				return ids;
 			});
 			expect(epochs.length).toBeGreaterThan(0);
@@ -237,25 +237,35 @@ describe("createAgentSessionFromServices", () => {
 				revision: displayed?.revision,
 				need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
 			};
-			const item = firstInput
-				? {
-						type: "function_call",
-						id: requestRecovery ? "fc_request_recovery" : "fc_epoch_recovery",
-						call_id: requestRecovery ? "call_request_recovery" : "call_epoch_recovery",
-						name: "prime_context",
-						status: "completed",
-						arguments: JSON.stringify({
-							action: "batch",
-							requests: [recoveryRequest, { ...recoveryRequest, revision: "not-the-recorded-revision" }],
-						}),
-					}
-				: {
-						type: "message",
-						id: `msg_epoch_${bodies.length + summaryBodies.length}`,
-						role: "assistant",
-						status: "completed",
-						content: [{ type: "output_text", text: "OK", annotations: [] }],
-					};
+			const item =
+				freshOff && bodies.length === 9
+					? {
+							type: "function_call",
+							id: "fc_fresh_off",
+							call_id: "call_fresh_off",
+							name: "fresh_echo",
+							status: "completed",
+							arguments: "{}",
+						}
+					: firstInput
+						? {
+								type: "function_call",
+								id: requestRecovery ? "fc_request_recovery" : "fc_epoch_recovery",
+								call_id: requestRecovery ? "call_request_recovery" : "call_epoch_recovery",
+								name: "prime_context",
+								status: "completed",
+								arguments: JSON.stringify({
+									action: "batch",
+									requests: [recoveryRequest, { ...recoveryRequest, revision: "not-the-recorded-revision" }],
+								}),
+							}
+						: {
+								type: "message",
+								id: `msg_epoch_${bodies.length + summaryBodies.length}`,
+								role: "assistant",
+								status: "completed",
+								content: [{ type: "output_text", text: "OK", annotations: [] }],
+							};
 			const opaqueTail = !summarizing && (bodies.length === 3 || requestRecovery);
 			const reasoning = {
 				type: "reasoning",
@@ -583,6 +593,131 @@ describe("createAgentSessionFromServices", () => {
 				}
 			}
 			expect(bodies).toHaveLength(7);
+			expect(summaryBodies).toHaveLength(1);
+			// Switch the actual owner after the existing public checkpoint, not a helper-only flag.
+			const protectedPrompt = epochSession.agent.state.systemPrompt;
+			await epochSession.setContextMode("off");
+			const offId = epochManager.getLeafId();
+			if (!offId) throw new Error("Expected the context mode ACK");
+			const offRecord = await epochManager.readBranchHistory((history) =>
+				history.hydrateEntry(offId, 2 * 1024 * 1024),
+			);
+			expect(offRecord?.source.qualification).toBe("native-context-epoch");
+			if (offRecord?.entry.type !== "compaction") throw new Error("Expected the policy checkpoint");
+			const offCheckpoint = readContextEpoch(offRecord.entry.details, 2 * 1024 * 1024);
+			expect(offCheckpoint).toMatchObject({ version: 5, mode: "off", policyOnly: true, representation: null });
+			expect(offCheckpoint?.includeSummary).toBeUndefined();
+			expect(offRecord.entry.tokensBefore).toBeNull();
+			expect(offCheckpoint?.continuation?.kind).toBe("portable-checkpoint");
+			await epochSession.setContextMode("off");
+			expect(epochManager.getLeafId()).toBe(offId);
+			await epochSession.prompt("Continue without context optimization.");
+			expect(bodies).toHaveLength(8);
+			expect(summaryBodies).toHaveLength(1);
+			expect(epochSession.agent.state.systemPrompt).toBe(protectedPrompt);
+			const offBody = bodies.at(-1)!;
+			expect(offBody).toContain("Foo.txt");
+			expect(offBody).toContain("Bar.txt");
+			expect(offBody).not.toContain("OPAQUE_REQUEST_CANONICAL_ONLY");
+			expect(offBody).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+			const offView = await epochManager.readBranchHistory((history) =>
+				new CanonicalContextCompiler().compile(
+					history.branchContext,
+					epochSession!.settingsManager.getCanonicalContextLimits(),
+				),
+			);
+			expect(getCanonicalEpochContext(offView)?.checkpoint?.source).toEqual(offCheckpoint?.source);
+			expect(getCanonicalEpochContext(offView)?.taskFrame).toBeUndefined();
+			expect(getCanonicalEpochContext(offView)?.resourceRevision).toBeUndefined();
+			for (const message of publicRequestMessages) expect(offView).toContainEqual(message);
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.open(epochFile);
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				sessionManager: epochManager,
+			}));
+			expect(epochSession.contextMode).toBe("off");
+			expect(epochManager.getLeafId()).not.toBeNull();
+			// The final native budget still refuses an oversized mandatory input; no selector or send.
+			await expect(epochSession.prompt("Required input. ".repeat(30000))).rejects.toBeInstanceOf(
+				RequestTokenBudgetError,
+			);
+			expect(bodies).toHaveLength(8);
+			const stillOff = await epochManager.readBranchHistory((history) =>
+				history.branchContext.contextManifest({ limit: 1 }),
+			);
+			if (stillOff.selection !== "known") throw new Error("Expected the retained policy checkpoint");
+			expect(stillOff.summaryRef?.entryId).toBe(offId);
+			// A genuinely fresh settings-seeded off owner accepts its first native contract once.
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.create(epochDir, join(epochDir, "fresh-off"));
+			freshOff = true;
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				services: {
+					...epochServices,
+					settingsManager: SettingsManager.inMemory({
+						context: { mode: "off" },
+						compaction: { enabled: false },
+						autoRefine: { enabled: false },
+						retry: { enabled: false },
+					}),
+				},
+				sessionManager: epochManager,
+				tools: ["fresh_echo"],
+				customTools: [
+					{
+						name: "fresh_echo",
+						label: "Fresh echo",
+						description: "Return a native fixture result.",
+						parameters: Type.Object({}),
+						execute: async () => ({
+							content: [{ type: "text" as const, text: "fresh native result" }],
+							details: {},
+						}),
+					},
+				],
+			}));
+			const pendingId = epochManager.getLeafId();
+			if (!pendingId) throw new Error("Expected the fresh off policy ACK");
+			const pending = await epochManager.readBranchHistory((history) =>
+				history.hydrateEntry(pendingId, 2 * 1024 * 1024),
+			);
+			if (pending?.entry.type !== "compaction") throw new Error("Expected the fresh policy checkpoint");
+			expect(pending.source.qualification).toBe("native-context-epoch");
+			expect(readContextEpoch(pending.entry.details, 2 * 1024 * 1024)).toMatchObject({
+				mode: "off",
+				pendingRequestContract: true,
+				representation: null,
+			});
+			await epochSession.prompt("Run the fresh echo tool.");
+			expect(bodies).toHaveLength(10);
+			expect(epochsAtSend.at(-2)).not.toBe(pendingId);
+			expect(epochsAtSend.at(-1)).toBe(epochsAtSend.at(-2));
+			const acceptedId = epochsAtSend.at(-1)!;
+			const accepted = await epochManager.readBranchHistory((history) =>
+				history.hydrateEntry(acceptedId, 2 * 1024 * 1024),
+			);
+			if (accepted?.entry.type !== "compaction") throw new Error("Expected the once-only native contract ACK");
+			const freshCheckpoint = readContextEpoch(accepted.entry.details, 2 * 1024 * 1024);
+			expect(freshCheckpoint).toMatchObject({
+				mode: "off",
+				representation: null,
+				requestContract: {
+					api: model.api,
+					provider: model.provider,
+					route: "https://api.openai.com/v1/responses",
+					model: model.id,
+					replayContract: "message-groups",
+				},
+			});
+			expect(freshCheckpoint?.pendingRequestContract).toBeUndefined();
+			expect(freshCheckpoint?.views).toEqual([]);
+			expect(accepted.entry.tokensBefore).toBeNull();
+			expect(bodies.at(-1)).toContain("fresh native result");
+			expect(epochSession.contextMode).toBe("off");
 			expect(summaryBodies).toHaveLength(1);
 		} finally {
 			try {

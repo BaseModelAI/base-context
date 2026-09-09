@@ -202,15 +202,17 @@ export async function rebuildCopiedContextEpoch(
 		maxViewBytes: limits.maxSourceBytes,
 	});
 	const taskFrame = compileTaskFrame(tasks, taskFrameLimits({ maxBytes: Math.min(16_384, limits.maxSourceBytes) }));
-	const { replayContract, publicWindow: _publicWindow, continuation, ...unchanged } = checkpoint;
+	const lowered =
+		copied.retained || origin.retention === "retained-import" || hydrated.source.retention === "retained-import";
+	const inherited =
+		checkpoint.version === 5 && lowered ? { ...checkpoint, pendingRequestContract: undefined } : checkpoint;
+	const { replayContract, publicWindow: _publicWindow, continuation, ...unchanged } = inherited;
 	const rebuiltContinuation = continuation
 		? {
 				kind: continuation.kind,
 				publicTailThrough: (await prefix(continuation.publicTailThrough)).source,
 			}
 		: undefined;
-	const lowered =
-		copied.retained || origin.retention === "retained-import" || hydrated.source.retention === "retained-import";
 	const rebuilt = snapshotContextEpoch(
 		{
 			...unchanged,

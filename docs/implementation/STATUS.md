@@ -1313,3 +1313,72 @@ billed cost, or latency causality. Usage/cost completeness is false and API-cost
 totals are null. The raw `thinking must be medium` publication flag remains.
 
 All LOW invocations must finish before any MEDIUM; S Astra LOW is next.
+
+### W44 — owner-backed context.mode
+
+A reversible on/off control now commits through the existing qualified epoch owner.
+Off keeps pinned/public continuation and the literal tail, without archive replay,
+new selection or new refine/compact planning. Accepted work drains. Explicit
+recovery, physical receipts, final budget/resource/adapter checks and protected
+prompt text remain. Settings seed only fresh policy; committed mode wins on resume.
+
+The v5 policy-only checkpoint stores no measured request or invented usage. A
+genuinely fresh off session may ACK its first actual compatibility contract once
+through that same owner; later native continuations validate it instead of learning
+new contracts. Legacy missing-contract history receives no generic grant.
+
+The existing serialized real-apply and native services cases pass, including
+post-public-checkpoint off/reopen/refusal and fresh-off native tool continuation.
+Controlled planner/fetch responses are not live provider evidence.
+Child/copy/re-enable/failure paths are source wiring, not extra behavioral coverage.
+Global tree scheduling, independent auxiliary budgets, bridge/semantic configuration and full G07 remain open.
+
+### W45 — learning model and effort selection
+
+An optional `autoRefine.model` contract now reaches both actual built-in review
+and planning requests, selected before history/auth waits. Invalid explicit
+selection refuses without auth/send or main-model fallback. Existing ownership,
+request budgets, receipts, cancellation and W44 admission remain unchanged.
+
+Without the override, the current main model is used and effort is omitted,
+as before. This corrects the earlier source-level assumption that passing the
+main thinkingLevel meant it reached the helper's request options.
+
+The same built-in-planner fallback and missing-main-auth cases pass, with actual
+default/configured faux callbacks and unknown-learning-model refusal.
+These observations are not physical wire, entitlement or billed-cost
+evidence. Other malformed/effort/cross-provider/capture branches are source wiring.
+Independent auxiliary budgets and the remaining §18.4/G07 work stay open.
+
+### Final S Astra LOW and completion of LOW sequence
+
+The frozen S/stock Astra LOW invocation finished with all 60 immutable primaries:
+modified S **25/30**, stock **27/30** judge passes. S failed tasks 6,17,24,26,27;
+stock failed 17,21,24. Every failed primary has one retained diagnostic attempt.
+The only runtime errors across all 68 retained attempts are primary S26 and
+stock21 (`AgentError: WebSocket closed 1006`). No capacity-invalid attempts were
+recorded. Both task30 primaries passed without runtime errors. Diagnostics do not
+replace primaries.
+
+Across 24 matched passing pairs, S took 3377.016s versus stock 3951.858s
+(**14.546% less time**); S was faster on 22 pairs and slower on 2. This conditional
+timing result accompanies lower S correctness, not an overall efficiency win.
+These are frozen S/stock results, not gains from current native source. Physical
+usage/cost remains incomplete and API cost totals remain null. The raw
+`thinking must be medium` publication blocker is retained.
+
+All six LOW invocations have finished. MEDIUM has not started at this source
+checkpoint. The planned MEDIUM sequence uses the same frozen W32 H/native and
+old D/S builds, without repacking or replacing them with these source changes.
+
+Initial W44/W45 diagnostics are retained: all four first case runs stopped on
+settings access before constructor assignment; the direct configuration reference
+fixed that. The missing-auth case then exposed an indexed mode read on an explicit
+in-memory session. The shared reader now retains that mode's creation default
+without attempting indexed history. Persistent reads still require their owner.
+The first project check also found two old summary fixtures widened to the new
+policy-only epoch union. The measured v4 producer and its unchanged bounded
+snapshot now preserve their actual return subtype; no fixture casts, runtime
+validation changes or weakened v5 null rules were added. Four distinct cases pass
+after these corrections. Required `npm run check` passes: 1038 files without
+formatter fixes, TypeScript, installer and browser-smoke checks.

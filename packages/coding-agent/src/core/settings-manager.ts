@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { ServiceTier, Transport } from "@ponythewhite/base-context-ai";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
@@ -20,11 +21,20 @@ export interface BranchSummarySettings {
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
 }
 
+/** One explicit learning-model selection, shared by the real reviewer and planner. */
+export interface AutoRefineModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+}
+
 export interface AutoRefineSettings {
 	enabled?: boolean; // default: true
 	turnInterval?: number; // default: 25 assistant turns
 	compact?: boolean; // default: true
 	cooldownMs?: number; // default: 20 minutes
+	/** Absent: inherit the main model and retain legacy omitted request effort. */
+	model?: AutoRefineModelSettings;
 }
 
 export interface ProviderRetrySettings {
@@ -147,6 +157,8 @@ export interface Settings {
 	/** Complete native invocation output, separate from the working context. */
 	invocationOutput?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
+	/** Creation default; an existing session changes policy through its canonical owner. */
+	context?: { mode?: "on" | "off" };
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
@@ -866,6 +878,12 @@ export class SettingsManager {
 		return limits;
 	}
 
+	getContextMode(): "on" | "off" {
+		const mode = this.settings.context?.mode ?? "on";
+		if (mode !== "on" && mode !== "off") throw new Error("context.mode must be on or off");
+		return mode;
+	}
+
 	getCompactionEnabled(): boolean {
 		return this.settings.compaction?.enabled ?? true;
 	}
@@ -941,6 +959,12 @@ export class SettingsManager {
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
 		};
+	}
+
+	/** Detached explicit configuration; the request path resolves and validates its model/effort. */
+	getAutoRefineModel(): AutoRefineModelSettings | undefined {
+		const model = this.settings.autoRefine?.model;
+		return model === undefined ? undefined : structuredClone(model);
 	}
 
 	getAutoRefineSettings(): { enabled: boolean; turnInterval: number; compact: boolean; cooldownMs: number } {

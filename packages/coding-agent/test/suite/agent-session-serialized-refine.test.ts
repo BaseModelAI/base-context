@@ -1890,7 +1890,19 @@ describe("P0 concurrency regressions", () => {
 				],
 			},
 		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue(fauxPlan as never);
+		let releasePlan!: () => void;
+		const planGate = new Promise<void>((resolve) => {
+			releasePlan = resolve;
+		});
+		let enteredPlan!: () => void;
+		const planEntered = new Promise<void>((resolve) => {
+			enteredPlan = resolve;
+		});
+		const planSpy = vi.spyOn(internals, "_planRefine").mockImplementation(async () => {
+			enteredPlan();
+			await planGate;
+			return fauxPlan as never;
+		});
 
 		// Spy on _rebuildSystemPrompt (call-through) to assert it was invoked.
 		const rebuildSpy = vi.spyOn(
@@ -1908,7 +1920,12 @@ describe("P0 concurrency regressions", () => {
 		});
 
 		// Run the serialized refine (real _applyRefine runs).
-		await internals._runSerializedRefine({ instructions: "add a memory" });
+		const refinement = internals._runSerializedRefine({ instructions: "add a memory" });
+		await planEntered;
+		const modeChange = harness.session.setContextMode("off");
+		releasePlan();
+		await refinement;
+		await modeChange;
 
 		// _rebuildSystemPrompt was called by _applyRefine.
 		expect(rebuildSpy).toHaveBeenCalledTimes(1);
@@ -1929,6 +1946,22 @@ describe("P0 concurrency regressions", () => {
 		// refine_complete reports only successfully applied edits to extensions.
 		expect(refineCompleteEmitted).toBe(true);
 		expect(extensionEmit).toHaveBeenCalledWith(expect.objectContaining({ type: "refine_complete", appliedEdits: 1 }));
+
+		expect(harness.session.contextMode).toBe("off");
+		const acceptedPrompt = harness.session.agent.state.systemPrompt;
+		harness.setResponses([fauxAssistantMessage("ordinary off-mode response")]);
+		await harness.session.prompt("Continue without optimization.");
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(planSpy).toHaveBeenCalledTimes(1);
+		expect(rebuildSpy).toHaveBeenCalledTimes(1);
+		expect(harness.session.agent.state.systemPrompt).toBe(acceptedPrompt);
+		await expect(harness.session.refine()).rejects.toThrow("explicitly re-enable context.mode");
+		await expect(harness.session.compact()).rejects.toThrow("explicitly re-enable context.mode");
+		expect(() => harness.session.handleRefineHostRequest("refine.run")).toThrow("explicitly re-enable context.mode");
+		await expect(harness.session.handleCompactHostRequest("compact.run")).rejects.toThrow(
+			"explicitly re-enable context.mode",
+		);
+		expect(planSpy).toHaveBeenCalledTimes(1);
 	});
 	it("explicit refine.run planning failure: stamps cooldown, no apply, no retry", async () => {
 		const harness = await createHarness({

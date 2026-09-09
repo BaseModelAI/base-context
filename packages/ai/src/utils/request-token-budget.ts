@@ -174,7 +174,7 @@ const bytes = (value: string): number => new TextEncoder().encode(value).byteLen
 const record = (value: unknown): value is Record<string, unknown> =>
 	value !== null && typeof value === "object" && !Array.isArray(value);
 
-function routeIdentity(raw: string): string | null {
+export function requestTokenRouteIdentity(raw: string): string | null {
 	try {
 		const url = new URL(raw);
 		if (url.username || url.password || url.search || url.hash) return null;
@@ -264,7 +264,7 @@ export class RequestTokenBudget {
 				!profile.authMode ||
 				!profile.templateRevision ||
 				!profile.replayFamily ||
-				routeIdentity(profile.url) !== profile.url ||
+				requestTokenRouteIdentity(profile.url) !== profile.url ||
 				!count(profile.contextTokens) ||
 				profile.contextTokens < 1 ||
 				!count(profile.outputCeilingTokens) ||
@@ -308,7 +308,7 @@ export class RequestTokenBudget {
 		captured?: CapturedRequestCalibration,
 	): RequestTokenAssessment {
 		const unknown: string[] = [];
-		const route = routeIdentity(request.url);
+		const route = requestTokenRouteIdentity(request.url);
 		let body: Record<string, unknown> = {};
 		try {
 			const parsed: unknown = request.body === undefined ? undefined : JSON.parse(request.body);

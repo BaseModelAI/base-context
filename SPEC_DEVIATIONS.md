@@ -651,3 +651,47 @@ The current publisher already advertises a relative tarball.
 This is only the metadata/advertised-URL boundary. It does not control npm or
 artifact-download redirects, add product/schema/integrity validation, or stage, activate
 or roll back a CLI/runtime pair. Other G14 requirements remain open.
+
+## W44 update — session-local context mode
+
+`context.mode` now seeds fresh sessions with on/off policy. The external
+`AgentSession.setContextMode()` path uses the existing serialized owner and a
+qualified policy epoch; committed policy wins on resume. Off retains the current
+canonical/public continuation and literal tail, explicit recovery, request/resource
+checks, receipts and cancellation. It omits generated TaskFrame/resource overlays
+and denies new automatic or manual refine/compact planning. Accepted work drains.
+Re-enable is an explicit successor from the retained baseline, not archive replay.
+Sol/custom/user/project/harness prompt text is unchanged.
+
+A v5 policy-only epoch is unmeasured (`representation:null`, `tokensBefore:null`),
+not a fabricated summary. Its small accepted adapter/route/model/replay contract
+stays in that same checkpoint. Only a genuinely fresh off owner may accept its
+first actual request contract once, before admission; missing legacy contracts get
+no generic grant. The final fixed request uses one real projection and does not
+select or learn another working set. Old v1–4 null rules remain unchanged.
+
+This policy is session-local. Newly admitted native children capture parent mode;
+existing independently owned children retain their accepted policy. Copy, child,
+re-enable and failure handling are source wiring unless separately exercised.
+Independent auxiliary model/effort/budget configuration and broader tree scheduling
+remain open G07/G08 work; this is not a global toggle or complete G07 closure.
+
+## W45 update — explicit learning model and effort
+
+`autoRefine.model` optionally selects one provider/model ID/effort contract for
+both the actual built-in reviewer and planner. Selection is captured before
+history/auth waits and uses the existing local registry and configured thinking
+level rules. Invalid explicit selection refuses before auth/send, without a
+main-model fallback. The same coordinator, purposes, receipts, cancellation and
+session budget remain in charge. W44's admission gates and protected prompt text
+are unchanged.
+
+The unconfigured legacy path inherits the main MODEL but omits request effort.
+The old helpers received thinkingLevel and deliberately discarded it; this was
+not wire inheritance of main effort. The new explicit contract reaches both
+helpers' real request options. Omitted effort still leaves provider defaults
+unknown; it does not establish no reasoning or a cost benefit.
+
+This does not supply independent learning budgets, bridge/semantic configuration,
+deployment/entitlement/pricing facts, or complete §18.4/G07. Configured effort
+validation is not deployment certification.

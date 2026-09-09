@@ -3,10 +3,14 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
+	CONTEXT_POLICY_EPOCH_RENDERER,
 	type ContextEpochCheckpoint,
+	type ContextMode,
 	type ContextReplayContract,
+	contextEpochMode,
 	type EpochViewReference,
 	readContextEpoch,
+	retainedContextRequestContract,
 	snapshotContextEpoch,
 } from "./context-epoch.js";
 import type {
@@ -25,7 +29,7 @@ import {
 	appendSentAgentMessageToToolResult,
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
-import type { SessionHistoryReadView } from "./session-history-index.js";
+import { hydrateCapturedHistoryEntry, type SessionHistoryReadView } from "./session-history-index.js";
 import type { SessionEntry } from "./session-manager.js";
 import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
 import { readTaskStateFromView } from "./task-state-reader.js";
@@ -80,6 +84,7 @@ export function getCanonicalMessageSource(message: AgentMessage): CanonicalMessa
 }
 
 interface CompiledEpochContext {
+	readonly mode: ContextMode;
 	readonly source: SourceSnapshotRef;
 	readonly checkpoint?: ContextEpochCheckpoint;
 	readonly taskFrame?: CompiledTaskFrame;
@@ -158,6 +163,72 @@ export function preparePublicContextWindow(messages: readonly AgentMessage[]):
 	return { messages: captured, replacements };
 }
 
+/** Read mode only from the same qualified compaction owner used by the compiler. */
+export async function readCanonicalContextMode(
+	view: SessionHistoryReadView,
+	maxBytes: number,
+	initial: ContextMode,
+): Promise<ContextMode> {
+	const manifest = await view.contextManifest({ limit: 1 });
+	if (manifest.selection !== "known") throw new Error("Context mode source is unavailable");
+	if (!manifest.summaryRef) return initial;
+	const metadata = await view.get(manifest.summaryRef.entryId);
+	if (!metadata) throw new Error("Context mode checkpoint is unavailable");
+	const hydrated = await hydrateCapturedHistoryEntry(metadata, maxBytes, view.readPayload);
+	if (!hydrated || hydrated.entry.type !== "compaction") throw new Error("Context mode checkpoint is unavailable");
+	const details = hydrated.entry.details;
+	if (!details || typeof details !== "object" || !(CONTEXT_EPOCH_DETAIL in details)) return initial;
+	if (hydrated.source.qualification !== "native-context-epoch" || hydrated.source.retention === "retained-import")
+		throw new Error("Context mode checkpoint is not qualified on this source");
+	return contextEpochMode(readContextEpoch(details, maxBytes), initial);
+}
+
+/** Policy changes retain the current recipe; generated overlays are not archived conversation. */
+export function prepareContextModeEpoch(
+	messages: readonly AgentMessage[],
+	mode: ContextMode,
+	maxBytes: number,
+	freshContextContract = false,
+): { checkpoint: ContextEpochCheckpoint; messages: AgentMessage[] } {
+	const context = compiledEpochContexts.get(messages);
+	const units = getCanonicalViewUnits(messages);
+	if (!context || !units || units.length !== messages.length)
+		throw new Error("Context mode requires captured canonical views");
+	const chosen = messages.filter(
+		(_, index) => units[index].kind !== "task-frame" && units[index].kind !== "resource-view",
+	);
+	const views = context.references.filter((reference): reference is EpochViewReference => reference !== null);
+	const tail = views.at(-1);
+	// A metadata-only fresh branch uses its existing source leaf; no fake user input is appended.
+	const literalTailId = tail && tail.ref.kind !== "compaction" ? views.pop()!.ref.entryId : context.source.leafId;
+	if (!literalTailId) throw new Error("Context mode requires a canonical source boundary");
+	return {
+		checkpoint: snapshotContextEpoch(
+			{
+				version: 5,
+				renderer: CONTEXT_POLICY_EPOCH_RENDERER,
+				mode,
+				policyOnly: true,
+				representation: null,
+				source: context.source,
+				views,
+				literalTailId,
+				requestContract: retainedContextRequestContract(context.checkpoint),
+				...(mode === "off" && !context.checkpoint && freshContextContract
+					? { pendingRequestContract: true as const }
+					: {}),
+				replayContract: context.checkpoint?.replayContract,
+				publicWindow: context.checkpoint?.publicWindow,
+				continuation: context.checkpoint?.continuation,
+				// Retain the existing bounded anchor recipe for explicit re-enable; off never injects it.
+				taskFrame: context.taskFrame ?? context.checkpoint?.taskFrame,
+			},
+			maxBytes,
+		),
+		messages: [...chosen],
+	};
+}
+
 /** A candidate only. The caller must ACK the canonical checkpoint before adoption or send. */
 export function prepareCanonicalEpoch(
 	messages: readonly AgentMessage[],
@@ -166,7 +237,10 @@ export function prepareCanonicalEpoch(
 	maxBytes: number,
 	replayContract: ContextReplayContract = "complete-context",
 	publicWindow = false,
-): { checkpoint: ContextEpochCheckpoint; messages: AgentMessage[] } {
+): {
+	checkpoint: ContextEpochCheckpoint & { readonly version: 4; readonly representation: string };
+	messages: AgentMessage[];
+} {
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units || units.length !== messages.length || context.references.length !== messages.length)
@@ -329,6 +403,7 @@ export class CanonicalContextCompiler {
 		omittedAssistantIds: ReadonlySet<string> = new Set(),
 		frameOptions: Partial<TaskFrameLimits> = {},
 		resourceCapture?: OwnedResourceCapture,
+		initialContextMode: ContextMode = "on",
 	): Promise<AgentMessage[]> {
 		const frameLimits = taskFrameLimits(frameOptions);
 		const previousSource = this.source;
@@ -457,6 +532,7 @@ export class CanonicalContextCompiler {
 					throw new Error("Context epoch checkpoint does not match its retained boundary");
 			}
 		}
+		const mode = contextEpochMode(checkpoint, initialContextMode);
 		const publicTail = checkpoint?.continuation?.publicTailThrough;
 		if (publicTail) {
 			if (!view.atSnapshot) throw new Error("Public summary transition requires its captured source");
@@ -471,22 +547,27 @@ export class CanonicalContextCompiler {
 			(previousSource !== undefined && previousSource.sourceSequence > view.source.sourceSequence);
 		if (!resetFrame && previousFrame && previousSource?.leafId && previousSource.leafId !== view.source.leafId)
 			resetFrame = !(await view.get(previousSource.leafId));
-		const tasks = await readTaskStateFromView(view, {
-			maxItems: maxMessages,
-			maxSourceBytes,
-			maxViewBytes: maxSourceBytes,
-		});
+		const tasks =
+			mode === "off"
+				? undefined
+				: await readTaskStateFromView(view, {
+						maxItems: maxMessages,
+						maxSourceBytes,
+						maxViewBytes: maxSourceBytes,
+					});
 		let taskSequence = -1;
-		for (const { event } of tasks.items) {
+		for (const { event } of tasks?.items ?? []) {
 			if (event.source.sequence === taskSequence) continue;
 			taskSequence = event.source.sequence;
 			// The task reader has already required an exact locator for every represented frame.
 			countBytes({ locator: event.source.locator! });
 		}
 		const referenceFrame = resetFrame ? checkpoint?.taskFrame : previousFrame;
-		let taskFrame = compileTaskFrame(tasks, frameLimits, referenceFrame);
+		let taskFrame = tasks ? compileTaskFrame(tasks, frameLimits, referenceFrame) : undefined;
 		const resource =
-			resourceCapture && (resourceCapture.enabled || checkpoint) ? renderResourceView(resourceCapture) : undefined;
+			mode === "on" && resourceCapture && (resourceCapture.enabled || checkpoint)
+				? renderResourceView(resourceCapture)
+				: undefined;
 		if (resource) {
 			sourceBytes += resource.bytes;
 			if (sourceBytes > maxSourceBytes) throw new Error("Canonical context source byte budget exceeded");
@@ -628,7 +709,7 @@ export class CanonicalContextCompiler {
 				if (
 					pinned.rendering !== undefined &&
 					(pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
-						(checkpoint.version !== 3 && checkpoint.version !== 4) ||
+						(checkpoint.version !== 3 && checkpoint.version !== 4 && checkpoint.version !== 5) ||
 						pinned.ref.kind === "compaction")
 				)
 					throw new Error("Unsupported context epoch view rendering");
@@ -758,6 +839,7 @@ export class CanonicalContextCompiler {
 			selection: { source: { ...view.source }, units: selectionUnits, limits: unitLimits },
 		});
 		compiledEpochContexts.set(closedMessages, {
+			mode,
 			source: { ...view.source },
 			checkpoint,
 			taskFrame,

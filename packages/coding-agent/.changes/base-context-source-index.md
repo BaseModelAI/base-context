@@ -82,3 +82,7 @@
 - Stopped self-update after unavailable or failed release lookup, including forced updates. Known-release updates remain supported, and earlier accepted extension-update effects are not rolled back or hidden.
 
 - Refused release-metadata redirects and whole manifests advertising a tarball on another configured-base origin, without falling back to a package install. Existing same-origin and owned-registry lookup behavior remains supported.
+
+- Added session-local, acknowledged `context.mode` on/off transitions. Off preserves retained continuation, explicit recovery and native safety while stopping new optimization. Fresh off sessions accept one actual native compatibility contract; Sol/custom prompt text stays unchanged.
+
+- Added optional `autoRefine.model` provider/model/effort selection for the actual reviewer and planner. Invalid explicit selection refuses before auth without fallback. Unconfigured requests retain the main model and omitted effort; ownership, budgets, off-mode gates and protected prompts stay unchanged.

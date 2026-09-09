@@ -34,20 +34,28 @@ export type RequestViewValidate = (
 	assessment: RequestTokenAssessment | undefined,
 ) => void;
 
+export type RequestViewFixedPrepare = (
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+	assessment: RequestTokenAssessment | undefined,
+) => void | Promise<void>;
+
 export interface CapturedRequestViewBoundary extends CanonicalViewSelectionSource {
 	readonly messages: readonly AgentMessage[];
 	readonly commit: RequestViewCommit;
 	readonly validate?: RequestViewValidate;
+	readonly fixedPrepare?: RequestViewFixedPrepare;
 }
 
 export function captureRequestViewBoundary(
 	messages: readonly AgentMessage[],
 	commit: RequestViewCommit,
 	validate?: RequestViewValidate,
+	fixedPrepare?: RequestViewFixedPrepare,
 ): CapturedRequestViewBoundary {
 	const source = getCanonicalViewSelectionSource(messages);
 	if (!source) throw new Error("Request view boundary requires compiled canonical messages");
-	return { ...source, messages: captureCanonicalRequestMessages(messages), commit, validate };
+	return { ...source, messages: captureCanonicalRequestMessages(messages), commit, validate, fixedPrepare };
 }
 
 export function matchesRequestView(
@@ -65,6 +73,45 @@ export function matchesRequestView(
 		return false;
 	const rendered = convertToLlm([...boundary.messages]);
 	return rendered.length === boundary.units.length && JSON.stringify(rendered) === JSON.stringify(context.messages);
+}
+
+/** Check the actual final mapping without selecting, converting, or committing another view. */
+export async function prepareFixedRequestView(
+	boundary: CapturedRequestViewBoundary,
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+	assessment: RequestTokenAssessment | undefined,
+): Promise<void> {
+	const payload: unknown = JSON.parse(request.body!);
+	if (
+		!payload ||
+		typeof payload !== "object" ||
+		!("input" in payload) ||
+		!Array.isArray(payload.input) ||
+		payload.input.length !== projection.messageIndices.length
+	)
+		throw new Error("Fixed context requires its final provider projection");
+	if (
+		projection.kind === "openai-responses-text-v1" &&
+		boundary.messages.some(
+			(message) =>
+				message.role === "toolResult" ||
+				(message.role === "assistant" && (message.content.length !== 1 || message.content[0].type !== "text")),
+		)
+	)
+		throw new Error("Fixed context requires its native replay adapter");
+	const units = bindMessageReplayUnits(
+		boundary.messages,
+		boundary.units,
+		boundary.limits,
+		projection.replayContract ?? "complete-context",
+	);
+	closeViewSelection(
+		units,
+		units.map((unit) => unit.id),
+		boundary.limits,
+	);
+	await boundary.fixedPrepare!(request, projection, assessment);
 }
 
 /** Only the actual serializer's established replay contract authorizes historical-literal omission. */

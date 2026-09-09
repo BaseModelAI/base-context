@@ -233,6 +233,7 @@ export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
 	/** Defined trusted creation options override the inherited explicit parent policy. */
 	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: "on" | "off";
 	/** The same live parent owns this setup. Native factories reserve it when omitted. */
 	admission?: RlmChildAdmission;
 	id: string;

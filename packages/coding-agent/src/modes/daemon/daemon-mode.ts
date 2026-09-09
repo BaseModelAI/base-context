@@ -2617,6 +2617,7 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
+		options = { ...options, contextMode: options.contextMode ?? options.parentSession.contextMode };
 		const requestTokenBudget =
 			options.requestTokenBudget === undefined
 				? options.parentSession.requests.getRequestTokenBudgetOptions()
@@ -2673,6 +2674,7 @@ export class AgentDaemon {
 						...(options.requestTokenBudget === undefined
 							? {}
 							: { requestTokenBudget: options.requestTokenBudget }),
+						contextMode: options.contextMode,
 						model: options.model,
 						thinkingLevel: options.thinkingLevel,
 						serviceTier: options.serviceTier,
@@ -3112,6 +3114,7 @@ export class AgentDaemon {
 		restoreActiveSessionId?: string,
 		clientEnv?: Record<string, string>,
 	): Promise<ActiveSessionState> {
+		const contextMode = admission.parent.contextMode;
 		const requestTokenBudget = admission.parent.requests.getRequestTokenBudgetOptions();
 		const hydrationEnv = parentState.clientEnv ?? clientEnv;
 		const assertAdmission = () => {
@@ -3157,6 +3160,7 @@ export class AgentDaemon {
 					sessionLease,
 					sessionOptions: {
 						...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
+						contextMode,
 						...(rehydratedModel ? { model: rehydratedModel } : {}),
 						agentMessageController: this.createAgentMessageController(() => stateRef),
 						agentObserveController: this.createAgentObserveController(() => stateRef),

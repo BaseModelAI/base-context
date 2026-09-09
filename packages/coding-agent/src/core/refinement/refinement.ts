@@ -1035,6 +1035,7 @@ export async function planRefinement(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
+	useConfiguredThinkingLevel = false,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -1066,12 +1067,8 @@ export async function planRefinement(
 		.filter(Boolean)
 		.join("\n\n");
 
-	// /refine requires a parseable JSON object in the final text. Some reasoning-capable
-	// OpenAI-compatible models can spend the response on visible thinking and return no
-	// final text, which makes otherwise successful daemon /refine calls fail parsing.
-	// Keep the refinement request non-reasoning regardless of the interactive session
-	// thinking level so the model uses its output budget for the JSON object.
-	void thinkingLevel;
+	// Preserve legacy omitted effort for JSON requests. Only an explicit learning-model
+	// contract opts into a captured effort; omission does not certify provider behavior.
 	const response = await completeInference(
 		requests,
 		model,
@@ -1079,7 +1076,13 @@ export async function planRefinement(
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			maxTokens: refinementMaxOutputTokens(model),
+			signal,
+			apiKey,
+			headers,
+			...(useConfiguredThinkingLevel ? { reasoning: thinkingLevel } : {}),
+		},
 		{
 			purpose: "refine",
 			purposeDetail: "plan",
@@ -1126,6 +1129,7 @@ export async function reviewAutoRefine(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
+	useConfiguredThinkingLevel = false,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -1143,9 +1147,7 @@ ${conversationText}
 </conversation>`,
 		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
 	].join("\n\n");
-	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
-	// reasoning-capable models use final text budget for the JSON object.
-	void thinkingLevel;
+	// Match planning: legacy requests omit effort; an explicit contract carries its exact level.
 	const response = await completeInference(
 		requests,
 		model,
@@ -1153,7 +1155,13 @@ ${conversationText}
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			maxTokens: autoRefineReviewMaxOutputTokens(model),
+			signal,
+			apiKey,
+			headers,
+			...(useConfiguredThinkingLevel ? { reasoning: thinkingLevel } : {}),
+		},
 		{
 			purpose: "refine",
 			purposeDetail: "auto-refine-review",

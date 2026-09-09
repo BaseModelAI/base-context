@@ -706,6 +706,7 @@ export function resolveRuntimeSessionOptions(
 ): CreateAgentSessionOptions {
 	return {
 		requestTokenBudget: runtimeSessionOptions?.requestTokenBudget ?? sessionOptions.requestTokenBudget,
+		contextMode: runtimeSessionOptions?.contextMode ?? sessionOptions.contextMode,
 		model: runtimeSessionOptions?.model ?? sessionOptions.model,
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
@@ -749,6 +750,8 @@ export function createDefaultRuntimeFactory(
 		sessionConfig,
 		sessionOptions: runtimeSessionOptions,
 	}) => {
+		if (runtimeSessionOptions)
+			runtimeSessionOptions = { ...runtimeSessionOptions, contextMode: runtimeSessionOptions.contextMode };
 		if (runtimeSessionOptions?.requestTokenBudget) {
 			runtimeSessionOptions = {
 				...runtimeSessionOptions,

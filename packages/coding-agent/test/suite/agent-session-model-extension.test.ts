@@ -1,7 +1,7 @@
 import type { AgentTool, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";
 import type { ExtensionAPI } from "../../src/index.js";
 import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
@@ -554,6 +554,37 @@ describe("AgentSession model and extension characterization", () => {
 		await expect(harness.session.setModel(harness.getModel("faux-2")!)).rejects.toThrow(
 			`No API key for ${harness.getModel().provider}/faux-2`,
 		);
+
+		const internals = harness.session as unknown as {
+			_reviewAutoRefine(context: { reason: "turn_interval"; turnsSinceLastReview: number }): Promise<unknown>;
+			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+			_getRequiredRequestAuth(model: Model<string>): Promise<unknown>;
+		};
+		const auth = vi.spyOn(internals, "_getRequiredRequestAuth");
+		const callsBefore = harness.faux.state.callCount;
+		const mainModel = harness.session.model;
+		const provider = harness.getModel().provider;
+		harness.settingsManager.applyOverrides({
+			autoRefine: {
+				model: {
+					provider,
+					modelId: "missing-learning-model",
+					thinkingLevel: "off",
+				},
+			},
+		});
+		try {
+			const error = `Unknown autoRefine.model ${provider}/missing-learning-model`;
+			await expect(
+				internals._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 25 }),
+			).rejects.toThrow(error);
+			await expect(internals._planRefine({}, new AbortController().signal)).rejects.toThrow(error);
+			expect(auth).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(callsBefore);
+			expect(harness.session.model).toBe(mainModel);
+		} finally {
+			auth.mockRestore();
+		}
 	});
 
 	it("allows extension tool_call handlers to block tool execution", async () => {

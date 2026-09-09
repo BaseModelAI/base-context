@@ -105,7 +105,9 @@ import {
 	getCanonicalMessageSource,
 	getCanonicalViewUnits,
 	prepareCanonicalEpoch,
+	prepareContextModeEpoch,
 	prepareRecoveryCompaction,
+	readCanonicalContextMode,
 } from "./canonical-context.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -121,7 +123,18 @@ import {
 	serializeConversation,
 	shouldCompact,
 } from "./compaction/index.js";
-import { appendContextEpoch, CONTEXT_EPOCH_DETAIL, contextEpochRepresentation } from "./context-epoch.js";
+import {
+	appendContextEpoch,
+	assertContextRequestContract,
+	CONTEXT_EPOCH_DETAIL,
+	type ContextMode,
+	type ContextReplayContract,
+	contextEpochMode,
+	contextEpochRepresentation,
+	contextRequestContract,
+	retainedContextRequestContract,
+	snapshotContextEpoch,
+} from "./context-epoch.js";
 import {
 	type ContextTreeNode,
 	ContextTreeRequest,
@@ -484,6 +497,7 @@ export class RefineSkippedError extends Error {}
 export interface AgentSessionConfig {
 	/** Explicit request budget profiles; absent preserves control behavior. */
 	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: ContextMode;
 	/** Override native invocationOutput settings; complete finalized values or explicit refusal. */
 	invocationOutputLimits?: AgentOutputLimits;
 	agent: Agent;
@@ -1088,6 +1102,9 @@ export class AgentSession {
 	readonly runtimeServices: SessionRuntimeServices;
 	private readonly _contextCompiler = new CanonicalContextCompiler();
 	private readonly _contextEpochsEnabled: boolean;
+	private readonly _initialContextMode: ContextMode;
+	private _contextMode: ContextMode;
+	private _pendingContextModeChanges = 0;
 	private readonly _contextUsageReader = new ContextUsageReader();
 	private _compactionBoundaryCache?: {
 		sessionId: string;
@@ -1368,6 +1385,10 @@ export class AgentSession {
 			};
 		});
 		this.agent.bindInitializationOwner(() => this.initialize());
+		this._initialContextMode = config.contextMode ?? config.settingsManager.getContextMode();
+		if (this._initialContextMode !== "on" && this._initialContextMode !== "off")
+			throw new Error("context.mode must be on or off");
+		this._contextMode = this._initialContextMode;
 		this._contextEpochsEnabled = config.requestTokenBudget !== undefined;
 		const contextEpochsEnabled = this._contextEpochsEnabled;
 		this.agent.bindContextOwner(async () => {
@@ -1412,6 +1433,7 @@ export class AgentSession {
 						sameSource ? omitted : undefined,
 						{},
 						resource,
+						this._initialContextMode,
 					);
 					if (sameSource && this._contextOmissions === controls) {
 						// Only prune this captured set. A newer control or source switch must survive this read.
@@ -1423,6 +1445,7 @@ export class AgentSession {
 				this._mergeUnpersistedOutcomes(messages, outcomes);
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 				const epochContext = getCanonicalEpochContext(messages);
+				if (epochContext) this._contextMode = epochContext.mode;
 				if (
 					epochContext?.resourceRevision !== undefined &&
 					getCanonicalViewUnits(messages)?.length !== messages.length
@@ -1436,8 +1459,17 @@ export class AgentSession {
 					getCanonicalViewUnits(messages)?.length === messages.length
 				) {
 					let committed = epochContext.checkpoint;
+					const fixed = epochContext.mode === "off" || (committed?.policyOnly === true && !contextEpochsEnabled);
+					let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
+					const nativeTail = messages.some(
+						(message) =>
+							message.role === "toolResult" ||
+							(message.role === "assistant" &&
+								message.content.some((part) => part.type !== "text" || part.textSignature !== undefined)),
+					);
 					let accepted: string | undefined;
 					let acceptedBody: string | undefined;
+					let acceptedReplayContract: ContextReplayContract | undefined;
 					let acknowledged: CompactionCommit | undefined;
 					const commitFailure = (cause: unknown) => {
 						if (!acknowledged) return cause;
@@ -1448,6 +1480,7 @@ export class AgentSession {
 					captured.bindRequestViewBoundary(
 						messages,
 						async (candidate) => {
+							if (fixed) throw new Error("Context selection is disabled while context.mode is off");
 							assertResourceCurrent(resource);
 							const representation = contextEpochRepresentation(
 								candidate.request,
@@ -1520,6 +1553,22 @@ export class AgentSession {
 						(request, assessment) => {
 							try {
 								assertResourceCurrent(resource);
+								if (fixed) {
+									if (
+										(requestContract ||
+											committed?.pendingRequestContract ||
+											nativeTail ||
+											acceptedBody !== undefined) &&
+										(acceptedBody === undefined || request.body !== acceptedBody)
+									)
+										throw new Error("Fixed context requires a compatible final provider projection");
+									if (requestContract) {
+										if (!acceptedReplayContract)
+											throw new Error("Fixed context has no accepted replay projection");
+										assertContextRequestContract(requestContract, request, acceptedReplayContract);
+									}
+									return;
+								}
 								if (!committed) return;
 								if (acceptedBody === undefined || request.body !== acceptedBody)
 									throw new Error("Committed context epoch requires a compatible final provider projection");
@@ -1536,6 +1585,51 @@ export class AgentSession {
 								throw commitFailure(cause);
 							}
 						},
+						fixed
+							? async (request, projection) => {
+									try {
+										assertResourceCurrent(resource);
+										if (!requestContract && nativeTail)
+											throw new Error("Retained native context has no accepted request contract");
+										const replayContract = projection.replayContract ?? "complete-context";
+										if (!requestContract && committed?.pendingRequestContract) {
+											// A once-only first compatibility acceptance, not a new view or optimizer decision.
+											const nextContract = contextRequestContract(request, replayContract);
+											const checkpoint = snapshotContextEpoch(
+												{
+													...committed,
+													source: epochContext.source,
+													requestContract: nextContract,
+													pendingRequestContract: undefined,
+												},
+												limits.maxSourceBytes,
+											);
+											const entryId = await compaction[appendContextEpoch](checkpoint, null);
+											acknowledged = {
+												entryId,
+												result: {
+													summary: "",
+													firstKeptEntryId: checkpoint.literalTailId,
+													tokensBefore: null,
+												},
+											};
+											committed = checkpoint;
+											requestContract = nextContract;
+											assertResourceCurrent(resource);
+											if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+												throw new Error("Context contract source changed before acceptance");
+										}
+										if (requestContract)
+											assertContextRequestContract(requestContract, request, replayContract);
+										if (acceptedBody !== undefined && request.body !== acceptedBody)
+											throw new Error("Fixed context changed after acceptance");
+										acceptedBody = request.body;
+										acceptedReplayContract = replayContract;
+									} catch (cause) {
+										throw commitFailure(cause);
+									}
+								}
+							: undefined,
 					);
 				}
 				this._compactionSetupFailure = undefined;
@@ -1686,6 +1780,8 @@ export class AgentSession {
 
 	private async _initialize(): Promise<void> {
 		this._rlmParentAdmission?.assertCurrent();
+		this._contextMode = await this._readContextMode();
+		const freshContextContract = this.sessionManager.canSeedContextModeContract();
 		let goalSeedable = false;
 		if (this.sessionManager.isPersisted()) {
 			const bootstrap = await this._readRuntimeBootstrap();
@@ -1717,6 +1813,131 @@ export class AgentSession {
 			this._ensureGoalRuntimeActive();
 		}
 		await this.sessionManager.flushNow();
+		if (this._contextMode === "off") await this._writeContextMode("off", freshContextContract);
+	}
+
+	/** Accepted canonical policy. Settings are only the creation default. */
+	get contextMode(): ContextMode {
+		return this._contextMode;
+	}
+
+	private _contextOptimizationAllowed(): boolean {
+		return this._contextMode === "on" && this._pendingContextModeChanges === 0;
+	}
+
+	private _assertContextOptimizationAllowed(): void {
+		if (!this._contextOptimizationAllowed())
+			throw new Error("Context optimization is disabled; explicitly re-enable context.mode first");
+	}
+
+	private _retainContextOptimization<T>(operation: Promise<T>): Promise<T> {
+		const retained = operation.then(() => undefined);
+		this._autoRefineOperations.add(retained);
+		void retained.finally(() => this._autoRefineOperations.delete(retained)).catch(() => undefined);
+		return operation;
+	}
+
+	private _readContextMode(): Promise<ContextMode> {
+		if (!this.sessionManager.isPersisted()) return Promise.resolve(this._initialContextMode);
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return this.sessionManager.readBranchHistory((history) =>
+			readCanonicalContextMode(history.branchContext, maxSourceBytes, this._initialContextMode),
+		);
+	}
+
+	/** External session control; never await the current action's own pump or tool turn. */
+	async setContextMode(mode: ContextMode): Promise<void> {
+		if (mode !== "on" && mode !== "off") throw new Error("context.mode must be on or off");
+		if (this._sessionActionCommitContext.getStore() !== undefined)
+			throw new Error("Context mode changes require external session control");
+		this._pendingContextModeChanges++;
+		try {
+			await this.initialize();
+			while (true) {
+				await this._drainAcceptedRefinement();
+				await Promise.all([this._compactionOperation, this._branchSummaryOperation]);
+				await this.waitForIdle();
+				const fence = await this._acquireSessionActionCommitFence();
+				try {
+					if (
+						this.isStreaming ||
+						this.unfinishedActionCount !== 0 ||
+						this._compactionOperation ||
+						this._branchSummaryOperation ||
+						this._refineInFlight ||
+						this._refinePlanInFlight ||
+						this._serializedPlanInFlight
+					)
+						continue;
+					await this._sessionActionCommitContext.run(fence.owner, () => this._writeContextMode(mode));
+					return;
+				} finally {
+					fence.release();
+				}
+			}
+		} finally {
+			// Restore only the reversible barrier. EOF/disposal remains permanently closed.
+			this._pendingContextModeChanges--;
+		}
+	}
+
+	/** Called during unpublished initialization or while holding the existing session action fence. */
+	private async _writeContextMode(mode: ContextMode, freshContextContract = false): Promise<void> {
+		const manager = this.sessionManager;
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		const resource = this._captureKernelResource();
+		const compaction = manager.bindCompactionSink({
+			maxEntries: limits.maxMessages,
+			maxSourceBytes: limits.maxSourceBytes,
+		});
+		const captured = this.requests.capture(compaction);
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
+		let primaryCause: unknown;
+		try {
+			const messages = await captured.readHistory((view) =>
+				this._contextCompiler.compile(view, limits, undefined, {}, resource, this._initialContextMode),
+			);
+			const context = getCanonicalEpochContext(messages)!;
+			if (
+				contextEpochMode(context.checkpoint, this._initialContextMode) === mode &&
+				(context.checkpoint !== undefined || mode === "on")
+			) {
+				this._contextMode = mode;
+			} else {
+				const prepared = prepareContextModeEpoch(messages, mode, limits.maxSourceBytes, freshContextContract);
+				assertResourceCurrent(resource);
+				const entryId = await compaction[appendContextEpoch](prepared.checkpoint, null);
+				committed = {
+					entryId,
+					result: { summary: "", firstKeptEntryId: prepared.checkpoint.literalTailId, tokensBefore: null },
+				};
+				// ACK is authoritative even if later setup or release fails.
+				this._contextMode = mode;
+				if (this.sessionManager !== manager || manager.getLeafId() !== entryId)
+					throw new Error("Context mode source changed before adoption");
+				assertResourceCurrent(resource);
+				this.agent.state.messages = prepared.messages;
+			}
+		} catch (cause) {
+			primaryCause = cause;
+			failure = committed ? new CompactionCommittedError(committed.entryId, committed.result, cause) : cause;
+			if (committed) this._compactionSetupFailure = failure as CompactionCommittedError;
+		}
+		try {
+			await captured.dispose();
+		} catch (cause) {
+			if (failure !== undefined) {
+				if (cause !== primaryCause)
+					failure = new AggregateError([failure, cause], "Context mode transition and release failed", {
+						cause: failure,
+					});
+			} else {
+				failure = committed ? new CompactionCommittedError(committed.entryId, committed.result, cause) : cause;
+				if (committed) this._compactionSetupFailure = failure as CompactionCommittedError;
+			}
+		}
+		if (failure !== undefined) throw failure;
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -2178,6 +2399,7 @@ export class AgentSession {
 	}
 
 	private async _reloadBranchRuntimeState(): Promise<void> {
+		this._contextMode = await this._readContextMode();
 		const bootstrap = this.sessionManager.isPersisted()
 			? await this._readRuntimeBootstrap()
 			: { goalState: this._loadPersistedGoalState(), rlmMaxDepth: this._loadPersistedRlmMaxDepthState() };
@@ -3596,6 +3818,7 @@ export class AgentSession {
 		type: string,
 		payload: Record<string, unknown> = {},
 	): Promise<Record<string, unknown>> {
+		if (type === "compact.run") this._assertContextOptimizationAllowed();
 		if (!this._includeCompactSkill) {
 			throw new Error("the compact skill is disabled in this session");
 		}
@@ -3677,6 +3900,7 @@ export class AgentSession {
 	 * if refine() awaited agent idle from within the active tool call.
 	 */
 	handleRefineHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+		if (type === "refine.run") this._assertContextOptimizationAllowed();
 		switch (type) {
 			case "refine.status": {
 				return {
@@ -4683,6 +4907,10 @@ export class AgentSession {
 	/** Drain accepted refinement and explicit queued requests; never start an opportunistic review or plan. */
 	private async _drainPendingRefinementForDisposal(): Promise<void> {
 		this.closeAutoRefineAdmission();
+		await this._drainAcceptedRefinement();
+	}
+
+	private async _drainAcceptedRefinement(): Promise<void> {
 		const errors: unknown[] = [];
 		const drain = async () => {
 			for (const timer of this._scheduledAutoRefineTimers) {
@@ -6381,6 +6609,12 @@ export class AgentSession {
 				DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 			);
 		}
+		if (
+			!options.restore &&
+			action.payload.kind === "session_command" &&
+			(action.payload.command.name === "compact" || action.payload.command.name === "refine")
+		)
+			this._assertContextOptimizationAllowed();
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
@@ -6884,7 +7118,7 @@ export class AgentSession {
 			let displayResult = true;
 			switch (input.command.name) {
 				case "compact":
-					await this.compact(input.command.args || undefined, {
+					await this._compactAccepted(input.command.args || undefined, {
 						skipAbort: true,
 					});
 					break;
@@ -6892,7 +7126,7 @@ export class AgentSession {
 					let result: RefinementResult;
 					try {
 						const options = parseRefineCommandOptions(input.command.args);
-						result = await this.refine(options, { skipAbort: true });
+						result = await this._refineAccepted(options, { skipAbort: true });
 					} catch (error) {
 						// Only a failure of the refinement itself is a refine failure; a later
 						// result-row persist error must not report a completed refinement as failed.
@@ -8236,6 +8470,14 @@ export class AgentSession {
 	}
 
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
+		this._assertContextOptimizationAllowed();
+		return this._retainContextOptimization(this._compactAccepted(customInstructions, options));
+	}
+
+	private async _compactAccepted(
+		customInstructions?: string,
+		options: { skipAbort?: boolean } = {},
+	): Promise<CompactionResult> {
 		if (this._compactionSetupFailure) throw this._compactionSetupFailure;
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
@@ -8682,7 +8924,9 @@ export class AgentSession {
 	}
 
 	private _newAutoRefineAllowed(): boolean {
-		return !this._autoRefineAdmissionClosed && this._autoRefineAllowedForSession();
+		return (
+			this._contextOptimizationAllowed() && !this._autoRefineAdmissionClosed && this._autoRefineAllowedForSession()
+		);
 	}
 
 	private _settlePostCompactionContinue(error?: Error): void {
@@ -9113,14 +9357,43 @@ export class AgentSession {
 		}
 	}
 
+	private _resolveRefinementModel():
+		| { model: NonNullable<AgentSession["model"]>; thinkingLevel: ThinkingLevel; explicit: boolean }
+		| undefined {
+		const selection = this.settingsManager.getAutoRefineModel();
+		if (selection === undefined) {
+			const model = this.model;
+			return model
+				? { model: { ...model, cost: { ...model.cost } }, thinkingLevel: this.thinkingLevel, explicit: false }
+				: undefined;
+		}
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid autoRefine.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown autoRefine.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`autoRefine.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: { ...model, cost: { ...model.cost } }, thinkingLevel: selection.thinkingLevel, explicit: true };
+	}
+
 	private async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
 		if (this._autoRefineReviewer) return this._autoRefineReviewer(context, signal);
-		const selectedModel = this.model;
-		if (!selectedModel) return { shouldRefine: false, rationale: "No model selected." };
-		const model = { ...selectedModel, cost: { ...selectedModel.cost } };
+		const selected = this._resolveRefinementModel();
+		if (!selected) return { shouldRefine: false, rationale: "No model selected." };
+		const { model, thinkingLevel, explicit } = selected;
 		const messages = structuredClone(this.agent.state.messages);
 		const harnessState = this._loadMergedHarnessState();
-		const thinkingLevel = this.thinkingLevel;
 		const reviewContext = { ...context };
 		const requests = this.requests.capture();
 		try {
@@ -9137,6 +9410,7 @@ export class AgentSession {
 				signal,
 				thinkingLevel,
 				requests,
+				explicit,
 			);
 		} finally {
 			await requests.dispose();
@@ -9188,6 +9462,14 @@ export class AgentSession {
 	 * application phase (disk I/O + in-memory mutation) blocks turn entry points.
 	 */
 	async refine(
+		options: { instructions?: string; rollbackId?: string; global?: boolean } = {},
+		internal: { skipAbort?: boolean; trigger?: "manual" | "auto" } = {},
+	): Promise<RefinementResult> {
+		this._assertContextOptimizationAllowed();
+		return this._retainContextOptimization(this._refineAccepted(options, internal));
+	}
+
+	private async _refineAccepted(
 		options: {
 			instructions?: string;
 			rollbackId?: string;
@@ -9326,13 +9608,10 @@ export class AgentSession {
 			throw new Error("Cannot refine a disposed session.");
 		}
 
-		if (!this.model) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-
-		const model = { ...this.model, cost: { ...this.model.cost } };
+		const selected = this._resolveRefinementModel();
+		if (!selected) throw new Error(formatNoModelSelectedMessage());
+		const { model, thinkingLevel, explicit } = selected;
 		const messages = structuredClone(this.agent.state.messages);
-		const thinkingLevel = this.thinkingLevel;
 		const requestOptions = { ...options };
 		const globalHarnessStateDir = getGlobalHarnessStateDir();
 		const localHarnessStateDir = this._localHarnessStateDir();
@@ -9407,6 +9686,7 @@ export class AgentSession {
 				signal,
 				thinkingLevel,
 				requests,
+				explicit,
 			);
 			if (this._disposed || signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
@@ -9597,6 +9877,7 @@ export class AgentSession {
 		queueAutonomousContinuation = true,
 	): Promise<boolean> {
 		if (this._compactionSetupFailure) return false;
+		if (!this._contextOptimizationAllowed() && this._pendingRequestedCompaction === undefined) return false;
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
@@ -10849,6 +11130,7 @@ export class AgentSession {
 		const requestTokenBudget = this.requests.getRequestTokenBudgetOptions();
 		return {
 			parentSession: this,
+			contextMode: this.contextMode,
 			...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
 			admission: options.admission,
 			id: options.id,
@@ -10930,6 +11212,7 @@ export class AgentSession {
 			child = new AgentSession({
 				agent: childAgent,
 				requestTokenBudget: options.requestTokenBudget,
+				contextMode: options.contextMode,
 				sessionManager: childSessionManager,
 				settingsManager: this.settingsManager,
 				cwd: this._cwd,

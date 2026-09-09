@@ -162,6 +162,7 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	const contextMode = options.contextMode;
 	if (options.requestTokenBudget)
 		options = { ...options, requestTokenBudget: structuredClone(options.requestTokenBudget) };
 	const cwd = options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd();
@@ -377,6 +378,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		session = new AgentSession({
 			invocationOutputLimits: options.invocationOutputLimits,
 			requestTokenBudget: options.requestTokenBudget,
+			contextMode,
 			agent,
 			sessionManager,
 			settingsManager,

@@ -345,6 +345,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		options = { ...options, contextMode: options.contextMode ?? options.parentSession.contextMode };
 		const requestTokenBudget =
 			options.requestTokenBudget === undefined
 				? options.parentSession.requests.getRequestTokenBudgetOptions()
@@ -391,6 +392,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 						...(options.requestTokenBudget === undefined
 							? {}
 							: { requestTokenBudget: options.requestTokenBudget }),
+						contextMode: options.contextMode,
 						model: options.model,
 						thinkingLevel: options.thinkingLevel,
 						serviceTier: options.serviceTier,

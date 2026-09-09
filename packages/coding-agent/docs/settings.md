@@ -384,3 +384,43 @@ a resolved advertised tarball must have the same URL origin as that configured b
 A different origin makes the release unavailable; it does not trigger a fallback
 package install. Same-origin relative and absolute tarballs remain supported. This
 metadata rule does not control redirects performed by npm or artifact downloads.
+
+### Context optimization mode
+
+`context.mode` accepts `"on"` (default) or `"off"` as the creation policy. A saved
+session's qualified epoch takes precedence over that default. External SDK control
+can call `await session.setContextMode("off")` or `await session.setContextMode("on")`.
+The call waits for accepted work and completes after the existing owner commits
+and adopts the new policy. It does not change global settings.
+
+Off keeps the retained native/public context, explicit `prime_context` recovery,
+logging, receipts, cancellation and request/resource limits. It does not replay
+demoted archives. New automatic or manual refinement and compaction require
+explicitly re-enabling optimization first. Sol/custom/user/project/harness prompt
+text remains unchanged; only generated context overlays are omitted.
+
+The control is session-local. New native children capture the accepted parent mode;
+existing independently owned children keep their own policy. A fresh off session
+records its first actual native compatibility contract once before sending. This
+does not select a new view or authorize missing contracts in legacy history. Off
+is not the independent upstream H benchmark control.
+
+### Learning model and effort
+
+An optional `autoRefine.model` object sets `provider`, `modelId` and `thinkingLevel`
+together for built-in refinement review and planning. Provider and model ID must
+match the configured local registry. Effort must pass that model's existing
+configured thinking-level rules; this is not deployment availability certification.
+An invalid explicit contract refuses before authentication or a request, rather
+than falling back to the main model. Selection is captured before history/auth waits.
+
+Without this object, learning keeps the main model and omits effort from the
+request, as in the legacy helpers. Main-session thinking level is not implicitly
+forwarded. An explicit contract forwards its configured level, including `off`
+where supported, through the existing provider options. Omission does not prove
+that the provider performs no reasoning.
+
+The main model/effort state is unchanged. The existing session request budget also
+applies to the chosen learning model; this setting does not create an independent
+learning spend budget or configure bridge/semantic calls. `context.mode=off` still
+blocks new learning. Sol/custom/behavioral prompt text remains unchanged.

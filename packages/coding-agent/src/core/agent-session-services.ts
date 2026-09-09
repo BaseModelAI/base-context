@@ -47,6 +47,7 @@ export interface CreateAgentSessionServicesOptions {
 export interface AgentSessionCreationOptions {
 	/** Explicit native request-budget rollout; also forwarded by the services/runtime factory. */
 	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: "on" | "off";
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
@@ -246,6 +247,7 @@ export async function createAgentSessionFromServices(
 		sessionManager: options.sessionManager,
 		model: options.model,
 		requestTokenBudget: options.requestTokenBudget,
+		contextMode: options.contextMode,
 		thinkingLevel: options.thinkingLevel,
 		serviceTier: options.serviceTier,
 		scopedModels: options.scopedModels,

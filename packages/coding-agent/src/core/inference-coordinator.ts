@@ -26,7 +26,9 @@ import {
 	type CapturedRequestViewBoundary,
 	captureRequestViewBoundary,
 	matchesRequestView,
+	prepareFixedRequestView,
 	type RequestViewCommit,
+	type RequestViewFixedPrepare,
 	type RequestViewValidate,
 	selectRequestView,
 } from "./request-view-selection.js";
@@ -253,11 +255,12 @@ export class InferenceCoordinator {
 		messages: readonly AgentMessage[],
 		commit: RequestViewCommit,
 		validate?: RequestViewValidate,
+		fixedPrepare?: RequestViewFixedPrepare,
 	): void {
 		this.assertAdmission();
 		if (!this.capturedSink) throw new Error("Request view boundary requires a captured inference owner");
 		if (this.requestViewBoundary) throw new Error("Request view boundary is already bound");
-		this.requestViewBoundary = captureRequestViewBoundary(messages, commit, validate);
+		this.requestViewBoundary = captureRequestViewBoundary(messages, commit, validate, fixedPrepare);
 	}
 
 	/** Read through an explicit capture, never by recapturing the mutable current session. */
@@ -441,7 +444,8 @@ export class InferenceCoordinator {
 							}
 						}
 					: undefined;
-			const canSelect = budget && boundary && matchesRequestView(boundary, source, context);
+			const canSelect =
+				(budget || boundary?.fixedPrepare) && boundary && matchesRequestView(boundary, source, context);
 			const attempts: ProviderAttemptObserver = {
 				...(measureRequest ? { measureRequest } : {}),
 				...(canSelect
@@ -449,6 +453,12 @@ export class InferenceCoordinator {
 							prepareRequest: async (representation, projection) => {
 								try {
 									if (JSON.parse(representation.body!).model !== model.id) return;
+									if (boundary!.fixedPrepare) {
+										const assessment = budget?.measure(representation);
+										if (budget && assessment) budget.assert(assessment);
+										await prepareFixedRequestView(boundary!, representation, projection, assessment);
+										return;
+									}
 									return await selectRequestView(
 										boundary!,
 										representation,

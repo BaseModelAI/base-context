@@ -1389,6 +1389,7 @@ export class SessionManager {
 	private closing?: Promise<void>;
 
 	private readOnly = false;
+	private freshContextPolicySource = true;
 	private indexed = false;
 	private header: SessionHeader | null = null;
 
@@ -1499,6 +1500,7 @@ export class SessionManager {
 		this.sessionFile = next.sessionFile;
 		this.sessionDir = next.sessionDir;
 		this.persist = next.persist;
+		this.freshContextPolicySource = next.freshContextPolicySource;
 		this.indexed = next.indexed;
 		this.header = next.header;
 		this.fileEntries = next.fileEntries;
@@ -1781,6 +1783,11 @@ export class SessionManager {
 
 	isPersisted(): boolean {
 		return this.persist;
+	}
+
+	/** Actual new-owner creation plus the existing canonical bootstrap-content boundary. */
+	canSeedContextModeContract(): boolean {
+		return this.freshContextPolicySource && !this.readOnly && !this.hasUserContent();
 	}
 
 	/** Captured indexed reads require this manager's owned, framed source. */
@@ -2433,6 +2440,8 @@ export class SessionManager {
 			},
 			appendCompaction: appendCaptured,
 			[appendContextEpoch]: (checkpoint, tokensBefore, summary) => {
+				if (checkpoint.policyOnly && (tokensBefore !== null || summary !== undefined))
+					throw new Error("Context mode policy ACK is not a measured request or summary");
 				if (Boolean(summary) !== Boolean(checkpoint.includeSummary))
 					throw new Error("Context epoch summary does not match its rendering plan");
 				return appendCaptured(
@@ -3957,6 +3966,7 @@ export class SessionManager {
 			parentSession: input.sourceFile,
 			rlmDepth: input.rlmDepth,
 		});
+		next.freshContextPolicySource = false;
 		let bytes = Buffer.byteLength(stringifyBoundedJson(next.fileEntries[0], input.limits.maxSourceBytes));
 		const append = (
 			entry: SessionEntry,
@@ -4088,6 +4098,7 @@ export class SessionManager {
 				false,
 			);
 			manager.persist = true;
+			manager.freshContextPolicySource = false;
 			manager.sessionId = header.id;
 			manager.sessionFile = owner.journalPath;
 			manager.writeState.owner = owner;

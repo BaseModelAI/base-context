@@ -1,3 +1,8 @@
+import {
+	type FauxResponseFactory,
+	fauxAssistantMessage,
+	type SimpleStreamOptions,
+} from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
@@ -147,6 +152,10 @@ describe("AgentSession session_before_refine extension hook", () => {
 		let handlerCalls = 0;
 		const harness = await createHarness({
 			persistSession: true,
+			models: [
+				{ id: "main", reasoning: true },
+				{ id: "learning", reasoning: true },
+			],
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_refine", async () => {
@@ -162,6 +171,10 @@ describe("AgentSession session_before_refine extension hook", () => {
 
 		const internals = harness.session as unknown as {
 			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+			_reviewAutoRefine(context: {
+				reason: "turn_interval";
+				turnsSinceLastReview: number;
+			}): Promise<{ shouldRefine: boolean }>;
 		};
 		// The handler runs but does not short-circuit: planning proceeds to the
 		// built-in planner LLM call, which fails here (no faux response queued)
@@ -171,6 +184,61 @@ describe("AgentSession session_before_refine extension hook", () => {
 			RefineSkippedError,
 		);
 		expect(handlerCalls).toBe(1);
+
+		// Actual built-in requests, not an injected reviewer or planner implementation.
+		const observed: Array<{ modelId: string; reasoning: SimpleStreamOptions["reasoning"] }> = [];
+		const response =
+			(value: unknown): FauxResponseFactory =>
+			(_context, options, _state, model) => {
+				observed.push({ modelId: model.id, reasoning: (options as SimpleStreamOptions | undefined)?.reasoning });
+				return fauxAssistantMessage(JSON.stringify(value));
+			};
+		const queueReviewAndPlan = () =>
+			harness.appendResponses([
+				response({ shouldRefine: true, rationale: "fixture lesson", instructions: "capture it", global: false }),
+				response({
+					summary: "built-in fixture plan",
+					rationale: "fixture",
+					expectedOutcome: "no edit needed",
+					edits: [],
+				}),
+			]);
+		await harness.session.setThinkingLevel("high");
+		queueReviewAndPlan();
+		expect(
+			(await internals._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 25 })).shouldRefine,
+		).toBe(true);
+		expect((await harness.session.refine()).summary).toBe("built-in fixture plan");
+		// Legacy main MODEL inheritance does not imply main effort on either request.
+		expect(observed).toEqual([
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "main", reasoning: undefined },
+		]);
+
+		harness.settingsManager.applyOverrides({
+			autoRefine: {
+				model: {
+					provider: harness.getModel().provider,
+					modelId: "learning",
+					thinkingLevel: "off",
+				},
+			},
+		});
+		queueReviewAndPlan();
+		expect(
+			(await internals._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 25 })).shouldRefine,
+		).toBe(true);
+		expect((await harness.session.refine()).summary).toBe("built-in fixture plan");
+		expect(observed).toEqual([
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "learning", reasoning: "off" },
+			{ modelId: "learning", reasoning: "off" },
+		]);
+		expect(harness.session.model?.id).toBe("main");
+		expect(harness.session.thinkingLevel).toBe("high");
+		expect(handlerCalls).toBe(3);
+		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("consumes a non-serialized auto-refine round when an extension skips it", async () => {
