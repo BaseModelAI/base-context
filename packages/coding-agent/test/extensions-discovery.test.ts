@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
+import { discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -296,6 +296,23 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].path).toContain("invalid.ts");
 		expect(result.extensions).toHaveLength(0);
+
+		const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
+		expect(manifest.exports["."]).toBeDefined();
+		expect(manifest.exports["./hooks"]).toBeUndefined();
+		const hooksPath = path.join(tempDir, "obsolete-hooks.ts");
+		fs.writeFileSync(
+			hooksPath,
+			`
+			import * as hooks from "@ponythewhite/base-context/hooks";
+			export default function() { void hooks; }
+		`,
+		);
+		const unavailable = await loadExtensions([hooksPath], tempDir);
+		expect(unavailable.extensions).toHaveLength(0);
+		expect(unavailable.errors).toHaveLength(1);
+		expect(unavailable.errors[0].path).toBe(hooksPath);
+		expect(unavailable.errors[0].error).toContain("hooks");
 	});
 
 	it("handles explicitly configured paths", async () => {
@@ -389,7 +406,10 @@ describe("extensions discovery", () => {
 
 	it("loads extension with event handlers", async () => {
 		const extCode = `
-			export default function(pi) {
+			import { VERSION } from "@ponythewhite/base-context";
+			import type { ExtensionAPI } from "@ponythewhite/base-context";
+			export default function(pi: ExtensionAPI) {
+				if (typeof VERSION !== "string") throw new Error("Supported root import is unavailable");
 				pi.on("agent_start", async () => {});
 				pi.on("tool_call", async (event) => undefined);
 				pi.on("agent_end", async () => {});
@@ -399,7 +419,7 @@ describe("extensions discovery", () => {
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
+		expect(result.errors, JSON.stringify(result.errors)).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].handlers.has("agent_start")).toBe(true);
 		expect(result.extensions[0].handlers.has("tool_call")).toBe(true);

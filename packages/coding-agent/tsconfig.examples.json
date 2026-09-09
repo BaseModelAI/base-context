@@ -4,7 +4,6 @@
 		"noEmit": true,
 		"paths": {
 			"@ponythewhite/base-context": ["./src/index.ts"],
-			"@ponythewhite/base-context/hooks": ["./src/core/hooks/index.ts"],
 			"@ponythewhite/base-context-tui": ["../tui/src/index.ts"],
 			"@ponythewhite/base-context-ai": ["../ai/src/index.ts"],
 			"typebox": ["../../node_modules/typebox"]

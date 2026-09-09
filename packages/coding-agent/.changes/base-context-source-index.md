@@ -74,3 +74,9 @@
 - Bounded skill discovery to 16 KiB of frontmatter and selected SKILL.md captures to 1 MiB. Known selected-file read failures now reject the prompt instead of sending an unexpanded command; existing parsing and submitted-input attribution remain unchanged.
 
 - Rejected malformed or incomplete orphan tracking without deleting the unknown journal or its recovery descriptor. Pending RPC uncertainty reporting survives a read failure; valid cleanup and process identity/signal policy remain unchanged. Shared-writer enrollment is still outside this change.
+
+- Admitted selected skill catalogs with local limits of 32 visible items and 65536 rendered UTF-8 bytes, returning the same captured section to default/custom system prompts or refusing explicitly. Existing text, order, attribution and file-access gates remain unchanged.
+
+- Removed the unimplemented `./hooks` package export and its stale TypeScript source aliases. Fixed the missing exact owned AI `/mcp` alias needed by the supported root import, without changing native AI root sharing or actual ExtensionAPI lifecycle handlers.
+
+- Stopped self-update after unavailable or failed release lookup, including forced updates. Known-release updates remain supported, and earlier accepted extension-update effects are not rolled back or hidden.

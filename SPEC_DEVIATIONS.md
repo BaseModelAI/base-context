@@ -599,3 +599,43 @@ G01 remains open: shared host/kernel writers still lack record-level serializati
 No writer, Python enrollment gate, repair, format or ownership change is included.
 The reader remains unbounded in bytes. Detection and retention are not global
 durability or complete enrollment guarantees.
+
+## W40 update — selected skill catalog admission
+
+The existing system-prompt path now admits at most 32 visible skill items and
+65536 UTF-8 bytes for the exact rendered catalog section. It retains all selected
+entries in order or refuses explicitly. The unchanged introductory text, XML fields
+and newline separators count toward that limit. Admission occurs before unbounded
+escaped-field or complete-catalog assembly; the same captured section is appended
+at the existing default/custom prompt location without a second render.
+
+Disabled skills, legitimate empty catalogs and no-file-access gates keep their
+existing behavior. Inventory, SourceInfo and session selection are unchanged. This
+is not a discovery/inventory, full-system-prompt, wire-envelope, Python module/version
+or global heap bound. W38 readers and Sol/custom/behavioral instructions are intact.
+G09 remains open for those wider catalog/version requirements.
+
+## W41 update — remove an unimplemented public hooks subpath
+
+Removed the package `./hooks` export and its exact root/example TypeScript aliases.
+The tracked source has no corresponding implementation or build generator. The
+supported root API and actual ExtensionAPI lifecycle handlers remain unchanged.
+The real root-import case exposed a missing exact owned AI `/mcp` loader alias;
+it now resolves the published module through the existing workspace/package resolver.
+Native AI root sharing stays intact. No hooks facade, legacy subpath or replacement
+framework was added; bundled behavior was not inferred from this Node-path result.
+
+This closes that advertised source-surface mismatch only. The other G14/G15 updater,
+activation, build and installed-package requirements remain open.
+
+## W42 update — stop self-update after unknown release lookup
+
+Unavailable release metadata now rejects self-update explicitly. Thrown lookup
+errors reach the existing CLI error reporter instead of becoming an install plan.
+`--force` applies only after a known release result and still permits same-version
+reinstallation. Refusal precedes self-installer resolution, daemon probe and restart.
+Earlier accepted extension updates remain; no rollback or whole-command no-effects
+claim is made.
+
+This closes the G14 lookup-failure fallthrough only. Origin/product/schema policy,
+artifact validation and staged CLI/runtime activation or rollback remain open.

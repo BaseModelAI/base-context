@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { buildRlmPrompt } from "../src/core/prompts/index.js";
 import type { HarnessState } from "../src/core/refinement/index.js";
-import type { Skill } from "../src/core/skills.js";
+import { SKILL_CATALOG_MAX_BYTES, SKILL_CATALOG_MAX_ITEMS, type Skill } from "../src/core/skills.js";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 import { createIpythonToolDefinition } from "../src/core/tools/ipython.js";
 
@@ -633,10 +633,16 @@ describe("buildSystemPrompt", () => {
 	});
 
 	test("markdown skills are included in rlm harness prompts without Python pre-imports", () => {
+		const selectedSkills = [
+			skill("websearch"),
+			...Array.from({ length: SKILL_CATALOG_MAX_ITEMS - 1 }, (_, index) => skill(`selected-${index}`)),
+		];
+		const oversizedDescription = "é&".repeat(SKILL_CATALOG_MAX_BYTES / 4);
+		const disabled = { ...skill("disabled"), description: oversizedDescription, disableModelInvocation: true };
 		const prompt = buildSystemPrompt({
 			selectedTools: ["ipython"],
 			contextFiles: [],
-			skills: [skill("websearch")],
+			skills: [...selectedSkills, disabled],
 			cwd: "/repo",
 		});
 
@@ -645,6 +651,26 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("<name>websearch</name>");
 		expect(prompt).toContain("<type>markdown</type>");
 		expect(prompt).toContain("<location>/skills/websearch/SKILL.md</location>");
+		expect(prompt.match(/ {2}<skill>/g)).toHaveLength(SKILL_CATALOG_MAX_ITEMS);
+		expect(prompt).not.toContain("<name>disabled</name>");
+
+		const tooMany = [...selectedSkills, skill("one-too-many")];
+		expect(() => buildSystemPrompt({ cwd: "/repo", selectedTools: ["ipython"], skills: tooMany })).toThrow(
+			"Skill catalog item limit exceeded",
+		);
+		// The raw field fits; its UTF-8 XML-escaped form does not.
+		expect(Buffer.byteLength(oversizedDescription)).toBeLessThan(SKILL_CATALOG_MAX_BYTES);
+		expect(() =>
+			buildSystemPrompt({
+				cwd: "/repo",
+				selectedTools: ["bash"],
+				customPrompt: "custom body",
+				skills: [{ ...skill("oversized"), description: oversizedDescription }],
+			}),
+		).toThrow("Skill catalog byte limit exceeded");
+		expect(buildSystemPrompt({ cwd: "/repo", selectedTools: [], skills: tooMany })).not.toContain(
+			"<available_skills>",
+		);
 	});
 
 	test("Python skills are configured for IPython and included in skill metadata", () => {

@@ -59,6 +59,7 @@ function getAliases(): Record<string, string> {
 	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@ponythewhite/base-context-tui");
 	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@ponythewhite/base-context-ai");
 	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@ponythewhite/base-context-ai/oauth");
+	const piAiMcpEntry = resolveWorkspaceOrImport("ai/dist/mcp.js", "@ponythewhite/base-context-ai/mcp");
 
 	_aliases = {
 		"@ponythewhite/base-context": piCodingAgentEntry,
@@ -66,6 +67,7 @@ function getAliases(): Record<string, string> {
 		"@ponythewhite/base-context-tui": piTuiEntry,
 		"@ponythewhite/base-context-ai": piAiEntry,
 		"@ponythewhite/base-context-ai/oauth": piAiOauthEntry,
+		"@ponythewhite/base-context-ai/mcp": piAiMcpEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,

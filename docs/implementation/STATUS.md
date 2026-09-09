@@ -1216,3 +1216,67 @@ combined required `npm run check` passed after the fixture corrections
 (PID3452070, 4.025s, 1038 files, one formatting fix, types/installer/browser checks).
 Six distinct focused cases passed; corrected reruns are not additional cases.
 All logs are under `.work/logs/`. No benchmark ran during these source checks.
+
+### W40 — selected skill catalog admission
+
+Actual system-prompt construction captures one admitted skill catalog, with limits
+of 32 visible items and 65536 rendered UTF-8 bytes. All selected entries keep their
+existing order and text, or construction refuses; there is no partial/empty fallback.
+Default/custom prompt placement and existing disabled/empty/file-access gates stay
+unchanged. Loader inventory and attribution are not replaced or bounded by this work.
+
+Both existing ResourceLoader override and RLM markdown-skill system-prompt cases
+passed on their first invocation (PID3471235, 2.470s; PID3471240, 2.096s).
+Logs: `w40-42-catalog-loader.log`, `w40-42-catalog-prompt.log`. Initial formatting
+reported the boolean parameter `escape` shadowing a global; renaming it to
+`escapeValue` corrected the lint error without changing behavior. No model call,
+whole-prompt/model-fit, global heap, discovery or module/version-lifecycle claim
+follows. Sol's custom prompt is unchanged.
+
+### W41 — remove an unimplemented hooks export
+
+The package no longer advertises `./hooks` or its two stale TypeScript aliases.
+No corresponding source or generator exists, and runtime aliases never advertised
+that hooks entry. The real root-import case exposed a separate missing exact owned
+AI `/mcp` alias: the root alias incorrectly produced `dist/index.js/mcp`. Added only
+the published `dist/mcp.js` mapping through the existing resolver, preserving native
+AI root registry sharing, supported root API and actual extension events.
+
+The initial loader scope passed the unavailable-subpath case but failed the supported
+root import. One affected-case diagnostic exposed the import error (PID3473098,
+2.032s). Both existing cases passed after the two-line loader correction
+(PID3473445, 7.331s). Original failures remain in `w40-42-hooks-loader.log` and
+`w41-hooks-handler-diagnostic.log`; corrected scope is `w41-hooks-loader-corrected.log`.
+No existing assertion was weakened. This is Node source/import evidence, not bundled,
+installed-package or updater certification.
+
+### W42 — refuse self-update on unavailable lookup
+
+Self-update now requires an available release result, including with `--force`.
+Unknown metadata is reported as a failure, not updated or already up to date.
+Thrown errors use the existing CLI reporter and exit code 1. No self command,
+daemon probe, installer or restart follows a failed lookup. Accepted extension
+updates that precede lookup are retained; they are not described as rolled back.
+
+The same two package-command custom-socket and installer-failure cases passed on
+their first invocation (PID3471252, 3.041s), in `w40-42-update-lookup.log`. Lookup,
+installer and daemon effects were controlled. The displayed npm installation and
+success messages belong to those mocked effects, not a live installation. Known
+same-version forced reinstall remains supported. No origin validation or atomic
+CLI/runtime activation evidence follows.
+
+D Astra LOW completed on the frozen D/stock controls: 29/30 primary judge passes
+per arm, 31 retained attempts per arm, no capacity-invalid attempts. D task15
+(progress0) and stock task29 (progress1) retained their primary WebSocket1006
+failures; diagnostics did not replace them. No other retained runtime errors were
+recorded. Across 28 matched passing pairs D took4415.404s versus stock5211.983s
+(-15.3%), faster on24pairs. This is separately frozen D evidence, not the current
+native Base Context candidate. Physical usage and billed costs remain incomplete;
+the raw LOW publication blocker remains.
+
+W40–W42 ship as one source gap. Six distinct focused cases passed; diagnostic and
+corrected runs are not additional cases. The initial required check passed
+(PID3471259, 4.337s). After the real loader fix, the required `npm run check` passed
+again (PID3473450, 3.995s, 1038 files, no fixes, types/installer/browser checks).
+All initial formatting/runtime diagnostics remain under `.work/logs/`. No benchmark
+ran during integration or checks. Sol/custom/behavioral instructions are unchanged.

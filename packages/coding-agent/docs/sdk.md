@@ -1421,3 +1421,19 @@ SKILL.md. A known selected-file read or limit failure emits `skill_expansion` an
 rejects the prompt. Unknown skill commands still pass through. The actual returned
 capture drives the unchanged expansion and canonical input. These limits do not
 bound the aggregate catalog or certify a snapshot against same-size in-place writes.
+
+### Selected skill catalog limits
+
+System-prompt construction admits up to 32 visible skills and 65536 UTF-8 bytes for
+the rendered skill catalog, including its unchanged introductory text, XML escaping
+and newlines. It includes all selected entries in order or throws
+`Skill catalog item limit exceeded` / `Skill catalog byte limit exceeded`. Disabled
+skills do not count. Empty and no-file-access cases keep their existing behavior.
+The same captured catalog is appended without a second render. These are not
+inventory, full-system-prompt, model-fit or module/version-lifecycle bounds.
+
+### Extension imports
+
+Import supported extension values and types from `@ponythewhite/base-context`.
+The unimplemented `@ponythewhite/base-context/hooks` subpath is no longer advertised.
+Actual ExtensionAPI event handlers and supported root imports are unchanged.

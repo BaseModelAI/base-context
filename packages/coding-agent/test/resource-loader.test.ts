@@ -10,6 +10,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
+import { buildSystemPrompt } from "../src/core/system-prompt.js";
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
@@ -574,15 +575,37 @@ Explicit override.`,
 				cwd,
 				agentDir,
 				skillsOverride: () => ({
-					skills: [injectedSkill],
+					skills: [
+						{ ...injectedSkill, name: "disabled", disableModelInvocation: true },
+						injectedSkill,
+						{ ...injectedSkill, name: "second", description: "Second <&> skill" },
+					],
 					diagnostics: [],
 				}),
 			});
 			await loader.reload();
 
 			const { skills } = loader.getSkills();
-			expect(skills).toHaveLength(1);
-			expect(skills[0].name).toBe("injected");
+			expect(skills.map((skill) => skill.name)).toEqual(["disabled", "injected", "second"]);
+			expect(skills[0].disableModelInvocation).toBe(true);
+			expect(skills[1].sourceInfo).toEqual(injectedSkill.sourceInfo);
+			const prompt = buildSystemPrompt({ cwd, skills, selectedTools: ["bash"], contextFiles: [] });
+			const customPrompt = buildSystemPrompt({
+				cwd,
+				skills,
+				selectedTools: ["bash"],
+				contextFiles: [],
+				customPrompt: "Custom instructions stay unchanged.",
+			});
+			for (const rendered of [prompt, customPrompt]) {
+				expect(rendered).toContain("<name>injected</name>");
+				expect(rendered).toContain("<description>Second &lt;&amp;&gt; skill</description>");
+				expect(rendered).toContain("<location>/fake/path</location>");
+				expect(rendered).not.toContain("<name>disabled</name>");
+				expect(rendered.indexOf("<name>injected</name>")).toBeLessThan(rendered.indexOf("<name>second</name>"));
+			}
+			expect(customPrompt.startsWith("Custom instructions stay unchanged.")).toBe(true);
+			expect(loader.getSkills().skills).toBe(skills);
 		});
 
 		it("should apply systemPromptOverride", async () => {

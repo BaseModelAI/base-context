@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ import {
 	VERSION,
 } from "../src/config.js";
 import type { AgentSessionRuntimeMetadata } from "../src/core/agent-session-runtime.js";
+import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 import type * as DaemonSocketModule from "../src/modes/daemon/daemon-socket.js";
 import {
@@ -608,6 +609,7 @@ describe("self-update daemon restart", () => {
 		mockState.spawnExitCodes = [23];
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update");
 
 		try {
 			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
@@ -616,7 +618,39 @@ describe("self-update daemon restart", () => {
 			expect(mockState.calls).toContain("probe-daemon");
 			expect(mockState.calls.some((call) => call === "daemon-request:prepare_update_restart")).toBe(false);
 			expect(mockState.calls.some((call) => call === "shutdown-daemon")).toBe(false);
+
+			// Failed lookup must reach the CLI reporter unchanged, even with --force.
+			const callsBeforeLookup = [...mockState.calls];
+			const logsBeforeLookup = logSpy.mock.calls.length;
+			const lookupError = new Error("release lookup transport failed");
+			vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(lookupError));
+			await expect(handlePackageCommand(["update", "--self", "--force"])).resolves.toBe(true);
+			expect(process.exitCode).toBe(1);
+			expect(errorSpy.mock.calls.at(-1)?.[0]).toContain(lookupError.message);
+			expect(mockState.calls).toEqual(callsBeforeLookup);
+			expect(logSpy.mock.calls).toHaveLength(logsBeforeLookup);
+
+			// Preserve an earlier accepted extension update; an unavailable release is NOT self-update success.
+			const extensionEffect = join(projectDir, "accepted-extension-update");
+			updateSpy.mockImplementationOnce(async () => {
+				writeFileSync(extensionEffect, "completed");
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(null, { status: 503 })),
+			);
+			process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+			await expect(handlePackageCommand(["update", "--force"])).resolves.toBe(true);
+			expect(process.exitCode).toBe(1);
+			expect(errorSpy.mock.calls.at(-1)?.[0]).toContain(
+				"release lookup is unavailable; self-update was not attempted",
+			);
+			expect(mockState.calls).toEqual(callsBeforeLookup);
+			expect(readFileSync(extensionEffect, "utf8")).toBe("completed");
+			expect(logSpy.mock.calls.slice(logsBeforeLookup)).toHaveLength(1);
+			expect(logSpy.mock.calls.at(-1)?.[0]).toContain("Updated packages");
 		} finally {
+			updateSpy.mockRestore();
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
 		}
@@ -624,10 +658,18 @@ describe("self-update daemon restart", () => {
 
 	it("defers the exact custom-socket restart to the interactive parent", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+		// Force can reinstall a KNOWN same-version release, not bypass the lookup.
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ version: VERSION })),
+		);
 		const customSocketPath = join(tempDir, "custom", "daemon.sock");
 
-		await expect(handlePackageCommand(["update", "--self", "--daemon-socket", customSocketPath])).resolves.toBe(true);
+		await expect(
+			handlePackageCommand(["update", "--self", "--force", "--daemon-socket", customSocketPath]),
+		).resolves.toBe(true);
 
+		expect(process.exitCode).toBeUndefined();
 		expect(mockState.probeSocketPaths).toEqual([customSocketPath]);
 		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(true);
 		expect(mockState.calls.some((call) => call.startsWith("launch-coordinator:"))).toBe(false);

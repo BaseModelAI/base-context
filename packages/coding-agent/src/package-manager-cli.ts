@@ -439,21 +439,15 @@ function setSelfUpdateNoChangeExitCode(): void {
 }
 
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
-	try {
-		const latestRelease = await getLatestPiRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		const installSpec = latestRelease?.installSpec ?? packageName;
-		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		if (
-			force ||
-			!latestRelease ||
-			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
-		) {
-			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
-		}
-	} catch {
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
+	const latestRelease = await getLatestPiRelease(VERSION);
+	if (!latestRelease) {
+		throw new Error(`${APP_NAME} release lookup is unavailable; self-update was not attempted.`);
+	}
+	const packageName = latestRelease.packageName ?? PACKAGE_NAME;
+	const installSpec = latestRelease.installSpec ?? packageName;
+	const packageRenameRequiresUpdate = !latestRelease.installSpec && packageName !== PACKAGE_NAME;
+	if (force || packageRenameRequiresUpdate || isNewerPackageVersion(latestRelease.version, VERSION)) {
+		return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease.version };
 	}
 
 	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));

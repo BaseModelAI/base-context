@@ -28,9 +28,6 @@
 			"@ponythewhite/base-context": [
 				"./packages/coding-agent/src/index.ts"
 			],
-			"@ponythewhite/base-context/hooks": [
-				"./packages/coding-agent/src/core/hooks/index.ts"
-			],
 			"@ponythewhite/base-context/*": [
 				"./packages/coding-agent/src/*"
 			],

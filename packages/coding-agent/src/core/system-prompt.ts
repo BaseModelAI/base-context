@@ -67,6 +67,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const tools = selectedTools ?? ["ipython"];
 	const hasIpython = tools.includes("ipython");
 	const hasBash = tools.includes("bash");
+	// Admit and capture the catalog before constructing skill-derived prompt text.
+	const skillCatalog = (hasIpython || hasBash) && skills.length > 0 ? formatSkillsForPrompt(skills) : "";
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 	const visiblePythonSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
@@ -84,12 +86,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			}
 		}
 
-		// Append skills section only when the model has a way to inspect skill files.
-		const customPromptHasFileAccess =
-			!selectedTools || selectedTools.includes("ipython") || selectedTools.includes("bash");
-		if (customPromptHasFileAccess && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
-		}
+		prompt += skillCatalog;
 
 		// Add date and working directory last
 		prompt += `\nCurrent date: ${date}`;
@@ -166,11 +163,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
-	// Append skills section only when the model has a way to inspect skill files.
-	const hasFileAccess = tools.includes("ipython") || tools.includes("bash");
-	if (hasFileAccess && skills.length > 0) {
-		prompt += formatSkillsForPrompt(skills);
-	}
+	prompt += skillCatalog;
 
 	if (appendSection) {
 		prompt += appendSection;

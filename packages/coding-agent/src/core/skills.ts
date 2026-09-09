@@ -502,6 +502,10 @@ function loadSkillFromFile(
 	}
 }
 
+/** Admission limits for the rendered catalog only, not the whole system prompt. */
+export const SKILL_CATALOG_MAX_ITEMS = 32;
+export const SKILL_CATALOG_MAX_BYTES = 65536;
+
 /**
  * Format skills for inclusion in a system prompt.
  * Uses XML format per Agent Skills standard.
@@ -511,7 +515,12 @@ function loadSkillFromFile(
  * (they can only be invoked explicitly via /skill:name commands).
  */
 export function formatSkillsForPrompt(skills: Skill[]): string {
-	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
+	const visibleSkills: Skill[] = [];
+	for (const skill of skills) {
+		if (skill.disableModelInvocation) continue;
+		if (visibleSkills.length === SKILL_CATALOG_MAX_ITEMS) throw new Error("Skill catalog item limit exceeded");
+		visibleSkills.push(skill);
+	}
 
 	if (visibleSkills.length === 0) {
 		return "";
@@ -526,30 +535,53 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		"<available_skills>",
 	];
 
+	let renderedBytes = lines.reduce((bytes, line, index) => bytes + Buffer.byteLength(line) + (index ? 1 : 0), 0);
+	const appendLine = (line: string): void => {
+		const bytes = Buffer.byteLength(line) + 1;
+		if (bytes > SKILL_CATALOG_MAX_BYTES - renderedBytes) throw new Error("Skill catalog byte limit exceeded");
+		renderedBytes += bytes;
+		lines.push(line);
+	};
+	const appendField = (tag: string, value: string, escapeValue = true): void => {
+		const prefix = `    <${tag}>`;
+		const suffix = `</${tag}>`;
+		const available = SKILL_CATALOG_MAX_BYTES - renderedBytes - 1 - Buffer.byteLength(prefix + suffix);
+		const captured = escapeValue ? escapeXml(value, available) : value;
+		if (captured.length > available || Buffer.byteLength(captured) > available)
+			throw new Error("Skill catalog byte limit exceeded");
+		appendLine(prefix + captured + suffix);
+	};
+
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <type>${skill.kind}</type>`);
+		appendLine("  <skill>");
+		appendField("name", skill.name);
+		appendField("type", skill.kind, false);
 		if (skill.kind === "python") {
-			lines.push(`    <python_import>${escapeXml(skill.python.importName)}</python_import>`);
+			appendField("python_import", skill.python.importName);
 		}
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		appendField("description", skill.description);
+		appendField("location", skill.filePath);
+		appendLine("  </skill>");
 	}
 
-	lines.push("</available_skills>");
+	appendLine("</available_skills>");
 
 	return lines.join("\n");
 }
 
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
+function escapeXml(str: string, maxBytes: number): string {
+	// UTF-8 and XML escaping cannot use fewer bytes than the UTF-16 code-unit count.
+	if (str.length > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+	let bytes = Buffer.byteLength(str);
+	if (bytes > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+	const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+	return str.replace(/[&<>"']/g, (character) => {
+		const escaped = entities[character]!;
+		bytes += escaped.length - 1;
+		// Reject before the replacement can assemble an over-budget escaped field.
+		if (bytes > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+		return escaped;
+	});
 }
 
 export interface LoadSkillsOptions {
