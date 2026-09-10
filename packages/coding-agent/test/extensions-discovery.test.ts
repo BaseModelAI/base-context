@@ -368,6 +368,34 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].error).toContain("Initialization failed!");
 		expect(result.extensions).toHaveLength(0);
+
+		const legacyDir = path.join(tempDir, "legacy-package");
+		const legacyEntry = path.join(legacyDir, "dist", "index.js");
+		const importedMarker = path.join(tempDir, "legacy-imported");
+		fs.mkdirSync(path.dirname(legacyEntry), { recursive: true });
+		fs.writeFileSync(
+			path.join(legacyDir, "package.json"),
+			JSON.stringify({ name: "prime-agent-context", type: "module", pi: { extensions: ["./dist/index.js"] } }),
+		);
+		fs.writeFileSync(
+			legacyEntry,
+			`
+			import { writeFileSync } from "node:fs";
+			writeFileSync(${JSON.stringify(importedMarker)}, "imported");
+			export default function(pi) {
+				pi.registerCommand("legacy-context", { handler: async () => {} });
+			}
+			`,
+		);
+		// Package resolution hands this same entry path to the central loader.
+		const blocked = await loadExtensions([legacyEntry], tempDir);
+		expect(blocked.extensions).toHaveLength(0);
+		expect(blocked.errors).toHaveLength(1);
+		expect(blocked.errors[0].path).toBe(legacyEntry);
+		expect(blocked.errors[0].error).toContain("legacy prime-agent-context");
+		expect(blocked.errors[0].error).toContain("native Base Context");
+		expect(blocked.errors[0].error).toContain("Remove prime-agent-context");
+		expect(fs.existsSync(importedMarker)).toBe(false);
 	});
 
 	it("reports error when extension has no default export", async () => {

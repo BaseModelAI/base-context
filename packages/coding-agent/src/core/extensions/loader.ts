@@ -328,6 +328,33 @@ function createExtensionAPI(
 declare const __PI_BUNDLED__: boolean | undefined;
 const isBundledCli = typeof __PI_BUNDLED__ !== "undefined" && __PI_BUNDLED__ === true;
 
+/** Check the resolved entry's package identity without importing extension code. */
+function assertNativeExtensionPackage(extensionPath: string): void {
+	let directory = path.dirname(fs.realpathSync(extensionPath));
+	for (;;) {
+		const manifestPath = path.join(directory, "package.json");
+		if (fs.existsSync(manifestPath)) {
+			const manifest: unknown = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+			if (
+				manifest &&
+				typeof manifest === "object" &&
+				"name" in manifest &&
+				manifest.name === "prime-agent-context"
+			) {
+				throw new Error(
+					"The legacy prime-agent-context extension cannot load in native Base Context. " +
+						"Base Context already provides native context projection, learning, and continuation. " +
+						"Remove prime-agent-context from settings.json packages, and remove its extension path from extensions or -e/--extension.",
+				);
+			}
+			return; // The nearest manifest owns this entry, not an enclosing package.
+		}
+		const parent = path.dirname(directory);
+		if (parent === directory) return;
+		directory = parent;
+	}
+}
+
 async function loadExtensionModule(extensionPath: string) {
 	// jiti and the bundled virtual modules are loaded lazily so that importing
 	// the loader (which nearly every startup path does transitively) doesn't pay
@@ -352,7 +379,9 @@ async function loadExtensionModule(extensionPath: string) {
 				}),
 	});
 
-	const module = await jiti.import(extensionPath, { default: true });
+	const resolvedEntry = jiti.esmResolve(extensionPath);
+	assertNativeExtensionPackage(fileURLToPath(resolvedEntry));
+	const module = await jiti.import(resolvedEntry, { default: true });
 	const factory = module as ExtensionFactory;
 	return typeof factory !== "function" ? undefined : factory;
 }

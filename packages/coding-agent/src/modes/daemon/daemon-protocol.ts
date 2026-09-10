@@ -86,8 +86,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 35 requires request-time public checkpoints and honest unknown prior-token estimates.
 // Revision 36 requires owner-backed context mode and fixed native continuation contracts.
 // Revision 37 requires original tool-owner qualification and ACKed public tool continuation.
-export const DAEMON_SCHEMA_REVISION = 37;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-37-tool-continuation";
+// Revision 38 excludes the known legacy context extension before native owner loading.
+export const DAEMON_SCHEMA_REVISION = 38;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-38-native-extension-owner";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -725,7 +726,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 37,
+	minSchemaRevision: 38,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

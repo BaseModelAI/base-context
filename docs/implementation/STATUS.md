@@ -2053,3 +2053,37 @@ All four H/native invocations are complete on W32. Later source fixes, including
 0f36af6d4, were not substituted into any frozen campaign. All twelve completed
 invocations retain771 attempts. Every campaign has zero capacity-invalid attempts.
 No further campaign is active; no completed campaign was rerun.
+
+
+## G12/F21 — known legacy context extension pre-load exclusion
+
+The existing extension loader resolves an entry with Jiti without importing it,
+then checks the physical entry's nearest package.json. The actual legacy package
+name `prime-agent-context` refuses before target import or factory execution.
+Its documented dist/index.js and src/index.ts entries share that owner. The error
+names the native replacement and tells the user to remove the old package/path
+from packages, extensions or -e/--extension. Ordinary extensions keep the current
+API and load-error flow. Prime source, archives, host and processes are untouched.
+
+This loader executes inside native daemon/session workers through runtime service
+creation and DefaultResourceLoader.reload. Schema38
+(`protocol-11-schema-38-native-extension-owner`) and canonical-owner minimum38
+therefore use the existing stale-daemon/worker compatibility path to reject an
+old selected loader. No new lifecycle mechanism, forced teardown or unpatcher is
+added. Protocol11, index16 and request4/policy5/tool6 renderers are unchanged.
+
+The exclusion uses known package identity, not authenticated code provenance or
+arbitrary source matching. Renamed/copied code, wrappers/transitive imports,
+caller-supplied inline factories, private monkey patches and hostile filesystem
+replacement are not detected or certified. This is not a sandbox, complete
+migration/rollback workflow or whole-G12 completion.
+
+Exactly two existing offline discovery selectors passed first at actual
+Node22.12.0 (3804410,1.2318190038204193s;2pass/25skip). One loads an ordinary
+manifest extension. The existing initializer-failure case retains its original
+phase, then checks known-legacy refusal and absence of a top-level file marker.
+The real Prime plugin is never imported. No new case/suite/matrix, provider call,
+probe or extra runtime dependency. Required `npm run check` also passed first:
+1039files/no fixes, TypeScript, installer and browser smoke. No runtime reruns.
+
+The preceding qualified tool-continuation path is committed as `0e35c5c9b2b4c95c470c96a435c9888db4a7f3b8` (35files/1303+/92−). Its two existing focused selectors and corrected requiredcheck pass; normal commit hooks pass, clean `build:source` passes. Frozen benchmarks remain unchanged.
