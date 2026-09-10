@@ -4,6 +4,7 @@ import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
+	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
 	type ContextEpochCheckpoint,
 	type ContextMode,
@@ -23,7 +24,7 @@ import type {
 	ContextUpdateTarget,
 	IndexedSourceEvent,
 } from "./history-index.js";
-import { createCompactionSummaryMessage } from "./messages.js";
+import { createCompactionSummaryMessage, createCustomMessage } from "./messages.js";
 import {
 	PUBLIC_CONTEXT_RENDERER,
 	PUBLIC_TOOL_CONTINUATION_RENDERER,
@@ -32,6 +33,7 @@ import {
 } from "./public-context.js";
 import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
 import { type OwnedResourceCapture, renderResourceView } from "./resource-view.js";
+import { isNativeSkillSelection, type SelectedSkillReference, selectedSkillCapture } from "./selected-skills.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import {
 	appendSentAgentMessageToToolResult,
@@ -97,6 +99,7 @@ interface CompiledEpochContext {
 	readonly source: SourceSnapshotRef;
 	readonly checkpoint?: ContextEpochCheckpoint;
 	readonly checkpointEntry?: ContextEpochEntryRef;
+	readonly selectedSkills?: readonly SelectedSkillReference[];
 	readonly taskFrame?: CompiledTaskFrame;
 	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
@@ -270,7 +273,8 @@ export function prepareContextModeEpoch(
 		checkpoint: snapshotContextEpoch(
 			{
 				version: 5,
-				renderer: CONTEXT_POLICY_EPOCH_RENDERER,
+				renderer: context.selectedSkills?.length ? CONTEXT_SKILL_EPOCH_RENDERER : CONTEXT_POLICY_EPOCH_RENDERER,
+				...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 				mode,
 				policyOnly: true,
 				representation: null,
@@ -322,6 +326,8 @@ export function prepareCanonicalEpoch(
 		if (!selected.has(unit.id)) {
 			if (unit.kind === "task-frame") throw new Error("Context epoch cannot omit its task frame");
 			if (unit.kind === "resource-view") throw new Error("Context epoch cannot omit its current resource view");
+			if (unit.id === "native-selected-skill-versions")
+				throw new Error("Context epoch cannot omit its selected skill references");
 			continue;
 		}
 		chosen.push(messages[index]);
@@ -337,7 +343,12 @@ export function prepareCanonicalEpoch(
 		checkpoint: snapshotContextEpoch(
 			{
 				version: context.toolContinuations?.length ? 6 : 4,
-				renderer: context.toolContinuations?.length ? CONTEXT_TOOL_EPOCH_RENDERER : CONTEXT_EPOCH_RENDERER,
+				renderer: context.selectedSkills?.length
+					? CONTEXT_SKILL_EPOCH_RENDERER
+					: context.toolContinuations?.length
+						? CONTEXT_TOOL_EPOCH_RENDERER
+						: CONTEXT_EPOCH_RENDERER,
+				...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 				...(context.toolContinuations?.length ? { toolContinuations: context.toolContinuations } : {}),
 				source: context.source,
 				representation,
@@ -386,7 +397,7 @@ export function prepareRecoveryCompaction(
 	const context = compiledEpochContexts.get(messages);
 	const publicWindow =
 		context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
-	if (!boundary && !publicWindow) return;
+	if (!boundary && !publicWindow && !context?.selectedSkills?.length) return;
 	if (!context) throw new Error("Recovery compaction requires captured canonical views");
 	const selection = getCanonicalViewSelectionSource(messages)!;
 	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
@@ -422,15 +433,17 @@ export function prepareRecoveryCompaction(
 				]
 			: [];
 	});
-	if (!views.length && !publicWindow) return;
+	if (!views.length && !publicWindow && !context.selectedSkills?.length) return;
 	return snapshotContextEpoch(
 		{
 			version: 4,
-			renderer: CONTEXT_EPOCH_RENDERER,
+			renderer: context.selectedSkills?.length ? CONTEXT_SKILL_EPOCH_RENDERER : CONTEXT_EPOCH_RENDERER,
+			...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 			source: context.source,
 			representation: null,
 			includeSummary: true,
-			replayContract: "message-groups",
+			replayContract:
+				boundary || publicWindow ? "message-groups" : (context.checkpoint?.replayContract ?? "complete-context"),
 			...(publicWindow
 				? {
 						continuation: {
@@ -605,6 +618,23 @@ export class CanonicalContextCompiler {
 			}
 		}
 		const mode = contextEpochMode(checkpoint, initialContextMode);
+		const selectedSkills = new Map((checkpoint?.selectedSkills ?? []).map((skill) => [skill.name, skill]));
+		for (const skill of selectedSkills.values()) {
+			if (!view.atSnapshot) throw new Error("Selected skill epoch requires its original prefix");
+			const prefix = await view.atSnapshot(skill.view.source);
+			const actual = await prefix.get(skill.view.ref.entryId);
+			if (
+				!actual ||
+				actual.kind !== skill.view.ref.kind ||
+				!["custom_message", "custom"].includes(actual.kind) ||
+				actual.qualification !== "native-recovery" ||
+				actual.revision !== skill.view.ref.revision ||
+				actual.sequence !== skill.view.ref.sequence ||
+				JSON.stringify(actual.locator) !== JSON.stringify(skill.view.ref.locator) ||
+				skill.view.sourceRevision !== JSON.stringify([actual.revision])
+			)
+				throw new Error("Selected skill epoch source is unavailable");
+		}
 		const publicTail = checkpoint?.continuation?.publicTailThrough;
 		if (publicTail) {
 			if (!view.atSnapshot) throw new Error("Public summary transition requires its captured source");
@@ -698,7 +728,72 @@ export class CanonicalContextCompiler {
 		if (first.summaryRef && (!checkpoint || checkpoint.includeSummary))
 			await addSummary(first.summaryRef, view, first.retainedMessageCount);
 		const addLiteral = async (ref: ContextRef, readView: SessionHistoryReadView, pinned?: EpochViewReference) => {
-			const original = sessionEntryMessage(await hydrate(ref, undefined, readView));
+			const entry = await hydrate(ref, undefined, readView);
+			// Internal capture records never interrupt a native assistant/tool-result group.
+			// Retained records remain recoverable data, but cannot mint a new selection.
+			const skill = ref.qualification === "native-recovery" ? selectedSkillCapture(entry) : undefined;
+			if (skill) {
+				if (
+					skill.producer === "model" &&
+					isNativeSkillSelection(ref) &&
+					(!checkpoint || ref.sequence > checkpoint.source.sourceSequence)
+				) {
+					selectedSkills.set(skill.descriptor.name, {
+						name: skill.descriptor.name,
+						view: {
+							source: view.source,
+							ref: { ...ref, kind: "custom_message" },
+							sourceRevision: JSON.stringify([ref.revision]),
+						},
+					});
+				}
+				return;
+			}
+			const origin = entry.type === "message" || entry.type === "custom_message" ? entry.nativeOrigin : undefined;
+			if (
+				ref.qualification === "native-admission" &&
+				ref.retention !== "retained-import" &&
+				origin?.kind === "input" &&
+				origin.recordRole === "primary" &&
+				origin.selectedSkillRef &&
+				(!checkpoint || ref.sequence > checkpoint.source.sourceSequence) &&
+				![...selectedSkills.values()].some((skill) => skill.view.ref.entryId === origin.selectedSkillRef?.entryId)
+			) {
+				if (
+					origin.selectedSkillRef.sessionId !== view.source.sessionId ||
+					origin.selectedSkillRef.sessionFile !== view.source.sessionFile
+				)
+					throw new Error("Admitted skill selection belongs to another source");
+				const actual = await view.get(origin.selectedSkillRef.entryId);
+				if (
+					!actual ||
+					(actual.kind !== "custom" && actual.kind !== "custom_message") ||
+					actual.qualification !== "native-recovery"
+				)
+					throw new Error("Admitted input selected skill source is unavailable");
+				countBytes(actual);
+				const captured = await hydrateCapturedHistoryEntry(actual, actual.locator.length, view.readPayload);
+				const selected = captured ? selectedSkillCapture(captured.entry) : undefined;
+				if (!selected) throw new Error("Admitted input has no captured skill version");
+				selectedSkills.set(selected.descriptor.name, {
+					name: selected.descriptor.name,
+					view: {
+						source: view.source,
+						sourceRevision: JSON.stringify([actual.revision]),
+						ref: {
+							entryId: actual.id,
+							sequence: actual.sequence,
+							kind: actual.kind,
+							locator: actual.locator,
+							revision: actual.revision,
+							authority: actual.authority,
+							qualification: actual.qualification,
+							retention: actual.retention,
+						},
+					},
+				});
+			}
+			const original = sessionEntryMessage(entry);
 			if (!original) throw new Error("Canonical context reference is not a visible context entry");
 			// These IDs come from actual native retry controls, not inferred transcript membership or stop reasons.
 			if (original.role === "assistant" && omitted.has(ref.entryId)) return;
@@ -883,6 +978,35 @@ export class CanonicalContextCompiler {
 			messages.splice(at, 0, resource.message);
 			unitSources.set(resource.message, resource.unit);
 		}
+		if (selectedSkills.size) {
+			const selections = [...selectedSkills.values()];
+			const content = `Selected Skill versions (canonical source references):\n${JSON.stringify(
+				selections.map((skill) => ({
+					name: skill.name,
+					ref: skill.view.ref.entryId,
+					revision: skill.view.ref.revision,
+					sourceSessionId: skill.view.source.sessionId,
+				})),
+			)}`;
+			const message = createCustomMessage(
+				"base-context-selected-skill-versions",
+				content,
+				false,
+				undefined,
+				"1970-01-01T00:00:00.000Z",
+			);
+			messages.unshift(message);
+			unitSources.set(message, {
+				id: "native-selected-skill-versions",
+				sourceRevision: JSON.stringify(selections),
+				kind: "literal",
+				exactSources: selections.map((skill) => skill.view.ref.entryId),
+				requiredVisibleDependencies: [],
+				authority: "tool-data",
+				tokenEstimate: null,
+				immutableWithinEpoch: true,
+			});
+		}
 		const unitLimits = {
 			maxUnits: maxMessages,
 			maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
@@ -893,6 +1017,21 @@ export class CanonicalContextCompiler {
 			if (!unit) throw new Error("Compiled view unit has no captured source");
 			return unit;
 		});
+		if (selectedSkills.size) {
+			const tailIndex = messages
+				.map((message, index) => (epochReferences.has(message) ? index : -1))
+				.filter((index) => index >= 0)
+				.at(-1);
+			if (tailIndex !== undefined) {
+				const tail = sourceUnits[tailIndex];
+				sourceUnits[tailIndex] = {
+					...tail,
+					requiredVisibleDependencies: [
+						...new Set([...tail.requiredVisibleDependencies, "native-selected-skill-versions"]),
+					],
+				};
+			}
+		}
 		const replayUnits = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
 		const frozenGroups = checkpoint?.toolContinuations ?? [];
 		const candidates = messages.flatMap((message, index) => {
@@ -1120,6 +1259,7 @@ export class CanonicalContextCompiler {
 			taskFrame,
 			resourceRevision: resource?.revision,
 			references: closedMessages.map((message) => epochReferences.get(message) ?? null),
+			...(selectedSkills.size ? { selectedSkills: [...selectedSkills.values()] } : {}),
 			...(toolContinuations.length ? { toolContinuations } : {}),
 		});
 		this.entries = next;

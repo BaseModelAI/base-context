@@ -88,8 +88,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 37 requires original tool-owner qualification and ACKed public tool continuation.
 // Revision 38 excludes the known legacy context extension before native owner loading.
 // Revision 39 requires current serialized orphan registration and kernel writer ownership.
-export const DAEMON_SCHEMA_REVISION = 39;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-39-orphan-writer-owner";
+// Revision 40 requires selected-skill epochs and scoped queued skill bindings.
+export const DAEMON_SCHEMA_REVISION = 40;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-40-selected-skill-epochs";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -727,7 +728,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 39,
+	minSchemaRevision: 40,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

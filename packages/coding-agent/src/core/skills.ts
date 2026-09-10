@@ -514,7 +514,7 @@ export const SKILL_CATALOG_MAX_BYTES = 65536;
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[]): string {
+export function formatSkillsForPrompt(skills: Skill[], nativeSelection = false): string {
 	const visibleSkills: Skill[] = [];
 	for (const skill of skills) {
 		if (skill.disableModelInvocation) continue;
@@ -528,7 +528,9 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use ipython to inspect a skill's file when the task matches its description.",
+		nativeSelection
+			? 'Select a matching skill with the prime_context tool using {"action":"skill","name":"..."}. Re-read the returned canonical ref with action="read"; do not reopen its mutable location. A selected version is frozen for its committed epoch. A later accepted epoch permits a new selection.'
+			: "Use ipython to inspect a skill's file when the task matches its description.",
 		"Skills with a python_import are prepared in the persistent Python kernel when available and can be called directly by that import name.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",

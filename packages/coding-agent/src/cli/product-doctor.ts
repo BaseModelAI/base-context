@@ -12,6 +12,7 @@ import {
 import {
 	CONTEXT_EPOCH_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
+	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
 } from "../core/context-epoch.js";
 import { getKernelVenvDir, runtimeCandidateDirs } from "../core/kernel/bootstrap.js";
@@ -48,7 +49,7 @@ export function getProductDiagnostics() {
 			daemon: DAEMON_PROTOCOL_INFO,
 			daemonSchema: DAEMON_SCHEMA_ID,
 			session: CURRENT_SESSION_VERSION,
-			nativeContext: `${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation)`,
+			nativeContext: `${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation), ${CONTEXT_SKILL_EPOCH_RENDERER} (selected skills)`,
 		},
 		paths: {
 			...paths,

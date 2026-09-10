@@ -1197,3 +1197,72 @@ these fixtures are not a real package install or working-Python installation cla
 Required `npm run check` passed first (3860215,4.877740819007158s):1044files/no fixes,
 types, installer and browser checks. No provider call, dependency download, actual
 installation, publication, new benchmark or earlier-milestone reassurance rerun.
+
+## W68 / G09 — selected Skill instruction versions in native epochs
+
+The genuine native `prime_context` route adds the fixed action
+`{"action":"skill","name":"..."}`. Explicit host-owned `/skill:name` uses the
+same captured descriptor/body owner. Full bodies are read only on selection or
+invocation, under the existing limits. Captures live in the existing canonical
+source, not a separate version registry, body cache or filesystem snapshot.
+
+Queued command captures are not active context. Their scoped reference becomes
+selected only when the actual primary input consumes its captured expansion.
+Queue edits and body replacements cannot add a binding from copied markup.
+Model capture records do not insert user messages inside assistant/tool-result
+replay groups. The actual tool result or explicit input carries the body; a small
+source-backed view carries selected refs. Ordinary and fixed/off request admission
+check those refs against the accepted epoch. Existing boundaries permit a later
+version selection. Rotation, cold recovery and supported source copies keep the
+original captured material available by reference. The existing v6 tool-continuation
+copy refusal remains unchanged.
+
+Root chose capability-based advertising as a technical decision: native model
+selection is not advertised when the genuine recovery definition is replaced,
+overridden, inactive or outside the allowlist. A disabled capability is not enabled
+implicitly, and otherwise valid native admission does not fail merely because skills
+are installed. Explicit `/skill` still supports hidden/disabled-model skills and the
+effective loader ordering. Generic non-native behavior stays unchanged. Existing
+selected source material is not erased when tool policy changes.
+
+Selection-bearing v4/v5/v6 epochs use `native-canonical-epoch/7`; older readers refuse
+that marker. Only queued snapshots carrying a selected source binding use action
+format2; unaffected snapshots keep format1. The real restart parser preserves the
+supported version and validates the binding before forwarding it. Binding use stays
+on the original session/file namespace; there is no cross-session queue rebinding.
+Daemon schema/minimum40 (`protocol-11-schema-40-selected-skill-epochs`) fences the new
+selector and queued field. Protocol11, history index16, kernel4 and bootstrap11 remain.
+Doctor reports the selected-skill renderer in addition to the existing variants.
+
+**Limits:** these are captured instruction bodies/descriptors, not frozen Python
+packages, scripts/assets or immutable venvs. Normal Python Skill synchronization
+and Sol's custom instructions are unchanged. Existing capture/recovery byte and
+item limits can refuse work. This is not complete malicious-history learning,
+filesystem isolation, platform, billing or full G09/goal certification. The skill
+guide uses the actual owned paths and runtime overrides instead of directing writes
+to Prime. W67 and all frozen campaigns remain settled; publication is unapproved.
+
+The two existing focused selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3898155,7.812779288971797s;2passed/32skipped). The services
+case used fake SSE for selection/source/ACK/version reuse and cold recovery. The
+restart case used its existing mocked endpoint to preserve action2 and refuse bad
+ref shapes/format1 bindings; it is not destination writer/body certification.
+Controlled budget-refusal stderr is fixture output, not a live provider incident.
+
+The first required check failed (PID3898703,4.407891002018005s): TS2339 for the
+nonexistent `Agent.setSystemPrompt` in agent-session.ts:1492, TS2322 for the broad
+ContextRef kind in selected-skills.ts:206, and TS18048 for an optional captured ref
+inside session-manager.ts:2918's callback. The first error identified a real bad
+method call in the policy-refresh branch; the focused case did not exercise that
+branch. It was replaced with the existing `agent.state.systemPrompt` assignment.
+The other corrections explicitly retain the narrowed custom-message kind and a
+local selected ref across callbacks. No parser, test matrix or unrelated source
+was changed. Only the affected services selector and required check were rerun.
+
+The affected services selector passed (PID3899017,9.221652266802266s;
+1passed/5skipped). The parser selector was not rerun. Corrected `npm run check`
+passed (PID3899022,5.343376633012667s;1045files/no fixes,
+types, installer and browser checks). Both runs used the existing isolated source
+environment. No live provider, benchmark, installed lifecycle or publication run
+was made. These receipts do not establish current-native overall gains or physical
+billing. The active implementation/release objective remains incomplete.

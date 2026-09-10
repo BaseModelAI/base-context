@@ -16,8 +16,10 @@ import {
 } from "../src/core/canonical-context.js";
 import { readContextEpoch } from "../src/core/context-epoch.js";
 import { PUBLIC_CONTEXT_RENDERER } from "../src/core/public-context.js";
+import type { NativeRecoveryInput } from "../src/core/selective-recovery.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 import type { TaskStateSourceRef } from "../src/core/task-state.js";
 import { emptyUsage } from "../src/core/usage.js";
@@ -122,6 +124,7 @@ describe("createAgentSessionFromServices", () => {
 		// Actual service -> AgentSession -> final native body -> canonical epoch ACK.
 		const epochDir = join(tempDir, "epoch-native");
 		mkdirSync(epochDir);
+		const skillFixtures: Skill[] = [];
 		const epochServices = await createAgentSessionServices({
 			cwd: epochDir,
 			agentDir: epochDir,
@@ -132,7 +135,13 @@ describe("createAgentSessionFromServices", () => {
 				autoRefine: { enabled: false },
 				retry: { enabled: false },
 			}),
-			resourceLoaderOptions: { noExtensions: true, noPromptTemplates: true, noThemes: true },
+			resourceLoaderOptions: {
+				noExtensions: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noSkills: true,
+				skillsOverride: () => ({ skills: skillFixtures, diagnostics: [] }),
+			},
 		});
 		const model: Model<"openai-responses"> = {
 			id: "offline-epoch-services",
@@ -181,6 +190,7 @@ describe("createAgentSessionFromServices", () => {
 		let freshOff = false;
 		let toolContinuationPhase: "intent" | "resumed" | undefined;
 		let lateStateEntryId: string | undefined;
+		let skillRequest: NativeRecoveryInput | undefined;
 		type DisplaySource = Pick<TaskStateSourceRef, "sessionId" | "entryId" | "field" | "revision">;
 		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
 			const epochs = await epochManager.readBranchHistory(async (history) => {
@@ -249,8 +259,20 @@ describe("createAgentSessionFromServices", () => {
 				revision: displayed?.revision,
 				need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
 			};
-			const item =
-				toolContinuationPhase === "intent"
+			const selectedSkillRequest = skillRequest;
+			skillRequest = undefined;
+			if (selectedSkillRequest?.action === "skill")
+				expect(init!.body).toContain("Select a matching skill with the prime_context tool");
+			const item = selectedSkillRequest
+				? {
+						type: "function_call",
+						id: `fc_skill_${bodies.length}`,
+						call_id: `call_skill_${bodies.length}`,
+						name: "prime_context",
+						status: "completed",
+						arguments: JSON.stringify(selectedSkillRequest),
+					}
+				: toolContinuationPhase === "intent"
 					? {
 							type: "function_call",
 							id: "fc_pending_effect",
@@ -382,7 +404,7 @@ describe("createAgentSessionFromServices", () => {
 					parameters: expect.objectContaining({
 						type: "object",
 						properties: expect.objectContaining({
-							action: { type: "string", enum: ["read", "search", "recover", "batch"] },
+							action: { type: "string", enum: ["read", "search", "recover", "batch", "skill"] },
 							requests: expect.objectContaining({
 								items: expect.objectContaining({
 									properties: expect.objectContaining({
@@ -936,6 +958,107 @@ describe("createAgentSessionFromServices", () => {
 			expect(await epochManager.readEntry(executionId)).toBeUndefined();
 			expect(executions).toBe(0);
 			expect(bodies).toHaveLength(13);
+
+			// Same native fake-SSE fixture: advertised selection -> real producer -> source -> epoch ACK.
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.create(epochDir, join(epochDir, "selected-skill-native"));
+			toolContinuationPhase = undefined;
+			const skillPath = join(epochDir, "VERSION-SKILL.md");
+			writeFileSync(
+				skillPath,
+				"---\nname: version-fixture\ndescription: Skill version fixture\n---\nSKILL_VERSION_A",
+			);
+			skillFixtures.push({
+				name: "version-fixture",
+				description: "Skill version fixture",
+				kind: "markdown",
+				filePath: skillPath,
+				baseDir: epochDir,
+				disableModelInvocation: false,
+				sourceInfo: createSyntheticSourceInfo("skill-version-fixture", { source: "test" }),
+			});
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				sessionManager: epochManager,
+			}));
+			await epochSession.reload();
+			skillRequest = { action: "skill", name: "version-fixture" };
+			await epochSession.prompt("Select the version-fixture skill through the advertised read route.");
+			expect(bodies.at(-1)).toContain("SKILL_VERSION_A");
+			expect(bodies.at(-1)).toContain("Selected Skill versions (canonical source references)");
+			expect(epochsAtSend.at(-1)).not.toBe(epochsAtSend.at(-2));
+			const selectedEpoch = await epochManager.readEntry(epochsAtSend.at(-1)!);
+			if (selectedEpoch?.type !== "compaction") throw new Error("Expected selected skill epoch ACK");
+			const firstSkill = readContextEpoch(selectedEpoch.details, 2 * 1024 * 1024)?.selectedSkills?.[0];
+			expect(firstSkill?.name).toBe("version-fixture");
+			if (!firstSkill) throw new Error("Expected original selected source reference");
+			const originalSkill = await epochManager.readBranchHistory((history) =>
+				history.hydrateEntry(firstSkill.view.ref.entryId, 1024 * 1024),
+			);
+			expect(originalSkill?.source.qualification).toBe("native-recovery");
+			expect(originalSkill?.entry).toMatchObject({
+				type: "custom_message",
+				content: expect.stringContaining("SKILL_VERSION_A"),
+				details: { baseContextSelectedSkill: { descriptor: { name: "version-fixture", filePath: skillPath } } },
+			});
+
+			// Changed-file edge: fixed/off must reuse the selected version.
+			await epochSession.setContextMode("off");
+			writeFileSync(
+				skillPath,
+				"---\nname: version-fixture\ndescription: Skill version fixture\n---\nSKILL_VERSION_B",
+			);
+			await epochSession.prompt("/skill:version-fixture Keep the explicit user argument.");
+			expect(bodies.at(-1)).toContain("SKILL_VERSION_A");
+			expect(bodies.at(-1)).not.toContain("SKILL_VERSION_B");
+			expect(bodies.at(-1)).toContain("Keep the explicit user argument.");
+
+			// A real accepted new-epoch boundary permits a fresh explicit capture, never silent drift.
+			// Disabling model recovery hides the catalog, but must not disable host-owned /skill admission.
+			await epochSession.setContextMode("on");
+			skillFixtures[0].disableModelInvocation = true;
+			await epochSession.reload();
+			epochSession.setActiveToolsByName([]);
+			const beforeNewVersion = epochManager.getLeafId();
+			await epochSession.prompt("/skill:version-fixture Use the newly selected version.");
+			expect(bodies.at(-1)).toContain("SKILL_VERSION_B");
+			expect(bodies.at(-1)).not.toContain("<available_skills>");
+			expect(
+				await epochSession.recoverNativeHistory({ action: "read", ref: firstSkill.view.ref.entryId }),
+			).toMatchObject({ status: "not_authorized" });
+			expect(epochsAtSend.at(-1)).not.toBe(beforeNewVersion);
+			const replacementEpoch = await epochManager.readEntry(epochsAtSend.at(-1)!);
+			if (replacementEpoch?.type !== "compaction") throw new Error("Expected replacement skill epoch ACK");
+			const secondSkill = readContextEpoch(replacementEpoch.details, 2 * 1024 * 1024)?.selectedSkills?.[0];
+			expect(secondSkill?.view.ref.entryId).not.toBe(firstSkill.view.ref.entryId);
+			expect(await epochManager.readEntry(firstSkill.view.ref.entryId)).toMatchObject({
+				content: expect.stringContaining("SKILL_VERSION_A"),
+			});
+
+			// Cold recovery still reads the original source, not the now-changed file or a private body cache.
+			const skillSessionFile = epochManager.getSessionFile()!;
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.open(skillSessionFile);
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...epochOptions,
+				sessionManager: epochManager,
+			}));
+			skillRequest = { action: "read", ref: firstSkill.view.ref.entryId };
+			await epochSession.prompt("Recover the original selected skill source.");
+			const recoveredSkill = epochSession.messages
+				.filter((message) => message.role === "toolResult" && message.toolName === "prime_context")
+				.at(-1);
+			if (recoveredSkill?.role !== "toolResult" || recoveredSkill.content[0]?.type !== "text")
+				throw new Error("Expected actual native selected source recovery");
+			expect(JSON.parse(recoveredSkill.content[0].text).results[0].records).toContainEqual(
+				expect.objectContaining({
+					ref: firstSkill.view.ref.entryId,
+					field: "/content",
+					text: expect.stringContaining("SKILL_VERSION_A"),
+				}),
+			);
 		} finally {
 			try {
 				await epochSession?.disposeAsync({ kernelSnapshot: false });

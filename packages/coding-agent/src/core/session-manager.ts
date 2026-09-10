@@ -50,6 +50,13 @@ import {
 } from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type { ContextEpochEntryRef, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import {
+	SELECTED_SKILL_CUSTOM_TYPE,
+	SELECTED_SKILL_DETAIL,
+	selectedSkillBlock,
+	selectedSkillCapture,
+} from "./selected-skills.js";
+import { DEFAULT_NATIVE_RECOVERY_LIMITS } from "./selective-recovery.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import {
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
@@ -2823,6 +2830,38 @@ export class SessionManager {
 				throw new Error("Session source changed after native admission capture");
 		};
 		return {
+			captureSkillSelection: () => ({
+				assertCurrent: assertWriter,
+				append: (capture, producer) => {
+					assertWriter();
+					if (producer === "command")
+						return this._appendCustomEntry(
+							SELECTED_SKILL_CUSTOM_TYPE,
+							{
+								content: capture.content,
+								[SELECTED_SKILL_DETAIL]: {
+									version: 1,
+									producer,
+									descriptor: structuredClone(capture.descriptor),
+								},
+							},
+							undefined,
+							"native-recovery",
+							{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent: assertWriter },
+						);
+					return this._appendCustomMessageEntry(
+						SELECTED_SKILL_CUSTOM_TYPE,
+						capture.content,
+						false,
+						{
+							[SELECTED_SKILL_DETAIL]: { version: 1, producer, descriptor: structuredClone(capture.descriptor) },
+						},
+						undefined,
+						"native-recovery",
+						{ maxSourceBytes: DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes, assertCurrent: assertWriter },
+					);
+				},
+			}),
 			captureToolInvocation: (assistant) => {
 				const captured = assistant ? { ...assistant } : undefined;
 				if (
@@ -2849,19 +2888,44 @@ export class SessionManager {
 			},
 			captureMessage: (origin) => {
 				const captured = JSON.parse(stringifyBoundedJson(origin, MAX_SESSION_RECORD_BYTES)) as typeof origin;
-				return (message) => {
+				return async (message) => {
 					assertWriter();
-					// Hooks may replace the body. Admission remains the original action/record capture.
+					let applied = captured;
+					const selectedSkillRef = captured.selectedSkillRef;
+					if (selectedSkillRef) {
+						if (
+							selectedSkillRef.sessionId !== this.getSessionId() ||
+							selectedSkillRef.sessionFile !== this.getSessionFile()
+						)
+							throw new Error("Native input skill capture belongs to another source");
+						const source = await this.readBranchHistory((history) =>
+							history.hydrateEntry(selectedSkillRef.entryId, DEFAULT_NATIVE_RECOVERY_LIMITS.maxSourceBytes),
+						);
+						assertWriter();
+						const skill =
+							source?.source.qualification === "native-recovery"
+								? selectedSkillCapture(source.entry)
+								: undefined;
+						if (!skill) throw new Error("Native input selected skill source is unavailable");
+						const texts =
+							typeof message.content === "string"
+								? [message.content]
+								: message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+						// This only drops a real producer binding after a body replacement; copied text cannot add one.
+						if (!texts.some((text) => text.includes(selectedSkillBlock(skill, selectedSkillRef.entryId))))
+							applied = { ...captured, selectedSkillRef: undefined };
+					}
+					// Hooks may replace the body. Input/task admission stays on the original action/record.
 					return message.role === "custom"
 						? this._appendCustomMessageEntry(
 								message.customType,
 								message.content,
 								message.display,
 								message.details,
-								captured,
+								applied,
 								"native-admission",
 							)
-						: this._appendMessage(message, captured, "native-admission");
+						: this._appendMessage(message, applied, "native-admission");
 				};
 			},
 			captureGoalOperation: (origin) => {
@@ -3002,6 +3066,7 @@ export class SessionManager {
 		data?: unknown,
 		nativeOrigin?: NativeEntryOrigin,
 		qualification?: NativeEntryQualification,
+		selection?: { maxSourceBytes: number; assertCurrent: () => void },
 	): Promise<string> {
 		const entry: CustomEntry = {
 			type: "custom",
@@ -3012,7 +3077,17 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
+		await this._appendEntry(
+			withEntryRetention(entry, undefined, qualification),
+			false,
+			selection
+				? (snapshot) => {
+						stringifyBoundedJson(snapshot, selection.maxSourceBytes);
+					}
+				: undefined,
+			undefined,
+			selection?.assertCurrent,
+		);
 		return entry.id;
 	}
 
@@ -3285,6 +3360,7 @@ export class SessionManager {
 		details?: T,
 		nativeOrigin?: NativeEntryOrigin,
 		qualification?: NativeEntryQualification,
+		selection?: { maxSourceBytes: number; assertCurrent: () => void },
 	): Promise<string> {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -3297,7 +3373,17 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 		};
-		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
+		await this._appendEntry(
+			withEntryRetention(entry, undefined, qualification),
+			false,
+			selection
+				? (snapshot) => {
+						stringifyBoundedJson(snapshot, selection.maxSourceBytes);
+					}
+				: undefined,
+			undefined,
+			selection?.assertCurrent,
+		);
 		return entry.id;
 	}
 

@@ -3,6 +3,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { IndexedSourceEvent } from "./history-index.js";
+import { SELECTED_SKILL_CUSTOM_TYPE, selectedSkillCapture } from "./selected-skills.js";
 import { hydrateCapturedHistoryEntry, type SessionHistoryReadView } from "./session-history-index.js";
 import type { SessionEntry } from "./session-manager.js";
 import { projectTaskStateSource } from "./task-state.js";
@@ -44,6 +45,10 @@ const operationSchema = Type.Object(
 export const nativeRecoveryInputSchema = Type.Union([
 	operationSchema,
 	Type.Object(
+		{ action: Type.Literal("skill"), name: exactString, maxBytes: Type.Optional(byteLimit) },
+		{ additionalProperties: false },
+	),
+	Type.Object(
 		{
 			action: Type.Literal("batch"),
 			requests: Type.Array(operationSchema, { minItems: 1, maxItems: 8 }),
@@ -61,7 +66,8 @@ const providerOperationSchema = Type.Object(
 export const nativeRecoveryToolSchema = Type.Object(
 	{
 		...providerOperationSchema.properties,
-		action: StringEnum(["read", "search", "recover", "batch"] as const),
+		action: StringEnum(["read", "search", "recover", "batch", "skill"] as const),
+		name: Type.Optional(exactString),
 		requests: Type.Optional(Type.Array(providerOperationSchema, { minItems: 1, maxItems: 8 })),
 	},
 	{ additionalProperties: false },
@@ -188,13 +194,32 @@ function object(value: unknown): Record<string, unknown> | undefined {
 }
 
 /** Select known public string fields; never traverse executed-input/provider envelopes, signatures or thinking. */
-function publicFields(entry: SessionEntry, maxItems: number): PublicField[] | undefined {
+function publicFields(
+	entry: SessionEntry,
+	maxItems: number,
+	qualification?: IndexedSourceEvent["qualification"],
+): PublicField[] | undefined {
 	if (entry.type === "compaction" || entry.type === "branch_summary") {
 		return typeof entry.summary === "string" ? [{ field: "/summary", text: entry.summary }] : undefined;
 	}
 	let content: unknown;
 	let field: string;
 	let role: unknown;
+	if (
+		(entry.type === "custom" || entry.type === "custom_message") &&
+		qualification === "native-recovery" &&
+		entry.customType === SELECTED_SKILL_CUSTOM_TYPE
+	) {
+		const skill = selectedSkillCapture(entry);
+		if (skill)
+			return [
+				{ field: entry.type === "custom" ? "/data/content" : "/content", text: skill.content },
+				{
+					field: `/${entry.type === "custom" ? "data" : "details"}/baseContextSelectedSkill/descriptor`,
+					text: JSON.stringify({ ...skill.descriptor, sourceInfo: undefined }),
+				},
+			];
+	}
 	if (entry.type === "custom_message") {
 		content = entry.content;
 		field = "/content";
@@ -342,6 +367,8 @@ export async function recoverCapturedHistory(
 		leafId,
 		sourceSequence,
 	};
+	if (request.action === "skill")
+		return createNativeRecoveryRefusal("not_authorized", "native_skill_selection_owner_required", maxBytes);
 	const operations = request.action === "batch" ? request.requests : [request];
 	const results = operations.map((_, i) => outcome(i, "budget_refused", "unknown", [], "not_admitted"));
 	// Reserve an explicit result for EVERY requested operation before touching canonical payloads.
@@ -398,7 +425,7 @@ export async function recoverCapturedHistory(
 			}
 			return undefined;
 		}
-		return publicFields(cached.entry, cap.maxItems);
+		return publicFields(cached.entry, cap.maxItems, metadata.qualification);
 	}
 
 	async function recover(operation: NativeRecoveryOperation, i: number): Promise<NativeRecoveryResult> {

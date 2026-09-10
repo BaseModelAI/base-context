@@ -80,7 +80,7 @@ interface MockUpdateRestartSession {
 	config: Record<string, unknown>;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;
 	queue: {
-		actions: { formatVersion: 1; actions: MockRecoveryAction[] };
+		actions: { formatVersion: 1 | 2; actions: MockRecoveryAction[] };
 		nextTurn: MockCustomMessage[];
 	};
 	shouldResume: boolean;
@@ -1512,6 +1512,11 @@ describe("self-update daemon restart", () => {
 			display: true,
 			timestamp: Date.now(),
 		};
+		const selectedSkillRef = {
+			sessionId: "session-1",
+			sessionFile: join(projectDir, "session.jsonl"),
+			entryId: "selected-skill-1",
+		};
 		const recoveredAction: MockRecoveryAction = {
 			id: "action-1",
 			source: "internal",
@@ -1522,6 +1527,7 @@ describe("self-update daemon restart", () => {
 			payload: {
 				kind: "turn",
 				text: "heartbeat body",
+				selectedSkillRef,
 				customMessage,
 				records: [
 					{
@@ -1547,7 +1553,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(projectDir, "session.jsonl"),
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: { actions: { formatVersion: 1, actions: [recoveredAction] }, nextTurn: [] },
+					queue: { actions: { formatVersion: 2, actions: [recoveredAction] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1566,8 +1572,60 @@ describe("self-update daemon restart", () => {
 			expect(mockState.requestPayloads).toContainEqual({
 				type: "restore_actions",
 				activeSessionId: "restored-active",
-				snapshot: { formatVersion: 1, actions: [recoveredAction] },
+				snapshot: { formatVersion: 2, actions: [recoveredAction] },
 			});
+			// The actual restart parser must reject an invalid ref and must not downgrade a binding to format 1.
+			const session = mockState.prepareManifest.sessions[0]!;
+			mockState.prepareResponse = {
+				success: true,
+				data: {
+					...mockState.prepareManifest,
+					sessions: [
+						{
+							...session,
+							queue: {
+								...session.queue,
+								actions: {
+									formatVersion: 2,
+									actions: [
+										{
+											...recoveredAction,
+											payload: {
+												...recoveredAction.payload,
+												selectedSkillRef: { ...selectedSkillRef, entryId: 7 },
+											},
+										},
+									],
+								},
+							},
+						},
+					],
+				},
+			};
+			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).rejects.toThrow(
+				"Daemon update restart response is missing session actions",
+			);
+			mockState.prepareResponse = {
+				success: true,
+				data: {
+					...mockState.prepareManifest,
+					sessions: [
+						{
+							...session,
+							queue: {
+								...session.queue,
+								actions: {
+									formatVersion: 1,
+									actions: [recoveredAction],
+								},
+							},
+						},
+					],
+				},
+			};
+			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).rejects.toThrow(
+				"Daemon update restart response is missing session actions",
+			);
 			mockState.prepareResponse = {
 				success: true,
 				data: { ...mockState.prepareManifest, formatVersion: 2 },

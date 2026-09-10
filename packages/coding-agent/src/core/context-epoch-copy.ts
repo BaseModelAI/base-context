@@ -8,7 +8,7 @@ import {
 	readContextEpoch,
 	snapshotContextEpoch,
 } from "./context-epoch.js";
-import type { ContextRef, ContextUpdateTarget, IndexedSourceEvent } from "./history-index.js";
+import type { ContextUpdateTarget, IndexedSourceEvent } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
 import {
 	hydrateCapturedHistoryEntry,
@@ -142,8 +142,11 @@ export async function rebuildCopiedContextEpoch(
 		return narrowed;
 	};
 	await prefix(checkpoint.source);
-	const views: EpochViewReference[] = [];
-	for (const pinned of checkpoint.views) {
+	const copyReference = async <
+		T extends EpochViewReference | NonNullable<ContextEpochCheckpoint["selectedSkills"]>[number]["view"],
+	>(
+		pinned: T,
+	): Promise<T> => {
 		const old = oldById.get(pinned.ref.entryId);
 		if (
 			!old ||
@@ -156,7 +159,7 @@ export async function rebuildCopiedContextEpoch(
 		const read = await prefix(pinned.source);
 		const actual = await read.get(old.id);
 		if (!actual || actual.kind !== old.kind) throw new Error("Copied epoch view source is unavailable");
-		const ref: ContextRef = {
+		const ref = {
 			entryId: actual.id,
 			sequence: actual.sequence,
 			kind: pinned.ref.kind,
@@ -189,14 +192,20 @@ export async function rebuildCopiedContextEpoch(
 		} else if (pinned.sourceRevision !== old.revision || pinned.retainedMessageCount === undefined) {
 			throw new Error("Copied epoch summary source is unavailable");
 		}
-		views.push({
+		return {
 			source: read.source,
 			ref,
 			sourceRevision,
 			...(pinned.retainedMessageCount === undefined ? {} : { retainedMessageCount: pinned.retainedMessageCount }),
 			...(pinned.rendering === undefined ? {} : { rendering: pinned.rendering }),
-		});
-	}
+		} as T;
+	};
+	const views: EpochViewReference[] = [];
+	for (const pinned of checkpoint.views) views.push(await copyReference(pinned));
+	const selectedSkills: Array<NonNullable<ContextEpochCheckpoint["selectedSkills"]>[number]> | undefined =
+		checkpoint.selectedSkills ? [] : undefined;
+	for (const skill of checkpoint.selectedSkills ?? [])
+		selectedSkills!.push({ name: skill.name, view: await copyReference(skill.view) });
 	if (!(await view.get(checkpoint.literalTailId))) throw new Error("Copied epoch literal tail is unavailable");
 	const tasks = await readTaskStateFromView(view, {
 		maxItems: limits.maxEntries,
@@ -220,6 +229,7 @@ export async function rebuildCopiedContextEpoch(
 			...unchanged,
 			source: view.source,
 			views,
+			...(selectedSkills?.length ? { selectedSkills } : {}),
 			taskFrame,
 			resourceRevision: undefined, // Explicit copies must capture their destination owner anew.
 			...(rebuiltContinuation ? { continuation: rebuiltContinuation } : {}),

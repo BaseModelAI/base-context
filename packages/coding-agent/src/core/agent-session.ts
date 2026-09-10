@@ -40,7 +40,7 @@ import {
 } from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { PRODUCT } from "../product-identity.js";
-import { stripFrontmatter } from "../utils/frontmatter.js";
+
 import { sleep } from "../utils/sleep.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
@@ -127,6 +127,7 @@ import {
 	appendContextEpoch,
 	assertContextRequestContract,
 	CONTEXT_EPOCH_DETAIL,
+	CONTEXT_SKILL_EPOCH_RENDERER,
 	type ContextMode,
 	type ContextReplayContract,
 	contextEpochMode,
@@ -271,6 +272,17 @@ import {
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
 import {
+	type CapturedSkillSelectionWriter,
+	captureSelectedSkill,
+	captureSkillDescriptor,
+	type NativeSkillSourceRef,
+	readSkillSelection,
+	type SelectedSkillCapture,
+	sameSelectedSkills,
+	selectedSkillBlock,
+	selectedSkillIdentity,
+} from "./selected-skills.js";
+import {
 	createNativeRecoveryRefusal,
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
 	NativeRecoveryBudgetRefusal,
@@ -332,7 +344,8 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
-import { getPythonSkillRuntimeInfo, readSkillFile, type Skill } from "./skills.js";
+import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+
 import {
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
@@ -645,7 +658,13 @@ interface SubmissionNormalizationPolicy {
 }
 
 type NormalizedSubmission =
-	| { kind: "prompt"; text: string; images?: ImageContent[] }
+	| {
+			kind: "prompt";
+			text: string;
+			images?: ImageContent[];
+			selectedSkillRef?: NativeSkillSourceRef;
+			assertSkillCurrent?: () => void;
+	  }
 	| {
 			kind: "sessionCommand";
 			text: string;
@@ -654,6 +673,20 @@ type NormalizedSubmission =
 	  }
 	| { kind: "extensionCommand"; completion: Promise<void> }
 	| { kind: "handled" };
+
+interface NativeSkillSelectionOwner {
+	manager: SessionManager;
+	sessionId: string;
+	sessionFile: string | undefined;
+	writer: CapturedSkillSelectionWriter;
+	inputEpoch?: number;
+}
+
+interface SkillCommandExpansion {
+	text: string;
+	selectedSkillRef?: NativeSkillSourceRef;
+	assertSkillCurrent: () => void;
+}
 
 type PreTurnCompactionTiming = "beforeModelSelection" | "afterModelSelection" | "skip";
 type RefineBarrierPolicy = "always" | "ifInFlight" | "skip";
@@ -703,6 +736,7 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 
 interface PreparedTurnPayload extends SessionTurnPayload {
 	submitted?: NativeSubmittedInput;
+	selectedSkillRef?: NativeSkillSourceRef;
 	images?: ImageContent[];
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
@@ -752,6 +786,8 @@ interface RestoredPromptInput {
 }
 
 export const SESSION_ACTION_RECOVERY_FORMAT_VERSION = 1;
+/** Only snapshots carrying the new native source binding require this current-format discriminator. */
+export const SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION = 2;
 
 export interface SessionActionRecoveryRecord {
 	id: string;
@@ -764,6 +800,7 @@ export type SessionActionRecoveryPayload =
 	| {
 			kind: "turn";
 			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			text: string;
 			preview?: string;
 			records: SessionActionRecoveryRecord[];
@@ -795,7 +832,7 @@ export interface SessionActionRecoveryAction {
 }
 
 export interface SessionActionRecoverySnapshot {
-	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION;
+	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION | typeof SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION;
 	actions: SessionActionRecoveryAction[];
 }
 
@@ -1291,7 +1328,7 @@ export class AgentSession {
 
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _nativeRecoveryTools = new WeakMap<AgentTool, AgentTool["execute"]>();
-	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean }>();
+	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean; skillOwner?: NativeSkillSelectionOwner }>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -1447,6 +1484,16 @@ export class AgentSession {
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 				const epochContext = getCanonicalEpochContext(messages);
 				if (epochContext) this._contextMode = epochContext.mode;
+				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint);
+				const skillPolicy = nativeSkills ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined;
+				if (this._baseSystemPromptOptions.nativeSkillSelection !== skillPolicy) {
+					const previousBase = this._baseSystemPrompt;
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), nativeSkills);
+					this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(
+						this.agent.state.systemPrompt,
+						previousBase,
+					);
+				}
 				if (
 					epochContext?.resourceRevision !== undefined &&
 					getCanonicalViewUnits(messages)?.length !== messages.length
@@ -1523,6 +1570,7 @@ export class AgentSession {
 								(committed.publicWindow === true) === publicWindow &&
 								committed.taskFrame?.material === epochContext.taskFrame?.material &&
 								committed.resourceRevision === epochContext.resourceRevision &&
+								sameSelectedSkills(committed.selectedSkills, epochContext.selectedSkills) &&
 								candidate.selectedUnitIds.length === messages.length
 							) {
 								accepted = selection;
@@ -1565,6 +1613,8 @@ export class AgentSession {
 						(request, assessment) => {
 							try {
 								assertResourceCurrent(resource);
+								if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
+									throw new Error("Selected skill versions require a committed epoch boundary");
 								if (fixed) {
 									if (
 										(requestContract ||
@@ -1604,12 +1654,40 @@ export class AgentSession {
 										if (!requestContract && nativeTail)
 											throw new Error("Retained native context has no accepted request contract");
 										const replayContract = projection.replayContract ?? "complete-context";
-										if (!requestContract && committed?.pendingRequestContract) {
-											// A once-only first compatibility acceptance, not a new view or optimizer decision.
-											const nextContract = contextRequestContract(request, replayContract);
+										const skillChange = !sameSelectedSkills(
+											committed?.selectedSkills,
+											epochContext.selectedSkills,
+										);
+										if (
+											skillChange &&
+											committed?.selectedSkills?.some(
+												(skill) =>
+													!sameSelectedSkills(
+														[skill],
+														epochContext.selectedSkills?.filter((item) => item.name === skill.name),
+													),
+											)
+										)
+											throw new Error("Fixed context cannot replace a selected skill version");
+										if ((!requestContract && committed?.pendingRequestContract) || skillChange) {
+											// Existing policy-only ACK: bind first selections, without changing fixed views or mode.
+											const base =
+												committed ??
+												prepareContextModeEpoch(messages, epochContext.mode, limits.maxSourceBytes)
+													.checkpoint;
+											if (base.version !== 5)
+												throw new Error("Fixed skill selection requires its policy checkpoint");
+											const nextContract =
+												requestContract ?? contextRequestContract(request, replayContract);
 											const checkpoint = snapshotContextEpoch(
 												{
-													...committed,
+													...base,
+													renderer: epochContext.selectedSkills?.length
+														? CONTEXT_SKILL_EPOCH_RENDERER
+														: base.renderer,
+													...(epochContext.selectedSkills?.length
+														? { selectedSkills: epochContext.selectedSkills }
+														: {}),
 													source: epochContext.source,
 													requestContract: nextContract,
 													pendingRequestContract: undefined,
@@ -1632,6 +1710,8 @@ export class AgentSession {
 											if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
 												throw new Error("Context contract source changed before acceptance");
 										}
+										if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
+											throw new Error("Fixed context selected skill versions changed after acceptance");
 										if (requestContract)
 											assertContextRequestContract(requestContract, request, replayContract);
 										if (acceptedBody !== undefined && request.body !== acceptedBody)
@@ -1666,6 +1746,9 @@ export class AgentSession {
 				const writer = manager[bindNativeEntryWriter]();
 				const selected = this._toolRegistry.get(tool.name) === tool && tool.execute === execute;
 				const qualified = selected && manager.isPersisted();
+				const skillOwner = qualified
+					? { manager, sessionId, sessionFile, writer: writer.captureSkillSelection() }
+					: undefined;
 				await this.initialize();
 				await this._agentEventQueue;
 				if (this.sessionManager !== manager)
@@ -1682,7 +1765,7 @@ export class AgentSession {
 						: undefined;
 				await intentWrite(invocation);
 				if (!recoveryWrite && !exchangeWrite) return;
-				const producer = { used: false };
+				const producer = { used: false, skillOwner };
 				const owner: BoundToolExecution = {
 					run: (run) => (recoveryWrite ? this._nativeRecoveryProducer.run(producer, run) : run()),
 					finalize: async (exchange) => {
@@ -4376,6 +4459,9 @@ export class AgentSession {
 			inputSource: action.payload.acceptedAgentMessage ? "internal" : action.source,
 			recordRole: record.role,
 			...(record.role === "primary" && action.payload.submitted ? { submitted: action.payload.submitted } : {}),
+			...(record.role === "primary" && action.payload.selectedSkillRef
+				? { selectedSkillRef: action.payload.selectedSkillRef }
+				: {}),
 		});
 	}
 
@@ -5384,7 +5470,10 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _rebuildSystemPrompt(
+		toolNames: string[],
+		nativeEpoch = this.sessionManager.isPersisted() && this._contextEpochsEnabled,
+	): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelines: string[] = [];
@@ -5410,6 +5499,7 @@ export class AgentSession {
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
+			nativeSkillSelection: nativeEpoch ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
@@ -5440,13 +5530,21 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		policy: SubmissionNormalizationPolicy,
-	): NormalizedSubmission {
-		let expandedText = text;
-		if (policy.expandSkills) expandedText = this._expandSkillCommand(expandedText);
-		if (policy.expandPromptTemplates) {
-			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-		}
-		return { kind: "prompt", text: expandedText, images };
+		skillOwner?: NativeSkillSelectionOwner,
+	): NormalizedSubmission | Promise<NormalizedSubmission> {
+		const finish = (expanded: string | SkillCommandExpansion): NormalizedSubmission => {
+			const value = typeof expanded === "string" ? { text: expanded } : expanded;
+			return {
+				...value,
+				kind: "prompt",
+				images,
+				text: policy.expandPromptTemplates
+					? expandPromptTemplate(value.text, [...this.promptTemplates])
+					: value.text,
+			};
+		};
+		const expanded = policy.expandSkills ? this._expandSkillCommand(text, skillOwner) : text;
+		return expanded instanceof Promise ? expanded.then(finish) : finish(expanded);
 	}
 
 	private _normalizeSubmission(
@@ -5468,17 +5566,18 @@ export class AgentSession {
 			}
 		}
 
+		const skillOwner = policy.expandSkills ? this._captureSkillSelectionOwner() : undefined;
 		if (policy.inputSource !== undefined && this._extensionRunner.hasHandlers("input")) {
 			return this._extensionRunner.emitInput(text, images, policy.inputSource).then((result) => {
 				if (result.action === "handled") return { kind: "handled" };
 				if (result.action === "transform") {
-					return this._finishSubmissionNormalization(result.text, result.images ?? images, policy);
+					return this._finishSubmissionNormalization(result.text, result.images ?? images, policy, skillOwner);
 				}
-				return this._finishSubmissionNormalization(text, images, policy);
+				return this._finishSubmissionNormalization(text, images, policy, skillOwner);
 			});
 		}
 
-		return this._finishSubmissionNormalization(text, images, policy);
+		return this._finishSubmissionNormalization(text, images, policy, skillOwner);
 	}
 
 	private async _runPreTurnCompaction(): Promise<void> {
@@ -5964,6 +6063,7 @@ export class AgentSession {
 					return;
 				}
 
+				normalized.assertSkillCurrent?.();
 				const queueForStreaming = this.isStreaming;
 				const queueForBusy = options?.queueIfBusy === true && this._isBusyForSessionInput("preflight");
 				const visibleQueued = queueForStreaming || queueForBusy;
@@ -5989,6 +6089,7 @@ export class AgentSession {
 							timestamp: Date.now(),
 						} satisfies UserMessage);
 				const action = this._createPreparedTurnAction(schedule, normalized.text, normalized.images, {
+					selectedSkillRef: normalized.selectedSkillRef,
 					agentMessageId: options?.agentMessageId,
 					queueKey: options?.followUpQueueKey,
 					content,
@@ -6107,29 +6208,47 @@ export class AgentSession {
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
 	 * Emits errors via extension runner and rejects if the selected file cannot be read completely.
 	 */
-	private _expandSkillCommand(text: string): string {
+	private _expandSkillCommand(
+		text: string,
+		owner?: NativeSkillSelectionOwner,
+	): string | Promise<string | SkillCommandExpansion> {
 		if (!text.startsWith("/skill:")) return text;
-
 		const parsed = parseSlashCommand(text);
 		if (!parsed?.name.startsWith("skill:")) return text;
 		const skillName = parsed.name.slice("skill:".length);
-		const args = parsed.args;
-
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown skill, pass through
-
-		try {
-			const content = readSkillFile(skill.filePath);
-			const body = stripFrontmatter(content).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
-		} catch (err) {
+		const skill = this.resourceLoader.getSkills().skills.find((item) => item.name === skillName);
+		if (!skill) return text;
+		const skillPath = skill.filePath;
+		const render = (capture: SelectedSkillCapture, ref?: string): string => {
+			const block = selectedSkillBlock(capture, ref);
+			return parsed.args ? `${block}\n\n${parsed.args}` : block;
+		};
+		const failure = (error: unknown): never => {
 			this._extensionRunner.emitError({
-				extensionPath: skill.filePath,
+				extensionPath: skillPath,
 				event: "skill_expansion",
-				error: err instanceof Error ? err.message : String(err),
+				error: error instanceof Error ? error.message : String(error),
 			});
-			throw err;
+			throw error;
+		};
+		try {
+			if (owner)
+				return this._selectNativeSkill(skill, owner, false)
+					.then((selected) => {
+						const assertSkillCurrent = () => this._assertSkillSelectionOwner(owner);
+						assertSkillCurrent();
+						return selected
+							? {
+									text: render(selected.capture, selected.ref),
+									selectedSkillRef: { ...selected.source },
+									assertSkillCurrent,
+								}
+							: { text: render(captureSelectedSkill(captureSkillDescriptor(skill))), assertSkillCurrent };
+					})
+					.catch(failure);
+			return render(captureSelectedSkill(captureSkillDescriptor(skill)));
+		} catch (error) {
+			return failure(error);
 		}
 	}
 
@@ -6151,18 +6270,33 @@ export class AgentSession {
 		} = {},
 	): Promise<void> {
 		const submitted = captureSubmittedInput(text, { images });
-		const normalized = this._normalizeSubmission(text, images, {
+		const manager = this.sessionManager;
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile();
+		const inputEpoch = this._sessionInputPumpEpoch;
+		const normalization = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
 			expandSkills: true,
 			expandPromptTemplates: true,
 		});
-		if (normalized instanceof Promise || normalized.kind !== "prompt") {
+		const normalized = normalization instanceof Promise ? await normalization : normalization;
+		if (
+			normalization instanceof Promise &&
+			(this.sessionManager !== manager ||
+				sessionId !== manager.getSessionId() ||
+				sessionFile !== manager.getSessionFile() ||
+				inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Queued prompt normalization owner changed");
+		if (normalized.kind !== "prompt") {
 			throw new Error("Queued prompt normalization did not produce a prompt");
 		}
 
+		normalized.assertSkillCurrent?.();
 		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 			submitted,
+			selectedSkillRef: normalized.selectedSkillRef,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -6186,18 +6320,33 @@ export class AgentSession {
 		} = {},
 	): Promise<boolean> {
 		const submitted = captureSubmittedInput(text, { images });
-		const normalized = this._normalizeSubmission(text, images, {
+		const manager = this.sessionManager;
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile();
+		const inputEpoch = this._sessionInputPumpEpoch;
+		const normalization = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
 			expandSkills: true,
 			expandPromptTemplates: true,
 		});
-		if (normalized instanceof Promise || normalized.kind !== "prompt") {
+		const normalized = normalization instanceof Promise ? await normalization : normalization;
+		if (
+			normalization instanceof Promise &&
+			(this.sessionManager !== manager ||
+				sessionId !== manager.getSessionId() ||
+				sessionFile !== manager.getSessionFile() ||
+				inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Queued prompt normalization owner changed");
+		if (normalized.kind !== "prompt") {
 			throw new Error("Queued prompt normalization did not produce a prompt");
 		}
 
+		normalized.assertSkillCurrent?.();
 		return this._queuePreparedPrompt("followUp", normalized.text, normalized.images, {
 			submitted,
+			selectedSkillRef: normalized.selectedSkillRef,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -6205,7 +6354,12 @@ export class AgentSession {
 	}
 
 	async restoreSessionActions(snapshot: SessionActionRecoverySnapshot): Promise<number> {
-		if (snapshot.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION) {
+		if (
+			(snapshot.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+				snapshot.formatVersion !== SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION) ||
+			(snapshot.formatVersion === SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+				snapshot.actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef))
+		) {
 			throw new Error(`Unsupported session action recovery format version: ${snapshot.formatVersion}`);
 		}
 		const actionIds = new Set(this._actionStore.ownedActions().map((action) => action.id));
@@ -6223,6 +6377,9 @@ export class AgentSession {
 					? {
 							kind: "turn",
 							text: recovered.payload.text,
+							...(recovered.payload.selectedSkillRef
+								? { selectedSkillRef: { ...recovered.payload.selectedSkillRef } }
+								: {}),
 							...(recovered.payload.submitted
 								? { submitted: structuredClone(recovered.payload.submitted) }
 								: {}),
@@ -6503,6 +6660,7 @@ export class AgentSession {
 			agentMessageId?: string;
 			queueKey?: string;
 			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -6530,6 +6688,7 @@ export class AgentSession {
 		const payload: PreparedTurnPayload = {
 			kind: "turn",
 			submitted: options.submitted,
+			selectedSkillRef: options.selectedSkillRef ? { ...options.selectedSkillRef } : undefined,
 			text,
 			records: [
 				...prefixMessages.map((prefix) => this._createDeliveryRecord(id, "prefix", prefix)),
@@ -6693,6 +6852,7 @@ export class AgentSession {
 			agentMessageId?: string;
 			queueKey?: string;
 			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -7512,6 +7672,7 @@ export class AgentSession {
 			if (mutation.images !== undefined) item.payload.images = images?.length ? images : undefined;
 		} else {
 			item.payload.text = mutation.text;
+			item.payload.selectedSkillRef = undefined;
 			const text = { type: "text" as const, text: mutation.text };
 			if (mutation.images !== undefined) {
 				item.payload.images = images?.length ? images : undefined;
@@ -7634,9 +7795,12 @@ export class AgentSession {
 	}
 
 	getSessionActionRecoverySnapshot(): SessionActionRecoverySnapshot {
+		const actions = this._actionStore.snapshotActions();
 		return {
-			formatVersion: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
-			actions: this._actionStore.snapshotActions().map((action) => ({
+			formatVersion: actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef)
+				? SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION
+				: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+			actions: actions.map((action) => ({
 				id: action.id,
 				source: action.source,
 				delivery: action.delivery,
@@ -7649,6 +7813,9 @@ export class AgentSession {
 						? {
 								kind: "turn",
 								text: action.payload.text,
+								...(action.payload.selectedSkillRef
+									? { selectedSkillRef: { ...action.payload.selectedSkillRef } }
+									: {}),
 								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
 								...(action.payload.preview ? { preview: action.payload.preview } : {}),
 								records: action.payload.records.map((record) => ({
@@ -10737,6 +10904,93 @@ export class AgentSession {
 		return skills;
 	}
 
+	private _nativeRecoveryEnabled(): boolean {
+		const nativeDefinition = this._baseToolDefinitions.get("prime_context");
+		return (
+			!this._baseToolsOverride &&
+			nativeDefinition !== undefined &&
+			this._toolDefinitions.get("prime_context")?.definition === nativeDefinition &&
+			this.getActiveToolNames().includes("prime_context") &&
+			(!this._allowedToolNames || this._allowedToolNames.has("prime_context"))
+		);
+	}
+
+	private _captureSkillSelectionOwner(): NativeSkillSelectionOwner | undefined {
+		const manager = this.sessionManager;
+		return manager.isPersisted()
+			? {
+					manager,
+					sessionId: manager.getSessionId(),
+					sessionFile: manager.getSessionFile(),
+					writer: manager[bindNativeEntryWriter]().captureSkillSelection(),
+					inputEpoch: this._sessionInputPumpEpoch,
+				}
+			: undefined;
+	}
+
+	private _assertSkillSelectionOwner(owner: NativeSkillSelectionOwner): void {
+		owner.writer.assertCurrent();
+		if (
+			this.sessionManager !== owner.manager ||
+			owner.sessionId !== owner.manager.getSessionId() ||
+			owner.sessionFile !== owner.manager.getSessionFile() ||
+			(owner.inputEpoch !== undefined && owner.inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Skill selection owner changed");
+	}
+
+	private async _selectNativeSkill(
+		skill: Skill,
+		owner: NativeSkillSelectionOwner,
+		modelInvocation: boolean,
+		signal?: AbortSignal,
+	): Promise<
+		| { ref: string; capture: SelectedSkillCapture; source: NativeSkillSourceRef; assertCurrent: () => void }
+		| undefined
+	> {
+		const assertCurrent = () => {
+			signal?.throwIfAborted();
+			this._assertSkillSelectionOwner(owner);
+			if (modelInvocation && !this._nativeRecoveryEnabled())
+				throw new Error("Native skill selection is not authorized");
+		};
+		assertCurrent();
+		const descriptor = captureSkillDescriptor(skill);
+		const result = (ref: string, capture: SelectedSkillCapture) => ({
+			ref,
+			capture,
+			assertCurrent,
+			source: { sessionId: owner.sessionId, sessionFile: owner.sessionFile, entryId: ref },
+		});
+		const state = await owner.manager.readBranchHistory((history) =>
+			readSkillSelection(history.branchContext, descriptor.name, this.settingsManager.getCanonicalContextLimits()),
+		);
+		assertCurrent();
+		if (!this._contextEpochsEnabled && !state.checkpoint) return;
+		const fixed =
+			contextEpochMode(state.checkpoint, this._initialContextMode) === "off" ||
+			(state.checkpoint?.policyOnly === true && !this._contextEpochsEnabled);
+		// A new file capture is eligible only after an actual accepted epoch boundary.
+		// Off/fixed reads keep the retained version; no file read is a policy/epoch ACK.
+		const sameSource =
+			!state.capture || selectedSkillIdentity(state.capture.descriptor) === selectedSkillIdentity(descriptor);
+		if (state.reference && !sameSource && fixed)
+			throw new Error("Fixed context cannot substitute a different effective skill source");
+		if (
+			state.reference &&
+			state.capture &&
+			sameSource &&
+			(state.pending ||
+				fixed ||
+				JSON.stringify(state.reference.view.source) === JSON.stringify(state.checkpoint?.source))
+		)
+			return result(state.reference.view.ref.entryId, state.capture);
+		const capture = captureSelectedSkill(descriptor);
+		const ref = await owner.writer.append(capture, modelInvocation ? "model" : "command");
+		assertCurrent(); // A completed source append is not rolled back on cancellation or owner change.
+		return result(ref, capture);
+	}
+
 	/** Read only the server-owned branch captured for this operation (including a batch). */
 	async recoverNativeHistory(
 		input: NativeRecoveryInput,
@@ -10746,24 +11000,44 @@ export class AgentSession {
 		signal?.throwIfAborted();
 		const request = parseNativeRecoveryInput(input);
 		const responseBytes = Math.min(maxBytes, DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes, request.maxBytes ?? Infinity);
-		const nativeDefinition = this._baseToolDefinitions.get("prime_context");
-		if (
-			this._baseToolsOverride ||
-			!nativeDefinition ||
-			this._toolDefinitions.get("prime_context")?.definition !== nativeDefinition ||
-			!this.getActiveToolNames().includes("prime_context") ||
-			(this._allowedToolNames && !this._allowedToolNames.has("prime_context"))
-		) {
+		if (!this._nativeRecoveryEnabled()) {
 			return createNativeRecoveryRefusal("not_authorized", "native_recovery_not_enabled", responseBytes);
 		}
 		// Only the real authorized reader can latch this private admitted execution.
 		// A replacement method/result or descriptive JSON cannot set the producer bit.
 		const producer = this._nativeRecoveryProducer.getStore();
 		if (producer) producer.used = true;
+		if (request.action === "skill") {
+			if (!producer?.skillOwner)
+				return createNativeRecoveryRefusal(
+					"not_authorized",
+					"native_skill_selection_owner_required",
+					responseBytes,
+				);
+			const skill = this._modelVisibleSkills().find(
+				(item) => item.name === request.name && !item.disableModelInvocation,
+			);
+			if (!skill) return createNativeRecoveryRefusal("not_authorized", "skill_not_model_visible", responseBytes);
+			const selected = await this._selectNativeSkill(skill, producer.skillOwner, true, signal);
+			if (!selected)
+				return createNativeRecoveryRefusal("unavailable", "native_skill_epoch_not_enabled", responseBytes);
+			selected.assertCurrent();
+			return producer.skillOwner.manager.readBranchHistory((history) =>
+				recoverCapturedHistory(
+					history.branchContext,
+					{ action: "read", ref: selected.ref, maxBytes: responseBytes },
+					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
+					signal,
+				),
+			);
+		}
 		// readBranchHistory captures synchronously and preserves ordered read/release errors.
 		// Never accept a caller's owner/path/frontier or turn a failed read into evidence of absence.
 		try {
-			return await this.sessionManager.readBranchHistory((history) =>
+			const manager = producer?.skillOwner?.manager ?? this.sessionManager;
+			producer?.skillOwner?.writer.assertCurrent();
+			if (this.sessionManager !== manager) throw new Error("Native recovery source changed");
+			return await manager.readBranchHistory((history) =>
 				recoverCapturedHistory(
 					history.branchContext,
 					request,

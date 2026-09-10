@@ -25,6 +25,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Actual native recovery authorization at this owned prompt build. */
+	nativeSkillSelection?: "enabled" | "unavailable";
 	/** Whether to include the model-facing rlm recursion guidance. */
 	allowRecursion?: boolean;
 	/** Fixed recursive-agent depth for this session. */
@@ -63,12 +65,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 
 	const contextFiles = providedContextFiles ?? [];
-	const skills = providedSkills ?? [];
+	const skills = options.nativeSkillSelection === "unavailable" ? [] : (providedSkills ?? []);
 	const tools = selectedTools ?? ["ipython"];
 	const hasIpython = tools.includes("ipython");
 	const hasBash = tools.includes("bash");
 	// Admit and capture the catalog before constructing skill-derived prompt text.
-	const skillCatalog = (hasIpython || hasBash) && skills.length > 0 ? formatSkillsForPrompt(skills) : "";
+	const skillCatalog =
+		(options.nativeSkillSelection === "enabled" || hasIpython || hasBash) && skills.length > 0
+			? formatSkillsForPrompt(skills, options.nativeSkillSelection === "enabled")
+			: "";
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 	const visiblePythonSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);

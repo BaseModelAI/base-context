@@ -45,7 +45,10 @@ import {
 	VERSION,
 } from "./config.js";
 import type { SessionActionRecoverySnapshot } from "./core/agent-session.js";
-import { SESSION_ACTION_RECOVERY_FORMAT_VERSION } from "./core/agent-session.js";
+import {
+	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+	SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION,
+} from "./core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.js";
 import { type CustomMessage, isSessionSlashCommand } from "./core/messages.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
@@ -630,6 +633,16 @@ function isSessionActionRecoveryAction(value: unknown): value is SessionActionRe
 	) {
 		return false;
 	}
+	const selectedSkillRef = value.payload.selectedSkillRef;
+	if (
+		selectedSkillRef !== undefined &&
+		(value.payload.kind !== "turn" ||
+			!isRecord(selectedSkillRef) ||
+			typeof selectedSkillRef.sessionId !== "string" ||
+			typeof selectedSkillRef.entryId !== "string" ||
+			(selectedSkillRef.sessionFile !== undefined && typeof selectedSkillRef.sessionFile !== "string"))
+	)
+		return false;
 	if (value.payload.kind === "session_command") return isSessionSlashCommand(value.payload.command);
 	return (
 		value.payload.kind === "turn" &&
@@ -670,14 +683,24 @@ function isSessionActionRecoveryAction(value: unknown): value is SessionActionRe
 
 function parseSessionActionRecoverySnapshot(value: unknown): SessionActionRecoverySnapshot {
 	if (!isRecord(value)) throw new Error("Daemon update restart response contains invalid session actions");
-	if (value.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION) {
+	if (
+		value.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+		value.formatVersion !== SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION
+	) {
 		throw new Error(`Unsupported session action recovery format version: ${String(value.formatVersion)}`);
 	}
-	if (!Array.isArray(value.actions) || !value.actions.every(isSessionActionRecoveryAction)) {
+	if (
+		!Array.isArray(value.actions) ||
+		!value.actions.every(isSessionActionRecoveryAction) ||
+		(value.formatVersion === SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+			value.actions.some(
+				(action) => action.payload.kind === "turn" && action.payload.selectedSkillRef !== undefined,
+			))
+	) {
 		throw new Error("Daemon update restart response is missing session actions");
 	}
 	return {
-		formatVersion: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+		formatVersion: value.formatVersion,
 		actions: value.actions,
 	};
 }

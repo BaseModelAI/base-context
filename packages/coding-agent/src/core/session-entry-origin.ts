@@ -3,6 +3,7 @@ import type { ImageContent, Message, TextContent } from "@ponythewhite/base-cont
 
 import type { CustomMessage } from "./messages.js";
 import type { ContextEpochEntryRef } from "./request-events.js";
+import type { CapturedSkillSelectionWriter, NativeSkillSourceRef } from "./selected-skills.js";
 
 /** The submitted input before native transforms; absence does not imply an empty submission. */
 export interface NativeSubmittedInput {
@@ -21,6 +22,8 @@ export type NativeEntryOrigin =
 			inputSource: "interactive" | "rpc" | "extension" | "internal";
 			recordRole: "primary" | "prefix" | "next_turn";
 			submitted?: NativeSubmittedInput;
+			/** From the real expansion/action owner, never inferred from the input text. */
+			selectedSkillRef?: NativeSkillSourceRef;
 	  }
 	| {
 			version: 1;
@@ -39,6 +42,8 @@ export type CapturedNativeMessageWrite = (message: Message | CustomMessage) => P
 export type CapturedNativeGoalWrite = (goal: unknown) => Promise<string>;
 
 export interface NativeEntryWriter {
+	/** Only actual host command/cell selection producers obtain this captured writer. */
+	captureSkillSelection(): CapturedSkillSelectionWriter;
 	/** Optional provenance qualifies only the original selected owner; all writes retain the captured generation. */
 	captureToolInvocation(
 		assistant?: ContextEpochEntryRef & { sessionFile: string | undefined },

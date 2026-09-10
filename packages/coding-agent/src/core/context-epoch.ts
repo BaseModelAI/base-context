@@ -4,6 +4,7 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 import type { ContextRef, IndexedSourceEvent } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
 import { MAX_RESOURCE_REVISION_BYTES } from "./resource-view.js";
+import type { SelectedSkillReference } from "./selected-skills.js";
 import type { CompiledTaskFrame } from "./task-frame.js";
 
 export const CONTEXT_EPOCH_DETAIL = "baseContextEpoch";
@@ -12,6 +13,8 @@ export const appendContextEpoch = Symbol("appendContextEpoch");
 export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/4";
 export const CONTEXT_POLICY_EPOCH_RENDERER = "native-canonical-epoch/5";
 export const CONTEXT_TOOL_EPOCH_RENDERER = "native-canonical-epoch/6";
+/** Selection-bearing v4/v5/v6 variants; older readers must refuse rather than drop these refs. */
+export const CONTEXT_SKILL_EPOCH_RENDERER = "native-canonical-epoch/7";
 
 /** Descriptive, source-backed outcomes in the existing accepted epoch, not an execution store. */
 export interface ToolContinuationGroup {
@@ -61,7 +64,8 @@ interface ContextEpochFields {
 		| "native-canonical-epoch/3"
 		| typeof CONTEXT_EPOCH_RENDERER
 		| typeof CONTEXT_POLICY_EPOCH_RENDERER
-		| typeof CONTEXT_TOOL_EPOCH_RENDERER;
+		| typeof CONTEXT_TOOL_EPOCH_RENDERER
+		| typeof CONTEXT_SKILL_EPOCH_RENDERER;
 	readonly source: SourceSnapshotRef;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
@@ -74,6 +78,8 @@ interface ContextEpochFields {
 		readonly publicTailThrough: SourceSnapshotRef;
 	};
 	readonly views: readonly EpochViewReference[];
+	/** Captured versions, not a body cache or authority inferred from transcript markup. */
+	readonly selectedSkills?: readonly SelectedSkillReference[];
 	/** Only v6 records this whole-group public representation and its exact outcome refs. */
 	readonly toolContinuations?: readonly ToolContinuationGroup[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
@@ -200,8 +206,23 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(value.version === 3 && value.renderer === "native-canonical-epoch/3") ||
 			(value.version === 4 && value.renderer === "native-canonical-epoch/4") ||
 			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER) ||
-			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER)
+			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER) ||
+			([4, 5, 6].includes(value.version as number) && value.renderer === CONTEXT_SKILL_EPOCH_RENDERER)
 		) ||
+		(value.renderer === CONTEXT_SKILL_EPOCH_RENDERER
+			? !("selectedSkills" in value) ||
+				!Array.isArray(value.selectedSkills) ||
+				value.selectedSkills.length === 0 ||
+				value.selectedSkills.some(
+					(item) =>
+						!item ||
+						typeof item.name !== "string" ||
+						!item.view ||
+						!["custom_message", "custom"].includes(item.view.ref?.kind) ||
+						typeof item.view.sourceRevision !== "string",
+				) ||
+				new Set(value.selectedSkills.map((item) => item.name)).size !== value.selectedSkills.length
+			: "selectedSkills" in value) ||
 		!("source" in value) ||
 		!value.source ||
 		!("views" in value) ||
