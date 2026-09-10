@@ -51,7 +51,6 @@ base_context_screen_layout_lab_width=0
 base_context_screen_render_lab_width=0
 base_context_screen_compact=0
 base_context_download_dir=
-base_context_bootstrap_kernel_on_install=0
 base_context_screen_title=
 base_context_screen_status=
 base_context_screen_detail=
@@ -65,12 +64,20 @@ main() {
 		exit 1
 	fi
 
+	base_context_install_root="${BASE_CONTEXT_INSTALL_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/base-context}"
+	# Capture the original selection before prerequisite/download waits. Only the Node owner activates it.
+	if [ -e "$base_context_install_root/current.json" ]; then
+		base_context_original_selection=$(cat "$base_context_install_root/current.json")
+	else
+		base_context_original_selection=null
+	fi
+
 	base_context_install_traps
 	base_context_init_screen
 	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Installing Base Context" "" "" ""
+		base_context_screen "Installing Base-Context" "" "" ""
 	else
-		printf '\n\033[1m  Installing Base Context\033[0m\n\033[2m  npm global install\033[0m\n\n'
+		printf '\n\033[1m  Installing Base-Context\033[0m\n\033[2m  owned versioned install\033[0m\n\n'
 	fi
 
 	start_preflight_checks
@@ -103,43 +110,26 @@ main() {
 	tarball_url="$base_context_base_url/releases/v$version/$tarball_name"
 
 	confirm_install "$version" "$tarball_url"
-	confirm_kernel_runtime_setup
 
 	download_dir=$(create_temp_dir)
 	base_context_download_dir="$download_dir"
 	tarball_path="$download_dir/$tarball_name"
 
 	download_base_context_package "$version" "$tarball_url" "$tarball_path"
-	install_base_context_package "$tarball_path"
+	install_base_context_package "$tarball_path" "$version"
 	rm -rf "$download_dir"
 	base_context_download_dir=
 
-	if [ "${BASE_CONTEXT_NODE_INSTALLED_STANDALONE:-0}" = 1 ]; then
-		base_context_screen "Base Context installed" "" "Checking your shell PATH." ""
-		configure_standalone_node_path
-	elif command -v "$base_context_cmd" >/dev/null 2>&1; then
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base Context installed" "" "Run it with: $base_context_cmd" ""
-		else
-			printf '\nBase Context was installed successfully.\n'
-			printf '\nRun it with: %s\n' "$base_context_cmd"
-		fi
-	else
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base Context installed" "" "PATH update needed for $base_context_cmd." ""
-			base_context_restore_terminal
-		else
-			printf '\nBase Context was installed successfully.\n'
-		fi
-		cat <<EOF
-The $base_context_cmd command was installed, but it is not on your PATH yet.
-Check npm's global bin directory with:
-
-  npm bin -g
-
-Then add that directory to your shell PATH.
-EOF
+	base_context_owned_path="$base_context_install_root/bin"
+	if [ -n "${BASE_CONTEXT_STANDALONE_NODE_BIN:-}" ]; then
+		base_context_owned_path="$base_context_owned_path:$BASE_CONTEXT_STANDALONE_NODE_BIN"
 	fi
+	base_context_restore_terminal
+	printf '\nBase-Context was installed with its prepared Python runtime.\n'
+	printf '\nBefore running Base-Context, apply this PATH and add it to your shell profile:\n\n  export PATH="%s:$PATH"\n' "$base_context_owned_path"
+	printf '\nThen run: %s/bin/base-context\n' "$base_context_install_root"
+	printf '\nExplicit rollback: %s/bin/base-context-install rollback\n' "$base_context_install_root"
+	printf '\nExisting package-manager installations were not changed.\n'
 }
 
 create_temp_dir() {
@@ -427,16 +417,9 @@ base_context_set_lab_line() {
 
 base_context_logo_line() {
 	case "$1" in
-		2) printf '                          ▄▄███▀' ;;
-		3) printf '    ▄▄▄▄▄              ▄█████▀' ;;
-		4) printf '    ██████▄         ▄██████▀' ;;
-		5) printf '   ▄███▀███▄     ▄███▀▄██▀' ;;
-		6) printf '   ███ ▄████▄▄▄████▀▄▄██' ;;
-		7) printf '  ▀██  ▀█████████▀▀▀▀▀▀' ;;
-		8) printf '  ▄██   ██████▀▀ ▄███' ;;
-		9) printf ' █████    ▀█▄▄▄█████▀' ;;
-		10) printf '███████▄  ████████▀' ;;
-		11) printf '▀███▀▀    █████▀' ;;
+		5) printf '        +--------------+        ' ;;
+		6) printf '        | Base-Context |        ' ;;
+		7) printf '        +--------------+        ' ;;
 	esac
 }
 
@@ -584,7 +567,7 @@ base_context_set_title_line() {
 	base_context_content_text=$(base_context_fit_ascii "$1" "$max_width")
 	base_context_content_width=${#base_context_content_text}
 	case "$base_context_content_text" in
-		*"Base Context"*)
+		*"Base-Context"*)
 			base_context_content_text=$(base_context_style_base_context_title "$base_context_content_text")
 			base_context_content_style=
 			;;
@@ -600,11 +583,11 @@ base_context_style_base_context_title() {
 	styled=
 	while :; do
 		case "$text" in
-			*"Base Context"*)
-				before=${text%%Base Context*}
-				rest=${text#*Base Context}
+			*"Base-Context"*)
+				before=${text%%Base-Context*}
+				rest=${text#*Base-Context}
 				styled="${styled}${base_context_bold}${base_context_color_primary}${before}"
-				styled="${styled}${base_context_bold}${base_context_color_primary}Base Context${base_context_reset}"
+				styled="${styled}${base_context_bold}${base_context_color_primary}Base-Context${base_context_reset}"
 				text="$rest"
 				;;
 			*)
@@ -874,7 +857,7 @@ finish_preflight_checks() {
 	if [ "$base_context_screen_enabled" = 1 ]; then
 		if [ "$preflight_status" -ne 0 ]; then
 			preflight_summary=$(sed -n '1p' "$preflight_file")
-			base_context_screen "Node.js 22.8.0 or newer is required" "" "$preflight_summary" ""
+			base_context_screen "Node.js ^22.12.0 || >=23.3.0 is required" "" "$preflight_summary" ""
 			sleep 0.4
 		elif [ -s "$preflight_file" ]; then
 			preflight_summary="Existing $base_context_cmd command found on PATH."
@@ -895,17 +878,17 @@ run_preflight_checks() {
 
 	if command -v node >/dev/null 2>&1; then
 		node_version=$(node --version)
-		if ! node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && (minor > 8 || (minor === 8 && patch >= 0))) ? 0 : 1)' >/dev/null; then
-			printf 'error: Base Context requires Node.js 22.8.0 or newer. Found %s.\n' "$node_version"
+		if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 23 || (major === 23 && minor >= 3) || (major === 22 && minor >= 12) ? 0 : 1)' >/dev/null; then
+			printf 'error: Base-Context requires Node.js ^22.12.0 || >=23.3.0. Found %s.\n' "$node_version"
 			status=1
 		fi
 	else
-		printf 'error: Node.js 22.8.0 or newer is required to install Base Context.\n'
+		printf 'error: Node.js ^22.12.0 || >=23.3.0 is required to install Base-Context.\n'
 		status=1
 	fi
 
 	if ! command -v npm >/dev/null 2>&1; then
-		printf 'error: npm is required to install Base Context.\n'
+		printf 'error: npm is required to install Base-Context.\n'
 		status=1
 	fi
 
@@ -940,14 +923,14 @@ resolve_base_context_version() {
 	fi
 
 	if ! command -v curl >/dev/null 2>&1; then
-		printf 'error: curl is required to resolve the latest Base Context version.\n' >&2
+		printf 'error: curl is required to resolve the latest Base-Context version.\n' >&2
 		exit 1
 	fi
 
 	case "$release_channel" in
 		stable|beta) ;;
 		*)
-			printf 'error: invalid Base Context release channel: %s\n' "$release_channel" >&2
+			printf 'error: invalid Base-Context release channel: %s\n' "$release_channel" >&2
 			exit 1
 			;;
 	esac
@@ -960,13 +943,13 @@ resolve_base_context_version() {
 		"Checking the $release_channel release channel." \
 		curl -fsSL "$base_context_base_url/$release_channel" -o "$channel_path"; then
 		rm -rf "$channel_dir"
-		printf 'error: could not resolve latest Base Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
+		printf 'error: could not resolve latest Base-Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
 		exit 1
 	fi
 	channel_version="$(tr -d '[:space:]' <"$channel_path")"
 	rm -rf "$channel_dir"
 	if [ -z "$channel_version" ]; then
-		printf 'error: could not resolve latest Base Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
+		printf 'error: could not resolve latest Base-Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
 		exit 1
 	fi
 	normalize_version "$channel_version"
@@ -976,11 +959,11 @@ normalize_version() {
 	version="${1#v}"
 	case "$version" in
 		"")
-			printf 'error: empty Base Context version.\n' >&2
+			printf 'error: empty Base-Context version.\n' >&2
 			exit 1
 			;;
 		*[!0-9A-Za-z.-]*)
-			printf 'error: invalid Base Context version: %s\n' "$1" >&2
+			printf 'error: invalid Base-Context version: %s\n' "$1" >&2
 			exit 1
 			;;
 	esac
@@ -1002,7 +985,7 @@ install_node_npm_interactive() {
 
 	if base_context_prompt_yes_no \
 		"Install Node.js and npm with $label?" \
-		"Required before Base Context can be installed." \
+		"Required before Base-Context can be installed." \
 		"Install? [Y/n]"; then
 		install_node_npm "$method" "$label"
 		return
@@ -1010,9 +993,9 @@ install_node_npm_interactive() {
 		prompt_status=$?
 	fi
 	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; install Node.js 22.8.0 or newer and npm, then run this installer again.\n'
+		printf 'No terminal detected; install Node.js ^22.12.0 || >=23.3.0 and npm, then run this installer again.\n'
 	else
-		printf '\nInstall Node.js 22.8.0 or newer and npm, then run this installer again.\n'
+		printf '\nInstall Node.js ^22.12.0 || >=23.3.0 and npm, then run this installer again.\n'
 	fi
 	return 1
 }
@@ -1064,14 +1047,12 @@ node_version_string_is_new_enough() {
 	IFS=$version_ifs
 	major="${1:-}"
 	minor="${2:-0}"
-	patch="${3:-0}"
 	case "$major" in ''|*[!0-9]*) return 1 ;; esac
 	case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
-	case "$patch" in ''|*[!0-9]*) patch=0 ;; esac
 
-	[ "$major" -gt 22 ] && return 0
-	[ "$major" -eq 22 ] && [ "$minor" -gt 8 ] && return 0
-	[ "$major" -eq 22 ] && [ "$minor" -eq 8 ] && [ "$patch" -ge 0 ] && return 0
+	[ "$major" -gt 23 ] && return 0
+	[ "$major" -eq 23 ] && [ "$minor" -ge 3 ] && return 0
+	[ "$major" -eq 22 ] && [ "$minor" -ge 12 ] && return 0
 	return 1
 }
 
@@ -1088,7 +1069,7 @@ install_node_npm() {
 Resolving Node.js packages.
 Downloading Node.js runtime.
 Installing npm.
-Preparing Base Context setup."
+Preparing Base-Context setup."
 		base_context_run_quiet_with_animation_steps \
 			"Installing Node.js and npm" \
 			"Installing Node.js and npm" \
@@ -1102,7 +1083,7 @@ Preparing Base Context setup."
 	fi
 	hash -r
 	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Node.js and npm installed" "" "Continuing Base Context setup." ""
+		base_context_screen "Node.js and npm installed" "" "Continuing Base-Context setup." ""
 	else
 		printf '\nNode.js and npm are installed.\n\n'
 	fi
@@ -1313,7 +1294,7 @@ configure_standalone_node_path() {
 		case "$original_base_context_path" in
 			"$BASE_CONTEXT_STANDALONE_NODE_BIN/"*)
 				if [ "$base_context_screen_enabled" = 1 ]; then
-					base_context_screen "Base Context installed" "" "Run it with: $base_context_cmd" ""
+					base_context_screen "Base-Context installed" "" "Run it with: $base_context_cmd" ""
 				else
 					printf '\nRun it with: %s\n' "$base_context_cmd"
 				fi
@@ -1321,14 +1302,14 @@ configure_standalone_node_path() {
 				;;
 		esac
 		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base Context installed" "" "PATH update needed for $base_context_cmd." ""
+			base_context_screen "Base-Context installed" "" "PATH update needed for $base_context_cmd." ""
 		else
 			printf '%s was installed, but your shell is not using that install yet.\n' "$base_context_cmd"
 			printf 'Your shell currently resolves %s to: %s\n' "$base_context_cmd" "$original_base_context_path"
 		fi
 	else
 		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base Context installed" "" "PATH update needed for $base_context_cmd." ""
+			base_context_screen "Base-Context installed" "" "PATH update needed for $base_context_cmd." ""
 		else
 			printf '%s was installed, but your shell is not using that install yet.\n' "$base_context_cmd"
 		fi
@@ -1345,7 +1326,7 @@ configure_standalone_node_path() {
 
 	if shell_profile_has_standalone_node_path "$profile"; then
 		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
+			base_context_screen "Base-Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
 		else
 			printf '%s already contains %s.\n' "$profile" "$BASE_CONTEXT_STANDALONE_NODE_BIN"
 			printf 'Restart your shell or run: %s\n' "$(base_context_source_profile_command "$profile")"
@@ -1421,11 +1402,11 @@ prompt_add_standalone_node_path() {
 
 	mkdir -p "$(dirname "$profile")"
 	{
-		printf '\n# Base Context standalone Node.js\n'
+		printf '\n# Base-Context standalone Node.js\n'
 		printf '%s\n' "$path_line"
 	} >>"$profile"
 	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Base Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
+		base_context_screen "Base-Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
 	else
 		printf 'Added %s to %s.\n' "$BASE_CONTEXT_STANDALONE_NODE_BIN" "$profile"
 		printf 'Restart your shell or run: %s\n' "$(base_context_source_profile_command "$profile")"
@@ -1461,19 +1442,19 @@ download_base_context_package() {
 	checksums_path="$download_dir/SHA256SUMS"
 
 	if ! command -v curl >/dev/null 2>&1; then
-		printf 'error: curl is required to download Base Context.\n' >&2
+		printf 'error: curl is required to download Base-Context.\n' >&2
 		exit 1
 	fi
 
 	base_context_run_quiet_with_animation \
 		"Downloading checksums" \
 		"Downloading release checksums" \
-		"Base Context v$version" \
+		"Base-Context v$version" \
 		curl -fsSL "$checksums_url" -o "$checksums_path"
 
 	base_context_run_quiet_with_animation \
-		"Downloading Base Context" \
-		"Downloading Base Context v$version" \
+		"Downloading Base-Context" \
+		"Downloading Base-Context v$version" \
 		"Fetching the verified package." \
 		curl -fsSL "$tarball_url" -o "$tarball_path"
 
@@ -1496,17 +1477,17 @@ verify_base_context_package_checksum() {
 	if command -v sha256sum >/dev/null 2>&1; then
 		base_context_run_quiet_with_animation \
 			"Verifying download" \
-			"Verifying Base Context download" \
+			"Verifying Base-Context download" \
 			"Checking SHA-256." \
 			base_context_run_checksum_check "$checksum_dir" "$(basename "$selected_checksums_path")" sha256sum
 	elif command -v shasum >/dev/null 2>&1; then
 		base_context_run_quiet_with_animation \
 			"Verifying download" \
-			"Verifying Base Context download" \
+			"Verifying Base-Context download" \
 			"Checking SHA-256." \
 			base_context_run_checksum_check "$checksum_dir" "$(basename "$selected_checksums_path")" shasum
 	else
-		printf 'error: sha256sum or shasum is required to verify the Base Context download.\n' >&2
+		printf 'error: sha256sum or shasum is required to verify the Base-Context download.\n' >&2
 		exit 1
 	fi
 }
@@ -1530,8 +1511,8 @@ confirm_install() {
 	tarball_url="$2"
 
 	if base_context_prompt_yes_no \
-		"Install Base Context v$version globally with npm?" \
-		"Downloads the verified release and runs npm install -g." \
+		"Install Base-Context v$version in an owned version directory?" \
+		"Prepares the CLI and Python runtime before selecting them together." \
 		"Install? [Y/n]"; then
 		return 0
 	else
@@ -1552,90 +1533,29 @@ confirm_install() {
 	exit 0
 }
 
-confirm_kernel_runtime_setup() {
-	case "${BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL:-}" in
-		1)
-			base_context_bootstrap_kernel_on_install=1
-			return
-			;;
-		0)
-			base_context_bootstrap_kernel_on_install=0
-			return
-			;;
-	esac
-
-	if base_context_prompt_yes_no \
-		"Prepare Python runtime now?" \
-		"Installs uv, Python 3.11, and the Base Context runtime." \
-		"Prepare? [Y/n]"; then
-		base_context_bootstrap_kernel_on_install=1
-		return
-	else
-		prompt_status=$?
-	fi
-
-	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; preparing the Python runtime during install.\n'
-		base_context_bootstrap_kernel_on_install=1
-		return
-	fi
-
-	base_context_bootstrap_kernel_on_install=0
-	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Python setup skipped" "" "The runtime can be prepared on first ipython use." ""
-		sleep 0.4
-	else
-		printf '\nSkipping Python runtime setup.\n'
-	fi
-}
-
-base_context_npm_requires_remote_policy() {
-	npm_version=$(npm --version 2>/dev/null) || return 1
-	npm_major=${npm_version%%.*}
-	case "$npm_major" in
-		""|*[!0-9]*) return 1 ;;
-	esac
-	[ "$npm_major" -ge 12 ]
-}
-
-base_context_npm_install() {
+base_context_owned_install() {
 	tarball_path="$1"
-	shift
-	if base_context_npm_requires_remote_policy; then
-		# Limit npm 12's required policy overrides to the verified root package.
-		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false \
-			--allow-remote=all --allow-scripts="$tarball_path" "$tarball_path"
-	else
-		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
-	fi
+	version="$2"
+	bootstrap_dir="$base_context_download_dir/bootstrap"
+	mkdir -p "$bootstrap_dir"
+	# The verified package contains one bundled installer owner; no global install or shell activation.
+	tar -xzf "$tarball_path" -C "$bootstrap_dir"
+	node "$bootstrap_dir/package/dist/installer.mjs" install \
+		"$base_context_install_root" "$base_context_original_selection" "$tarball_path" "$version"
 }
 
 install_base_context_package() {
 	tarball_path="$1"
-	if [ "$base_context_bootstrap_kernel_on_install" = 1 ]; then
-		npm_install_details="Preparing global install.
-Linking command binaries.
-Installing runtime packages.
-Preloading search tools.
-Preparing Python kernel.
-Finalizing npm install."
-		base_context_run_quiet_with_animation_steps \
-			"Installing Base Context" \
-			"Installing Base Context" \
-			"$npm_install_details" \
-			base_context_npm_install "$tarball_path" BASE_CONTEXT_BOOTSTRAP_TOOLS_ON_INSTALL=1 BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL=1 BASE_CONTEXT_INSTALL_UV=1
-	else
-		npm_install_details="Preparing global install.
-Linking command binaries.
-Installing runtime packages.
-Preloading search tools.
-Finalizing npm install."
-		base_context_run_quiet_with_animation_steps \
-			"Installing Base Context" \
-			"Installing Base Context" \
-			"$npm_install_details" \
-			base_context_npm_install "$tarball_path" BASE_CONTEXT_BOOTSTRAP_TOOLS_ON_INSTALL=1
-	fi
+	version="$2"
+	install_details="Staging a unique Base-Context version.
+Preparing its release-local Python runtime.
+Selecting the executable and runtime together.
+Retaining the previous version for rollback."
+	base_context_run_quiet_with_animation_steps \
+		"Installing Base-Context" \
+		"Installing Base-Context" \
+		"$install_details" \
+		base_context_owned_install "$tarball_path" "$version"
 }
 
 main "$@"

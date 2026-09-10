@@ -70,11 +70,11 @@ export interface DaemonSocketIdentity {
 	ino: number;
 }
 
-export function defaultDaemonSocketPath(): string {
+export function defaultDaemonSocketPath(packageDir = getPackageDir()): string {
 	if (process.platform === "win32") {
-		return `\\\\.\\pipe\\${PRODUCT.command}-${daemonScopeId()}`;
+		return `\\\\.\\pipe\\${PRODUCT.command}-${daemonScopeId(packageDir)}`;
 	}
-	return join(defaultDaemonSocketDir(), "daemon.sock");
+	return join(defaultDaemonSocketDir(packageDir), "daemon.sock");
 }
 
 export async function acquireDaemonSocketPathLease(socketPath: string): Promise<DaemonSocketPathLease | undefined> {
@@ -279,13 +279,13 @@ function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease)
 	}
 }
 
-function daemonScopeId(): string {
-	return createHash("sha256").update(`${getAgentDir()}\0${getPackageDir()}`).digest("hex").slice(0, 12);
+function daemonScopeId(packageDir: string): string {
+	return createHash("sha256").update(`${getAgentDir()}\0${packageDir}`).digest("hex").slice(0, 12);
 }
 
-export function defaultDaemonSocketDir(): string {
+export function defaultDaemonSocketDir(packageDir = getPackageDir()): string {
 	const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
-	return join(tmpdir(), `bc-${suffix}-${daemonScopeId().slice(0, 8)}`);
+	return join(tmpdir(), `bc-${suffix}-${daemonScopeId(packageDir).slice(0, 8)}`);
 }
 
 function ensureDefaultDaemonSocketDir(socketPath: string): void {

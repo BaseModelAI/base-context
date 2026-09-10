@@ -373,6 +373,11 @@ export function getPackageDir(): string {
 		return envDir;
 	}
 
+	return getPhysicalPackageDir();
+}
+
+/** The immutable package containing this module, independent of an asset-path override. */
+export function getPhysicalPackageDir(): string {
 	if (isBunBinary) {
 		// Bun binary: process.execPath points to the compiled executable
 		return dirname(process.execPath);

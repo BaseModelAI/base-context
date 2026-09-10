@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -39,7 +39,7 @@ print_render_meta() {
 }
 
 render_case() {
-	base_context_screen_title="Installing Base Context"
+	base_context_screen_title="Installing Base-Context"
 	base_context_screen_detail="Fetching the verified package."
 	base_context_screen_question=
 	base_context_screen_frame=1
@@ -82,13 +82,13 @@ screen_case() {
 	base_context_test_cols="$1"
 	base_context_test_rows="$2"
 	printf '__SCREEN_START__ first\\n' >&2
-	base_context_screen "Installing Base Context" "Installing Base Context" "Fetching the verified package." ""
+	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ first\\n' >&2
 
 	base_context_test_cols="$3"
 	base_context_test_rows="$4"
 	printf '__SCREEN_START__ second\\n' >&2
-	base_context_screen "Installing Base Context" "Installing Base Context" "Fetching the verified package." ""
+	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ second\\n' >&2
 }
 
@@ -98,7 +98,7 @@ Linking command binaries.
 Finalizing npm install."
 	for progress_frame in 1 24 25 48 49 200; do
 		base_context_animation_frame="$progress_frame"
-		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(base_context_animation_status "Installing Base Context" "$progress_details" static)" "$(base_context_animation_detail "$progress_details")"
+		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(base_context_animation_status "Installing Base-Context" "$progress_details" static)" "$(base_context_animation_detail "$progress_details")"
 	done
 }
 
@@ -116,6 +116,10 @@ try {
 	const stableVisible = runCase("stable visible logo", 100, 30, 90, 30);
 	check(stableVisible.meta.first.visible === "1", "expected the initial large render to show the logo");
 	check(stableVisible.meta.second.visible === "1", "expected a safe resize to keep showing the logo");
+	check(
+		stableVisible.renders.first.some((line) => line.includes("| Base-Context |")),
+		"expected the visible installer wordmark to say Base-Context",
+	);
 	check(
 		stableVisible.meta.first.lab_width === stableVisible.meta.second.lab_width,
 		"expected logo lab width to stay stable across a safe resize",
@@ -153,7 +157,7 @@ try {
 	check(compactRows.meta.second.compact === "1", "expected shrink below frozen splash height to use compact mode");
 	check(compactRows.meta.second.visible === "0", "expected compact row mode to hide the logo");
 
-	checkNpmInstallPolicies();
+	checkOwnedInstallerRoute();
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
 }
@@ -165,64 +169,37 @@ if (failures.length > 0) {
 
 console.log("Installer check passed.");
 
-function checkNpmInstallPolicies() {
+function checkOwnedInstallerRoute() {
 	const binDir = join(tempDir, "bin");
 	const installHarnessPath = join(tempDir, "install-harness.sh");
-	const npmPath = join(binDir, "npm");
 	const tarballPath = join(tempDir, "verified release package.tgz");
+	const root = join(tempDir, "owned install");
+	const original = JSON.stringify({ generation: "original", active: "old", previous: null });
 	const installHarnessSource = `${installerSource.slice(0, mainCallIndex)}
-
-base_context_npm_install "$1"
+base_context_download_dir="$1"
+base_context_install_root="$2"
+base_context_original_selection="$3"
+base_context_owned_install "$4" 1.2.3
 `;
-	const npmSource = `#!/bin/sh
-set -eu
-
-if [ "\${1:-}" = "--version" ]; then
-	printf '%s\\n' "$FAKE_NPM_VERSION"
-	exit 0
-fi
-[ "\${1:-}" = install ] || exit 1
-
-remote_policy=
-script_policy=
-target=
-for arg in "$@"; do
-	case "$arg" in
-		--allow-remote=*) remote_policy=\${arg#*=} ;;
-		--allow-scripts=*) script_policy=\${arg#*=} ;;
-		"$FAKE_NPM_TARBALL") target="$arg" ;;
-	esac
-done
-[ "$target" = "$FAKE_NPM_TARBALL" ] || exit 1
-
-npm_major=\${FAKE_NPM_VERSION%%.*}
-if [ "$npm_major" -ge 12 ]; then
-	[ "$remote_policy" = all ] && [ "$script_policy" = "$FAKE_NPM_TARBALL" ] || exit 1
-else
-	[ -z "$remote_policy" ] && [ -z "$script_policy" ] || exit 1
-fi
-`;
-
 	mkdirSync(binDir);
-	writeFileSync(installHarnessPath, installHarnessSource, "utf-8");
-	writeFileSync(npmPath, npmSource, "utf-8");
-	writeFileSync(tarballPath, "verified fixture", "utf-8");
-	chmodSync(npmPath, 0o755);
-
-	for (const npmVersion of ["10.9.8", "11.12.1", "12.0.2"]) {
-		const result = spawnSync("sh", [installHarnessPath, tarballPath], {
-			encoding: "utf-8",
-			env: {
-				...process.env,
-				FAKE_NPM_TARBALL: tarballPath,
-				FAKE_NPM_VERSION: npmVersion,
-				PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-			},
-		});
-		if (result.status !== 0) {
-			failures.push(`npm ${npmVersion}: install policy check failed\n${result.stderr}${result.stdout}`);
-		}
-	}
+	writeFileSync(installHarnessPath, installHarnessSource, "utf8");
+	writeFileSync(tarballPath, "verified fixture", "utf8");
+	writeFileSync(join(binDir, "tar"), `#!/bin/sh
+[ "$1" = -xzf ] && [ "$2" = "$EXPECTED_TARBALL" ] && [ "$3" = -C ] || exit 1
+mkdir -p "$4/package/dist"
+: > "$4/package/dist/installer.mjs"
+`, { mode: 0o755 });
+	writeFileSync(join(binDir, "node"), `#!/bin/sh
+[ "$1" = "$EXPECTED_ENTRY" ] && [ "$2" = install ] && [ "$3" = "$EXPECTED_ROOT" ] &&
+[ "$4" = "$EXPECTED_SELECTION" ] && [ "$5" = "$EXPECTED_TARBALL" ] && [ "$6" = 1.2.3 ]
+`, { mode: 0o755 });
+	const result = spawnSync("sh", [installHarnessPath, tempDir, root, original, tarballPath], {
+		encoding: "utf8",
+		env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+			EXPECTED_ENTRY: join(tempDir, "bootstrap", "package", "dist", "installer.mjs"),
+			EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
+	});
+	check(result.status === 0, `owned Base-Context installer handoff failed\n${result.stderr}${result.stdout}`);
 }
 
 function runCase(name, initialCols, initialRows, resizedCols, resizedRows) {
@@ -316,7 +293,7 @@ function assertInstallerProgress(progress) {
 			`expected progress sample ${index + 1} to show "${expectedDetail}", got "${progress[index].detail}"`,
 		);
 		check(
-			progress[index].status === "Installing Base Context...",
+			progress[index].status === "Installing Base-Context...",
 			`expected progress sample ${index + 1} to use indeterminate status`,
 		);
 		check(!progress[index].status.includes("%"), `expected progress sample ${index + 1} not to include a percent`);

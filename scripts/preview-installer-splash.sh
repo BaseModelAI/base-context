@@ -55,7 +55,7 @@ trap 'preview_signal_cleanup 143' TERM
 
 i=0
 while [ "$i" -lt "$1" ]; do
-	base_context_screen "Installing Base Context" "Downloading Base Context$(base_context_pulse)" "Fetching the verified package." ""
+	base_context_screen "Installing Base-Context" "Downloading Base-Context$(base_context_pulse)" "Fetching the verified package." ""
 	sleep 0.18
 	i=$((i + 1))
 done

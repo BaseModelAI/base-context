@@ -19,6 +19,7 @@ import {
 	DAEMON_UPDATE_RESTART_COORDINATOR_FLAG,
 	DAEMON_UPDATE_RESTART_ORIGIN_FLAG,
 	DAEMON_UPDATE_RESTART_STATUS_FLAG,
+	DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG,
 	DaemonUpdateRestartCoordinatorAlreadyRunningError,
 	type DaemonUpdateRestartCounts,
 	type DaemonUpdateRestartFailure,
@@ -34,6 +35,7 @@ import {
 	getAgentDir,
 	getDaemonUpdateRestartManifestPath,
 	getLegacyDaemonUpdateRestartManifestPath,
+	getPhysicalPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	PACKAGE_NAME,
@@ -67,6 +69,8 @@ import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
+import { captureOwnedUpdate, installOwnedRelease, OwnedInstallActivatedError } from "./owned-install.js";
+import { getOwnedInstallation, type OwnedInstallation } from "./owned-install-layout.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
 
@@ -91,6 +95,7 @@ interface PackageCommandOptions {
 	restartCoordinator: boolean;
 	restartStatusPath?: string;
 	restartOriginActiveSessionId?: string;
+	restartSuccessorSocketPath?: string;
 	invalidOption?: string;
 	invalidArgument?: string;
 	missingOptionValue?: string;
@@ -212,6 +217,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let restartCoordinator = false;
 	let restartStatusPath: string | undefined;
 	let restartOriginActiveSessionId: string | undefined;
+	let restartSuccessorSocketPath: string | undefined;
 
 	for (let index = 0; index < rest.length; index++) {
 		const arg = rest[index];
@@ -283,7 +289,11 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
-		if (arg === DAEMON_UPDATE_RESTART_STATUS_FLAG || arg === DAEMON_UPDATE_RESTART_ORIGIN_FLAG) {
+		if (
+			arg === DAEMON_UPDATE_RESTART_STATUS_FLAG ||
+			arg === DAEMON_UPDATE_RESTART_ORIGIN_FLAG ||
+			arg === DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG
+		) {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
 				continue;
@@ -295,6 +305,8 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			}
 			if (arg === DAEMON_UPDATE_RESTART_STATUS_FLAG) {
 				restartStatusPath = value;
+			} else if (arg === DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG) {
+				restartSuccessorSocketPath = value;
 			} else {
 				restartOriginActiveSessionId = value;
 			}
@@ -376,6 +388,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		restartCoordinator,
 		restartStatusPath,
 		restartOriginActiveSessionId,
+		restartSuccessorSocketPath,
 		invalidOption,
 		invalidArgument,
 		missingOptionValue,
@@ -455,6 +468,7 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 }
 
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
+	console.log(chalk.dim("External package-manager install: Base-Context paired rollback does not apply."));
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
 	for (const step of command.steps ?? [command]) {
 		await new Promise<void>((resolve, reject) => {
@@ -1217,6 +1231,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 	agentDir: string;
 	statusPath: string;
 	originActiveSessionId?: string;
+	successorSocketPath?: string;
 }): Promise<DaemonUpdateRestartStatus> {
 	const statusWriter = new DaemonUpdateRestartStatusWriter(
 		options.statusPath,
@@ -1327,13 +1342,14 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		await shutdownAdmission.assertOrRenew();
 		await shutdownAdmission.release();
 		shutdownAdmission = undefined;
-		await ensureInteractiveDaemonRunning(options.socketPath);
-		const successorClient = new DaemonClient(options.socketPath);
+		const successorSocketPath = options.successorSocketPath ?? options.socketPath;
+		await ensureInteractiveDaemonRunning(successorSocketPath);
+		const successorClient = new DaemonClient(successorSocketPath);
 		let successor: DaemonUpdateRestartProcessIdentity;
 		try {
 			await successorClient.connect(1000);
 			const successorHello = await successorClient.waitForHello(60000);
-			successor = validateReplacementDaemon(options.socketPath, successorHello, predecessor);
+			successor = validateReplacementDaemon(successorSocketPath, successorHello, predecessor);
 		} finally {
 			successorClient.close();
 		}
@@ -1343,7 +1359,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		let failures: DaemonUpdateRestartFailure[] = [];
 		if (manifest) {
 			const restoreResult = await restoreDaemonUpdateRestart(
-				options.socketPath,
+				successorSocketPath,
 				manifest,
 				options.originActiveSessionId,
 				reportRestoreProgress,
@@ -1458,6 +1474,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 			agentDir,
 			statusPath,
 			originActiveSessionId: options.restartOriginActiveSessionId,
+			successorSocketPath: options.restartSuccessorSocketPath,
 		});
 		if (status.phase === "failed") {
 			process.exitCode = 1;
@@ -1465,7 +1482,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		return true;
 	}
 
-	if (options.restartStatusPath || options.restartOriginActiveSessionId) {
+	if (options.restartStatusPath || options.restartOriginActiveSessionId || options.restartSuccessorSocketPath) {
 		console.error(chalk.red("Invalid daemon update restart coordinator invocation."));
 		process.exitCode = 1;
 		return true;
@@ -1493,6 +1510,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		}
 	});
 
+	let activatedInstallation: OwnedInstallation | undefined;
 	try {
 		switch (options.command) {
 			case "install":
@@ -1549,6 +1567,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 
 			case "update": {
 				const target = options.updateTarget ?? { type: "all" };
+				const ownedInstallation = updateTargetIncludesSelf(target)
+					? getOwnedInstallation(getPhysicalPackageDir())
+					: undefined;
+				const originalSelection = ownedInstallation ? captureOwnedUpdate(ownedInstallation) : null;
 				if (updateTargetIncludesExtensions(target)) {
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
@@ -1564,13 +1586,15 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
-					const selfUpdateCommand = getSelfUpdateCommand(
-						PACKAGE_NAME,
-						selfUpdateNpmCommand,
-						selfUpdatePlan.installSpec,
-						selfUpdatePlan.packageName,
-					);
-					if (!selfUpdateCommand) {
+					const selfUpdateCommand = ownedInstallation
+						? undefined
+						: getSelfUpdateCommand(
+								PACKAGE_NAME,
+								selfUpdateNpmCommand,
+								selfUpdatePlan.installSpec,
+								selfUpdatePlan.packageName,
+							);
+					if (!ownedInstallation && !selfUpdateCommand) {
 						printSelfUpdateUnavailable(
 							selfUpdateNpmCommand,
 							selfUpdatePlan.installSpec,
@@ -1590,13 +1614,35 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						return true;
 					}
 					try {
-						await runSelfUpdate(selfUpdateCommand);
+						if (ownedInstallation) {
+							if (!selfUpdatePlan.targetVersion)
+								throw new Error("The Base-Context update has no target version.");
+							const activated = await installOwnedRelease({
+								root: ownedInstallation.root,
+								expected: originalSelection,
+								installSpec: selfUpdatePlan.installSpec,
+								version: selfUpdatePlan.targetVersion,
+							});
+							activatedInstallation = activated.installation;
+						} else if (selfUpdateCommand) {
+							await runSelfUpdate(selfUpdateCommand);
+						}
 					} catch (error: unknown) {
 						const message = error instanceof Error ? error.message : "Unknown package command error";
 						console.error(chalk.red(`Error: ${message}`));
-						printSelfUpdateFallback(selfUpdateCommand);
-						process.exitCode = 1;
-						return true;
+						if (error instanceof OwnedInstallActivatedError) {
+							activatedInstallation = error.activation.installation;
+							process.exitCode = 1;
+							console.error(
+								chalk.yellow(
+									`Base-Context activation was accepted for ${error.activation.installation.packageDir}; no rollback was attempted.`,
+								),
+							);
+						} else {
+							if (selfUpdateCommand && !ownedInstallation) printSelfUpdateFallback(selfUpdateCommand);
+							process.exitCode = 1;
+							return true;
+						}
 					}
 					const versionChange = selfUpdatePlan.targetVersion
 						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
@@ -1611,6 +1657,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 							agentDir,
 							cwd,
 							originActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
+							installation: activatedInstallation,
+							keepSocket: options.daemonSocketPath !== undefined,
 						});
 						reportDaemonUpdateRestartStatus(status);
 					} catch (error: unknown) {
@@ -1626,6 +1674,12 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		}
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : "Unknown package command error";
+		if (activatedInstallation)
+			console.error(
+				chalk.yellow(
+					`Base-Context activation was accepted for ${activatedInstallation.packageDir}; no rollback was attempted.`,
+				),
+			);
 		console.error(chalk.red(`Error: ${message}`));
 		process.exitCode = 1;
 		return true;

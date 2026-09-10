@@ -47,6 +47,7 @@ import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
+	selectedUpdateInstallation,
 } from "../../cli/daemon-update-restart.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -56,6 +57,7 @@ import {
 	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
+	getPhysicalPackageDir,
 	getShareViewerUrl,
 	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
@@ -134,6 +136,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import { getOwnedInstallation } from "../../owned-install-layout.js";
 import { assertProductStatePath } from "../../runtime-paths.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
@@ -8793,6 +8796,7 @@ export class InteractiveMode {
 			resolveDaemonUpdateRestartSocketPath(this.options.daemonSocketPath),
 		);
 		const updateChildArgs = includesSelf ? buildUpdateChildArgs(updateArgs, daemonSocketPath) : updateArgs;
+		const sourceInstallation = includesSelf ? getOwnedInstallation(getPhysicalPackageDir()) : undefined;
 		this.stopWorkingLoader();
 		await this.ui.terminal.drainInput(1000).catch(() => undefined);
 		this.ui.stop();
@@ -8812,6 +8816,12 @@ export class InteractiveMode {
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;
 
 		if (includesSelf && !selfUpdateNotAttempted) {
+			const selectedInstallation = selectedUpdateInstallation();
+			const selectedPairChanged =
+				selectedInstallation !== undefined && selectedInstallation.packageDir !== sourceInstallation?.packageDir;
+			const relaunchEntrypoint = selectedInstallation
+				? path.join(selectedInstallation.packageDir, "dist", "bundle", "cli.js")
+				: entrypoint;
 			const relaunchArgs = buildUpdateRelaunchArgs(process.argv.slice(2), this.connectionState?.sessionFile);
 			if (updateResult.error) {
 				console.error(`Update failed: ${updateResult.error.message}`);
@@ -8824,6 +8834,11 @@ export class InteractiveMode {
 				);
 				console.error(`Relaunching ${APP_NAME}...`);
 			}
+			if (selectedPairChanged && (updateResult.error || updateExitCode !== 0)) {
+				console.error(
+					`The captured Base-Context selection is ${selectedInstallation.packageDir}; coordinating that pair before relaunch despite the failed update command.`,
+				);
+			}
 			this.stop();
 			await this.agentConnection.dispose().catch(() => undefined);
 			try {
@@ -8831,13 +8846,15 @@ export class InteractiveMode {
 			} catch {
 				// The update already completed; do not block relaunch on local teardown.
 			}
-			if (!updateResult.error && updateExitCode === 0) {
+			if ((!updateResult.error && updateExitCode === 0) || selectedPairChanged) {
 				try {
 					const status = await launchDaemonUpdateRestartCoordinator({
 						socketPath: daemonSocketPath,
 						agentDir: getAgentDir(),
 						cwd: updateCwd,
 						originActiveSessionId: this.connectionState?.activeSessionId,
+						installation: selectedInstallation,
+						keepSocket: [...process.argv.slice(2), ...updateArgs].includes("--daemon-socket"),
 					});
 					const report = buildDaemonUpdateRestartReport(status);
 					for (const message of report.info) {
@@ -8848,11 +8865,19 @@ export class InteractiveMode {
 					}
 				} catch (error: unknown) {
 					console.error(
-						`Warning: updated, but could not coordinate the daemon restart (${error instanceof Error ? error.message : String(error)}).`,
+						`Warning: could not coordinate the daemon restart before relaunch (${error instanceof Error ? error.message : String(error)}).`,
 					);
 				}
 			}
-			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const relaunch = createCliSubprocessLaunchSpec(
+				relaunchArgs,
+				process.execPath,
+				process.execArgv,
+				relaunchEntrypoint,
+			);
+			const relaunchEnvironment = selectedInstallation
+				? { ...process.env, BASE_CONTEXT_PACKAGE_DIR: selectedInstallation.packageDir }
+				: process.env;
 			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
 			try {
 				if (
@@ -8861,7 +8886,7 @@ export class InteractiveMode {
 						nodeVersion: process.versions.node,
 						cwd: updateCwd,
 						previousCwd: process.cwd(),
-						environment: process.env,
+						environment: relaunchEnvironment,
 						chdir: (directory) => process.chdir(directory),
 						execve: updateProcess.execve,
 					})
@@ -8876,7 +8901,7 @@ export class InteractiveMode {
 			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
-				env: process.env,
+				env: relaunchEnvironment,
 			});
 			if (relaunchResult.error) {
 				console.error(`Failed to relaunch ${APP_NAME}: ${relaunchResult.error.message}`);

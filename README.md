@@ -39,6 +39,33 @@ that directory and invoke the built CLI by its absolute path. The installed bina
 named `base-context`; until a release is approved, do not use an upstream installer or
 expect an unpublished npm package to resolve.
 
+### Owned installer and rollback
+
+The POSIX installer is branded **Base-Context**. Its release endpoints remain
+unpublished. The owned installation defaults to
+`${XDG_DATA_HOME:-$HOME/.local/share}/base-context`; set `BASE_CONTEXT_INSTALL_ROOT`
+to choose another root. Each version has its own CLI, shipped runtime payload,
+and prepared default Python environment. Preparation must finish before that
+version becomes selected. Follow the installer's PATH instructions before launch,
+including the separate `base-context-node` directory if it installed standalone Node.
+
+Once installed through this route:
+
+```bash
+base-context update --self
+base-context-install rollback
+```
+
+Rollback selects the retained previous CLI/Python pair for future launches. It does
+not stop running owners, roll back session data or Node, or undo changes made by
+running processes. Normal Python Skill synchronization is unchanged; these
+Python environments are not immutable snapshots. Old and failed version directories
+are retained; there is no automatic cleanup.
+
+Existing npm/pnpm/yarn/bun global installations stay externally owned. Their normal
+updater remains supported, but they do not gain this paired rollback guarantee.
+The owned installer does not convert or overwrite those global installations.
+
 Base Context uses its own `~/.base-context` state. Copied OAuth clients are not globally
 authorized. Supported explicit credential routes and the narrow read-only existing OpenAI
 subscription API are documented in the [SDK guide](packages/coding-agent/docs/sdk.md).

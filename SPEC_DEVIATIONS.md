@@ -1129,3 +1129,71 @@ process-group/admission cleanup. Production code did not change for this fix.
 Required `npm run check` passed first (3825461,4.9721702160313725s):1040files/no
 fixes, TypeScript, installer and browser smoke. No extra case, suite, live probe,
 Node reassurance rerun, installed/native-platform or whole-process claim.
+
+## W67 / G14 — owned POSIX installation and paired selection
+
+The user approved the owned layout and exact human-facing installer name
+**Base-Context**. Publication remains unapproved. The shell installer and owned
+self-update use one bundled installer owner rather than modifying an external
+package-manager global tree. A unique version directory contains the CLI, shipped
+runtime payload and release-local default Python environment. Candidate npm and
+runtime preparation run inside that directory. The candidate's bundled
+`installer.mjs prepare` must finish runtime/default-import readiness before selection;
+ambient Python/venv overrides cannot stand in for its prepared default runtime.
+
+One `current.json` records generation, active and previous together. The switch
+captures its expected selection before effects. An external Node worker, launched
+with child-only `--experimental-sqlite`, holds the SQLite mutex and compares the
+generation before rename. Node executable, environment, worker entry and original
+parent are captured before waits; Bun also uses external Node. Previous comes from
+the actual held selection. A returned accepted selection survives later helper or
+cleanup failures. Missing or malformed helper output stays uncertain, without
+candidate deletion or rollback. The synchronous bridge can block the caller;
+its timeout is not a hard-wall or fairness guarantee.
+Initial stable launchers are published as complete files under that same owner.
+Explicit `base-context-install rollback` selects the retained previous pair through
+the same switch. Failed preparation does not replace the old selection. Old and
+failed candidates remain on disk; there is no automatic garbage collection or new
+state table. A known accepted activation and a later cleanup failure remain separate
+facts, with the failed status retained rather than reported as complete success.
+
+Running owners remain bound to their physical package/runtime paths. The existing
+restart coordinator launches the selected physical CLI, uses that release's default
+daemon socket, and retains an exact explicit/custom socket. Its existing registry
+and lease use the stable owned root within the existing home/install scope; actual
+daemon sockets remain release-physical. The interactive updater captures one
+physical target after child settlement and before teardown/restart awaits, then
+uses that same target for restart and relaunch. Observing a different selected pair
+still requires predecessor coordination even when the child reports a failure; it
+does not establish which updater accepted that selection. Existing predecessor
+preparation, drain, fence and recovery remain authoritative. No daemon/schema,
+kernel/bootstrap or history-index version changes are needed for this route.
+
+The default owned root is `${XDG_DATA_HOME:-$HOME/.local/share}/base-context`, or
+`BASE_CONTEXT_INSTALL_ROOT`. Standalone Node stays in the separate `base-context-node`
+root. PATH guidance precedes Run guidance. Installer predicates and messages now
+match the shipped Node range `^22.12.0 || >=23.3.0`. CLI/package/environment names
+remain `base-context`, `@ponythewhite/base-context` and `BASE_CONTEXT_*`.
+
+**Scope limits:** existing npm/pnpm/yarn/bun global trees keep their own updater and
+are outside paired rollback. Running processes and session data are not rolled
+back. Normal Python Skill synchronization remains unchanged; retained venvs are not
+immutable snapshots or sandboxes. There is no Node rollback, Windows/Homebrew/binary
+installation guarantee, automatic repair, power-loss/universal-filesystem guarantee
+or complete migration claim. Frozen benchmarks, subscription auth, Prime state and
+Sol's custom instructions are unchanged. Whole G14 and release completion remain
+open outside this owned route.
+
+The first focused run (3851419,2.4425214750226587s) failed both existing selectors
+at `owned-install.ts:100`: `No such built-in module: node:sqlite`. Node22.12 needs
+`--experimental-sqlite`; this was a production activation-path gap, not a fixture
+failure. The first log is retained. The external-Node correction was formatted
+once (3859815,0.07831983803771436s;3files/fixed3). Only the same two affected selectors
+reran (3859954,2.7806692151352763s):2passed/26skipped, actual external Node22.12 and
+SQLite activation/rollback, captured request inputs and candidate cwd, retained old
+pair after failed preparation. npm and Python preparation remain offline boundaries;
+these fixtures are not a real package install or working-Python installation claim.
+
+Required `npm run check` passed first (3860215,4.877740819007158s):1044files/no fixes,
+types, installer and browser checks. No provider call, dependency download, actual
+installation, publication, new benchmark or earlier-milestone reassurance rerun.

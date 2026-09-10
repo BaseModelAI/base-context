@@ -7,11 +7,13 @@ import path from "node:path";
 import { stderr, stdin } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
-import { getPackageDir } from "../../config.js";
+import { getPackageDir, getPhysicalPackageDir } from "../../config.js";
+import { getOwnedInstallation, readInstallSelection } from "../../owned-install-layout.js";
 import { PRODUCT, PRODUCT_ENV } from "../../product-identity.js";
 import { assertProductStatePath, readAbsolutePathEnv, resolveRuntimePaths } from "../../runtime-paths.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
+const ownedRuntime = getOwnedInstallation(getPhysicalPackageDir());
 const BOOTSTRAP_SCHEMA = 11;
 const PYTHON_VERSION = "3.11";
 const RUNTIME_REQUIREMENT = PRODUCT.runtimeDistribution;
@@ -331,7 +333,7 @@ function ensureKernelPythonKey(pythonSkills: readonly BootstrapPythonSkill[]): s
 
 export function getKernelVenvDir(): string {
 	const override = readAbsolutePathEnv(PRODUCT_ENV.kernelVenv);
-	return assertProductStatePath(override ?? resolveRuntimePaths().runtime);
+	return assertProductStatePath(override ?? ownedRuntime?.runtimeDir ?? resolveRuntimePaths().runtime);
 }
 
 async function resolveWritableKernelVenvDir(): Promise<string> {
@@ -621,6 +623,7 @@ async function writeBootstrapVersion(
 }
 
 export function runtimeCandidateDirs(): string[] {
+	if (ownedRuntime) return [path.join(ownedRuntime.packageDir, "dist", RUNTIME_REQUIREMENT)];
 	const packageDir = getPackageDir();
 	if (existsSync(path.join(packageDir, "src"))) {
 		return [path.resolve(packageDir, "..", "..", "prime-agent-runtime")];
@@ -844,6 +847,12 @@ async function ensureKernelPythonUncached(
 			return python;
 		}
 
+		if (ownedRuntime && !readAbsolutePathEnv(PRODUCT_ENV.kernelVenv)) {
+			throw new Error(
+				"The selected Base-Context default runtime is unavailable or stale. Install a prepared candidate or explicitly roll back; the retained runtime was not rebuilt.",
+			);
+		}
+
 		const hadVenv = existsSync(venv);
 		reportProgress(options, "› setting up python kernel (one-time, ~30s)…");
 		if (hadVenv) {
@@ -872,4 +881,26 @@ export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Pro
 	});
 	inFlightEnsureKernelPython = { key, promise };
 	return promise;
+}
+
+/** Prepare only a new physical owned release, before its selection can be published. */
+export async function prepareOwnedKernelPython(): Promise<string> {
+	if (!ownedRuntime || existsSync(ownedRuntime.runtimeDir)) {
+		throw new Error("Base-Context runtime preparation requires a new, empty owned release runtime directory.");
+	}
+	const selected = readInstallSelection(ownedRuntime.root);
+	if (selected?.active === ownedRuntime.version || selected?.previous === ownedRuntime.version) {
+		throw new Error("Base-Context will not prepare a published release in place. Install a new candidate instead.");
+	}
+	const python = path.join(ownedRuntime.runtimeDir, "bin", "python");
+	const options: EnsureKernelPythonOptions = { onProgress: (message) => console.error(message) };
+	await bootstrapVenv(ownedRuntime.runtimeDir, [], options);
+	const runtimeIdentity = await resolveRuntimeIdentity();
+	if (
+		!(await kernelReady(python, ownedRuntime.runtimeDir, runtimeIdentity, [])) ||
+		(await missingRlmExtraImportLabels(python)).length > 0
+	) {
+		throw new Error("Base-Context candidate Python runtime did not become ready. This candidate was not activated.");
+	}
+	return python;
 }
