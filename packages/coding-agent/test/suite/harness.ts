@@ -84,6 +84,7 @@ export interface HarnessOptions {
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	persistSession?: boolean;
 	invocationOutputLimits?: AgentSessionConfig["invocationOutputLimits"];
+	requestTokenBudget?: AgentSessionConfig["requestTokenBudget"];
 	sessionManager?: SessionManager;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
@@ -217,6 +218,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		requestTokenBudget: options.requestTokenBudget,
 		...(options.invocationOutputLimits === undefined
 			? {}
 			: { invocationOutputLimits: options.invocationOutputLimits }),

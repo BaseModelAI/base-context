@@ -115,6 +115,7 @@ Opt-in alone does not send events without both the explicit endpoint and dedicat
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.model` | object | Current main model and effort | Explicit summary model: `provider`, `modelId`, and `thinkingLevel` are all required |
 
 ```json
 {
@@ -125,6 +126,35 @@ Opt-in alone does not send events without both the explicit endpoint and dedicat
   }
 }
 ```
+
+
+Set `compaction.model` to choose the model and effort for manual, automatic and
+model-requested compaction summaries. For example, when this exact model/route is
+configured and budgeted:
+
+```json
+{
+  "compaction": {
+    "model": {
+      "provider": "openai-codex",
+      "modelId": "gpt-6-astra",
+      "thinkingLevel": "medium"
+    }
+  }
+}
+```
+
+The main session model and effort do not change. The summary operation captures
+its choice before authentication and history reads. An invalid or unsupported
+explicit choice fails instead of silently using the main model. If the setting is
+absent, the existing main-model/current-effort behavior remains. `autoRefine.model`
+is a separate setting for learning; it does not select the compaction model.
+
+Under enforced request budgets, explicit profiles must cover the actual auxiliary
+route/model within the existing supported API set. This setting does not create a
+profile, widen support or bypass limits. Extension-provided summaries and generic
+standalone calls retain their own behavior. Selecting a model does not schedule
+extra calls or enable context optimization when it is off.
 
 ### Canonical Context Resources
 

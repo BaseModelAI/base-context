@@ -2283,3 +2283,60 @@ types, installer and browser checks). Both runs used the existing isolated sourc
 environment. No live provider, benchmark, installed lifecycle or publication run
 was made. These receipts do not establish current-native overall gains or physical
 billing. The active implementation/release objective remains incomplete.
+
+## W69 / G07 — independent compaction model and effort
+
+An explicit `compaction.model` object selects `provider`, `modelId` and
+`thinkingLevel` together for the existing owned compaction summary path. All three
+fields are required when the setting is present. Resolution uses the local model
+registry and that model's existing effort rules. Invalid or unsupported choices
+refuse instead of silently falling back to the main model. With no setting, the
+existing main-model/current-effort behavior remains. Learning still uses the
+separate `autoRefine.model` setting from W45.
+
+The manual and automatic/model-requested compaction callers capture the selected
+model/effort before their authentication and summary-history waits. They do not
+change the main session model or its overflow trigger. The existing summary and
+split-turn-prefix generators use the passed choice, existing coordinator purpose,
+request measurement, cancellation and physical attempt receipts. Accepted summary
+adoption still requires the original captured source's canonical append ACK.
+No extra automatic call or parallel summary owner is added. Extension-provided
+summaries and generic standalone calls retain their existing behavior.
+
+An enforced request budget must explicitly cover the actual auxiliary API, provider,
+endpoint and model within the current supported API set (`openai-codex-responses`,
+`openai-responses`, `openai-completions`). The setting does not synthesize a profile,
+widen API support, infer availability from the main model or bypass an unknown/
+over-budget refusal. Configured model/effort support is not deployment entitlement
+or pricing evidence. This is not an independent spending/call-count budget,
+semantic-extraction configuration, branch-navigation summary setting or full G07
+completion. Context-off/shutdown admission, generic behavior and Sol text remain.
+
+Daemon schema/minimum41 (`protocol-11-schema-41-compaction-model`) prevents current
+native commands from reusing an older worker that ignores the explicit choice.
+Protocol11, history index16, kernel4/bootstrap11, epoch variants and queued-action
+formats do not change. No provider, benchmark, installed lifecycle or publication
+activity is authorized by this setting. W68/W67 and all frozen campaigns remain
+settled; the implementation/release objective is still active.
+
+Both agreed existing selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3908124,5.168437144020572s;2passed/36skipped).
+The happy path kept the main conversation on its local Faux model and sent both
+auxiliary summaries through the real OpenAI Responses adapter with only HTTP
+fetch replaced. It observed the explicit different model/high effort, captured
+settings across source-read work, owner-bound physical receipts, canonical summary
+adoption and unchanged main model/effort. That fixture retained its original absent-
+budget policy: it is not positive enforced-profile coverage or deployment evidence.
+
+The edge case retained the original missing-auth assertion. An unknown explicit
+model refused before auth/source binding. A known explicit model on the actual
+requested/automatic path refused under enforce with no covering profile, without
+fetch or accepted compaction. The controlled budget-refusal stderr is not a live
+provider incident. No new selector, suite, harness or test matrix was added; the
+existing harness only forwards the optional request budget.
+
+Required `npm run check` passed first (PID3908129,5.044830980943516s;
+1045files/no fixes, types, installer and browser checks). No correction or focused
+rerun was needed. No provider, benchmark, installed lifecycle or publication run
+occurred. These source receipts do not establish cost/efficiency gains, physical
+billing or completion of the active implementation/release objective.

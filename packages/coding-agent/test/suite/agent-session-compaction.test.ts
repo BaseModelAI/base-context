@@ -15,7 +15,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompactionCommittedError } from "../../src/core/agent-session.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
-import { SessionManager } from "../../src/core/session-manager.js";
+import { readSessionJournal } from "../../src/core/session-journal-reader.js";
+import { type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -34,6 +35,19 @@ type SessionWithCompactionInternals = {
 		outcome: "skipped" | "cancelled" | "failed",
 		message: string,
 	) => Promise<void>;
+};
+
+const compactionModel: Model<"openai-responses"> = {
+	api: "openai-responses",
+	provider: "compaction-model-fixture",
+	id: "summary-model",
+	name: "Summary model",
+	baseUrl: "https://compaction.invalid/v1",
+	input: ["text"],
+	reasoning: true,
+	contextWindow: 128000,
+	maxTokens: 32768,
+	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 };
 
 function createUsage(totalTokens: number) {
@@ -168,10 +182,64 @@ describe("AgentSession compaction characterization", () => {
 		harness.setResponses([
 			fauxAssistantMessage("one response"),
 			fauxAssistantMessage("two response"),
-			fauxAssistantMessage("model-generated summary"),
-			fauxAssistantMessage("model-generated turn summary"),
 			fauxAssistantMessage("still usable"),
 		]);
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "summary-fixture-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "summary-fixture-key");
+		const selection = {
+			provider: compactionModel.provider,
+			modelId: compactionModel.id,
+			thinkingLevel: "high" as const,
+		};
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		const detached = harness.settingsManager.getCompactionModel()!;
+		detached.modelId = "changed-getter-copy";
+		expect(harness.settingsManager.getCompactionModel()).toEqual(selection);
+		const mainModel = structuredClone(harness.session.model);
+		const mainEffort = harness.session.thinkingLevel;
+		const bodies: Array<{ model: string; reasoning: { effort: string } }> = [];
+		// Only HTTP is offline; the real adapter owns serialization, admission and receipts.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const text = bodies.length === 1 ? "model-generated summary" : "model-generated turn summary";
+			const item = {
+				type: "message",
+				id: `msg_summary_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text, annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_summary_${bodies.length}`,
+						model: compactionModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 10,
+							output_tokens: 1,
+							total_tokens: 11,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 		const readOwnUsage = async () => {
@@ -202,6 +270,8 @@ describe("AgentSession compaction characterization", () => {
 			sourceRead.mockRestore();
 		}
 
+		const sourceSessionId = harness.sessionManager.getSessionId();
+		const sourceLeafId = harness.sessionManager.getLeafId();
 		const originalBind = harness.sessionManager.bindCompactionSink.bind(harness.sessionManager);
 		let branchReads = 0;
 		const bound = vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((limits) => {
@@ -209,12 +279,40 @@ describe("AgentSession compaction characterization", () => {
 			const read = sink.readBranch.bind(sink);
 			vi.spyOn(sink, "readBranch").mockImplementation(() => {
 				branchReads++;
+				if (branchReads === 1) {
+					harness.settingsManager.applyOverrides({
+						compaction: { model: { ...selection, modelId: "changed-after-capture", thinkingLevel: "low" } },
+					});
+				}
 				return read();
 			});
 			return sink;
 		});
 		const captures = vi.spyOn(InferenceCoordinator.prototype, "capture");
 		const result = await harness.session.compact();
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
+		expect(offlineFetch).toHaveBeenCalledTimes(2);
+		expect(bodies).toEqual([
+			expect.objectContaining({ model: compactionModel.id, reasoning: expect.objectContaining({ effort: "high" }) }),
+			expect.objectContaining({ model: compactionModel.id, reasoning: expect.objectContaining({ effort: "high" }) }),
+		]);
+		const receipts: RequestJournalEntry[] = [];
+		for await (const { entry: record } of readSessionJournal(harness.sessionManager.getSessionFile()!)) {
+			const entry = record as RequestJournalEntry;
+			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+		}
+		expect(receipts).toHaveLength(2);
+		for (const { request } of receipts) {
+			expect(request).toMatchObject({
+				purpose: "summary",
+				owner: { sessionId: sourceSessionId },
+				source: { sessionId: sourceSessionId, leafId: sourceLeafId },
+				modelContract: { provider: compactionModel.provider, model: compactionModel.id },
+				receipt: { api: compactionModel.api, model: compactionModel.id, effort: "high", outcome: "completed" },
+			});
+		}
 		expect(bound).toHaveBeenCalledOnce();
 		expect(branchReads).toBe(1);
 		expect(captures).toHaveBeenCalledWith(bound.mock.results[0].value);
@@ -259,6 +357,9 @@ describe("AgentSession compaction characterization", () => {
 		]);
 
 		await harness.session.prompt("after compaction");
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
+		expect(offlineFetch).toHaveBeenCalledTimes(2);
 		expect(harness.session.agent.state.errorMessage).toBeUndefined();
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
@@ -793,10 +894,59 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("throws when compacting without configured auth", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			requestTokenBudget: { mode: "enforce", profiles: [] },
+		});
 		harnesses.push(harness);
 
 		await expect(harness.session.compact()).rejects.toThrow(`No API key found for ${harness.getModel().provider}.`);
+
+		const mainModel = structuredClone(harness.session.model);
+		const mainEffort = harness.session.thinkingLevel;
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "summary-fixture-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "summary-fixture-key");
+		const selection = {
+			provider: compactionModel.provider,
+			modelId: compactionModel.id,
+			thinkingLevel: "high" as const,
+		};
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { ...selection, modelId: "missing-summary-model" } },
+		});
+		const auth = vi.spyOn(harness.session.modelRegistry, "getApiKeyAndHeaders");
+		const bind = vi.spyOn(harness.sessionManager, "bindCompactionSink");
+		await expect(harness.session.compact()).rejects.toThrow(
+			`Unknown compaction.model ${compactionModel.provider}/missing-summary-model`,
+		);
+		expect(auth).not.toHaveBeenCalled();
+		expect(bind).not.toHaveBeenCalled();
+		auth.mockRestore();
+		bind.mockRestore();
+
+		// A known explicit model still requires its own covered route profile.
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		await harness.sessionManager.appendMessage({ role: "user", content: "Summarize this input", timestamp: 1 });
+		await harness.sessionManager.appendMessage({ role: "user", content: "Keep this input", timestamp: 2 });
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unprofiled request sent"));
+		await (harness.session as unknown as SessionWithCompactionInternals)._runAutoCompaction("requested", false);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "requested",
+			result: undefined,
+			errorMessage: expect.stringContaining(
+				"Request token budget unknown: exact explicit route/model profile unavailable or ambiguous",
+			),
+		});
+		expect(offlineFetch).not.toHaveBeenCalled();
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {

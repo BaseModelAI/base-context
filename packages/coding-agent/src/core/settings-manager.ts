@@ -9,11 +9,19 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 
+export interface CompactionModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+}
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
 	agentCallable?: boolean; // default: true - expose the compact skill so the model can request compaction
+	/** Absent: inherit the main session model and its current thinking level. */
+	model?: CompactionModelSettings;
 }
 
 export interface BranchSummarySettings {
@@ -951,6 +959,12 @@ export class SettingsManager {
 
 	getCompactionAgentCallable(): boolean {
 		return this.settings.compaction?.agentCallable ?? true;
+	}
+
+	/** Detached explicit configuration; compaction resolves and validates its model/effort. */
+	getCompactionModel(): CompactionModelSettings | undefined {
+		const model = this.settings.compaction?.model;
+		return model === undefined ? undefined : structuredClone(model);
 	}
 
 	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {

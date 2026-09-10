@@ -8670,6 +8670,32 @@ export class AgentSession {
 		return this._retainContextOptimization(this._compactAccepted(customInstructions, options));
 	}
 
+	private _resolveCompactionModel(): { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined {
+		const selection = this.settingsManager.getCompactionModel();
+		if (selection === undefined) {
+			const model = this.model;
+			return model ? { model: { ...model, cost: { ...model.cost } }, thinkingLevel: this.thinkingLevel } : undefined;
+		}
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid compaction.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown compaction.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`compaction.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: structuredClone(model), thinkingLevel: selection.thinkingLevel };
+	}
+
 	private async _compactAccepted(
 		customInstructions?: string,
 		options: { skipAbort?: boolean } = {},
@@ -8701,12 +8727,12 @@ export class AgentSession {
 		});
 
 		try {
-			if (!this.model) {
+			const selected = this._resolveCompactionModel();
+			if (!selected) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			const model = { ...this.model, cost: { ...this.model.cost } };
-			const thinkingLevel = this.thinkingLevel;
+			const { model, thinkingLevel } = selected;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			const semanticEdges = this._semanticEdges;
 			compaction = this.sessionManager.bindCompactionSink();
@@ -10273,9 +10299,9 @@ export class AgentSession {
 		let failure: unknown;
 
 		try {
-			const selectedModel = this.model;
-			const model = selectedModel ? { ...selectedModel, cost: { ...selectedModel.cost } } : undefined;
-			const thinkingLevel = this.thinkingLevel;
+			const selected = this._resolveCompactionModel();
+			const model = selected?.model;
+			const thinkingLevel = selected?.thinkingLevel ?? this.thinkingLevel;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
 			const semanticEdges = this._semanticEdges;
 			compaction = this.sessionManager.bindCompactionSink();
