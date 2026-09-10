@@ -1255,23 +1255,62 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                         bash("sleep 30")
 
     async def test_journal_short_write_rejects_when_configured(self):
-        # A partial os.write would leave a truncated JSON line the host
-        # discards; enrollment must treat it as failure.
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
+            marker = os.path.join(tmp, "executed")
+            pids: list[int] = []
+            journal_fds: set[int] = set()
+            real_popen, real_open, real_write = subprocess.Popen, os.open, os.write
+            write_error = OSError("injected orphan append failure after a short write")
+            wrote_prefix = False
+
+            def capturing_popen(*args, **kwargs):
+                proc = real_popen(*args, **kwargs)
+                pids.append(proc.pid)
+                return proc
+
+            def capturing_open(path, *args, **kwargs):
+                fd = real_open(path, *args, **kwargs)
+                if os.path.realpath(path) == os.path.realpath(journal):
+                    journal_fds.add(fd)
+                return fd
 
             def short_write(fd, data):
-                return 0  # no progress
+                nonlocal wrote_prefix
+                if fd not in journal_fds:
+                    return real_write(fd, data)
+                if not wrote_prefix:
+                    wrote_prefix = True
+                    return real_write(fd, bytes(data)[:2])
+                raise write_error
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
-                },
-            ):
-                with mock.patch.object(bash_module.os, "write", short_write):
-                    self.assertFalse(bash_module._record_journal(os.getpid(), active=False))
+            with mock.patch.dict(os.environ, {
+                "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
+            }):
+                with mock.patch.object(bash_module.subprocess, "Popen", capturing_popen), \
+                     mock.patch.object(bash_module.os, "open", capturing_open), \
+                     mock.patch.object(bash_module.os, "write", short_write):
+                    with self.assertRaises(RuntimeError) as caught:
+                        bash(f"touch {marker}")
+                self.assertIn("command gate was not released", str(caught.exception))
+                cause = caught.exception.__cause__
+                self.assertIsInstance(cause, ExceptionGroup)
+                self.assertIs(cause.exceptions[0], write_error)
+                self.assertIn("Incomplete orphan process journal tail", str(cause.exceptions[1]))
+                with open(journal, "rb") as stream:
+                    prefix = stream.read()
+                self.assertEqual(prefix, b'{"')
+                # The next owner cannot append past this failed record, even after the old owner closed.
+                later_failures: list[Exception] = []
+                self.assertFalse(bash_module._record_journal(os.getpid(), active=False, failures=later_failures))
+                self.assertIn("Incomplete orphan process journal tail", str(later_failures[0]))
+                with open(journal, "rb") as stream:
+                    self.assertEqual(stream.read(), prefix)
+            await _poll_group_dead(pids[0])
+            self.assertFalse(os.path.exists(marker))
+            with bash_module._live_lock:
+                self.assertFalse(bash_module._live_handles)
 
     async def test_journal_partial_writes_complete_the_record(self):
         with tempfile.TemporaryDirectory() as tmp:

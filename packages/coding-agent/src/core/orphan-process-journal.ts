@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
-import { win32 } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import { getPackageDir } from "../config.js";
 import { getProcessStartId } from "./session-lease.js";
 
 export const ORPHAN_PROCESS_JOURNAL_ENV = "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL";
@@ -23,31 +26,96 @@ export interface ActiveOrphanProcess {
 	processStartId?: string;
 }
 
-export function recordOrphanProcessState(pid: number, active: boolean): void {
+export interface OrphanProcessJournalOwner {
+	readonly path: string | undefined;
+	readonly ownerPid: number;
+	record(pid: number, active: boolean): Error | undefined;
+}
+
+/** Capture before spawning or waiting. Retirement must use this same owner, not later environment state. */
+export function captureOrphanProcessJournalOwner(): OrphanProcessJournalOwner {
 	const path = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
-	if (!path || !Number.isInteger(pid) || pid <= 0) {
-		return;
-	}
-	const processStartId = active ? getProcessStartId(pid) : undefined;
-	const record: OrphanProcessRecord = {
-		version: 1,
-		pid,
-		ownerPid: process.pid,
-		...(processStartId ? { processStartId } : {}),
-		active,
-		recordedAt: new Date().toISOString(),
+	const ownerPid = process.pid;
+	const nodeExecutable = "bun" in process.versions ? "node" : process.execPath;
+	const env = {
+		PATH: process.env.PATH,
+		HOME: homedir(),
+		TMPDIR: tmpdir(),
+		SYSTEMROOT: process.env.SYSTEMROOT,
+		WINDIR: process.env.WINDIR,
 	};
-	try {
-		const descriptor = openSync(path, "a", 0o600);
-		try {
-			writeSync(descriptor, `${JSON.stringify(record)}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-	} catch {
-		// Process tracking must not make a successfully spawned command fail.
-	}
+	return {
+		path,
+		ownerPid,
+		record: (pid, active) => {
+			if (!path) return undefined;
+			try {
+				if (!Number.isInteger(pid) || pid <= 0) throw new Error("Invalid orphan process pid");
+				const processStartId = active ? getProcessStartId(pid) : undefined;
+				const record: OrphanProcessRecord = {
+					version: 1,
+					pid,
+					ownerPid,
+					...(processStartId ? { processStartId } : {}),
+					active,
+					recordedAt: new Date().toISOString(),
+				};
+				const candidates = [
+					fileURLToPath(new URL("./orphan-process-journal-worker.js", import.meta.url)),
+					fileURLToPath(new URL("./orphan-process-journal-worker.ts", import.meta.url)),
+					join(getPackageDir(), "dist", "core", "orphan-process-journal-worker.js"),
+					join(dirname(process.execPath), "core", "orphan-process-journal-worker.js"),
+					join(dirname(process.execPath), "orphan-process-journal-worker.js"),
+				];
+				const entrypoint = candidates.find((candidate) => existsSync(candidate));
+				if (!entrypoint) throw new Error("Base Context orphan journal worker payload is missing");
+				const result = spawnSync(
+					nodeExecutable,
+					[
+						"--experimental-sqlite",
+						"--disable-warning=ExperimentalWarning",
+						...(entrypoint.endsWith(".ts") ? ["--import", import.meta.resolve("tsx")] : []),
+						entrypoint,
+						JSON.stringify({ path, parentPid: ownerPid, record: `${JSON.stringify(record)}\n` }),
+					],
+					{ env, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024 },
+				);
+				if (result.error) throw result.error;
+				if (result.signal)
+					throw new Error(`Orphan journal writer exited on ${result.signal}; append outcome is unknown`);
+				if (!result.stdout)
+					throw new Error(
+						`Orphan journal writer exited (${result.status}): ${result.stderr}; append outcome is unknown`,
+					);
+				const failures = (JSON.parse(result.stdout) as { name: string; message: string; code?: string }[]).map(
+					(failure) =>
+						Object.assign(new Error(failure.message), {
+							name: failure.name,
+							...(failure.code ? { code: failure.code } : {}),
+						}),
+				);
+				if (failures.length)
+					throw failures.length === 1
+						? failures[0]
+						: new AggregateError(
+								failures,
+								`Orphan append and cleanup failed: ${failures.map((failure) => failure.message).join("; ")}`,
+							);
+				if (result.status !== 0)
+					throw new Error(`Orphan journal writer exited (${result.status}); append outcome is unknown`);
+				return undefined;
+			} catch (cause) {
+				return new Error(
+					`Orphan ${active ? "registration" : "retirement"} failed for already-spawned pid ${pid}; tracking is unknown, and the process may have run: ${cause instanceof Error ? cause.message : String(cause)}`,
+					{ cause },
+				);
+			}
+		},
+	};
+}
+
+export function recordOrphanProcessState(pid: number, active: boolean): Error | undefined {
+	return captureOrphanProcessJournalOwner().record(pid, active);
 }
 
 export function readActiveOrphanProcesses(path: string, ownerPid: number): ActiveOrphanProcess[] {
@@ -131,17 +199,21 @@ export function clearOrphanProcessJournal(path: string): void {
 }
 
 // Kills still-active bash() children journaled by the given kernel pid; sibling kernels' records are untouched.
-export function reapKernelOrphanProcesses(kernelPid: number): void {
-	const path = process.env[ORPHAN_PROCESS_JOURNAL_ENV];
+export function reapKernelOrphanProcesses(
+	kernelPid: number,
+	owner = captureOrphanProcessJournalOwner(),
+): Error | undefined {
+	const path = owner.path;
 	if (!path || !Number.isInteger(kernelPid) || kernelPid <= 0) {
 		return;
 	}
 	let orphans: ActiveOrphanProcess[];
 	try {
-		orphans = readActiveOrphanProcesses(path, process.pid);
-	} catch {
-		return;
+		orphans = readActiveOrphanProcesses(path, owner.ownerPid);
+	} catch (cause) {
+		return new Error("Kernel orphan tracking is unknown; journal retained", { cause });
 	}
+	const failures: Error[] = [];
 	for (const orphan of orphans) {
 		if (orphan.kernelPid !== kernelPid || orphan.pid === kernelPid) {
 			continue;
@@ -151,9 +223,15 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 		}
 		// Inactive only after a delivered signal; a stale record is neutralized by the startId check.
 		if (killOrphanProcess(orphan.pid)) {
-			recordOrphanProcessState(orphan.pid, false);
+			const failure = owner.record(orphan.pid, false);
+			if (failure) failures.push(failure);
 		}
 	}
+	return failures.length === 0
+		? undefined
+		: failures.length === 1
+			? failures[0]
+			: new AggregateError(failures, "Kernel orphan retirement failed");
 }
 
 // Hardened cross-platform tree kill for journaled orphans: absolute System32

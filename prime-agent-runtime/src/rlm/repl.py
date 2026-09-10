@@ -32,7 +32,7 @@ from typing import Any
 from .bash import _kill_live_handles
 from .product import assert_product_state_path, product_env
 
-PROTOCOL_VERSION = 3
+PROTOCOL_VERSION = 4
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024

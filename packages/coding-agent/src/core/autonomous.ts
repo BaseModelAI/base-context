@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import type { AssistantMessage, Usage, UserMessage } from "@ponythewhite/base-context-ai";
 import { waitForChildProcess } from "../utils/child-process.js";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
+import { captureOrphanProcessJournalOwner } from "./orphan-process-journal.js";
 
 export interface AgentAutonomousConfig {
 	enabled?: boolean;
@@ -490,19 +491,18 @@ function runChildProcess(
 	} = {},
 ): Promise<ChildProcessResult> {
 	options.signal?.throwIfAborted();
-	return new Promise((resolve) => {
+	const orphanOwner = captureOrphanProcessJournalOwner();
+	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: options.cwd,
 			detached: process.platform !== "win32",
 			shell: options.shell === true,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		if (child.pid) {
-			trackDetachedChildPid(child.pid);
-		}
+		let registrationError: Error | undefined;
+		let error: Error | undefined;
 		let stdout = "";
 		let stderr = "";
-		let error: Error | undefined;
 		let timedOut = false;
 		let outputTruncated = false;
 		let settled = false;
@@ -516,10 +516,27 @@ function runChildProcess(
 				clearTimeout(timer);
 			}
 			options.signal?.removeEventListener("abort", abort);
-			if (child.pid) {
-				untrackDetachedChildPid(child.pid);
+			const retirementError = child.pid ? untrackDetachedChildPid(child.pid) : undefined;
+			const completed: ChildProcessResult = { ...result, stdout, stderr, error, timedOut, outputTruncated };
+			const trackingError = registrationError ?? retirementError;
+			if (trackingError) {
+				const failures = [
+					trackingError,
+					...(error ? [error] : []),
+					...(registrationError && retirementError ? [retirementError] : []),
+				];
+				// Reject only after the owned child settled and controls were cleaned. A gate
+				// retry or an unavailable Git snapshot must not consume tracking uncertainty.
+				reject(
+					new AggregateError(
+						failures,
+						`Spawned command exited with status ${completed.status} and signal ${completed.signal}; tracking is unknown: ${failures.map((failure) => failure.message).join("; ")}`,
+						{ cause: completed },
+					),
+				);
+				return;
 			}
-			resolve({ ...result, stdout, stderr, error, timedOut, outputTruncated });
+			resolve(completed);
 		};
 		const timer = options.timeoutMs
 			? setTimeout(() => {
@@ -565,6 +582,8 @@ function runChildProcess(
 				finish({ status: child.exitCode, signal: child.signalCode });
 			},
 		);
+		// Install all existing controls before the synchronous journal bridge can block.
+		registrationError = child.pid ? trackDetachedChildPid(child.pid, orphanOwner) : undefined;
 	});
 }
 

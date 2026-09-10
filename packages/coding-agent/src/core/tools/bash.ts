@@ -15,6 +15,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { captureOrphanProcessJournalOwner } from "../orphan-process-journal.js";
 import { previewBashCommand } from "./code-preview.js";
 import { OutputAccumulator } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
@@ -72,13 +73,14 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
 					return;
 				}
+				const orphanOwner = captureOrphanProcessJournalOwner();
 				const child = spawn(shell, [...args, command], {
 					cwd,
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),
 					stdio: ["ignore", "pipe", "pipe"],
 				});
-				if (child.pid) trackDetachedChildPid(child.pid);
+				let registrationError: Error | undefined;
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
 				if (timeout !== undefined && timeout > 0) {
@@ -98,27 +100,51 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
+				// A registration failure cannot undo this spawn. Keep its handle and existing
+				// timeout/abort cleanup until completion, then report the original failure.
 				waitForChildProcess(child)
 					.then((code) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
+						const retirementError = child.pid ? untrackDetachedChildPid(child.pid) : undefined;
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (signal) signal.removeEventListener("abort", onAbort);
-						if (signal?.aborted) {
-							reject(new Error("aborted"));
-							return;
-						}
-						if (timedOut) {
-							reject(new Error(`timeout:${timeout}`));
+						const executionError = signal?.aborted
+							? new Error("aborted")
+							: timedOut
+								? new Error(`timeout:${timeout}`)
+								: undefined;
+						const failures = [registrationError, executionError, retirementError].filter(
+							(error): error is Error => error !== undefined,
+						);
+						if (failures.length) {
+							reject(
+								registrationError || retirementError
+									? new AggregateError(
+											failures,
+											`Spawned command exited with code ${code}; tracking is unknown: ${failures.map((failure) => failure.message).join("; ")}`,
+										)
+									: failures[0],
+							);
 							return;
 						}
 						resolve({ exitCode: code });
 					})
 					.catch((err) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
+						const retirementError = child.pid ? untrackDetachedChildPid(child.pid) : undefined;
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (signal) signal.removeEventListener("abort", onAbort);
-						reject(err);
+						const failures = [
+							...(registrationError ? [registrationError] : []),
+							err,
+							...(retirementError ? [retirementError] : []),
+						];
+						reject(
+							failures.length === 1
+								? err
+								: new AggregateError(failures, "Spawned command and tracking cleanup failed"),
+						);
 					});
+				// Install all existing controls before the synchronous journal bridge can block.
+				registrationError = child.pid ? trackDetachedChildPid(child.pid, orphanOwner) : undefined;
 			});
 		},
 	};

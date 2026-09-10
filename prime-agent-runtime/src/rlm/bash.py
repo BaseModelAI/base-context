@@ -11,6 +11,7 @@ import selectors
 import shutil
 import signal
 import socket
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -118,6 +119,7 @@ class BashHandle:
     """
 
     def __init__(self, command: str) -> None:
+        self._orphan_source = (product_env("INTERNAL_ORPHAN_PROCESS_JOURNAL"), product_env("KERNEL_OWNER_PID"))
         self._constructing = True
         self._setup_resources = False
         self._group_absent = False
@@ -237,15 +239,22 @@ class BashHandle:
         self._pid: int = self._proc.pid
         self._released = False
         self._signal_ready = True
-        enrolled = _record_journal(self._pid, active=True)
+        enrollment_failures: list[Exception] = []
+        enrolled = _record_journal(self._pid, active=True, source=self._orphan_source, failures=enrollment_failures)
         if not enrolled:
-            # Fail closed: a configured journal that cannot enroll the pid must
-            # not let the command run (the host reaper would never see it).
-            self._abort_spawn()
-            raise RuntimeError(
-                "bash(): orphan-journal enrollment failed (journal configured but the "
-                "pid could not be recorded); the spawned process was killed"
+            # The existing gate stays closed. Registration failure does not prove cleanup.
+            try:
+                self._abort_spawn(enrollment_failures)
+            except Exception as cleanup_error:
+                enrollment_failures.append(cleanup_error)
+            cause = enrollment_failures[0] if len(enrollment_failures) == 1 else ExceptionGroup(
+                "Orphan registration failed, followed by cleanup failures", enrollment_failures
             )
+            cleanup = "confirmed" if not self._setup_resources else "unconfirmed"
+            raise RuntimeError(
+                "bash(): orphan-journal enrollment failed; command gate was not released; "
+                f"spawned-process cleanup is {cleanup}; journal tracking is unknown"
+            ) from cause
         if _IS_POSIX:
             # Journal first, then open the gate: the child does not run the user
             # command until this byte arrives. A failed write means the child
@@ -476,7 +485,7 @@ class BashHandle:
                 # Reaped: pid fallbacks are gone, so the handle may finally close.
                 cast("_winjob.JobProcess", self._proc).close()
         if delivered:
-            _record_journal(self._pid, active=False)
+            _record_journal(self._pid, active=False, source=self._orphan_source)
         self._watch_settled = True
 
     def _reap_group(self) -> bool:
@@ -662,7 +671,7 @@ class BashHandle:
             await asyncio.sleep(0.02)
         return True
 
-    def _abort_spawn(self) -> None:
+    def _abort_spawn(self, failures: list[Exception] | None = None) -> None:
         # Enrollment or containment failed before the gate opened (POSIX) or
         # while the child is still suspended, before resume (Windows): kill
         # the child and unwind the handle before threads start.
@@ -672,8 +681,10 @@ class BashHandle:
                 if fd >= 0:
                     try:
                         os.close(fd)
-                    except OSError:
+                    except OSError as error:
                         cleanup_known = False
+                        if failures is not None:
+                            failures.append(error)
             self._status_read = self._wake_read = self._wake_write = -1
             delivered = _signal_group(self._pid, signal.SIGKILL)
         else:
@@ -701,8 +712,9 @@ class BashHandle:
         try:
             self._proc.wait(timeout=5)
             waited = True
-        except (OSError, subprocess.SubprocessError):
-            pass
+        except (OSError, subprocess.SubprocessError) as error:
+            if failures is not None:
+                failures.append(error)
         if waited and _IS_POSIX:
             try:
                 self._group_alive()  # Actual absence, not delivery of the earlier kill.
@@ -714,7 +726,7 @@ class BashHandle:
                 # Reaped commits before close: later lock holders skip raw-pid fallbacks.
                 cast("_winjob.JobProcess", self._proc).close()
         if delivered:
-            _record_journal(self._pid, active=False)
+            _record_journal(self._pid, active=False, source=self._orphan_source, failures=failures)
         if (
             waited
             and cleanup_known
@@ -899,48 +911,80 @@ def _process_start_id(pid: int) -> str | None:
         return None
 
 
-def _record_journal(pid: int, active: bool) -> bool:
-    # Returns False only when the journal is configured but enrollment failed;
-    # active-record callers must then fail closed. Active records always carry
-    # a processStartId so host reaping stays identity-verified.
-    path = product_env("INTERNAL_ORPHAN_PROCESS_JOURNAL")
-    owner = product_env("KERNEL_OWNER_PID")
+def _record_journal(
+    pid: int,
+    active: bool,
+    *,
+    source: tuple[str | None, str | None] | None = None,
+    failures: list[Exception] | None = None,
+) -> bool:
+    path, owner = source if source is not None else (
+        product_env("INTERNAL_ORPHAN_PROCESS_JOURNAL"), product_env("KERNEL_OWNER_PID")
+    )
     if not path or not owner:
         return True
+    errors: list[Exception] = []
+    database: sqlite3.Connection | None = None
+    fd: int | None = None
     try:
         path = assert_product_state_path(path)
         owner_pid = int(owner)
-    except (OSError, ValueError):
-        return False
-    start_id = _process_start_id(pid) if active else None
-    if active and start_id is None:
-        return False
-    record: dict[str, Any] = {
-        "version": 1,
-        "pid": pid,
-        "ownerPid": owner_pid,
-        # The host reaps bash children per kernel pid when it kills or loses this kernel.
-        "kernelPid": os.getpid(),
-        **({"processStartId": start_id} if start_id else {}),
-        "active": active,
-        "recordedAt": datetime.now(timezone.utc).isoformat(),
-    }
-    data = (json.dumps(record) + "\n").encode()
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            # Complete-write loop: a short write would leave a truncated JSON
-            # line that the host discards, which must count as failure.
-            view = memoryview(data)
-            while view:
-                written = os.write(fd, view)
-                if written <= 0:
-                    return False
-                view = view[written:]
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except OSError:
+        if owner_pid <= 0:
+            raise ValueError("Invalid orphan journal owner pid")
+        start_id = _process_start_id(pid) if active else None
+        if active and start_id is None:
+            raise RuntimeError("Orphan registration has no process start identity")
+        record: dict[str, Any] = {
+            "version": 1,
+            "pid": pid,
+            "ownerPid": owner_pid,
+            "kernelPid": os.getpid(),
+            **({"processStartId": start_id} if start_id else {}),
+            "active": active,
+            "recordedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        data = (json.dumps(record) + "\n").encode()
+        # This database is only the shared Node/Python mutex, never process state.
+        # EXCLUSIVE locking_mode retains ownership after COMMIT until close().
+        database = sqlite3.connect(assert_product_state_path(f"{path}.owner.sqlite"), timeout=5, isolation_level=None)
+        database.executescript(
+            "PRAGMA busy_timeout=5000; PRAGMA locking_mode=EXCLUSIVE; "
+            "BEGIN EXCLUSIVE; PRAGMA user_version=1; COMMIT;"
+        )
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+        size = os.fstat(fd).st_size
+        if size:
+            os.lseek(fd, size - 1, os.SEEK_SET)
+            if os.read(fd, 1) != b"\n":
+                raise RuntimeError("Incomplete orphan process journal tail; tracking is unknown")
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0 or written > len(view):
+                raise OSError("Orphan journal write made invalid byte progress")
+            view = view[written:]
+        os.fsync(fd)
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        errors.append(error)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError as error:
+                errors.append(error)
+        if database is not None:
+            try:
+                database.close()
+            except sqlite3.Error as error:
+                errors.append(error)
+    if errors:
+        if failures is not None:
+            failures.extend(errors)
+        else:
+            # Background retirement cannot revoke an already returned command result.
+            # Report its uncertainty without abandoning the remaining shutdown drain.
+            for error in errors:
+                print(f"bash(): orphan journal tracking is unknown: {error!r}", file=sys.stderr)
         return False
     return True
 
@@ -968,7 +1012,7 @@ def _kill_live_handles() -> None:
                     except OSError:
                         pass
         if delivered:
-            _record_journal(handle._pid, active=False)
+            _record_journal(handle._pid, active=False, source=handle._orphan_source)
 
 
 def _install_shutdown_hook() -> None:

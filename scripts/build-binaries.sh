@@ -97,6 +97,7 @@ mkdir -p binaries/{darwin-arm64,darwin-x64,linux-x64,linux-arm64,windows-x64}
 mkdir -p binaries/worker-bundles
 bun build ./dist/core/rlm-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/rlm-journal-owner-worker.js
 bun build ./dist/core/session-journal-owner-worker.js --target=node --format=esm --outfile binaries/worker-bundles/session-journal-owner-worker.js
+bun build ./dist/core/orphan-process-journal-worker.js --target=node --format=esm --outfile binaries/worker-bundles/orphan-process-journal-worker.js
 bun build ./dist/core/history-index-worker.js --target=node --format=esm --outfile binaries/worker-bundles/history-index-worker.js
 
 # Determine which platforms to build
@@ -132,6 +133,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp binaries/worker-bundles/history-index-worker.js binaries/$platform/dist/core/
     cp binaries/worker-bundles/rlm-journal-owner-worker.js binaries/$platform/dist/core/
     cp binaries/worker-bundles/session-journal-owner-worker.js binaries/$platform/dist/core/
+    cp binaries/worker-bundles/orphan-process-journal-worker.js binaries/$platform/dist/core/
     cp -r dist/base-context-runtime binaries/$platform/dist/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme

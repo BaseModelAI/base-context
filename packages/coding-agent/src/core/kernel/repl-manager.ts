@@ -8,7 +8,12 @@ import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
 import { PRODUCT } from "../../product-identity.js";
-import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
+import {
+	captureOrphanProcessJournalOwner,
+	ORPHAN_PROCESS_JOURNAL_ENV,
+	type OrphanProcessJournalOwner,
+	reapKernelOrphanProcesses,
+} from "../orphan-process-journal.js";
 import {
 	createNativeRecoveryRefusal,
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
@@ -59,7 +64,7 @@ import {
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
-const REPL_PROTOCOL_VERSION = 3;
+const REPL_PROTOCOL_VERSION = 4;
 const READY_TIMEOUT_MS = 30_000;
 const REPAIR_STEP_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
@@ -177,6 +182,7 @@ export class ReplKernelManager {
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
+	private childOrphanOwner?: OrphanProcessJournalOwner;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private kernelStderr = "";
 	/** Serializes execute() calls — the runtime runs one request at a time. */
@@ -303,6 +309,7 @@ export class ReplKernelManager {
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
 		if (this.state !== "idle") return;
+		const orphanOwner = captureOrphanProcessJournalOwner();
 		const generation = ++this.startGeneration;
 		this.state = "starting";
 		installSignalHandlersOnce();
@@ -338,17 +345,20 @@ export class ReplKernelManager {
 			env: {
 				...process.env,
 				...this.options.env,
-				BASE_CONTEXT_KERNEL_OWNER_PID: String(process.pid),
+				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanOwner.path,
+				BASE_CONTEXT_KERNEL_OWNER_PID: String(orphanOwner.ownerPid),
 			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;
-		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
+		this.childOrphanOwner = orphanOwner;
 		this.readyDeferred = createDeferred<number>();
 		this.startupProtocolError = undefined;
 		this.wireChild(child);
 
 		try {
+			const registrationError = child.pid !== undefined ? orphanOwner.record(child.pid, true) : undefined;
+			if (registrationError) throw registrationError;
 			const protocol = await this.waitForReady(child);
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			// Ready and a corrupt frame can share one stdout chunk: ready resolved the
@@ -366,7 +376,14 @@ export class ReplKernelManager {
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			// Only the call that performed the cleanup may resurrect to idle; a
 			// concurrent kill()/teardown owns the state otherwise.
-			if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
+			try {
+				if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
+			} catch (cleanupError) {
+				throw new AggregateError(
+					[e, cleanupError],
+					`Kernel startup failed: ${errorMessage(e)}; cleanup failed: ${errorMessage(cleanupError)}`,
+				);
+			}
 			throw e;
 		}
 
@@ -1331,7 +1348,8 @@ export class ReplKernelManager {
 		await this.writeLine({ type: "interrupt", id: requestId });
 	}
 
-	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): Error | undefined {
+		const failures: unknown[] = [];
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
@@ -1341,7 +1359,9 @@ export class ReplKernelManager {
 		this.pendingBackgroundOutputTruncated = false;
 		this.rejectActiveExecution(new Error("Kernel has been shut down"));
 		const child = this.child;
+		const orphanOwner = this.childOrphanOwner;
 		this.child = undefined;
+		this.childOrphanOwner = undefined;
 		this.readyDeferred = undefined;
 		if (child) {
 			child.stdin?.destroy();
@@ -1357,16 +1377,31 @@ export class ReplKernelManager {
 			let signaled = false;
 			try {
 				signaled = child.kill(killSignal);
-			} catch {
-				// The kernel has already exited.
+			} catch (error) {
+				failures.push(error);
 			}
 			// Inactive only when the signal proved the pid still named our un-reaped child.
-			if (pid !== undefined && signaled) recordOrphanProcessState(pid, false);
+			if (pid !== undefined && signaled) {
+				const failure = orphanOwner?.record(pid, false);
+				if (failure) failures.push(failure);
+			}
 			// A killed/crashed kernel cannot run its own shutdown hook, so the host
 			// reaps the bash() process groups it journaled under this kernel pid.
-			if (pid !== undefined) reapKernelOrphanProcesses(pid);
+			if (pid !== undefined && orphanOwner) {
+				const failure = reapKernelOrphanProcesses(pid, orphanOwner);
+				if (failure) failures.push(failure);
+			}
 		}
 		this.startPromise = undefined;
+		if (failures.length) {
+			const failure = new AggregateError(
+				failures,
+				`Kernel cleanup tracking is unknown: ${failures.map(errorMessage).join("; ")}`,
+			);
+			this.appendKernelDiagnostic(failure.message);
+			return failure;
+		}
+		return undefined;
 	}
 
 	private async waitForKernelExit(): Promise<void> {
@@ -1420,7 +1455,8 @@ export class ReplKernelManager {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
-			this.cleanupResources();
+			const failure = this.cleanupResources();
+			if (failure) throw failure;
 			return true;
 		}
 		// Captured before any await: teardowns and newer starts bump the counter.
@@ -1438,6 +1474,8 @@ export class ReplKernelManager {
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		let doneWaiterId: string | undefined;
 		let performedCleanup = false;
+		let gracefulFailure: unknown;
+		let cleanupFailure: Error | undefined;
 		try {
 			if (opts.drainHostRequests) {
 				const inFlightHostRequests = [...this.inFlightHostRequests];
@@ -1472,6 +1510,7 @@ export class ReplKernelManager {
 				await Promise.race([kernelExit, shutdownDeadline]);
 			}
 		} catch (error) {
+			gracefulFailure = error;
 			this.appendKernelDiagnostic(
 				`graceful shutdown failed (killing instead): ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -1480,11 +1519,15 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
-				this.cleanupResources();
+				cleanupFailure = this.cleanupResources();
 				performedCleanup = true;
 			}
 		}
 
+		if (cleanupFailure)
+			throw gracefulFailure
+				? new AggregateError([gracefulFailure, cleanupFailure], "Kernel graceful shutdown and cleanup failed")
+				: cleanupFailure;
 		return performedCleanup;
 	}
 

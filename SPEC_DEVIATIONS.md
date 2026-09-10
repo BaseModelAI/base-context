@@ -1070,3 +1070,62 @@ phase, then checks known-legacy refusal and absence of a top-level file marker.
 The real Prime plugin is never imported. No new case/suite/matrix, provider call,
 probe or extra runtime dependency. Required `npm run check` also passed first:
 1039files/no fixes, TypeScript, installer and browser smoke. No runtime reruns.
+
+
+## W66 / G01 — serialize current orphan-process writers
+
+Current Node and Python orphan writers capture their original path/owner before
+bootstrap waits or command spawn. One existing-pattern SQLite sidecar mutex spans
+incomplete-tail admission, complete JSONL writes, file fsync and descriptor close.
+The connection closes last. SQLite stores no process/job/receipt data. A partial
+write stays in place; the next participating writer refuses it without repair.
+Write errors remain first, followed by distinct descriptor/owner cleanup errors.
+
+Node tracking is still post-spawn. Shell and autonomous commands install their
+existing timeout, abort, output and completion controls before the synchronous
+bridge. Registration failure retains the actual handle until settlement/cleanup,
+not a fictional unstarted command. Autonomous tracking errors escape before gate
+retry classification or unavailable-snapshot fallback; the error cause retains
+the observed result/status/signal/output. Ordinary execution errors keep their
+existing result behavior. The existing outer lifecycle diagnostic ends the run
+and is excluded by session retry admission; this is source evidence, not a claim
+of an unsynthesized outer refusal. Kernel startup keeps its original error and
+actual child cleanup. Retirement retains the original owner and existing drain.
+
+Python enrollment failure keeps its existing command gate closed and invokes the
+existing abort path. It retains the original I/O error, then cleanup errors. Only
+existing resource/group-absence state determines confirmed cleanup/quota release;
+failed enrollment alone does not establish that the spawned process was killed.
+Background retirement reports uncertainty without abandoning shutdown drain.
+
+Daemon schema39 (`protocol-11-schema-39-orphan-writer-owner`) and owner minimum39
+use existing stale-worker handling. TS/Python kernel protocol4 and bootstrap
+schema11/readiness4 use existing ready checks and installed-runtime reuse rules.
+Current fixture metadata follows those versions; deliberate old/mismatch inputs
+remain. Existing runtime source identity already covers the changed Python files.
+No extra cache/hash mechanism, dependency, PID registry, journal format, repair,
+append replay, forced teardown or lifecycle policy is added. The external-Node
+worker is included in the existing source/dist/native packaging paths.
+
+The mutex only coordinates participating writers. Old binaries can ignore it;
+read/clear still depends on existing accepted shutdown drain. Node's post-spawn,
+pre-registration crash window remains. The five-second lock wait/ten-second Node
+helper timeout can block the host thread, delaying timer delivery even with
+controls installed first. No hard-wall deadline, fairness, power-loss/directory
+persistence, universal filesystem/platform or whole-G01 completion is claimed.
+Sol instructions, Prime processes and all12 frozen campaigns are unchanged.
+
+Exactly two existing offline selectors now pass. Node registration/retirement
+passed first on actual22.12.0 (3825110,1.018226739950478s;1pass/4skip). It uses the
+real external-Node SQLite writer and retains its captured path after environment
+drift. Python gated short-write first failed (3825115,0.08898586686700583s): the
+fixture compared a canonical Path with a string, so it never injected the fault.
+The command was not demonstrated to stay gated by that failed case. Its later
+SQLite warning followed temporary-directory teardown, not a proved mutex defect.
+The fixture now compares canonical path strings. Only that affected selector was
+rerun (3825456,0.09537421888671815s;pass): original I/O error first, retained partial
+prefix, cleanup tail refusal, later-owner refusal, no command marker and actual
+process-group/admission cleanup. Production code did not change for this fix.
+Required `npm run check` passed first (3825461,4.9721702160313725s):1040files/no
+fixes, TypeScript, installer and browser smoke. No extra case, suite, live probe,
+Node reassurance rerun, installed/native-platform or whole-process claim.
