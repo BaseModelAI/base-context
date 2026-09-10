@@ -831,3 +831,28 @@ or uncloneable successful scans return unchanged and uncached, never clipped or
 replaced by an empty list. Missing/stat/null behavior and the existing size/mtime
 snapshot rule remain. Same-size/mtime edits, scans, paging, IPC/output, other
 caches, transient/caller-held values and full G08 remain outside this local bound.
+
+## Post-prerequisite implementation — W54
+
+This closes one further G17 metadata seam, not all receipt/accounting coverage.
+The existing native request events gain an optional descriptive `contextEpoch`
+reference containing the session ID and exact accepted epoch entry ID. The
+compiler retains that ID only beside its already-qualified checkpoint. Actual
+selection/fixed preparation returns either that retained reference or the entry
+ID returned by the new epoch/first off-mode compatibility ACK. A source frontier,
+public/copied IDs, an unrelated purpose or a latest-leaf lookup is not a substitute.
+
+The coordinator copies the accepted reference when the physical attempt is
+admitted. Its existing transient attempt tracking retains the reference for that
+attempt's settlement; later source changes cannot replace it. No second owner,
+receipt store, history scan, descriptor budget/effort copy, profile promotion or
+new selection/replay authority is introduced. Original source capture, purpose,
+ACK/adoption/send order, resource checks, cancellation and error handling remain.
+Unsupported/unmanaged or unrelated auxiliary contexts remain unassociated.
+
+Two existing offline cases exercise the actual native service/canonical fake-SSE
+path with new/retained references and a late ordinary source entry, plus the
+existing unmanaged/child/auxiliary coordinator boundary. No provider call or test
+case is added. This is not live provider, installed/platform, complete lifecycle,
+billing or whole G17 certification. Frozen benchmark artifacts/runners and prior
+results are unchanged. Sol and other protected instruction text remain unchanged.

@@ -178,6 +178,7 @@ describe("createAgentSessionFromServices", () => {
 		const summaryBodies: string[] = [];
 		let summarizing = false;
 		let freshOff = false;
+		let lateStateEntryId: string | undefined;
 		type DisplaySource = Pick<TaskStateSourceRef, "sessionId" | "entryId" | "field" | "revision">;
 		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
 			const epochs = await epochManager.readBranchHistory(async (history) => {
@@ -190,6 +191,15 @@ describe("createAgentSessionFromServices", () => {
 				return ids;
 			});
 			expect(epochs.length).toBeGreaterThan(0);
+			const admitted = (await epochManager.readEntries())
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request)
+				.filter((event) => event.type === "attempt_admitted")
+				.at(-1);
+			expect(admitted).toBeDefined();
+			if (summarizing) expect(admitted?.contextEpoch).toBeUndefined();
+			else
+				expect(admitted?.contextEpoch).toEqual({ sessionId: epochManager.getSessionId(), entryId: epochs.at(-1) });
 			if (summarizing) expect(epochs.at(-1)).toBe(epochsAtSend.at(-1));
 			else epochsAtSend.push(epochs.at(-1)!);
 			expect(typeof init?.body).toBe("string");
@@ -303,6 +313,8 @@ describe("createAgentSessionFromServices", () => {
 			]
 				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
 				.join("");
+			if (freshOff && bodies.length === 10)
+				lateStateEntryId = await epochManager.appendCustomEntry("epoch-association-late-state", {});
 			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
 		});
 		const epochOptions: Omit<Parameters<typeof createAgentSessionFromServices>[0], "sessionManager"> = {
@@ -716,6 +728,23 @@ describe("createAgentSessionFromServices", () => {
 			expect(freshCheckpoint?.pendingRequestContract).toBeUndefined();
 			expect(freshCheckpoint?.views).toEqual([]);
 			expect(accepted.entry.tokensBefore).toBeNull();
+			const freshRequests = (await epochManager.readEntries())
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request);
+			const admissions = freshRequests.filter((event) => event.type === "attempt_admitted");
+			const settlements = freshRequests.filter((event) => event.type === "attempt_settled");
+			expect(admissions).toHaveLength(2);
+			expect(settlements).toHaveLength(2);
+			for (const admission of admissions) {
+				expect(admission.contextEpoch).toEqual({ sessionId: epochManager.getSessionId(), entryId: acceptedId });
+				expect(settlements.find((event) => event.attemptId === admission.attemptId)?.contextEpoch).toEqual(
+					admission.contextEpoch,
+				);
+			}
+			expect(admissions[0].source.leafId).not.toBe(acceptedId);
+			expect(lateStateEntryId).toEqual(expect.any(String));
+			expect(lateStateEntryId).not.toBe(acceptedId);
+			expect(epochManager.getLeafId()).not.toBe(acceptedId);
 			expect(bodies.at(-1)).toContain("fresh native result");
 			expect(epochSession.contextMode).toBe("off");
 			expect(summaryBodies).toHaveLength(1);

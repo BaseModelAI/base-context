@@ -1459,6 +1459,7 @@ export class AgentSession {
 					getCanonicalViewUnits(messages)?.length === messages.length
 				) {
 					let committed = epochContext.checkpoint;
+					let committedEntry = epochContext.checkpointEntry;
 					const fixed = epochContext.mode === "off" || (committed?.policyOnly === true && !contextEpochsEnabled);
 					let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
 					const nativeTail = messages.some(
@@ -1504,7 +1505,7 @@ export class AgentSession {
 							if (accepted !== undefined) {
 								if (accepted !== selection)
 									throw new Error("Captured epoch request selection changed after acceptance");
-								return;
+								return committedEntry;
 							}
 							if (
 								!candidate.publicMessages &&
@@ -1517,7 +1518,7 @@ export class AgentSession {
 							) {
 								accepted = selection;
 								acceptedBody = candidate.request.body;
-								return;
+								return committedEntry;
 							}
 							const prepared = prepareCanonicalEpoch(
 								candidate.publicMessages ?? messages,
@@ -1544,8 +1545,10 @@ export class AgentSession {
 									throw new Error("Context epoch source changed before adoption");
 								this.agent.state.messages = prepared.messages;
 								committed = prepared.checkpoint;
+								committedEntry = { sessionId: epochContext.source.sessionId, entryId };
 								accepted = selection;
 								acceptedBody = candidate.request.body;
+								return committedEntry;
 							} catch (cause) {
 								throw commitFailure(cause);
 							}
@@ -1614,6 +1617,7 @@ export class AgentSession {
 												},
 											};
 											committed = checkpoint;
+											committedEntry = { sessionId: epochContext.source.sessionId, entryId };
 											requestContract = nextContract;
 											assertResourceCurrent(resource);
 											if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
@@ -1625,6 +1629,7 @@ export class AgentSession {
 											throw new Error("Fixed context changed after acceptance");
 										acceptedBody = request.body;
 										acceptedReplayContract = replayContract;
+										return committedEntry;
 									} catch (cause) {
 										throw commitFailure(cause);
 									}

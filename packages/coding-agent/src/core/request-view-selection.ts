@@ -13,7 +13,7 @@ import {
 	preparePublicContextWindow,
 } from "./canonical-context.js";
 import { convertToLlm } from "./messages.js";
-import type { SourceSnapshotRef } from "./request-events.js";
+import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
 import { bindMessageReplayUnits, closeViewSelection } from "./view-units.js";
 
 export interface RequestViewCandidate {
@@ -28,7 +28,9 @@ export interface RequestViewCandidate {
 }
 
 /** Root resolves only after its canonical epoch checkpoint ACK. This module owns no epoch state. */
-export type RequestViewCommit = (candidate: RequestViewCandidate) => Promise<void>;
+export type RequestViewCommit = (
+	candidate: RequestViewCandidate,
+) => Promise<ContextEpochEntryRef | undefined> | Promise<void>;
 export type RequestViewValidate = (
 	request: ProviderRequestRepresentation,
 	assessment: RequestTokenAssessment | undefined,
@@ -38,7 +40,7 @@ export type RequestViewFixedPrepare = (
 	request: ProviderRequestRepresentation,
 	projection: ProviderRequestProjection,
 	assessment: RequestTokenAssessment | undefined,
-) => void | Promise<void>;
+) => ContextEpochEntryRef | void | Promise<ContextEpochEntryRef | undefined> | Promise<void>;
 
 export interface CapturedRequestViewBoundary extends CanonicalViewSelectionSource {
 	readonly messages: readonly AgentMessage[];
@@ -81,7 +83,7 @@ export async function prepareFixedRequestView(
 	request: ProviderRequestRepresentation,
 	projection: ProviderRequestProjection,
 	assessment: RequestTokenAssessment | undefined,
-): Promise<void> {
+) {
 	const payload: unknown = JSON.parse(request.body!);
 	if (
 		!payload ||
@@ -111,7 +113,7 @@ export async function prepareFixedRequestView(
 		units.map((unit) => unit.id),
 		boundary.limits,
 	);
-	await boundary.fixedPrepare!(request, projection, assessment);
+	return await boundary.fixedPrepare!(request, projection, assessment);
 }
 
 /** Only the actual serializer's established replay contract authorizes historical-literal omission. */

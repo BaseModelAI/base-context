@@ -22,7 +22,7 @@ import type {
 } from "./history-index.js";
 import { createCompactionSummaryMessage } from "./messages.js";
 import { PUBLIC_CONTEXT_RENDERER, renderPublicHistory } from "./public-context.js";
-import type { SourceSnapshotRef } from "./request-events.js";
+import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
 import { type OwnedResourceCapture, renderResourceView } from "./resource-view.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import {
@@ -87,6 +87,7 @@ interface CompiledEpochContext {
 	readonly mode: ContextMode;
 	readonly source: SourceSnapshotRef;
 	readonly checkpoint?: ContextEpochCheckpoint;
+	readonly checkpointEntry?: ContextEpochEntryRef;
 	readonly taskFrame?: CompiledTaskFrame;
 	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
@@ -842,6 +843,10 @@ export class CanonicalContextCompiler {
 			mode,
 			source: { ...view.source },
 			checkpoint,
+			checkpointEntry:
+				checkpoint && first.summaryRef
+					? { sessionId: view.source.sessionId, entryId: first.summaryRef.entryId }
+					: undefined,
 			taskFrame,
 			resourceRevision: resource?.revision,
 			references: closedMessages.map((message) => epochReferences.get(message) ?? null),

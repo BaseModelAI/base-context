@@ -17,6 +17,7 @@ import {
 } from "@ponythewhite/base-context-ai";
 import type {
 	BoundRequestSink,
+	ContextEpochEntryRef,
 	NativeRequestMetadata,
 	RequestOwnerRef,
 	RequestPurpose,
@@ -70,7 +71,7 @@ interface SinkUse {
 interface BoundOperation {
 	readonly binding: SinkUse;
 	readonly owner: Omit<RequestOwnerRef, "sessionId">;
-	readonly metadata: Omit<NativeRequestMetadata, "source" | "owner">;
+	readonly metadata: Omit<NativeRequestMetadata, "source" | "owner" | "contextEpoch">;
 }
 
 const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
@@ -357,7 +358,7 @@ export class InferenceCoordinator {
 			this.active.delete(pending);
 			this.notifyActivity();
 		};
-		const attemptIds: string[] = [];
+		const admittedAttempts: Array<{ attemptId: string; contextEpoch?: ContextEpochEntryRef }> = [];
 		const receiptWrites: Promise<void>[] = [];
 		let activeUser = false;
 		let localSimulation = false;
@@ -375,8 +376,12 @@ export class InferenceCoordinator {
 			return {
 				message: message!,
 				operationId: operation.metadata.operationId,
-				attemptIds,
-				physicalCoverage: attemptIds.length ? "reported" : localSimulation ? "local-simulation" : "unestablished",
+				attemptIds: admittedAttempts.map(({ attemptId }) => attemptId),
+				physicalCoverage: admittedAttempts.length
+					? "reported"
+					: localSimulation
+						? "local-simulation"
+						: "unestablished",
 			};
 		};
 		try {
@@ -446,21 +451,36 @@ export class InferenceCoordinator {
 					: undefined;
 			const canSelect =
 				(budget || boundary?.fixedPrepare) && boundary && matchesRequestView(boundary, source, context);
+			let selectedContextEpoch: ContextEpochEntryRef | undefined;
 			const attempts: ProviderAttemptObserver = {
 				...(measureRequest ? { measureRequest } : {}),
 				...(canSelect
 					? ({
 							prepareRequest: async (representation, projection) => {
 								try {
+									selectedContextEpoch = undefined;
 									if (JSON.parse(representation.body!).model !== model.id) return;
 									if (boundary!.fixedPrepare) {
 										const assessment = budget?.measure(representation);
 										if (budget && assessment) budget.assert(assessment);
-										await prepareFixedRequestView(boundary!, representation, projection, assessment);
+										const accepted = await prepareFixedRequestView(
+											boundary!,
+											representation,
+											projection,
+											assessment,
+										);
+										if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
 										return;
 									}
 									return await selectRequestView(
-										boundary!,
+										{
+											...boundary!,
+											commit: async (candidate) => {
+												const accepted = await boundary!.commit(candidate);
+												if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
+												return accepted || undefined;
+											},
+										},
 										representation,
 										projection,
 										budget!,
@@ -487,8 +507,10 @@ export class InferenceCoordinator {
 					}
 					measuredForAdmission = false;
 					const attemptId = randomUUID();
+					const contextEpoch = selectedContextEpoch ? Object.freeze({ ...selectedContextEpoch }) : undefined;
 					const write = operation.binding.sink.persist({
 						...metadata,
+						...(contextEpoch ? { contextEpoch } : {}),
 						type: "attempt_admitted",
 						attemptId,
 						timestamp: Date.now(),
@@ -496,12 +518,16 @@ export class InferenceCoordinator {
 					});
 					receiptWrites.push(write);
 					await write;
-					attemptIds.push(attemptId);
+					admittedAttempts.push({ attemptId, contextEpoch });
 					return attemptId;
 				},
 				settle: async (receipt) => {
+					const contextEpoch = admittedAttempts.find(
+						(attempt) => attempt.attemptId === receipt.attemptId,
+					)?.contextEpoch;
 					const write = operation.binding.sink.persist({
 						...metadata,
+						...(contextEpoch ? { contextEpoch } : {}),
 						type: "attempt_settled",
 						attemptId: receipt.attemptId,
 						timestamp: Date.now(),

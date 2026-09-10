@@ -102,3 +102,13 @@
 - Native benchmark capacity invalidation now requires an existing parsed settled physical receipt. RPC markers remain observations; generic H behavior, first-valid-primary retention and unknown costs remain unchanged. Selected host identity is checked through existing manifest metadata admission. Frozen hosts/runners and past results are not rewritten.
 
 - Optional session-info caching now retains at most256 entries/4MiB encoded key/stat/info metadata in the same Map. Caller copies stay detached with Date/types preserved; oversized complete results bypass caching. Scans, paging, IPC/output and global heap remain outside this bound.
+
+## W54 — descriptive accepted-epoch association
+
+Existing native request admission/settlement events include the exact accepted
+context-epoch entry reference when actual selected/fixed preparation supplies it.
+The compiler retains qualified references; new boundaries use their returned ACK.
+Per-attempt tracking keeps the admitted reference stable through later source
+changes. No latest-state inference, new store, budget/effort duplication, policy
+authority or prompt change. Two existing offline cases cover the supported path;
+live provider/platform/billing and broader G17 coverage remain unestablished.

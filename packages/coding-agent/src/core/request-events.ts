@@ -10,6 +10,12 @@ export interface SourceSnapshotRef {
 	readonly persistent: boolean;
 }
 
+/** Descriptive reference to an actually accepted native epoch, never replay/selection authority. */
+export interface ContextEpochEntryRef {
+	readonly sessionId: string;
+	readonly entryId: string;
+}
+
 export type RequestPurpose = "main" | "summary" | "refine" | "learning" | "child" | "native-control" | "other";
 
 export interface RequestOwnerRef {
@@ -48,6 +54,8 @@ export interface NativeRequestMetadata {
 	readonly purpose: RequestPurpose;
 	readonly purposeDetail?: string;
 	readonly modelContract: ResolvedModelContract;
+	/** Absent unless this request actually used the associated compiled epoch. */
+	readonly contextEpoch?: ContextEpochEntryRef;
 }
 
 export type NativeRequestEvent = NativeRequestMetadata &

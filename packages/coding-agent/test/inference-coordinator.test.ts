@@ -1085,6 +1085,8 @@ describe("native inference coordination", () => {
 		} finally {
 			await foreign.dispose();
 		}
+		// A source frontier, a late source change, or child/auxiliary purpose alone is not an epoch association.
+		expect(facts.every((event) => event.contextEpoch === undefined)).toBe(true);
 	});
 	it("keeps a rejected aggregate's captured sibling owned through receipt persistence", async () => {
 		const facts: NativeRequestEvent[] = [];

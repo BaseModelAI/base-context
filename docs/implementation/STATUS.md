@@ -1637,3 +1637,89 @@ coverage uses real persisted metadata, full list/read paths and call-through rea
 spies without injected cache entries or quota resets. These scoped paths do not
 establish manifest/artifact/provider certification, bounded catalog scans, all
 IPC/resolve/copy-failure branches, global heap, billing or release readiness.
+
+### W54 — exact accepted epoch reference in request events
+
+Native request admission and settlement now carry the optional descriptive
+`contextEpoch: { sessionId, entryId }` from successful actual request-view
+preparation. Retained epochs use the qualified compiler reference; new selection
+and fresh-off compatibility use the actual epoch ACK. Each physical attempt
+keeps its detached admission reference through settlement, not a later leaf or
+selection. The original pre-commit source frontier remains unchanged.
+
+This uses existing compiler metadata/callbacks and transient attempt tracking,
+not a parallel registry, body store or authority mechanism. Generic/unmanaged
+and unrelated auxiliary contexts do not infer an association. Budget/effort
+fields, unvalidated model/pricing declarations, source/purpose ownership, resource
+checks, conversion/callback count and ACK/cancellation/error semantics remain.
+
+Validation passed: exactly two existing cases: services `honors an explicit
+daemon-carried telemetry opt-out` and coordinator `keeps late settlement and
+semantic retries on their captured source and rebinds children`. The service
+case uses its existing fake-SSE sends for new/retained ACKs, local destination
+references, summary omission and a late ordinary source entry. The unmanaged
+fixture retains its existing child/auxiliary/foreign-capture phases and checks
+omission. No new provider call, test suite or additional lifecycle matrix.
+
+The added late-state phase moves an ordinary source leaf; it does not fabricate
+a new epoch. Wider retry/epoch-change/copy/import/lifecycle cases not exercised
+by those existing paths remain source-only. This does not certify live providers,
+installed artifacts/platforms, complete receipt coverage or billing. The change
+does not modify frozen campaign runners/parsers/controls or protected prompts.
+
+### D Sol MEDIUM — separately frozen control completed
+
+The frozen D invocation exited with code0 after 6501.520s.
+All60 immutable primaries and64 retained attempts remain: D29/30 judges
+(31 attempts), stock27/30 (33 attempts), zero capacity-invalid attempts.
+Failed primaries are stock5 (main5/5, edgeFalse, no runtime error), D19
+(main4/5, edgeTrue, WebSocket1006), stock19 (main0/5, edgeFalse, no runtime
+error; bad gaps.csv header/BAD-only edge failure), and stock20 (main1/5,
+edgeFalse, WebSocket1006; negative-kWh edge outputs missing). Each has one
+retained diagnostic, never substituted for its primary. The only two runtime
+errors across all64 attempts are primary D19 and stock20.
+
+All27 matched passing pairs are runtime-clean: D
+9279.136s/stock11312.508s,
+-17.975%,24 faster/3 slower. These results show higher observed
+correctness and faster conditional time for this separately frozen D control,
+not for current native source. All-retained agent10295.602s/13232.381s is not
+paired speed evidence. Usage/cost remain incomplete; catalog/assistant cost
+observations are not physical totals or billed cost. MEDIUM has no publication
+protocol blockers, but publication readiness remains false and no approval is
+granted. Old LOW flags and all completed results remain unchanged.
+
+Nine invocations are complete with576 retained attempts. D Astra MEDIUM is next,
+then S Sol and S Astra MEDIUM, on their existing frozen runners/hosts. No
+candidate/runner/model/auth change or probe was used to finish this invocation.
+
+Same27 matched solver observations, D/stock: model calls
+372/389, tools
+368/347, recovery
+12/0; input including cache
+4666234/5848887, uncached
+932346/1041463, cache-read
+3733888/4807424, output
+259939/313327, total
+4926173/6162214, cache-write0 observed. These counts do not establish
+complete physical calls, billing, causation, or current-native performance.
+
+### W54 validation outcome
+
+Both distinct existing cases passed on their first focused runs. Expected
+controlled pre-fetch budget refusals appeared on stderr in the passing service
+case; no live provider call occurred. Initial formatting corrected two files but
+reported three noConfusingVoidType warnings. The initial required check stopped
+on those same warnings before type/installer/browser checks.
+
+Callback types now keep value/undefined promises separate from existing
+Promise<void> callbacks, and fixed preparation infers its return type. A second
+check passed lint but reported TS2322 on the wrapper's combined inferred return.
+The wrapper now normalizes its optional return with `accepted || undefined`;
+actual reference/undefined values and the selected provider body are unchanged.
+The selector does not consume this callback result. No fixture, suppression,
+unsafe fix, cast or extra inference was added. The focused cases were not rerun.
+
+The final required `npm run check` passed:1038 files with no fixes, TypeScript,
+installer and browser checks. Both earlier diagnostics remain retained. No broad
+suite, provider probe or frozen benchmark change was made.
