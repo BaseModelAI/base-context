@@ -4,6 +4,7 @@ import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
+	CONTEXT_TOOL_EPOCH_RENDERER,
 	type ContextEpochCheckpoint,
 	type ContextMode,
 	type ContextReplayContract,
@@ -12,6 +13,7 @@ import {
 	readContextEpoch,
 	retainedContextRequestContract,
 	snapshotContextEpoch,
+	type ToolContinuationGroup,
 } from "./context-epoch.js";
 import type {
 	ContextManifestCursor,
@@ -19,9 +21,15 @@ import type {
 	ContextRef,
 	ContextUpdateRef,
 	ContextUpdateTarget,
+	IndexedSourceEvent,
 } from "./history-index.js";
 import { createCompactionSummaryMessage } from "./messages.js";
-import { PUBLIC_CONTEXT_RENDERER, renderPublicHistory } from "./public-context.js";
+import {
+	PUBLIC_CONTEXT_RENDERER,
+	PUBLIC_TOOL_CONTINUATION_RENDERER,
+	renderPublicHistory,
+	renderToolContinuation,
+} from "./public-context.js";
 import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
 import { type OwnedResourceCapture, renderResourceView } from "./resource-view.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
@@ -53,6 +61,7 @@ export interface CanonicalViewSelectionSource {
 	readonly source: SourceSnapshotRef;
 	readonly units: readonly ViewUnit[];
 	readonly limits: ViewUnitLimits;
+	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
 }
 
 const compiledViewUnits = new WeakMap<
@@ -93,6 +102,7 @@ interface CompiledEpochContext {
 	readonly references: readonly (EpochViewReference | null)[];
 	/** Uncommitted public candidate plan; never a fabricated accepted checkpoint. */
 	readonly continuation?: ContextEpochCheckpoint["continuation"];
+	readonly toolContinuations?: readonly ToolContinuationGroup[];
 }
 const compiledEpochContexts = new WeakMap<readonly AgentMessage[], CompiledEpochContext>();
 
@@ -115,6 +125,57 @@ export function captureCanonicalRequestMessages(messages: readonly AgentMessage[
 		if (source) messageSources.set(captured[index], { ...source });
 	}
 	return captured;
+}
+
+/** Called only for the actual current adapter's mandatory whole-group public candidate. */
+export function prepareToolContinuationWindow(messages: readonly AgentMessage[]): {
+	messages: AgentMessage[];
+	replacements: readonly { messageIndex: number; text: string }[];
+} {
+	const captured = captureCanonicalRequestMessages(messages);
+	const views = compiledViewUnits.get(captured)!;
+	const epoch = compiledEpochContexts.get(captured)!;
+	const groups = views.selection.pendingPublicMessageGroups;
+	if (!groups?.length || groups.length !== epoch.toolContinuations?.length)
+		throw new Error("Tool continuation requires its captured native source plan");
+	const maxBytes = views.selection.limits.maxMetadataBytes;
+	const references = [...epoch.references];
+	const replacements: { messageIndex: number; text: string }[] = [];
+	const markers = new Set(groups.map((group) => `public-tool-continuation:${views.units[group[0]].id}`));
+	const renderedGroups = new Map<number, ToolContinuationGroup>();
+	for (const [groupIndex, members] of groups.entries()) {
+		const group = epoch.toolContinuations![groupIndex];
+		if (references[members[0]]?.ref.entryId !== group.assistantEntryId)
+			throw new Error("Tool continuation original group changed");
+		for (const index of members) {
+			const reference = references[index];
+			if (!reference) throw new Error("Tool continuation source is unavailable");
+			const original = captured[index];
+			const rendered = renderToolContinuation(original, reference.ref.entryId, epoch.source, group, maxBytes);
+			const source = messageSources.get(original);
+			if (source) messageSources.set(rendered, source);
+			captured[index] = rendered;
+			references[index] = { ...reference, rendering: PUBLIC_TOOL_CONTINUATION_RENDERER };
+			replacements.push({ messageIndex: index, text: rendered.content });
+			renderedGroups.set(index, group);
+		}
+	}
+	stringifyBoundedJson(captured, maxBytes);
+	const publicUnits = views.units.map(
+		(unit, index): ViewUnit => ({
+			...unit,
+			sourceRevision: renderedGroups.has(index)
+				? JSON.stringify([unit.sourceRevision, PUBLIC_TOOL_CONTINUATION_RENDERER, renderedGroups.get(index)])
+				: unit.sourceRevision,
+			unavailableDependencies: unit.unavailableDependencies?.filter((id) => !markers.has(id)),
+		}),
+	);
+	compiledViewUnits.set(captured, {
+		units: publicUnits,
+		selection: { ...views.selection, units: publicUnits, pendingPublicMessageGroups: undefined },
+	});
+	compiledEpochContexts.set(captured, { ...epoch, references });
+	return { messages: captured, replacements };
 }
 
 /** Deterministic public data only. The actual adapter must permit and accept this candidate. */
@@ -195,6 +256,8 @@ export function prepareContextModeEpoch(
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units || units.length !== messages.length)
 		throw new Error("Context mode requires captured canonical views");
+	if (context.toolContinuations?.length)
+		throw new Error("Tool continuation cannot enter a policy-only context checkpoint");
 	const chosen = messages.filter(
 		(_, index) => units[index].kind !== "task-frame" && units[index].kind !== "resource-view",
 	);
@@ -239,13 +302,17 @@ export function prepareCanonicalEpoch(
 	replayContract: ContextReplayContract = "complete-context",
 	publicWindow = false,
 ): {
-	checkpoint: ContextEpochCheckpoint & { readonly version: 4; readonly representation: string };
+	checkpoint: ContextEpochCheckpoint & { readonly version: 4 | 6; readonly representation: string };
 	messages: AgentMessage[];
 } {
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units || units.length !== messages.length || context.references.length !== messages.length)
 		throw new Error("Context epoch requires its captured compiler output");
+	if (compiledViewUnits.get(messages)?.selection.pendingPublicMessageGroups?.length)
+		throw new Error("Tool continuation requires its accepted public representation");
+	if (context.toolContinuations?.length && (!publicWindow || replayContract !== "message-groups"))
+		throw new Error("Tool continuation epoch requires its actual public replay contract");
 	const selected = new Set(selectedUnitIds);
 	if (selected.size !== selectedUnitIds.length || [...selected].some((id) => !units.some((unit) => unit.id === id)))
 		throw new Error("Context epoch selection has an unknown or repeated unit");
@@ -269,8 +336,9 @@ export function prepareCanonicalEpoch(
 	return {
 		checkpoint: snapshotContextEpoch(
 			{
-				version: 4,
-				renderer: CONTEXT_EPOCH_RENDERER,
+				version: context.toolContinuations?.length ? 6 : 4,
+				renderer: context.toolContinuations?.length ? CONTEXT_TOOL_EPOCH_RENDERER : CONTEXT_EPOCH_RENDERER,
+				...(context.toolContinuations?.length ? { toolContinuations: context.toolContinuations } : {}),
 				source: context.source,
 				representation,
 				replayContract,
@@ -294,6 +362,8 @@ export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): st
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units) throw new Error("Recovery compaction requires captured canonical views");
+	if (context.toolContinuations?.length)
+		throw new Error("Tool continuation cannot enter an older recovery summary recipe");
 	const recoveries = units.flatMap((unit, index) => (unit.kind === "recovery" ? [context.references[index]] : []));
 	if (!recoveries.length) return;
 	const checkpoint = context.checkpoint;
@@ -405,6 +475,7 @@ export class CanonicalContextCompiler {
 		frameOptions: Partial<TaskFrameLimits> = {},
 		resourceCapture?: OwnedResourceCapture,
 		initialContextMode: ContextMode = "on",
+		allowPendingToolPublic = false,
 	): Promise<AgentMessage[]> {
 		const frameLimits = taskFrameLimits(frameOptions);
 		const previousSource = this.source;
@@ -709,8 +780,13 @@ export class CanonicalContextCompiler {
 			for (const pinned of checkpoint.views) {
 				if (
 					pinned.rendering !== undefined &&
-					(pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
-						(checkpoint.version !== 3 && checkpoint.version !== 4 && checkpoint.version !== 5) ||
+					((pinned.rendering === PUBLIC_TOOL_CONTINUATION_RENDERER
+						? checkpoint.version !== 6
+						: pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
+							(checkpoint.version !== 3 &&
+								checkpoint.version !== 4 &&
+								checkpoint.version !== 5 &&
+								checkpoint.version !== 6)) ||
 						pinned.ref.kind === "compaction")
 				)
 					throw new Error("Unsupported context epoch view rendering");
@@ -817,13 +893,202 @@ export class CanonicalContextCompiler {
 			if (!unit) throw new Error("Compiled view unit has no captured source");
 			return unit;
 		});
-		const units = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
-		// Keep the full context, but refuse incomplete replay before returning provider-bound messages.
-		const closedUnits = closeViewSelection(
-			units,
+		const replayUnits = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
+		const frozenGroups = checkpoint?.toolContinuations ?? [];
+		const candidates = messages.flatMap((message, index) => {
+			if (message.role !== "assistant") return [];
+			const reference = epochReferences.get(message);
+			const prior = frozenGroups.find((group) => group.assistantEntryId === reference?.ref.entryId);
+			if (!prior && !replayUnits[index].unavailableDependencies?.some((id) => id.startsWith("tool-result:")))
+				return [];
+			if (!reference || reference.ref.retention === "retained-import")
+				throw new Error("Tool continuation requires its original assistant source");
+			return [
+				{
+					message,
+					index,
+					reference,
+					prior,
+					intents: new Map<number, Awaited<ReturnType<typeof hydrateCapturedHistoryEntry>>>(),
+				},
+			];
+		});
+		if (frozenGroups.length !== candidates.filter((candidate) => candidate.prior).length)
+			throw new Error("Committed tool continuation lost its original group");
+		if (candidates.length && (!allowPendingToolPublic || mode === "off"))
+			throw new Error("Tool continuation requires an enabled native public request boundary");
+		const readToolEvidence = async (metadata: IndexedSourceEvent) => {
+			const cached = next.get(metadata.id);
+			if (cached?.revision === metadata.revision) return { entry: cached.entry, source: metadata };
+			countBytes(metadata);
+			return hydrateCapturedHistoryEntry(metadata, maxSourceBytes, view.readPayload);
+		};
+		const acceptIntent = async (metadata: IndexedSourceEvent) => {
+			if (
+				metadata.kind !== "tool_intent" ||
+				metadata.qualification !== "native-tool-execution" ||
+				metadata.retention === "retained-import"
+			)
+				return;
+			const hydrated = await readToolEvidence(metadata);
+			const entry = hydrated.entry;
+			if (
+				entry.type !== "tool_intent" ||
+				entry.assistant?.sessionId !== view.source.sessionId ||
+				entry.assistant.sessionFile !== view.source.sessionFile
+			)
+				return;
+			const candidate = candidates.find((item) => item.reference.ref.entryId === entry.assistant?.entryId);
+			if (!candidate) return;
+			const invocation = entry.invocation;
+			const call = candidate.message.content.filter((part) => part.type === "toolCall")[invocation.sourceOrder];
+			if (
+				!Number.isSafeInteger(invocation.sourceOrder) ||
+				!call ||
+				call.id !== invocation.toolCallId ||
+				call.name !== invocation.toolName ||
+				!invocation.executionId ||
+				entry.id !== `${invocation.executionId}:intent` ||
+				metadata.sequence <= candidate.reference.ref.sequence ||
+				candidate.intents.has(invocation.sourceOrder)
+			)
+				throw new Error("Tool continuation has ambiguous original intent");
+			candidate.intents.set(invocation.sourceOrder, hydrated);
+		};
+		for (const candidate of candidates) {
+			if (!candidate.prior) continue;
+			if (!Array.isArray(candidate.prior.calls)) throw new Error("Invalid committed tool continuation");
+			for (const call of candidate.prior.calls) {
+				const actual = await view.get(call.intent.id);
+				if (!actual || actual.revision !== call.intent.revision || actual.sequence !== call.intent.sequence)
+					throw new Error("Committed tool intent is unavailable on this captured branch");
+				await acceptIntent(actual);
+			}
+		}
+		const newGroups = candidates.filter((candidate) => !candidate.prior);
+		if (newGroups.length) {
+			let after = Math.min(...newGroups.map((candidate) => candidate.reference.ref.sequence));
+			let scanned = 0;
+			for (;;) {
+				const page = await view.page(after, Math.min(128, maxMessages - scanned + 1));
+				scanned += page.events.length;
+				if (scanned > maxMessages) throw new Error("Tool continuation source item budget exceeded");
+				if (page.coverage !== "complete") throw new Error("Tool continuation source coverage is incomplete");
+				for (const metadata of page.events) {
+					// Frozen intent refs were already read exactly; do not count them twice as another execution.
+					if (
+						!candidates.some((candidate) => candidate.prior?.calls.some((call) => call.intent.id === metadata.id))
+					)
+						await acceptIntent(metadata);
+				}
+				if (page.nextAfter === null) break;
+				if (page.nextAfter <= after) throw new Error("Tool continuation source page did not advance");
+				after = page.nextAfter;
+			}
+		}
+		const toolContinuations: ToolContinuationGroup[] = [];
+		const pendingPublicMessageGroups: number[][] = [];
+		for (const candidate of candidates) {
+			const toolCalls = candidate.message.content.filter((part) => part.type === "toolCall");
+			if (
+				!toolCalls.length ||
+				candidate.intents.size !== toolCalls.length ||
+				(candidate.prior && candidate.prior.calls.length !== toolCalls.length)
+			)
+				throw new Error("View-unit replay group is incomplete: original tool owner is unqualified");
+			const members = [candidate.index];
+			const calls: ToolContinuationGroup["calls"][number][] = [];
+			for (let order = 0; order < toolCalls.length; order++) {
+				const intent = candidate.intents.get(order)!;
+				if (intent.entry.type !== "tool_intent") throw new Error("Invalid native tool intent");
+				const invocation = intent.entry.invocation;
+				const original = candidate.prior?.calls[order];
+				if (
+					original &&
+					(original.executionId !== invocation.executionId || original.intent.id !== intent.source.id)
+				)
+					throw new Error("Committed tool execution identity changed");
+				const actual = await view.get(invocation.executionId);
+				let outcome: ToolContinuationGroup["calls"][number]["outcome"] = "outcome_unknown";
+				if (actual) {
+					if (
+						actual.kind !== "message" ||
+						actual.retention === "retained-import" ||
+						(actual.qualification !== "native-tool-execution" && actual.qualification !== "native-recovery") ||
+						actual.sequence <= intent.source.sequence
+					)
+						throw new Error("Tool outcome lacks its original finalized owner");
+					const { entry } = await readToolEvidence(actual);
+					if (
+						entry.type !== "message" ||
+						entry.message.role !== "toolResult" ||
+						entry.execution?.executionId !== invocation.executionId ||
+						!("invocationId" in entry.execution) ||
+						entry.execution.invocationId !== intent.source.id ||
+						entry.execution.sourceOrder !== order ||
+						entry.execution.toolCallId !== invocation.toolCallId ||
+						entry.execution.toolName !== invocation.toolName ||
+						entry.message.toolCallId !== invocation.toolCallId ||
+						entry.message.toolName !== invocation.toolName ||
+						!["not_started", "completed", "failed", "outcome_unknown"].includes(entry.execution.executionOutcome)
+					)
+						throw new Error("Tool outcome does not match its original captured intent");
+					outcome = entry.execution.executionOutcome;
+					const index = messages.findIndex((message) => {
+						const ref = epochReferences.get(message)?.ref;
+						return ref?.entryId === actual.id && ref.revision === actual.revision;
+					});
+					if (index <= candidate.index)
+						throw new Error("Finalized tool outcome is absent from its whole public group");
+					members.push(index);
+				}
+				if (
+					original?.result &&
+					(!actual ||
+						original.result.id !== actual.id ||
+						original.result.sequence !== actual.sequence ||
+						original.result.revision !== actual.revision)
+				)
+					throw new Error("Committed finalized tool outcome is unavailable on this captured branch");
+				calls.push({
+					executionId: invocation.executionId,
+					intent: { id: intent.source.id, sequence: intent.source.sequence, revision: intent.source.revision },
+					outcome,
+					...(actual ? { result: { id: actual.id, sequence: actual.sequence, revision: actual.revision } } : {}),
+				});
+			}
+			toolContinuations.push({ assistantEntryId: candidate.reference.ref.entryId, calls });
+			pendingPublicMessageGroups.push(members.sort((left, right) => left - right));
+		}
+		const publicSourceIds = new Set(
+			pendingPublicMessageGroups.flatMap((group) =>
+				group.map((index) => epochReferences.get(messages[index])!.ref.entryId),
+			),
+		);
+		if (
+			checkpoint?.views.some(
+				(pinned) =>
+					pinned.rendering === PUBLIC_TOOL_CONTINUATION_RENDERER && !publicSourceIds.has(pinned.ref.entryId),
+			)
+		)
+			throw new Error("Committed tool rendering has no matching whole-group recipe");
+		stringifyBoundedJson(toolContinuations, maxSourceBytes);
+		const units = pendingPublicMessageGroups.length
+			? bindMessageReplayUnits(messages, sourceUnits, unitLimits, "complete-context", pendingPublicMessageGroups)
+			: replayUnits;
+		const pendingMarkers = new Set(
+			pendingPublicMessageGroups.map((group) => `public-tool-continuation:${units[group[0]].id}`),
+		);
+		// Check every ordinary dependency now. Return the original unadmittable units, not native replay permission.
+		closeViewSelection(
+			units.map((unit) => ({
+				...unit,
+				unavailableDependencies: unit.unavailableDependencies?.filter((id) => !pendingMarkers.has(id)),
+			})),
 			units.map((unit) => unit.id),
 			unitLimits,
 		);
+		const closedUnits = units;
 		const messagesByUnit = new Map(units.map((unit, index) => [unit.id, messages[index]]));
 		const closedMessages = closedUnits.map((unit) => messagesByUnit.get(unit.id)!);
 		// A frozen literal is immutable inside this epoch, not permanently mandatory at its next ACK boundary.
@@ -837,7 +1102,12 @@ export class CanonicalContextCompiler {
 		});
 		compiledViewUnits.set(closedMessages, {
 			units: closedUnits,
-			selection: { source: { ...view.source }, units: selectionUnits, limits: unitLimits },
+			selection: {
+				source: { ...view.source },
+				units: selectionUnits,
+				limits: unitLimits,
+				...(pendingPublicMessageGroups.length ? { pendingPublicMessageGroups } : {}),
+			},
 		});
 		compiledEpochContexts.set(closedMessages, {
 			mode,
@@ -850,6 +1120,7 @@ export class CanonicalContextCompiler {
 			taskFrame,
 			resourceRevision: resource?.revision,
 			references: closedMessages.map((message) => epochReferences.get(message) ?? null),
+			...(toolContinuations.length ? { toolContinuations } : {}),
 		});
 		this.entries = next;
 		this.taskFrame = taskFrame;

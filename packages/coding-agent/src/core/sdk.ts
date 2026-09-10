@@ -203,7 +203,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			hasExistingSession,
 			hasThinkingEntry,
 			hasServiceTierEntry,
-		} = await readSessionBootstrap(sessionManager, settingsManager.getCanonicalContextLimits());
+		} = await readSessionBootstrap(sessionManager, settingsManager.getCanonicalContextLimits(), {
+			allowPendingToolPublic: options.requestTokenBudget !== undefined,
+			initialContextMode: contextMode ?? settingsManager.getContextMode(),
+		});
 
 		let model = options.model;
 		let modelFallbackMessage: string | undefined;

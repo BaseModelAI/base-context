@@ -19,6 +19,7 @@ const MAX_PENDING_OPERATIONS = 32;
 export const APPEND_NATIVE_ADMISSION = Symbol("session-journal.native-admission");
 export const APPEND_NATIVE_RECOVERY = Symbol("session-journal.native-recovery");
 export const APPEND_NATIVE_CONTEXT_EPOCH = Symbol("session-journal.native-context-epoch");
+export const APPEND_NATIVE_TOOL_EXECUTION = Symbol("session-journal.native-tool-execution");
 
 export interface SessionJournalOwnerOptions {
 	journalPath: string;
@@ -39,7 +40,7 @@ export interface SessionJournalState {
 export type SessionJournalRequest =
 	| {
 			id: number;
-			action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch";
+			action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch" | "begin-tool-execution";
 			bytes: number;
 			retention?: JournalFrameRetention;
 	  }
@@ -313,10 +314,15 @@ export class SessionJournalOwner {
 		return this.uploadJson(json, retention, "begin-context-epoch");
 	}
 
+	/** @internal Only the captured native tool owner grants this qualification. */
+	[APPEND_NATIVE_TOOL_EXECUTION](json: string, retention?: JournalFrameRetention): Promise<{ sequence: number }> {
+		return this.uploadJson(json, retention, "begin-tool-execution");
+	}
+
 	private async uploadJson(
 		json: string,
 		retention: JournalFrameRetention | undefined,
-		action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch",
+		action: "begin" | "begin-admitted" | "begin-recovery" | "begin-context-epoch" | "begin-tool-execution",
 	): Promise<{ sequence: number }> {
 		const bytes = Buffer.byteLength(json);
 		if (bytes === 0 || bytes > SESSION_JOURNAL_MAX_RECORD_BYTES)

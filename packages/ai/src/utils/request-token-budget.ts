@@ -51,8 +51,10 @@ export interface ProviderRequestProjection {
 	readonly replayContract?: "complete-context" | "message-groups";
 	/** Actual native request can begin a fresh stateless public window after its closed replay group. */
 	readonly publicWindow?: true;
-	/** Completed source groups from the existing native converter traversal; not route permission. */
+	/** Closed or explicitly public-only original groups from the converter; not route or native replay permission. */
 	readonly publicMessageGroups?: readonly (readonly number[])[];
+	/** Validated originals that MUST leave native replay, even when the raw request is under budget. */
+	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
 	/** Bound to this actual full native request. Undefined refuses an unsupported/partial public replacement. */
 	readonly encodePublicWindow?: (
 		replacements: readonly ProviderRequestPublicMessage[],

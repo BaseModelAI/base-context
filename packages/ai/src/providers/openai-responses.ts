@@ -106,6 +106,11 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}
+			if (
+				options?.attempts?.pendingPublicMessageGroups?.length &&
+				(!attempts.hasRequestBudget || !options.attempts.prepareRequest)
+			)
+				throw new Error("Pending tool groups require native public preparation and measurement");
 			let projection: ProviderRequestProjection | undefined;
 			let params = buildParams(
 				model,
@@ -130,6 +135,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			}
 			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
 			if (attempts.hasRequestBudget) {
+				let pendingPublicBody: string | undefined;
 				const body = JSON.stringify(params);
 				const serialized = JSON.parse(body) as ResponseCreateParamsStreaming;
 				const requestUrl = `${client.baseURL.replace(/\/$/, "")}/responses`;
@@ -146,9 +152,17 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 					requestProjection = bindResponsesPublicWindow(
 						{ api: model.api, provider: model.provider, url: requestUrl, body },
 						requestProjection,
+						(encoded) => {
+							pendingPublicBody = encoded;
+						},
 					);
 				}
 				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection);
+				if (
+					options?.attempts?.pendingPublicMessageGroups?.length &&
+					(pendingPublicBody === undefined || selected !== pendingPublicBody)
+				)
+					throw new Error("Pending original tool groups were not accepted as public");
 				params = JSON.parse(selected!) as ResponseCreateParamsStreaming;
 			}
 			const requestOptions = {
@@ -278,7 +292,10 @@ function buildParams(
 	options?: OpenAIResponsesOptions,
 	onProjection?: (projection: ProviderRequestProjection) => void,
 ) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { onProjection });
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+		onProjection,
+		pendingPublicMessageGroups: options?.attempts?.pendingPublicMessageGroups,
+	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model, requestUrl);

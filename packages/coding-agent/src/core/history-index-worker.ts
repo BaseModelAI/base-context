@@ -341,7 +341,8 @@ function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 		item.qualification !== undefined &&
 		item.qualification !== "native-admission" &&
 		item.qualification !== "native-recovery" &&
-		item.qualification !== "native-context-epoch"
+		item.qualification !== "native-context-epoch" &&
+		item.qualification !== "native-tool-execution"
 	)
 		throw new Error("Unsupported indexed source qualification");
 	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(

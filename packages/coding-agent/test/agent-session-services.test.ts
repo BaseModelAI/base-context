@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AgentOutputLimitError } from "@ponythewhite/base-context-agent";
 import { type Model, RequestTokenBudgetError, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -178,6 +179,7 @@ describe("createAgentSessionFromServices", () => {
 		const summaryBodies: string[] = [];
 		let summarizing = false;
 		let freshOff = false;
+		let toolContinuationPhase: "intent" | "resumed" | undefined;
 		let lateStateEntryId: string | undefined;
 		type DisplaySource = Pick<TaskStateSourceRef, "sessionId" | "entryId" | "field" | "revision">;
 		const epochFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
@@ -248,35 +250,48 @@ describe("createAgentSessionFromServices", () => {
 				need: requestRecovery ? "Also preserve Bar.txt." : "Preserve Foo.txt.",
 			};
 			const item =
-				freshOff && bodies.length === 9
+				toolContinuationPhase === "intent"
 					? {
 							type: "function_call",
-							id: "fc_fresh_off",
-							call_id: "call_fresh_off",
-							name: "fresh_echo",
+							id: "fc_pending_effect",
+							call_id: "call_pending_effect",
+							name: "pending_effect",
 							status: "completed",
-							arguments: "{}",
+							arguments: JSON.stringify({ value: "MODEL_ARGUMENT" }),
 						}
-					: firstInput
+					: freshOff && bodies.length === 9
 						? {
 								type: "function_call",
-								id: requestRecovery ? "fc_request_recovery" : "fc_epoch_recovery",
-								call_id: requestRecovery ? "call_request_recovery" : "call_epoch_recovery",
-								name: "prime_context",
+								id: "fc_fresh_off",
+								call_id: "call_fresh_off",
+								name: "fresh_echo",
 								status: "completed",
-								arguments: JSON.stringify({
-									action: "batch",
-									requests: [recoveryRequest, { ...recoveryRequest, revision: "not-the-recorded-revision" }],
-								}),
+								arguments: "{}",
 							}
-						: {
-								type: "message",
-								id: `msg_epoch_${bodies.length + summaryBodies.length}`,
-								role: "assistant",
-								status: "completed",
-								content: [{ type: "output_text", text: "OK", annotations: [] }],
-							};
-			const opaqueTail = !summarizing && (bodies.length === 3 || requestRecovery);
+						: firstInput
+							? {
+									type: "function_call",
+									id: requestRecovery ? "fc_request_recovery" : "fc_epoch_recovery",
+									call_id: requestRecovery ? "call_request_recovery" : "call_epoch_recovery",
+									name: "prime_context",
+									status: "completed",
+									arguments: JSON.stringify({
+										action: "batch",
+										requests: [
+											recoveryRequest,
+											{ ...recoveryRequest, revision: "not-the-recorded-revision" },
+										],
+									}),
+								}
+							: {
+									type: "message",
+									id: `msg_epoch_${bodies.length + summaryBodies.length}`,
+									role: "assistant",
+									status: "completed",
+									content: [{ type: "output_text", text: "OK", annotations: [] }],
+								};
+			const opaqueTail =
+				!summarizing && (bodies.length === 3 || requestRecovery || toolContinuationPhase === "intent");
 			const reasoning = {
 				type: "reasoning",
 				id: requestRecovery ? "rs_opaque_request" : "rs_opaque_tail",
@@ -748,6 +763,179 @@ describe("createAgentSessionFromServices", () => {
 			expect(bodies.at(-1)).toContain("fresh native result");
 			expect(epochSession.contextMode).toBe("off");
 			expect(summaryBodies).toHaveLength(1);
+
+			// Genuine selected-owner ACK, then a controlled stop before execution/finalization.
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.create(epochDir, join(epochDir, "pending-native-tool"));
+			freshOff = false;
+			toolContinuationPhase = "intent";
+			let executions = 0;
+			let executionId: string | undefined;
+			let assistantEntryId: string | undefined;
+			const pendingOptions: typeof epochOptions = {
+				...epochOptions,
+				tools: ["pending_effect"],
+				customTools: [
+					{
+						name: "pending_effect",
+						label: "Pending effect",
+						description: "Offline effect fixture.",
+						parameters: Type.Object({ value: Type.String() }),
+						execute: async () => {
+							executions++;
+							return { content: [{ type: "text" as const, text: "effect finalized" }], details: {} };
+						},
+					},
+				],
+			};
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...pendingOptions,
+				sessionManager: epochManager,
+			}));
+			epochSession.agent.beforeToolCall = async ({ args }) => {
+				if (args && typeof args === "object" && "value" in args) args.value = "PRIVATE_EXECUTED_ARGUMENT";
+				return undefined;
+			};
+			const afterAckStop = new AgentOutputLimitError({
+				kind: "output_limit",
+				limit: "messages",
+				maxMessages: 1,
+				maxSourceBytes: 1,
+			});
+			epochSession.agent.onToolInvocationStarting = async (invocation) => {
+				executionId = invocation.executionId;
+				expect(invocation.originalInput).toEqual({ value: "MODEL_ARGUMENT" });
+				expect(invocation.executedInput).toEqual({ value: "PRIVATE_EXECUTED_ARGUMENT" });
+				const intent = await epochManager.readBranchHistory((history) =>
+					history.hydrateEntry(`${invocation.executionId}:intent`, 2 * 1024 * 1024),
+				);
+				if (intent?.entry.type !== "tool_intent") throw new Error("Expected the original owner intent ACK");
+				expect(intent.source.qualification).toBe("native-tool-execution");
+				assistantEntryId = intent.entry.assistant?.entryId;
+				expect(intent.entry.assistant).toEqual({
+					sessionId: epochManager.getSessionId(),
+					sessionFile: epochManager.getSessionFile(),
+					entryId: expect.any(String),
+				});
+				throw afterAckStop;
+			};
+			await expect(epochSession.prompt("Request the fixture tool. Preserve EXACT_USER_CONTENT.")).rejects.toBe(
+				afterAckStop,
+			);
+			expect(executions).toBe(0);
+			if (!executionId || !assistantEntryId) throw new Error("Expected captured original execution references");
+			expect(await epochManager.readEntry(executionId)).toBeUndefined();
+			const pendingFile = epochManager.getSessionFile()!;
+			await epochSession.disposeAsync({ kernelSnapshot: false });
+			await epochManager.close();
+			epochManager = await SessionManager.open(pendingFile);
+			toolContinuationPhase = "resumed";
+			({ session: epochSession } = await createAgentSessionFromServices({
+				...pendingOptions,
+				sessionManager: epochManager,
+				contextMode: "off",
+			}));
+			// Accepted source mode wins over this creation preference.
+			expect(epochSession.contextMode).toBe("on");
+			let rawPendingBody = "";
+			let payloadCalls = 0;
+			epochSession.agent.onPayload = (payload) => {
+				payloadCalls++;
+				rawPendingBody = JSON.stringify(payload);
+			};
+			await epochSession.prompt("Continue with the recorded outcome. Preserve EXACT_RESUMED_CONTENT.");
+			expect(payloadCalls).toBe(1);
+			expect(rawPendingBody).toContain('"function_call"');
+			expect(rawPendingBody).toContain("MODEL_ARGUMENT");
+			expect(rawPendingBody).toContain("OPAQUE_TAIL_CANONICAL_ONLY");
+			expect(rawPendingBody).not.toContain("No result provided");
+			const publicToolBody = bodies.at(-1)!;
+			expect(publicToolBody).toContain("outcome_unknown");
+			expect(publicToolBody).toContain(executionId);
+			expect(publicToolBody).toContain("EXACT_USER_CONTENT");
+			expect(publicToolBody).toContain("EXACT_RESUMED_CONTENT");
+			for (const privateOrNative of [
+				"PRIVATE_EXECUTED_ARGUMENT",
+				"MODEL_ARGUMENT",
+				"OPAQUE_TAIL_CANONICAL_ONLY",
+				'"function_call"',
+				"No result provided",
+			])
+				expect(publicToolBody).not.toContain(privateOrNative);
+			const raw = JSON.parse(rawPendingBody) as {
+				input: Array<{ role?: string; content?: Array<{ type: string; text?: string }> }>;
+				instructions?: string;
+			};
+			const displayed = JSON.parse(publicToolBody) as typeof raw;
+			expect(displayed.instructions).toEqual(raw.instructions);
+			expect(displayed.input.filter((item) => item.role === "system" || item.role === "developer")).toEqual(
+				raw.input.filter((item) => item.role === "system" || item.role === "developer"),
+			);
+			const toolEpochId = epochsAtSend.at(-1)!;
+			const toolEpoch = await epochManager.readEntry(toolEpochId);
+			if (toolEpoch?.type !== "compaction") throw new Error("Expected accepted native public tool epoch");
+			expect(readContextEpoch(toolEpoch.details, 2 * 1024 * 1024)).toMatchObject({
+				version: 6,
+				renderer: "native-canonical-epoch/6",
+				publicWindow: true,
+				toolContinuations: [
+					{
+						assistantEntryId,
+						calls: [{ executionId, intent: { id: `${executionId}:intent` }, outcome: "outcome_unknown" }],
+					},
+				],
+			});
+			const pendingRequests = (await epochManager.readEntries())
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request);
+			const resumedAdmission = pendingRequests.filter((event) => event.type === "attempt_admitted").at(-1)!;
+			expect(resumedAdmission.contextEpoch).toEqual({
+				sessionId: epochManager.getSessionId(),
+				entryId: toolEpochId,
+			});
+			expect(
+				pendingRequests.find(
+					(event) => event.type === "attempt_settled" && event.attemptId === resumedAdmission.attemptId,
+				)?.contextEpoch,
+			).toEqual(resumedAdmission.contextEpoch);
+			expect(await epochManager.readEntry(executionId)).toBeUndefined();
+			expect(executions).toBe(0);
+			expect(bodies).toHaveLength(12);
+			const firstToolLiteral = displayed.input
+				.flatMap((item) => item.content ?? [])
+				.find(
+					(part) => part.type === "input_text" && part.text?.startsWith("Recorded tool continuation data."),
+				)?.text;
+			expect(typeof firstToolLiteral).toBe("string");
+			// One ordinary continuation changes the tail/receipts, not the unchanged tool fact.
+			await epochSession.prompt("Continue normally. Preserve EXACT_RESUMED_CONTENT.");
+			expect(payloadCalls).toBe(2);
+			const followingBody = JSON.parse(bodies.at(-1)!) as typeof raw;
+			const followingToolLiteral = followingBody.input
+				.flatMap((item) => item.content ?? [])
+				.find(
+					(part) => part.type === "input_text" && part.text?.startsWith("Recorded tool continuation data."),
+				)?.text;
+			expect(followingToolLiteral).toBe(firstToolLiteral);
+			const followingEpochId = epochsAtSend.at(-1)!;
+			expect(followingEpochId).not.toBe(toolEpochId);
+			const followingRequests = (await epochManager.readEntries())
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request);
+			const followingAdmission = followingRequests.filter((event) => event.type === "attempt_admitted").at(-1)!;
+			expect(followingAdmission.contextEpoch).toEqual({
+				sessionId: epochManager.getSessionId(),
+				entryId: followingEpochId,
+			});
+			expect(
+				followingRequests.find(
+					(event) => event.type === "attempt_settled" && event.attemptId === followingAdmission.attemptId,
+				)?.contextEpoch,
+			).toEqual(followingAdmission.contextEpoch);
+			expect(await epochManager.readEntry(executionId)).toBeUndefined();
+			expect(executions).toBe(0);
+			expect(bodies).toHaveLength(13);
 		} finally {
 			try {
 				await epochSession?.disposeAsync({ kernelSnapshot: false });

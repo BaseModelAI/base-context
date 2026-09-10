@@ -556,8 +556,14 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			onToolInvocationStarting: async (invocation, signal, tool, execute) => {
-				const owner = await this.toolExecutionOwner?.onToolInvocationStarting(invocation, signal, tool, execute);
+			onToolInvocationStarting: async (invocation, signal, tool, execute, assistantMessage) => {
+				const owner = await this.toolExecutionOwner?.onToolInvocationStarting(
+					invocation,
+					signal,
+					tool,
+					execute,
+					assistantMessage,
+				);
 				await onToolInvocationStarting?.(invocation, signal);
 				return owner || undefined;
 			},

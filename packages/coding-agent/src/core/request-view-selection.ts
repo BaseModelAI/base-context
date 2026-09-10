@@ -11,6 +11,7 @@ import {
 	captureCanonicalRequestMessages,
 	getCanonicalViewSelectionSource,
 	preparePublicContextWindow,
+	prepareToolContinuationWindow,
 } from "./canonical-context.js";
 import { convertToLlm } from "./messages.js";
 import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
@@ -145,7 +146,13 @@ export async function selectRequestView(
 		)
 	)
 		return;
-	const units = bindMessageReplayUnits(boundary.messages, boundary.units, boundary.limits, replayContract);
+	const units = bindMessageReplayUnits(
+		boundary.messages,
+		boundary.units,
+		boundary.limits,
+		replayContract,
+		boundary.pendingPublicMessageGroups,
+	);
 	const offer = async (
 		selectedUnitIds: readonly string[],
 		candidateRequest: ProviderRequestRepresentation,
@@ -178,6 +185,44 @@ export async function selectRequestView(
 				...(publicMessages ? { publicMessages } : {}),
 			}),
 		);
+	if (boundary.pendingPublicMessageGroups?.length) {
+		if (
+			replayContract !== "message-groups" ||
+			!projection.publicWindow ||
+			!projection.encodePublicWindow ||
+			JSON.stringify(projection.pendingPublicMessageGroups) !== JSON.stringify(boundary.pendingPublicMessageGroups)
+		)
+			throw new Error("Original tool group requires current native adapter public conversion");
+		const publicView = prepareToolContinuationWindow(boundary.messages);
+		const encoded = projection.encodePublicWindow(publicView.replacements);
+		if (!encoded || encoded.projection.pendingPublicMessageGroups?.length)
+			throw new Error("Native adapter did not convert the whole required tool group");
+		const publicSource = getCanonicalViewSelectionSource(publicView.messages)!;
+		const publicUnits = bindMessageReplayUnits(
+			publicView.messages,
+			publicSource.units,
+			boundary.limits,
+			replayContract,
+		);
+		const closed = closeViewSelection(
+			publicUnits,
+			publicUnits.map((unit) => unit.id),
+			boundary.limits,
+		);
+		const assessment = budget.measure(encoded.request);
+		if (assessment.status !== "within-estimate")
+			throw new Error("Tool continuation public request exceeds its token budget");
+		await offer(
+			closed.map((unit) => unit.id),
+			encoded.request,
+			encoded.projection,
+			assessment,
+			publicView.messages,
+		);
+		return encoded.request.body;
+	}
+	if (projection.pendingPublicMessageGroups?.length)
+		throw new Error("Adapter pending group has no original owned source plan");
 	const offerPublicWindow = async (): Promise<string | undefined> => {
 		if (
 			!allowShrink ||

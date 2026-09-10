@@ -126,6 +126,7 @@ export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
 	/** Internal native projection capture during this conversion, never a second conversion. */
 	onProjection?: (projection: ProviderRequestProjection) => void;
+	pendingPublicMessageGroups?: readonly (readonly number[])[];
 }
 
 export interface ConvertResponsesToolsOptions {
@@ -138,6 +139,7 @@ function captureResponsesProjection<TApi extends Api>(
 	transformed: Context["messages"],
 	input: ResponseInput,
 	messageIndices: readonly (number | null)[],
+	pendingPublicMessageGroups: readonly (readonly number[])[],
 ): ProviderRequestProjection | undefined {
 	if (
 		!(
@@ -156,6 +158,26 @@ function captureResponsesProjection<TApi extends Api>(
 	for (const [index, sourceIndex] of messageIndices.entries()) {
 		if (sourceIndex !== null) items[sourceIndex].push(input[index]);
 	}
+	const required = pendingPublicMessageGroups.map((indices) => ({
+		indices,
+		calls: new Map<string, { wireId: string; seen: boolean }>(),
+	}));
+	const requiredAt = new Map<number, (typeof required)[number]>();
+	for (const group of required) {
+		if (!group.indices.length || context.messages[group.indices[0]]?.role !== "assistant") return;
+		let previous = -1;
+		for (const index of group.indices) {
+			if (
+				!Number.isSafeInteger(index) ||
+				index <= previous ||
+				index >= context.messages.length ||
+				requiredAt.has(index)
+			)
+				return;
+			requiredAt.set(index, group);
+			previous = index;
+		}
+	}
 	let replayContract: "complete-context" | "message-groups" = "message-groups";
 	const optionalMessageIndices: number[] = [];
 	const generatedMessageIndices: number[] = [];
@@ -172,11 +194,20 @@ function captureResponsesProjection<TApi extends Api>(
 	for (const [index, message] of context.messages.entries()) {
 		const rendered = items[index];
 		if (!rendered.length) return;
+		const requiredGroup = requiredAt.get(index);
+		const calls = requiredGroup?.calls ?? pending;
+		if (
+			requiredGroup &&
+			(index === requiredGroup.indices[0] ? message.role !== "assistant" : message.role !== "toolResult")
+		)
+			return;
 		if (message.role === "assistant" || message.role === "user") {
 			if (!closeCalls()) return;
 		}
 		if (message.role === "assistant") {
-			publicGroup = message.stopReason === "stop" || message.stopReason === "toolUse" ? [index] : undefined;
+			publicGroup =
+				!requiredGroup && (message.stopReason === "stop" || message.stopReason === "toolUse") ? [index] : undefined;
+			if (requiredGroup && message.stopReason !== "toolUse" && message.stopReason !== "stop") return;
 			if (
 				message.api !== model.api ||
 				message.provider !== model.provider ||
@@ -205,27 +236,34 @@ function captureResponsesProjection<TApi extends Api>(
 						item.type !== "function_call" ||
 						item.call_id !== callId ||
 						item.id !== itemId ||
-						pending.has(block.id) ||
-						[...pending.values()].some((call) => call.wireId === callId)
+						calls.has(block.id) ||
+						[...calls.values()].some((call) => call.wireId === callId)
 					)
 						return;
-					pending.set(block.id, { wireId: callId, seen: false });
+					calls.set(block.id, { wireId: callId, seen: false });
 					if (block.thoughtSignature !== undefined) replayContract = "complete-context";
 				}
 			}
 			if (message.stopReason === "stop" && message.content.length === 1 && message.content[0].type === "text")
 				optionalMessageIndices.push(index);
 		} else if (message.role === "toolResult") {
-			const call = pending.get(message.toolCallId);
+			const call = calls.get(message.toolCallId);
 			const item = rendered[0];
 			if (!call || rendered.length !== 1 || item.type !== "function_call_output" || item.call_id !== call.wireId)
 				return;
-			if (call.seen || message.content.some((part) => part.type !== "text")) publicGroup = undefined;
-			publicGroup?.push(index);
+			if (call.seen || message.content.some((part) => part.type !== "text")) {
+				if (requiredGroup) return;
+				publicGroup = undefined;
+			}
+			if (!requiredGroup) publicGroup?.push(index);
 			call.seen = true;
 		} else if (rendered.length !== 1) return;
 	}
 	if (!closeCalls()) return;
+	for (const group of required) {
+		if (!group.calls.size) return;
+		publicMessageGroups.push([...group.indices]);
+	}
 	// These IDs depend on the whole preceding layout, not just tool-message dependencies.
 	if (generatedMessageIndices.length) replayContract = "complete-context";
 	return {
@@ -235,6 +273,7 @@ function captureResponsesProjection<TApi extends Api>(
 		optionalMessageIndices,
 		generatedMessageIndices,
 		publicMessageGroups,
+		...(required.length ? { pendingPublicMessageGroups: required.map((group) => [...group.indices]) } : {}),
 	};
 }
 
@@ -242,6 +281,7 @@ function captureResponsesProjection<TApi extends Api>(
 export function bindResponsesPublicWindow(
 	request: ProviderRequestRepresentation,
 	projection: ProviderRequestProjection,
+	onPendingPublicEncoded?: (body: string) => void,
 ): ProviderRequestProjection {
 	return {
 		...projection,
@@ -270,7 +310,11 @@ export function bindResponsesPublicWindow(
 				if (!group.every((index) => texts.has(index))) return;
 				for (const index of group) covered.add(index);
 			}
-			if (covered.size !== texts.size) return;
+			if (
+				covered.size !== texts.size ||
+				projection.pendingPublicMessageGroups?.some((group) => group.some((index) => !texts.has(index)))
+			)
+				return;
 			const body = JSON.parse(request.body) as { input: ResponseInput };
 			if (body.input.length !== projection.messageIndices.length) return;
 			const input: ResponseInput = [];
@@ -287,8 +331,10 @@ export function bindResponsesPublicWindow(
 				} else input.push(body.input[itemIndex]);
 				messageIndices.push(messageIndex);
 			}
+			const encoded = withRequestBody(request, JSON.stringify({ ...body, input }));
+			if (projection.pendingPublicMessageGroups?.length) onPendingPublicEncoded?.(encoded.body!);
 			return {
-				request: withRequestBody(request, JSON.stringify({ ...body, input })),
+				request: encoded,
 				projection: {
 					kind: projection.kind,
 					replayContract: projection.replayContract,
@@ -335,7 +381,13 @@ export function convertResponsesMessages<TApi extends Api>(
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const pendingPublicMessageGroups = options?.onProjection ? (options.pendingPublicMessageGroups ?? []) : [];
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		normalizeToolCallId,
+		pendingPublicMessageGroups,
+	);
 
 	const includeSystemPrompt = options?.includeSystemPrompt ?? true;
 	if (includeSystemPrompt && context.systemPrompt) {
@@ -480,7 +532,14 @@ export function convertResponsesMessages<TApi extends Api>(
 		msgIndex++;
 	}
 	if (messageIndices) {
-		const projection = captureResponsesProjection(model, context, transformedMessages, messages, messageIndices);
+		const projection = captureResponsesProjection(
+			model,
+			context,
+			transformedMessages,
+			messages,
+			messageIndices,
+			pendingPublicMessageGroups,
+		);
 		if (projection) options!.onProjection!(projection);
 	}
 	return messages;

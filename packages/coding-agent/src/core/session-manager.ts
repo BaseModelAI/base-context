@@ -49,7 +49,7 @@ import {
 	type NativeEntryQualification,
 } from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
-import type { NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import type { ContextEpochEntryRef, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
 import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
 import {
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
@@ -86,6 +86,7 @@ import {
 	APPEND_NATIVE_ADMISSION,
 	APPEND_NATIVE_CONTEXT_EPOCH,
 	APPEND_NATIVE_RECOVERY,
+	APPEND_NATIVE_TOOL_EXECUTION,
 	SESSION_JOURNAL_MAX_RECORD_BYTES as MAX_SESSION_RECORD_BYTES,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
@@ -202,6 +203,8 @@ export interface SessionMessageEntry extends SessionEntryBase {
 export interface ToolIntentEntry extends SessionEntryBase {
 	type: "tool_intent";
 	invocation: ToolInvocation;
+	/** Only the qualified original execution owner supplies this acknowledged source. */
+	assistant?: ContextEpochEntryRef & { sessionFile: string | undefined };
 }
 
 export interface RequestJournalEntry extends SessionEntryBase {
@@ -713,6 +716,8 @@ function appendSourceEntry(owner: SessionJournalOwner, json: string, entry: File
 	if (qualification === "native-recovery") return owner[APPEND_NATIVE_RECOVERY](json, entryRetentions.get(entry));
 	if (qualification === "native-context-epoch")
 		return owner[APPEND_NATIVE_CONTEXT_EPOCH](json, entryRetentions.get(entry));
+	if (qualification === "native-tool-execution")
+		return owner[APPEND_NATIVE_TOOL_EXECUTION](json, entryRetentions.get(entry));
 	return owner.appendJson(json, entryRetentions.get(entry));
 }
 
@@ -2676,7 +2681,14 @@ export class SessionManager {
 		};
 	}
 
-	async appendToolInvocation(invocation: ToolInvocation): Promise<string> {
+	appendToolInvocation(invocation: ToolInvocation): Promise<string> {
+		return this._appendToolInvocation(invocation);
+	}
+
+	private async _appendToolInvocation(
+		invocation: ToolInvocation,
+		assistant?: ContextEpochEntryRef & { sessionFile: string | undefined },
+	): Promise<string> {
 		const id = `${invocation.executionId}:intent`;
 		if (!this.indexed && this.byId.has(id))
 			throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
@@ -2686,10 +2698,16 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			invocation: structuredClone(invocation),
+			...(assistant ? { assistant: { ...assistant } } : {}),
 		};
-		await this._appendEntry(entry, false, undefined, () => {
-			throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
-		});
+		await this._appendEntry(
+			withEntryRetention(entry, undefined, assistant ? "native-tool-execution" : undefined),
+			false,
+			undefined,
+			() => {
+				throw new Error(`Tool invocation already admitted: ${invocation.executionId}`);
+			},
+		);
 		return entry.id;
 	}
 
@@ -2699,7 +2717,7 @@ export class SessionManager {
 
 	private _appendToolExchangeOnce(
 		exchange: FinalizedToolExchange,
-		qualification?: "native-recovery",
+		qualification?: "native-recovery" | "native-tool-execution",
 	): Promise<string> {
 		const executionId = exchange.executionId;
 		const pending = this.pendingToolExchanges.get(executionId);
@@ -2713,7 +2731,7 @@ export class SessionManager {
 
 	private async _appendToolExchange(
 		exchange: FinalizedToolExchange,
-		qualification?: "native-recovery",
+		qualification?: "native-recovery" | "native-tool-execution",
 	): Promise<string> {
 		if (this.indexed) {
 			const state = this.writeState;
@@ -2805,6 +2823,25 @@ export class SessionManager {
 				throw new Error("Session source changed after native admission capture");
 		};
 		return {
+			captureToolInvocation: (assistant) => {
+				const captured = assistant ? { ...assistant } : undefined;
+				if (
+					captured &&
+					(captured.sessionId !== this.getSessionId() ||
+						typeof captured.sessionFile !== "string" ||
+						captured.sessionFile !== this.getSessionFile())
+				)
+					throw new Error("Tool intent belongs to another assistant owner");
+				return (invocation) => {
+					assertWriter();
+					return this._appendToolInvocation(invocation, captured);
+				};
+			},
+			captureToolExchange: (executionId) => (exchange) => {
+				assertWriter();
+				if (exchange.executionId !== executionId) throw new Error("Tool execution identity changed");
+				return this._appendToolExchangeOnce(exchange, "native-tool-execution");
+			},
 			captureRecoveryExchange: (executionId) => (exchange) => {
 				assertWriter();
 				if (exchange.executionId !== executionId) throw new Error("Recovery execution identity changed");

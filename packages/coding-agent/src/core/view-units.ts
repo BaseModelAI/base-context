@@ -76,6 +76,7 @@ export function bindMessageReplayUnits(
 	units: readonly ViewUnit[],
 	limits: ViewUnitLimits,
 	policy: "complete-context" | "message-groups" = "complete-context",
+	pendingPublicMessageGroups: readonly (readonly number[])[] = [],
 ): readonly ViewUnit[] {
 	admit(units, limits);
 	if (messages.length !== units.length) throw new Error("View units do not match their messages");
@@ -87,6 +88,23 @@ export function bindMessageReplayUnits(
 		if (++edgeCount > limits.maxDependencies) throw new Error("View-unit dependency budget exceeded");
 		edges[index].add(id);
 	};
+	// A pending group remains unadmittable. Only its compiler-owned public candidate can discharge this marker.
+	const publicMembers = new Set<number>();
+	for (const group of pendingPublicMessageGroups) {
+		if (!group.length) throw new Error("Empty pending public group");
+		const first = group[0];
+		for (const index of group) {
+			if (!Number.isSafeInteger(index) || index < 0 || index >= units.length || publicMembers.has(index))
+				throw new Error("Invalid pending public group membership");
+			publicMembers.add(index);
+			if (index !== first) {
+				add(first, units[index].id);
+				add(index, units[first].id);
+			}
+		}
+		if (++edgeCount > limits.maxDependencies) throw new Error("View-unit dependency budget exceeded");
+		missing[first].add(`public-tool-continuation:${units[first].id}`);
+	}
 	const calls = new Map<string, { index: number; results: number }>();
 	const closeCalls = () => {
 		for (const [id, call] of calls)
@@ -98,6 +116,10 @@ export function bindMessageReplayUnits(
 	};
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
+		if (publicMembers.has(index)) {
+			if (message.role === "assistant") closeCalls();
+			continue;
+		}
 		if (message.role === "assistant") {
 			closeCalls();
 			for (const part of message.content)

@@ -1,7 +1,7 @@
 import type { ProviderRequestRepresentation, RequestTokenAssessment, Usage } from "@ponythewhite/base-context-ai";
 import { requestTokenRouteIdentity } from "@ponythewhite/base-context-ai";
 import { stringifyBoundedJson } from "./bounded-json.js";
-import type { ContextRef } from "./history-index.js";
+import type { ContextRef, IndexedSourceEvent } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
 import { MAX_RESOURCE_REVISION_BYTES } from "./resource-view.js";
 import type { CompiledTaskFrame } from "./task-frame.js";
@@ -11,6 +11,18 @@ export const CONTEXT_EPOCH_DETAIL = "baseContextEpoch";
 export const appendContextEpoch = Symbol("appendContextEpoch");
 export const CONTEXT_EPOCH_RENDERER = "native-canonical-epoch/4";
 export const CONTEXT_POLICY_EPOCH_RENDERER = "native-canonical-epoch/5";
+export const CONTEXT_TOOL_EPOCH_RENDERER = "native-canonical-epoch/6";
+
+/** Descriptive, source-backed outcomes in the existing accepted epoch, not an execution store. */
+export interface ToolContinuationGroup {
+	readonly assistantEntryId: string;
+	readonly calls: readonly {
+		readonly executionId: string;
+		readonly intent: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
+		readonly outcome: "outcome_unknown" | "not_started" | "completed" | "failed";
+		readonly result?: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
+	}[];
+}
 export type ContextMode = "on" | "off";
 
 /** Compatibility retained from an accepted native request, not measurement or replay credit. */
@@ -39,7 +51,7 @@ export interface EpochViewReference {
 	readonly sourceRevision: string;
 	/** Present only for an existing rendered compaction summary. */
 	readonly retainedMessageCount?: number;
-	readonly rendering?: "public-history/1";
+	readonly rendering?: "public-history/1" | "public-tool-continuation/1";
 }
 
 interface ContextEpochFields {
@@ -48,7 +60,8 @@ interface ContextEpochFields {
 		| "native-canonical-epoch/2"
 		| "native-canonical-epoch/3"
 		| typeof CONTEXT_EPOCH_RENDERER
-		| typeof CONTEXT_POLICY_EPOCH_RENDERER;
+		| typeof CONTEXT_POLICY_EPOCH_RENDERER
+		| typeof CONTEXT_TOOL_EPOCH_RENDERER;
 	readonly source: SourceSnapshotRef;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
@@ -61,6 +74,8 @@ interface ContextEpochFields {
 		readonly publicTailThrough: SourceSnapshotRef;
 	};
 	readonly views: readonly EpochViewReference[];
+	/** Only v6 records this whole-group public representation and its exact outcome refs. */
+	readonly toolContinuations?: readonly ToolContinuationGroup[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
 	readonly taskFrame?: CompiledTaskFrame;
 	/** Accepted-state comparison only; saved metadata never establishes current resource liveness. */
@@ -72,7 +87,7 @@ interface ContextEpochFields {
 export type ContextEpochCheckpoint = ContextEpochFields &
 	(
 		| {
-				readonly version: 1 | 2 | 3 | 4;
+				readonly version: 1 | 2 | 3 | 4 | 6;
 				readonly representation: string | null;
 				readonly mode?: never;
 				readonly policyOnly?: never;
@@ -184,7 +199,8 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(value.version === 2 && value.renderer === "native-canonical-epoch/2") ||
 			(value.version === 3 && value.renderer === "native-canonical-epoch/3") ||
 			(value.version === 4 && value.renderer === "native-canonical-epoch/4") ||
-			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER)
+			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER) ||
+			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER)
 		) ||
 		!("source" in value) ||
 		!value.source ||
@@ -227,14 +243,25 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(typeof value.resourceRevision !== "string" ||
 				Buffer.byteLength(value.resourceRevision, "utf8") > MAX_RESOURCE_REVISION_BYTES)) ||
 		("publicWindow" in value &&
-			((value.version !== 3 && value.version !== 4 && value.version !== 5) || value.publicWindow !== true)) ||
+			((value.version !== 3 && value.version !== 4 && value.version !== 5 && value.version !== 6) ||
+				value.publicWindow !== true)) ||
+		("toolContinuations" in value && value.version !== 6) ||
+		(value.version === 6 &&
+			(!("toolContinuations" in value) ||
+				!Array.isArray(value.toolContinuations) ||
+				!value.toolContinuations.length ||
+				!("publicWindow" in value) ||
+				value.publicWindow !== true ||
+				!("replayContract" in value) ||
+				value.replayContract !== "message-groups")) ||
 		("continuation" in value &&
-			((value.version !== 3 && value.version !== 4 && value.version !== 5) ||
+			((value.version !== 3 && value.version !== 4 && value.version !== 5 && value.version !== 6) ||
 				!value.continuation ||
 				typeof value.continuation !== "object" ||
 				!("kind" in value.continuation) ||
 				(value.continuation.kind !== "harness-summary" &&
-					((value.version !== 4 && value.version !== 5) || value.continuation.kind !== "portable-checkpoint")) ||
+					((value.version !== 4 && value.version !== 5 && value.version !== 6) ||
+						value.continuation.kind !== "portable-checkpoint")) ||
 				!("publicTailThrough" in value.continuation) ||
 				!value.continuation.publicTailThrough))
 	)

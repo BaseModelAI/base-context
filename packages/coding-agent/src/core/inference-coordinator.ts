@@ -451,14 +451,22 @@ export class InferenceCoordinator {
 					: undefined;
 			const canSelect =
 				(budget || boundary?.fixedPrepare) && boundary && matchesRequestView(boundary, source, context);
+			const requiredPublic = Boolean(boundary?.pendingPublicMessageGroups?.length);
+			if (requiredPublic && (!canSelect || boundary?.fixedPrepare))
+				throw new Error("Tool continuation requires a selectable native public request boundary");
+			let publicAccepted = false;
 			let selectedContextEpoch: ContextEpochEntryRef | undefined;
 			const attempts: ProviderAttemptObserver = {
+				...(requiredPublic
+					? { pendingPublicMessageGroups: boundary!.pendingPublicMessageGroups!.map((group) => [...group]) }
+					: {}),
 				...(measureRequest ? { measureRequest } : {}),
 				...(canSelect
 					? ({
 							prepareRequest: async (representation, projection) => {
 								try {
 									selectedContextEpoch = undefined;
+									publicAccepted = false;
 									if (JSON.parse(representation.body!).model !== model.id) return;
 									if (boundary!.fixedPrepare) {
 										const assessment = budget?.measure(representation);
@@ -478,6 +486,12 @@ export class InferenceCoordinator {
 											commit: async (candidate) => {
 												const accepted = await boundary!.commit(candidate);
 												if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
+												publicAccepted = Boolean(
+													accepted &&
+														candidate.publicMessages &&
+														candidate.projection.publicWindow &&
+														!candidate.projection.pendingPublicMessageGroups?.length,
+												);
 												return accepted || undefined;
 											},
 										},
@@ -494,6 +508,8 @@ export class InferenceCoordinator {
 						} satisfies Pick<ProviderAttemptObserver, "prepareRequest">)
 					: {}),
 				admit: async (descriptor) => {
+					if (requiredPublic && !publicAccepted)
+						throw new Error("Unaccepted tool continuation cannot enter native transport");
 					if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
 					// An adapter without a serializer meter must not bypass an enforced budget.
 					if (measureRequest && !descriptor.requestBudget && (budget || !measuredForAdmission)) {

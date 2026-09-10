@@ -359,7 +359,9 @@ export function* projectTaskStateSource(source: TaskStateSource): Generator<Task
 		throw new Error("Unsupported task source retention");
 	if (
 		source.qualification !== undefined &&
-		!["native-admission", "native-recovery", "native-context-epoch"].includes(source.qualification)
+		!["native-admission", "native-recovery", "native-context-epoch", "native-tool-execution"].includes(
+			source.qualification,
+		)
 	)
 		throw new Error("Unsupported task source qualification");
 	const retained = source.retention === "retained-import";

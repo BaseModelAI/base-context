@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
 import { formatProductDiagnostics, getProductDiagnostics } from "../src/cli/product-doctor.js";
-import { CONTEXT_EPOCH_RENDERER, CONTEXT_POLICY_EPOCH_RENDERER } from "../src/core/context-epoch.js";
+import {
+	CONTEXT_EPOCH_RENDERER,
+	CONTEXT_POLICY_EPOCH_RENDERER,
+	CONTEXT_TOOL_EPOCH_RENDERER,
+} from "../src/core/context-epoch.js";
 
 let home: string | undefined;
 afterEach(() => {
@@ -22,7 +26,7 @@ test("reports owned product paths and unavailable auth contracts without credent
 	expect(report.paths.settings).toBe(join(home, "settings.json"));
 	expect(report.schemas.daemon.name).toBe("base-context.daemon");
 	expect(report.schemas.nativeContext).toBe(
-		`${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy)`,
+		`${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation)`,
 	);
 	const formatted = formatProductDiagnostics(report);
 	expect(formatted).toContain(`native context: ${report.schemas.nativeContext}`);

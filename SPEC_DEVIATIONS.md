@@ -935,3 +935,106 @@ fabricated result, automatic replay/repair, stale-contract grant or weakened
 closure was added. This is a bounded source finding, not a new crash execution or
 full G10 closure. No G10 implementation or case change is included in this
 milestone; the separate continuation proposal remains unapplied.
+
+
+### G10 original-owner public tool continuation (source scope)
+
+A qualified intent records original selected-tool-owner admission after its
+assistant entry ACK and before execution. Per-invocation manager/source/write
+generation are captured before initialization and event-queue waits. All intent
+writes, including ordinary unqualified ones, use that captured writer; replaced
+owners and persisted native-source mismatches refuse rather than redirect.
+A recorded intent never proves execution, start, failure or rollback.
+
+The native compiler keeps the original RAW whole group with a mandatory public
+constraint. It correlates intent/finalized refs only through the held indexed
+branch/frontier and existing source/item bounds. Ordinary/imported/copied-label
+intentions do not qualify; absent finalized evidence remains outcome_unknown.
+Known finalized evidence must match the original invocation and be present in
+the same captured whole group; sibling/future results cannot be borrowed.
+
+Only the real Responses converter receives the bounded pending-group plan. Its
+one ordinary traversal suppresses synthetic missing results for those originals
+alone and validates original items, IDs, signatures and membership. Actual
+current official route/config and unchanged-onPayload checks must enable the
+existing public encoder. Every required member becomes descriptive public data,
+then the existing v6 epoch ACK precedes adoption and physical admission—even if
+the raw request fits budget. Default/unsupported/replaced adapters, actual mode
+off and incompatible recipes refuse. The producer checks the accepted public
+body; the coordinator separately requires the actual accepted epoch entry.
+
+Public literals retain stable session/entry/intent/result references, original
+public text and recorded outcomes, not a moving current leaf/sequence. Private
+executed arguments, tool arguments, signatures and reasoning are not rendered.
+Accepted source mode overrides creation or previous-branch preferences; defaults
+for summaries/exports do not gain the RAW native plan. v6 copy and older
+policy/recovery-summary recipes refuse rather than downgrade original ownership.
+No automatic execution/replay/reconciliation, new effect/receipt/job store,
+probe, production model call or prompt bookkeeping is added. Sol instructions
+and W54's exact per-attempt accepted-entry association remain unchanged.
+
+Schema37 (`protocol-11-schema-37-tool-continuation`) and canonical-owner minimum37
+use existing stale-daemon handling/incompatible-worker parking; protocol11,
+legacy inspection and index16 remain unchanged. There is no forced teardown,
+repair or claim that parser refusal alone fenced an old reused owner. Doctor
+metadata names actual request4/policy5/tool6 renderers, not runtime readiness.
+
+Two existing offline selectors ran at actual Node22.12.0. The canonical
+unqualified copied-label refusal passed first (3797206,3.3596966231707484s).
+The services path initially failed (3797201,3.2501375270076096s) because the task
+source envelope decoder still rejected the new qualification tag. Only that
+allowlist was extended; task authority remains native-admission-only. The same
+services selector then passed (3798155,6.975471487967297s), using genuine intent
+ACK → controlled post-ACK resource-class stop → real close/reopen → actual native
+fake-SSE public request, plus a normal follow-on. Saved-on mode wins creation-off;
+the unchanged public literal and exact per-attempt accepted epoch refs survive.
+No tool runs and no finalized result is fabricated. The first failure is retained;
+the already-passing negative selector was not rerun. Expected controlled budget
+refusal stderr is not a provider call or failed case.
+
+Initial formatting found a duplicate local publicBody in the existing services
+fixture; the new block was renamed publicToolBody before either case ran. Required
+check then found TS2339 for invocationId on the execution-evidence union. The
+existing required intent-reference check now narrows that variant; missing refs
+still refuse. No fallback, qualification grant or schema weakening was added.
+
+This is not a process-crash/external-effect/installed/platform or whole G10
+certification. The doctor expectation changes only with its metadata string;
+no extra runtime case or matrix is added.
+
+Corrected required `npm run check` passed (3798599,4.835714657092467s):
+1039 files/no fixes, TypeScript, installer and browser smoke. Initial failures
+remain recorded; no extra runtime cases or provider probes were run.
+
+
+
+### Final S Astra MEDIUM and completed frozen benchmark sequence
+
+Final frozen S `gpt-6-astra` MEDIUM exited0 after4676.512568940991s. S passed28/30
+versus stock26/30. There are60 immutable primaries and66 retained attempts
+(S32/stock34), zero capacity-invalid. All25 matched passing pairs are runtime-clean:
+4109.5781885349425s versus5805.029968667892s, −29.206598230913407%; S faster24/25.
+This is conditional paired time, not an all-task/all-attempt or billing claim.
+
+Failed primaries remain S6/S24 and stock12/17/21/24. Each has exactly one retained
+diagnostic, not a substitute. S6 and stock17 pass4/5 main checks and the edge but
+stop at progress3; stock17 names semantic check4. S24 has no allocations.csv,
+main0/edgefalse/progress0; stock24 main3/edgetrue/progress3. Stock21 fails audio,
+transcript and all-silence checks (main0/edgefalse/progress1). The sole runtime
+error across all66 attempts is stock12 primary `AgentError: WebSocket closed 1006`
+at123.30849059601314s; it fails main replay/idempotency (3/5, edge true, progress3).
+The error code does not establish a new causal diagnosis. Runner5 regression
+entries are not five distinct failed tasks. All original times/errors remain.
+
+Same25 passing pairs, S/stock observational solver calls275/314, tools220/259,
+recovery0/0, inputTotal2171943/3271801, uncached454951/652409,
+cacheRead1716992/2619392, output103064/151450, total2275007/3423251.
+Observed cacheWrite0 is not billing. Physical usage/spend remains incomplete.
+
+All12 frozen campaigns are complete:720 immutable primaries/771 retained attempts.
+All six LOW finished before MEDIUM began. H/native remains frozen W32/schema35;
+D/S remain frozen0.9.1. W55 and later source were not substituted. No overall
+current-native accuracy/cost/efficiency gain or stock Codex CLI certification is
+established. Fixed waves are not randomized repeats/significance evidence. LOW
+publication flags remain; MEDIUM has no protocol blockers but publication ready
+is still no. Completion of these campaigns grants no publication approval.

@@ -1,7 +1,8 @@
-import type { FinalizedToolExchange } from "@ponythewhite/base-context-agent";
+import type { FinalizedToolExchange, ToolInvocation } from "@ponythewhite/base-context-agent";
 import type { ImageContent, Message, TextContent } from "@ponythewhite/base-context-ai";
 
 import type { CustomMessage } from "./messages.js";
+import type { ContextEpochEntryRef } from "./request-events.js";
 
 /** The submitted input before native transforms; absence does not imply an empty submission. */
 export interface NativeSubmittedInput {
@@ -38,6 +39,11 @@ export type CapturedNativeMessageWrite = (message: Message | CustomMessage) => P
 export type CapturedNativeGoalWrite = (goal: unknown) => Promise<string>;
 
 export interface NativeEntryWriter {
+	/** Optional provenance qualifies only the original selected owner; all writes retain the captured generation. */
+	captureToolInvocation(
+		assistant?: ContextEpochEntryRef & { sessionFile: string | undefined },
+	): (invocation: ToolInvocation) => Promise<string>;
+	captureToolExchange(executionId: string): (exchange: FinalizedToolExchange) => Promise<string>;
 	/** Separate from input/goal admission. The bound execution owner alone uses this writer. */
 	captureRecoveryExchange(executionId: string): (exchange: FinalizedToolExchange) => Promise<string>;
 	captureMessage(origin: Extract<NativeEntryOrigin, { kind: "input" }>): CapturedNativeMessageWrite;

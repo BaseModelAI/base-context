@@ -340,6 +340,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		signal: AbortSignal | undefined,
 		tool: AgentTool,
 		execute: AgentTool["execute"],
+		assistantMessage?: AssistantMessage,
 	) => void | BoundToolExecution | Promise<void> | Promise<BoundToolExecution | undefined>;
 
 	/**

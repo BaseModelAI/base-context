@@ -3,7 +3,11 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 
 export type JournalFrameRetention = "retained-import";
 /** Producer qualification decoded from the canonical frame, not from its payload. */
-export type NativeEntryQualification = "native-admission" | "native-recovery" | "native-context-epoch";
+export type NativeEntryQualification =
+	| "native-admission"
+	| "native-recovery"
+	| "native-context-epoch"
+	| "native-tool-execution";
 
 export interface JournalCursor {
 	readonly sequence: number;
@@ -60,7 +64,8 @@ export function encodeJournalFrameJson(
 		qualification !== undefined &&
 		qualification !== "native-admission" &&
 		qualification !== "native-recovery" &&
-		qualification !== "native-context-epoch"
+		qualification !== "native-context-epoch" &&
+		qualification !== "native-tool-execution"
 	)
 		throw new Error("Unsupported journal frame qualification");
 	const prefix = framePrefix(cursor, retention, qualification);
@@ -114,7 +119,8 @@ export function decodeJournalFrame(
 		qualification !== undefined &&
 		qualification !== "native-admission" &&
 		qualification !== "native-recovery" &&
-		qualification !== "native-context-epoch"
+		qualification !== "native-context-epoch" &&
+		qualification !== "native-tool-execution"
 	)
 		throw new Error("Unsupported journal frame qualification");
 	if (frame.sequence !== cursor.sequence || frame.previousChecksum !== cursor.checksum) {

@@ -906,6 +906,62 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 		await capture.dispose();
 		capture = undefined;
 		await manager.branchTo(secondEntryId);
+		// Ordinary intent payload labels/IDs cannot mint the original selected-owner qualifier.
+		const legacyAssistant = await manager.appendMessage({
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "offline-tool-owner",
+			content: [{ type: "toolCall", id: "copied_call|fc_copied", name: "copied_owner", arguments: {} }],
+			stopReason: "toolUse",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 4,
+		});
+		const legacyIntent = await manager.appendToolInvocation({
+			executionId: "copied-execution",
+			sourceOrder: 0,
+			toolCallId: "copied_call|fc_copied",
+			toolName: "copied_owner",
+			originalInput: {
+				qualification: "native-tool-execution",
+				assistant: {
+					sessionId: manager.getSessionId(),
+					sessionFile: manager.getSessionFile(),
+					entryId: legacyAssistant,
+				},
+			},
+			executedInput: {},
+			toolExecution: "sequential",
+		});
+		const beforeLegacy = await manager.readEntries();
+		capture = requests.capture();
+		expect(await capture.readHistory((view) => view.get(legacyIntent))).toMatchObject({ authority: "runtime" });
+		expect((await capture.readHistory((view) => view.get(legacyIntent)))?.qualification).toBeUndefined();
+		await expect(
+			capture.readHistory((view) =>
+				compiler.compile(
+					view,
+					{ maxMessages: 16, maxSourceBytes: 64 * 1024 },
+					undefined,
+					{},
+					undefined,
+					"on",
+					true,
+				),
+			),
+		).rejects.toThrow("original tool owner is unqualified");
+		expect(compiler.hasActiveEntry(legacyAssistant)).toBe(false);
+		expect(await manager.readEntries()).toEqual(beforeLegacy);
+		await capture.dispose();
+		capture = undefined;
+		await manager.branchTo(secondEntryId);
 		const checkpointSink = manager.bindCompactionSink();
 		capture = requests.capture(checkpointSink);
 		const epochLimits = { maxMessages: 16, maxSourceBytes: 64 * 1024 };

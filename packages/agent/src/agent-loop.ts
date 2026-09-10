@@ -749,6 +749,7 @@ async function executeToolCalls(
 			toolCall,
 			sourceOrder,
 			executionId: crypto.randomUUID(),
+			assistantMessage,
 			originalInput: structuredClone(toolCall.arguments),
 		}));
 	const hasSequentialToolCall = toolCalls.some(
@@ -763,6 +764,7 @@ async function executeToolCalls(
 type ToolCallSource = {
 	owner?: BoundToolExecution;
 	executionId: string;
+	assistantMessage: AssistantMessage;
 	toolCall: AgentToolCall;
 	sourceOrder: number;
 	originalInput: unknown;
@@ -1037,6 +1039,7 @@ async function executePreparedToolCall(
 			signal,
 			prepared.tool,
 			execute,
+			source.assistantMessage,
 		);
 		if (owner) source.owner = owner;
 	}

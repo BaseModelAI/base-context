@@ -1,4 +1,5 @@
 import { CanonicalContextCompiler, type CanonicalContextLimits } from "./canonical-context.js";
+import type { ContextMode } from "./context-epoch.js";
 import type { SessionContext, SessionEntry, SessionManager } from "./session-manager.js";
 
 function restoreBootstrapSetting(context: SessionContext, entry: SessionEntry): void {
@@ -25,7 +26,7 @@ function restoreBootstrapSetting(context: SessionContext, entry: SessionEntry): 
 export async function readSessionBootstrap(
 	sessionManager: SessionManager,
 	limits: CanonicalContextLimits,
-	options: { includeMessages?: boolean } = {},
+	options: { includeMessages?: boolean; allowPendingToolPublic?: boolean; initialContextMode?: ContextMode } = {},
 ) {
 	limits = { ...limits };
 	const includeMessages = options.includeMessages ?? true;
@@ -73,7 +74,17 @@ export async function readSessionBootstrap(
 			if (!hydrated) throw new Error("Bootstrap setting source is unavailable");
 			restoreBootstrapSetting(context, hydrated.entry);
 		}
-		if (includeMessages) context.messages = await new CanonicalContextCompiler().compile(view.branchContext, limits);
+		// Native session construction may restore an unadmittable raw plan. It grants no transport permission.
+		if (includeMessages)
+			context.messages = await new CanonicalContextCompiler().compile(
+				view.branchContext,
+				limits,
+				undefined,
+				{},
+				undefined,
+				options.initialContextMode ?? "on",
+				options.allowPendingToolPublic,
+			);
 		return {
 			context,
 			hasExistingSession: bootstrap.hasContextMessages,

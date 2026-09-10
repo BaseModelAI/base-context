@@ -154,6 +154,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			const accountId = extractAccountId(apiKey);
+			if (
+				options?.attempts?.pendingPublicMessageGroups?.length &&
+				(!attempts.hasRequestBudget || !options.attempts.prepareRequest)
+			)
+				throw new Error("Pending tool groups require native public preparation and measurement");
 			let projection: ProviderRequestProjection | undefined;
 			let body = buildRequestBody(
 				model,
@@ -200,6 +205,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					options.transport === "websocket-cached") &&
 				JSON.stringify({ ...body, input: undefined }) === nativeWindow;
 			let prepared = false;
+			let pendingPublicBody: string | undefined;
 			const prepareBody = async (url: string, retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"]) => {
 				const request = { url, body: bodyJson, ...(retainedPrefix ? { retainedPrefix } : {}) };
 				let requestProjection = prepared ? undefined : projection;
@@ -213,6 +219,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					requestProjection = bindResponsesPublicWindow(
 						{ ...request, api: model.api, provider: model.provider },
 						requestProjection,
+						(encoded) => {
+							pendingPublicBody = encoded;
+						},
 					);
 				}
 				const selected = await attempts.prepareRequest(request, requestProjection);
@@ -220,6 +229,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					bodyJson = selected;
 					body = JSON.parse(selected) as RequestBody;
 				}
+				if (
+					options?.attempts?.pendingPublicMessageGroups?.length &&
+					(!publicWindow ||
+						(url !== "https://chatgpt.com/backend-api/codex/responses" &&
+							url !== "wss://chatgpt.com/backend-api/codex/responses") ||
+						pendingPublicBody === undefined ||
+						bodyJson !== pendingPublicBody)
+				)
+					throw new Error("Pending original tool groups were not accepted as public");
 				prepared = true;
 				return body;
 			};
@@ -400,6 +418,7 @@ function buildRequestBody(
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 		onProjection,
+		pendingPublicMessageGroups: options?.attempts?.pendingPublicMessageGroups,
 	});
 
 	const body: RequestBody = {

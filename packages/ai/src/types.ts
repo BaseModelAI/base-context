@@ -147,6 +147,8 @@ export interface ProviderAttemptReceipt extends ProviderAttemptInfo {
 
 /** Optional for SDK embeddings. Built-in adapters await both callbacks in their producer lifecycle. */
 export interface ProviderAttemptObserver {
+	/** Owned source plan only. These original groups require actual public conversion before admission. */
+	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
 	/** Optional native pre-send budget gate. It does not admit a physical attempt. */
 	measureRequest?(request: ProviderRequestRepresentation): RequestTokenAssessment | undefined;
 	/** Optional native epoch-boundary selection; resolution means the owner accepted the candidate. */

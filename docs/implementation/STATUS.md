@@ -1856,3 +1856,200 @@ cache-write0 observed. These are not physical/billing completeness or causation.
 Eleven campaigns/705 retained attempts are now complete. S Astra MEDIUM is the
 only remaining campaign and will use its unchanged prepared frozen S runner
 once this coherent source gap finishes; unfinished W59 work does not hold it.
+
+
+### G10 original-owner public tool continuation (source scope)
+
+A qualified intent records original selected-tool-owner admission after its
+assistant entry ACK and before execution. Per-invocation manager/source/write
+generation are captured before initialization and event-queue waits. All intent
+writes, including ordinary unqualified ones, use that captured writer; replaced
+owners and persisted native-source mismatches refuse rather than redirect.
+A recorded intent never proves execution, start, failure or rollback.
+
+The native compiler keeps the original RAW whole group with a mandatory public
+constraint. It correlates intent/finalized refs only through the held indexed
+branch/frontier and existing source/item bounds. Ordinary/imported/copied-label
+intentions do not qualify; absent finalized evidence remains outcome_unknown.
+Known finalized evidence must match the original invocation and be present in
+the same captured whole group; sibling/future results cannot be borrowed.
+
+Only the real Responses converter receives the bounded pending-group plan. Its
+one ordinary traversal suppresses synthetic missing results for those originals
+alone and validates original items, IDs, signatures and membership. Actual
+current official route/config and unchanged-onPayload checks must enable the
+existing public encoder. Every required member becomes descriptive public data,
+then the existing v6 epoch ACK precedes adoption and physical admission—even if
+the raw request fits budget. Default/unsupported/replaced adapters, actual mode
+off and incompatible recipes refuse. The producer checks the accepted public
+body; the coordinator separately requires the actual accepted epoch entry.
+
+Public literals retain stable session/entry/intent/result references, original
+public text and recorded outcomes, not a moving current leaf/sequence. Private
+executed arguments, tool arguments, signatures and reasoning are not rendered.
+Accepted source mode overrides creation or previous-branch preferences; defaults
+for summaries/exports do not gain the RAW native plan. v6 copy and older
+policy/recovery-summary recipes refuse rather than downgrade original ownership.
+No automatic execution/replay/reconciliation, new effect/receipt/job store,
+probe, production model call or prompt bookkeeping is added. Sol instructions
+and W54's exact per-attempt accepted-entry association remain unchanged.
+
+Schema37 (`protocol-11-schema-37-tool-continuation`) and canonical-owner minimum37
+use existing stale-daemon handling/incompatible-worker parking; protocol11,
+legacy inspection and index16 remain unchanged. There is no forced teardown,
+repair or claim that parser refusal alone fenced an old reused owner. Doctor
+metadata names actual request4/policy5/tool6 renderers, not runtime readiness.
+
+Two existing offline selectors ran at actual Node22.12.0. The canonical
+unqualified copied-label refusal passed first (3797206,3.3596966231707484s).
+The services path initially failed (3797201,3.2501375270076096s) because the task
+source envelope decoder still rejected the new qualification tag. Only that
+allowlist was extended; task authority remains native-admission-only. The same
+services selector then passed (3798155,6.975471487967297s), using genuine intent
+ACK → controlled post-ACK resource-class stop → real close/reopen → actual native
+fake-SSE public request, plus a normal follow-on. Saved-on mode wins creation-off;
+the unchanged public literal and exact per-attempt accepted epoch refs survive.
+No tool runs and no finalized result is fabricated. The first failure is retained;
+the already-passing negative selector was not rerun. Expected controlled budget
+refusal stderr is not a provider call or failed case.
+
+Initial formatting found a duplicate local publicBody in the existing services
+fixture; the new block was renamed publicToolBody before either case ran. Required
+check then found TS2339 for invocationId on the execution-evidence union. The
+existing required intent-reference check now narrows that variant; missing refs
+still refuse. No fallback, qualification grant or schema weakening was added.
+
+This is not a process-crash/external-effect/installed/platform or whole G10
+certification. The doctor expectation changes only with its metadata string;
+no extra runtime case or matrix is added.
+
+Corrected required `npm run check` passed (3798599,4.835714657092467s):
+1039 files/no fixes, TypeScript, installer and browser smoke. Initial failures
+remain recorded; no extra runtime cases or provider probes were run.
+
+
+
+### Final S Astra MEDIUM and completed frozen benchmark sequence
+
+Final frozen S `gpt-6-astra` MEDIUM exited0 after4676.512568940991s. S passed28/30
+versus stock26/30. There are60 immutable primaries and66 retained attempts
+(S32/stock34), zero capacity-invalid. All25 matched passing pairs are runtime-clean:
+4109.5781885349425s versus5805.029968667892s, −29.206598230913407%; S faster24/25.
+This is conditional paired time, not an all-task/all-attempt or billing claim.
+
+Failed primaries remain S6/S24 and stock12/17/21/24. Each has exactly one retained
+diagnostic, not a substitute. S6 and stock17 pass4/5 main checks and the edge but
+stop at progress3; stock17 names semantic check4. S24 has no allocations.csv,
+main0/edgefalse/progress0; stock24 main3/edgetrue/progress3. Stock21 fails audio,
+transcript and all-silence checks (main0/edgefalse/progress1). The sole runtime
+error across all66 attempts is stock12 primary `AgentError: WebSocket closed 1006`
+at123.30849059601314s; it fails main replay/idempotency (3/5, edge true, progress3).
+The error code does not establish a new causal diagnosis. Runner5 regression
+entries are not five distinct failed tasks. All original times/errors remain.
+
+Same25 passing pairs, S/stock observational solver calls275/314, tools220/259,
+recovery0/0, inputTotal2171943/3271801, uncached454951/652409,
+cacheRead1716992/2619392, output103064/151450, total2275007/3423251.
+Observed cacheWrite0 is not billing. Physical usage/spend remains incomplete.
+
+All12 frozen campaigns are complete:720 immutable primaries/771 retained attempts.
+All six LOW finished before MEDIUM began. H/native remains frozen W32/schema35;
+D/S remain frozen0.9.1. W55 and later source were not substituted. No overall
+current-native accuracy/cost/efficiency gain or stock Codex CLI certification is
+established. Fixed waves are not randomized repeats/significance evidence. LOW
+publication flags remain; MEDIUM has no protocol blockers but publication ready
+is still no. Completion of these campaigns grants no publication approval.
+
+
+# Benchmark campaign summary — twelve frozen campaigns complete
+
+All six LOW invocations finished before MEDIUM began. All twelve invocations are
+complete: 720 immutable primaries and 771 retained attempts. This is not
+publication approval or evidence for later current-native source.
+
+Time is the current variant relative to its matched baseline on passing primary
+pairs: negative is faster. It is conditional on both primaries passing, not an
+all-task or all-attempt speed claim. Judge pass does not imply a runtime-clean
+attempt. Each accuracy denominator is all30 immutable primary tasks.
+
+| Comparison | Model | Effort | Current / baseline pass | Matched pairs | Current time delta | Retained attempts |
+|---|---|---|---|---:|---:|---:|
+| H/native (W32) | `gpt-5.6-sol` | low | 28/30 / 26/30 | 24 | ≈+8.8% | 66 |
+| H/native (W32) | `gpt-6-astra` | low | 30/30 / 29/30 | 29 | -2.770% | 61 |
+| D/stock (frozen0.9.1) | `gpt-5.6-sol` | low | 27/30 / 27/30 | 25 | -9.076% | 66 |
+| D/stock (frozen0.9.1) | `gpt-6-astra` | low | 29/30 / 29/30 | 28 | -15.284% | 62 |
+| S/stock (frozen0.9.1) | `gpt-5.6-sol` | low | 29/30 / 28/30 | 27 | -9.783% | 63 |
+| S/stock (frozen0.9.1) | `gpt-6-astra` | low | 25/30 / 27/30 | 24 | -14.546% | 68 |
+| H/native (W32) | `gpt-5.6-sol` | medium | 28/30 / 29/30 | 27 | -0.062% | 63 |
+| H/native (W32) | `gpt-6-astra` | medium | 29/30 / 28/30 | 28 | +3.759% | 63 |
+| D/stock (frozen0.9.1) | `gpt-5.6-sol` | medium | 29/30 / 27/30 | 27 | -17.975% | 64 |
+| D/stock (frozen0.9.1) | `gpt-6-astra` | medium | 29/30 / 29/30 | 29 | -26.733% | 62 |
+| S/stock (frozen0.9.1) | `gpt-5.6-sol` | medium | 28/30 / 25/30 | 24 | -24.937% | 67 |
+| S/stock (frozen0.9.1) | `gpt-6-astra` | medium | 28/30 / 26/30 | 25 | −29.207% | 66 |
+
+## What the results establish
+
+- No overall native accuracy/cost/efficiency gain is established. Native Sol LOW
+  was slower on matched passes. Native Astra LOW's runtime-clean supplement was
+  slower. Native Sol MEDIUM had lower correctness and effectively even timing.
+  Native Astra MEDIUM had higher correctness with slower matched timing.
+- D/S conditional gains describe their separately frozen controls. They are not
+  current-native results. S Astra LOW had lower correctness despite faster
+  matched passing pairs.
+- Usage and billed-cost coverage remain incomplete. Missing cost stays null, not
+  zero. Observed cached/uncached/output token counts are not physical billing or
+  causal timing attribution.
+- Failed primaries remain failed. Diagnostics and capacity-invalid attempts keep
+  their time, spend and errors; they do not become selected winners. Completed
+  invocations have zero capacity-invalid attempts.
+- All H/native invocations use frozen W32, not later shipped source. H0.9.3 is
+  not stock Codex CLI certification. D/S use frozen0.9.1 controls and runners.
+- LOW publication-protocol flags remain in the original reports. MEDIUM's lack
+  of that flag does not grant publication readiness or approval.
+
+## Native runtime-clean timing supplements
+
+These supplements keep the original matched results above. They exclude pairs
+with a reported runtime error and do not replace failed primaries with diagnostics.
+
+| Model / effort | Runtime-clean pairs | Native time delta |
+|---|---:|---:|
+| Sol LOW | 22 | ≈+8.2% |
+| Astra LOW | 27 | +4.803% |
+| Sol MEDIUM | 26 | −0.636% |
+| Astra MEDIUM | 27 | +6.807% |
+
+The runs used fixed ordered waves with concurrent comparison arms. They are not
+randomized repeated blocks and do not establish statistical significance.
+
+## Completed sequence
+
+The final S Astra MEDIUM runner exited0 after4676.512568940991s. All six LOW
+invocations finished before any MEDIUM invocation. Each used all30tasks, one
+runner/six workers maximum, exact model IDs and the same read-only ChatGPT
+subscription. No frozen runner/candidate was replaced with later source.
+
+## Evidence limits
+
+The native25 Sol MEDIUM primary returned an actual partial public recovery search
+result. Two source records contained the report-freshness clause; coverage stayed
+partial with unsupported_public_shape. This is not complete recovery or evidence
+that recovery caused correctness/time/cost gains.
+
+Native28 Sol MEDIUM remains a failed primary. Its explicit correction-batch import
+routing differed from H's nested discovery. Saved fresh-grader commands/outputs
+were unavailable. This does not establish lost context, optimizer causation or
+an exhaustive sole cause. No solver/corpus patch or diagnostic feedback followed.
+
+Native17 Astra LOW/MEDIUM primary comparison found identical saved clause and
+missing CSVs but different comparison-report labels and grouping. The inspected
+values and public inputs were present. The saved judge did not define check4 or
+expose its failing fresh output. This supports a report-representation difference,
+not a confirmed wrong-value bug, missing-context finding, or optimizer/effort
+cause. The failed MEDIUM primary remains failed. No solver/corpus patch or
+campaign feedback followed.
+
+All four H/native invocations are complete on W32. Later source fixes, including
+0f36af6d4, were not substituted into any frozen campaign. All twelve completed
+invocations retain771 attempts. Every campaign has zero capacity-invalid attempts.
+No further campaign is active; no completed campaign was rerun.

@@ -1434,6 +1434,7 @@ export class AgentSession {
 						{},
 						resource,
 						this._initialContextMode,
+						contextEpochsEnabled,
 					);
 					if (sameSource && this._contextOmissions === controls) {
 						// Only prune this captured set. A newer control or source switch must survive this read.
@@ -1482,6 +1483,14 @@ export class AgentSession {
 						messages,
 						async (candidate) => {
 							if (fixed) throw new Error("Context selection is disabled while context.mode is off");
+							if (
+								epochContext.toolContinuations?.length &&
+								(!candidate.publicMessages ||
+									JSON.stringify(getCanonicalEpochContext(candidate.publicMessages)?.toolContinuations) !==
+										JSON.stringify(epochContext.toolContinuations) ||
+									candidate.projection.pendingPublicMessageGroups?.length)
+							)
+								throw new Error("Tool continuation requires its exact public candidate before epoch ACK");
 							assertResourceCurrent(resource);
 							const representation = contextEpochRepresentation(
 								candidate.request,
@@ -1649,22 +1658,37 @@ export class AgentSession {
 			}
 		});
 		this.agent.bindToolExecutionOwner({
-			onToolInvocationStarting: async (invocation, _signal, tool, execute) => {
+			onToolInvocationStarting: async (invocation, _signal, tool, execute, assistantMessage) => {
+				// Capture this invocation's original source generation before either wait.
+				const manager = this.sessionManager;
+				const sessionId = manager.getSessionId();
+				const sessionFile = manager.getSessionFile();
+				const writer = manager[bindNativeEntryWriter]();
+				const selected = this._toolRegistry.get(tool.name) === tool && tool.execute === execute;
+				const qualified = selected && manager.isPersisted();
 				await this.initialize();
 				await this._agentEventQueue;
-				// Identity is the selected registered object AND the executor actually called by the loop.
+				if (this.sessionManager !== manager)
+					throw new Error("Tool execution owner changed before intent admission");
+				const assistant = assistantMessage ? this._assistantEntryIds.get(assistantMessage) : undefined;
+				if (qualified && (!assistant || assistant.sessionId !== sessionId || assistant.sessionFile !== sessionFile))
+					throw new Error("Tool intent does not match its original native assistant source");
+				const intentWrite = writer.captureToolInvocation(qualified ? assistant : undefined);
+				const exchangeWrite = qualified ? writer.captureToolExchange(invocation.executionId) : undefined;
+				// Recovery qualification still requires the selected genuine recovery producer.
 				const recoveryWrite =
 					this._nativeRecoveryTools.get(tool) === execute
-						? this.sessionManager[bindNativeEntryWriter]().captureRecoveryExchange(invocation.executionId)
+						? writer.captureRecoveryExchange(invocation.executionId)
 						: undefined;
-				await this.sessionManager.appendToolInvocation(invocation);
-				if (!recoveryWrite) return;
+				await intentWrite(invocation);
+				if (!recoveryWrite && !exchangeWrite) return;
 				const producer = { used: false };
 				const owner: BoundToolExecution = {
-					run: (run) => this._nativeRecoveryProducer.run(producer, run),
+					run: (run) => (recoveryWrite ? this._nativeRecoveryProducer.run(producer, run) : run()),
 					finalize: async (exchange) => {
-						if (producer.used) await recoveryWrite(exchange);
-						else await this.sessionManager.appendToolExchange(exchange);
+						if (producer.used && recoveryWrite) await recoveryWrite(exchange);
+						else if (exchangeWrite) await exchangeWrite(exchange);
+						else await manager.appendToolExchange(exchange);
 					},
 				};
 				return owner;
@@ -13459,6 +13483,7 @@ export class AgentSession {
 			const { context: sessionContext } = await readSessionBootstrap(
 				this.sessionManager,
 				this.settingsManager.getCanonicalContextLimits(),
+				{ allowPendingToolPublic: this._contextEpochsEnabled, initialContextMode: this._initialContextMode },
 			);
 			this.agent.state.messages = sessionContext.messages;
 			this._contextOmissions = undefined;

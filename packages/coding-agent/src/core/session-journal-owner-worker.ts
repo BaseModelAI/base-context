@@ -485,6 +485,7 @@ async function start(): Promise<void> {
 					"begin-admitted",
 					"begin-recovery",
 					"begin-context-epoch",
+					"begin-tool-execution",
 					"chunk",
 					"commit",
 					"abort",
@@ -519,6 +520,7 @@ async function start(): Promise<void> {
 				case "begin-admitted":
 				case "begin-recovery":
 				case "begin-context-epoch":
+				case "begin-tool-execution":
 					requireAppendable();
 					if (upload) throw new Error("Session journal upload already active");
 					if (request.retention !== undefined && request.retention !== "retained-import")
@@ -541,7 +543,9 @@ async function start(): Promise<void> {
 									? "native-recovery"
 									: request.action === "begin-context-epoch"
 										? "native-context-epoch"
-										: undefined,
+										: request.action === "begin-tool-execution"
+											? "native-tool-execution"
+											: undefined,
 					};
 					return;
 				case "chunk": {
@@ -601,6 +605,7 @@ async function start(): Promise<void> {
 							request.action === "begin-admitted" ||
 							request.action === "begin-recovery" ||
 							request.action === "begin-context-epoch" ||
+							request.action === "begin-tool-execution" ||
 							request.action === "chunk" ||
 							request.action === "commit"
 						)
