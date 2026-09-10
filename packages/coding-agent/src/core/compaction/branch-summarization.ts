@@ -5,7 +5,7 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model, Usage } from "@ponythewhite/base-context-ai";
 import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
 import {
@@ -62,6 +62,8 @@ export interface CollectEntriesResult {
 export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model<any>;
+	/** Explicit effort only; absent preserves the provider's existing omitted-effort behavior. */
+	thinkingLevel?: ThinkingLevel;
 	/** API key for the model */
 	apiKey: string;
 	/** Request headers for the model */
@@ -228,6 +230,7 @@ export async function generateBranchSummary(
 ): Promise<BranchSummaryResult> {
 	const {
 		model,
+		thinkingLevel,
 		apiKey,
 		headers,
 		requests,
@@ -269,7 +272,13 @@ export async function generateBranchSummary(
 		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens: 2048 },
+		{
+			apiKey,
+			headers,
+			signal,
+			maxTokens: 2048,
+			...(thinkingLevel === undefined ? {} : { reasoning: thinkingLevel }),
+		},
 		{
 			purpose: "summary",
 			purposeDetail: "branch",

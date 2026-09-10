@@ -90,8 +90,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 39 requires current serialized orphan registration and kernel writer ownership.
 // Revision 40 requires selected-skill epochs and scoped queued skill bindings.
 // Revision 41 honors explicit compaction model and effort selection.
-export const DAEMON_SCHEMA_REVISION = 41;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-41-compaction-model";
+// Revision 42 honors explicit branch-summary model and effort selection.
+export const DAEMON_SCHEMA_REVISION = 42;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-42-branch-summary-model";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -729,7 +730,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 41,
+	minSchemaRevision: 42,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

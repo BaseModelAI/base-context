@@ -13557,6 +13557,29 @@ export class AgentSession {
 		}
 	}
 
+	private _resolveBranchSummaryModel(): { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined {
+		const selection = this.settingsManager.getBranchSummaryModel();
+		if (selection === undefined) return undefined;
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid branchSummary.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown branchSummary.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`branchSummary.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: structuredClone(model), thinkingLevel: selection.thinkingLevel };
+	}
+
 	private async _navigateTree(
 		targetId: string,
 		options: {
@@ -13571,7 +13594,8 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
-		if (options.summarize && !this.model) {
+		const summarySelection = options.summarize ? this._resolveBranchSummaryModel() : undefined;
+		if (options.summarize && !summarySelection && !this.model) {
 			throw new Error("No model available for summarization");
 		}
 
@@ -13592,7 +13616,7 @@ export class AgentSession {
 				await this._agentEventQueue;
 				if (targetSource.sessionId !== this.sessionId || targetSource.sessionFile !== this.sessionFile)
 					throw new Error("Session source changed during branch navigation");
-				return this._navigateTreeUnderPause(targetId, targetEntry, options);
+				return this._navigateTreeUnderPause(targetId, targetEntry, options, summarySelection);
 			});
 		} finally {
 			queuedWorkPause.release();
@@ -13609,6 +13633,7 @@ export class AgentSession {
 			replaceInstructions?: boolean;
 			label?: string;
 		},
+		summarySelection: { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined,
 	): Promise<{
 		editorText?: string;
 		cancelled: boolean;
@@ -13698,7 +13723,7 @@ export class AgentSession {
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const selectedModel = this.model!;
+				const selectedModel = summarySelection?.model ?? this.model!;
 				const model = { ...selectedModel, cost: { ...selectedModel.cost } };
 				const branchSummarySettings = { ...this.settingsManager.getBranchSummarySettings() };
 				const summaryEntries = structuredClone(entriesToSummarize);
@@ -13707,6 +13732,7 @@ export class AgentSession {
 					const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 					const result = await generateBranchSummary(summaryEntries, {
 						model,
+						...(summarySelection === undefined ? {} : { thinkingLevel: summarySelection.thinkingLevel }),
 						apiKey,
 						headers,
 						signal: this._branchSummaryAbortController.signal,

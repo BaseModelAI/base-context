@@ -204,6 +204,23 @@ partials and caller-retained allocations are not bounded by these settings.
 |---------|------|---------|-------------|
 | `branchSummary.reserveTokens` | number | `16384` | Tokens reserved for branch summarization |
 | `branchSummary.skipPrompt` | boolean | `false` | Skip "Summarize branch?" prompt on `/tree` navigation (defaults to no summary) |
+| `branchSummary.model` | object | Main model; effort omitted | Explicit branch-summary model: `provider`, `modelId`, and `thinkingLevel` are all required |
+
+`branchSummary.model` selects the model and effort for a built-in summary when
+navigating the session tree. It uses the same required fields as `compaction.model`,
+but the two settings are independent. The main session model and effort do not
+change. Invalid or unsupported explicit choices fail rather than falling back.
+
+Without this setting, branch summaries keep the main model and omit request effort,
+as before. They do not inherit the main session's thinking level. Omission does not
+prove that the provider performs no reasoning. Extension-provided summaries and
+navigation without a summary retain their existing behavior. This setting does not
+schedule extra summaries or change the branch-summary prompt/skip policy.
+
+Enforced request budgets still need explicit coverage for the actual auxiliary
+route/model in the existing supported API set. The setting does not create a budget
+profile, enable a new provider capability or establish deployment availability.
+
 
 ### Retry
 

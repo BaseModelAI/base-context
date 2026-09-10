@@ -2340,3 +2340,57 @@ Required `npm run check` passed first (PID3908129,5.044830980943516s;
 rerun was needed. No provider, benchmark, installed lifecycle or publication run
 occurred. These source receipts do not establish cost/efficiency gains, physical
 billing or completion of the active implementation/release objective.
+
+## W70 / G07 — independent branch-summary model and effort
+
+An optional `branchSummary.model` selects `provider`, `modelId` and `thinkingLevel`
+together for built-in tree-navigation summaries. Its explicit choice is separate
+from W69 `compaction.model` and W45 `autoRefine.model`. Invalid, unknown or unsupported
+explicit choices refuse rather than silently using the main model. An absent
+setting preserves the existing main-model and omitted-request-effort behavior;
+it does not forward the main session's effort or certify reasoning is disabled.
+
+The actual `navigateTree` summary path uses one captured choice with the existing
+`generateBranchSummary` producer, coordinator purpose `summary`/detail `branch`,
+request budget, cancellation, physical receipts and acknowledged destination
+adoption. It preserves original source/target ownership and does not change the
+main model/effort. Explicit effort follows existing provider option semantics.
+Extension-provided summaries, no-summary navigation and standalone omitted-effort
+calls retain their existing behavior. The change does not add automatic summaries
+or change branch-summary prompt/skip policy.
+
+Enforcement still requires explicit coverage for the actual supported auxiliary
+route/model. There is no profile synthesis, wider provider support, inferred
+entitlement, parallel summary owner or separate receipt store. This is not an
+independent auxiliary spending/call-count budget, semantic extraction or full G07
+completion. Existing Sol/custom prompt text remains unchanged.
+
+Daemon schema/minimum42 (`protocol-11-schema-42-branch-summary-model`) fences reuse
+of workers that ignore the explicit setting. Protocol11, history index16,
+kernel4/bootstrap11, epoch and queued-action formats remain unchanged. W69/W68/W67
+and all frozen campaigns stay settled. No live provider, benchmark, installed
+lifecycle or publication activity is authorized; the overall objective remains
+active and incomplete.
+
+The two agreed existing selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3917516,5.488804213935509s;2passed/26skipped).
+They were relocated from the live-gated tree-navigation suite into its existing
+offline runtime suite. Old definitions were removed; the other eight live cases,
+their auth gate and setup were unchanged and unrun. No auth/environment change,
+new case, suite, matrix or harness was added.
+
+The happy path used a local Faux main conversation and the actual OpenAI Responses
+adapter/coordinator with HTTP fetch replaced. It observed the explicit different
+model/high effort, auxiliary-model auth, detached selection across a target read,
+owner-bound receipt and acknowledged root-destination summary, with the main model/
+effort unchanged. The second case retained in-flight cancellation and added an
+unknown explicit-model refusal before target read/auth. Its cancelled native receipt
+settled without a summary or transcript-branch/leaf change. These fixtures retain
+absent-budget policy; they are not positive enforced-profile, off-level deployment,
+independent spending-budget or live-provider evidence.
+
+Required `npm run check` passed first (PID3917521,5.427920550107956s;
+1045files/no fixes, types, installer/browser checks). No correction or focused rerun
+was needed. No live provider, benchmark, installed lifecycle or publication run was
+made. Source results do not establish cost/efficiency gains, physical billing or
+completion of the active implementation/release objective.

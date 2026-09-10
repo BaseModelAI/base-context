@@ -22,7 +22,8 @@ import {
 	readSemanticEdgeLedger,
 	SEMANTIC_EDGES_LEDGER_FILENAME,
 } from "../../src/core/semantic-edges.js";
-import { SessionManager } from "../../src/core/session-manager.js";
+import { readSessionJournal } from "../../src/core/session-journal-reader.js";
+import { type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -35,6 +36,20 @@ import { createDefaultRuntimeFactory } from "../../src/main.js";
 import type { ActiveSessionState } from "../../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../../src/modes/daemon/daemon-mode.js";
 import type { DaemonCommand } from "../../src/modes/daemon/daemon-protocol.js";
+import { createDeferred } from "./scheduling.js";
+
+const branchSummaryModel: Model<"openai-responses"> = {
+	api: "openai-responses",
+	provider: "branch-summary-fixture",
+	id: "branch-summary-model",
+	name: "Branch summary model",
+	baseUrl: "https://branch-summary.invalid/v1",
+	input: ["text"],
+	reasoning: true,
+	contextWindow: 128000,
+	maxTokens: 32768,
+	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+};
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -1067,6 +1082,216 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(runtime.session.messages).toEqual([]);
 		expect(runtime.session.sessionFile).toBeUndefined();
 	});
+
+	it("should create branch summary when navigating with summarize=true", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const { session } = runtime;
+		const { sessionManager, settingsManager, modelRegistry } = session;
+		settingsManager.applyOverrides({ autoRefine: { enabled: false } });
+		await sessionManager.branchTo(null);
+		await session.prompt("What is 2+2?");
+		await session.prompt("What is 3+3?");
+		await session.waitForIdle();
+		const target = (await sessionManager.readEntries()).find(
+			(entry) => entry.type === "message" && entry.message.role === "user",
+		);
+		if (!target) throw new Error("Missing original user navigation target");
+		expect(target.parentId).toBeNull();
+		const sourceSessionId = sessionManager.getSessionId();
+		const sourceLeafId = sessionManager.getLeafId();
+		const mainModel = structuredClone(session.model);
+		const mainEffort = session.thinkingLevel;
+		modelRegistry.registerProvider(branchSummaryModel.provider, {
+			api: branchSummaryModel.api,
+			baseUrl: branchSummaryModel.baseUrl,
+			apiKey: "branch-summary-fixture-key",
+			models: [branchSummaryModel],
+		});
+		const selection = {
+			provider: branchSummaryModel.provider,
+			modelId: branchSummaryModel.id,
+			thinkingLevel: "high" as const,
+		};
+		settingsManager.applyOverrides({ branchSummary: { model: selection } });
+		const detached = settingsManager.getBranchSummaryModel()!;
+		detached.modelId = "mutated-getter-copy";
+		expect(settingsManager.getBranchSummaryModel()).toEqual(selection);
+		const readEntry = sessionManager.readEntry.bind(sessionManager);
+		const targetRead = vi.spyOn(sessionManager, "readEntry").mockImplementationOnce((...args) => {
+			settingsManager.applyOverrides({
+				branchSummary: { model: { ...selection, modelId: "mutated-during-target-read", thinkingLevel: "low" } },
+			});
+			return readEntry(...args);
+		});
+		cleanups.push(() => targetRead.mockRestore());
+		const auth = vi.spyOn(modelRegistry, "getApiKeyAndHeaders");
+		cleanups.push(() => auth.mockRestore());
+		const bodies: Array<{ model: string; reasoning: { effort: string } }> = [];
+		// The real built-in adapter/coordinator runs; only HTTP is offline.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const item = {
+				type: "message",
+				id: "msg_branch",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Remember both sums", annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_branch",
+						model: branchSummaryModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 10,
+							output_tokens: 1,
+							total_tokens: 11,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		cleanups.push(() => offlineFetch.mockRestore());
+
+		const result = await session.navigateTree(target.id, { summarize: true });
+
+		expect(result.cancelled).toBe(false);
+		expect(result.editorText).toBe("What is 2+2?");
+		expect(result.summaryEntry).toMatchObject({
+			type: "branch_summary",
+			summary: expect.stringContaining("Remember both sums"),
+			parentId: null,
+		});
+		expect(sessionManager.getLeafId()).toBe(result.summaryEntry?.id);
+		expect(await sessionManager.readEntry(result.summaryEntry!.id)).toEqual(result.summaryEntry);
+		expect(session.messages.some((message) => message.role === "branchSummary")).toBe(true);
+		expect(session.model).toEqual(mainModel);
+		expect(session.thinkingLevel).toBe(mainEffort);
+		expect(auth.mock.calls.map(([model]) => [model.provider, model.id])).toEqual([
+			[branchSummaryModel.provider, branchSummaryModel.id],
+		]);
+		expect(bodies).toEqual([
+			expect.objectContaining({
+				model: branchSummaryModel.id,
+				reasoning: expect.objectContaining({ effort: "high" }),
+			}),
+		]);
+		const receipts: RequestJournalEntry[] = [];
+		for await (const { entry: record } of readSessionJournal(sessionManager.getSessionFile()!)) {
+			const entry = record as RequestJournalEntry;
+			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+		}
+		expect(receipts).toHaveLength(1);
+		expect(receipts[0]?.request).toMatchObject({
+			purpose: "summary",
+			purposeDetail: "branch",
+			owner: { sessionId: sourceSessionId },
+			source: { sessionId: sourceSessionId, leafId: sourceLeafId },
+			modelContract: { provider: branchSummaryModel.provider, model: branchSummaryModel.id },
+			receipt: { model: branchSummaryModel.id, effort: "high", outcome: "completed" },
+		});
+	}, 120000);
+
+	it("should handle abort during summarization", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const { session } = runtime;
+		const { sessionManager, settingsManager, modelRegistry } = session;
+		settingsManager.applyOverrides({ autoRefine: { enabled: false } });
+		await session.prompt("Tell me about something");
+		await session.prompt("Continue");
+		await session.waitForIdle();
+		const branchBefore = await sessionManager.readBranch();
+		const leafBefore = sessionManager.getLeafId();
+		const target = branchBefore.find((entry) => entry.type === "message" && entry.message.role === "user");
+		if (!target) throw new Error("Missing original user navigation target");
+		const mainModel = structuredClone(session.model);
+		const mainEffort = session.thinkingLevel;
+		modelRegistry.registerProvider(branchSummaryModel.provider, {
+			api: branchSummaryModel.api,
+			baseUrl: branchSummaryModel.baseUrl,
+			apiKey: "branch-summary-fixture-key",
+			models: [branchSummaryModel],
+		});
+		const selection = {
+			provider: branchSummaryModel.provider,
+			modelId: branchSummaryModel.id,
+			thinkingLevel: "high" as const,
+		};
+		settingsManager.applyOverrides({
+			branchSummary: { model: { ...selection, modelId: "missing-branch-summary-model" } },
+		});
+		const auth = vi.spyOn(modelRegistry, "getApiKeyAndHeaders");
+		const targetRead = vi.spyOn(sessionManager, "readEntry");
+		cleanups.push(
+			() => auth.mockRestore(),
+			() => targetRead.mockRestore(),
+		);
+		await expect(session.navigateTree(target.id, { summarize: true })).rejects.toThrow(
+			`Unknown branchSummary.model ${branchSummaryModel.provider}/missing-branch-summary-model`,
+		);
+		expect(auth).not.toHaveBeenCalled();
+		expect(targetRead).not.toHaveBeenCalled();
+		expect(sessionManager.getLeafId()).toBe(leafBefore);
+		expect(await sessionManager.readBranch()).toEqual(branchBefore);
+		auth.mockRestore();
+		targetRead.mockRestore();
+
+		settingsManager.applyOverrides({ branchSummary: { model: selection } });
+		const started = createDeferred();
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			started.resolve();
+			return new Promise<Response>((_resolve, reject) => {
+				const signal = init?.signal;
+				if (!signal) {
+					reject(new Error("Missing summary request cancellation signal"));
+					return;
+				}
+				const abort = () => reject(new DOMException("Summary request aborted", "AbortError"));
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			});
+		});
+		cleanups.push(() => offlineFetch.mockRestore());
+		const navigation = session.navigateTree(target.id, { summarize: true });
+		await started.promise;
+		expect(session.isCompacting).toBe(true);
+		session.abortBranchSummary();
+		const result = await navigation;
+
+		expect(result.cancelled).toBe(true);
+		expect(result.aborted).toBe(true);
+		expect(result.summaryEntry).toBeUndefined();
+		// Native attempt rows may settle, but the selected transcript branch must not change.
+		expect(await sessionManager.readBranch()).toEqual(branchBefore);
+		expect(sessionManager.getLeafId()).toBe(leafBefore);
+		expect(session.model).toEqual(mainModel);
+		expect(session.thinkingLevel).toBe(mainEffort);
+		expect(offlineFetch).toHaveBeenCalledOnce();
+		const receipts: RequestJournalEntry[] = [];
+		for await (const { entry: record } of readSessionJournal(sessionManager.getSessionFile()!)) {
+			const entry = record as RequestJournalEntry;
+			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+		}
+		expect(receipts).toHaveLength(1);
+		expect(receipts[0]?.request).toMatchObject({
+			purpose: "summary",
+			purposeDetail: "branch",
+			source: { sessionId: sessionManager.getSessionId(), leafId: leafBefore },
+			receipt: { model: branchSummaryModel.id, effort: "high", outcome: "cancelled" },
+		});
+	}, 60000);
 
 	it("duplicates the current active branch when forking at the current position", async () => {
 		const { runtime } = await createRuntimeForTest((pi: ExtensionAPI) => {

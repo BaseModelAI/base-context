@@ -24,9 +24,17 @@ export interface CompactionSettings {
 	model?: CompactionModelSettings;
 }
 
+export interface BranchSummaryModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+}
+
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
+	/** Absent: inherit the main model and retain omitted request effort. */
+	model?: BranchSummaryModelSettings;
 }
 
 /** One explicit learning-model selection, shared by the real reviewer and planner. */
@@ -996,6 +1004,12 @@ export class SettingsManager {
 				typeof cooldownMs === "number" && Number.isFinite(cooldownMs) ? cooldownMs : 20 * 60_000,
 			),
 		};
+	}
+
+	/** Detached explicit configuration; branch navigation validates the selected model/effort. */
+	getBranchSummaryModel(): BranchSummaryModelSettings | undefined {
+		const model = this.settings.branchSummary?.model;
+		return model === undefined ? undefined : structuredClone(model);
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
