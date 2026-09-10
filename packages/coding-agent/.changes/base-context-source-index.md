@@ -112,3 +112,6 @@ Per-attempt tracking keeps the admitted reference stable through later source
 changes. No latest-state inference, new store, budget/effort duplication, policy
 authority or prompt change. Two existing offline cases cover the supported path;
 live provider/platform/billing and broader G17 coverage remain unestablished.
+
+
+- Read native SessionInfo through an owner-maintained schema16 projection and a genuinely read-only, current covered index snapshot; keep selected payload hydration and final source checks, whole-source usage order, explicit unavailable/stale/unsupported/errors and W53 complete uncached results. Correct native oversized-record usage omission. Require `^22.12.0 || >=23.3.0` with migration notice; no third-party version, canonical format or frozen benchmark changes. The same two existing cases passed once on actual22.12 and once on current22.22.1; the required check passed after cleanup-flow and type corrections. No physical billing/global-resource/installed or full G08/G10 closure claim.

@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { HistoryIndex } from "../src/core/history-index.js";
 import * as sessionJournalReader from "../src/core/session-journal-reader.js";
 import type { SessionHeader } from "../src/core/session-manager.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
@@ -65,7 +66,7 @@ describe("SessionInfo.modified", () => {
 		const mgr = await SessionManager.open(filePath);
 		managers.push(mgr);
 		const msgTime = Date.now();
-		await mgr.appendMessage({
+		const assistantId = await mgr.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "later" }],
 			api: "openai-completions",
@@ -83,6 +84,11 @@ describe("SessionInfo.modified", () => {
 			timestamp: msgTime,
 		});
 
+		await mgr.appendSessionInfo("indexed catalog fixture");
+		await mgr.readSourceHistory(async () => undefined); // Original owner publishes the covered projection.
+		const scans = vi.spyOn(sessionJournalReader, "readSessionJournal");
+		const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+		const payloadsForSession = () => payloads.mock.calls.filter(([id]) => id === mgr.getSessionId()).length;
 		const sessions = await SessionManager.list("/tmp", dirname(filePath));
 		const s = sessions.find((x) => x.path === filePath);
 		expect(s).toBeDefined();
@@ -90,7 +96,7 @@ describe("SessionInfo.modified", () => {
 		expect(s!.modified.getTime()).not.toBe(before.mtime.getTime());
 
 		const expected = structuredClone(s!);
-		const scans = vi.spyOn(sessionJournalReader, "readSessionJournal");
+		const cachedPayloadReads = payloadsForSession();
 		s!.name = "caller-only name";
 		s!.created.setTime(42);
 		s!.modified.setTime(0);
@@ -103,6 +109,7 @@ describe("SessionInfo.modified", () => {
 			expected,
 		);
 		expect(scans).not.toHaveBeenCalled();
+		expect(payloadsForSession()).toBe(cachedPayloadReads);
 
 		// Empty readable files retain null metadata too. Fill the real item bound,
 		// without inserting cache records or changing/resetting its limits.
@@ -115,10 +122,41 @@ describe("SessionInfo.modified", () => {
 		const beforeNullHit = scans.mock.calls.length;
 		expect(await readSessionInfo(lastEmpty)).toBeNull();
 		expect(scans).toHaveBeenCalledTimes(beforeNullHit);
-		const beforeSessionRescan = scans.mock.calls.filter(([path]) => path === filePath).length;
+		const beforeSessionRead = payloadsForSession();
 		expect((await SessionManager.list("/tmp", dirname(filePath))).find((item) => item.path === filePath)).toEqual(
 			expected,
 		);
-		expect(scans.mock.calls.filter(([path]) => path === filePath)).toHaveLength(beforeSessionRescan + 1);
+		expect(payloadsForSession()).toBeGreaterThan(beforeSessionRead);
+		expect(scans.mock.calls.filter(([path]) => path === filePath)).toHaveLength(0);
+
+		const usage = (input: number, output: number, cost: number) => ({
+			input,
+			output,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: input + output,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+		});
+		await mgr.appendChildUsageAttribution(assistantId, usage(3, 5, 0.125));
+		await mgr.appendChildUsageAttribution(assistantId, usage(2, 4, 0.25));
+		await mgr.branchTo(null);
+		await mgr.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "another source branch" }],
+			api: "openai-completions",
+			provider: "openai",
+			model: "test",
+			stopReason: "stop",
+			timestamp: msgTime + 1,
+			usage: usage(4, 6, 0.375),
+		});
+		await mgr.readSourceHistory(async () => undefined);
+		const wholeSource = (await SessionManager.list("/tmp", dirname(filePath))).find(
+			(item) => item.path === filePath,
+		)!;
+		expect(wholeSource.messageCount).toBe(3);
+		expect(wholeSource.usage).toEqual({ inputTokens: 6, outputTokens: 8, cost: 0.375 });
+		expect(wholeSource.modified.getTime()).toBe(msgTime + 1);
+		expect(scans.mock.calls.filter(([path]) => path === filePath)).toHaveLength(0);
 	});
 });

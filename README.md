@@ -22,7 +22,9 @@ Base Context combines a persistent Python control environment with durable harne
 
 ## Getting Started
 
-Build from this repository with Node.js 22.8 or newer and a compatible npm version:
+**Runtime upgrade:** The Node engine range is now `^22.12.0 || >=23.3.0`, replacing `>=22.8.0`. Upgrade Node before installing or building this revision. The native session catalog requires SQLite's read-only open option; Node 22.8–22.11 and 23.0–23.2 are no longer supported. This runtime change does not change session journal formats. The normal session owner rebuilds older derived indexes; read-only catalog discovery does not migrate them.
+
+Build from this repository with Node.js 22.12+ on the 22.x line, or Node.js 23.3+, and a compatible npm version:
 
 ```bash
 git clone --branch implement/base-context-v0.1 https://github.com/BaseModelAI/base-context.git

@@ -1723,3 +1723,136 @@ unsafe fix, cast or extra inference was added. The focused cases were not rerun.
 The final required `npm run check` passed:1038 files with no fixes, TypeScript,
 installer and browser checks. Both earlier diagnostics remain retained. No broad
 suite, provider probe or frozen benchmark change was made.
+
+
+### W55/W58 — native indexed catalog and explicit Node compatibility change
+
+The existing derived index owner now maintains a whole-source SessionInfo
+projection and same-index numeric usage rows under schema16. Discovery uses a
+real read-only index worker and one held SQLite snapshot, checked against the
+current source path/dev/ino/length and actual header/terminal frames. Selected
+metadata records use existing payload parts, then the source capture is checked
+again. Covered reads do not iterate the complete journal body history. Header,
+terminal and selected metadata records can still require complete bounded frame
+or payload reads; this is not a zero-body-read or constant-time claim.
+
+Actual native readSessionInfo/list/listAll consume the covered summary. Missing,
+stale and unsupported coverage remain explicit; SQL/open/read failures remain
+errors. Native failures escape list handling rather than becoming an empty or
+partial successful catalog. Already emitted progress is not rolled back. Normal
+source owners rebuild known older derived indexes; discovery does not acquire a
+writer, create/seed/repair/migrate the index or fall back to a native EOF scan.
+Legacy header scanning remains a separate path. Original public fields, Dates,
+text/search/preview limits, all-source metadata and the sole W53 optional cache
+remain. Cache hits require current native coverage. Complete oversized results
+are returned uncached; encoded cache charges include key/stat/capture/info data.
+
+Native usage now includes actual assistant/compaction/branch-summary usage even
+when a containing record exceeds the old scanner's text cutoff. This corrects
+that native omission without changing legacy scan behavior. Source-order target
+eligibility and aggregate replacement precede the original assistant order,
+summary addition and ordered clamped child subtraction. Numeric reduction uses
+128-row pages on relevant usage changes, not a per-message JS map or every
+unrelated append. Missing usage is not invented zero; incomplete/non-finite
+supplied usage makes projection coverage unsupported. Known observed zero and
+existing all-zero public summary omission are preserved. These are source usage
+summaries, not complete physical requests, billed cost or attribution causality.
+Indexing/reduction work and index disk size still grow with source history.
+
+Root explicitly selected `^22.12.0 || >=23.3.0` under spec343/586, with a README
+migration notice and matching five own package/lock engine entries. This replaces
+the inherited22.8 floor and excludes early23 releases that lack the read-only
+option. Older runtimes refuse read-only opening before database access; no
+writable/query_only fallback, alternate backend or capability probe is added.
+No third-party dependency versions change. This is Root's explicit engineering
+compatibility decision, not inferred user consent; release publication still
+requires approval. Actual minimum/current-runtime execution is required before
+claiming support. Current source protocol11/schema36 and canonical journal
+formats are unchanged; the derived history index alone advances15→16.
+
+No Sol/custom/behavior/system/developer/tool instructions, model/auth/runner/
+control artifacts, source-effect ownership, or frozen benchmark evidence change.
+G08 still has inventory/paging/output/global-resource limits open; this is not
+full G08, migration, installed/platform, lifecycle, billing or release closure.
+Validation passed: exactly the two existing W53 cases ran once on actual22.12
+and once on current22.22.1 (four isolated commands), all first-pass. These cover
+native writer projection, current covered read-only discovery, attribution order,
+large usage/text fields, cache ownership and unavailable-index refusal; they do
+not establish whole-process/global-resource or installed-platform behavior.
+Initial formatting found three unsafe-finally errors and one catch-assignment
+warning. Read outcomes now close outside finally before return/rethrow, preserving
+primary-first cleanup errors; the worker uses a local failure variable. The first
+required check then found entry-view, TextContent-import and fs.stat-overload type
+errors. Type-only corrections retained the full original payload and actual
+numeric Stats contract; runtime cases were not rerun. Corrected `npm run check`
+passed (1039 files, TypeScript, installer and browser smoke). Original failed
+format/check outputs are retained. No provider/auth probes were run.
+
+
+### Frozen D Astra MEDIUM final
+
+All30 tasks completed on the unchanged frozen D0.9.1 runner/hosts-v1:29/30 D
+and29/30 stock. All60 immutable primaries and62 retained attempts are kept;
+capacity-invalid0 and no reported runtime errors across all62. Only both task17
+primaries failed: main4/5, edgeTrue, progress3, main semantic check4 failed,
+D149.51800973305944s/stock227.6213664910756s. Both have a separately retained
+diagnostic attempt; no substitution or causal attribution was made.
+
+All29 matched passing pairs are runtime-clean: D4616.516224260558s versus
+stock6300.907294527511s, -26.732516%,27 faster/2 slower.
+The all-retained4925.459s/6770.057s totals are not matched-pair timing. This is
+frozen D evidence, not current-native performance or billing. Usage/cost remain
+incomplete and API cost null. No MEDIUM protocol blocker grants publication
+readiness or approval; old LOW flags remain unchanged.
+
+Same29 matched solver observations, D/stock:307/336 calls,241/270 tools,
+0/0 recovery, input including cache2438189/3238672, uncached551085/709520,
+cache-read1887104/2529152, output117668/171800, total2555857/3410472;
+cache-write0 observed. These are not complete physical totals or billed cost.
+After D Astra, ten campaigns/638 retained attempts were complete; the following
+S Sol campaign is summarized below. S Astra retains its existing frozen S runner. No current-source
+substitution, extra provider/auth/model probe or completed-campaign rerun occurs.
+
+
+### G10 unresolved-effect boundary remains open
+
+Source inspection found that an ACKed tool intent advances the canonical branch,
+but an assistant call with no finalized result is refused as an incomplete replay
+group before actual provider/public-window admission. Ordinary tool-intent frames
+also lack a separate positive native-tool-owner qualification. Existing captured
+IDs support correlation, not effect reconciliation or a new replay permission.
+A working resumed path needs an explicit qualified incomplete-whole-group public
+continuation/admission rule and frozen-epoch treatment. No helper-only API,
+fabricated result, automatic replay/repair, stale-contract grant or weakened
+closure was added. This is a bounded source finding, not a new crash execution or
+full G10 closure. No G10 implementation or case change is included in this
+milestone; the separate continuation proposal remains unapplied.
+
+
+### Frozen S Sol MEDIUM final
+
+All30 tasks completed on the unchanged frozen S0.9.1 runner/hosts-v1: S28/30,
+stock25/30. All60 immutable primaries and67 retained attempts are kept (S32,
+stock35), capacity-invalid0. Failed primaries are S8/S27 and stock5/21/25/27/30;
+each has one separately retained diagnostic, never a replacement. S8/S27 and
+stock5/25 reported WebSocket1006; stock23 passed the judge but also reported
+WebSocket1006. Those five PRIMARY errors are the only reported runtime errors
+across all67; no new cause is inferred from the error code. Stock21 failed all
+main/edge checks; stock27/30 passed4/5 main checks and the edge, progress3.
+
+On24 matched passing pairs S7377.048331256141s/stock9827.773780670948s gives
+-24.936730%,21 faster/3 slower. Excluding stock23's reported runtime
+error gives23 clean pairs, S6971.100903418148s/stock9326.260575299966s,
+-25.252990%,20 faster/3 slower. The clean supplement does not replace
+failed primaries or the original matched result. These observed correctness and
+conditional-time gains belong to frozen S, not current-native source. Usage/cost
+remain incomplete, physical/billed cost unknown; MEDIUM publication readiness
+remains false and old LOW flags are unchanged.
+
+Same24 matched solver observations, S/stock:303/316 calls,297/288 tools,
+1/0 recovery, input including cache3405656/4117915, uncached678616/909723,
+cache-read2727040/3208192, output201525/265306, total3607181/4383221,
+cache-write0 observed. These are not physical/billing completeness or causation.
+Eleven campaigns/705 retained attempts are now complete. S Astra MEDIUM is the
+only remaining campaign and will use its unchanged prepared frozen S runner
+once this coherent source gap finishes; unfinished W59 work does not hold it.

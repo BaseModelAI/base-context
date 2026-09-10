@@ -147,3 +147,26 @@ export function readSessionJournalHeader(filePath: string): unknown {
 	if (line === undefined) return undefined;
 	return new SessionJournalDecoder().decode(line)?.entry;
 }
+
+/** Read-only discovery of the existing header format, without constructing a session writer. */
+export function readSessionCatalogHeader(filePath: string): CapturedSessionJournalRecord | undefined {
+	const line = readFirstLineBufferSync(filePath, SESSION_JOURNAL_MAX_FRAME_BYTES, true);
+	if (line === undefined) return undefined;
+	if (line[line.length - 1] !== 0x0a) throw new Error("Catalog header is incomplete or exceeds its frame bound");
+	let raw: unknown;
+	try {
+		raw = JSON.parse(line.toString("utf8"));
+	} catch (error) {
+		throw new Error("Catalog source header is invalid", { cause: error });
+	}
+	const framed =
+		raw !== null &&
+		typeof raw === "object" &&
+		(Object.hasOwn(raw, "journalFrame") || Object.hasOwn(raw, "previousChecksum"));
+	try {
+		return new SessionJournalDecoder().decode(line, { path: filePath, offset: 0, length: line.length });
+	} catch (error) {
+		if (framed) throw error;
+		return undefined; // Existing invalid legacy-header semantics.
+	}
+}

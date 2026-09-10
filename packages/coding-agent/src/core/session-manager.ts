@@ -9,7 +9,7 @@ import type {
 	Usage,
 } from "@ponythewhite/base-context-ai";
 import { randomUUID } from "crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, type Stats, statSync } from "fs";
 import { open as openFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
@@ -35,13 +35,13 @@ import { GOAL_STATE_CUSTOM_TYPE } from "./goals.js";
 import type {
 	ContextManifestOptions,
 	ContextManifestPage,
-	HistoryIndex,
 	HistoryIndexPage,
 	HistoryPayloadReadOptions,
 	IndexedSourceEvent,
 	TaskEvidenceOptions,
 	TaskEvidencePage,
 } from "./history-index.js";
+import { HistoryIndex, HistoryIndexUnsupportedError } from "./history-index.js";
 import {
 	decodeJournalFrame,
 	INITIAL_JOURNAL_CURSOR,
@@ -64,12 +64,24 @@ import {
 	createSessionHistoryReadScope,
 	type HistoryReadQuery,
 	type HydratedSessionHistoryEntry,
+	hydrateCapturedHistoryEntry,
 	type MaterializedSessionHistory,
 	SessionHistoryIndex,
 	type SessionHistoryReadLimits,
 	type SessionHistoryReadScope,
 	type SessionHistoryReadView,
 } from "./session-history-index.js";
+import {
+	appendCappedSearchText,
+	extractOversizedMessageSummary,
+	extractTextContent,
+	getSessionModifiedDateFromLastActivity,
+	isMessageWithContent,
+	looksLikeMessageEntry,
+	normalizeSessionStateStatus,
+	SESSION_LIST_PARSE_MAX_LINE_CHARS,
+	updateLastActivityTime,
+} from "./session-info-projection.js";
 import {
 	APPEND_NATIVE_ADMISSION,
 	APPEND_NATIVE_CONTEXT_EPOCH,
@@ -81,6 +93,7 @@ import {
 } from "./session-journal-owner.js";
 import {
 	readCapturedSessionJournal,
+	readSessionCatalogHeader,
 	readSessionJournal,
 	readSessionJournalHeader,
 	SessionJournalDecoder,
@@ -97,9 +110,6 @@ import {
 } from "./usage.js";
 
 export const CURRENT_SESSION_VERSION = 3;
-const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
-const SESSION_LIST_PARSE_MAX_LINE_CHARS = 1024 * 1024;
-const SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS = 256;
 const SESSION_ASYNC_PARSE_YIELD_BYTES = 4 * 1024 * 1024;
 
 // Entry types that can represent user intent (vs. daemon bookkeeping like
@@ -916,176 +926,173 @@ export function findMostRecentSessionForCwd(sessionDir: string, cwd: string): st
 	}
 }
 
-function isMessageWithContent(message: AgentMessage): message is Message {
-	return typeof (message as Message).role === "string" && "content" in message;
-}
-
-function extractTextContent(message: Message): string {
-	const content = message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	return content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text)
-		.join(" ");
-}
-
-function normalizeSessionStateStatus(value: unknown): SessionStateStatus | undefined {
-	if (value === "active" || value === "archived" || value === "crash") {
-		return value;
-	}
-	if (value === "hidden" || value === "sleep") {
-		return "archived";
-	}
-	return undefined;
-}
-
-function updateLastActivityTime(lastActivityTime: number | undefined, entry: FileEntry): number | undefined {
-	if (entry.type !== "message") {
-		return lastActivityTime;
-	}
-
-	const message = (entry as SessionMessageEntry).message;
-	if (!isMessageWithContent(message)) {
-		return lastActivityTime;
-	}
-	if (message.role !== "user" && message.role !== "assistant") {
-		return lastActivityTime;
-	}
-
-	const msgTimestamp = (message as { timestamp?: number }).timestamp;
-	if (typeof msgTimestamp === "number") {
-		return Math.max(lastActivityTime ?? 0, msgTimestamp);
-	}
-
-	const entryTimestamp = (entry as SessionEntryBase).timestamp;
-	if (typeof entryTimestamp === "string") {
-		const t = new Date(entryTimestamp).getTime();
-		if (!Number.isNaN(t)) {
-			return Math.max(lastActivityTime ?? 0, t);
-		}
-	}
-
-	return lastActivityTime;
-}
-
-function getSessionModifiedDateFromLastActivity(
-	lastActivityTime: number | undefined,
-	header: SessionHeader,
-	statsMtime: Date,
-): Date {
-	if (typeof lastActivityTime === "number" && lastActivityTime > 0) {
-		return new Date(lastActivityTime);
-	}
-
-	const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-	return !Number.isNaN(headerTime) ? new Date(headerTime) : statsMtime;
-}
-
-function appendCappedSearchText(current: string, text: string): string {
-	if (!text || current.length >= SESSION_LIST_SEARCH_TEXT_MAX_CHARS) {
-		return current;
-	}
-	const next = current ? ` ${text}` : text;
-	return current + next.slice(0, SESSION_LIST_SEARCH_TEXT_MAX_CHARS - current.length);
-}
-
-function looksLikeMessageEntry(line: string): boolean {
-	return line.includes('"type":"message"') || line.includes('"type": "message"');
-}
-
-function extractJsonStringPropertyPrefix(
-	text: string,
-	propertyName: string,
-	maxChars: number,
-	startIndex = 0,
-): string | undefined {
-	const propertyIndex = text.indexOf(`"${propertyName}"`, startIndex);
-	if (propertyIndex < 0) {
-		return undefined;
-	}
-	let index = propertyIndex + propertyName.length + 2;
-	while (index < text.length && /\s/.test(text[index] ?? "")) index++;
-	if (text[index] !== ":") {
-		return undefined;
-	}
-	index++;
-	while (index < text.length && /\s/.test(text[index] ?? "")) index++;
-	if (text[index] !== '"') {
-		return undefined;
-	}
-	index++;
-
-	let result = "";
-	let escaped = false;
-	for (; index < text.length && result.length < maxChars; index++) {
-		const char = text[index];
-		if (escaped) {
-			result += char;
-			escaped = false;
-			continue;
-		}
-		if (char === "\\") {
-			escaped = true;
-			continue;
-		}
-		if (char === '"') {
-			break;
-		}
-		result += char;
-	}
-	return result;
-}
-
-function extractOversizedMessageSummary(line: string): {
-	role?: string;
-	timestamp?: number;
-	textPreview?: string;
-} {
-	const timestampText = extractJsonStringPropertyPrefix(line, "timestamp", 64);
-	const timestamp = timestampText ? new Date(timestampText).getTime() : NaN;
-	const messageIndex = line.indexOf('"message"');
-	const role =
-		messageIndex >= 0
-			? extractJsonStringPropertyPrefix(line, "role", 64, messageIndex)
-			: extractJsonStringPropertyPrefix(line, "role", 64);
-	let textPreview: string | undefined;
-	if (messageIndex >= 0) {
-		textPreview =
-			extractJsonStringPropertyPrefix(line, "content", SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS, messageIndex) ??
-			extractJsonStringPropertyPrefix(line, "text", SESSION_LIST_LARGE_MESSAGE_PREVIEW_MAX_CHARS, messageIndex);
-	}
-	return {
-		role,
-		...(Number.isNaN(timestamp) ? {} : { timestamp }),
-		...(textPreview ? { textPreview } : {}),
-	};
-}
-
 const SESSION_INFO_CACHE_MAX_ENTRIES = 256;
 const SESSION_INFO_CACHE_MAX_BYTES = 4 * 1024 * 1024;
 
 interface SessionInfoCacheEntry {
+	dev: number;
+	ino: number;
+	nativeRevision?: string;
 	size: number;
 	mtimeMs: number;
 	info: SessionInfo | null;
 	encodedBytes: number;
 }
 
-// Optional derived metadata using the existing size/mtime snapshot. The byte
-// limit covers encoded key/stat/info data, not scan allocations or process heap.
+// Optional derived metadata. Native hits also require current indexed coverage.
+// The byte limit covers encoded key/stat/capture/info data, not process heap.
 const sessionInfoCache = new Map<string, SessionInfoCacheEntry>();
+
+export class SessionCatalogReadError extends Error {
+	constructor(
+		readonly reason: "unavailable" | "stale" | "unsupported" | "error",
+		message: string,
+		options?: ErrorOptions,
+	) {
+		super(`Native session catalog ${reason}: ${message}`, options);
+		this.name = "SessionCatalogReadError";
+	}
+}
+
+async function readIndexedSessionInfo(
+	filePath: string,
+	stats: Stats,
+	header: SessionHeader,
+	headerChecksum: string,
+	cached?: SessionInfoCacheEntry,
+): Promise<{ info: SessionInfo; revision: string; cached: boolean }> {
+	const source = {
+		journalPath: realpathIfPresent(resolve(filePath)),
+		dev: stats.dev,
+		ino: stats.ino,
+		byteLength: stats.size,
+		headerChecksum,
+	};
+	const indexPath = join(getSessionArtifactPathForFile(source.journalPath, header.id), "history.sqlite");
+	let index: HistoryIndex | undefined;
+	const outcome = await (async () => {
+		try {
+			await stat(indexPath);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT")
+				throw new SessionCatalogReadError("unavailable", "The existing history index is missing");
+			throw error;
+		}
+		index = await HistoryIndex.open(indexPath, { readOnly: true });
+		const capturedIndex = index;
+		const view = await index.readSessionCatalog(header.id, source);
+		if (view.selection !== "covered") throw new SessionCatalogReadError(view.selection, view.reason);
+		const revision = view.frontier.checksum!;
+		const hit =
+			!!cached?.info &&
+			cached.nativeRevision === revision &&
+			cached.dev === stats.dev &&
+			cached.ino === stats.ino &&
+			cached.size === stats.size &&
+			cached.mtimeMs === stats.mtimeMs;
+		let info: SessionInfo;
+		if (hit && cached?.info) {
+			try {
+				info = structuredClone(cached.info);
+			} catch {
+				sessionInfoCache.delete(filePath);
+				info = cached.info;
+			}
+			if (sessionInfoCache.has(filePath)) {
+				sessionInfoCache.delete(filePath);
+				sessionInfoCache.set(filePath, cached);
+			}
+		} else {
+			const read = async (ref: IndexedSourceEvent | null) =>
+				ref
+					? (
+							await hydrateCapturedHistoryEntry(ref, MAX_SESSION_RECORD_BYTES, (id, options) =>
+								capturedIndex.readSourcePayload(header.id, id, view.frontier.indexedThrough, options),
+							)
+						).entry
+					: undefined;
+			let firstMessage = "(no messages)";
+			if (view.projection.firstMessage && "preview" in view.projection.firstMessage)
+				firstMessage = view.projection.firstMessage.preview;
+			else if (view.refs.firstMessage) {
+				const entry = await read(view.refs.firstMessage);
+				if (entry?.type !== "message" || entry.message.role !== "user" || !isMessageWithContent(entry.message))
+					throw new Error("Indexed catalog first-message reference is invalid");
+				firstMessage = extractTextContent(entry.message) || "(no messages)";
+			}
+			const named = await read(view.refs.name);
+			if (named && named.type !== "session_info") throw new Error("Indexed catalog name reference is invalid");
+			const status = await read(view.refs.agentStatus);
+			if (status && status.type !== "agent_status") throw new Error("Indexed catalog status reference is invalid");
+			info = {
+				path: filePath,
+				id: header.id,
+				cwd: typeof header.cwd === "string" ? header.cwd : "",
+				name: named?.type === "session_info" ? named.name?.trim() || undefined : undefined,
+				state: view.projection.state,
+				parentSessionPath: header.parentSession,
+				rlmDepth: resolveSessionRlmDepth(header, filePath),
+				created: new Date(header.timestamp),
+				modified: getSessionModifiedDateFromLastActivity(view.projection.lastActivityTime, header, stats.mtime),
+				messageCount: view.projection.messageCount,
+				firstMessage,
+				allMessagesText: view.projection.allMessagesText,
+				agentStatus: status?.type === "agent_status" ? status.status : undefined,
+				usage: view.projection.usage,
+			};
+		}
+		// The same read transaction and descriptor/frontier contract must still be current
+		// after bounded source-part hydration, not merely when the query began.
+		const final = await index.readSessionCatalog(header.id, source);
+		if (final.selection !== "covered") throw new SessionCatalogReadError(final.selection, final.reason);
+		return { info, revision, cached: hit };
+	})().then(
+		(value) => ({ ok: true as const, value }),
+		(error: unknown) => ({
+			ok: false as const,
+			error:
+				error instanceof SessionCatalogReadError
+					? error
+					: error instanceof HistoryIndexUnsupportedError
+						? new SessionCatalogReadError("unsupported", error.message, { cause: error })
+						: new SessionCatalogReadError("error", `Indexed metadata read failed: ${String(error)}`, {
+								cause: error,
+							}),
+		}),
+	);
+	try {
+		await index?.close();
+	} catch (error) {
+		throw new SessionCatalogReadError(
+			"error",
+			outcome.ok
+				? `Index reader close failed: ${String(error)}`
+				: `Catalog read and close failed: ${String(outcome.error)}; ${String(error)}`,
+			{ cause: outcome.ok ? error : new AggregateError([outcome.error, error], "Catalog read and close failed") },
+		);
+	}
+	if (!outcome.ok) throw outcome.error;
+	return outcome.value;
+}
 
 export async function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	let stats: Awaited<ReturnType<typeof stat>>;
 	try {
 		stats = await stat(filePath);
-	} catch {
-		return null;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR")
+			return null;
+		throw new SessionCatalogReadError("error", `Source metadata stat failed: ${String(error)}`, { cause: error });
 	}
 	const cached = sessionInfoCache.get(filePath);
-	if (cached && cached.size === stats.size && cached.mtimeMs === stats.mtimeMs) {
+	if (
+		cached &&
+		cached.nativeRevision === undefined &&
+		cached.dev === stats.dev &&
+		cached.ino === stats.ino &&
+		cached.size === stats.size &&
+		cached.mtimeMs === stats.mtimeMs
+	) {
 		try {
 			const info = structuredClone(cached.info);
 			sessionInfoCache.delete(filePath);
@@ -1097,7 +1104,23 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 			return cached.info;
 		}
 	}
-	const info = await scanSessionInfo(filePath, stats);
+	let nativeRevision: string | undefined;
+	let info: SessionInfo | null;
+	try {
+		const first = readSessionCatalogHeader(filePath);
+		if (first?.source) {
+			const header = first.entry as SessionHeader;
+			if (header?.type !== "session" || typeof header.id !== "string")
+				throw new SessionCatalogReadError("unsupported", "Native source has no supported session header");
+			const result = await readIndexedSessionInfo(filePath, stats, header, first.source.revision, cached);
+			if (result.cached) return result.info;
+			info = result.info;
+			nativeRevision = result.revision;
+		} else info = first ? await scanSessionInfo(filePath, stats) : null; // Explicitly legacy/invalid-header only.
+	} catch (error) {
+		if (error instanceof SessionCatalogReadError) throw error;
+		throw new SessionCatalogReadError("error", `Source header read failed: ${String(error)}`, { cause: error });
+	}
 	sessionInfoCache.delete(filePath);
 	try {
 		const encoded = stringifyBoundedJson(
@@ -1105,6 +1128,9 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 				filePath,
 				size: stats.size,
 				mtimeMs: stats.mtimeMs,
+				dev: stats.dev,
+				ino: stats.ino,
+				nativeRevision,
 				info:
 					info === null
 						? null
@@ -1119,6 +1145,9 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 		const entry: SessionInfoCacheEntry = {
 			size: stats.size,
 			mtimeMs: stats.mtimeMs,
+			dev: stats.dev,
+			ino: stats.ino,
+			nativeRevision,
 			info: structuredClone(info),
 			encodedBytes: Buffer.byteLength(encoded),
 		};
@@ -1135,7 +1164,7 @@ export async function readSessionInfo(filePath: string): Promise<SessionInfo | n
 		}
 		sessionInfoCache.set(filePath, entry);
 	} catch {
-		// Cache admission is optional. Return the complete scan result unchanged.
+		// Cache admission is optional. Return the complete successful result unchanged.
 	}
 	return info;
 }
@@ -1310,7 +1339,8 @@ async function listSessionsFromDir(
 				callbacks?.onSession?.(info);
 			}
 		}
-	} catch {
+	} catch (error) {
+		if (error instanceof SessionCatalogReadError) throw error;
 		// Return no sessions when the directory cannot be read.
 	}
 

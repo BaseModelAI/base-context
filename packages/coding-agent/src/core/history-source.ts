@@ -136,6 +136,7 @@ async function* frames(file: FileHandle, start: number, end: number, initial: Jo
 					frameBytes.length - Buffer.byteLength(`,"checksum":"${decoded.next.checksum}"}\n`) - payloadLength;
 				yield {
 					payload: decoded.payload,
+					json: decoded.json,
 					retention: decoded.retention,
 					qualification: decoded.qualification,
 					payloadBytes: frameBytes.subarray(payloadStart, payloadStart + payloadLength),
@@ -169,6 +170,7 @@ export async function readSessionSource(
 		parts: CanonicalPayloadParts,
 		retention?: JournalFrameRetention,
 		qualification?: NativeEntryQualification,
+		json?: string,
 	) => void,
 ): Promise<SourceIndexCursor> {
 	if (
@@ -242,6 +244,7 @@ export async function readSessionSource(
 					}),
 					frame.retention,
 					frame.qualification,
+					frame.json,
 				);
 			}
 			cursor = { sequence: frame.sequence + 1, checksum: frame.checksum };
@@ -258,4 +261,97 @@ export async function readSessionSource(
 	} finally {
 		await file.close();
 	}
+}
+
+export interface CatalogSourceIdentity {
+	journalPath: string;
+	dev: number;
+	ino: number;
+	byteLength: number;
+	headerChecksum: string;
+}
+
+/** Validate one current indexed capture without iterating its journal body history. */
+export async function validateIndexedCatalogSource(
+	sessionId: string,
+	expected: CatalogSourceIdentity,
+	indexed: SourceIndexCursor,
+	tail: IndexedSourceEvent | null,
+	previousChecksum: string,
+): Promise<boolean> {
+	const source = indexed.frontier;
+	if (
+		source.format !== "framed" ||
+		source.journalPath !== expected.journalPath ||
+		source.dev !== expected.dev ||
+		source.ino !== expected.ino ||
+		source.byteLength !== expected.byteLength ||
+		indexed.headerChecksum !== expected.headerChecksum ||
+		source.indexedThrough !== source.nextSequence - 1
+	)
+		return false;
+	const matches = (info: { dev: number; ino: number; size: number }) =>
+		info.dev === source.dev && info.ino === source.ino && info.size === source.byteLength;
+	const file = await open(source.journalPath, "r");
+	const outcome = await (async () => {
+		if (!matches(await file.stat())) return false;
+		let headerSeen = false;
+		for await (const frame of frames(file, 0, indexed.headerByteLength, INITIAL_JOURNAL_CURSOR)) {
+			if (
+				headerSeen ||
+				frame.sequence !== 0 ||
+				frame.checksum !== indexed.headerChecksum ||
+				record(frame.payload)?.type !== "session" ||
+				record(frame.payload)?.id !== sessionId
+			)
+				throw new Error("Catalog source header does not match its indexed capture");
+			headerSeen = true;
+		}
+		if (!headerSeen) throw new Error("Catalog source header is unavailable");
+		if (source.nextSequence === 1) {
+			if (tail || indexed.headerByteLength !== source.byteLength || indexed.headerChecksum !== source.checksum)
+				throw new Error("Invalid header-only catalog frontier");
+		} else {
+			if (
+				!tail ||
+				tail.sequence !== source.indexedThrough ||
+				tail.revision !== source.checksum ||
+				tail.locator.path !== source.journalPath ||
+				tail.locator.offset + tail.locator.length !== source.byteLength
+			)
+				throw new Error("Catalog terminal source metadata is unavailable");
+			let terminalSeen = false;
+			for await (const frame of frames(file, tail.locator.offset, source.byteLength, {
+				sequence: tail.sequence,
+				checksum: previousChecksum,
+			})) {
+				if (
+					terminalSeen ||
+					frame.sequence !== tail.sequence ||
+					frame.checksum !== tail.revision ||
+					record(frame.payload)?.id !== tail.id ||
+					record(frame.payload)?.type !== tail.kind
+				)
+					throw new Error("Catalog terminal frame does not match its indexed capture");
+				terminalSeen = true;
+			}
+			if (!terminalSeen) throw new Error("Catalog terminal frame is unavailable");
+		}
+		return matches(await file.stat()) && matches(await stat(source.journalPath));
+	})().then(
+		(value) => ({ ok: true as const, value }),
+		(error: unknown) => ({ ok: false as const, error }),
+	);
+	try {
+		await file.close();
+	} catch (error) {
+		if (!outcome.ok)
+			throw new AggregateError(
+				[outcome.error, error],
+				`Catalog source read and close failed: ${String(outcome.error)}; ${String(error)}`,
+			);
+		throw error;
+	}
+	if (!outcome.ok) throw outcome.error;
+	return outcome.value;
 }

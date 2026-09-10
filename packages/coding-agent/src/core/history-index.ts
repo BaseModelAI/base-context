@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
 import type { CanonicalPayloadCursor, CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import type { CatalogSourceIdentity } from "./history-source.js";
 import type { JournalFrameRetention, NativeEntryQualification } from "./journal-frame.js";
+import type { SessionCatalogProjection } from "./session-info-projection.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import type { TaskStateProjection, TaskStateSourceRef } from "./task-state.js";
 
@@ -54,6 +56,19 @@ export interface SourceBootstrapState {
 	contentPrefix: number;
 	hasUserContent: boolean;
 }
+
+export type SessionCatalogIndexResult =
+	| { selection: "unavailable" | "stale" | "unsupported"; reason: string }
+	| {
+			selection: "covered";
+			frontier: HistoryIndexFrontier;
+			projection: SessionCatalogProjection;
+			refs: {
+				firstMessage: IndexedSourceEvent | null;
+				name: IndexedSourceEvent | null;
+				agentStatus: IndexedSourceEvent | null;
+			};
+	  };
 
 /** Captured parent-chain state. Values remain in the referenced canonical payloads. */
 export interface BranchBootstrapState {
@@ -218,6 +233,7 @@ export type HistoryIndexRequest =
 			options: IpythonSentMessagesOptions;
 	  }
 	| { id: number; action: "current_source_bootstrap"; sessionId: string; snapshot: SessionJournalState }
+	| { id: number; action: "catalog"; sessionId: string; source: CatalogSourceIdentity }
 	| {
 			id: number;
 			action: "source_label" | "source_assistant_usage";
@@ -309,7 +325,12 @@ export type HistoryIndexRequest =
 	| { id: number; action: "clear"; sessionId: string }
 	| { id: number; action: "close" };
 
-type Response = { id: number; result?: unknown; error?: string } | { ready: true };
+export class HistoryIndexUnsupportedError extends Error {}
+
+type Response =
+	| { id: number; result?: unknown; error?: string }
+	| { ready: true }
+	| { startupError: string; unsupported: boolean };
 const MAX_PENDING_BYTES = 4 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
@@ -342,7 +363,10 @@ export class HistoryIndex {
 	>();
 	private ready: Promise<void>;
 
-	static async open(path: string, options: { nodeExecutable?: string } = {}): Promise<HistoryIndex> {
+	static async open(
+		path: string,
+		options: { nodeExecutable?: string; readOnly?: boolean } = {},
+	): Promise<HistoryIndex> {
 		const index = new HistoryIndex(path, options);
 		try {
 			await index.ready;
@@ -353,11 +377,11 @@ export class HistoryIndex {
 		}
 	}
 
-	private constructor(path: string, options: { nodeExecutable?: string }) {
+	private constructor(path: string, options: { nodeExecutable?: string; readOnly?: boolean }) {
 		assertProductStatePath(path);
 		const entrypoint = workerPath();
 		const nodeExecutable = options.nodeExecutable ?? ("bun" in process.versions ? "node" : process.execPath);
-		this.child = fork(entrypoint, [path], {
+		this.child = fork(entrypoint, options.readOnly ? [path, "--read-only"] : [path], {
 			execPath: nodeExecutable,
 			execArgv: [
 				"--experimental-sqlite",
@@ -406,6 +430,14 @@ export class HistoryIndex {
 			fail(new Error(`History-index worker exited (${code})${diagnostics ? `: ${diagnostics}` : ""}`)),
 		);
 		this.child.on("message", (message: Response) => {
+			if ("startupError" in message) {
+				fail(
+					message.unsupported
+						? new HistoryIndexUnsupportedError(message.startupError)
+						: new Error(message.startupError),
+				);
+				return;
+			}
 			if ("ready" in message) {
 				readyResolve();
 				return;
@@ -518,6 +550,15 @@ export class HistoryIndex {
 			sessionId,
 			snapshot: target,
 		})) as HistoryIndexFrontier;
+	}
+	/** One read-only SQLite snapshot, checked against current source descriptor/frontier identity. */
+	async readSessionCatalog(sessionId: string, source: CatalogSourceIdentity): Promise<SessionCatalogIndexResult> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "catalog",
+			sessionId,
+			source: { ...source },
+		})) as SessionCatalogIndexResult;
 	}
 	/** Current whole-source bootstrap; equality with this exact owner snapshot is required. */
 	async currentSourceBootstrap(sessionId: string, snapshot: SessionJournalState): Promise<SourceBootstrapState> {

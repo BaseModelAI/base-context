@@ -1,9 +1,11 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { HistoryIndex } from "../../src/core/history-index.js";
 import * as sessionJournalReader from "../../src/core/session-journal-reader.js";
-import { readSessionInfo, SessionManager } from "../../src/core/session-manager.js";
+import { getSessionArtifactPathForFile, readSessionInfo, SessionManager } from "../../src/core/session-manager.js";
+import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
 import { assistantMsg, userMsg } from "../utilities.js";
 
 const managers: SessionManager[] = [];
@@ -47,6 +49,7 @@ describe("SessionManager flat storage", () => {
 	it("lists sessions without loading large message bodies into search text", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "session-large-list-"));
 		const scans = vi.spyOn(sessionJournalReader, "readSessionJournal");
+		const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
 		try {
 			const sessionDir = join(tempDir, "sessions");
 			const cwd = join(tempDir, "project");
@@ -55,7 +58,9 @@ describe("SessionManager flat storage", () => {
 			await session.appendSessionInfo("large history");
 			await session.appendSessionState({ status: "active" });
 			await session.appendMessage(userMsg("small prompt"));
-			await session.appendMessage(assistantMsg("x".repeat(2 * 1024 * 1024)));
+			const largeAssistant = assistantMsg("x".repeat(2 * 1024 * 1024));
+			await session.appendMessage(largeAssistant);
+			await session.readSourceHistory(async () => undefined);
 
 			const sessions = await SessionManager.listAll(undefined, sessionDir);
 			expect(sessions).toHaveLength(1);
@@ -65,33 +70,37 @@ describe("SessionManager flat storage", () => {
 			expect(sessions[0].messageCount).toBe(2);
 			expect(sessions[0].firstMessage).toBe("small prompt");
 			expect(sessions[0].allMessagesText).toBe("small prompt");
+			expect(sessions[0].usage).toEqual(sessionUsageSummaryFrom(largeAssistant.usage));
 
 			// Each metadata row remains below the existing scanner's character limit.
 			// UTF-8 makes two retained summaries exceed 4MiB well before 256 entries.
 			const largeMetadata = "界".repeat(720_000);
 			const sessionPath = session.getSessionFile()!;
-			const scansFor = (path: string) => scans.mock.calls.filter(([source]) => source === path).length;
+			const payloadsFor = (id: string) => payloads.mock.calls.filter(([source]) => source === id).length;
 			await session.appendAgentStatus({ summary: largeMetadata, taskState: "completed", basedOnMessageCount: 2 });
+			await session.readSourceHistory(async () => undefined);
 			const initial = await readSessionInfo(sessionPath);
 			expect(initial!.agentStatus!.summary).toBe(largeMetadata);
 			const complete = structuredClone(initial);
 			initial!.agentStatus!.summary = "caller-only summary";
 			initial!.state!.status = "archived";
-			const beforeHit = scansFor(sessionPath);
+			const beforeHit = payloadsFor(session.getSessionId());
 			expect((await SessionManager.list(cwd, sessionDir))[0]).toEqual(complete);
-			expect(scansFor(sessionPath)).toBe(beforeHit);
+			expect(payloadsFor(session.getSessionId())).toBe(beforeHit);
 
 			const peer = await createPersistedSession(cwd, sessionDir, "byte-budget peer");
 			await peer.appendAgentStatus({ summary: largeMetadata, basedOnMessageCount: 2 });
+			await peer.readSourceHistory(async () => undefined);
 			expect((await readSessionInfo(peer.getSessionFile()!))!.agentStatus!.summary).toBe(largeMetadata);
-			const beforeEvictedRead = scansFor(sessionPath);
+			const beforeEvictedRead = payloadsFor(session.getSessionId());
 			expect(await readSessionInfo(sessionPath)).toEqual(complete);
-			expect(scansFor(sessionPath)).toBe(beforeEvictedRead + 1);
+			expect(payloadsFor(session.getSessionId())).toBeGreaterThan(beforeEvictedRead);
 
 			// A complete single result can exceed the cache budget. It still appears
-			// unchanged in actual list results, and another read must rescan it.
+			// unchanged in actual list results; another read hydrates selected source parts only.
 			await session.appendSessionInfo(largeMetadata);
-			const beforeOversizedRead = scansFor(sessionPath);
+			await session.readSourceHistory(async () => undefined);
+			const beforeOversizedRead = payloadsFor(session.getSessionId());
 			const uncached = await readSessionInfo(sessionPath);
 			expect(uncached!.name).toBe(largeMetadata);
 			expect(uncached!.agentStatus!.summary).toBe(largeMetadata);
@@ -100,9 +109,29 @@ describe("SessionManager flat storage", () => {
 			const completeList = await SessionManager.listAll(undefined, sessionDir);
 			expect(completeList).toHaveLength(2);
 			expect(completeList.find((item) => item.id === session.getSessionId())).toEqual(uncached);
-			expect(scansFor(sessionPath)).toBe(beforeOversizedRead + 2);
+			expect(payloadsFor(session.getSessionId())).toBeGreaterThan(beforeOversizedRead);
+			expect(scans.mock.calls.filter(([path]) => path === sessionPath)).toHaveLength(0);
+
+			await Promise.all([session.close(), peer.close()]);
+			const indexPath = join(
+				getSessionArtifactPathForFile(peer.getSessionFile()!, peer.getSessionId()),
+				"history.sqlite",
+			);
+			const savedIndex = `${indexPath}.saved`;
+			renameSync(indexPath, savedIndex);
+			try {
+				await expect(readSessionInfo(peer.getSessionFile()!)).rejects.toThrow("Native session catalog unavailable");
+				await expect(SessionManager.listAll(undefined, sessionDir)).rejects.toThrow(
+					"Native session catalog unavailable",
+				);
+				expect(existsSync(indexPath)).toBe(false); // Discovery neither seeds an index nor acquires a writer.
+				expect(scans.mock.calls.filter(([path]) => path === peer.getSessionFile())).toHaveLength(0);
+			} finally {
+				renameSync(savedIndex, indexPath);
+			}
 		} finally {
 			scans.mockRestore();
+			payloads.mockRestore();
 			await Promise.all(managers.splice(0).map((manager) => manager.close()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}

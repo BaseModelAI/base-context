@@ -1,6 +1,7 @@
 import { fstatSync, mkdirSync, openSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { Usage } from "@ponythewhite/base-context-ai";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import { type CanonicalPayloadParts, readCanonicalPayloadFragment } from "./canonical-payload-parts.js";
 import { GOAL_STATE_CUSTOM_TYPE, isPersistedGoalState } from "./goals.js";
@@ -20,6 +21,7 @@ import type {
 	IpythonSentMessagesPage,
 	ParentPathCursor,
 	ParentPathPage,
+	SessionCatalogIndexResult,
 	SourceBootstrapState,
 	TaskEvidencePage,
 } from "./history-index.js";
@@ -28,42 +30,84 @@ import {
 	readSessionSource,
 	type SessionSourceEntry,
 	type SourceIndexCursor,
+	validateIndexedCatalogSource,
 } from "./history-source.js";
 import { withJournalDescriptorSync } from "./journal-io.js";
 import {
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
 	parsePersistedIpythonSentAgentMessage,
 } from "./session-context-updates.js";
+import {
+	CatalogProjectionUnsupportedError,
+	decodeSessionCatalog,
+	emptySessionCatalog,
+	foldSessionCatalog,
+	type SessionCatalogProjection,
+} from "./session-info-projection.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
+import type { FileEntry } from "./session-manager.js";
 import { getTaskStateImportCoverage, projectTaskStateSource } from "./task-state.js";
+import { addAssistantUsage, cloneUsage, emptyUsage, sessionUsageSummaryFrom, subtractAssistantUsage } from "./usage.js";
 
 process.umask(0o077);
-mkdirSync(dirname(process.argv[2]), { recursive: true, mode: 0o700 });
-const db = new DatabaseSync(process.argv[2]);
-const applicationId = Number(db.prepare("PRAGMA application_id").get()?.application_id ?? 0);
-const schemaVersion = Number(db.prepare("PRAGMA user_version").get()?.user_version ?? 0);
-const hasTables = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get();
-if (
-	(applicationId !== 0x42435458 && (applicationId !== 0 || hasTables)) ||
-	(schemaVersion !== 0 &&
-		schemaVersion !== 2 &&
-		schemaVersion !== 3 &&
-		schemaVersion !== 4 &&
-		schemaVersion !== 5 &&
-		schemaVersion !== 6 &&
-		schemaVersion !== 7 &&
-		schemaVersion !== 8 &&
-		schemaVersion !== 9 &&
-		schemaVersion !== 10 &&
-		schemaVersion !== 11 &&
-		schemaVersion !== 12 &&
-		schemaVersion !== 13 &&
-		schemaVersion !== 14 &&
-		schemaVersion !== 15)
-) {
-	throw new Error("Not a supported Base Context history index");
+const readOnly = process.argv[3] === "--read-only";
+async function openIndex() {
+	let opened: DatabaseSync | undefined;
+	let unsupported = false;
+	try {
+		const [major, minor] = process.versions.node.split(".").map(Number);
+		// The API was backported to 22.12; early 23.x can also ignore the option.
+		if (readOnly && (major < 22 || (major === 22 && minor < 12) || (major === 23 && minor < 3))) {
+			unsupported = true;
+			throw new Error("Read-only catalog requires Node 22.12+ (23.x requires 23.3+)");
+		}
+		if (!readOnly) mkdirSync(dirname(process.argv[2]), { recursive: true, mode: 0o700 });
+		const database = new DatabaseSync(process.argv[2], { readOnly });
+		opened = database;
+		const applicationId = Number(database.prepare("PRAGMA application_id").get()?.application_id ?? 0);
+		const schemaVersion = Number(database.prepare("PRAGMA user_version").get()?.user_version ?? 0);
+		const hasTables = !!database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").get();
+		if (
+			(applicationId !== 0x42435458 && (applicationId !== 0 || hasTables)) ||
+			![0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].includes(schemaVersion) ||
+			(readOnly && (applicationId !== 0x42435458 || schemaVersion !== 16))
+		) {
+			unsupported = true;
+			throw new Error(
+				readOnly
+					? "Catalog requires supported history-index schema 16; read-only discovery does not migrate"
+					: "Not a supported Base Context history index",
+			);
+		}
+		return { db: database, schemaVersion };
+	} catch (error) {
+		let failure = error;
+		try {
+			opened?.close();
+		} catch (cleanup) {
+			unsupported = false;
+			failure = new AggregateError(
+				[error, cleanup],
+				`Index open and close failed: ${String(error)}; ${String(cleanup)}`,
+			);
+		}
+		if (readOnly && process.connected)
+			await new Promise<void>((resolveSent) => {
+				try {
+					process.send?.(
+						{ startupError: failure instanceof Error ? failure.message : String(failure), unsupported },
+						() => resolveSent(),
+					);
+				} catch {
+					resolveSent();
+				}
+			});
+		throw failure;
+	}
 }
-db.exec(`
+const { db, schemaVersion } = await openIndex();
+if (!readOnly)
+	db.exec(`
 	PRAGMA application_id=1111708760;
 	PRAGMA journal_mode=WAL;
 	PRAGMA synchronous=FULL;
@@ -96,6 +140,7 @@ const TASK_PAGE_BYTES = 1024 * 1024 - 1024;
 const MAX_JUMP_LEVELS = 53;
 const MAX_PARENT_LOOKUPS = 128;
 const DERIVED_TABLES = [
+	"source_catalog_usage",
 	"context_update",
 	"context_node",
 	"source_ancestry",
@@ -109,8 +154,9 @@ const DERIVED_TABLES = [
 	"coverage",
 	"source_cursor",
 ];
-transaction(() => {
-	db.exec(`CREATE TABLE IF NOT EXISTS task_evidence (
+if (!readOnly)
+	transaction(() => {
+		db.exec(`CREATE TABLE IF NOT EXISTS task_evidence (
   session TEXT NOT NULL, sequence INTEGER NOT NULL, ordinal INTEGER NOT NULL,
   task_key TEXT, item_id TEXT, source_ref TEXT NOT NULL, projection TEXT,
   PRIMARY KEY(session,sequence,ordinal)
@@ -138,30 +184,35 @@ transaction(() => {
   session TEXT NOT NULL,event_id TEXT NOT NULL,update_kind TEXT NOT NULL,target_key TEXT NOT NULL,sequence INTEGER NOT NULL,
   PRIMARY KEY(session,update_kind,event_id)
  );
- CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);`);
-	// Old labels/projections cannot survive unchanged source identities across this upgrade.
-	if (schemaVersion !== 15) {
-		if (
-			!db
-				.prepare("PRAGMA table_info(source_event)")
-				.all()
-				.some((column) => column.name === "retention")
-		)
-			db.exec("ALTER TABLE source_event ADD COLUMN retention TEXT");
-		if (
-			!db
-				.prepare("PRAGMA table_info(source_event)")
-				.all()
-				.some((column) => column.name === "qualification")
-		)
-			db.exec("ALTER TABLE source_event ADD COLUMN qualification TEXT");
-		if (
-			!db
-				.prepare("PRAGMA table_info(context_node)")
-				.all()
-				.some((column) => column.name === "latest_model")
-		)
-			db.exec(`
+ CREATE INDEX IF NOT EXISTS context_update_target ON context_update(session,update_kind,target_key,sequence);
+  CREATE TABLE IF NOT EXISTS source_catalog_usage (
+    session TEXT NOT NULL,category INTEGER NOT NULL,id TEXT NOT NULL,sequence INTEGER NOT NULL,usage TEXT NOT NULL,
+    PRIMARY KEY(session,category,id)
+  );
+  CREATE INDEX IF NOT EXISTS source_catalog_usage_order ON source_catalog_usage(session,category,sequence);`);
+		// Old labels/projections cannot survive unchanged source identities across this upgrade.
+		if (schemaVersion !== 16) {
+			if (
+				!db
+					.prepare("PRAGMA table_info(source_event)")
+					.all()
+					.some((column) => column.name === "retention")
+			)
+				db.exec("ALTER TABLE source_event ADD COLUMN retention TEXT");
+			if (
+				!db
+					.prepare("PRAGMA table_info(source_event)")
+					.all()
+					.some((column) => column.name === "qualification")
+			)
+				db.exec("ALTER TABLE source_event ADD COLUMN qualification TEXT");
+			if (
+				!db
+					.prepare("PRAGMA table_info(context_node)")
+					.all()
+					.some((column) => column.name === "latest_model")
+			)
+				db.exec(`
  ALTER TABLE context_node ADD COLUMN latest_model TEXT;
  ALTER TABLE context_node ADD COLUMN latest_thinking TEXT;
  ALTER TABLE context_node ADD COLUMN latest_service_tier TEXT;
@@ -169,53 +220,60 @@ transaction(() => {
  ALTER TABLE context_node ADD COLUMN has_session_message INTEGER;
  ALTER TABLE context_node ADD COLUMN goal_seedable INTEGER;
  `);
-		if (
-			!db
-				.prepare("PRAGMA table_info(context_node)")
-				.all()
-				.some((column) => column.name === "latest_rlm_max_depth")
-		)
-			db.exec(`
+			if (
+				!db
+					.prepare("PRAGMA table_info(context_node)")
+					.all()
+					.some((column) => column.name === "latest_rlm_max_depth")
+			)
+				db.exec(`
  ALTER TABLE context_node ADD COLUMN latest_rlm_max_depth TEXT;
  ALTER TABLE context_node ADD COLUMN has_branch_message INTEGER;
  `);
-		if (
-			!db
-				.prepare("PRAGMA table_info(context_node)")
-				.all()
-				.some((column) => column.name === "context_usage_assistant")
-		)
-			db.exec("ALTER TABLE context_node ADD COLUMN context_usage_assistant TEXT");
-		if (
-			!db
-				.prepare("PRAGMA table_info(context_node)")
-				.all()
-				.some((column) => column.name === "latest_git_state")
-		)
-			db.exec(`ALTER TABLE context_node ADD COLUMN latest_git_state TEXT;
+			if (
+				!db
+					.prepare("PRAGMA table_info(context_node)")
+					.all()
+					.some((column) => column.name === "context_usage_assistant")
+			)
+				db.exec("ALTER TABLE context_node ADD COLUMN context_usage_assistant TEXT");
+			if (
+				!db
+					.prepare("PRAGMA table_info(context_node)")
+					.all()
+					.some((column) => column.name === "latest_git_state")
+			)
+				db.exec(`ALTER TABLE context_node ADD COLUMN latest_git_state TEXT;
  ALTER TABLE context_node ADD COLUMN latest_agent_status TEXT;`);
-		if (
-			!db
-				.prepare("PRAGMA table_info(source_cursor)")
-				.all()
-				.some((column) => column.name === "source_leaf")
-		)
-			db.exec(`ALTER TABLE source_cursor ADD COLUMN source_leaf TEXT;
+			if (
+				!db
+					.prepare("PRAGMA table_info(source_cursor)")
+					.all()
+					.some((column) => column.name === "source_leaf")
+			)
+				db.exec(`ALTER TABLE source_cursor ADD COLUMN source_leaf TEXT;
  ALTER TABLE source_cursor ADD COLUMN source_session_info TEXT;
  ALTER TABLE source_cursor ADD COLUMN source_session_state TEXT;
  ALTER TABLE source_cursor ADD COLUMN source_compaction_count INTEGER NOT NULL DEFAULT 0;
  ALTER TABLE source_cursor ADD COLUMN source_content_prefix INTEGER NOT NULL DEFAULT 0;
  ALTER TABLE source_cursor ADD COLUMN source_has_user_content INTEGER NOT NULL DEFAULT 0;`);
-		for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
-	}
-	db.exec(`
+			if (
+				!db
+					.prepare("PRAGMA table_info(source_cursor)")
+					.all()
+					.some((column) => column.name === "catalog_summary")
+			)
+				db.exec("ALTER TABLE source_cursor ADD COLUMN catalog_summary TEXT");
+			for (const table of DERIVED_TABLES) db.exec(`DELETE FROM ${table}`);
+		}
+		db.exec(`
  CREATE INDEX IF NOT EXISTS source_incomplete ON source_event(session,sequence) WHERE text_complete=0;
  CREATE INDEX IF NOT EXISTS task_sequence ON task_evidence(session,task_key,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_item_sequence ON task_evidence(session,item_id,sequence,ordinal);
  CREATE INDEX IF NOT EXISTS task_loss_key ON task_import_loss(session,task_key,sequence);
  `);
-	db.exec("PRAGMA user_version=15");
-});
+		db.exec("PRAGMA user_version=16");
+	});
 
 // Node22.8 ships SQLite without FTS5. A normal SQLite posting index keeps the
 // declared floor and bounded lookups without loading a platform extension.
@@ -500,6 +558,83 @@ function foldSourceBootstrap(state: SourceBootstrapColumns, entry: SessionSource
 		else state.source_has_user_content = 1;
 	}
 }
+
+/** Numeric derived metadata only, in canonical source order; no message bodies. */
+function catalogUsage(value: Usage): string {
+	let usage: Usage;
+	try {
+		usage = cloneUsage(value);
+	} catch (error) {
+		if (error instanceof TypeError) throw new CatalogProjectionUnsupportedError("Missing catalog usage fields");
+		throw error;
+	}
+	const values = [
+		usage.input,
+		usage.output,
+		usage.cacheRead,
+		usage.cacheWrite,
+		usage.totalTokens,
+		usage.cost.input,
+		usage.cost.output,
+		usage.cost.cacheRead,
+		usage.cost.cacheWrite,
+		usage.cost.total,
+	];
+	if (values.some((part) => typeof part !== "number" || !Number.isFinite(part)))
+		throw new CatalogProjectionUnsupportedError("Non-finite or incomplete catalog usage is unsupported");
+	return stringifyBoundedJson(usage, 4096);
+}
+function foldCatalogUsage(sessionId: string, entry: FileEntry, sequence: number): boolean {
+	const insert = (category: number, value: Usage) =>
+		db
+			.prepare("INSERT INTO source_catalog_usage VALUES (?,?,?,?,?)")
+			.run(sessionId, category, entry.id, sequence, catalogUsage(value));
+	if (entry.type === "message" && entry.message.role === "assistant" && (entry.message as { usage?: Usage }).usage)
+		insert(0, (entry.message as { usage: Usage }).usage);
+	else if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) insert(1, entry.usage);
+	else if (entry.type === "child_usage_attributed") {
+		const prior = db
+			.prepare("SELECT usage FROM source_catalog_usage WHERE session=? AND category=0 AND id=?")
+			.get(sessionId, entry.targetId);
+		if (!prior) return false; // Same source-order target eligibility as the original fold.
+		const aggregate = catalogUsage(entry.aggregateUsage);
+		const child = catalogUsage(entry.childUsage);
+		db.prepare("UPDATE source_catalog_usage SET usage=? WHERE session=? AND category=0 AND id=?").run(
+			aggregate,
+			sessionId,
+			entry.targetId,
+		);
+		db.prepare("INSERT INTO source_catalog_usage VALUES (?,?,?,?,?)").run(sessionId, 2, entry.id, sequence, child);
+	} else return false;
+	return true;
+}
+function catalogUsageTotal(sessionId: string) {
+	const total = emptyUsage();
+	const page = db.prepare(
+		"SELECT sequence,usage FROM source_catalog_usage WHERE session=? AND category=? AND sequence>? ORDER BY sequence LIMIT 128",
+	);
+	// Preserve assistant insertion order, then summaries, then ordered clamped
+	// child subtraction. Incremental replacement never subtracts a stale aggregate.
+	for (const category of [0, 1, 2]) {
+		let after = 0;
+		for (;;) {
+			const rows = page.all(sessionId, category, after);
+			if (!rows.length) break;
+			for (const row of rows) {
+				const usage = JSON.parse(String(row.usage)) as Usage;
+				if (category === 2) subtractAssistantUsage(total, usage);
+				else addAssistantUsage(total, usage);
+				after = Number(row.sequence);
+			}
+		}
+	}
+	catalogUsage(total); // Unsupported arithmetic is never persisted as JSON null/zero.
+	const summary = sessionUsageSummaryFrom(total);
+	if (summary && ![summary.inputTokens, summary.outputTokens, summary.cost].every(Number.isFinite))
+		throw new CatalogProjectionUnsupportedError("Catalog usage total is not finite");
+	return summary;
+}
+
 async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 	const row = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
 	let previous: SourceIndexCursor | undefined = row
@@ -528,6 +663,10 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 				source_content_prefix: 0,
 				source_has_user_content: 0,
 			};
+	let usageChanged = !previous;
+	const catalog: SessionCatalogProjection = previous
+		? decodeSessionCatalog(JSON.parse(String(row?.catalog_summary)))
+		: emptySessionCatalog();
 	db.exec("BEGIN IMMEDIATE");
 	try {
 		if (!previous) clearSession(sessionId);
@@ -535,8 +674,20 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			sessionId,
 			snapshot,
 			previous,
-			(entry, sequence, locator, revision, parts, retention, qualification) => {
+			(entry, sequence, locator, revision, parts, retention, qualification, json) => {
 				foldSourceBootstrap(sourceState, entry);
+				if (!catalog.unsupported) {
+					try {
+						if (json === undefined) throw new Error("Catalog source JSON is unavailable");
+						// The source envelope type retains the full canonical payload's fields.
+						const catalogEntry = entry as SessionSourceEntry & FileEntry;
+						if (foldCatalogUsage(sessionId, catalogEntry, sequence)) usageChanged = true;
+						foldSessionCatalog(catalog, catalogEntry, json);
+					} catch (error) {
+						if (!(error instanceof CatalogProjectionUnsupportedError)) throw error;
+						catalog.unsupported = error.message;
+					}
+				}
 				const item = projectSessionSourceEvent(entry, sequence, locator, revision);
 				if (retention !== undefined) item.retention = retention;
 				if (qualification !== undefined) item.qualification = qualification;
@@ -575,12 +726,20 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 				}
 			},
 		);
+		if (usageChanged && !catalog.unsupported) {
+			try {
+				catalog.usage = catalogUsageTotal(sessionId);
+			} catch (error) {
+				if (!(error instanceof CatalogProjectionUnsupportedError)) throw error;
+				catalog.unsupported = error.message;
+			}
+		}
 		db.prepare("INSERT INTO coverage VALUES (?,?) ON CONFLICT(session) DO UPDATE SET sequence=excluded.sequence").run(
 			sessionId,
 			indexed.frontier.indexedThrough,
 		);
 		db.prepare(
-			"INSERT INTO source_cursor VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET frontier=excluded.frontier,header_bytes=excluded.header_bytes,header_checksum=excluded.header_checksum,source_leaf=excluded.source_leaf,source_session_info=excluded.source_session_info,source_session_state=excluded.source_session_state,source_compaction_count=excluded.source_compaction_count,source_content_prefix=excluded.source_content_prefix,source_has_user_content=excluded.source_has_user_content",
+			"INSERT INTO source_cursor VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET frontier=excluded.frontier,header_bytes=excluded.header_bytes,header_checksum=excluded.header_checksum,source_leaf=excluded.source_leaf,source_session_info=excluded.source_session_info,source_session_state=excluded.source_session_state,source_compaction_count=excluded.source_compaction_count,source_content_prefix=excluded.source_content_prefix,source_has_user_content=excluded.source_has_user_content,catalog_summary=excluded.catalog_summary",
 		).run(
 			sessionId,
 			JSON.stringify(indexed.frontier),
@@ -592,6 +751,7 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 			sourceState.source_compaction_count,
 			sourceState.source_content_prefix,
 			sourceState.source_has_user_content,
+			stringifyBoundedJson(catalog, TASK_PAGE_BYTES),
 		);
 		db.exec("COMMIT");
 		return indexed.frontier;
@@ -1582,8 +1742,84 @@ function readPayloadRow(
 	});
 }
 
+let catalogTransaction = false;
+let catalogReadScope: { sessionId: string; through: number } | undefined;
+async function sessionCatalog(
+	request: Extract<HistoryIndexRequest, { action: "catalog" }>,
+): Promise<SessionCatalogIndexResult> {
+	if (!readOnly) throw new Error("Catalog discovery requires a read-only index connection");
+	catalogReadScope = undefined;
+	if (!catalogTransaction) {
+		db.exec("BEGIN");
+		catalogTransaction = true;
+	}
+	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(request.sessionId);
+	if (!saved || saved.catalog_summary === null)
+		return { selection: "unavailable", reason: "No owner-maintained catalog projection covers this source" };
+	const frontier = JSON.parse(String(saved.frontier)) as SourceIndexCursor["frontier"];
+	const covered = db.prepare("SELECT sequence FROM coverage WHERE session=?").get(request.sessionId);
+	if (!covered || covered.sequence !== frontier.indexedThrough)
+		return { selection: "stale", reason: "Catalog index coverage is incomplete" };
+	const bySequence = (sequence: number) =>
+		db.prepare("SELECT * FROM source_event WHERE session=? AND sequence=?").get(request.sessionId, sequence) as
+			| Row
+			| undefined;
+	const tail = frontier.indexedThrough > 0 ? bySequence(frontier.indexedThrough) : undefined;
+	const previous = frontier.indexedThrough > 1 ? bySequence(frontier.indexedThrough - 1) : undefined;
+	if (frontier.indexedThrough > 1 && !previous) throw new Error("Catalog predecessor metadata is unavailable");
+	const indexed: SourceIndexCursor = {
+		frontier,
+		headerByteLength: Number(saved.header_bytes),
+		headerChecksum: String(saved.header_checksum),
+	};
+	if (
+		!(await validateIndexedCatalogSource(
+			request.sessionId,
+			request.source,
+			indexed,
+			tail ? event(tail) : null,
+			previous?.revision ?? indexed.headerChecksum,
+		))
+	)
+		return { selection: "stale", reason: "Catalog does not cover the current canonical source" };
+	const projection = decodeSessionCatalog(JSON.parse(String(saved.catalog_summary)));
+	if (projection.unsupported) return { selection: "unsupported", reason: projection.unsupported };
+	const reference = (id: string | null) => {
+		if (id === null) return null;
+		const row = db
+			.prepare("SELECT * FROM source_event WHERE session=? AND id=? AND sequence<=?")
+			.get(request.sessionId, id, frontier.indexedThrough) as Row | undefined;
+		if (!row) throw new Error("Catalog source reference is unavailable");
+		return event(row);
+	};
+	catalogReadScope = { sessionId: request.sessionId, through: frontier.indexedThrough };
+	return {
+		selection: "covered",
+		frontier,
+		projection,
+		refs: {
+			firstMessage:
+				projection.firstMessage && "id" in projection.firstMessage ? reference(projection.firstMessage.id) : null,
+			name: reference(projection.nameId),
+			agentStatus: reference(projection.agentStatusId),
+		},
+	};
+}
+
 async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
+	if (readOnly && !["catalog", "get_source", "read_source_payload", "close"].includes(request.action))
+		throw new Error("Read-only catalog index does not admit this operation");
+	if (
+		readOnly &&
+		(request.action === "get_source" || request.action === "read_source_payload") &&
+		(!catalogReadScope ||
+			request.sessionId !== catalogReadScope.sessionId ||
+			request.through !== catalogReadScope.through)
+	)
+		throw new Error("Catalog payload read is outside its covered snapshot");
 	switch (request.action) {
+		case "catalog":
+			return sessionCatalog(request);
 		case "sync_source":
 			return syncSource(request.sessionId, request.snapshot);
 		case "ipython_sent_messages":

@@ -856,3 +856,82 @@ existing unmanaged/child/auxiliary coordinator boundary. No provider call or tes
 case is added. This is not live provider, installed/platform, complete lifecycle,
 billing or whole G17 certification. Frozen benchmark artifacts/runners and prior
 results are unchanged. Sol and other protected instruction text remain unchanged.
+
+
+### W55/W58 — native indexed catalog and explicit Node compatibility change
+
+The existing derived index owner now maintains a whole-source SessionInfo
+projection and same-index numeric usage rows under schema16. Discovery uses a
+real read-only index worker and one held SQLite snapshot, checked against the
+current source path/dev/ino/length and actual header/terminal frames. Selected
+metadata records use existing payload parts, then the source capture is checked
+again. Covered reads do not iterate the complete journal body history. Header,
+terminal and selected metadata records can still require complete bounded frame
+or payload reads; this is not a zero-body-read or constant-time claim.
+
+Actual native readSessionInfo/list/listAll consume the covered summary. Missing,
+stale and unsupported coverage remain explicit; SQL/open/read failures remain
+errors. Native failures escape list handling rather than becoming an empty or
+partial successful catalog. Already emitted progress is not rolled back. Normal
+source owners rebuild known older derived indexes; discovery does not acquire a
+writer, create/seed/repair/migrate the index or fall back to a native EOF scan.
+Legacy header scanning remains a separate path. Original public fields, Dates,
+text/search/preview limits, all-source metadata and the sole W53 optional cache
+remain. Cache hits require current native coverage. Complete oversized results
+are returned uncached; encoded cache charges include key/stat/capture/info data.
+
+Native usage now includes actual assistant/compaction/branch-summary usage even
+when a containing record exceeds the old scanner's text cutoff. This corrects
+that native omission without changing legacy scan behavior. Source-order target
+eligibility and aggregate replacement precede the original assistant order,
+summary addition and ordered clamped child subtraction. Numeric reduction uses
+128-row pages on relevant usage changes, not a per-message JS map or every
+unrelated append. Missing usage is not invented zero; incomplete/non-finite
+supplied usage makes projection coverage unsupported. Known observed zero and
+existing all-zero public summary omission are preserved. These are source usage
+summaries, not complete physical requests, billed cost or attribution causality.
+Indexing/reduction work and index disk size still grow with source history.
+
+Root explicitly selected `^22.12.0 || >=23.3.0` under spec343/586, with a README
+migration notice and matching five own package/lock engine entries. This replaces
+the inherited22.8 floor and excludes early23 releases that lack the read-only
+option. Older runtimes refuse read-only opening before database access; no
+writable/query_only fallback, alternate backend or capability probe is added.
+No third-party dependency versions change. This is Root's explicit engineering
+compatibility decision, not inferred user consent; release publication still
+requires approval. Actual minimum/current-runtime execution is required before
+claiming support. Current source protocol11/schema36 and canonical journal
+formats are unchanged; the derived history index alone advances15→16.
+
+No Sol/custom/behavior/system/developer/tool instructions, model/auth/runner/
+control artifacts, source-effect ownership, or frozen benchmark evidence change.
+G08 still has inventory/paging/output/global-resource limits open; this is not
+full G08, migration, installed/platform, lifecycle, billing or release closure.
+Validation passed: exactly the two existing W53 cases ran once on actual22.12
+and once on current22.22.1 (four isolated commands), all first-pass. These cover
+native writer projection, current covered read-only discovery, attribution order,
+large usage/text fields, cache ownership and unavailable-index refusal; they do
+not establish whole-process/global-resource or installed-platform behavior.
+Initial formatting found three unsafe-finally errors and one catch-assignment
+warning. Read outcomes now close outside finally before return/rethrow, preserving
+primary-first cleanup errors; the worker uses a local failure variable. The first
+required check then found entry-view, TextContent-import and fs.stat-overload type
+errors. Type-only corrections retained the full original payload and actual
+numeric Stats contract; runtime cases were not rerun. Corrected `npm run check`
+passed (1039 files, TypeScript, installer and browser smoke). Original failed
+format/check outputs are retained. No provider/auth probes were run.
+
+
+### G10 unresolved-effect boundary remains open
+
+Source inspection found that an ACKed tool intent advances the canonical branch,
+but an assistant call with no finalized result is refused as an incomplete replay
+group before actual provider/public-window admission. Ordinary tool-intent frames
+also lack a separate positive native-tool-owner qualification. Existing captured
+IDs support correlation, not effect reconciliation or a new replay permission.
+A working resumed path needs an explicit qualified incomplete-whole-group public
+continuation/admission rule and frozen-epoch treatment. No helper-only API,
+fabricated result, automatic replay/repair, stale-contract grant or weakened
+closure was added. This is a bounded source finding, not a new crash execution or
+full G10 closure. No G10 implementation or case change is included in this
+milestone; the separate continuation proposal remains unapplied.
