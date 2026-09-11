@@ -2014,3 +2014,20 @@ new store, quota or frozen-result rewrite is included.
 OpenAI native2 and Python2 existing cases passed first; required check passed
 1046/no fixes, types/installer/browser. No project failure or native/Python rerun.
 No new inference, benchmark, installation or publication occurred.
+
+
+### W99 — literal prompt argument substitution from upstream
+
+Adapt upstream `24519c30856965a832551206b3e9ed87e814d602` (public main after
+v0.9.4) at the existing pure prompt-template helper. One callback-based replacement
+pass preserves argument values literally, including placeholder-looking strings
+and JavaScript replacement dollar sequences. Positional, all-argument and sliced
+selection semantics remain. Two existing cases cover normal selection and literal
+arguments; no cases or model calls were added. The first formatter reported three
+literal-template warnings; Root changed only their spelling to escaped template
+strings with identical runtime values. The passing cases were not rerun for that
+style-only correction. Sol's custom prompt and system/autonomous prompt content,
+source/request/ACK/epoch/budget owners remain unchanged.
+
+The shared required check passed1046/no fixes, types/installer/browser.
+The upstream selection and adaptation note is `docs/implementation/upstream-0.9.4.md`.

@@ -38,10 +38,16 @@ describe("substituteArgs", () => {
 		expect(substituteArgs("$ARGUMENTS", ["$1", "$ARGUMENTS"])).toBe("$1 $ARGUMENTS");
 		expect(substituteArgs("$@", ["$100", "$1"])).toBe("$100 $1");
 		expect(substituteArgs("$ARGUMENTS", ["$100", "$1"])).toBe("$100 $1");
+		const args = [`$ARGUMENTS \${@:2} $@`, "$& $$ $` $'"];
+		expect(substituteArgs(`$1 | \${@:2:1} | $ARGUMENTS | $@`, args)).toBe(
+			`${args[0]} | ${args[1]} | ${args.join(" ")} | ${args.join(" ")}`,
+		);
 	});
 
 	test("should support mixed $1, $2, and $ARGUMENTS", () => {
-		expect(substituteArgs("$1: $ARGUMENTS", ["prefix", "a", "b"])).toBe("prefix: prefix a b");
+		expect(substituteArgs(`$1/$2: $ARGUMENTS; \${@:2:1}; \${@:0:2}`, ["prefix", "a", "b"])).toBe(
+			"prefix/a: prefix a b; a; prefix a",
+		);
 	});
 
 	test("should support mixed $1, $2, and $@", () => {
