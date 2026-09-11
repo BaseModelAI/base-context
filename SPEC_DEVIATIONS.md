@@ -2220,3 +2220,46 @@ This fixture is not a successful real installation. The original failed candidat
 remains, with no current selection observed after that failure. A corrected build
 and a new real installation attempt are next; frozen benchmark artifacts stay
 unchanged. Actual publication still requires final approval.
+
+
+### W122 — Real owned installation and launcher accepted
+
+The corrected installation of source `a7a8841b0` completed with exit 0 after
+normal npm dependency installation and mandatory fresh Python preparation.
+The owned activation was acknowledged, and current.json selected the new
+release with previous:null. The stable `~/.local/share/base-context/bin/base-context`
+launcher returned `0.1.0` through its actual installed entrypoint. No shell
+profile, Prime installation, Prime credentials or running benchmark image changed.
+
+The release-local venv uses a newly installed uv-managed Python 3.11.15 under
+the retained private installation HOME. That HOME must remain available; the
+interpreter binary is not bundled inside the selected version directory and is
+not Prime's existing environment. npm's three uncovered install-script warnings
+and node-domexception deprecation were retained. The original EALLOWSCRIPTS
+failure and its unactivated candidate were retained too; no rollback or blind
+replay occurred. This first activation has no previous release for rollback.
+
+### W123 — GitHub versioned assets with npm channel discovery
+
+Release preparation and shell download URLs now use the approved repository
+base `https://github.com/BaseModelAI/base-context` and `/releases/download/v<V>/`.
+The packager's internal dependency URLs and main manifest tarball path use this
+layout. The shell's main tarball and existing SHA256SUMS URLs match it; no checksum
+mechanism changed. Default stable/beta shell discovery uses the owned npm
+package's latest/beta tags. Positional versions and BASE_CONTEXT_VERSION retain
+their precedence and bypass discovery. The existing progress owner still captures
+the resolver output without introducing a second lookup or fallback origin.
+
+The existing installer checker now exercises two real shell-main paths: default
+stable discovery and explicit positional version. npm/curl, external tools,
+preflight, confirmation and checksum approval are fake boundaries. These are
+resolver/URL/owned-handoff cases, not online download, bootstrap or checksum
+acceptance. Beta mapping and packager URL output remain source-reviewed only.
+
+Native updater defaults and custom static-manifest identity/origin/redirect
+rules are unchanged. Do not set the application's runtime download-base override
+to the GitHub repository URL. Use the existing npm default instead. These changes
+do not publish GitHub assets or npm tags; actual publication still needs final
+approval after benchmark review. Whole-root migration is being implemented for
+supplied coherent offline exports only. No live Prime export/import or credential
+migration is authorized or claimed.

@@ -172,34 +172,77 @@ console.log("Installer check passed.");
 function checkOwnedInstallerRoute() {
 	const binDir = join(tempDir, "bin");
 	const installHarnessPath = join(tempDir, "install-harness.sh");
-	const tarballPath = join(tempDir, "verified release package.tgz");
+	const downloadDir = join(tempDir, "download scope");
+	const tarballPath = join(downloadDir, "base-context-1.2.3.tgz");
+	const checksumsPath = join(downloadDir, "SHA256SUMS");
 	const root = join(tempDir, "owned install");
 	const original = JSON.stringify({ generation: "original", active: "old", previous: null });
+	// Run the real main/resolver/URL owners; prerequisites and external effects stay offline boundaries.
 	const installHarnessSource = `${installerSource.slice(0, mainCallIndex)}
-base_context_download_dir="$1"
-base_context_install_root="$2"
-base_context_original_selection="$3"
-base_context_owned_install "$4" 1.2.3
+base_context_install_traps() { :; }
+base_context_init_screen() { base_context_screen_enabled=0; }
+start_preflight_checks() { :; }
+finish_preflight_checks() { return 0; }
+confirm_install() { :; }
+verify_base_context_package_checksum() { :; }
+create_temp_dir() {
+  mkdir -p "$FIXTURE_DOWNLOAD_DIR"
+  printf '%s\n' "$FIXTURE_DOWNLOAD_DIR"
+}
+main "$@"
 `;
 	mkdirSync(binDir);
+	mkdirSync(root);
+	writeFileSync(join(root, "current.json"), original, "utf8");
 	writeFileSync(installHarnessPath, installHarnessSource, "utf8");
-	writeFileSync(tarballPath, "verified fixture", "utf8");
+	writeFileSync(join(binDir, "npm"), `#!/bin/sh
+[ "$EXPECT_NPM_VIEW" = 1 ] || exit 1
+[ "$1" = view ] && [ "$2" = --registry=https://registry.npmjs.org ] &&
+[ "$3" = @ponythewhite/base-context@latest ] && [ "$4" = version ] || exit 1
+: > "$NPM_VIEW_MARKER"
+printf '1.2.3\n'
+`, { mode: 0o755 });
+	writeFileSync(join(binDir, "curl"), `#!/bin/sh
+[ "$1" = -fsSL ] && [ "$3" = -o ] || exit 1
+case "$2" in
+  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/SHA256SUMS)
+    [ "$4" = "$EXPECTED_CHECKSUMS" ] || exit 1 ;;
+  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/base-context-1.2.3.tgz)
+    [ "$4" = "$EXPECTED_TARBALL" ] || exit 1 ;;
+  *) exit 1 ;;
+esac
+printf 'offline fixture' > "$4"
+`, { mode: 0o755 });
 	writeFileSync(join(binDir, "tar"), `#!/bin/sh
 [ "$1" = -xzf ] && [ "$2" = "$EXPECTED_TARBALL" ] && [ "$3" = -C ] || exit 1
+[ -f "$EXPECTED_CHECKSUMS" ] && [ -f "$EXPECTED_TARBALL" ] || exit 1
 mkdir -p "$4/package/dist"
 : > "$4/package/dist/installer.mjs"
 `, { mode: 0o755 });
 	writeFileSync(join(binDir, "node"), `#!/bin/sh
+if [ "$EXPECT_NPM_VIEW" = 1 ]; then
+  [ -f "$NPM_VIEW_MARKER" ] || exit 1
+fi
 [ "$1" = "$EXPECTED_ENTRY" ] && [ "$2" = install ] && [ "$3" = "$EXPECTED_ROOT" ] &&
 [ "$4" = "$EXPECTED_SELECTION" ] && [ "$5" = "$EXPECTED_TARBALL" ] && [ "$6" = 1.2.3 ]
 `, { mode: 0o755 });
-	const result = spawnSync("sh", [installHarnessPath, tempDir, root, original, tarballPath], {
-		encoding: "utf8",
-		env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-			EXPECTED_ENTRY: join(tempDir, "bootstrap", "package", "dist", "installer.mjs"),
-			EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
-	});
-	check(result.status === 0, `owned Base-Context installer handoff failed\n${result.stderr}${result.stdout}`);
+	for (const [name, args, expectNpmView] of [
+		["default stable", [], "1"],
+		["explicit version", ["v1.2.3"], "0"],
+	]) {
+		const result = spawnSync("sh", [installHarnessPath, ...args], {
+			encoding: "utf8",
+			env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+				BASE_CONTEXT_DOWNLOAD_BASE_URL: "https://github.com/BaseModelAI/base-context",
+				BASE_CONTEXT_INSTALL_ROOT: root, BASE_CONTEXT_PACKAGE: "@ponythewhite/base-context",
+				BASE_CONTEXT_RELEASE_CHANNEL: "stable", BASE_CONTEXT_VERSION: "",
+				FIXTURE_DOWNLOAD_DIR: downloadDir, EXPECT_NPM_VIEW: expectNpmView,
+				NPM_VIEW_MARKER: join(tempDir, "npm-view"), EXPECTED_CHECKSUMS: checksumsPath,
+				EXPECTED_ENTRY: join(downloadDir, "bootstrap", "package", "dist", "installer.mjs"),
+				EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
+		});
+		check(result.status === 0, `${name} owned Base-Context installer route failed\n${result.stderr}${result.stdout}`);
+	}
 }
 
 function runCase(name, initialCols, initialRows, resizedCols, resizedRows) {

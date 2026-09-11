@@ -91,7 +91,7 @@ function parseArgs(args) {
 function printHelp() {
 	console.log(`Usage: node scripts/pack-base-context-release.mjs --base-url url [--channel stable|beta] [--version x.y.z] [--out-dir path]
 
-Creates private npm tarballs for R2 distribution:
+Creates package tarballs for GitHub Releases:
 
   <out-dir>/artifacts/base-context-<version>.tgz
   <out-dir>/artifacts/base-context-ai-<version>.tgz
@@ -153,7 +153,7 @@ function npmTarballName(packageName, version) {
 }
 
 function releaseTarballUrl(baseUrl, version, tarballFile) {
-	return `${baseUrl}/releases/v${version}/${tarballFile}`;
+	return `${baseUrl}/releases/download/v${version}/${tarballFile}`;
 }
 
 function rewriteInternalDependencies(dependencies, internalPackageUrls) {
@@ -324,7 +324,7 @@ function main() {
 	writeJson(join(artifactsDir, manifestName), {
 		version: `v${releaseVersion}`,
 		package: publicPackageName,
-		tarball: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
+		tarball: `releases/download/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
 		tarballs: tarballs.map((tarball) => ({
 			package: tarball.name,
 			file: tarball.file,

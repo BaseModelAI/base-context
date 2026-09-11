@@ -180,3 +180,4 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Include the existing Absolute Prohibition block unchanged in every main Base Context system prompt, including custom-prompt builds. No Sol-only switch or project prompt file is required. Stock public prompts and auxiliary request policy are unchanged.
 - Added approved native per-invocation provider-attempt caps: compaction 4 shared across both parts, branch/reviewer/planner 2; nested captures share allowance without output authority, and failed attempts do not refund it. Running benchmark images are unchanged.
 - Corrected owned npm project installs to write candidate-local `allowScripts` permissions instead of the rejected CLI flag; normal dependency scripts and fresh Python bootstrap remain enabled.
+- Routed shell release discovery through owned npm tags and versioned package assets through GitHub Releases, while preserving native update-manifest redirect rules.

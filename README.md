@@ -49,6 +49,22 @@ and prepared default Python environment. Preparation must finish before that
 version becomes selected. Follow the installer's PATH instructions before launch,
 including the separate `base-context-node` directory if it installed standalone Node.
 
+Release preparation uses `npm run release:pack -- --base-url https://github.com/BaseModelAI/base-context`.
+The same repository-root base configures the published shell installer. Versioned
+assets use `/releases/download/v<V>/`, including `base-context-<V>.tgz`, the three
+core tarballs, and the existing `SHA256SUMS`. The default shell installer resolves
+`@ponythewhite/base-context@latest` on npm; its `beta` channel uses the npm `beta` tag.
+A positional version, such as `sh install.sh v0.1.0`, or `BASE_CONTEXT_VERSION`
+bypasses channel discovery. An unpublished local shell script still needs its
+`BASE_CONTEXT_DOWNLOAD_BASE_URL` set to that repository base; these settings do not
+publish assets or make unpublished npm tags available.
+
+Leave `BASE_CONTEXT_DOWNLOAD_BASE_URL` unset when running the installed application
+to keep native updates on the owned npm package. A GitHub repository URL is not
+the application's custom static-manifest endpoint. That separate
+[update manifest contract](packages/coding-agent/docs/settings.md#update-checks)
+and its redirect rules are unchanged.
+
 Once installed through this route:
 
 ```bash

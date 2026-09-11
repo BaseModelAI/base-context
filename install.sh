@@ -107,7 +107,7 @@ main() {
 
 	version="$(resolve_base_context_version "$@")"
 	tarball_name="base-context-$version.tgz"
-	tarball_url="$base_context_base_url/releases/v$version/$tarball_name"
+	tarball_url="$base_context_base_url/releases/download/v$version/$tarball_name"
 
 	confirm_install "$version" "$tarball_url"
 
@@ -904,6 +904,10 @@ run_preflight_checks() {
 	return "$status"
 }
 
+base_context_write_npm_version() {
+	npm view --registry=https://registry.npmjs.org "$base_context_package@$1" version >"$2"
+}
+
 resolve_base_context_version() {
 	if [ "${1:-}" ]; then
 		case "$1" in
@@ -922,13 +926,14 @@ resolve_base_context_version() {
 		return
 	fi
 
-	if ! command -v curl >/dev/null 2>&1; then
-		printf 'error: curl is required to resolve the latest Base-Context version.\n' >&2
+	if ! command -v npm >/dev/null 2>&1; then
+		printf 'error: npm is required to resolve the latest Base-Context version.\n' >&2
 		exit 1
 	fi
 
 	case "$release_channel" in
-		stable|beta) ;;
+		stable) release_tag=latest ;;
+		beta) release_tag=beta ;;
 		*)
 			printf 'error: invalid Base-Context release channel: %s\n' "$release_channel" >&2
 			exit 1
@@ -941,15 +946,15 @@ resolve_base_context_version() {
 		"Resolving latest release" \
 		"Resolving latest release" \
 		"Checking the $release_channel release channel." \
-		curl -fsSL "$base_context_base_url/$release_channel" -o "$channel_path"; then
+		base_context_write_npm_version "$release_tag" "$channel_path"; then
 		rm -rf "$channel_dir"
-		printf 'error: could not resolve latest Base-Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
+		printf 'error: could not resolve latest Base-Context version from npm %s@%s\n' "$base_context_package" "$release_tag" >&2
 		exit 1
 	fi
 	channel_version="$(tr -d '[:space:]' <"$channel_path")"
 	rm -rf "$channel_dir"
 	if [ -z "$channel_version" ]; then
-		printf 'error: could not resolve latest Base-Context version from %s/%s\n' "$base_context_base_url" "$release_channel" >&2
+		printf 'error: could not resolve latest Base-Context version from npm %s@%s\n' "$base_context_package" "$release_tag" >&2
 		exit 1
 	fi
 	normalize_version "$channel_version"
@@ -1438,7 +1443,7 @@ download_base_context_package() {
 	tarball_path="$3"
 	download_dir=$(dirname "$tarball_path")
 	tarball_name=$(basename "$tarball_path")
-	checksums_url="$base_context_base_url/releases/v$version/SHA256SUMS"
+	checksums_url="$base_context_base_url/releases/download/v$version/SHA256SUMS"
 	checksums_path="$download_dir/SHA256SUMS"
 
 	if ! command -v curl >/dev/null 2>&1; then
