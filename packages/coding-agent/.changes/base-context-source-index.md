@@ -176,3 +176,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Add canonical DeepSeek-V4.1-Flash and its direct native text/tool Completions projection, preserving one serialization/callback and existing source/epoch ACK owners. Native offline tool/public-checkpoint/compaction/next-request path and altered-payload edge passed. Explicit budgets only; media budgeting, live availability and new benchmark readiness remain unclaimed.
 
 - Add opt-in balanced Sol/Astra/DeepSeek comparison scheduling, pinned public Prime Agent 0.9.4 host preparation, and selected-only provider credential/SDK launch routing. Offline scheduling and local setup cases passed; actual prepared SDK readiness and new benchmarks remain pending. OpenAI subscription billing, conditional API estimates, and release holds remain unchanged.
+
+- Include the existing Absolute Prohibition block unchanged in every main Base Context system prompt, including custom-prompt builds. No Sol-only switch or project prompt file is required. Stock public prompts and auxiliary request policy are unchanged.

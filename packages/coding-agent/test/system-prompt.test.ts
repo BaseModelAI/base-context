@@ -218,6 +218,14 @@ describe("buildSystemPrompt", () => {
 				genericMcpServers: ["zebra", "filesystem"],
 			});
 
+			expect(prompt.match(/## Absolute Prohibition: No Verification Theater \/ Proof Boilerplate/g)).toHaveLength(1);
+			expect(prompt).toContain(
+				"You are FORBIDDEN from inventing, adding, or expanding any of the following unless the user explicitly requests them in the current message:",
+			);
+			expect(prompt).toContain(
+				"**Build the actual thing first.**  \nYour job is to ship working, minimal, readable code that solves the stated problem.  ",
+			);
+			expect(prompt).toContain("5. When in doubt: less is more. KISS is mandatory.");
 			expect(prompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(prompt).toContain('await mcp.list_tools("filesystem")');
 			expect(prompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
@@ -232,6 +240,7 @@ describe("buildSystemPrompt", () => {
 			genericMcpServers: ["filesystem"],
 		});
 		expect(shellPrompt).not.toContain("Generic MCP Connections");
+		expect(shellPrompt).toContain("## Absolute Prohibition: No Verification Theater / Proof Boilerplate");
 	});
 
 	test("injects compact global harness context and refine guidance by default", () => {
@@ -562,6 +571,12 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("custom body");
+		expect(prompt.match(/## Absolute Prohibition: No Verification Theater \/ Proof Boilerplate/g)).toHaveLength(1);
+		expect(prompt.indexOf("## Absolute Prohibition:")).toBeGreaterThan(prompt.indexOf("custom body"));
+		expect(prompt.indexOf("## Absolute Prohibition:")).toBeLessThan(prompt.indexOf("custom append"));
+		expect(prompt).toContain(
+			"Violation of this rule is considered a failure. Re-plan and ship the real feature instead.",
+		);
 		expect(prompt).toContain("# Continual Harness State");
 		expect(prompt).toContain("[global:custom_memory] Custom memory (custom, v1)");
 		expect(prompt).not.toContain("# IPython Kernel Guidance");

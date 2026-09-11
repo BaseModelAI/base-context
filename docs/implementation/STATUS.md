@@ -3152,3 +3152,31 @@ The JS syntax checks passed. These checks do not execute the prepared SDKs or
 establish live availability. A clean current image, actual host preparation and
 an offline SDK working path remain before any new live campaign. No benchmark,
 owned installation, publication, complete-cost win or full-spec claim is made.
+
+
+### W113 — Shared main-prompt restraint for every model
+
+User clarification: "The Absolute Prohibition block should apply to all models
+and be a part of the main base-context prompt."
+
+The existing Absolute Prohibition block from `/home/jdabrowski/AGENTS.md` is now
+included unchanged by the common main system-prompt builder. It applies to every
+model without a Sol selector, external prompt file or project-context discovery.
+The default trained prefix stays intact. Custom system prompts replace the
+default body but retain this shared policy. This is a prompt instruction, not a
+new runtime validator or an auxiliary-call quota. The stock public comparison
+prompt is unchanged.
+
+Separately, the actual prepared public Prime Agent 0.9.4 and Base Context SDK/RPC
+paths passed the offline DeepSeek exercise at native source `dd7cf0944`: canonical
+model selection, requested medium mapping to wire high, `max_tokens: 32000`,
+literal command-shaped dummy key, one HTTP completion and clean EOF per arm.
+Neither dummy command executed; stderr was empty. Only HTTP was mocked; the
+real SDK, model registry, session/runtime and RPC ran. This does not establish
+live availability, billing, tools or campaign results. That exercise is frozen;
+the shared-prompt change requires a new native image before the comparison.
+
+Two existing main-prompt cases passed on Node 22.12.0: the default/custom IPython
+and Bash paths include the policy, and custom replacement still retains it.
+The required check passed. No prompt-behavior or efficiency gain is inferred
+from these string/path checks. The passing prepared-SDK exercise was not rerun.

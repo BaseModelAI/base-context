@@ -6,8 +6,36 @@ import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "
 import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "./refinement/index.js";
 import { formatSkillsForPrompt, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 
+// User-approved policy shared by every main model, including custom system prompts.
+const ABSOLUTE_PROHIBITION = [
+	"## Absolute Prohibition: No Verification Theater / Proof Boilerplate",
+	"",
+	"You are FORBIDDEN from inventing, adding, or expanding any of the following unless the user explicitly requests them in the current message:",
+	"",
+	'- Proofs of correctness, formal verification, or "proof harnesses"',
+	'- Ledgers, audit logs, provenance tracking, or event sourcing "for safety"',
+	"- Cryptographic hashes, checksums, integrity checks, or signature schemes",
+	'- Review loops, multi-stage validation pipelines, or "ensure this works" rituals',
+	"- Extra test suites, property-based tests, or mutation testing that go beyond the minimal happy-path + one edge case",
+	"- Over-cautious guardrails, legacy-compatibility layers, or defensive code for failure modes the user did not mention",
+	"",
+	"### Core Rule",
+	"**Build the actual thing first.**  ",
+	"Your job is to ship working, minimal, readable code that solves the stated problem.  ",
+	"Do **not** turn a simple feature request into a research project on correctness.",
+	"",
+	"### Enforcement",
+	"1. If the task is a prototype, MVP, script, or simple project → write the direct implementation. Stop.",
+	'2. Only add verification mechanisms when the user says words like "prove", "formally verify", "add ledger", "hash everything", or "make it bulletproof".',
+	"3. If you feel the urge to add any of the banned items, rewrite the plan to remove them before writing any code.",
+	"4. Prefer deleting code over adding protective boilerplate.",
+	"5. When in doubt: less is more. KISS is mandatory.",
+	"",
+	"Violation of this rule is considered a failure. Re-plan and ship the real feature instead.",
+].join("\n");
+
 export interface BuildSystemPromptOptions {
-	/** Custom system prompt (replaces default). */
+	/** Custom system prompt (replaces the default body; shared main-prompt policy remains). */
 	customPrompt?: string;
 	/** Active tools. Tool schemas carry tool descriptions outside the prompt body. */
 	selectedTools?: string[];
@@ -80,7 +108,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const genericMcpSection = hasIpython ? formatGenericMcpGuidance(options.genericMcpServers) : "";
 
 	if (customPrompt) {
-		let prompt = customPrompt;
+		let prompt = `${customPrompt}\n\n${ABSOLUTE_PROHIBITION}`;
 
 		// Append project context files
 		if (contextFiles.length > 0) {
@@ -131,6 +159,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
 	});
+
+	prompt += `\n\n${ABSOLUTE_PROHIBITION}`;
 
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
 	// menu, so the model reads when/why to delegate and then sees the concrete subagent
