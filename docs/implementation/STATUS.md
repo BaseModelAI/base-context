@@ -2835,3 +2835,17 @@ owned path/import and awaited-factory text. The legacy-alias refusal case remain
 unchanged. Required `npm run check` passed with 1046 files/no fixes. These cases do
 not execute SDK factories, registry/services, credentials, model examples or
 installs, and do not compile the guide's snippets.
+
+
+## W88 / G13 — RPC examples declare the current startup contract
+
+RPC/SDK launch examples now supply protocol 11, including the SDK server call's
+second argument. The RPC guide uses owned paths/SDK identity and the actual typed
+client's minimum schema45. The Node example displays terminal success or refusal
+and marks a refusal with a nonzero exit status. No runtime, protocol, framing,
+stdin/abort or budget policy changed; source-only availability remains explicit.
+
+The existing RPC argument case passed (1 passed/101 skipped), covering valid,
+missing and old markers plus actual guide launch arguments. Required `npm run
+check` passed with 1046 files/no fixes. No RPC client, SDK server, model or network
+process was launched. The terminal-display snippet was source-reviewed only.

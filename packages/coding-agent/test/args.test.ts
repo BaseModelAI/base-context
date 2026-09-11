@@ -1,6 +1,10 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "../src/cli/args.js";
-import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	DAEMON_PROTOCOL_VERSION,
+} from "../src/modes/daemon/daemon-protocol.js";
 
 describe("parseArgs", () => {
 	describe("--version flag", () => {
@@ -191,6 +195,24 @@ describe("parseArgs", () => {
 			expect(result.mode).toBe("rpc");
 			expect(result.rpcProtocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
 			expect(result.diagnostics).toEqual([]);
+			const rpcGuide = readFileSync(new URL("../docs/rpc.md", import.meta.url), "utf8");
+			const launch = rpcGuide.match(/spawn\("base-context", (\[[^\n]+\])\)/)?.[1];
+			if (!launch) throw new Error("RPC guide Node launch is missing");
+			const nodeArgs: string[] = JSON.parse(launch);
+			const nodeExample = parseArgs(nodeArgs);
+			expect(nodeExample.mode).toBe("rpc");
+			expect(nodeExample.rpcProtocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
+			expect(nodeExample.noSession).toBe(true);
+			expect(nodeExample.diagnostics).toEqual([]);
+			expect(rpcGuide).toContain(
+				`schema revision at least ${CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision}`,
+			);
+			expect(rpcGuide).toContain('console.error("Invocation output refused:", event.refusal)');
+			const sdkGuide = readFileSync(new URL("../docs/sdk.md", import.meta.url), "utf8");
+			const cli = sdkGuide.match(/^base-context (--mode rpc[^\n]+)/m)?.[1];
+			if (!cli) throw new Error("SDK guide RPC launch is missing");
+			expect(parseArgs(cli.split(" ")).rpcProtocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
+			expect(sdkGuide).toContain(`await runRpcMode(runtime, ${DAEMON_PROTOCOL_VERSION});`);
 			for (const marker of [[], ["--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION - 1)]]) {
 				expect(parseArgs(["--mode", "rpc", ...marker]).diagnostics).toEqual([
 					{
