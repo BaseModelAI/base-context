@@ -2805,3 +2805,17 @@ loads through extension discovery and registers `greet` and `hello`; the existin
 missing-default-export case still refuses. Required `npm run check` passed with
 1046 files/no fixes. No install, model call or extension API behavior was tested
 beyond those loader paths.
+
+
+## W86 / G13 — package guide uses owned controls
+
+The linked package guide now uses Base Context commands, settings/resource paths
+and SDK peer names, with source-only availability stated. The Node wrapper example
+uses 22.12.0; git dependency installation and unavailable self-update lookup follow
+the existing behavior. The inherited `pi` manifest, `pi-package` keyword and
+third-party examples remain unchanged. No runtime or package policy changed.
+
+Two existing offline parser cases passed (2 passed/93 skipped). The documentation
+case parses the actual eight install-source arguments and retains its earlier
+fixtures; dot-relative paths remain local. Required `npm run check` passed with
+1046 files/no fixes. No package install, clone, provider or other network case ran.

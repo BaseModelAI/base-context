@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
@@ -737,17 +737,46 @@ Content`,
 		});
 
 		it("should parse package source types from docs examples", () => {
-			expect((packageManager as any).parseSource("npm:@scope/pkg@1.2.3").type).toBe("npm");
-			expect((packageManager as any).parseSource("npm:pkg").type).toBe("npm");
+			const parser = packageManager as unknown as {
+				parseSource(source: string): { type: "npm" | "git" | "local" };
+			};
+			expect(parser.parseSource("npm:@scope/pkg@1.2.3").type).toBe("npm");
+			expect(parser.parseSource("npm:pkg").type).toBe("npm");
 
-			expect((packageManager as any).parseSource("git:github.com/user/repo@v1").type).toBe("git");
-			expect((packageManager as any).parseSource("https://github.com/user/repo@v1").type).toBe("git");
-			expect((packageManager as any).parseSource("git:git@github.com:user/repo@v1").type).toBe("git");
-			expect((packageManager as any).parseSource("ssh://git@github.com/user/repo@v1").type).toBe("git");
+			expect(parser.parseSource("git:github.com/user/repo@v1").type).toBe("git");
+			expect(parser.parseSource("https://github.com/user/repo@v1").type).toBe("git");
+			expect(parser.parseSource("git:git@github.com:user/repo@v1").type).toBe("git");
+			expect(parser.parseSource("ssh://git@github.com/user/repo@v1").type).toBe("git");
 
-			expect((packageManager as any).parseSource("/absolute/path/to/package").type).toBe("local");
-			expect((packageManager as any).parseSource("./relative/path/to/package").type).toBe("local");
-			expect((packageManager as any).parseSource("../relative/path/to/package").type).toBe("local");
+			expect(parser.parseSource("/absolute/path/to/package").type).toBe("local");
+			expect(parser.parseSource("./relative/path/to/package").type).toBe("local");
+			expect(parser.parseSource("../relative/path/to/package").type).toBe("local");
+
+			const guide = readFileSync(new URL("../docs/packages.md", import.meta.url), "utf8");
+			const installSources = [...guide.matchAll(/^base-context package install (\S+)/gm)].map((match) => match[1]);
+			expect(installSources).toEqual([
+				"npm:@foo/bar@1.0.0",
+				"git:github.com/user/repo@v1",
+				"https://github.com/user/repo",
+				"/absolute/path/to/package",
+				"./relative/path/to/package",
+				"git:git@github.com:user/repo",
+				"ssh://git@github.com/user/repo",
+				"git:git@github.com:user/repo@v1.0.0",
+			]);
+			expect(installSources.map((source) => parser.parseSource(source).type)).toEqual([
+				"npm",
+				"git",
+				"git",
+				"local",
+				"local",
+				"git",
+				"git",
+				"git",
+			]);
+			expect(guide).toContain("`BASE_CONTEXT_HOME`");
+			expect(guide).toContain("`~/.base-context/settings.json`");
+			expect(guide).not.toMatch(/\.prime\/agent|@earendil-works\/pi-/);
 		});
 
 		it("should never parse dot-relative paths as git", () => {
