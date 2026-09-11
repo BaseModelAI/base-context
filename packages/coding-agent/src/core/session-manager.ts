@@ -18,6 +18,7 @@ import { assertProductStatePath } from "../runtime-paths.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CanonicalPayloadFragment } from "./canonical-payload-parts.js";
+import { takeCompactionRequestOutputs } from "./compaction/compaction.js";
 import {
 	appendContextEpoch,
 	CONTEXT_EPOCH_DETAIL,
@@ -51,6 +52,7 @@ import {
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type {
 	ContextEpochEntryRef,
+	NativeCompactionRequestOutputAssociation,
 	NativeRequestEvent,
 	NativeRequestOutputAssociation,
 	NativeRequestOutputSource,
@@ -155,11 +157,23 @@ function realpathIfPresent(path: string): string {
 }
 
 // Only actual manager-created source objects enter this private binding. Payloads and callbacks cannot brand a sink.
-const nativeRequestOutputSources = new WeakMap<object, NativeRequestOutputSource>();
+type NativeOutputCapture = (association: NativeRequestOutputAssociation) => NativeRequestOutputAssociation | undefined;
+interface NativeOutputSource {
+	capture: NativeOutputCapture;
+	main: NativeRequestOutputSource;
+	compaction?: true;
+}
+const nativeRequestOutputSources = new WeakMap<object, NativeOutputSource>();
 
 /** Internal main-stream capture; the factory closes over its original manager/writer before any waits. */
 export function captureNativeRequestOutputSource(sink: object): NativeRequestOutputSource | undefined {
-	return nativeRequestOutputSources.get(sink);
+	return nativeRequestOutputSources.get(sink)?.main;
+}
+
+/** Only the actual bound compaction wrapper, not a described or generic request sink. */
+export function captureNativeCompactionOutputSource(sink: object): NativeOutputCapture | undefined {
+	const source = nativeRequestOutputSources.get(sink);
+	return source?.compaction ? source.capture : undefined;
 }
 
 export interface SessionHeader {
@@ -182,6 +196,7 @@ export interface BoundCompactionSink extends BoundSessionRequestSink {
 		checkpoint: ContextEpochCheckpoint,
 		tokensBefore: number | null,
 		summary?: ContextEpochSummary,
+		requestOutputSource?: object,
 	): Promise<string>;
 	appendCompaction<T = unknown>(
 		summary: string,
@@ -191,6 +206,7 @@ export interface BoundCompactionSink extends BoundSessionRequestSink {
 		fromHook?: boolean,
 		customInstructions?: string,
 		usage?: Usage,
+		requestOutputSource?: object,
 	): Promise<string>;
 }
 
@@ -282,6 +298,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	type: "compaction";
 	summary: string;
+	/** Descriptive native projected-output links; not checkpoint/task authority or append ACK. */
+	requestOutputs?: readonly NativeCompactionRequestOutputAssociation[];
 	firstKeptEntryId: string;
 	/** Prior-context estimate; null when the original context is not measurable. */
 	tokensBefore: number | null;
@@ -2560,6 +2578,7 @@ export class SessionManager {
 			instructions?: string,
 			usage?: Usage,
 			qualification?: NativeEntryQualification,
+			requestOutputSource?: object,
 		): Promise<string> => {
 			sink.assertRetained();
 			const values = {
@@ -2570,6 +2589,8 @@ export class SessionManager {
 				fromHook,
 				instructions,
 				usage: usage ? cloneUsage(usage) : undefined,
+				requestOutputs:
+					fromHook === false ? takeCompactionRequestOutputs(requestOutputSource, bound, summary) : undefined,
 			};
 			const snapshot = JSON.parse(stringifyBoundedJson(values, MAX_SESSION_RECORD_BYTES)) as typeof values;
 			const assertCurrent = () => {
@@ -2605,7 +2626,9 @@ export class SessionManager {
 				snapshot.usage,
 				assertCurrent,
 			] as const;
-			return qualification ? this._appendCompaction(...args, qualification) : this.appendCompaction(...args);
+			return qualification || snapshot.requestOutputs
+				? this._appendCompaction(...args, qualification, snapshot.requestOutputs)
+				: this.appendCompaction(...args);
 		};
 		const bound: BoundCompactionSink = {
 			...sink,
@@ -2627,8 +2650,28 @@ export class SessionManager {
 					),
 				);
 			},
-			appendCompaction: appendCaptured,
-			[appendContextEpoch]: (checkpoint, tokensBefore, summary) => {
+			appendCompaction: (
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromHook,
+				instructions,
+				usage,
+				outputSource,
+			) =>
+				appendCaptured(
+					summary,
+					firstKeptEntryId,
+					tokensBefore,
+					details,
+					fromHook,
+					instructions,
+					usage,
+					undefined,
+					outputSource,
+				),
+			[appendContextEpoch]: (checkpoint, tokensBefore, summary, outputSource) => {
 				if (checkpoint.policyOnly && (tokensBefore !== null || summary !== undefined))
 					throw new Error("Context mode policy ACK is not a measured request or summary");
 				if (Boolean(summary) !== Boolean(checkpoint.includeSummary))
@@ -2642,11 +2685,12 @@ export class SessionManager {
 					summary?.customInstructions,
 					summary?.usage,
 					"native-context-epoch",
+					outputSource,
 				);
 			},
 		};
 		const outputSource = nativeRequestOutputSources.get(sink);
-		if (outputSource) nativeRequestOutputSources.set(bound, outputSource);
+		if (outputSource) nativeRequestOutputSources.set(bound, { ...outputSource, compaction: true });
 		return bound;
 	}
 
@@ -2790,25 +2834,32 @@ export class SessionManager {
 			},
 		};
 		if (persistent && indexed && writer?.format === "framed") {
-			nativeRequestOutputSources.set(sink, (association) => {
+			const capture: NativeOutputCapture = (association) => {
 				if (!outputSource || !ownsOutputSource() || !isDeepStrictEqual(association.source, outputSource))
 					return undefined;
-				const requestOutput = structuredClone(association);
-				return async (manager, message) => {
-					if (manager !== this || !ownsOutputSource()) return undefined;
-					const stale = new Error("Native request output source changed before append");
-					const assertCurrent = () => {
-						if (!ownsOutputSource()) throw stale;
+				return structuredClone(association);
+			};
+			nativeRequestOutputSources.set(sink, {
+				capture,
+				main: (association) => {
+					const requestOutput = capture(association);
+					if (!requestOutput) return undefined;
+					return async (manager, message) => {
+						if (manager !== this || !ownsOutputSource()) return undefined;
+						const stale = new Error("Native request output source changed before append");
+						const assertCurrent = () => {
+							if (!ownsOutputSource()) throw stale;
+						};
+						try {
+							// No new qualification: this is request metadata, not input/task authority.
+							return await this._appendMessage(message, undefined, undefined, { requestOutput, assertCurrent });
+						} catch (error) {
+							// Only this pre-append stale signal permits the ordinary unassociated append.
+							if (error === stale) return undefined;
+							throw error;
+						}
 					};
-					try {
-						// No new qualification: this is request metadata, not input/task authority.
-						return await this._appendMessage(message, undefined, undefined, { requestOutput, assertCurrent });
-					} catch (error) {
-						// Only this pre-append stale signal permits the ordinary unassociated append.
-						if (error === stale) return undefined;
-						throw error;
-					}
-				};
+				},
 			});
 		}
 		return sink;
@@ -3167,6 +3218,7 @@ export class SessionManager {
 		usage?: Usage,
 		assertCurrent?: () => void,
 		qualification?: NativeEntryQualification,
+		requestOutputs?: readonly NativeCompactionRequestOutputAssociation[],
 	): Promise<string> {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -3180,6 +3232,7 @@ export class SessionManager {
 			fromHook,
 			customInstructions,
 			usage,
+			...(requestOutputs?.length ? { requestOutputs } : {}),
 		};
 		await this._appendEntry(
 			withEntryRetention(entry, undefined, qualification),

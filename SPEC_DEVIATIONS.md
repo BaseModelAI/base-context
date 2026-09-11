@@ -1879,3 +1879,36 @@ acceptance. Required `npm run check` passed, 1046 files/no fixes. No post-execut
 correction or rerun was needed. Before execution, Root corrected the test's default
 separator expectation: existing npm argv already contained `--`; production did
 not change that separator. Format-only changes remain separate from test results.
+
+## W95 — native compaction request/output associations
+
+Native built-in history/prefix compaction can retain descriptive links from its
+actual returned requests through the text projections/composition into the same
+owned CompactionEntry. Optional per-part requestOutputs stay outside the epoch and
+provider bodies. Physical accounting, semantic ACK-gated commitment and W75
+continuation ownership are unchanged. Ordinary RAW source qualification stays
+absent; existing epoch compaction keeps native-context-epoch. Neither label alone
+proves native model-summary production. Extension, generic/copy lookalikes and
+stale/unmatched metadata remain unknown rather than rejected/zero output.
+The parser reports only understood recorded part associations, not complete-output
+coverage or producing-attempt attribution. Source presence, append ACK and later
+caller delivery/refusal remain separate. No new record/store/format, qualifier,
+policy, budget or integrity scheme is added. Branch/learning output and downstream
+delivery remain outside this change. W72 and real install/bootstrap approvals
+remain separate and ungranted.
+
+The existing native compaction case passed on Node22.12 with its two unchanged
+fake-HTTP Responses requests: exact history/prefix links, metadata outside current
+request/replay bodies, copied extension metadata and generic append left unlinked,
+and the original links retained through the later extension ACK/refresh failure.
+That is not native linked-summary post-ACK fault injection or an epoch/import matrix.
+The existing Python case passed for a RAW history match, prefix mismatch staying
+unknown, aggregate propagation and unchanged prior MAIN/accounting assertions.
+Before application, Root found standalone eligibility too broad; the original33
+fragments were never applied. The sole39-fragment refresh adds a private native
+session capture opt-in, not inherited by generic capture. That exclusion is source
+control, not a new standalone-helper execution case. Required check first failed
+TS2454 on the self-referencing completion declaration. Root changed only the local
+declaration/assignment; the affected required check then passed,1046/no fixes.
+Passing native/parser cases were not rerun. No real models, installation/bootstrap,
+new campaigns, publication or full-G17/delivery claim follows from these checks.

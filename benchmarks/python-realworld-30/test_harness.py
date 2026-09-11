@@ -49,6 +49,7 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
 
 def native_journal(
     path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
+    compaction_output: bool = False,
 ) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
@@ -66,9 +67,12 @@ def native_journal(
                         "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
         },
     }
-    if request_output:
+    if request_output or compaction_output:
         # A recorded original path need not be the archive path being parsed.
         metadata["source"]["sessionFile"] = "/recorded/original-session.jsonl"
+    if compaction_output:
+        metadata["purpose"] = "summary"
+        metadata["purposeDetail"] = "compaction"
     usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
     if incomplete:
         usage.pop("cacheWrite")
@@ -95,6 +99,16 @@ def native_journal(
             "id": "recorded-assistant",
             "requestOutput": {"operationId": metadata["operationId"], "attemptIds": ["physical-attempt"],
                               "source": dict(metadata["source"])},
+        })
+    if compaction_output:
+        entries[-1]["id"] = "retained-message"
+        recorded = {"operationId": metadata["operationId"], "attemptIds": ["physical-attempt"],
+                    "source": dict(metadata["source"])}
+        entries.append({
+            "type": "compaction", "id": "recorded-compaction", "parentId": "retained-message", "timestamp": timestamp,
+            "summary": "Saved history projection and file-operation text", "firstKeptEntryId": "retained-message",
+            "tokensBefore": 100, "fromHook": False,
+            "requestOutputs": [{"part": "history", **recorded}, {"part": "turn-prefix", **recorded}],
         })
     # Accounting consumes the documented payload envelope, not frame-integrity validation.
     path.write_text("".join(json.dumps({"journalFrame": 1, "payload": entry}) + "\n" for entry in entries))
@@ -140,6 +154,21 @@ class HarnessComparisonTests(unittest.TestCase):
                 item["associations"] for item in metrics["assistant_request_associations"]
                 if item["session_id"] == "root"
             ))
+            # Separate fixture: original MAIN/accounting assertions below remain unchanged.
+            native_journal(root / "compaction.jsonl", compaction_output=True)
+            compacted = parse_session_file(root / "compaction.jsonl")
+            compaction_association = compacted["compaction_request_associations"][0]
+            self.assertEqual(compaction_association, {
+                "compaction_entry_id": "recorded-compaction",
+                "recorded_requests": [
+                    {"part": "history", "recorded_request": association["recorded_request"]},
+                    # A history request cannot also match the prefix's different purposeDetail.
+                    {"part": "turn-prefix", "recorded_request": None},
+                ],
+            })
+            compaction_metrics = aggregate_sessions([compacted])
+            self.assertEqual(compaction_metrics["compaction_request_associations"][0]["associations"],
+                             [compaction_association])
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})

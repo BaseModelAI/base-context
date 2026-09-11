@@ -158,3 +158,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Native main-response assistant entries can retain their original request/source association. The parser reports exact recorded links separately from physical accounting; missing links, output attribution and caller delivery are not inferred.
 
 - Add optional captured local dependency tarballs and repeatable installer `--local-dependency` operands to the same owned npm install; preserve default input, activation and failure behavior. Two existing Node22.12 API cases/required check passed; fake npm/Python, not actual installation or CLI-parser execution.
+
+- Link native built-in compaction history/prefix projections to exact returned requests on the existing saved entry, with private invocation/result/source ownership and unchanged ACK/accounting. Extend the recorded-association parser; native/Python cases passed. Declaration-only TS2454 correction passed the affected check. No full output-delivery or actual install/bootstrap claim.

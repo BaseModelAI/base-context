@@ -30,6 +30,11 @@ export interface NativeRequestOutputAssociation {
 	readonly source: SourceSnapshotRef;
 }
 
+/** Links to built-in text projections, not whole provider messages or output-producing attempts. */
+export type NativeCompactionRequestOutputAssociation = NativeRequestOutputAssociation & {
+	readonly part: "history" | "turn-prefix";
+};
+
 export type NativeRequestOutputWriter = (owner: object, message: AssistantMessage) => Promise<string | undefined>;
 export type NativeRequestOutputSource = (
 	association: NativeRequestOutputAssociation,

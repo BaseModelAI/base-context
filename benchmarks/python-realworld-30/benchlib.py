@@ -455,6 +455,7 @@ def _mark_incomplete(accounting: dict[str, Any]) -> None:
 
 def _recorded_request_output(
     entry: dict[str, Any], header: dict[str, Any], requests: dict[str, list[dict[str, Any]]],
+    *, purpose: str = "main", purpose_detail: str | None = None,
 ) -> dict[str, Any] | None:
     """Recorded association only: neither an append ACK nor output delivery/attempt attribution."""
     output = entry.get("requestOutput")
@@ -485,11 +486,29 @@ def _recorded_request_output(
         if not matching or any(
             request.get("operationId") != operation_id or request.get("source") != source
             or any(type(request["source"][key]) is not type(value) for key, value in source.items())
-            or request.get("purpose") != "main"
+            or request.get("purpose") != purpose
+            or purpose_detail is not None and request.get("purposeDetail") != purpose_detail
             for request in matching
         ):
             return None
     return {"operationId": operation_id, "attemptIds": list(attempt_ids), "source": dict(source)}
+
+
+def _recorded_compaction_requests(
+    entry: dict[str, Any], header: dict[str, Any], requests: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]] | None:
+    # The reader retains only supported part metadata, not a claim of complete part coverage.
+    outputs = entry.get("requestOutputs")
+    if not outputs or not isinstance(entry.get("id"), str) or not entry["id"]:
+        return None
+    return [
+        {"part": output["part"], "recorded_request": _recorded_request_output(
+            {"id": entry["id"], "requestOutput": output}, header, requests,
+            purpose="summary",
+            purpose_detail="compaction" if output["part"] == "history" else "compaction-turn-prefix",
+        )}
+        for output in outputs
+    ]
 
 
 def parse_session_file(path: Path) -> dict[str, Any] | None:
@@ -497,6 +516,7 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     requests: dict[str, dict[str, Any]] = {}
     assistant_usage: list[dict[str, Any]] = []
     assistant_sources: list[tuple[dict[str, Any], bool]] = []
+    compaction_sources: list[tuple[dict[str, Any], bool]] = []
     association_requests: dict[str, list[dict[str, Any]]] = {}
     original_header = False
     native = False
@@ -523,9 +543,13 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
             # SessionJournalDecoder identifies frames by these exact fields.
             # This benchmark reads their payload, not assistant usage attributions.
             framed = "journalFrame" in entry or "previousChecksum" in entry
-            original_frame = (
+            original_envelope = (
                 type(entry.get("journalFrame")) is int and entry["journalFrame"] == 1
-                and line.endswith("\n") and "retention" not in entry and "qualification" not in entry
+                and line.endswith("\n") and "retention" not in entry
+            )
+            original_frame = original_envelope and "qualification" not in entry
+            compaction_frame = original_envelope and (
+                "qualification" not in entry or entry["qualification"] == "native-context-epoch"
             )
             if framed_format is not None and framed_format != framed:
                 incomplete = True
@@ -567,10 +591,19 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                 if original_frame and isinstance(attempt_id, str):
                     association_requests.setdefault(attempt_id, []).append({
                         "operationId": request.get("operationId"), "source": request.get("source"),
-                        "purpose": request.get("purpose"),
+                        "purpose": request.get("purpose"), "purposeDetail": request.get("purposeDetail"),
                     })
             elif entry_type == "compaction":
                 compactions += 1
+                outputs = entry.get("requestOutputs")
+                compaction_sources.append(({
+                    "id": entry.get("id"),
+                    "requestOutputs": [
+                        {key: output.get(key) for key in ("part", "operationId", "attemptIds", "source")}
+                        for output in outputs
+                        if isinstance(output, dict) and output.get("part") in ("history", "turn-prefix")
+                    ] if isinstance(outputs, list) else None,
+                }, compaction_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
             elif entry_type == "custom" and entry.get("customType") == "prime-agent.refinement":
                 refinement_entries += 1
             if entry_type != "message":
@@ -650,6 +683,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
              "recorded_request": _recorded_request_output(entry, header, association_requests)
              if original_header and original else None}
             for entry, original in assistant_sources
+        ],
+        "compaction_request_associations": [
+            {"compaction_entry_id": entry.get("id"),
+             "recorded_requests": _recorded_compaction_requests(entry, header, association_requests)
+             if original_header and original else None}
+            for entry, original in compaction_sources
         ],
         **accounting,
     }
@@ -751,6 +790,11 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "assistant_request_associations": [
             {"session_id": item["session_id"], "path": item["path"],
              "associations": item.get("assistant_request_associations")}
+            for item in sessions
+        ],
+        "compaction_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("compaction_request_associations")}
             for item in sessions
         ],
         "observed_accounting_scope": "solver_messages",

@@ -229,3 +229,27 @@ create new native output links; an archived copy can still contain historical da
 
 This covers native main-response source association only. It does not complete
 auxiliary-output or downstream delivery/rejection accounting.
+
+### Native Compaction-Request Output Links
+
+A native built-in compaction entry can also record `requestOutputs`: per-part
+`operationId`, admitted `attemptIds` and captured `source`, with `part` equal to
+`history` or `turn-prefix`. These link the requests used by the built-in text
+projection and composition. They do not mean that whole provider messages were
+saved, or identify a producing attempt. Literal and file-operation text can also
+appear in the composed summary; literal text does not create a model-request link.
+
+The native session invocation, original source owner and built-in result path
+establish eligibility. Standalone helper results do not create these links.
+Extension-provided summaries and copied labels cannot create these links. The
+metadata does not change epoch/replay qualification or physical outcome/usage.
+As with main-output links, recorded source presence, the append API's ACK and later
+caller delivery/refusal are separate. A later error does not undo a known ACK.
+
+The native parser reports `compaction_request_associations` with the compaction
+entry ID and per-part recorded request matches. Missing, ineligible or unmatched
+data is `null` (unknown), not rejected or zero committed output.
+Only understood part labels are listed; the list is not complete-output coverage.
+These are historical
+recorded associations, not current authority or delivery completeness. Branch
+summary/learning outputs and downstream delivery remain separate coverage.

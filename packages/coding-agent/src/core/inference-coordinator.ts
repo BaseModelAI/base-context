@@ -18,6 +18,7 @@ import {
 import type {
 	BoundRequestSink,
 	ContextEpochEntryRef,
+	NativeCompactionRequestOutputAssociation,
 	NativeRequestMetadata,
 	NativeRequestOutputWriter,
 	RequestOwnerRef,
@@ -37,7 +38,7 @@ import {
 } from "./request-view-selection.js";
 import { hashTurnBody, MODEL_REQUEST_ID_HEADER, unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 import type { SessionHistoryReadView } from "./session-history-index.js";
-import { captureNativeRequestOutputSource } from "./session-manager.js";
+import { captureNativeCompactionOutputSource, captureNativeRequestOutputSource } from "./session-manager.js";
 
 export interface InferenceRequestOptions {
 	readonly purpose: RequestPurpose;
@@ -53,6 +54,12 @@ export interface InferenceSettlement {
 	readonly attemptIds: readonly string[];
 	/** Reporting is not a guarantee about an opaque adapter's hidden retries. */
 	readonly physicalCoverage: "reported" | "unestablished" | "local-simulation";
+}
+
+/** Private completion identity carries this actual source, never descriptive sink labels. */
+export interface NativeCompactionOutputBinding {
+	readonly sink: BoundRequestSink;
+	readonly output: NativeCompactionRequestOutputAssociation;
 }
 
 export interface InferenceRun {
@@ -78,6 +85,8 @@ interface BoundOperation {
 }
 
 const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
+/** Internal AgentSession built-in compaction entry, not a public inference option. */
+export const captureNativeCompactionRequests = Symbol("base-context.native-compaction-requests");
 interface StreamBinding {
 	readonly coordinator: InferenceCoordinator;
 	readonly inner: StreamFn;
@@ -129,6 +138,7 @@ export function createNativeInferenceStream(
 
 /** Routes physical observations to the source writer. It owns no receipt store. */
 export class InferenceCoordinator {
+	#nativeCompactionOutput = false;
 	private retryTurn = false;
 	private requestViewBoundary?: CapturedRequestViewBoundary;
 	private active = new Set<Promise<void>>();
@@ -141,6 +151,8 @@ export class InferenceCoordinator {
 		pending: new Set<Promise<void>>(),
 		sinks: new WeakMap<BoundRequestSink, SinkUse>(),
 		mainOutputs: new WeakMap<AssistantMessage, NativeRequestOutputWriter>(),
+		compactionSettlements: new WeakMap<InferenceSettlement, NativeCompactionOutputBinding>(),
+		compactionCompletions: new WeakMap<Promise<AssistantMessage>, NativeCompactionOutputBinding>(),
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
@@ -176,6 +188,20 @@ export class InferenceCoordinator {
 		const write = this.work.mainOutputs.get(message);
 		this.work.mainOutputs.delete(message);
 		return write?.(owner, message);
+	}
+
+	/** Opt in only this new native invocation capture. Ordinary capture() deliberately does not inherit it. */
+	[captureNativeCompactionRequests](): InferenceCoordinator {
+		const captured = InferenceCoordinator.prototype.capture.call(this);
+		captured.#nativeCompactionOutput = true;
+		return captured;
+	}
+
+	/** Only the original completion promise and captured source can supply a projected-output link. */
+	takeCompactionOutput(completion: Promise<AssistantMessage>): NativeCompactionOutputBinding | undefined {
+		const binding = this.work.compactionCompletions.get(completion);
+		this.work.compactionCompletions.delete(completion);
+		return binding?.sink === this.capturedSink?.sink ? binding : undefined;
 	}
 
 	/** Owner teardown stops new sends, but never suppresses an admitted request's settlement. */
@@ -359,6 +385,18 @@ export class InferenceCoordinator {
 		bindMainOutput = false,
 	): Promise<InferenceRun> {
 		const outputSource = bindMainOutput ? captureNativeRequestOutputSource(operation.binding.sink) : undefined;
+		const part =
+			operation.metadata.purpose === "summary"
+				? operation.metadata.purposeDetail === "compaction"
+					? "history"
+					: operation.metadata.purposeDetail === "compaction-turn-prefix"
+						? "turn-prefix"
+						: undefined
+				: undefined;
+		const compactionSource =
+			this.#nativeCompactionOutput && part && this.capturedSink?.sink === operation.binding.sink
+				? captureNativeCompactionOutputSource(operation.binding.sink)
+				: undefined;
 		let outputSourceRef: SourceSnapshotRef | undefined;
 		let release!: (completion?: PromiseLike<void>) => void;
 		const pending = new Promise<void>((resolve) => {
@@ -395,7 +433,7 @@ export class InferenceCoordinator {
 				});
 				if (write) this.work.mainOutputs.set(message, write);
 			}
-			return {
+			const settlement: InferenceSettlement = {
 				message: message!,
 				operationId: operation.metadata.operationId,
 				attemptIds: admittedAttempts.map(({ attemptId }) => attemptId),
@@ -405,6 +443,19 @@ export class InferenceCoordinator {
 						? "local-simulation"
 						: "unestablished",
 			};
+			if (part && compactionSource && outputSourceRef) {
+				const output = compactionSource({
+					operationId: settlement.operationId,
+					attemptIds: settlement.attemptIds,
+					source: outputSourceRef,
+				});
+				if (output)
+					this.work.compactionSettlements.set(settlement, {
+						sink: operation.binding.sink,
+						output: { ...output, part },
+					});
+			}
+			return settlement;
 		};
 		try {
 			this.assertAdmission();
@@ -615,13 +666,21 @@ export class InferenceCoordinator {
 		);
 	}
 
-	async complete(
+	complete(
 		model: Model<Api>,
 		context: Context,
 		options: SimpleStreamOptions | undefined,
 		request: InferenceRequestOptions,
 	): Promise<AssistantMessage> {
-		return (await (await this.start(model, context, options, request)).settled).message;
+		let completion!: Promise<AssistantMessage>;
+		completion = (async () => {
+			const settlement = await (await this.start(model, context, options, request)).settled;
+			const binding = this.work.compactionSettlements.get(settlement);
+			this.work.compactionSettlements.delete(settlement);
+			if (binding) this.work.compactionCompletions.set(completion, binding);
+			return settlement.message;
+		})();
+		return completion;
 	}
 
 	bindStream(streamFn: StreamFn, request: InferenceRequestOptions): AgentOwnedStreamFn {

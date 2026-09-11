@@ -201,7 +201,11 @@ import {
 	validateGoalObjective,
 } from "./goals.js";
 import type { IpythonSentMessagesCursor } from "./history-index.js";
-import { InferenceCoordinator, type SessionRuntimeServices } from "./inference-coordinator.js";
+import {
+	captureNativeCompactionRequests,
+	InferenceCoordinator,
+	type SessionRuntimeServices,
+} from "./inference-coordinator.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -9386,6 +9390,7 @@ export class AgentSession {
 		}
 
 		let extensionCompaction: CompactionResult | undefined;
+		let nativeCompaction: CompactionResult | undefined;
 		let fromExtension = false;
 
 		const semanticCompaction = semanticEdges.beginCompaction();
@@ -9449,10 +9454,10 @@ export class AgentSession {
 						throw error;
 					}
 				};
-				const summaryRequests = requests.capture();
+				const summaryRequests = requests[captureNativeCompactionRequests]();
 				let summaryFailure: unknown;
 				try {
-					({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
+					nativeCompaction = await compact(
 						preparation,
 						model,
 						apiKey,
@@ -9462,7 +9467,8 @@ export class AgentSession {
 						thinkingLevel,
 						summaryCall,
 						summaryRequests,
-					));
+					);
+					({ summary, firstKeptEntryId, tokensBefore, details, usage } = nativeCompaction);
 				} catch (error) {
 					summaryFailure = error;
 					throw error;
@@ -9491,13 +9497,18 @@ export class AgentSession {
 					throw new Error("Recovery compaction details require an object");
 				const recoveryDetails = { ...result.details, [CONTEXT_EPOCH_DETAIL]: recovery };
 				result.details = recoveryDetails;
-				savedCompactionId = await compaction[appendContextEpoch](recovery, tokensBefore, {
-					summary,
-					details: recoveryDetails,
-					fromHook: fromExtension,
-					customInstructions,
-					usage,
-				});
+				savedCompactionId = await compaction[appendContextEpoch](
+					recovery,
+					tokensBefore,
+					{
+						summary,
+						details: recoveryDetails,
+						fromHook: fromExtension,
+						customInstructions,
+						usage,
+					},
+					nativeCompaction,
+				);
 			} else {
 				savedCompactionId = await compaction.appendCompaction(
 					summary,
@@ -9507,6 +9518,7 @@ export class AgentSession {
 					fromExtension,
 					customInstructions,
 					usage,
+					nativeCompaction,
 				);
 			}
 			// Only the canonical append ACK commits summary slices and advances the semantic epoch.

@@ -7,13 +7,18 @@
 
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { AssistantMessage, Model, Usage } from "@ponythewhite/base-context-ai";
-import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
+import {
+	completeInference,
+	InferenceCoordinator,
+	type NativeCompactionOutputBinding,
+} from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
+import type { NativeCompactionRequestOutputAssociation } from "../request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
 import { addAssistantUsage, emptyUsage } from "../usage.js";
@@ -35,6 +40,38 @@ export interface CompactionDetails {
 export interface SummarySlice {
 	summary: string;
 	usage?: Usage;
+}
+
+// Identity follows the actual completion -> text slice -> built-in composition, never copied fields.
+const nativeSummarySlices = new WeakMap<SummarySlice, { summary: string; binding: NativeCompactionOutputBinding }>();
+const nativeCompactionResults = new WeakMap<object, { summary: string; bindings: NativeCompactionOutputBinding[] }>();
+
+function captureSummarySlice(
+	slice: SummarySlice,
+	requests: InferenceCoordinator | undefined,
+	completion: Promise<AssistantMessage>,
+	part: NativeCompactionRequestOutputAssociation["part"],
+): SummarySlice {
+	const binding =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takeCompactionOutput.call(requests, completion)
+			: undefined;
+	if (binding?.output.part === part) nativeSummarySlices.set(slice, { summary: slice.summary, binding });
+	return slice;
+}
+
+/** Internal append input: only this exact built-in result and original sink can contribute links. */
+export function takeCompactionRequestOutputs(
+	result: object | undefined,
+	sink: object,
+	summary: string,
+): readonly NativeCompactionRequestOutputAssociation[] | undefined {
+	const captured = result ? nativeCompactionResults.get(result) : undefined;
+	if (result) nativeCompactionResults.delete(result);
+	// Equality only checks an already privately bound projection for mutation; it never discovers a link.
+	if (!captured || captured.summary !== summary) return undefined;
+	const outputs = captured.bindings.filter((binding) => binding.sink === sink).map((binding) => binding.output);
+	return outputs.length ? outputs : undefined;
 }
 
 /**
@@ -552,7 +589,7 @@ export async function generateSummary(
 			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
 			: { maxTokens, signal, apiKey, headers };
 
-	const response = await completeInference(
+	const completion = completeInference(
 		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
@@ -565,6 +602,7 @@ export async function generateSummary(
 		},
 	);
 
+	const response = await completion;
 	if (response.stopReason === "error") {
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
@@ -574,7 +612,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return { summary: textContent, usage: response.usage };
+	return captureSummarySlice({ summary: textContent, usage: response.usage }, requests, completion, "history");
 }
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
@@ -857,13 +895,20 @@ export async function compact(
 		usage ??= emptyUsage();
 		addAssistantUsage(usage, slice.usage);
 	}
-	return {
+	const result: CompactionResult = {
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
 		usage,
 	};
+	const bindings = slices.flatMap((slice) => {
+		const captured = nativeSummarySlices.get(slice);
+		nativeSummarySlices.delete(slice);
+		return captured?.summary === slice.summary ? [captured.binding] : [];
+	});
+	if (bindings.length) nativeCompactionResults.set(result, { summary, bindings });
+	return result;
 }
 
 /**
@@ -891,7 +936,7 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await completeInference(
+	const completion = completeInference(
 		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
@@ -906,15 +951,17 @@ async function generateTurnPrefixSummary(
 		},
 	);
 
+	const response = await completion;
 	if (response.stopReason === "error") {
 		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	return {
+	const slice: SummarySlice = {
 		summary: response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map((c) => c.text)
 			.join("\n"),
 		usage: response.usage,
 	};
+	return captureSummarySlice(slice, requests, completion, "turn-prefix");
 }

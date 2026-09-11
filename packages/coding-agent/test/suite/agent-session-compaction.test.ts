@@ -16,7 +16,7 @@ import { CompactionCommittedError } from "../../src/core/agent-session.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
-import { type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
+import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
@@ -160,6 +160,7 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
 		let postAckSummary = false;
+		let extensionRequestOutputs: CompactionEntry["requestOutputs"];
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			persistSession: true,
@@ -172,6 +173,7 @@ describe("AgentSession compaction characterization", () => {
 								summary: "acknowledged refresh probe",
 								firstKeptEntryId: event.preparation.firstKeptEntryId,
 								tokensBefore: event.preparation.tokensBefore,
+								requestOutputs: extensionRequestOutputs,
 							},
 						};
 					});
@@ -317,6 +319,24 @@ describe("AgentSession compaction characterization", () => {
 		expect(branchReads).toBe(1);
 		expect(captures).toHaveBeenCalledWith(bound.mock.results[0].value);
 		const entry = (await harness.sessionManager.readEntries()).find((candidate) => candidate.type === "compaction");
+		if (!entry || entry.type !== "compaction" || !entry.requestOutputs)
+			throw new Error("Expected native compaction request links");
+		expect(entry.requestOutputs.map((output) => output.part).sort()).toEqual(["history", "turn-prefix"]);
+		for (const output of entry.requestOutputs) {
+			const purposeDetail = output.part === "history" ? "compaction" : "compaction-turn-prefix";
+			const request = receipts.find(({ request }) => request.purposeDetail === purposeDetail)?.request;
+			if (!request) throw new Error("Expected the recorded summary request");
+			// This fixture admits one attempt per actual history/prefix request, without retries.
+			expect(output).toEqual({
+				part: output.part,
+				operationId: request.operationId,
+				attemptIds: [request.attemptId],
+				source: request.source,
+			});
+		}
+		const originalRequestOutputs = structuredClone(entry.requestOutputs);
+		extensionRequestOutputs = structuredClone(originalRequestOutputs);
+		expect(JSON.stringify(bodies)).not.toContain("requestOutputs");
 
 		expect(result.summary).toContain("model-generated summary");
 		expect(result.tokensBefore).toBeGreaterThan(0);
@@ -346,6 +366,7 @@ describe("AgentSession compaction characterization", () => {
 			role: "compactionSummary",
 			summary: expect.stringContaining("model-generated summary"),
 		});
+		expect(literalMessages[0]).not.toHaveProperty("requestOutputs");
 		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "manual" })]);
 		expect(harness.eventsOfType("compaction_end")).toEqual([
 			expect.objectContaining({
@@ -399,10 +420,15 @@ describe("AgentSession compaction characterization", () => {
 			expect(committed.cause).toBe(refreshError);
 			await expect(harness.session.compact()).rejects.toBe(committed);
 			expect(appendProbe).toHaveBeenCalledOnce();
-			expect(await harness.sessionManager.readEntry(committed.entryId)).toMatchObject({
+			const extensionEntry = await harness.sessionManager.readEntry(committed.entryId);
+			expect(extensionEntry).toMatchObject({
 				id: committed.entryId,
 				type: "compaction",
 				summary: committed.result.summary,
+			});
+			expect(extensionEntry).not.toHaveProperty("requestOutputs");
+			expect(await harness.sessionManager.readEntry(entry.id)).toMatchObject({
+				requestOutputs: originalRequestOutputs,
 			});
 			expect(
 				(await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction"),
@@ -459,13 +485,15 @@ describe("AgentSession compaction characterization", () => {
 			const releasing = admitted.release();
 			const [entryId, readBranch] = await Promise.all([appending, reading, releasing]);
 			expect(readBranch).toEqual(branchBeforeAdmission);
-			expect(await harness.sessionManager.readEntry(entryId)).toMatchObject({
+			const genericEntry = await harness.sessionManager.readEntry(entryId);
+			expect(genericEntry).toMatchObject({
 				type: "compaction",
 				summary: "bound argument snapshot",
 				firstKeptEntryId: firstKept.id,
 				details: originalDetails,
 				usage: originalUsage,
 			});
+			expect(genericEntry).not.toHaveProperty("requestOutputs");
 		} finally {
 			await admitted.release();
 		}
