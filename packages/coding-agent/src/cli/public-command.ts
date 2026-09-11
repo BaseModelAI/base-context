@@ -327,10 +327,29 @@ function describeSessionImportError(error: unknown): string {
 }
 
 async function runSessionImport(args: string[]): Promise<PublicCommandResult> {
-	if (args.length !== 1 || !args[0] || args[0].startsWith("-"))
+	const preview = args.includes("--preview");
+	const files = args.filter((arg) => arg !== "--preview");
+	if (files.length !== 1 || !files[0] || files[0].startsWith("-") || args.length !== (preview ? 2 : 1))
 		return fail(`Usage: ${APP_NAME} ${getCommandSpec(["session", "import"])!.usage}`);
 	const destinationCwd = process.cwd();
-	const sourcePath = resolve(destinationCwd, args[0]);
+	const sourcePath = resolve(destinationCwd, files[0]);
+	if (preview) {
+		try {
+			const report = await SessionManager.previewRetainedImport(sourcePath, destinationCwd);
+			console.log(JSON.stringify(report, null, 2));
+			console.log(
+				"Captured-source preparation completed. No session destination was created. " +
+					"Destination creation/indexing, canonical epoch activation and reference/replay coverage were not assessed. " +
+					"A later import rereads the source and can still fail. " +
+					"The existing V6 tool-continuation refusal remains part of real epoch activation, not this preview.",
+			);
+		} catch (error) {
+			return fail(
+				`Session import preview did not complete: ${describeSessionImportError(error)}. No session destination was created.`,
+			);
+		}
+		return HANDLED;
+	}
 	let manager: SessionManager;
 	try {
 		manager = await SessionManager.importRetainedFrom(sourcePath, destinationCwd);

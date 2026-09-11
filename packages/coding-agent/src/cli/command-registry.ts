@@ -168,10 +168,10 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["session", "import"],
-		usage: "session import <file>",
+		usage: "session import [--preview] <file>",
 		summary: "Import one session file into a new owned session",
 		description:
-			"Imports supported legacy or native session data as retained history. Records must end with LF. Prints the new session path; the source is not changed.",
+			"Imports supported legacy or native session data as retained history. Records must end with LF. Prints the new session path; the source is not changed. --preview reports source preparation without creating a destination or assessing epoch activation/reference coverage; it does not guarantee a later import.",
 	},
 	{
 		path: ["session", "export"],

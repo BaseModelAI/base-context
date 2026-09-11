@@ -66,6 +66,23 @@ or activation failures can leave an owned destination; there is no automatic
 delete/rollback or atomic whole-import guarantee. A successful import and a later
 close/report error remain separate outcomes.
 
+### Previewing Source Preparation
+
+```bash
+base-context session import --preview /path/to/session.jsonl
+```
+
+Preview uses the same captured-source preparation as an actual import. It reports
+input format/version, decoded record/JSON-byte counts, prepared retained entries,
+and the intended target directory. It creates no destination or reserved session
+ID. The SDK entry point is `SessionManager.previewRetainedImport`.
+
+This is **not a full import dry run**. Destination creation/indexing, canonical
+epoch activation, and reference/replay coverage are not assessed. For example,
+the native version6 tool-continuation refusal above remains on actual activation.
+A later import reads the source again and can still fail. Preview does not read
+legacy parent-session files to infer worker depth or inspect runtime ownership.
+
 ## Resuming and Deleting Sessions
 
 In a running session, `/resume` opens the agents view. Its live roster is separate

@@ -568,6 +568,11 @@ authority lowered, including native-framed input. Supported versions and complet
 captured records are required. It prints the new path without starting a runtime;
 it does not migrate credentials or settings. See [external session imports](docs/sessions.md#importing-an-external-session).
 
+Use `base-context session import --preview <file>` to report the same source
+preparation without creating a destination. It does not assess destination
+creation/indexing, canonical epoch activation or reference/replay coverage.
+A later import rereads the source and can still fail; this is not a full import dry run.
+
 ### Tool Options
 
 | Option | Description |

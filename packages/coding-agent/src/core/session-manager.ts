@@ -186,6 +186,30 @@ export interface NewSessionOptions {
 	rlmDepth?: number;
 }
 
+/** Source preparation only. No destination is allocated and no activation result is predicted. */
+export interface SessionImportPreview {
+	sourcePath: string;
+	sourceFormat: "legacy-jsonl" | "native-framed";
+	inputVersion: number;
+	/** Decoded records after the initial header. */
+	entriesRead: number;
+	/** Decoded JSON bytes including the header, not physical file bytes. */
+	sourceJsonBytes: number;
+	/** Prepared source entries, excluding the new header and any rebuilt epoch. */
+	preparedEntryCount: number;
+	targetCwd: string;
+	targetDirectory: string;
+	retention: "retained-import";
+	sourceHeader: "replace";
+	gitState: "omit-and-relink-parents";
+	capture: "bounded-prefix-not-live-snapshot";
+	destinationCreated: false;
+	destinationCreationAndIndexing: "not-assessed";
+	canonicalEpochActivation: "not-assessed";
+	referenceReplayCoverage: "not-assessed";
+	laterImport: "rereads-source-and-can-fail";
+}
+
 export type SessionPersistListener = (sessionFile: string) => void;
 
 export interface SessionEntryBase {
@@ -4444,6 +4468,36 @@ export class SessionManager {
 		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, "retained-import", { ...limits });
 	}
 
+	/** Prepare one retained source without allocating a destination or assessing its activation. */
+	static async previewRetainedImport(
+		sourcePath: string,
+		targetCwd: string,
+		sessionDir?: string,
+		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+	): Promise<SessionImportPreview> {
+		const targetDirectory = assertProductStatePath(sessionDir ?? getDefaultSessionDir(targetCwd));
+		const prepared = await SessionManager._prepareCopy(sourcePath, "retained-import", { ...limits });
+		return {
+			sourcePath: prepared.sourcePath,
+			sourceFormat: prepared.sourceFormat,
+			inputVersion: prepared.inputVersion,
+			entriesRead: prepared.entriesRead,
+			sourceJsonBytes: prepared.sourceJsonBytes,
+			preparedEntryCount: prepared.targetEntries.length,
+			targetCwd,
+			targetDirectory,
+			retention: "retained-import",
+			sourceHeader: "replace",
+			gitState: "omit-and-relink-parents",
+			capture: "bounded-prefix-not-live-snapshot",
+			destinationCreated: false,
+			destinationCreationAndIndexing: "not-assessed",
+			canonicalEpochActivation: "not-assessed",
+			referenceReplayCoverage: "not-assessed",
+			laterImport: "rereads-source-and-can-fail",
+		};
+	}
+
 	private static async _copyFrom(
 		sourcePath: string,
 		targetCwd: string,
@@ -4451,6 +4505,35 @@ export class SessionManager {
 		retention?: JournalFrameRetention,
 		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
 	): Promise<SessionManager> {
+		const targetDirectory = resolve(sessionDir ?? getDefaultSessionDir(targetCwd));
+		const prepared = await SessionManager._prepareCopy(sourcePath, retention, limits);
+		const manager = new SessionManager(targetCwd, targetDirectory, true, {
+			parentSession: sourcePath,
+			rlmDepth: resolveSessionRlmDepth(prepared.sourceHeader, sourcePath),
+		});
+		prepared.targetEntries.unshift(manager.fileEntries[0]);
+		manager.fileEntries = prepared.targetEntries;
+		manager._buildIndex();
+		await manager._openNew();
+		try {
+			await manager._rebuildCopiedEpoch(prepared.epochCopy, limits);
+		} catch (error) {
+			try {
+				await manager.close();
+			} catch (cleanup) {
+				throw new AggregateError([error, cleanup], "Copied context activation and destination close failed");
+			}
+			throw error;
+		}
+		return manager;
+	}
+
+	/** The same held source preparation feeds preview and the real destination writer. */
+	private static async _prepareCopy(
+		sourcePath: string,
+		retention: JournalFrameRetention | undefined,
+		limits: SessionHistoryReadLimits,
+	) {
 		const { maxEntries, maxSourceBytes } = limits;
 		const explicitImport = retention === "retained-import";
 		if (
@@ -4462,7 +4545,13 @@ export class SessionManager {
 			throw new Error("Invalid copied history limits");
 		let entriesRead = 0;
 		let sourceBytes = 0;
-		let sourceHeader: SessionHeader | undefined;
+		let sourceHeader:
+			| {
+					entry: SessionHeader;
+					format: SessionImportPreview["sourceFormat"];
+					inputVersion: number;
+			  }
+			| undefined;
 		const capturedPath = realpathIfPresent(resolve(sourcePath));
 		const capturedEntries: CopiedEpochEntry[] = [];
 		let through = 0;
@@ -4492,7 +4581,11 @@ export class SessionManager {
 						const version = entry.version === undefined ? 1 : entry.version;
 						if (explicitImport && ![1, 2, CURRENT_SESSION_VERSION].includes(version))
 							throw new Error(`Unsupported session version for retained import: ${String(entry.version)}`);
-						sourceHeader = entry;
+						sourceHeader = {
+							entry,
+							format: record.source ? "native-framed" : "legacy-jsonl",
+							inputVersion: version,
+						};
 						if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
 					} else {
 						if (++entriesRead > maxEntries) throw new Error("Copied history entry budget exceeded");
@@ -4525,10 +4618,6 @@ export class SessionManager {
 		) {
 			applyChildUsageAttributions(targetEntries);
 		}
-		const manager = new SessionManager(targetCwd, sessionDir ?? getDefaultSessionDir(targetCwd), true, {
-			parentSession: sourcePath,
-			rlmDepth: resolveSessionRlmDepth(sourceHeader, sourcePath),
-		});
 		// Relink after reading so even forward references through dropped git facts keep their old meaning.
 		for (let index = 0; index < targetEntries.length; index++) {
 			const entry = targetEntries[index] as SessionEntry;
@@ -4546,30 +4635,22 @@ export class SessionManager {
 					entryQualifications.get(entry),
 				);
 		}
-		targetEntries.unshift(manager.fileEntries[0]);
-		manager.fileEntries = targetEntries;
-		manager._buildIndex();
-		await manager._openNew();
-		try {
-			await manager._rebuildCopiedEpoch(
-				{
-					sessionId: sourceHeader.id,
-					sessionFile: capturedPath,
-					through,
-					entries: capturedEntries,
-					retained: retention === "retained-import",
-				},
-				limits,
-			);
-		} catch (error) {
-			try {
-				await manager.close();
-			} catch (cleanup) {
-				throw new AggregateError([error, cleanup], "Copied context activation and destination close failed");
-			}
-			throw error;
-		}
-		return manager;
+		return {
+			sourcePath: capturedPath,
+			sourceFormat: sourceHeader.format,
+			inputVersion: sourceHeader.inputVersion,
+			entriesRead,
+			sourceJsonBytes: sourceBytes,
+			sourceHeader: sourceHeader.entry,
+			targetEntries,
+			epochCopy: {
+				sessionId: sourceHeader.entry.id,
+				sessionFile: capturedPath,
+				through,
+				entries: capturedEntries,
+				retained: retention === "retained-import",
+			},
+		};
 	}
 
 	static async list(cwd: string, sessionDir?: string, callbacks?: SessionListCallbacks): Promise<SessionInfo[]> {

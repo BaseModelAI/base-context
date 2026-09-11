@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -281,6 +281,43 @@ describe("public command routing", () => {
 				await writer.close();
 			}
 			const before = readFileSync(source);
+			const destinationDir = join(root, "owned-sessions");
+			expect(existsSync(destinationDir)).toBe(false);
+			await expect(handlePublicCommand(["session", "import", "--preview", basename(source)])).resolves.toEqual({
+				handled: true,
+				args: [],
+				explicitAgentsView: false,
+			});
+			expect(process.exitCode).toBeUndefined();
+			const previewJson = vi.mocked(console.log).mock.calls.at(-2)?.[0];
+			if (typeof previewJson !== "string") throw new Error("Preview did not report its source preparation");
+			const preview: unknown = JSON.parse(previewJson);
+			expect(preview).toEqual({
+				sourcePath: source,
+				sourceFormat: "native-framed",
+				inputVersion: 3,
+				entriesRead: 1,
+				sourceJsonBytes: expect.any(Number),
+				preparedEntryCount: 1,
+				targetCwd: root,
+				targetDirectory: destinationDir,
+				retention: "retained-import",
+				sourceHeader: "replace",
+				gitState: "omit-and-relink-parents",
+				capture: "bounded-prefix-not-live-snapshot",
+				destinationCreated: false,
+				destinationCreationAndIndexing: "not-assessed",
+				canonicalEpochActivation: "not-assessed",
+				referenceReplayCoverage: "not-assessed",
+				laterImport: "rereads-source-and-can-fail",
+			});
+			expect(vi.mocked(console.log).mock.calls.at(-1)?.[0]).toContain(
+				"Captured-source preparation completed. No session destination was created. " +
+					"Destination creation/indexing, canonical epoch activation and reference/replay coverage were not assessed. " +
+					"A later import rereads the source and can still fail.",
+			);
+			expect(existsSync(destinationDir)).toBe(false);
+			expect(readFileSync(source)).toEqual(before);
 			await expect(handlePublicCommand(["session", "import", basename(source)])).resolves.toEqual({
 				handled: true,
 				args: [],

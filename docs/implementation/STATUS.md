@@ -2710,3 +2710,37 @@ No new queue, limit, status producer or wire/state format is introduced. Callbac
 already handed to completion or the event loop are not promised drained by this
 change. This is not a global memory bound or measured efficiency gain. W72 budgets,
 live benchmarks, installation and publication remain outside this change.
+
+## W78 / G12 — preview single-session source preparation
+
+`base-context session import --preview <file>` and
+`SessionManager.previewRetainedImport` share actual source preparation with retained
+import. The held bounded reader, input-version check, complete-tail rule, legacy
+conversion, retention lowering and git-parent relinking run before any destination
+constructor. Real import consumes the same prepared entries; there is no second
+parser, body store or preview/apply token.
+
+The report identifies the observed input format and pre-conversion version,
+decoded source records/JSON bytes, prepared retained-entry count and intended
+target directory. These are not physical-file bytes or final destination totals.
+It creates no destination or session ID. Destination creation/indexing, canonical
+epoch activation and reference/replay coverage remain explicitly unassessed.
+A later import recaptures the source and can still fail, including the existing
+version6 tool-continuation refusal. Legacy parent-depth reads and all destination
+ownership/activation remain on actual import, not preview.
+
+This is a limited source-preparation report, not full G12/F16 migration, a live
+source snapshot or a full import dry run. No whole-home, credential, schedule,
+job or runtime migration, new format, native-owner simulation or staging store.
+W72 auxiliary-budget defaults remain unapproved and unchanged.
+
+Two existing offline selectors passed first (4050312, 2 passed/68 skipped):
+`maps model listing and session export to the existing runtime flags` exercises
+native-framed preview without a destination, then real retained import/reopen;
+`only treats LF bytes as JSONL record boundaries` checks the original legacy
+input version and decoded bytes, then incomplete-tail preview/import refusal and
+the existing ordinary-fork prefix control. These used actual Node22.12, fresh
+six-variable state, network/PID/proc isolation and the package Vitest runner.
+Required check4050317 passed (1046 files/no fixes, types, installer and browser
+checks). No corrections or reruns. This is not installed-CLI, native epoch
+activation, full migration, live-provider or publication evidence.

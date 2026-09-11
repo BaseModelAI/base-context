@@ -158,9 +158,27 @@ describe("loadEntriesFromFile", () => {
 		expect((await readSessionInfo(file))?.firstMessage).toBe(content);
 
 		const complete = readFileSync(file);
+		const destinationDir = join(tempDir, "retained-import");
+		await expect(SessionManager.previewRetainedImport(file, tempDir, destinationDir)).resolves.toMatchObject({
+			sourceFormat: "legacy-jsonl",
+			inputVersion: 1,
+			entriesRead: 1,
+			sourceJsonBytes: complete.length - 2, // Two LF delimiters are not decoded JSON bytes.
+			preparedEntryCount: 1,
+			retention: "retained-import",
+			destinationCreated: false,
+			canonicalEpochActivation: "not-assessed",
+			referenceReplayCoverage: "not-assessed",
+		});
+		expect(existsSync(destinationDir)).toBe(false);
+		expect(readFileSync(file)).toEqual(complete);
 		const incomplete = complete.subarray(0, complete.length - 1);
 		writeFileSync(file, incomplete);
-		const destinationDir = join(tempDir, "retained-import");
+		await expect(SessionManager.previewRetainedImport(file, tempDir, destinationDir)).rejects.toThrow(
+			"Captured session source has an incomplete final record",
+		);
+		expect(existsSync(destinationDir)).toBe(false);
+		expect(readFileSync(file)).toEqual(incomplete);
 		await expect(SessionManager.importRetainedFrom(file, tempDir, destinationDir)).rejects.toThrow(
 			"Captured session source has an incomplete final record",
 		);
