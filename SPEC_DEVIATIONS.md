@@ -1773,3 +1773,18 @@ Two existing offline loader cases passed (2 passed/30 skipped): the valid-Skill
 case loads the actual bundled metadata, body and linked Python guide; the missing
 Python-package case retains its metadata-only fallback. Required `npm run check`
 passed with 1046 files/no fixes. No install, kernel launch or provider call was run.
+
+
+## W85 / G13 — extension guide uses owned paths and SDKs
+
+The extension guide now uses Base Context commands, extension directories and
+first-party SDK imports. It links to this branch's source setup and states that
+public packages/installers are not released. Third-party examples, provider
+identities, `pi` and API behavior are unchanged. This is a guide correction,
+not a broader extension API or platform assessment.
+
+Two existing offline cases passed (2 passed/25 skipped). The actual Quick Start
+loads through extension discovery and registers `greet` and `hello`; the existing
+missing-default-export case still refuses. Required `npm run check` passed with
+1046 files/no fixes. No install, model call or extension API behavior was tested
+beyond those loader paths.

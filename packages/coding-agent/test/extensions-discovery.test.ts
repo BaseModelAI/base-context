@@ -279,13 +279,19 @@ describe("extensions discovery", () => {
 	});
 
 	it("loads extensions and registers tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), extensionCodeWithTool("my-tool"));
+		const guide = fs.readFileSync(path.join(__dirname, "../docs/extensions.md"), "utf8");
+		const quickStart = guide.match(/## Quick Start[\s\S]*?```typescript\n([\s\S]*?)\n```/)?.[1];
+		if (!quickStart) throw new Error("Extension guide Quick Start is missing");
+		expect(quickStart).toContain('from "@ponythewhite/base-context"');
+		expect(guide).toContain("`~/.base-context/extensions/my-extension.ts`");
+		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), quickStart);
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
+		expect(result.extensions[0].tools.has("greet")).toBe(true);
+		expect(result.extensions[0].commands.has("hello")).toBe(true);
 	});
 
 	it("reports errors for invalid extension code", async () => {
