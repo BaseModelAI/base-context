@@ -19,9 +19,11 @@ import type {
 	BoundRequestSink,
 	ContextEpochEntryRef,
 	NativeRequestMetadata,
+	NativeRequestOutputWriter,
 	RequestOwnerRef,
 	RequestPurpose,
 	ResolvedModelContract,
+	SourceSnapshotRef,
 } from "./request-events.js";
 import {
 	type CapturedRequestViewBoundary,
@@ -35,6 +37,7 @@ import {
 } from "./request-view-selection.js";
 import { hashTurnBody, MODEL_REQUEST_ID_HEADER, unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 import type { SessionHistoryReadView } from "./session-history-index.js";
+import { captureNativeRequestOutputSource } from "./session-manager.js";
 
 export interface InferenceRequestOptions {
 	readonly purpose: RequestPurpose;
@@ -137,6 +140,7 @@ export class InferenceCoordinator {
 	private work = {
 		pending: new Set<Promise<void>>(),
 		sinks: new WeakMap<BoundRequestSink, SinkUse>(),
+		mainOutputs: new WeakMap<AssistantMessage, NativeRequestOutputWriter>(),
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
@@ -165,6 +169,13 @@ export class InferenceCoordinator {
 				/* Notification is not execution. */
 			}
 		}
+	}
+
+	/** Consume only this owner's real returned object. Labels and replacement messages remain unassociated. */
+	appendMainOutput(message: AssistantMessage, owner: object): Promise<string | undefined> | undefined {
+		const write = this.work.mainOutputs.get(message);
+		this.work.mainOutputs.delete(message);
+		return write?.(owner, message);
 	}
 
 	/** Owner teardown stops new sends, but never suppresses an admitted request's settlement. */
@@ -345,7 +356,10 @@ export class InferenceCoordinator {
 		context: Context,
 		options: SimpleStreamOptions | undefined,
 		send: StreamFn,
+		bindMainOutput = false,
 	): Promise<InferenceRun> {
+		const outputSource = bindMainOutput ? captureNativeRequestOutputSource(operation.binding.sink) : undefined;
+		let outputSourceRef: SourceSnapshotRef | undefined;
 		let release!: (completion?: PromiseLike<void>) => void;
 		const pending = new Promise<void>((resolve) => {
 			release = resolve;
@@ -373,6 +387,14 @@ export class InferenceCoordinator {
 			}
 			if (budgetFailure !== undefined && !failures.includes(budgetFailure)) failures.push(budgetFailure);
 			await this.finishSink(operation.binding, receiptWrites, activeUser, failures);
+			if (message && outputSource && outputSourceRef) {
+				const write = outputSource({
+					operationId: operation.metadata.operationId,
+					attemptIds: admittedAttempts.map(({ attemptId }) => attemptId),
+					source: outputSourceRef,
+				});
+				if (write) this.work.mainOutputs.set(message, write);
+			}
 			return {
 				message: message!,
 				operationId: operation.metadata.operationId,
@@ -418,6 +440,7 @@ export class InferenceCoordinator {
 					: undefined;
 			}
 			const source = Object.freeze({ ...(await operation.binding.sink.source) });
+			outputSourceRef = source;
 			const metadata: NativeRequestMetadata = {
 				...operation.metadata,
 				source,
@@ -632,7 +655,16 @@ export class InferenceCoordinator {
 				// A semantic retry can reuse its operation ID, but compilation owns this exact source frontier.
 				previous = executor.bindOperation(model, { ...request, semanticEdgeId }, operationId);
 			}
-			return (await executor.execute(previous, model, context, options, inner)).events;
+			return (
+				await executor.execute(
+					previous,
+					model,
+					context,
+					options,
+					inner,
+					captured !== undefined && request.purpose === "main",
+				)
+			).events;
 		};
 		wrapped[REQUEST_STREAM_BINDING] = { coordinator: this, inner };
 		return wrapped;

@@ -394,6 +394,36 @@ describe("createAgentSessionFromServices", () => {
 			// A same-task tool continuation may reuse its ACK; eviction must commit a new boundary.
 			expect(epochsAtSend[2]).not.toBe(epochsAtSend[1]);
 			expect(bodies).toHaveLength(3);
+			const outputSourceEntries = await epochManager.readEntries();
+			const sourceAssistants = outputSourceEntries
+				.filter((entry) => entry.type === "message")
+				.filter((entry) => entry.message.role === "assistant");
+			expect(sourceAssistants).toHaveLength(4);
+			// The manually seeded assistant is not a native request output.
+			expect(sourceAssistants[0].requestOutput).toBeUndefined();
+			const outputAdmissions = outputSourceEntries
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request)
+				.filter((event) => event.type === "attempt_admitted");
+			for (const assistant of sourceAssistants.slice(1)) {
+				const link = assistant.requestOutput;
+				if (!link) throw new Error("Expected recorded native main-request output association");
+				expect(link.source).toMatchObject({
+					sessionId: epochManager.getSessionId(),
+					sessionFile: epochManager.getSessionFile(),
+					persistent: true,
+				});
+				const requestAdmissions = outputAdmissions.filter((event) => event.operationId === link.operationId);
+				expect(requestAdmissions.length).toBeGreaterThan(0);
+				expect(link.attemptIds).toEqual(requestAdmissions.map((event) => event.attemptId));
+				for (const admission of requestAdmissions) expect(admission.source).toEqual(link.source);
+				expect(assistant.message).not.toHaveProperty("requestOutput");
+				const recorded = await epochManager.readBranchHistory((history) =>
+					history.hydrateEntry(assistant.id, 2 * 1024 * 1024),
+				);
+				expect(recorded?.source.qualification).toBeUndefined();
+			}
+			expect(bodies.every((body) => !body.includes('"requestOutput"'))).toBe(true);
 			expect(bodies[0]).toContain("OPTIONAL_PRIOR_LITERAL");
 			expect(bodies[1]).toContain("OPTIONAL_PRIOR_LITERAL");
 			expect(bodies[2]).not.toContain("OPTIONAL_PRIOR_LITERAL");
@@ -847,11 +877,25 @@ describe("createAgentSessionFromServices", () => {
 			);
 			expect(executions).toBe(0);
 			if (!executionId || !assistantEntryId) throw new Error("Expected captured original execution references");
+			const stoppedAssistant = await epochManager.readEntry(assistantEntryId);
+			if (stoppedAssistant?.type !== "message" || !stoppedAssistant.requestOutput)
+				throw new Error("Expected the recorded assistant link after the controlled post-ACK stop");
+			const stoppedOutputLink = stoppedAssistant.requestOutput;
+			const stoppedRequestSettlements = (await epochManager.readEntries())
+				.filter((entry) => entry.type === "request")
+				.map((entry) => entry.request)
+				.filter((event) => event.type === "attempt_settled")
+				.filter((event) => event.operationId === stoppedOutputLink.operationId);
+			expect(stoppedRequestSettlements.map((event) => event.attemptId)).toEqual(stoppedOutputLink.attemptIds);
+			for (const event of stoppedRequestSettlements) expect(event.receipt.outcome).toBe("completed");
 			expect(await epochManager.readEntry(executionId)).toBeUndefined();
 			const pendingFile = epochManager.getSessionFile()!;
 			await epochSession.disposeAsync({ kernelSnapshot: false });
 			await epochManager.close();
 			epochManager = await SessionManager.open(pendingFile);
+			const reopenedStoppedAssistant = await epochManager.readEntry(assistantEntryId);
+			if (reopenedStoppedAssistant?.type !== "message") throw new Error("Expected the recorded assistant on reopen");
+			expect(reopenedStoppedAssistant.requestOutput).toEqual(stoppedOutputLink);
 			toolContinuationPhase = "resumed";
 			({ session: epochSession } = await createAgentSessionFromServices({
 				...pendingOptions,

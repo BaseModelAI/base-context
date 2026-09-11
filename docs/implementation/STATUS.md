@@ -2849,3 +2849,24 @@ The existing RPC argument case passed (1 passed/101 skipped), covering valid,
 missing and old markers plus actual guide launch arguments. Required `npm run
 check` passed with 1046 files/no fixes. No RPC client, SDK server, model or network
 process was launched. The terminal-display snippet was source-reviewed only.
+
+
+## W90 / G17 — native main-output request/source association
+
+The native main-response path can attach its original request and admitted attempt
+IDs to the existing assistant source entry. The existing parser follows exact
+recorded session/source/request links; missing or ineligible links stay unknown.
+Admitted attempts are not labelled as output producers. This is not a new task
+qualification, provider outcome, output ACK or caller-delivery assertion. Source
+presence, a known append ACK and later invocation refusal remain distinct.
+
+The existing instrumented native service case passed with three real fake-HTTP
+request/source links, an unlinked manually seeded assistant, unchanged assistant
+qualification/provider messages, and the existing controlled post-ACK stop/reopen.
+Its physical receipts still report completed provider work. The existing Python
+parser case passed for recorded linkage, copied-header unknown state and aggregate
+propagation. These are two existing cases, not live provider/campaign execution.
+The controlled stop is not a new actual output-limit admission fault injection.
+Required `npm run check` passed with 1046 files/no fixes. No corrections or case
+reruns were needed. Parser retention adds only link metadata, not full assistant
+bodies or duplicate full request descriptors/receipts.

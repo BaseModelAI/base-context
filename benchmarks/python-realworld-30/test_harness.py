@@ -47,7 +47,9 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
     }
 
 
-def native_journal(path: Path, *, session_id: str = "root", incomplete: bool = False) -> None:
+def native_journal(
+    path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
+) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
         "api": "openai-completions", "provider": "openai", "model": "fixture",
@@ -64,6 +66,9 @@ def native_journal(path: Path, *, session_id: str = "root", incomplete: bool = F
                         "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
         },
     }
+    if request_output:
+        # A recorded original path need not be the archive path being parsed.
+        metadata["source"]["sessionFile"] = "/recorded/original-session.jsonl"
     usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
     if incomplete:
         usage.pop("cacheWrite")
@@ -85,6 +90,12 @@ def native_journal(path: Path, *, session_id: str = "root", incomplete: bool = F
                                        "stopReason": "error", "errorMessage": "Selected model is at capacity.",
                                        "usage": {"input": 99999, "output": 99999, "cost": {"total": 99}}}},
     ]
+    if request_output:
+        entries[-1].update({
+            "id": "recorded-assistant",
+            "requestOutput": {"operationId": metadata["operationId"], "attemptIds": ["physical-attempt"],
+                              "source": dict(metadata["source"])},
+        })
     # Accounting consumes the documented payload envelope, not frame-integrity validation.
     path.write_text("".join(json.dumps({"journalFrame": 1, "payload": entry}) + "\n" for entry in entries))
 
@@ -109,9 +120,26 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertFalse(summary["publication_ready"])
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
-            native_journal(root / "root.jsonl")
-            native_journal(root / "fork.jsonl", session_id="fork")
+            native_journal(root / "root.jsonl", request_output=True)
+            native_journal(root / "fork.jsonl", session_id="fork", request_output=True)
+            original = parse_session_file(root / "root.jsonl")
+            copied = parse_session_file(root / "fork.jsonl")
+            association = original["assistant_request_associations"][0]
+            self.assertEqual(association, {
+                "assistant_entry_id": "recorded-assistant",
+                "recorded_request": {
+                    "operationId": "operation", "attemptIds": ["physical-attempt"],
+                    "source": {"sessionId": "root", "leafId": None, "sourceSequence": 0, "persistent": True,
+                               "sessionFile": "/recorded/original-session.jsonl"},
+                },
+            })
+            # The assistant observation's error is not an output-delivery/refusal verdict.
+            self.assertIsNone(copied["assistant_request_associations"][0]["recorded_request"])
             metrics = aggregate_sessions(collect_sessions(root))
+            self.assertIn(association, next(
+                item["associations"] for item in metrics["assistant_request_associations"]
+                if item["session_id"] == "root"
+            ))
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})

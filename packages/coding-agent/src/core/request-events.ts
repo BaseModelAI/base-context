@@ -1,4 +1,10 @@
-import type { Api, Provider, ProviderAttemptInfo, ProviderAttemptReceipt } from "@ponythewhite/base-context-ai";
+import type {
+	Api,
+	AssistantMessage,
+	Provider,
+	ProviderAttemptInfo,
+	ProviderAttemptReceipt,
+} from "@ponythewhite/base-context-ai";
 import type { SessionHistoryReadView } from "./session-history-index.js";
 
 /** A writer-bound source. It does not move when the UI selects another session or leaf. */
@@ -15,6 +21,19 @@ export interface ContextEpochEntryRef {
 	readonly sessionId: string;
 	readonly entryId: string;
 }
+
+/** Recorded request/source correlation only: not task authority, append ACK or caller delivery. */
+export interface NativeRequestOutputAssociation {
+	readonly operationId: string;
+	/** All admitted attempts of this request; none is identified as the output-producing attempt. */
+	readonly attemptIds: readonly string[];
+	readonly source: SourceSnapshotRef;
+}
+
+export type NativeRequestOutputWriter = (owner: object, message: AssistantMessage) => Promise<string | undefined>;
+export type NativeRequestOutputSource = (
+	association: NativeRequestOutputAssociation,
+) => NativeRequestOutputWriter | undefined;
 
 export type RequestPurpose = "main" | "summary" | "refine" | "learning" | "child" | "native-control" | "other";
 

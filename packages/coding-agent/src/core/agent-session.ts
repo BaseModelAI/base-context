@@ -5099,11 +5099,16 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				const sessionId = this.sessionManager.getSessionId();
-				const sessionFile = this.sessionManager.getSessionFile();
+				const manager = this.sessionManager;
+				const sessionId = manager.getSessionId();
+				const sessionFile = manager.getSessionFile();
+				const nativeOutput =
+					!nativeMessageWrite && event.message.role === "assistant"
+						? this.requests.appendMainOutput(event.message, manager)
+						: undefined;
 				const entryId = nativeMessageWrite
 					? await nativeMessageWrite(event.message)
-					: await this.sessionManager.appendMessage(event.message);
+					: ((nativeOutput ? await nativeOutput : undefined) ?? (await manager.appendMessage(event.message)));
 				if (event.message.role === "assistant")
 					this._assistantEntryIds.set(event.message, { sessionId, sessionFile, entryId });
 			}

@@ -49,7 +49,13 @@ import {
 	type NativeEntryQualification,
 } from "./journal-frame.js";
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
-import type { ContextEpochEntryRef, NativeRequestEvent, SourceSnapshotRef } from "./request-events.js";
+import type {
+	ContextEpochEntryRef,
+	NativeRequestEvent,
+	NativeRequestOutputAssociation,
+	NativeRequestOutputSource,
+	SourceSnapshotRef,
+} from "./request-events.js";
 import {
 	SELECTED_SKILL_CUSTOM_TYPE,
 	SELECTED_SKILL_DETAIL,
@@ -148,6 +154,14 @@ function realpathIfPresent(path: string): string {
 	}
 }
 
+// Only actual manager-created source objects enter this private binding. Payloads and callbacks cannot brand a sink.
+const nativeRequestOutputSources = new WeakMap<object, NativeRequestOutputSource>();
+
+/** Internal main-stream capture; the factory closes over its original manager/writer before any waits. */
+export function captureNativeRequestOutputSource(sink: object): NativeRequestOutputSource | undefined {
+	return nativeRequestOutputSources.get(sink);
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -227,6 +241,8 @@ export type SessionExecutionEvidence = Omit<FinalizedToolExchange, "result" | "o
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Metadata from the original main-request owner; does not grant native input/task authority. */
+	requestOutput?: NativeRequestOutputAssociation;
 	/** Native execution evidence belongs to this result, not a second transcript. */
 	execution?: SessionExecutionEvidence;
 }
@@ -2591,7 +2607,7 @@ export class SessionManager {
 			] as const;
 			return qualification ? this._appendCompaction(...args, qualification) : this.appendCompaction(...args);
 		};
-		return {
+		const bound: BoundCompactionSink = {
 			...sink,
 			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
 			[readCopiedEpochSource]: (read) => sink.readHistory(read),
@@ -2629,6 +2645,9 @@ export class SessionManager {
 				);
 			},
 		};
+		const outputSource = nativeRequestOutputSources.get(sink);
+		if (outputSource) nativeRequestOutputSources.set(bound, outputSource);
+		return bound;
 	}
 
 	private _bindHistorySource<View>(
@@ -2644,6 +2663,9 @@ export class SessionManager {
 		const indexed = this.indexed;
 		const entries = this.fileEntries;
 		const byId = this.byId;
+		const writer = state.owner;
+		const ownsOutputSource = SessionManager.prototype.captureCompactionSourceOwner.call(this);
+		let outputSource: SourceSnapshotRef | undefined;
 		let held = false;
 		const retain = () => {
 			if (held) return;
@@ -2665,13 +2687,14 @@ export class SessionManager {
 				persistent,
 			});
 			const snapshot = state.owner?.getSnapshot();
+			outputSource = source;
 			onCapture?.(source);
 			return { source, snapshot };
 		});
 		const source = captured.then((value) => value.source);
 		// A captured auxiliary operation can await UI work before consuming its barrier.
 		void source.catch(() => undefined);
-		return {
+		const sink: BoundHistoryReadSink<View> & { assertRetained(): void } = {
 			source,
 			assertRetained,
 			readHistory: async <T>(read: (view: View) => Promise<T>): Promise<T> => {
@@ -2766,6 +2789,29 @@ export class SessionManager {
 				});
 			},
 		};
+		if (persistent && indexed && writer?.format === "framed") {
+			nativeRequestOutputSources.set(sink, (association) => {
+				if (!outputSource || !ownsOutputSource() || !isDeepStrictEqual(association.source, outputSource))
+					return undefined;
+				const requestOutput = structuredClone(association);
+				return async (manager, message) => {
+					if (manager !== this || !ownsOutputSource()) return undefined;
+					const stale = new Error("Native request output source changed before append");
+					const assertCurrent = () => {
+						if (!ownsOutputSource()) throw stale;
+					};
+					try {
+						// No new qualification: this is request metadata, not input/task authority.
+						return await this._appendMessage(message, undefined, undefined, { requestOutput, assertCurrent });
+					} catch (error) {
+						// Only this pre-append stale signal permits the ordinary unassociated append.
+						if (error === stale) return undefined;
+						throw error;
+					}
+				};
+			});
+		}
+		return sink;
 	}
 
 	appendToolInvocation(invocation: ToolInvocation): Promise<string> {
@@ -3029,6 +3075,7 @@ export class SessionManager {
 		message: Message | CustomMessage | BashExecutionMessage,
 		nativeOrigin?: NativeEntryOrigin,
 		qualification?: NativeEntryQualification,
+		output?: { requestOutput: NativeRequestOutputAssociation; assertCurrent(): void },
 	): Promise<string> {
 		const finalized = this.finalizedToolMessages.get(message);
 		if (finalized) return finalized;
@@ -3039,8 +3086,15 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			message,
 			...(nativeOrigin ? { nativeOrigin } : {}),
+			...(output ? { requestOutput: output.requestOutput } : {}),
 		};
-		await this._appendEntry(withEntryRetention(entry, undefined, qualification));
+		await this._appendEntry(
+			withEntryRetention(entry, undefined, qualification),
+			false,
+			undefined,
+			undefined,
+			output?.assertCurrent,
+		);
 		return entry.id;
 	}
 

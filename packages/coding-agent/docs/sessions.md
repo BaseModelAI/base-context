@@ -208,3 +208,24 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
 
 For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).
+
+
+### Native Main-Request Output Links
+
+An assistant source entry from the native main-response path can include
+`requestOutput`, containing the original `operationId`, its admitted `attemptIds`,
+and the captured request `source` (`SourceSnapshotRef`). This links recorded output
+to its request; it does not identify which physical attempt produced the output.
+The metadata is outside the provider message and does not add input/task authority.
+
+The existing benchmark parser reports `assistant_request_associations`. Each
+`recorded_request` is an exact matched source link or `null` (unknown). A match
+requires the original session header and matching request records to agree. Recorded
+source presence, the append call's ACK, and later caller delivery or refusal are
+separate facts. A later invocation refusal does not undo a known source ACK.
+Missing, old, ineligible or unmatched links remain unknown, not rejected output
+or zero committed output. Retained imports and copied destination headers do not
+create new native output links; an archived copy can still contain historical data.
+
+This covers native main-response source association only. It does not complete
+auxiliary-output or downstream delivery/rejection accounting.

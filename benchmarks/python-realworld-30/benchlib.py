@@ -453,10 +453,52 @@ def _mark_incomplete(accounting: dict[str, Any]) -> None:
     })
 
 
+def _recorded_request_output(
+    entry: dict[str, Any], header: dict[str, Any], requests: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Recorded association only: neither an append ACK nor output delivery/attempt attribution."""
+    output = entry.get("requestOutput")
+    if not isinstance(entry.get("id"), str) or not entry["id"] or not isinstance(output, dict):
+        return None
+    operation_id = output.get("operationId")
+    attempt_ids = output.get("attemptIds")
+    source = output.get("source")
+    if not isinstance(operation_id, str) or not operation_id or not isinstance(source, dict):
+        return None
+    if not isinstance(attempt_ids, list) or not attempt_ids or any(
+        not isinstance(attempt_id, str) or not attempt_id for attempt_id in attempt_ids
+    ) or len(set(attempt_ids)) != len(attempt_ids):
+        return None
+    required = {"sessionId", "leafId", "sourceSequence", "persistent"}
+    if not required <= source.keys() or source.keys() - required - {"sessionFile"}:
+        return None
+    if (
+        not isinstance(source["sessionId"], str) or not source["sessionId"]
+        or source["sessionId"] != header.get("id") or source["persistent"] is not True
+        or type(source["sourceSequence"]) is not int or source["sourceSequence"] < 0
+        or source["leafId"] is not None and not isinstance(source["leafId"], str)
+        or "sessionFile" in source and not isinstance(source["sessionFile"], str)
+    ):
+        return None
+    for attempt_id in attempt_ids:
+        matching = requests.get(attempt_id, [])
+        if not matching or any(
+            request.get("operationId") != operation_id or request.get("source") != source
+            or any(type(request["source"][key]) is not type(value) for key, value in source.items())
+            or request.get("purpose") != "main"
+            for request in matching
+        ):
+            return None
+    return {"operationId": operation_id, "attemptIds": list(attempt_ids), "source": dict(source)}
+
+
 def parse_session_file(path: Path) -> dict[str, Any] | None:
     header: dict[str, Any] | None = None
     requests: dict[str, dict[str, Any]] = {}
     assistant_usage: list[dict[str, Any]] = []
+    assistant_sources: list[tuple[dict[str, Any], bool]] = []
+    association_requests: dict[str, list[dict[str, Any]]] = {}
+    original_header = False
     native = False
     capacity_confirmed = False
     incomplete = False
@@ -481,6 +523,10 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
             # SessionJournalDecoder identifies frames by these exact fields.
             # This benchmark reads their payload, not assistant usage attributions.
             framed = "journalFrame" in entry or "previousChecksum" in entry
+            original_frame = (
+                type(entry.get("journalFrame")) is int and entry["journalFrame"] == 1
+                and line.endswith("\n") and "retention" not in entry and "qualification" not in entry
+            )
             if framed_format is not None and framed_format != framed:
                 incomplete = True
             framed_format = framed
@@ -497,6 +543,7 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                 incomplete = True
             if entry_type == "session":
                 header = entry
+                original_header = original_frame
             elif entry_type == "request":
                 native = True
                 if not line.endswith("\n"):
@@ -516,6 +563,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                     requests.setdefault(attempt_id, request)
                 else:
                     incomplete = True
+                    continue
+                if original_frame and isinstance(attempt_id, str):
+                    association_requests.setdefault(attempt_id, []).append({
+                        "operationId": request.get("operationId"), "source": request.get("source"),
+                        "purpose": request.get("purpose"),
+                    })
             elif entry_type == "compaction":
                 compactions += 1
             elif entry_type == "custom" and entry.get("customType") == "prime-agent.refinement":
@@ -525,6 +578,9 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
             message = entry.get("message") or {}
             role = message.get("role")
             if role == "assistant":
+                assistant_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("requestOutput"),
+                }, original_frame))
                 assistant_usage.append(message.get("usage") or {})
                 capacity_confirmed = capacity_confirmed or (
                     message.get("stopReason") == "error"
@@ -589,6 +645,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
         "visible_tool_bytes": visible_tool_bytes,
         "compactions": compactions,
         "automatic_refinement_applied": refinement_entries,
+        "assistant_request_associations": [
+            {"assistant_entry_id": entry.get("id"),
+             "recorded_request": _recorded_request_output(entry, header, association_requests)
+             if original_header and original else None}
+            for entry, original in assistant_sources
+        ],
         **accounting,
     }
 
@@ -684,6 +746,11 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "observed_cost_basis": "assistant_usage_cost" if sessions else None,
         "assistant_usage_observations": [
             {"session_id": item["session_id"], "path": item["path"], "usage": item["assistant_usage_observations"]}
+            for item in sessions
+        ],
+        "assistant_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("assistant_request_associations")}
             for item in sessions
         ],
         "observed_accounting_scope": "solver_messages",

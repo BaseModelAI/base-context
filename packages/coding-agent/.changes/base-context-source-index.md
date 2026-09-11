@@ -154,3 +154,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - SDK guidance now uses owned packages/state and source setup, resolves its state directory with `getAgentDir()`, and awaits async SessionManager factories in eight examples. Two existing identity/path cases and the required check passed; model examples were not executed.
 
 - RPC/SDK examples now declare protocol11 and use owned startup paths; the typed-client floor is documented as schema45. The Node sample reports terminal refusals. The existing valid/missing/old-marker argument case and required check passed; no example clients were launched.
+
+- Native main-response assistant entries can retain their original request/source association. The parser reports exact recorded links separately from physical accounting; missing links, output attribution and caller delivery are not inferred.
