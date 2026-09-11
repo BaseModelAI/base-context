@@ -14,8 +14,10 @@ release selected at preparation, not a moving main branch.
   argument substitution. Use its single-pass callback in the existing pure helper.
   Keep positional and slice semantics. Two existing tests cover normal substitution
   and literal dollar sequences. Sol's custom prompt is not changed.
-- **Next small ports:** MCPv2 `input_schema` at the existing runtime `_load_tools`
-  adapter; unsigned WebP/TIFF lengths; oversized-tail rescue with a final newline;
+- **Incorporated:** MCPv2 `input_schema` at `McpIntegration._ensure_tools`, retaining
+  the existing `inputSchema` wire shape and session/tool ownership. Two existing
+  fake-session cases cover schema preservation and unknown-tool handling.
+- **Next small ports:** unsigned WebP/TIFF lengths; oversized-tail rescue with a final newline;
   BOM frontmatter; precise LiteLLM overflow recognition; well-formed terminal marker
   text. These are separate candidates, not claims of completed implementation.
 - **Adapt, do not copy:** static system prefixes may reduce cache churn, but must

@@ -3048,3 +3048,20 @@ source/request/ACK/epoch/budget owners remain unchanged.
 
 The shared required check passed1046/no fixes, types/installer/browser.
 The upstream selection and adaptation note is `docs/implementation/upstream-0.9.4.md`.
+
+
+### W100 — MCPv2 schema at the existing runtime adapter
+
+Port the MCPv2 schema leaf from upstream844e85545af6858dcb3d6cfe42bbfcf2ca0be4e5.
+`McpIntegration._ensure_tools` reads the required-v2 `input_schema` field and keeps
+object schemas; missing/non-object values become an empty object. Outward
+`inputSchema`, cached tool names, locks, sessions and actual tool calls are unchanged.
+No old-attribute fallback, invocation policy, credential or registry change is added.
+The two existing fake-session cases cover actual schema/arguments/result and the
+unknown-tool path with a non-object schema. The first run failed in common setup
+because it patched removed `_agent_dir`; neither case body ran. Root corrected only
+the fixture to patch current `product_state_path` to its private auth path. The
+same two cases then passed on Python3.11.15. Required check passed first1046/no fixes,
+types/installer/browser; it was not rerun for the fixture-only correction apart
+from mandatory commit hooks. Other auth/transport cases remain unrun. No real SDK
+session, auth/network call, installation, benchmark or publication was performed.

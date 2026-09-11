@@ -32,7 +32,7 @@ class _FakeSession:
             t = Tool()
             t.name = name
             t.description = desc
-            t.inputSchema = schema
+            t.input_schema = schema
             return t
 
         resp = type("Resp", (), {})()
@@ -54,7 +54,7 @@ class McpIntegrationTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.agent_dir = Path(self._tmp.name)
         self.auth_path = self.agent_dir / "auth.json"
-        patcher = mock.patch.object(mcp_base, "_agent_dir", return_value=self.agent_dir)
+        patcher = mock.patch.object(mcp_base, "product_state_path", return_value=self.auth_path)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
@@ -156,29 +156,29 @@ class McpIntegrationTest(unittest.TestCase):
         self.assertIn("boom", str(ctx.exception))
 
     def test_auto_bound_tool_calls_session(self):
+        schema = {"type": "object", "properties": {"team": {"type": "string"}}, "required": ["team"]}
         session = _FakeSession(
-            tools=[("list_issues", "List issues", {"type": "object"})],
+            tools=[("list_issues", "List issues", schema)],
             result=type("R", (), {"structuredContent": {"issues": [1, 2]}})(),
-        )
-        self._write_auth(
-            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
         )
         with self._patch_session(session):
             integration = _Integration()
             out = _run(integration.list_issues(team="Eng"))
+            tools = _run(integration.list_tools())
         self.assertEqual(out, {"issues": [1, 2]})
         self.assertEqual(session.calls, [("list_issues", {"team": "Eng"})])
+        self.assertEqual(tools, [{"name": "list_issues", "description": "List issues", "inputSchema": schema}])
 
     def test_unknown_tool_raises_with_available_list(self):
-        session = _FakeSession(tools=[("list_issues", "", {})], result=None)
-        self._write_auth(
-            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
-        )
+        session = _FakeSession(tools=[("list_issues", "", ["not an object"])], result=None)
         with self._patch_session(session):
             integration = _Integration()
             with self.assertRaises(AttributeError) as ctx:
                 _run(integration.nonexistent_tool())
+            tools = _run(integration.list_tools())
         self.assertIn("list_issues", str(ctx.exception))
+        self.assertEqual(tools, [{"name": "list_issues", "description": "", "inputSchema": {}}])
+        self.assertEqual(session.calls, [])
 
     def test_text_result_parsing(self):
         block = type("B", (), {"text": "hello"})()

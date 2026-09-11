@@ -217,14 +217,16 @@ class McpIntegration:
             async with AsyncExitStack() as stack:
                 session = await self._open_session(stack)
                 resp = await session.list_tools()
-                self._tools = {
-                    t.name: {
+                tools = {}
+                for t in resp.tools:
+                    # mcp>=2 uses input_schema in Python; inputSchema is the wire key.
+                    schema = getattr(t, "input_schema", None)
+                    tools[t.name] = {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        "inputSchema": schema if isinstance(schema, dict) else {},
                     }
-                    for t in resp.tools
-                }
+                self._tools = tools
 
     async def call_tool(self, tool: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call ``tool`` on the server and return its parsed result.

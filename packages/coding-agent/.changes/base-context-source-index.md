@@ -168,3 +168,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Retain reported OpenAI Responses cache-write usage and price known writes once. Keep missing physical counts unknown. Benchmark zero-rate estimate coverage and cache reuse now use the known priced quantities/inputTotal; reports distinguish API-equivalent estimates from cash charges. Existing OpenAI2/Python2 cases and required check passed first. Tariff selection and new experiments remain separate work.
 
 - Port upstream24519c30856965a832551206b3e9ed87e814d602: substitute prompt arguments in one literal-safe callback pass. Two existing cases passed; literal-style warnings were corrected without changing values or rerunning passing cases. Record the32-commit upstream disposition in docs/implementation/upstream-0.9.4.md. Sol and native source/ACK/policy owners are unchanged.
+
+- Port the MCPv2 input_schema leaf at the existing _ensure_tools adapter, retaining inputSchema on the wire. Existing fake-session happy/unknown-tool cases passed after correcting their stale path-helper fixture; required check passed first. No auth, SDK-session or invocation-policy change.
