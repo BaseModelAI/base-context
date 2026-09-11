@@ -144,3 +144,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Added single-session `session import --preview <file>` using the same source preparation as real retained import, without creating a destination. Report input format/version, source counts and target directory; explicitly leave destination/index/epoch/reference/replay checks unassessed. A later import rereads the source and can still fail. Not a full migration dry run. Two existing offline selectors and required check passed first; no corrections or reruns.
 
 - Changed the shared autonomous continuation default to focus on requested work and checks, without demanding proof artifacts, self-certification or repeated validation. Preserve required approvals, explicit custom prompts, configured gates/limits and Sol's special custom prompt. Two existing offline continuation cases and required check passed first; no correction or rerun.
+
+- Bundled skill-creation guidance now uses Base Context skill paths, runtime distribution and kernel variables. The `rlm` API and templates are unchanged. Two existing loader cases and the required check passed.

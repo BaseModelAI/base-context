@@ -1758,3 +1758,18 @@ one-continuation/two-turn assertions remain. Tests used actual Node22.12, fresh
 six-variable state, network/PID/proc isolation and package Vitest. Required
 check4054822 passed (1046 files/no fixes, types, installer/browser). No corrections
 or reruns. Configured command-gate/process cases were not added to this scope.
+
+
+## W83 / G13 — bundled skill-creation guidance
+
+The packaged `skill-creator` skill and its Python reference now direct users to
+Base Context's project/global skill paths, runtime distribution and kernel
+variables. Owned installations use their release-local runtime; other installs
+use the configured state root. `rlm`, `rlm.skill:cli`, templates and provider
+identities remain unchanged. This changes newly loaded guidance, not runtime
+behavior, captured Skill versions, Sol's special prompt or budget policy.
+
+Two existing offline loader cases passed (2 passed/30 skipped): the valid-Skill
+case loads the actual bundled metadata, body and linked Python guide; the missing
+Python-package case retains its metadata-only fallback. Required `npm run check`
+passed with 1046 files/no fixes. No install, kernel launch or provider call was run.
