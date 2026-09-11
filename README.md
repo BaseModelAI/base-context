@@ -124,6 +124,33 @@ base-context update [--force]         # Update Base Context
 base-context shutdown [--force]       # Stop every agent, worker, and background service
 ```
 
+## Import an offline Prime export
+
+Use a separately produced, coherent offline/filesystem export. This command does
+not snapshot or copy a live Prime root, stop writers, or make a read-only view stable.
+It accepts supported flat `sessions/*.jsonl` legacy journals, not native-framed
+Base Context histories. The destination must be new; imports do not merge or overwrite.
+
+```sh
+base-context migrate --from-prime-agent /path/to/offline-export --dry-run --destination /path/to/new-root
+base-context migrate --from-prime-agent /path/to/offline-export --destination /path/to/new-root
+BASE_CONTEXT_HOME=/path/to/new-root base-context
+```
+
+The command retains session history and known working directories, selected model/UI
+preferences, and supported package declarations in `inactivePackages`. It does not
+resolve or install those packages. `base-context package list` labels them inactive;
+only an explicit successful `base-context package install <source>` activates one.
+Review and trust a declaration before installing it. An explicit
+`BASE_CONTEXT_SESSION_DIR` still controls session storage separately.
+
+Auth files, model credentials, executable/instruction paths, autonomous jobs, daemon
+state and kernel snapshots are excluded. Session history itself is retained data,
+not scrubbed for secrets and not execution authority. Attachment/artifact and external
+reference remapping, paused-job import, opaque replay and trusted runtime resume are
+not provided by this command. Its report lists supported and excluded coverage;
+this is not a complete migration of every legacy feature. Binary selection is unchanged.
+
 ## Built for Long-Running Work
 Base Context is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
 

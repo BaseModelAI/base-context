@@ -4658,8 +4658,16 @@ export class SessionManager {
 		targetCwd: string,
 		sessionDir?: string,
 		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+		requiredSourceFormat?: "legacy-jsonl",
 	): Promise<SessionManager> {
-		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, "retained-import", { ...limits });
+		return SessionManager._copyFrom(
+			sourcePath,
+			targetCwd,
+			sessionDir,
+			"retained-import",
+			{ ...limits },
+			requiredSourceFormat,
+		);
 	}
 
 	/** Prepare one retained source without allocating a destination or assessing its activation. */
@@ -4698,9 +4706,10 @@ export class SessionManager {
 		sessionDir?: string,
 		retention?: JournalFrameRetention,
 		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
+		requiredSourceFormat?: "legacy-jsonl",
 	): Promise<SessionManager> {
 		const targetDirectory = resolve(sessionDir ?? getDefaultSessionDir(targetCwd));
-		const prepared = await SessionManager._prepareCopy(sourcePath, retention, limits);
+		const prepared = await SessionManager._prepareCopy(sourcePath, retention, limits, requiredSourceFormat);
 		const manager = new SessionManager(targetCwd, targetDirectory, true, {
 			parentSession: sourcePath,
 			rlmDepth: resolveSessionRlmDepth(prepared.sourceHeader, sourcePath),
@@ -4727,6 +4736,7 @@ export class SessionManager {
 		sourcePath: string,
 		retention: JournalFrameRetention | undefined,
 		limits: SessionHistoryReadLimits,
+		requiredSourceFormat?: "legacy-jsonl",
 	) {
 		const { maxEntries, maxSourceBytes } = limits;
 		const explicitImport = retention === "retained-import";
@@ -4775,6 +4785,8 @@ export class SessionManager {
 						const version = entry.version === undefined ? 1 : entry.version;
 						if (explicitImport && ![1, 2, CURRENT_SESSION_VERSION].includes(version))
 							throw new Error(`Unsupported session version for retained import: ${String(entry.version)}`);
+						if (requiredSourceFormat === "legacy-jsonl" && record.source)
+							throw new Error("This import requires legacy-jsonl; native-framed input is unsupported");
 						sourceHeader = {
 							entry,
 							format: record.source ? "native-framed" : "legacy-jsonl",

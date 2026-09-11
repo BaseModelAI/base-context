@@ -162,6 +162,13 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "List available models",
 	},
 	{
+		path: ["migrate"],
+		usage: "migrate --from-prime-agent <offline-export-root> [--dry-run] [--destination <new-root>]",
+		summary: "Import a supplied coherent offline Prime export into a new state root",
+		description:
+			"Requires an externally produced coherent offline/filesystem export, not a live Prime root. Apply requires a new destination; --dry-run writes nothing. Imports supported legacy JSONL and safe preferences; package declarations stay inactive. Credentials, executable/autonomous state, artifacts and native-framed journals are excluded. This command does not produce snapshots or complete all migration/replay coverage.",
+	},
+	{
 		path: ["session"],
 		usage: "session <command>",
 		summary: "Manage saved sessions",

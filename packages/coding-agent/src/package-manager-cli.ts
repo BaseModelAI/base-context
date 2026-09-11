@@ -1563,7 +1563,11 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 				}
 
 				const formatPackage = (pkg: (typeof configuredPackages)[number]) => {
-					const display = pkg.filtered ? `${pkg.source} (filtered)` : pkg.source;
+					const display = pkg.inactive
+						? `${pkg.source} (inactive; explicit install required)`
+						: pkg.filtered
+							? `${pkg.source} (filtered)`
+							: pkg.source;
 					console.log(`  ${display}`);
 					if (pkg.installedPath) {
 						console.log(chalk.dim(`    ${pkg.installedPath}`));

@@ -186,7 +186,9 @@ export interface Settings {
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	mcpServers?: Record<string, McpServerConfig>; // User-declared MCP servers (name → config); built-ins are in the ai/mcp catalog
-	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
+	packages?: PackageSource[];
+	/** Imported declarations only; never resolved or installed until an explicit package install. */
+	inactivePackages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
@@ -1106,16 +1108,24 @@ export class SettingsManager {
 		return [...(this.settings.packages ?? [])];
 	}
 
-	setPackages(packages: PackageSource[]): void {
+	setPackages(packages: PackageSource[], inactivePackages?: PackageSource[]): void {
 		this.globalSettings.packages = packages;
 		this.markModified("packages");
+		if (inactivePackages !== undefined) {
+			this.globalSettings.inactivePackages = inactivePackages;
+			this.markModified("inactivePackages");
+		}
 		this.save();
 	}
 
-	setProjectPackages(packages: PackageSource[]): void {
+	setProjectPackages(packages: PackageSource[], inactivePackages?: PackageSource[]): void {
 		const projectSettings = structuredClone(this.projectSettings);
 		projectSettings.packages = packages;
 		this.markProjectModified("packages");
+		if (inactivePackages !== undefined) {
+			projectSettings.inactivePackages = inactivePackages;
+			this.markProjectModified("inactivePackages");
+		}
 		this.saveProjectSettings(projectSettings);
 	}
 

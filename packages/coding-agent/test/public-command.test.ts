@@ -1,13 +1,16 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../src/config.js";
+import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { APPEND_NATIVE_ADMISSION, SessionJournalOwner } from "../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../src/core/session-journal-reader.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 
 const mocks = vi.hoisted(() => ({
+	realSettings: false,
 	daemonCommands: [] as string[][],
 	packageCommands: [] as string[][],
 	psCalls: [] as boolean[],
@@ -38,11 +41,18 @@ vi.mock("../src/core/mcp/mcp-command.js", () => ({
 	},
 }));
 
-vi.mock("../src/core/settings-manager.js", () => ({
-	SettingsManager: {
-		create: () => ({ flush: async () => {}, drainErrors: () => [], getGlobalMcpServers: () => undefined }),
-	},
-}));
+vi.mock("../src/core/settings-manager.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/settings-manager.js")>();
+	return {
+		...actual,
+		SettingsManager: {
+			create: (...args: Parameters<typeof actual.SettingsManager.create>) =>
+				mocks.realSettings
+					? actual.SettingsManager.create(...args)
+					: { flush: async () => {}, drainErrors: () => [], getGlobalMcpServers: () => undefined },
+		},
+	};
+});
 
 vi.mock("../src/cli/daemon-ps.js", () => ({
 	runPs: async (json: boolean) => {
@@ -61,8 +71,24 @@ import { formatTopLevelHelp } from "../src/cli/command-registry.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "../src/cli/daemon-update-restart.js";
 import { handlePublicCommand } from "../src/cli/public-command.js";
 
+function offlineMigrationJournal(id: string, cwd: string): string {
+	return `${[
+		{ type: "session", version: 3, id, timestamp: "2025-01-01T00:00:00.000Z", cwd },
+		{
+			type: "message",
+			id: `${id}-message`,
+			parentId: null,
+			timestamp: "2025-01-01T00:00:01.000Z",
+			message: { role: "user", content: `History for ${id}`, timestamp: 1 },
+		},
+	]
+		.map((entry) => JSON.stringify(entry))
+		.join("\n")}\n`;
+}
+
 describe("public command routing", () => {
 	beforeEach(() => {
+		mocks.realSettings = false;
 		mocks.daemonCommands.length = 0;
 		mocks.packageCommands.length = 0;
 		mocks.psCalls.length = 0;
@@ -75,8 +101,166 @@ describe("public command routing", () => {
 	});
 
 	afterEach(() => {
+		mocks.realSettings = false;
 		process.exitCode = undefined;
 		vi.restoreAllMocks();
+	});
+
+	it("migrates an offline legacy root through preview and real owners without activating imported packages", async () => {
+		mocks.realSettings = true;
+		const root = mkdtempSync(join(tmpdir(), "base-context-root-import-"));
+		const source = join(root, "offline-export");
+		const destination = join(root, "imported");
+		const cwds = [join(root, "project-one"), join(root, "project-two")];
+		const packageSource = "npm:offline-migration-fixture@1.0.0";
+		const secret = "fixture-secret-must-not-appear";
+		try {
+			mkdirSync(join(source, "sessions"), { recursive: true });
+			const first = offlineMigrationJournal("legacy-a", cwds[0]!);
+			const second = offlineMigrationJournal("legacy-b", cwds[1]!);
+			writeFileSync(join(source, "sessions", "a.jsonl"), first);
+			writeFileSync(join(source, "sessions", "b.jsonl"), second);
+			const sourceSettings = JSON.stringify({
+				defaultProvider: "openai-codex",
+				defaultModel: "gpt-5.6-sol",
+				defaultThinkingLevel: "low",
+				theme: "dark",
+				quietStartup: true,
+				terminal: { showImages: false, showTerminalProgress: true },
+				packages: [
+					{ source: packageSource, extensions: [] },
+					`git:https://token:${secret}@example.invalid/repo`,
+					"./untrusted-local",
+				],
+				apiKeys: { openai: secret },
+				shellPath: secret,
+				extensions: ["./untrusted.ts"],
+				skills: ["./untrusted-skill"],
+			});
+			writeFileSync(join(source, "settings.json"), sourceSettings);
+			writeFileSync(join(source, "auth.json"), secret);
+			writeFileSync(join(source, "cron-jobs.json"), "[]");
+			writeFileSync(join(source, "untrusted.ts"), 'throw new Error("must not load imported code");');
+			mkdirSync(join(source, "session-artifacts", "legacy-a"), { recursive: true });
+			writeFileSync(join(source, "session-artifacts", "legacy-a", "kernel-state.dill"), secret);
+			const args = ["migrate", "--from-prime-agent", source, "--destination", destination];
+			await expect(handlePublicCommand([...args, "--dry-run"])).resolves.toMatchObject({ handled: true });
+			expect(process.exitCode).toBeUndefined();
+			expect(existsSync(destination)).toBe(false);
+			expect(readdirSync(root).filter((name) => name.includes(".import-"))).toEqual([]);
+			const preview = JSON.parse(String(vi.mocked(console.log).mock.calls.at(-1)?.[0]));
+			expect(preview).toMatchObject({
+				mode: "dry-run",
+				preparedSessions: 2,
+				inactivePackages: 1,
+				skippedPackages: 2,
+			});
+			const imports = vi.spyOn(SessionManager, "importRetainedFrom");
+			await handlePublicCommand(args);
+			expect(process.exitCode).toBeUndefined();
+			expect(imports).toHaveBeenCalledTimes(2);
+			expect(imports.mock.calls.every((call) => call[4] === "legacy-jsonl")).toBe(true);
+			const reopenedCwds: string[] = [];
+			for (const name of readdirSync(join(destination, "sessions"))) {
+				if (!name.endsWith(".jsonl")) continue;
+				const manager = await SessionManager.open(join(destination, "sessions", name));
+				try {
+					reopenedCwds.push(manager.getCwd());
+					expect(manager.getLeafId()).toMatch(/^legacy-[ab]-message$/);
+					const history = await manager.materializeBranchHistory({ maxEntries: 8, maxSourceBytes: 16384 });
+					expect(JSON.stringify(history)).toContain(
+						`History for ${manager.getLeafId()!.replace(/-message$/, "")}`,
+					);
+				} finally {
+					await manager.close();
+				}
+			}
+			expect(reopenedCwds.sort()).toEqual([...cwds].sort());
+			const settings = SettingsManager.create(destination, destination);
+			expect(settings.getGlobalSettings()).toMatchObject({
+				defaultProvider: "openai-codex",
+				defaultModel: "gpt-5.6-sol",
+				defaultThinkingLevel: "low",
+				theme: "dark",
+				quietStartup: true,
+				terminal: { showImages: false, showTerminalProgress: true },
+				packages: [],
+				inactivePackages: [{ source: packageSource, extensions: [] }],
+			});
+			const packages = new DefaultPackageManager({
+				cwd: destination,
+				agentDir: destination,
+				settingsManager: settings,
+				bundledSkillsDir: null,
+			});
+			const installGuard = vi
+				.spyOn(packages as unknown as { installParsedSource(): Promise<void> }, "installParsedSource")
+				.mockRejectedValue(new Error("Inactive package attempted installation"));
+			const pathGuard = vi.spyOn(packages, "getInstalledPath").mockImplementation(() => {
+				throw new Error("Inactive package path lookup");
+			});
+			const resolved = await packages.resolve();
+			expect(resolved.extensions).toEqual([]);
+			expect(resolved.skills).toEqual([]);
+			expect(packages.listConfiguredPackages()).toEqual([
+				{ source: packageSource, scope: "user", filtered: true, inactive: true },
+			]);
+			expect(installGuard).not.toHaveBeenCalled();
+			expect(pathGuard).not.toHaveBeenCalled();
+			expect(mocks.packageCommands).toEqual([]);
+			expect(mocks.daemonCommands).toEqual([]);
+			for (const name of ["auth.json", "models.json", "cron-jobs.json", "untrusted.ts", "extensions", "skills"])
+				expect(existsSync(join(destination, name))).toBe(false);
+			expect(existsSync(join(destination, "session-artifacts", "legacy-a", "kernel-state.dill"))).toBe(false);
+			expect(readFileSync(join(destination, "settings.json"), "utf8")).not.toContain(secret);
+			expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toContain(secret);
+			expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(secret);
+			expect(readFileSync(join(source, "settings.json"), "utf8")).toBe(sourceSettings);
+			expect(readFileSync(join(source, "sessions", "a.jsonl"), "utf8")).toBe(first);
+			expect(readFileSync(join(source, "sessions", "b.jsonl"), "utf8")).toBe(second);
+			// Only an explicit successful install moves the declaration; the installer itself stays fake.
+			const explicitInstall = vi.spyOn(packages, "install").mockResolvedValue(undefined);
+			await packages.installAndPersist(packageSource);
+			await settings.flush();
+			expect(explicitInstall).toHaveBeenCalledWith(packageSource, undefined);
+			expect(settings.getGlobalSettings()).toMatchObject({
+				packages: [{ source: packageSource, extensions: [] }],
+				inactivePackages: [],
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a later invalid offline journal without activating a destination or overwriting one", async () => {
+		mocks.realSettings = true;
+		const root = mkdtempSync(join(tmpdir(), "base-context-root-import-edge-"));
+		const source = join(root, "offline-export");
+		const destination = join(root, "imported");
+		try {
+			mkdirSync(join(source, "sessions"), { recursive: true });
+			const first = offlineMigrationJournal("legacy-a", join(root, "project-a"));
+			const incomplete = offlineMigrationJournal("legacy-b", join(root, "project-b")).trimEnd();
+			writeFileSync(join(source, "sessions", "a.jsonl"), first);
+			writeFileSync(join(source, "sessions", "b.jsonl"), incomplete);
+			const args = ["migrate", "--from-prime-agent", source, "--destination", destination];
+			await expect(handlePublicCommand(args)).resolves.toMatchObject({ handled: true });
+			expect(process.exitCode).toBe(1);
+			expect(existsSync(destination)).toBe(false);
+			expect(readFileSync(join(source, "sessions", "a.jsonl"), "utf8")).toBe(first);
+			expect(readFileSync(join(source, "sessions", "b.jsonl"), "utf8")).toBe(incomplete);
+			expect(mocks.packageCommands).toEqual([]);
+			expect(mocks.daemonCommands).toEqual([]);
+			process.exitCode = undefined;
+			mkdirSync(destination);
+			writeFileSync(join(destination, "keep.txt"), "keep existing destination");
+			await handlePublicCommand(args);
+			expect(process.exitCode).toBe(1);
+			expect(readFileSync(join(destination, "keep.txt"), "utf8")).toBe("keep existing destination");
+			expect(readdirSync(destination)).toEqual(["keep.txt"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("rewrites attach into the normal interactive resume path", async () => {

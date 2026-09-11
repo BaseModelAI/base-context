@@ -2263,3 +2263,50 @@ do not publish GitHub assets or npm tags; actual publication still needs final
 approval after benchmark review. Whole-root migration is being implemented for
 supplied coherent offline exports only. No live Prime export/import or credential
 migration is authorized or claimed.
+
+
+### W125 — Offline legacy-root import with inactive packages
+
+The registered `migrate --from-prime-agent <offline-export-root>` command now has
+`--dry-run` and explicit new `--destination` paths. It returns before startup
+migrations or runtime creation. The input must be a separately produced coherent
+offline/filesystem export. Known/default Prime roots are refused; this command
+neither creates a live snapshot nor certifies arbitrary custom roots as inactive.
+No actual user-data migration, source quiescence or credential import was performed.
+
+Supported flat legacy JSONL sessions go through the existing preview/import owners
+with their known cwd. Missing cwd is refused rather than replaced by the command's
+cwd. All previews precede destination effects, and actual import checks its held
+source format again before that session's destination. Native-framed input is
+refused here because qualified epochs retain pinned source paths across staging;
+standalone retained-import/preview defaults remain unchanged. Owners close before
+final publication of a new state directory. Failed staging is retained, not replayed;
+existing targets are not merged or overwritten. Binary selection is unaffected.
+
+Selected typed preferences use the destination settings owner. Model/UI preferences
+include the real nested terminal fields. Supported noncredential npm/HTTPS package
+declarations are stored in inactivePackages OUTSIDE packages[], so even older readers
+that ignore the new field do not install them. Current resolve/update paths remain
+active-only; listing inactive declarations does not resolve installed paths. An
+explicit successful install moves the matching declaration through the existing
+settings owner while retaining its resource filters. No schema framework or new
+manifest, hash, receipt store, snapshot mechanism or epoch relocation was added.
+
+The two focused CLI cases exercise real session/settings owners, two source cwd
+values, final-root reopen AND branch-history reads, inactive package resolution,
+secret-file/settings exclusions, explicit activation after a fake successful package
+install, and invalid-source/existing-target refusal. First run: the edge passed;
+the happy case failed at its settings assertion because showImages was incorrectly
+modeled as top-level. Production projection and the fixture were corrected to
+terminal.showImages/terminal.showTerminalProgress. Only the affected happy case was
+rerun and passed. The required check passed; its useTemplate INFO was retained and
+fixed with a value-identical fixture template literal, without a native rerun.
+The invalid-source case fails during pre-preview; later apply-failure retention,
+native-format refusal and missing-cwd refusal are source-reviewed, not separately
+executed cases. No broader compatibility or live-migration claim is made.
+
+Auth/models secrets, executable/instruction paths, autonomous records, daemon state
+and kernel snapshots are excluded. History contents are retained, not secret-scrubbed.
+Attachment/artifact/external-reference remapping, paused jobs, opaque replay and
+trusted runtime resume remain unsupported. This is useful partial migration, not
+full G12/F16 closure. The benchmark image remains W113, and publication stays held.

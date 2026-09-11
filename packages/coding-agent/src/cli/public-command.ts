@@ -21,6 +21,7 @@ import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
 import { getProductDiagnostics } from "./product-doctor.js";
+import { runProductMigration } from "./product-migrate.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -113,6 +114,9 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runDoctor(args.slice(1));
 		case "shutdown":
 			return runShutdown(args.slice(1));
+		case "migrate":
+			await runProductMigration(args.slice(1));
+			return HANDLED;
 		case "package":
 			return runPackage(args.slice(1));
 		case "mcp":
