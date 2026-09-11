@@ -3,9 +3,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	Agent,
 	type AgentContext,
+	type AgentContinuationOutcome,
 	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
@@ -762,6 +764,18 @@ interface PreparedPromptPreparation {
 }
 
 class DeferredSessionInputError extends Error {}
+class StaleGoalContinuationError extends Error {}
+
+interface GoalContinuationOwner {
+	manager: SessionManager;
+	sessionId: string;
+	sessionFile: string | undefined;
+	pumpEpoch: number;
+	goal: GoalState;
+	goalRevision: number;
+	accountingStartedAt: number | undefined;
+	signal: AbortSignal | undefined;
+}
 
 function oncePreflight(
 	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
@@ -1191,6 +1205,7 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
 	private _goalState: GoalState = emptyGoalState();
+	private _goalStateRevision = 0;
 	private _goalAccountingStartedAt: number | undefined = undefined;
 	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
@@ -2253,6 +2268,7 @@ export class AgentSession {
 
 	private _installAgentContinuationHook(): void {
 		this.agent.getContinuationMessages = (context, signal) => this._getContinuationMessages(context, signal);
+		this.agent.getContinuationOutcome = (context, signal) => this._getContinuationOutcome(context, signal);
 	}
 
 	private _installAgentTurnHook(): void {
@@ -2528,31 +2544,90 @@ export class AgentSession {
 		}
 	}
 
-	private async _persistGoalState(goal: GoalState, nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
+	private _captureGoalContinuationOwner(signal?: AbortSignal): GoalContinuationOwner {
+		const manager = this.sessionManager;
+		return {
+			manager,
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			pumpEpoch: this._sessionInputPumpEpoch,
+			goal: this._goalState,
+			goalRevision: this._goalStateRevision,
+			accountingStartedAt: this._goalAccountingStartedAt,
+			signal,
+		};
+	}
+
+	private _isGoalContinuationOwnerCurrent(owner: GoalContinuationOwner): boolean {
+		return (
+			!owner.signal?.aborted &&
+			!this._disposed &&
+			!this._disposing &&
+			this.sessionManager === owner.manager &&
+			owner.manager.getSessionId() === owner.sessionId &&
+			owner.manager.getSessionFile() === owner.sessionFile &&
+			this._sessionInputPumpEpoch === owner.pumpEpoch &&
+			this._goalStateRevision === owner.goalRevision &&
+			this._goalState === owner.goal &&
+			this._goalAccountingStartedAt === owner.accountingStartedAt
+		);
+	}
+
+	private _assertGoalContinuationOwner(owner: GoalContinuationOwner): void {
+		if (!this._isGoalContinuationOwnerCurrent(owner)) {
+			throw new StaleGoalContinuationError("Goal continuation owner changed");
+		}
+	}
+
+	private _stoppedContinuationOutcome(signal?: AbortSignal): AgentContinuationOutcome {
+		return { kind: signal?.aborted || this._disposed || this._disposing ? "cancelled" : "finish" };
+	}
+
+	private async _persistGoalState(
+		goal: GoalState,
+		nativeGoalWrite?: CapturedNativeGoalWrite,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<void> {
+		const manager = continuationOwner?.manager ?? this.sessionManager;
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
 		if (nativeGoalWrite) await nativeGoalWrite(goal);
-		else await this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
-		// Force flush so the goal state is durable on disk immediately,
-		// even before the first assistant response. This ensures idempotent
-		// restart/rehydration can detect the persisted goal.
-		await this.sessionManager.flushNow();
+		else await manager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
+		// Accepted writes stay on their source. Do not admit a flush on a replacement after the ACK.
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
+		// Force flush so the goal state is durable before the first assistant response.
+		await manager.flushNow();
 	}
 
 	private async _setGoalState(
 		next: GoalState,
-		options: { persist?: boolean; nativeGoalWrite?: CapturedNativeGoalWrite } = {},
+		options: {
+			persist?: boolean;
+			nativeGoalWrite?: CapturedNativeGoalWrite;
+			continuationOwner?: GoalContinuationOwner;
+		} = {},
 	): Promise<GoalState> {
+		const owner = options.continuationOwner;
+		if (owner) this._assertGoalContinuationOwner(owner);
+		// A newer goal write invalidates a continuation before that write's awaited publication.
+		this._goalStateRevision++;
+		if (owner) owner.goalRevision = this._goalStateRevision;
 		const normalized = normalizeGoalState({
 			...next,
 			updatedAt: Date.now(),
 		});
 		if (options.persist !== false) {
-			await this._persistGoalState(normalized, options.nativeGoalWrite);
+			await this._persistGoalState(normalized, options.nativeGoalWrite, owner);
 		}
+		if (owner) this._assertGoalContinuationOwner(owner);
 		this._goalState = normalized;
 		if (normalized.status === "active") {
 			this._goalAccountingStartedAt ??= Date.now();
 		} else {
 			this._goalAccountingStartedAt = undefined;
+		}
+		if (owner) {
+			owner.goal = normalized;
+			owner.accountingStartedAt = this._goalAccountingStartedAt;
 		}
 		this._emitGoalUpdate();
 		return normalized;
@@ -2736,21 +2811,30 @@ export class AgentSession {
 		}
 	}
 
-	private async _finishGoalWithError(errorMessage: string): Promise<void> {
+	private async _finishGoalWithError(errorMessage: string, continuationOwner?: GoalContinuationOwner): Promise<void> {
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
 		if (!this._goalState.objective || this._goalState.status !== "active") {
 			return;
 		}
 		const goal = this._goalWithAccountedWallClock();
-		await this._setGoalState({
-			...goal,
-			active: false,
-			status: "error",
-			lastReason: errorMessage,
-			lastError: errorMessage,
-		});
+		if (continuationOwner) continuationOwner.accountingStartedAt = this._goalAccountingStartedAt;
+		await this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "error",
+				lastReason: errorMessage,
+				lastError: errorMessage,
+			},
+			{ continuationOwner },
+		);
 	}
 
-	private async _finishGoalForTerminalAssistantMessage(message: AssistantMessage): Promise<void> {
+	private async _finishGoalForTerminalAssistantMessage(
+		message: AssistantMessage,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<void> {
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
 		if (this._goalState.status !== "active") {
 			return;
 		}
@@ -2765,16 +2849,19 @@ export class AgentSession {
 				this._goalAbortInProgress = false;
 				return;
 			}
-			await this._finishGoalWithError(message.errorMessage || "Assistant response failed");
+			await this._finishGoalWithError(message.errorMessage || "Assistant response failed", continuationOwner);
 		}
 	}
 
-	private async _stopGoalContinuationForTerminalMessage(message: AssistantMessage): Promise<boolean> {
+	private async _stopGoalContinuationForTerminalMessage(
+		message: AssistantMessage,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<boolean> {
 		if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 			return false;
 		}
 		try {
-			await this._finishGoalForTerminalAssistantMessage(message);
+			await this._finishGoalForTerminalAssistantMessage(message, continuationOwner);
 		} catch {
 			// Goal hooks must not reject; listener failures should not crash the agent loop.
 		}
@@ -2969,16 +3056,21 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
-		const goalBeforeResume = this._goalState;
+		const owner = this._captureGoalContinuationOwner();
+		const goalBeforeResume = owner.goal;
 		try {
 			this._ensureGoalRuntimeActive();
-			await this._setGoalState({
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
-				lastReason: undefined,
-				lastError: undefined,
-			});
-			const message = createGoalContextMessage(this._goalState, "continuation");
+			await this._setGoalState(
+				{
+					...owner.goal,
+					continuationsUsed: owner.goal.continuationsUsed + 1,
+					lastReason: undefined,
+					lastError: undefined,
+				},
+				{ continuationOwner: owner },
+			);
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			const message = createGoalContextMessage(owner.goal, "continuation");
 			const normalized = normalizeMessageContent(message.content);
 			// No front: a settling child's terminal notice must be read first.
 			this._admitSessionInput(
@@ -2989,8 +3081,13 @@ export class AgentSession {
 			);
 			this._goalContinuationAwaitsRlmWork = false;
 		} catch {
-			// Admission can race a new pause; roll back so the retry re-counts.
-			await this._setGoalState(goalBeforeResume);
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			// Compensate only on the unchanged owner; an accepted old write is not rolled back on a new goal.
+			try {
+				await this._setGoalState(goalBeforeResume, { continuationOwner: owner });
+			} catch (error) {
+				if (!(error instanceof StaleGoalContinuationError)) throw error;
+			}
 		}
 	}
 
@@ -4293,41 +4390,62 @@ export class AgentSession {
 		);
 	}
 
-	private async _getGoalContinuationMessages(
+	private _getGoalContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
-	): Promise<AgentMessage[]> {
-		if (await this._stopGoalContinuationForTerminalMessage(context.message)) {
-			return [];
+	): Promise<AgentMessage[]>;
+	private _getGoalContinuationMessages(
+		context: GetContinuationMessagesContext,
+		signal: AbortSignal | undefined,
+		owner: GoalContinuationOwner,
+	): Promise<AgentContinuationOutcome>;
+	private _getGoalContinuationMessages(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+		owner?: GoalContinuationOwner,
+	): Promise<AgentMessage[] | AgentContinuationOutcome> {
+		const outcome = this._getGoalContinuationOutcome(context, owner ?? this._captureGoalContinuationOwner(signal));
+		return owner ? outcome : outcome.then((value) => (value.kind === "continue" ? value.messages : []));
+	}
+
+	private async _getGoalContinuationOutcome(
+		context: GetContinuationMessagesContext,
+		owner: GoalContinuationOwner,
+	): Promise<AgentContinuationOutcome> {
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (await this._stopGoalContinuationForTerminalMessage(context.message, owner)) {
+			return this._stoppedContinuationOutcome(owner.signal);
 		}
-		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
-			return [];
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			return { kind: "finish" };
 		}
-		// Delegating and ending the turn is correct behavior; hold the continuation
-		// until descendants settle instead of re-prompting a waiting parent.
+		// Delegating and ending the turn is correct behavior; retain the existing wakeup owner.
 		if (this._hasUnsettledRlmQuiescenceWork()) {
 			this._goalContinuationAwaitsRlmWork = true;
-			return [];
+			return { kind: "wait_for_owned_work" };
 		}
 		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
+				...owner.goal,
+				continuationsUsed: owner.goal.continuationsUsed + 1,
 				lastReason: undefined,
 				lastError: undefined,
 			};
-			await this._setGoalState(nextGoal);
-			return [createGoalContextMessage(this._goalState, "continuation")];
+			await this._setGoalState(nextGoal, { continuationOwner: owner });
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+			return { kind: "continue", messages: [createGoalContextMessage(owner.goal, "continuation")] };
 		} catch (error) {
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
 			const message = error instanceof Error ? error.message : String(error);
 			try {
-				await this._finishGoalWithError(message);
+				await this._finishGoalWithError(message, owner);
 			} catch {
-				// The continuation hook must not reject; listener failures should not crash the agent loop.
+				// Preserve the goal hook's existing non-rejection policy, without finishing a replacement goal.
 			}
-			return [];
+			return this._stoppedContinuationOutcome(owner.signal);
 		}
 	}
 
@@ -4335,39 +4453,72 @@ export class AgentSession {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
-		if (this.queuedActionCount > 0) {
-			return [];
-		}
+		// Keep direct callers of the original Agent callback; the real loop uses the typed owner only.
+		const outcome = await this._getContinuationOutcome(context, signal);
+		return outcome.kind === "continue" ? outcome.messages : [];
+	}
+
+	private async _getContinuationOutcome(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<AgentContinuationOutcome> {
+		if (signal?.aborted || this._disposed || this._disposing) return this._stoppedContinuationOutcome(signal);
+		if (this.queuedActionCount > 0) return { kind: "finish" };
+		const owner = this._captureGoalContinuationOwner(signal);
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
-		const goalSnapshot = this._goalState;
-		const goalAccountingStartedAt = this._goalAccountingStartedAt;
-		const goalMessages = await this._getGoalContinuationMessages(context, signal);
-		if (goalMessages.length > 0 || signal?.aborted) {
-			if (goalMessages.length > 0 && this._sessionInputArrivalEpoch !== arrivalEpoch) {
-				await this._setGoalState(goalSnapshot);
+		const goalSnapshot = owner.goal;
+		const goalAccountingStartedAt = owner.accountingStartedAt;
+		const autonomousState = this._autonomousState;
+		const autonomousSnapshot = structuredClone(autonomousState);
+		const cwd = this._cwd;
+		const autonomousOwnerIsCurrent = () =>
+			this._autonomousState === autonomousState && isDeepStrictEqual(autonomousState, autonomousSnapshot);
+		const goalOutcome = await this._getGoalContinuationMessages(context, signal, owner);
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
+		if (goalOutcome.kind === "continue") {
+			if (this._sessionInputArrivalEpoch !== arrivalEpoch) {
+				try {
+					await this._setGoalState(goalSnapshot, { continuationOwner: owner });
+				} catch (error) {
+					if (error instanceof StaleGoalContinuationError) return this._stoppedContinuationOutcome(signal);
+					throw error;
+				}
+				if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
 				this._goalAccountingStartedAt = goalAccountingStartedAt;
-				return [];
+				return { kind: "finish" };
 			}
-			return goalMessages;
+			return goalOutcome;
 		}
+		const noContinuation = (): AgentContinuationOutcome =>
+			goalOutcome.kind === "wait_for_owned_work" && this._goalContinuationAwaitsRlmWork
+				? { kind: "wait_for_owned_work" }
+				: { kind: "finish" };
 		if (
 			this._autonomousContinuationSuppressionDepth > 0 ||
-			(this.sessionManager.supportsCapturedHistoryReads()
+			(owner.manager.supportsCapturedHistoryReads()
 				? this._invocationSuppressedAutonomousContinuation
 				: context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message)))
 		) {
-			return [];
+			return noContinuation();
 		}
-		const autonomousSnapshot = this._snapshotAutonomousRuntimeState();
-		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, context.message, {
-			cwd: this._cwd,
-			signal,
-		});
-		if (autonomousMessage && this._sessionInputArrivalEpoch !== arrivalEpoch) {
-			this._restoreAutonomousRuntimeSnapshot(autonomousSnapshot);
-			return [];
+		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
+		// Gate work may await. It must not mutate a new run's counters or failure state while it waits.
+		const candidate = structuredClone(autonomousSnapshot);
+		let autonomousMessage: AgentMessage | undefined;
+		try {
+			autonomousMessage = await nextAutonomousContinuation(candidate, context.message, { cwd, signal });
+		} catch (error) {
+			if (this._isGoalContinuationOwnerCurrent(owner) && autonomousOwnerIsCurrent()) {
+				this._restoreAutonomousRuntimeSnapshot(candidate);
+			}
+			throw error;
 		}
-		return autonomousMessage ? [autonomousMessage] : [];
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
+		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
+		if (autonomousMessage && this._sessionInputArrivalEpoch !== arrivalEpoch) return { kind: "finish" };
+		this._restoreAutonomousRuntimeSnapshot(candidate);
+		// Preserve the current policy winner: a goal deferral does not override autonomous continuation.
+		return autonomousMessage ? { kind: "continue", messages: [autonomousMessage] } : noContinuation();
 	}
 
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;

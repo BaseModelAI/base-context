@@ -167,6 +167,8 @@ describe("AgentSession goals", () => {
 
 	it("keeps continuing until the model completes the goal through ipython", async () => {
 		const harness = await createGoalHarness([], true);
+		const typedContinuation = vi.spyOn(harness.session.agent, "getContinuationOutcome");
+		const legacyContinuation = vi.spyOn(harness.session.agent, "getContinuationMessages");
 		harness.setResponses([
 			fauxAssistantMessage("I need another step."),
 			fauxAssistantMessage("The work is complete."),
@@ -176,6 +178,12 @@ describe("AgentSession goals", () => {
 
 		await harness.session.prompt("/goal finish the task");
 
+		expect(legacyContinuation).not.toHaveBeenCalled();
+		expect(await Promise.all(typedContinuation.mock.results.map((result) => result.value))).toMatchObject([
+			{ kind: "continue" },
+			{ kind: "continue" },
+			{ kind: "finish" },
+		]);
 		expect(visibleAssistantTexts(harness)).toEqual([
 			"I need another step.",
 			"The work is complete.",

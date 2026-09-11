@@ -139,6 +139,26 @@ const stream = agentLoop(prompts, context, {
 
 `shouldStopAfterTurn` runs after `turn_end` is emitted and after the assistant response and any tool executions have completed normally. If it returns `true`, the loop emits `agent_end` and exits before polling steering or follow-up queues, and before starting another LLM call. It does not abort the provider stream, does not cancel running tools, and does not alter the assistant message stop reason.
 
+### Native continuation control
+
+At a natural stop, `Agent` and `AgentLoopConfig` can use the optional
+`getContinuationOutcome(context, signal)` callback. It returns a promise of the
+exported `AgentContinuationOutcome` type. The native session binds this callback. Only `continue` requests another model turn. `wait_for_owned_work`,
+`finish` and `cancelled` end the current low-level invocation. A message body or
+`turn_end` event is not a control instruction.
+
+`wait_for_owned_work` does not wait for the invocation's own idle barrier. The
+existing goal wakeup owner resumes work after descendant settlement and terminal
+notice delivery. Goal and autonomous-work priority is unchanged. This is not a
+new scheduler, cancellation policy or checkpoint transition.
+
+`getContinuationOutcome` takes precedence over the existing `getContinuationMessages`
+callback; the loop does not call both. Without a typed owner, the existing array
+callback keeps its behavior. Explicit stop hooks, steering, follow-ups and finalized
+tool results keep their existing precedence. The native owner retains the original
+session and input-pump ownership across waits; late control cannot start a turn on
+a replacement session.
+
 When you use the `Agent` class, assistant `message_end` processing is treated as a barrier before tool preflight begins. That means `beforeToolCall` sees agent state that already includes the assistant message that requested the tool call.
 
 ### continue() Event Sequence

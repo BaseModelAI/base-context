@@ -2530,3 +2530,71 @@ package, Python/kernel/process migration, live provider, benchmark or publicatio
 run occurred. Whole-product migration/rollback, current-native gains and completion
 of the active objective remain unclaimed. W72 budget defaults are unchanged and
 still awaiting the user's decision.
+
+## W74 / G11 — explicit natural-turn continuation control
+
+The native AgentSession natural-stop producer uses typed continuation outcomes on
+the existing Agent/agent-loop callback path. Only `continue` authorizes another
+model turn. `wait_for_owned_work`, `finish` and `cancelled` end this low-level
+invocation. Descriptive `turn_end` events and message bodies do not gain control
+authority. The existing array callback retains its generic behavior when no typed
+owner is bound; a bound typed owner is not followed by a second callback invocation.
+
+Goal/autonomous policy and limits are unchanged. An actual outstanding goal
+deferral becomes `wait_for_owned_work` only when no existing continuation wins.
+Existing descendant settlement/terminal-notice delivery and the single goal-resume
+owner remain responsible for wakeup. Waiting is not a self-quiescence await,
+conversation polling, job cancellation or a new scheduler/registry. A final response
+and unfinished owned work remain separate facts.
+
+The original session/source and input-pump owner govern work across awaits. Accepted
+goal bookkeeping stays with its source, without requalifying it as native admission.
+Stale control cannot select a replacement's next turn or roll back a new goal.
+Existing stop-hook precedence, finalized tool results, all-tools terminate handling,
+steering/follow-up ordering, primary failures and cancellation/disposal/EOF owners
+remain in place. The result type does not make a second aborted assistant or hide
+an accepted write/late failure.
+
+The compaction/checkpoint producer is unchanged; no unused
+`checkpoint_then_continue` state is claimed. Shared workspaces, a whole job registry,
+strong descendant lifecycle drains, all G11 outcomes and global efficiency gains
+remain outside this bounded change. No new provider call, auxiliary budget default,
+wire message, journal, index, kernel/bootstrap, epoch or queued-action format is
+introduced. Schema44/min44 (`protocol-11-schema-44-turn-outcomes`) fences loaded
+native workers with older continuation behavior; protocol11 is unchanged.
+W72 auxiliary-budget defaults remain unapproved and untouched.
+
+The existing autonomous command result/abort and mutable gate-bookkeeping retention
+limits remain. This change does not add a durable command-result registry or claim
+complete output retention on stale/cancelled paths. Existing process settlement,
+orphan tracking and primary lifecycle errors are not converted into harmless finish
+outcomes. The existing goal-resume write/admission/compensation body reuses the same
+scoped ownership capture; its scheduling and wakeup policy are unchanged.
+The existing callback-abort race can finish the low-level invocation before the
+callback itself settles. No new all-callback drain or complete late-error visibility
+guarantee is claimed by these outcomes.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx/package Vitest in fresh six-variable, network/PID-isolated environments.
+The persisted native-goal path (PID4006647,5.029995028162375s,
+1passed/42skipped) exercised real SessionManager/AgentSession/Agent/loop with the
+existing Faux provider and ipython host bridge. It observed typed
+continue/continue/finish, no legacy callback invocation, unchanged response counts,
+qualified goal creation/completion and ordinary unqualified bookkeeping. This is
+an actual native producer-to-loop fixture, not a live provider or kernel run.
+
+The completed-turn abort case (PID4006652,2.1680260528810322s,
+1passed/34skipped) left the typed callback pending, ended on abort, then released
+its late continue result. It retained exactly one completed assistant/agent_end,
+one model stream and no legacy fallback, second assistant or extra input. No new
+case, suite, matrix or harness was added. Real descendants, wakeup replacement,
+all concurrent goal/state changes and process-crash behavior have source-review
+scope here, not a separate runtime certification.
+
+Required `npm run check` passed first (PID4006658,5.189717738190666s;
+1046files/no fixes, types, installer/browser). There were no failing checks/cases,
+source corrections or focused reruns. No provider, benchmark, user-session migration,
+installation or publication run occurred. The existing command-result retention
+and callback-abort limits remain explicit. W72 defaults are still unapproved;
+whole G11 completion, current-native gains and overall goal completion are not
+claimed.

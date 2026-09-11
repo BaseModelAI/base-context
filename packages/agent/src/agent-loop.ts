@@ -536,6 +536,20 @@ async function runLoop(
 		}
 
 		if (shouldStopBeforeTurn()) break;
+		if (lastTurn && config.getContinuationOutcome) {
+			const outcome = await settlePostTurn(
+				maybePromiseWithAbort(
+					config.getContinuationOutcome(output ? { ...lastTurn, newMessages: output.copy() } : lastTurn, signal),
+					signal,
+				),
+				signal,
+			);
+			if (outcome.status === "completed" && outcome.value.kind === "continue") {
+				pendingMessages = outcome.value.messages;
+				continue;
+			}
+			break;
+		}
 		const continuationMessagesResult = lastTurn
 			? await settlePostTurn(
 					maybePromiseWithAbort(

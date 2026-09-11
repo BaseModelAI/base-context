@@ -172,7 +172,7 @@ export interface AgentOutputPolicy {
 	snapshot(message: AgentMessage, maxSourceBytes: number): { message: AgentMessage; sourceBytes: number } | undefined;
 }
 
-/** Context passed to `shouldStopAfterTurn` and `getContinuationMessages`. */
+/** Context passed to `shouldStopAfterTurn` and both continuation callbacks. */
 export interface ShouldStopAfterTurnContext {
 	/** Assistant message that completed the turn. */
 	message: AssistantMessage;
@@ -185,6 +185,11 @@ export interface ShouldStopAfterTurnContext {
 }
 
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
+
+/** Runtime control at a natural turn boundary; message payload does not decide whether to restart. */
+export type AgentContinuationOutcome =
+	| { kind: "continue"; messages: AgentMessage[] }
+	| { kind: "finish" | "wait_for_owned_work" | "cancelled" };
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	/** Opt-in bounded finalized results. Native sinks must join their message_end job. */
@@ -323,6 +328,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Return [] when no continuation should run.
 	 */
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
+
+	/**
+	 * Authoritative runtime continuation control, after steering and explicit follow-ups.
+	 * When present, only this callback is called; getContinuationMessages is not polled.
+	 * Only continue restarts this invocation. Waiting leaves future work with its existing owner.
+	 */
+	getContinuationOutcome?: (
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContinuationOutcome>;
 
 	/**
 	 * Tool execution mode. Defaults to `"parallel"`.

@@ -95,8 +95,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 41 honors explicit compaction model and effort selection.
 // Revision 42 honors explicit branch-summary model and effort selection.
 // Revision 43 requires bounded saved-session query pages on the native catalog path.
-export const DAEMON_SCHEMA_REVISION = 43;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-43-saved-session-pages";
+// Revision 44 uses typed native natural-turn continuation outcomes.
+export const DAEMON_SCHEMA_REVISION = 44;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-44-turn-outcomes";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -741,7 +742,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 43,
+	minSchemaRevision: 44,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

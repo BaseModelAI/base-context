@@ -15,7 +15,14 @@ import { stringifyBoundedJson } from "../../coding-agent/src/core/bounded-json.j
 import { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
 import { AgentOutputLimitError } from "../src/index.js";
-import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
+import type {
+	AgentContext,
+	AgentContinuationOutcome,
+	AgentEvent,
+	AgentLoopConfig,
+	AgentMessage,
+	AgentTool,
+} from "../src/types.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -291,22 +298,28 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		const controller = new AbortController();
 		const finalMessage = createAssistantMessage([{ type: "text", text: "complete" }]);
+		let finishContinuation: (outcome: AgentContinuationOutcome) => void = () => {};
+		const continuation = new Promise<AgentContinuationOutcome>((resolve) => {
+			finishContinuation = resolve;
+		});
+		const legacyContinuation = vi.fn(async () => [createUserMessage("unused legacy continuation")]);
+		const typedContinuation = vi.fn(() => {
+			controller.abort();
+			return continuation;
+		});
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
-			shouldStopAfterTurn: async () => {
-				controller.abort();
-				await new Promise((resolve) => setTimeout(resolve, 0));
-				return false;
-			},
+			getContinuationMessages: legacyContinuation,
+			getContinuationOutcome: typedContinuation,
 		};
-		const streamFn = () => {
+		const streamFn = vi.fn(() => {
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				stream.push({ type: "done", reason: "stop", message: finalMessage });
 			});
 			return stream;
-		};
+		});
 
 		const events: AgentEvent[] = [];
 		const stream = agentLoop([createUserMessage("Hello")], context, config, controller.signal, streamFn);
@@ -316,7 +329,13 @@ describe("agentLoop with AgentMessage", () => {
 
 		const messages = await stream.result();
 		const assistantMessages = messages.filter((message) => message.role === "assistant");
+		finishContinuation({ kind: "continue", messages: [createUserMessage("too late")] });
+		await continuation;
 
+		expect(typedContinuation).toHaveBeenCalledTimes(1);
+		expect(legacyContinuation).not.toHaveBeenCalled();
+		expect(streamFn).toHaveBeenCalledTimes(1);
+		expect(messages.filter((message) => message.role === "user")).toHaveLength(1);
 		expect(assistantMessages).toHaveLength(1);
 		expect(assistantMessages[0]?.role).toBe("assistant");
 		if (assistantMessages[0]?.role === "assistant") {
