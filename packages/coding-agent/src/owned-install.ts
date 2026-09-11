@@ -292,6 +292,15 @@ export async function installOwnedRelease(options: {
 	const installation = ownedVersion(root, `${version}-${randomUUID()}`);
 	const directory = join(root, "versions", installation.version);
 	mkdirSync(directory, { recursive: true, mode: 0o700 });
+	// Project-scoped npm installs read script permissions from their own package.json.
+	writeFileSync(
+		join(directory, "package.json"),
+		`${JSON.stringify({
+			private: true,
+			allowScripts: Object.fromEntries([installSpec, ...localDependencyTarballs].map((spec) => [spec, true])),
+		})}\n`,
+		{ flag: "wx", mode: 0o600 },
+	);
 	delete environment[PRODUCT_ENV.kernelPython];
 	delete environment[PRODUCT_ENV.kernelVenv];
 	delete environment[PRODUCT_ENV.packageDirectory];
@@ -309,7 +318,6 @@ export async function installOwnedRelease(options: {
 			"--global=false",
 			"--no-save",
 			"--package-lock=false",
-			`--allow-scripts=${installSpec}`,
 			"--engine-strict",
 			"--no-fund",
 			"--no-audit",

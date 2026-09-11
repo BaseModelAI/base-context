@@ -3217,3 +3217,23 @@ Releases downloads. The first real owned install stopped during npm preparation:
 The owned selection was absent afterward; the failed candidate was retained.
 A minimal installer fix is pending. Actual publication still needs final approval
 after benchmark review. Whole-root/settings/package migration remains separate.
+
+
+### W120 — Correct npm project-scoped installation policy
+
+The first real owned installation failed before activation with npm 11.19
+`EALLOWSCRIPTS`. The new version directory now gets a private package.json with
+`allowScripts` entries for the captured main install operand and absolute local
+dependency tarballs. The invalid project-scoped `--allow-scripts` argument was
+removed; `--allow-remote=all` remains valid and unchanged. Normal non-strict npm
+dependency scripts, downloads and mandatory fresh Python preparation remain.
+No global npm configuration, bypass, dependency downgrade or skipped scripts
+were added. This map does not claim a complete future dependency script policy.
+
+Both affected existing owned-install cases passed first. Their shared fake npm
+boundary reads the real candidate-local policy before writing installed files;
+real activation/rollback ownership and preparation-failure retention are unchanged.
+This fixture is not a successful real installation. The original failed candidate
+remains, with no current selection observed after that failure. A corrected build
+and a new real installation attempt are next; frozen benchmark artifacts stay
+unchanged. Actual publication still requires final approval.

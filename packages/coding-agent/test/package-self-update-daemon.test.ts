@@ -457,10 +457,14 @@ describe("self-update daemon restart", () => {
 					expect(args.slice(args.indexOf("--"))).toEqual(["--", args.at(-1)]);
 				}
 				expect(args).not.toContain("-g");
-				expect(args).toContain(`--allow-scripts=${args.at(-1)}`);
+				expect(args).not.toContain(`--allow-scripts=${args.at(-1)}`);
 				expect(environment.BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL).toBe("0");
 				expect(environment.BASE_CONTEXT_BOOTSTRAP_TOOLS_ON_INSTALL).toBe("0");
 				const directory = args[args.indexOf("--prefix") + 1];
+				expect(JSON.parse(readFileSync(join(directory, "package.json"), "utf8"))).toEqual({
+					private: true,
+					allowScripts: Object.fromEntries(args.slice(args.indexOf("--") + 1).map((spec) => [spec, true])),
+				});
 				expect(cwd).toBe(directory);
 				expect(dirname(directory)).toBe(join(root, "versions"));
 				const candidatePackage = join(directory, "node_modules", PACKAGE_NAME);
