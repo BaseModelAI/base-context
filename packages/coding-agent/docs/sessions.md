@@ -33,6 +33,39 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 
+## Importing an External Session
+
+Use an explicit file path to create a new owned session in the current project:
+
+```bash
+base-context session import /path/to/session.jsonl
+```
+
+The command prints the new session path. It does not resume the session or start
+an agent runtime. Use `base-context --resume <printed-path>` separately if desired.
+The source is read-only. No credentials, settings, packages, Python environment or
+running processes are migrated.
+
+This route uses `SessionManager.importRetainedFrom`, including for native-framed
+input. Copied entries are retained imports, not newly admitted native authority.
+The existing `--fork` route is a different copy operation; it does not force this
+lowering for every source. Source claims about tools, jobs or variables do not make
+those resources live in the new session. Native version6 tool-continuation copies
+still refuse because they need their original native execution source.
+
+Explicit retained imports accept missing-version/v1, v2 and current v3 session
+headers. Future or invalid versions and an incomplete final record refuse before
+destination creation. Records must be LF-terminated. The reader holds one read-only
+descriptor and imports within one captured size; this is not an atomic snapshot of
+a file that is still changing.
+
+The existing copy limits are 16,384 entries after the header and 64MiB of consumed
+JSON payload, including header bytes. These are not raw-file-size or global-memory
+limits. Supported older payloads use the existing conversion path. Some later copy
+or activation failures can leave an owned destination; there is no automatic
+delete/rollback or atomic whole-import guarantee. A successful import and a later
+close/report error remain separate outcomes.
+
 ## Resuming and Deleting Sessions
 
 In a running session, `/resume` opens the agents view. Its live roster is separate

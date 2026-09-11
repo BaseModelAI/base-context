@@ -1,5 +1,11 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../src/config.js";
+import { ENV_AGENT_DIR, ENV_SESSION_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../src/config.js";
+import { APPEND_NATIVE_ADMISSION, SessionJournalOwner } from "../src/core/session-journal-owner.js";
+import { readSessionJournal } from "../src/core/session-journal-reader.js";
+import { SessionManager } from "../src/core/session-manager.js";
 
 const mocks = vi.hoisted(() => ({
 	daemonCommands: [] as string[][],
@@ -232,6 +238,84 @@ describe("public command routing", () => {
 			handled: false,
 			args: [INTERNAL_RUNTIME_COMMAND_MARKER, "--export", "session.jsonl", "session.html"],
 		});
+
+		const root = mkdtempSync(join(tmpdir(), "base-context-session-import-"));
+		const previousHome = process.env[ENV_AGENT_DIR];
+		const previousSessions = process.env[ENV_SESSION_DIR];
+		process.env[ENV_AGENT_DIR] = root;
+		process.env[ENV_SESSION_DIR] = join(root, "owned-sessions");
+		vi.spyOn(process, "cwd").mockReturnValue(root);
+		try {
+			const source = join(root, "external.jsonl");
+			const writer = await SessionJournalOwner.open({ journalPath: source, create: true });
+			try {
+				await writer.appendJson(
+					JSON.stringify({
+						type: "session",
+						version: 3,
+						id: "external-session",
+						timestamp: "2026-01-01T00:00:00.000Z",
+						cwd: root,
+						rlmDepth: 0,
+					}),
+				);
+				await writer[APPEND_NATIVE_ADMISSION](
+					JSON.stringify({
+						type: "message",
+						id: "imported-input",
+						parentId: null,
+						timestamp: "2026-01-01T00:00:01.000Z",
+						message: { role: "user", content: "Keep this source text", timestamp: 1 },
+						nativeOrigin: {
+							version: 1,
+							kind: "input",
+							actionId: "source-action",
+							recordId: "source-record",
+							inputSource: "interactive",
+							recordRole: "primary",
+							submitted: { text: "Keep this source text" },
+						},
+					}),
+				);
+			} finally {
+				await writer.close();
+			}
+			const before = readFileSync(source);
+			await expect(handlePublicCommand(["session", "import", basename(source)])).resolves.toEqual({
+				handled: true,
+				args: [],
+				explicitAgentsView: false,
+			});
+			expect(process.exitCode).toBeUndefined();
+			const destinationPath = vi.mocked(console.log).mock.calls.at(-1)?.[0];
+			if (typeof destinationPath !== "string") throw new Error("Import did not report its destination");
+			expect(destinationPath.startsWith(join(root, "owned-sessions"))).toBe(true);
+			expect(readFileSync(source)).toEqual(before);
+			const records = [];
+			for await (const record of readSessionJournal(destinationPath)) records.push(record);
+			expect(records[1]).toMatchObject({
+				retention: "retained-import",
+				qualification: "native-admission",
+				entry: { id: "imported-input", message: { content: "Keep this source text" } },
+			});
+			// The command returned only after releasing its destination owner.
+			const imported = await SessionManager.open(destinationPath);
+			try {
+				expect(imported.getSessionId()).not.toBe("external-session");
+				expect((await imported.readEntry("imported-input"))?.type).toBe("message");
+			} finally {
+				await imported.close();
+			}
+			expect(mocks.daemonCommands).toEqual([]);
+			expect(mocks.mcpCommands).toEqual([]);
+			expect(mocks.packageCommands).toEqual([]);
+		} finally {
+			if (previousHome === undefined) delete process.env[ENV_AGENT_DIR];
+			else process.env[ENV_AGENT_DIR] = previousHome;
+			if (previousSessions === undefined) delete process.env[ENV_SESSION_DIR];
+			else process.env[ENV_SESSION_DIR] = previousSessions;
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	it("preserves trailing global options for model listing and session export", async () => {

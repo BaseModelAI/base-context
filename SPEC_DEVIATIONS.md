@@ -1459,3 +1459,57 @@ The known package README correction was integrated in the same change without a
 separate pipeline. No live provider, benchmark, installed lifecycle or publication
 run occurred. No current-native overall accuracy/cost/efficiency or complete G08
 claim follows from this bounded listing path; the overall objective remains open.
+
+## W73 / G12 — explicit single-session retained import
+
+`base-context session import <file>` connects the existing public session command
+handler to `SessionManager.importRetainedFrom`. It accepts one explicit file path,
+uses the current destination cwd and normal owned session-directory default,
+reports the resulting path, closes the returned manager and returns before runtime
+creation. It does not discover a source by session ID or route through resume/fork.
+
+The existing copy owner handles both native-framed and supported legacy data with
+forced retained-import semantics. Copied labels do not establish native task
+admission. Existing conversion, entry/JSON-byte limits, acknowledged destination
+writer/index, copied epoch/resource rules and version6 tool-continuation refusal
+remain their owners. No second copy engine, index, authority store or checksum
+scheme is added.
+
+The explicit retained-import API now requires a supported header (missing/v1,
+v2, currentv3) and complete LF-terminated records within its captured descriptor/
+size. Future/invalid versions and incomplete tails refuse before destination
+construction. Ordinary captured-prefix readers and `--fork` retain their existing
+semantics. This is not an atomic writer snapshot or completeness guarantee across
+concurrent source mutations. The existing16,384entries-after-header/64MiB consumed
+JSON limit includes header bytes, not raw framing size or a global heap bound.
+
+The original source is read-only. A later copy/activation failure may leave an owned
+destination; no automatic deletion or rollback is added. A known successful import
+is not reclassified as rolled back if close/reporting then fails. No credential,
+settings, package, Python/kernel/process, whole-root migration or full G12 rollback
+workflow is claimed. No daemon protocol/schema, history-index, kernel/bootstrap,
+epoch or queued-action format change is required by this local command/API path.
+W72 auxiliary-budget defaults remain unapproved and unchanged.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx and package Vitest (PID3976053,2.857291626976803s;
+2passed/68skipped). The public-command case kept its existing export/model rewrites
+and exercised the real import owner using a native-framed admitted source. It
+observed retained-import on copied data, unchanged source bytes, the reported new
+owned path/new session ID, and reopening after the command closed its manager.
+Existing unrelated command mocks were not invoked. This is public-handler evidence,
+not a separately launched/installed CLI or platform certification.
+
+The existing LF-boundary case exercised incomplete-tail refusal before destination
+creation, retained the source unchanged, and confirmed that ordinary fork still
+accepts its captured complete prefix. Supported/future-version handling is source
+implementation, not a separate version-matrix runtime claim. No new cases, suite,
+matrix, harness or provider setup were added.
+
+Required `npm run check` passed first (PID3976058,5.054137552157044s;
+1046files/no fixes, types, installer/browser checks). No failing test/check,
+correction or focused rerun occurred. No user session, credential store, settings,
+package, Python/kernel/process migration, live provider, benchmark or publication
+run occurred. Whole-product migration/rollback, current-native gains and completion
+of the active objective remain unclaimed. W72 budget defaults are unchanged and
+still awaiting the user's decision.

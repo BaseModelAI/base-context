@@ -1,7 +1,9 @@
+import { resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { AuthStorage } from "../core/auth-storage.js";
 import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
+import { SessionManager } from "../core/session-manager.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
@@ -142,6 +144,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "model":
 			return rewriteNestedCommand("model", "list", "--list-models", args.slice(1));
 		case "session":
+			if (args[1] === "import") return runSessionImport(args.slice(2));
 			return rewriteNestedCommand("session", "export", "--export", args.slice(1));
 		case "config":
 			if (!requireArgumentCount(args.slice(1), 0, "config")) return HANDLED;
@@ -317,10 +320,61 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 	return HANDLED;
 }
 
+function describeSessionImportError(error: unknown): string {
+	if (error instanceof AggregateError)
+		return `${error.message}: ${[...new Set(error.errors)].map(describeSessionImportError).join("; ")}`;
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function runSessionImport(args: string[]): Promise<PublicCommandResult> {
+	if (args.length !== 1 || !args[0] || args[0].startsWith("-"))
+		return fail(`Usage: ${APP_NAME} ${getCommandSpec(["session", "import"])!.usage}`);
+	const destinationCwd = process.cwd();
+	const sourcePath = resolve(destinationCwd, args[0]);
+	let manager: SessionManager;
+	try {
+		manager = await SessionManager.importRetainedFrom(sourcePath, destinationCwd);
+	} catch (error) {
+		return fail(
+			`Session import did not complete: ${describeSessionImportError(error)}. A destination may already exist.`,
+		);
+	}
+
+	// Import has completed. Reporting/close errors must not turn this into an alleged rollback.
+	let destinationPath: string | undefined;
+	let reportFailure: { error: unknown } | undefined;
+	const failures: string[] = [];
+	try {
+		destinationPath = manager.getSessionFile();
+		if (!destinationPath) throw new Error("The imported session has no destination path");
+		console.log(destinationPath);
+	} catch (error) {
+		reportFailure = { error };
+		failures.push(`destination reporting failed: ${describeSessionImportError(error)}`);
+	}
+	try {
+		await manager.close();
+	} catch (error) {
+		if (!reportFailure || error !== reportFailure.error)
+			failures.push(`destination close failed: ${describeSessionImportError(error)}`);
+		else failures.push("destination close also failed with the reporting error");
+	}
+	if (failures.length > 0)
+		return fail(
+			`Session imported${destinationPath ? ` to ${destinationPath}` : " (destination path unavailable)"}; ${failures.join("; ")}`,
+		);
+	return HANDLED;
+}
+
 function rewriteNestedCommand(parent: string, subcommand: string, flag: string, args: string[]): PublicCommandResult {
 	if (args[0] !== subcommand) {
 		const candidate = args[0];
-		const suggestion = candidate ? findCommandSuggestion(candidate, [subcommand]) : undefined;
+		const suggestion = candidate
+			? findCommandSuggestion(
+					candidate,
+					getChildCommandSpecs([parent]).map((spec) => spec.path.at(-1)!),
+				)
+			: undefined;
 		return fail(
 			candidate ? `Unknown ${parent} command: ${candidate}` : `Missing ${parent} command.`,
 			suggestion

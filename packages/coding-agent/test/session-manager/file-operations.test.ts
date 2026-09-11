@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -156,6 +156,19 @@ describe("loadEntriesFromFile", () => {
 		expect(streamed).toEqual(loadEntriesFromFile(file));
 		expect(streamed[1]).toMatchObject({ type: "message", message: { content } });
 		expect((await readSessionInfo(file))?.firstMessage).toBe(content);
+
+		const complete = readFileSync(file);
+		const incomplete = complete.subarray(0, complete.length - 1);
+		writeFileSync(file, incomplete);
+		const destinationDir = join(tempDir, "retained-import");
+		await expect(SessionManager.importRetainedFrom(file, tempDir, destinationDir)).rejects.toThrow(
+			"Captured session source has an incomplete final record",
+		);
+		expect(existsSync(destinationDir)).toBe(false); // Refusal precedes destination construction.
+		expect(readFileSync(file)).toEqual(incomplete);
+		// Ordinary --fork/captured-prefix semantics are not tightened by explicit import.
+		const forked = await forkSession(file, tempDir, join(tempDir, "prefix-fork"));
+		expect(await forked.readEntries()).toEqual([]);
 	});
 
 	it("streams a multi-megabyte JSONL record without losing following entries", async () => {

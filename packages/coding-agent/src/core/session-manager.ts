@@ -4417,7 +4417,7 @@ export class SessionManager {
 		return SessionManager._copyFrom(sourcePath, targetCwd, sessionDir, undefined, { ...limits });
 	}
 
-	/** Explicit external import: copied payload claims cannot establish native source authority. */
+	/** Explicit external import: supported payload versions and complete captured records, with copied authority lowered. */
 	static async importRetainedFrom(
 		sourcePath: string,
 		targetCwd: string,
@@ -4435,6 +4435,7 @@ export class SessionManager {
 		limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS,
 	): Promise<SessionManager> {
 		const { maxEntries, maxSourceBytes } = limits;
+		const explicitImport = retention === "retained-import";
 		if (
 			!Number.isSafeInteger(maxEntries) ||
 			maxEntries <= 0 ||
@@ -4461,35 +4462,43 @@ export class SessionManager {
 				);
 		};
 		if (existsSync(sourcePath)) {
-			await readCapturedSessionJournal(capturedPath, (record) => {
-				sourceBytes += Buffer.byteLength(record.json);
-				if (sourceBytes > maxSourceBytes) throw new Error("Copied history JSON byte budget exceeded");
-				const entry = sessionFileEntry(record.entry, record.retention, record.qualification);
-				if (record.source) through = record.source.sequence;
-				if (!sourceHeader) {
-					if (entry.type !== "session" || typeof entry.id !== "string")
-						throw new Error("Session source has no valid header");
-					sourceHeader = entry;
-					if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
-				} else {
-					if (++entriesRead > maxEntries) throw new Error("Copied history entry budget exceeded");
-					if (entry.type !== "session" && record.source)
-						capturedEntries.push(
-							captureEpochCopyEntry(entry, {
-								...record.source,
-								id: entry.id,
-								parentId: entry.parentId,
-								kind: entry.type,
-								retention: record.retention,
-								qualification: record.qualification,
-							}),
-						);
-					if (legacyEntries) legacyEntries.push(entry);
-					else keep(entry);
-				}
-			});
+			await readCapturedSessionJournal(
+				capturedPath,
+				(record) => {
+					sourceBytes += Buffer.byteLength(record.json);
+					if (sourceBytes > maxSourceBytes) throw new Error("Copied history JSON byte budget exceeded");
+					const entry = sessionFileEntry(record.entry, record.retention, record.qualification);
+					if (record.source) through = record.source.sequence;
+					if (!sourceHeader) {
+						if (entry.type !== "session" || typeof entry.id !== "string")
+							throw new Error("Session source has no valid header");
+						const version = entry.version === undefined ? 1 : entry.version;
+						if (explicitImport && ![1, 2, CURRENT_SESSION_VERSION].includes(version))
+							throw new Error(`Unsupported session version for retained import: ${String(entry.version)}`);
+						sourceHeader = entry;
+						if (entry.version !== CURRENT_SESSION_VERSION) legacyEntries = [entry];
+					} else {
+						if (++entriesRead > maxEntries) throw new Error("Copied history entry budget exceeded");
+						if (entry.type !== "session" && record.source)
+							capturedEntries.push(
+								captureEpochCopyEntry(entry, {
+									...record.source,
+									id: entry.id,
+									parentId: entry.parentId,
+									kind: entry.type,
+									retention: record.retention,
+									qualification: record.qualification,
+								}),
+							);
+						if (legacyEntries) legacyEntries.push(entry);
+						else keep(entry);
+					}
+				},
+				{ requireCompleteTail: explicitImport },
+			);
 		}
-		if (!sourceHeader) throw new Error(`Cannot fork: source session has no header: ${sourcePath}`);
+		if (!sourceHeader)
+			throw new Error(`Cannot ${explicitImport ? "import" : "fork"}: source session has no header: ${sourcePath}`);
 		if (legacyEntries) {
 			finalizeLoadedEntries(legacyEntries);
 			migrateToCurrentVersion(legacyEntries);

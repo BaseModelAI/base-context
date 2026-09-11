@@ -163,8 +163,15 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["session"],
-		usage: "session export <file> [output]",
+		usage: "session <command>",
 		summary: "Manage saved sessions",
+	},
+	{
+		path: ["session", "import"],
+		usage: "session import <file>",
+		summary: "Import one session file into a new owned session",
+		description:
+			"Imports supported legacy or native session data as retained history. Records must end with LF. Prints the new session path; the source is not changed.",
 	},
 	{
 		path: ["session", "export"],

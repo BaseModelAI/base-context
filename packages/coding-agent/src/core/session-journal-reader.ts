@@ -90,7 +90,9 @@ export async function* readSessionJournal(filePath: string): AsyncGenerator<{
 export async function readCapturedSessionJournal(
 	filePath: string,
 	consume: (record: CapturedSessionJournalRecord) => void,
+	options: { requireCompleteTail?: boolean } = {},
 ): Promise<void> {
+	const requireCompleteTail = options.requireCompleteTail === true;
 	const file = await open(filePath, "r");
 	try {
 		const { size } = await file.stat();
@@ -130,7 +132,9 @@ export async function readCapturedSessionJournal(
 				lineBytes = 0;
 			}
 		}
-		// An incomplete final record is not consumed, matching readSessionJournal.
+		if (requireCompleteTail && lineBytes > 0)
+			throw new Error("Captured session source has an incomplete final record");
+		// Other captured-prefix readers still leave an incomplete final record unconsumed.
 	} catch (error) {
 		try {
 			await file.close();

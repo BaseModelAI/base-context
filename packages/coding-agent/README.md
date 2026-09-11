@@ -563,6 +563,11 @@ Use `base-context model list [search]` to list available models.
 
 Use `base-context session export <file> [output]` to export a saved session to HTML.
 
+Use `base-context session import <file>` for an explicit new owned copy with imported
+authority lowered, including native-framed input. Supported versions and complete
+captured records are required. It prints the new path without starting a runtime;
+it does not migrate credentials or settings. See [external session imports](docs/sessions.md#importing-an-external-session).
+
 ### Tool Options
 
 | Option | Description |
