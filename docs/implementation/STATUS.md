@@ -2744,3 +2744,34 @@ six-variable state, network/PID/proc isolation and the package Vitest runner.
 Required check4050317 passed (1046 files/no fixes, types, installer and browser
 checks). No corrections or reruns. This is not installed-CLI, native epoch
 activation, full migration, live-provider or publication evidence.
+
+## W79 / G08 — existing autonomous output bounds retained
+
+The source-only lookup found existing per-stream capture limits and explicit
+truncation: 1,048,576 JavaScript characters by default and 6,000 for configured
+gate output. No output-buffer change was needed; this is not a global memory bound.
+
+## W80 / G16 — task-focused autonomous continuation text
+
+The shared default autonomous continuation no longer asks models to prove blockers
+or add verification work. It asks for the requested task, requested checks or
+configured gates, brief concrete blockers, and independent unblocked work within
+existing permissions. Required approvals remain required.
+
+The actual path remains default selection in `createAutonomousRuntimeState` →
+`nextAutonomousContinuation` → AgentSession's typed continuation. Only default
+text changes: configured gates/limits, continuation decisions, custom prompt
+selection and existing runtime state are not rewritten. Sol's special custom
+prompt and the standing user instruction are untouched. No new controller,
+permission mechanism, quota, wire/state format or startup requirement is added.
+This is not measured model behavior, efficiency or full G16 acceptance. W72
+auxiliary-budget defaults remain unapproved and unchanged.
+
+Two existing actual AgentSession/Faux selectors passed first (4054817, 2 passed/
+20 skipped): the help-question path injects the task-focused default, and the
+claimed-blocker path preserves an explicit custom continuation. The latter uses
+scripted assistant text; no credential check or provider call occurs. The original
+one-continuation/two-turn assertions remain. Tests used actual Node22.12, fresh
+six-variable state, network/PID/proc isolation and package Vitest. Required
+check4054822 passed (1046 files/no fixes, types, installer/browser). No corrections
+or reruns. Configured command-gate/process cases were not added to this scope.

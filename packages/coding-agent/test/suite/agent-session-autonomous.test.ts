@@ -67,6 +67,10 @@ describe("AgentSession autonomous mode", () => {
 			"I inspected the repo and used npm.",
 		]);
 		expect(getUserTexts(harness)).toEqual(["fix the project", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)[1]).toContain(
+			"do not add proof artifacts, self-certification, or repeated validation loops",
+		);
+		expect(getUserTexts(harness)[1]).toContain("Required approvals remain required.");
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
@@ -75,8 +79,9 @@ describe("AgentSession autonomous mode", () => {
 	});
 
 	it("continues through a claimed external blocker instead of trusting prose", async () => {
+		const continuationPrompt = "Continue independent local work without assuming permission for the blocked action.";
 		const harness = await createHarness({
-			autonomous: { enabled: true, maxContinuations: 1 },
+			autonomous: { enabled: true, maxContinuations: 1, continuationPrompt },
 		});
 		harnesses.push(harness);
 		harness.setResponses([
@@ -88,7 +93,7 @@ describe("AgentSession autonomous mode", () => {
 
 		await harness.session.prompt("run the private eval");
 
-		expect(getUserTexts(harness)).toEqual(["run the private eval", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
+		expect(getUserTexts(harness)).toEqual(["run the private eval", continuationPrompt]);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			enabled: true,
 			continuationsUsed: 1,
