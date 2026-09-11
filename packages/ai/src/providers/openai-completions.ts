@@ -35,6 +35,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import {
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	withRequestBody,
+} from "../utils/request-token-budget.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
@@ -179,7 +184,29 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}
-			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
+			const requestUrl = `${client.baseURL.replace(/\/$/, "")}/chat/completions`;
+			const nativeDeepSeek =
+				supportsNativeDeepSeek(model, compat) && requestUrl === "https://api.deepseek.com/chat/completions";
+			if (
+				options?.attempts?.pendingPublicMessageGroups?.length &&
+				(!nativeDeepSeek || !attempts.hasRequestBudget || !options.attempts.prepareRequest)
+			)
+				throw new Error("Pending tool groups require native DeepSeek public preparation and measurement");
+			let projection: ProviderRequestProjection | undefined;
+			let params = buildParams(
+				model,
+				context,
+				options,
+				compat,
+				cacheRetention,
+				cacheControl,
+				nativeDeepSeek && options?.attempts?.prepareRequest
+					? (value) => {
+							projection = value;
+						}
+					: undefined,
+			);
+			const originalBody = projection ? JSON.stringify(params) : undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
@@ -192,9 +219,28 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				serviceTier: params.service_tier,
 			});
 			if (attempts.hasRequestBudget) {
+				let pendingPublicBody: string | undefined;
 				const body = JSON.stringify(params);
-				params = JSON.parse(body) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
-				await attempts.measureRequest({ url: `${client.baseURL.replace(/\/$/, "")}/chat/completions`, body });
+				const requestProjection =
+					projection && body === originalBody && supportsNativeDeepSeek(model, compat)
+						? bindDeepSeekPublicWindow(
+								{ api: model.api, provider: model.provider, url: requestUrl, body },
+								projection,
+								(encoded) => {
+									pendingPublicBody = encoded;
+								},
+							)
+						: undefined;
+				let selected = body;
+				if (nativeDeepSeek)
+					selected = (await attempts.prepareRequest({ url: requestUrl, body }, requestProjection))!;
+				else await attempts.measureRequest({ url: requestUrl, body });
+				if (
+					options?.attempts?.pendingPublicMessageGroups?.length &&
+					(pendingPublicBody === undefined || selected !== pendingPublicBody)
+				)
+					throw new Error("Pending original tool groups were not accepted as DeepSeek public messages");
+				params = JSON.parse(selected!) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -610,6 +656,219 @@ function createClient(
 	});
 }
 
+/** The direct canonical DeepSeek route has a text/tool Chat-Completions contract, not Responses replay. */
+function supportsNativeDeepSeek(model: Model<"openai-completions">, compat: ResolvedOpenAICompletionsCompat): boolean {
+	return (
+		model.api === "openai-completions" &&
+		model.provider === "deepseek" &&
+		model.id === "deepseek-flash" &&
+		model.baseUrl.replace(/\/$/, "") === "https://api.deepseek.com" &&
+		model.reasoning &&
+		compat.thinkingFormat === "deepseek" &&
+		compat.maxTokensField === "max_tokens" &&
+		!compat.supportsDeveloperRole &&
+		compat.requiresReasoningContentOnAssistantMessages &&
+		!compat.requiresThinkingAsText &&
+		!compat.requiresAssistantAfterToolResult
+	);
+}
+
+/** Captured from the one normal converter pass; changed, foreign, opaque or unclosed replay is unsupported. */
+function captureDeepSeekProjection(
+	model: Model<"openai-completions">,
+	context: Context,
+	transformed: Message[],
+	messages: ChatCompletionMessageParam[],
+	messageIndices: readonly (number | null)[],
+	pendingPublicMessageGroups: readonly (readonly number[])[],
+): ProviderRequestProjection | undefined {
+	if (
+		transformed.length !== context.messages.length ||
+		transformed.some((message, index) => JSON.stringify(message) !== JSON.stringify(context.messages[index])) ||
+		messages.length !== messageIndices.length
+	)
+		return;
+	const items = context.messages.map((): ChatCompletionMessageParam[] => []);
+	for (const [index, sourceIndex] of messageIndices.entries()) {
+		if (sourceIndex !== null) items[sourceIndex].push(messages[index]);
+	}
+	const required = pendingPublicMessageGroups.map((indices) => ({
+		indices,
+		calls: new Map<string, boolean>(),
+	}));
+	const requiredAt = new Map<number, (typeof required)[number]>();
+	for (const group of required) {
+		if (!group.indices.length || context.messages[group.indices[0]]?.role !== "assistant") return;
+		let previous = -1;
+		for (const index of group.indices) {
+			if (
+				!Number.isSafeInteger(index) ||
+				index <= previous ||
+				index >= context.messages.length ||
+				requiredAt.has(index)
+			)
+				return;
+			requiredAt.set(index, group);
+			previous = index;
+		}
+	}
+	const pending = new Map<string, boolean>();
+	const publicMessageGroups: number[][] = [];
+	const optionalMessageIndices: number[] = [];
+	let publicGroup: number[] | undefined;
+	const closeCalls = () => {
+		const complete = [...pending.values()].every(Boolean);
+		if (complete && publicGroup) publicMessageGroups.push(publicGroup);
+		publicGroup = undefined;
+		pending.clear();
+		return complete;
+	};
+	for (const [index, message] of context.messages.entries()) {
+		if (items[index].length !== 1) return;
+		const item = items[index][0];
+		const requiredGroup = requiredAt.get(index);
+		if (
+			requiredGroup &&
+			(index === requiredGroup.indices[0] ? message.role !== "assistant" : message.role !== "toolResult")
+		)
+			return;
+		if ((message.role === "assistant" || message.role === "user") && !closeCalls()) return;
+		const calls = requiredGroup?.calls ?? pending;
+		if (message.role === "assistant") {
+			if (
+				message.api !== model.api ||
+				message.provider !== model.provider ||
+				message.model !== model.id ||
+				(message.stopReason !== "stop" && message.stopReason !== "toolUse") ||
+				item.role !== "assistant" ||
+				(item.content !== null && typeof item.content !== "string") ||
+				typeof (item as { reasoning_content?: unknown }).reasoning_content !== "string" ||
+				"reasoning_details" in item
+			)
+				return;
+			const toolCalls = message.content.filter(isToolCallBlock);
+			if ((item.tool_calls?.length ?? 0) !== toolCalls.length) return;
+			for (const [callIndex, call] of toolCalls.entries()) {
+				const wire = item.tool_calls![callIndex];
+				if (
+					!call.id ||
+					calls.has(call.id) ||
+					call.thoughtSignature !== undefined ||
+					wire.type !== "function" ||
+					wire.id !== call.id ||
+					wire.function.name !== call.name
+				)
+					return;
+				calls.set(call.id, false);
+			}
+			if (
+				message.content.some((block) =>
+					block.type === "thinking"
+						? block.redacted ||
+							(block.thinkingSignature !== undefined && block.thinkingSignature !== "reasoning_content")
+						: block.type === "text" && block.textSignature !== undefined,
+				)
+			)
+				return;
+			if (!requiredGroup) publicGroup = [index];
+			if (message.stopReason === "stop" && message.content.length === 1 && message.content[0].type === "text")
+				optionalMessageIndices.push(index);
+		} else if (message.role === "toolResult") {
+			if (
+				!calls.has(message.toolCallId) ||
+				calls.get(message.toolCallId) ||
+				item.role !== "tool" ||
+				item.tool_call_id !== message.toolCallId ||
+				message.content.some((part) => part.type !== "text")
+			)
+				return;
+			calls.set(message.toolCallId, true);
+			if (!requiredGroup) publicGroup?.push(index);
+		} else if (
+			item.role !== "user" ||
+			(typeof message.content !== "string" && message.content.some((part) => part.type !== "text"))
+		)
+			return;
+	}
+	if (!closeCalls()) return;
+	for (const group of required) {
+		if (!group.calls.size) return;
+		publicMessageGroups.push([...group.indices]);
+	}
+	return {
+		kind: "deepseek-completions-text-tools-v1",
+		replayContract: "message-groups",
+		messageIndices,
+		optionalMessageIndices,
+		// Chat Completions does not generate Responses layout-dependent item IDs.
+		generatedMessageIndices: [],
+		publicMessageGroups,
+		...(required.length ? { pendingPublicMessageGroups: required.map((group) => [...group.indices]) } : {}),
+	};
+}
+
+/** Bound only after the direct DeepSeek request still matches the native serializer after onPayload. */
+function bindDeepSeekPublicWindow(
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+	onPendingPublicEncoded: (body: string) => void,
+): ProviderRequestProjection {
+	return {
+		...projection,
+		publicWindow: true,
+		encodePublicWindow(replacements) {
+			if (!request.body || !replacements.length || !projection.publicMessageGroups) return;
+			const texts = new Map<number, string>();
+			for (const replacement of replacements) {
+				if (
+					!Number.isSafeInteger(replacement.messageIndex) ||
+					typeof replacement.text !== "string" ||
+					texts.has(replacement.messageIndex)
+				)
+					return;
+				texts.set(replacement.messageIndex, replacement.text);
+			}
+			const covered = new Set<number>();
+			for (const group of projection.publicMessageGroups) {
+				if (!group.some((index) => texts.has(index))) continue;
+				if (!group.every((index) => texts.has(index))) return;
+				for (const index of group) covered.add(index);
+			}
+			if (
+				covered.size !== texts.size ||
+				projection.pendingPublicMessageGroups?.some((group) => group.some((index) => !texts.has(index)))
+			)
+				return;
+			const body = JSON.parse(request.body) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+			if (body.messages.length !== projection.messageIndices.length) return;
+			const messages: ChatCompletionMessageParam[] = [];
+			const messageIndices: Array<number | null> = [];
+			const emitted = new Set<number>();
+			for (const [itemIndex, messageIndex] of projection.messageIndices.entries()) {
+				if (messageIndex !== null && texts.has(messageIndex)) {
+					if (emitted.has(messageIndex)) continue;
+					emitted.add(messageIndex);
+					messages.push({ role: "user", content: sanitizeSurrogates(texts.get(messageIndex)!) });
+				} else messages.push(body.messages[itemIndex]);
+				messageIndices.push(messageIndex);
+			}
+			const encoded = withRequestBody(request, JSON.stringify({ ...body, messages }));
+			if (projection.pendingPublicMessageGroups?.length) onPendingPublicEncoded(encoded.body!);
+			return {
+				request: encoded,
+				projection: {
+					kind: projection.kind,
+					replayContract: "message-groups",
+					publicWindow: true,
+					messageIndices,
+					optionalMessageIndices: projection.optionalMessageIndices,
+					generatedMessageIndices: [],
+				},
+			};
+		},
+	};
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -617,8 +876,15 @@ function buildParams(
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
 	cacheControl: OpenAICompatCacheControl | undefined = getCompatCacheControl(compat, cacheRetention),
+	onProjection?: (projection: ProviderRequestProjection) => void,
 ) {
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(
+		model,
+		context,
+		compat,
+		onProjection,
+		options?.attempts?.pendingPublicMessageGroups,
+	);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
@@ -846,6 +1112,8 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
+	onProjection?: (projection: ProviderRequestProjection) => void,
+	pendingPublicMessageGroups: readonly (readonly number[])[] = [],
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -864,7 +1132,9 @@ export function convertMessages(
 		return id;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+	const capture = onProjection && supportsNativeDeepSeek(model, compat) ? onProjection : undefined;
+	const pending = capture ? pendingPublicMessageGroups : [];
+	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id), pending);
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -872,6 +1142,10 @@ export function convertMessages(
 		params.push({ role: role, content: sanitizeSurrogates(context.systemPrompt) });
 	}
 
+	const messageIndices: Array<number | null> | undefined = capture ? params.map(() => null) : undefined;
+	const recordMessage = (index: number) => {
+		if (messageIndices) while (messageIndices.length < params.length) messageIndices.push(index);
+	};
 	let lastRole: string | null = null;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -1059,6 +1333,7 @@ export function convertMessages(
 					(toolResultMsg as any).name = toolMsg.toolName;
 				}
 				params.push(toolResultMsg);
+				recordMessage(j);
 
 				if (hasImages && model.input.includes("image")) {
 					for (const block of toolMsg.content) {
@@ -1098,12 +1373,25 @@ export function convertMessages(
 			} else {
 				lastRole = "toolResult";
 			}
+			recordMessage(i);
 			continue;
 		}
 
+		recordMessage(i);
 		lastRole = msg.role;
 	}
 
+	if (capture && messageIndices) {
+		const projection = captureDeepSeekProjection(
+			model,
+			context,
+			transformedMessages,
+			params,
+			messageIndices,
+			pending,
+		);
+		if (projection) capture(projection);
+	}
 	return params;
 }
 

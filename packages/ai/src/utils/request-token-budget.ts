@@ -46,7 +46,7 @@ export interface ContextTokenObservation {
 
 /** Source/item mapping captured during the actual supported serializer pass. */
 export interface ProviderRequestProjection {
-	readonly kind: "openai-responses-text-v1" | "openai-responses-replay-v1";
+	readonly kind: "openai-responses-text-v1" | "openai-responses-replay-v1" | "deepseek-completions-text-tools-v1";
 	/** Absent means complete-context. Only the native renderer establishes message-group replay. */
 	readonly replayContract?: "complete-context" | "message-groups";
 	/** Actual native request can begin a fresh stateless public window after its closed replay group. */

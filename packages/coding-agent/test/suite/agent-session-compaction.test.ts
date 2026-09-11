@@ -7,12 +7,15 @@ import {
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	getModel,
 	type Model,
 	type ToolResultMessage,
 	type Usage,
 } from "@ponythewhite/base-context-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompactionCommittedError } from "../../src/core/agent-session.js";
+import { readContextEpoch } from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
@@ -156,6 +159,201 @@ describe("AgentSession compaction characterization", () => {
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+	});
+
+	it("continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload", async () => {
+		const model = getModel("deepseek", "deepseek-flash");
+		const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
+		let executions = 0;
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			tools: [
+				{
+					name: "deepseek_probe",
+					label: "DeepSeek probe",
+					description: "Return the fixture result.",
+					parameters: Type.Object({}),
+					execute: async () => {
+						executions++;
+						return { content: [{ type: "text", text: "TOOL_RESULT_PRESERVED" }], details: {} };
+					},
+				},
+			],
+			requestTokenBudget: {
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-deepseek-native",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://api.deepseek.com/chat/completions",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "deepseek-text-tools-fixture-v1",
+						replayFamily: "deepseek-completions",
+						contextTokens: 120000,
+						outputCeilingTokens: 393216,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+					},
+				],
+			},
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			baseUrl: model.baseUrl,
+			apiKey: "offline-deepseek-key",
+			models: [model],
+		});
+		harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		harness.session.setActiveToolsByName(["deepseek_probe"]);
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
+		});
+		type Body = {
+			model: string;
+			messages: Array<Record<string, unknown>>;
+			max_tokens: number;
+			reasoning_effort?: string;
+			tools?: unknown[];
+		};
+		const mainBodies: Body[] = [];
+		const summaryBodies: Body[] = [];
+		const epochsAtSend: string[] = [];
+		const rawBodies: string[] = [];
+		let altered = false;
+		harness.session.agent.onPayload = (payload) => {
+			rawBodies.push(JSON.stringify(payload));
+			if (altered) {
+				const body = payload as Body;
+				return { ...body, messages: [...body.messages, { role: "user", content: "UNOWNED_PAYLOAD_CHANGE" }] };
+			}
+		};
+		// Only HTTP is offline. The real adapter, selected tool, journal and epoch owner run normally.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+			const body = JSON.parse(String(init?.body)) as Body;
+			expect(body.model).toBe(model.id);
+			expect(body.max_tokens).toBeGreaterThan(0);
+			expect(body).not.toHaveProperty("max_completion_tokens");
+			expect(body).not.toHaveProperty("input");
+			const entries = await harness.sessionManager.readEntries();
+			const admitted = entries
+				.flatMap((entry) =>
+					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+				)
+				.at(-1)!;
+			const summarizing = admitted.purpose === "summary";
+			if (summarizing) summaryBodies.push(body);
+			else {
+				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+				const checkpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024)!;
+				expect(checkpoint.replayContract).toBe("message-groups");
+				expect(admitted.contextEpoch).toEqual({
+					sessionId: harness.sessionManager.getSessionId(),
+					entryId: epoch.id,
+				});
+				// Admission and HTTP follow the existing canonical append ACK, not a predicted epoch ID.
+				epochsAtSend.push(epoch.id);
+				mainBodies.push(body);
+			}
+			const toolCall = !summarizing && mainBodies.length === 1;
+			const delta = toolCall
+				? {
+						role: "assistant",
+						reasoning_content: privateThinking,
+						tool_calls: [
+							{
+								index: 0,
+								id: "deepseek_call",
+								type: "function",
+								function: { name: "deepseek_probe", arguments: "{}" },
+							},
+						],
+					}
+				: {
+						role: "assistant",
+						reasoning_content: "Retain the result.",
+						content: summarizing ? "DeepSeek compacted summary." : "DeepSeek continuation complete.",
+					};
+			const chunk = {
+				id: `deepseek_reply_${mainBodies.length}_${summaryBodies.length}`,
+				object: "chat.completion.chunk",
+				model: model.id,
+				choices: [{ index: 0, delta, finish_reason: toolCall ? "tool_calls" : "stop" }],
+				usage: {
+					prompt_tokens: 10,
+					completion_tokens: 10,
+					total_tokens: 20,
+					prompt_cache_hit_tokens: 2,
+					prompt_cache_miss_tokens: 8,
+				},
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+
+		await harness.session.prompt("Run deepseek_probe and retain its result.");
+		expect(executions).toBe(1);
+		expect(mainBodies).toHaveLength(2);
+		expect(rawBodies).toHaveLength(2); // The public candidate does not convert or call onPayload again.
+		expect(rawBodies[1]).toContain(privateThinking);
+		expect(rawBodies[1]).toContain('"reasoning_content"');
+		expect(rawBodies[1]).toContain('"tool_calls"');
+		expect(JSON.stringify(mainBodies[1])).not.toContain("PRIVATE_DEEPSEEK_REASONING");
+		expect(JSON.stringify(mainBodies[1])).not.toContain('"tool_calls"');
+		expect(mainBodies[1].messages.some((message) => message.role === "tool")).toBe(false);
+		expect(JSON.stringify(mainBodies[1])).toContain("TOOL_RESULT_PRESERVED");
+		expect(mainBodies[1].tools).toEqual(mainBodies[0].tools);
+		expect(mainBodies.map((body) => body.reasoning_effort)).toEqual(["low", "low"]);
+		expect(epochsAtSend[1]).not.toBe(epochsAtSend[0]);
+		const qualifiedTool = await harness.sessionManager.readBranchHistory(async (history) => {
+			for await (const item of history.iterateEntries({ maxEntries: 128, maxSourceBytes: 2 * 1024 * 1024 }))
+				if (item.source.qualification === "native-tool-execution") return true;
+			return false;
+		});
+		expect(qualifiedTool).toBe(true);
+		const beforeCompaction = await harness.sessionManager.readEntries();
+		const toolAssistant = beforeCompaction.find(
+			(entry) =>
+				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "toolUse",
+		);
+		expect(toolAssistant).toMatchObject({
+			requestOutput: {
+				attemptIds: [expect.any(String)],
+				source: { sessionId: harness.sessionManager.getSessionId() },
+			},
+		});
+
+		const compacted = await harness.session.compact();
+		expect(compacted.summary).toContain("DeepSeek compacted summary.");
+		expect(summaryBodies.length).toBeGreaterThan(0);
+		const saved = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction").at(-1)!;
+		expect(saved.requestOutputs?.length).toBe(summaryBodies.length);
+		expect(readContextEpoch(saved.details, 2 * 1024 * 1024)).toBeDefined();
+		await harness.session.setThinkingLevel("medium");
+		await harness.session.prompt("Continue after the committed summary.");
+		expect(mainBodies).toHaveLength(3);
+		expect(mainBodies[2].reasoning_effort).toBe("high");
+		expect(JSON.stringify(mainBodies[2])).toContain("DeepSeek compacted summary.");
+		expect(rawBodies).toHaveLength(3);
+		expect(executions).toBe(1);
+
+		const sent = offlineFetch.mock.calls.length;
+		const accepted = epochsAtSend.at(-1)!;
+		altered = true;
+		await expect(harness.session.prompt("Do not accept a changed projection.")).rejects.toThrow(
+			"compatible final provider projection",
+		);
+		expect(rawBodies).toHaveLength(4);
+		expect(offlineFetch).toHaveBeenCalledTimes(sent);
+		expect((await harness.sessionManager.readEntries()).some((entry) => entry.id === accepted)).toBe(true);
 	});
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {

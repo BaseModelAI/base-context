@@ -172,3 +172,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Port the MCPv2 input_schema leaf at the existing _ensure_tools adapter, retaining inputSchema on the wire. Existing fake-session happy/unknown-tool cases passed after correcting their stale path-helper fixture; required check passed first. No auth, SDK-session or invocation-policy change.
 
 - Add optional captured API-price profiles to benchmark parsing/reports: STANDARD OpenAI API-equivalent per-request long pricing and DeepSeek peak estimates, with separately labeled stock conditional ranges/subtotals. Preserve unknowns, receipts and primary/all-attempt selection. Existing Python happy/edge cases passed; no new benchmark or credential path.
+
+- Add canonical DeepSeek-V4.1-Flash and its direct native text/tool Completions projection, preserving one serialization/callback and existing source/epoch ACK owners. Native offline tool/public-checkpoint/compaction/next-request path and altered-payload edge passed. Explicit budgets only; media budgeting, live availability and new benchmark readiness remain unclaimed.

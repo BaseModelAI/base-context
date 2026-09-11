@@ -329,6 +329,18 @@ export function contextEpochRepresentation(
 		"prompt_cache_retention",
 		"stream_options",
 	]);
+	if (
+		request.api === "openai-completions" &&
+		request.provider === "deepseek" &&
+		request.url === "https://api.deepseek.com/chat/completions" &&
+		assessment.route === request.url &&
+		"model" in body &&
+		body.model === "deepseek-flash" &&
+		assessment.model === body.model
+	) {
+		fields.add("thinking");
+		fields.add("reasoning_effort");
+	}
 	for (const [key, value] of Object.entries(body)) {
 		if (["input", "messages", "previous_response_id", "prompt_cache_key"].includes(key)) continue;
 		// Unknown payload extensions may contain private data or change the representation.

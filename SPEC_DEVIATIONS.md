@@ -2068,3 +2068,37 @@ copy deduplication, missing writes, duplicate profiles and conditional reporting
 No SDK observer, model call, credential read, new schedule or benchmark ran. The
 canonical DeepSeek catalog and native projection are separate work, not established
 by these price calculations. Owned installation/publication and W72 remain held.
+
+
+### W107 — Canonical DeepSeek V4.1 Flash and native text/tool replay
+
+The generator and committed catalog now define direct `deepseek-flash`,
+`DeepSeek-V4.1-Flash`, at `https://api.deepseek.com`, with `max_tokens` and a393216
+output ceiling. Published context is1M; the catalog uses conservative decimal
+1000000, not a claimed exact provider integer. The announcement declares native
+multimodal support; enforced media budgeting remains unknown. Declared peak rates
+are input.30/read.006/output1.20 USD per million, with no separate write price.
+Logical minimal/low map to low; medium/high/xhigh to high; max to max. Legacy
+aliases are unchanged. Existing reasoning replay and cache-hit handling are reused.
+
+The actual Completions serializer now captures a distinct direct-canonical
+DeepSeek text/tool projection. Whole eligible groups can become descriptive user
+text via `messages`, not Responses `input` or generated IDs. One converter and
+one payload callback feed the existing selector, source capture, epoch append
+ACK/adoption, measurement and send. Generic Completions retains measure-only
+behavior. Exact route/model/config checks and pending-group acceptance remain;
+changed/foreign/opaque mappings get no new permission. Only this exact contract
+admits thinking/reasoning_effort into the existing epoch representation. No new
+schema, quota, default budget profile, source writer or epoch algorithm is added.
+
+One new case in the existing compaction suite passed first on Node22.12.0: real
+offline adapter/tool/native source, forced public conversion, compaction/ACK,
+next request, low/medium wire mapping and an altered-payload refusal after ACK.
+Existing OpenAI cases were untouched and unrun. Required check passed first;
+one template-literal style info was corrected without changing the string value
+or rerunning the passing native case. The generator-only formatter attempt had
+processed no files because that file is intentionally ignored; no forced rerun.
+No live provider/key read, benchmark, installation or publication occurred.
+Benchmark API-key delivery, latest-public host and balanced scheduling remain
+separate work. This is a working offline native path, not availability, tokenizer,
+vision-budget, billing, performance or full-spec acceptance.

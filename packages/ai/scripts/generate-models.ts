@@ -1894,6 +1894,28 @@ async function generateModels() {
 		});
 	}
 
+	// Pin the direct V4.1 contract ahead of fetched catalog rows (first model ID wins).
+	// Rates are the published peak estimate, not a detected billing window.
+	allModels.unshift({
+		id: "deepseek-flash",
+		name: "DeepSeek-V4.1-Flash",
+		api: "openai-completions",
+		baseUrl: "https://api.deepseek.com",
+		provider: "deepseek",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+		// The public context display is 1M; use the conservative decimal size.
+		contextWindow: 1000000,
+		maxTokens: 393216,
+		thinkingLevelMap: { minimal: "low", low: "low", medium: "high", high: "high", xhigh: "high", max: "max" },
+		compat: {
+			requiresReasoningContentOnAssistantMessages: true,
+			thinkingFormat: "deepseek",
+			maxTokensField: "max_tokens",
+		},
+	});
+
 	const deepseekV4Models: Model<"openai-completions">[] = [
 		{
 			id: "deepseek-v4-flash",

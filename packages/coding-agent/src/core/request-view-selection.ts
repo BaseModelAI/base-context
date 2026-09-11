@@ -78,6 +78,28 @@ export function matchesRequestView(
 	return rendered.length === boundary.units.length && JSON.stringify(rendered) === JSON.stringify(context.messages);
 }
 
+/** Projection kinds describe their actual provider body, never an OpenAI-format route alias. */
+function requestInputKey(
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+): "input" | "messages" | undefined {
+	if (
+		(request.api === "openai-responses" || request.api === "openai-codex-responses") &&
+		(projection.kind === "openai-responses-text-v1" || projection.kind === "openai-responses-replay-v1")
+	)
+		return "input";
+	if (
+		request.api === "openai-completions" &&
+		request.provider === "deepseek" &&
+		request.url === "https://api.deepseek.com/chat/completions" &&
+		projection.kind === "deepseek-completions-text-tools-v1" &&
+		request.body !== undefined &&
+		JSON.parse(request.body).model === "deepseek-flash"
+	)
+		return "messages";
+	return undefined;
+}
+
 /** Check the actual final mapping without selecting, converting, or committing another view. */
 export async function prepareFixedRequestView(
 	boundary: CapturedRequestViewBoundary,
@@ -85,14 +107,10 @@ export async function prepareFixedRequestView(
 	projection: ProviderRequestProjection,
 	assessment: RequestTokenAssessment | undefined,
 ) {
-	const payload: unknown = JSON.parse(request.body!);
-	if (
-		!payload ||
-		typeof payload !== "object" ||
-		!("input" in payload) ||
-		!Array.isArray(payload.input) ||
-		payload.input.length !== projection.messageIndices.length
-	)
+	const inputKey = requestInputKey(request, projection);
+	const payload = JSON.parse(request.body!) as Record<string, unknown> | null;
+	const input = inputKey && payload ? payload[inputKey] : undefined;
+	if (!Array.isArray(input) || input.length !== projection.messageIndices.length)
 		throw new Error("Fixed context requires its final provider projection");
 	if (
 		projection.kind === "openai-responses-text-v1" &&
@@ -126,13 +144,10 @@ export async function selectRequestView(
 	allowShrink: boolean,
 ): Promise<string | undefined> {
 	const full = budget.measure(request);
-	if (
-		full.limitSource !== "explicit-profile" ||
-		(request.api !== "openai-responses" && request.api !== "openai-codex-responses")
-	)
-		return;
+	const inputKey = requestInputKey(request, projection);
+	if (full.limitSource !== "explicit-profile" || !inputKey) return;
 	const payload = JSON.parse(request.body!) as Record<string, unknown>;
-	const input = payload.input;
+	const input = payload[inputKey];
 	if (!Array.isArray(input) || input.length !== projection.messageIndices.length) return;
 
 	// Absence is complete-context; a profile or tool-shaped message is never group authority.
@@ -272,7 +287,7 @@ export async function selectRequestView(
 		if (message.role === "assistant") latestAssistant = index;
 	const retained = new Set(projection.messageIndices.slice(0, request.retainedPrefix?.inputItems ?? 0));
 	const projectedOptional =
-		projection.kind === "openai-responses-replay-v1" ? new Set(projection.optionalMessageIndices ?? []) : undefined;
+		projection.kind !== "openai-responses-text-v1" ? new Set(projection.optionalMessageIndices ?? []) : undefined;
 	const optional = units.filter((unit, index) => {
 		const message = boundary.messages[index];
 		return (
@@ -311,7 +326,7 @@ export async function selectRequestView(
 			const messageIndex = projection.messageIndices[index];
 			return messageIndex === null || closedIds.has(units[messageIndex].id);
 		};
-		const body = JSON.stringify({ ...payload, input: input.filter((_, index) => keepItem(index)) });
+		const body = JSON.stringify({ ...payload, [inputKey]: input.filter((_, index) => keepItem(index)) });
 		const candidateRequest = { ...request, body };
 		const assessment = budget.measure(candidateRequest);
 		if (assessment.status !== "within-estimate") continue;
