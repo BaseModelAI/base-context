@@ -543,6 +543,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         try:
+            with handle._callback_lock:
+                self.assertEqual(handle._callbacks, [])
             os.killpg(handle._pid, 0)  # still alive
         finally:
             handle.kill(signal.SIGKILL)
@@ -556,6 +558,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handle._released)
         again = await handle
         self.assertEqual(again, result)
+        with handle._callback_lock:
+            self.assertEqual(handle._callbacks, [])
 
     async def test_second_cancel_during_cleanup_still_confirms_group_death(self):
         # Python 3.11: an await inside an except-CancelledError block of a

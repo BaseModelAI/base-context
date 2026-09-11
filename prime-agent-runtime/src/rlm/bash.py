@@ -607,7 +607,12 @@ class BashHandle:
                 pass  # awaiting loop already closed
 
         self._add_done_callback(_wake)
-        await fut
+        try:
+            await fut
+        finally:
+            with self._callback_lock:
+                if _wake in self._callbacks:
+                    self._callbacks.remove(_wake)
         assert self._result is not None
         return self._result
 

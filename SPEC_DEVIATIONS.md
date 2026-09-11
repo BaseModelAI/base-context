@@ -1667,3 +1667,29 @@ These cases do not certify real-provider summarization, all lifecycle races,
 installed binaries, crash recovery or platforms. No new provider/benchmark/install/
 publication approval is implied. W72 remains a separate pending policy decision;
 the overall objective remains active.
+
+## W76 / G06,G20 — existing lifecycle view retained
+
+The bounded source trace found no change needed. The existing owned kernel
+lifecycle capture reaches native context with stale-generation checks. Bash busy
+flags and recorded command/task evidence are not promoted into process availability.
+This does not establish a complete live job inventory.
+
+## W77 / G08 — release cancelled Bash waiters
+
+`BashHandle._wait` now removes its own completion callback under the existing lock
+when the await exits. Previously a cancelled background await retained its future
+and event loop through that callback until the command finished. The existing
+2MiB head/tail output buffer and 32 live-handle admission limit already apply;
+neither prevented this waiter retention.
+
+Two existing Python cases passed first (4043706): completion/later-await returns
+the same result, and cancelling a released-handle await removes its callback while
+the command remains live. Required check4043788 passed: 1046 files/no fixes, types,
+installer and browser checks. The cases used the existing project Python environment
+and fresh six-variable, network/PID/proc-isolated state. No corrections or reruns.
+
+No new queue, limit, status producer or wire/state format is introduced. Callbacks
+already handed to completion or the event loop are not promised drained by this
+change. This is not a global memory bound or measured efficiency gain. W72 budgets,
+live benchmarks, installation and publication remain outside this change.
