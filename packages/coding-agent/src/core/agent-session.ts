@@ -15,8 +15,10 @@ import {
 	type AgentOutputLimits,
 	type AgentState,
 	type AgentTool,
+	type AgentTurnOutcome,
 	type BoundToolExecution,
 	type GetContinuationMessagesContext,
+	type GetTurnOutcomeContext,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
 } from "@ponythewhite/base-context-agent";
@@ -775,6 +777,7 @@ interface GoalContinuationOwner {
 	goalRevision: number;
 	accountingStartedAt: number | undefined;
 	signal: AbortSignal | undefined;
+	checkpointOwner?: CompactionOwner;
 }
 
 function oncePreflight(
@@ -947,14 +950,64 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-/** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
+class StaleCompactionOwnerError extends Error {}
+
+interface CompactionOwner {
+	manager: SessionManager;
+	agent: Agent;
+	sessionId: string;
+	sessionFile: string | undefined;
+	pumpEpoch: number;
+	isSourceCurrent: () => boolean;
+	requests: InferenceCoordinator;
+	semanticEdges: SemanticEdgeRecorder;
+	extensions: ExtensionRunner;
+	provisioner: IpythonKernelProvisioner | undefined;
+	signal: AbortSignal | undefined;
+}
+
+interface CheckpointAction {
+	action: QueuedSessionAction;
+	ticket: ActionTicket;
+}
+
+interface CheckpointBoundary {
+	kind: "tool" | "overflow";
+	state: "pending" | "consumed";
+}
+
+interface CheckpointResume {
+	owner: CompactionOwner;
+	boundary?: CheckpointBoundary;
+	actions: CheckpointAction[];
+}
+
+interface ThresholdGoalContinuation extends CheckpointAction {
+	owner: GoalContinuationOwner;
+}
+
+interface ThresholdAutonomousOwner {
+	state: AutonomousRuntimeState;
+	snapshot: AutonomousRuntimeState;
+	cwd: string;
+	arrivalEpoch: number;
+}
+
+interface ThresholdAutonomousContinuation extends CheckpointAction {
+	owner: CompactionOwner;
+	state: AutonomousRuntimeState;
+	before: AutonomousRuntimeSnapshot;
+	after: AutonomousRuntimeState;
+}
+
+/** One-shot settlement for the same captured checkpoint directive; a settled failure is not re-exposed. */
 interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
-	continueAfterSessionInput: boolean;
+	resume: CheckpointResume;
 	settled: boolean;
 }
 
-function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
-	return { ...createAgentMessageDeferred(), continueAfterSessionInput: false, settled: false };
+function createPostCompactionContinuationSettlement(resume: CheckpointResume): PostCompactionContinuationSettlement {
+	return { ...createAgentMessageDeferred(), resume, settled: false };
 }
 
 export interface ModelCycleResult {
@@ -1225,8 +1278,9 @@ export class AgentSession {
 	private _compactionSetupFailure: CompactionCommittedError | undefined;
 	/** One recovery attempt per overflow; "reported" dedups the failure notice. */
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
-	private _continueAfterThresholdCompaction = false;
-	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
+	private _invocationCompactionOwner: CompactionOwner | undefined;
+	private _pendingCheckpoint: CheckpointResume | undefined;
+	private _pendingRequestedCompaction: { customInstructions?: string; owner: CompactionOwner } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
 
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1360,12 +1414,10 @@ export class AgentSession {
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
-	private _postCompactionContinuationMessages: AgentMessage[] = [];
-	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
-	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
-	private _queuedAutonomousContinuationSnapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
-	private _pendingThresholdCompactionAutonomousMessages: AgentMessage[] = [];
-	private _queuedGoalThresholdContinuation: AgentMessage | undefined;
+	private _postCompactionContinuations: ThresholdAutonomousContinuation[] = [];
+	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, ThresholdAutonomousContinuation>();
+	private _pendingThresholdCompactionAutonomousContinuations: ThresholdAutonomousContinuation[] = [];
+	private _queuedGoalThresholdContinuation: ThresholdGoalContinuation | undefined;
 	private _pendingAutoRefineReview: { reason: AutoRefineReason; review: AutoRefineReview } | undefined;
 	private _autoRefineBranchVersion = 0;
 	private _autoRefineReviewAbort?: AbortController;
@@ -2274,6 +2326,7 @@ export class AgentSession {
 	private _installAgentTurnHook(): void {
 		this.agent.shouldStopBeforeTurn = () => this._shouldStopBeforeTurn();
 		this.agent.shouldStopAfterTurn = (context) => this._shouldStopAfterTurn(context);
+		this.agent.getTurnOutcome = (context, signal) => this._getTurnOutcome(context, signal);
 	}
 
 	private _emit(event: AgentSessionEvent): void {
@@ -2561,12 +2614,13 @@ export class AgentSession {
 	private _isGoalContinuationOwnerCurrent(owner: GoalContinuationOwner): boolean {
 		return (
 			!owner.signal?.aborted &&
+			(!owner.checkpointOwner || this._isCompactionOwnerCurrent(owner.checkpointOwner)) &&
 			!this._disposed &&
 			!this._disposing &&
 			this.sessionManager === owner.manager &&
 			owner.manager.getSessionId() === owner.sessionId &&
 			owner.manager.getSessionFile() === owner.sessionFile &&
-			this._sessionInputPumpEpoch === owner.pumpEpoch &&
+			this._sessionInputPumpEpoch === (owner.checkpointOwner?.pumpEpoch ?? owner.pumpEpoch) &&
 			this._goalStateRevision === owner.goalRevision &&
 			this._goalState === owner.goal &&
 			this._goalAccountingStartedAt === owner.accountingStartedAt
@@ -3159,7 +3213,11 @@ export class AgentSession {
 		return true;
 	}
 
-	private async _accountGoalUsageForAssistantMessage(message: AssistantMessage): Promise<boolean> {
+	private async _accountGoalUsageForAssistantMessage(
+		message: AssistantMessage,
+		owner?: GoalContinuationOwner,
+	): Promise<boolean> {
+		if (owner) this._assertGoalContinuationOwner(owner);
 		if (!this._goalState.objective) {
 			return false;
 		}
@@ -3180,22 +3238,26 @@ export class AgentSession {
 		this._goalAccountedAssistantMessages.add(message);
 		const tokenDelta = goalTokenDeltaForUsage(message.usage);
 		const goal = this._goalWithAccountedWallClock();
+		if (owner) owner.accountingStartedAt = this._goalAccountingStartedAt;
 		const nextGoal: GoalState = {
 			...goal,
 			tokensUsed: goal.tokensUsed + tokenDelta,
 		};
 		const budgetReached = nextGoal.tokenBudget !== undefined && nextGoal.tokensUsed >= nextGoal.tokenBudget;
 		if (!budgetReached) {
-			await this._setGoalState(nextGoal);
+			await this._setGoalState(nextGoal, { continuationOwner: owner });
 			return false;
 		}
-		await this._setGoalState({
-			...nextGoal,
-			active: false,
-			status: "budget_limited",
-			lastReason: `Reached ${nextGoal.tokenBudget} token goal budget`,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...nextGoal,
+				active: false,
+				status: "budget_limited",
+				lastReason: `Reached ${nextGoal.tokenBudget} token goal budget`,
+				lastError: undefined,
+			},
+			{ continuationOwner: owner },
+		);
 		return true;
 	}
 
@@ -3216,51 +3278,182 @@ export class AgentSession {
 		return this._steeringStopPending;
 	}
 
-	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		if (await this._stopGoalContinuationForTerminalMessage(context.message)) {
-			return true;
-		}
-		try {
-			if (await this._accountGoalUsageForAssistantMessage(context.message)) {
-				const message = createGoalContextMessage(this._goalState, "budget_limit");
-				const normalized = normalizeMessageContent(message.content);
-				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
-					message,
-					resumeIfIdle: true,
-				});
-			}
-		} catch {
-			// Goal accounting must not interrupt the core agent loop.
-		}
-		// Serialized refine checkpoint: in print/headless mode, run refinement
-		// planning+apply synchronously here — the quiescent boundary between
-		// turns — so it never overlaps the primary model request.
-		// This MUST run BEFORE threshold compaction to prevent the
-		// compaction model call from overlapping an in-flight refine
-		// plan/apply that was started at message_end.
-		if (this._serializedRefine) {
-			// Ensure the preceding message_end processing (counter increment,
-			// background plan kickoff) has completed before the checkpoint.
-			await this._agentEventQueue;
-			await this._runSerializedRefineCheckpoint();
-		}
-		if (await this._shouldStopForThresholdCompaction(context)) {
-			return true;
-		}
-		// Steering stops continuation only after mandatory serialized checkpoints.
-		// Returning true here still prevents the agent loop from starting another turn.
-		return this._steeringStopPending;
+	private _captureCompactionOwner(signal?: AbortSignal): CompactionOwner {
+		const manager = this.sessionManager;
+		return {
+			manager,
+			agent: this.agent,
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			pumpEpoch: this._sessionInputPumpEpoch,
+			isSourceCurrent: manager.captureCompactionSourceOwner(),
+			requests: this.requests,
+			semanticEdges: this._semanticEdges,
+			extensions: this._extensionRunner,
+			provisioner: this._ipythonKernelProvisioner,
+			signal,
+		};
 	}
 
-	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		this._continueAfterThresholdCompaction = false;
-		if (this._pendingRequestedCompaction === undefined && !(await this._thresholdCompactionNeeded(context))) {
-			return false;
-		}
+	private _isCompactionSourceOwnerCurrent(owner: CompactionOwner): boolean {
+		return (
+			this.sessionManager === owner.manager &&
+			this.agent === owner.agent &&
+			owner.manager.getSessionId() === owner.sessionId &&
+			owner.manager.getSessionFile() === owner.sessionFile &&
+			owner.isSourceCurrent() &&
+			this.requests === owner.requests &&
+			this._semanticEdges === owner.semanticEdges &&
+			this._extensionRunner === owner.extensions &&
+			this._ipythonKernelProvisioner === owner.provisioner
+		);
+	}
 
-		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
-		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
-		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
+	private _isCompactionOwnerCurrent(owner: CompactionOwner): boolean {
+		return (
+			!this._disposed &&
+			!this._disposing &&
+			!owner.signal?.aborted &&
+			this._isCompactionSourceOwnerCurrent(owner) &&
+			this._sessionInputPumpEpoch === owner.pumpEpoch
+		);
+	}
+
+	private _assertCompactionSourceOwner(owner: CompactionOwner): void {
+		if (!this._isCompactionSourceOwnerCurrent(owner))
+			throw new StaleCompactionOwnerError("Compaction source owner changed");
+	}
+
+	private _assertCompactionOwner(owner: CompactionOwner): void {
+		if (!this._isCompactionOwnerCurrent(owner)) throw new StaleCompactionOwnerError("Compaction owner changed");
+	}
+
+	private _checkpointActionPending({ action }: CheckpointAction): boolean {
+		return (
+			action.payload.kind === "turn" &&
+			!primaryDeliveryRecord(action).started &&
+			(action.lifecycle.state === "queued" ||
+				action.lifecycle.state === "selected" ||
+				action.lifecycle.state === "preparing" ||
+				action.lifecycle.state === "committing")
+		);
+	}
+
+	private _captureCheckpointResume(owner: CompactionOwner, boundary?: CheckpointBoundary): CheckpointResume {
+		const actions = this._actionStore
+			.unfinishedActions()
+			.filter((action) => action.payload.kind === "turn" && !primaryDeliveryRecord(action).started)
+			.map((action) => ({ action, ticket: this._actionStore.ticketFor(action).ticket }));
+		return { owner, boundary, actions };
+	}
+
+	private _checkpointHasResume(resume: CheckpointResume): boolean {
+		return (
+			resume.boundary?.state === "pending" || resume.actions.some((action) => this._checkpointActionPending(action))
+		);
+	}
+
+	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		// The legacy direct adapter has no finalized-batch decision. The installed native hook does.
+		const last = this.agent.state.messages.at(-1);
+		return (
+			(await this._getTurnOutcome({ ...context, hasMoreToolCalls: !!last && last.role !== "assistant" })).kind !==
+			"proceed"
+		);
+	}
+
+	private async _getTurnOutcome(context: GetTurnOutcomeContext, signal?: AbortSignal): Promise<AgentTurnOutcome> {
+		const sourceOwner = signal ? this._invocationCompactionOwner : this._captureCompactionOwner();
+		if (
+			!sourceOwner ||
+			signal?.aborted ||
+			(signal && sourceOwner.signal !== signal) ||
+			!this._isCompactionSourceOwnerCurrent(sourceOwner)
+		)
+			return { kind: "cancelled" };
+		// This is a new turn-boundary admission. Its source predicate still belongs to the original invocation.
+		const owner = { ...sourceOwner, pumpEpoch: this._sessionInputPumpEpoch };
+		const requested = this._pendingRequestedCompaction;
+		const mayCheckpoint =
+			this._contextOptimizationAllowed() ||
+			(requested !== undefined && this._isCompactionOwnerCurrent(requested.owner));
+		const preparing = mayCheckpoint
+			? this._captureCheckpointResume(
+					owner,
+					context.hasMoreToolCalls ? { kind: "tool", state: "pending" } : undefined,
+				)
+			: undefined;
+		if (preparing) this._pendingCheckpoint = preparing;
+		const current = () =>
+			preparing
+				? this._isCompactionOwnerCurrent(owner)
+				: !signal?.aborted && !this._disposed && !this._disposing && this._isCompactionSourceOwnerCurrent(owner);
+		const goalOwner = { ...this._captureGoalContinuationOwner(signal), checkpointOwner: owner };
+		const autonomousOwner = this._captureThresholdAutonomousOwner();
+		try {
+			if (await this._stopGoalContinuationForTerminalMessage(context.message, goalOwner)) return { kind: "finish" };
+			if (!current()) return { kind: "cancelled" };
+			try {
+				if (await this._accountGoalUsageForAssistantMessage(context.message, goalOwner)) {
+					this._assertGoalContinuationOwner(goalOwner);
+					const message = createGoalContextMessage(goalOwner.goal, "budget_limit");
+					const normalized = normalizeMessageContent(message.content);
+					this._admitSessionInput(
+						this._createPreparedTurnAction("steer", normalized.text, normalized.images, {
+							message,
+							resumeIfIdle: true,
+						}),
+					);
+				}
+			} catch {
+				// Ordinary accounting retains its non-rejection policy; it cannot publish on a replacement.
+			}
+			if (!current()) return { kind: "cancelled" };
+			// Keep mandatory serialized refinement before threshold and steering, without self-waiting for idle.
+			if (this._serializedRefine) {
+				await this._agentEventQueue;
+				if (!current()) return { kind: "cancelled" };
+				await this._runSerializedRefineCheckpoint();
+			}
+			if (!current()) return { kind: "cancelled" };
+			try {
+				if (
+					preparing &&
+					(await this._shouldStopForThresholdCompaction(context, owner, goalOwner, autonomousOwner))
+				) {
+					const resume = this._pendingCheckpoint;
+					return { kind: resume && this._checkpointHasResume(resume) ? "checkpoint_then_continue" : "finish" };
+				}
+			} catch (error) {
+				if (!(error instanceof StaleCompactionOwnerError)) throw error;
+				return { kind: "cancelled" };
+			}
+			if (!current()) return { kind: "cancelled" };
+			return { kind: this._steeringStopPending ? "finish" : "proceed" };
+		} finally {
+			// Only an actual checkpoint decision replaces this preparing reference.
+			if (preparing && this._pendingCheckpoint === preparing) this._pendingCheckpoint = undefined;
+		}
+	}
+
+	private async _shouldStopForThresholdCompaction(
+		context: GetTurnOutcomeContext,
+		owner: CompactionOwner,
+		goalOwner: GoalContinuationOwner,
+		autonomousOwner: ThresholdAutonomousOwner,
+	): Promise<boolean> {
+		const pending = this._pendingRequestedCompaction;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) {
+			if (this._pendingRequestedCompaction === pending) this._pendingRequestedCompaction = undefined;
+		}
+		const requested = pending !== undefined && this._pendingRequestedCompaction === pending;
+		if (!requested && !(await this._thresholdCompactionNeeded(context, owner, goalOwner, autonomousOwner)))
+			return false;
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
+		this._pendingCheckpoint = this._captureCheckpointResume(
+			owner,
+			context.hasMoreToolCalls ? { kind: "tool", state: "pending" } : undefined,
+		);
 		return true;
 	}
 
@@ -3750,14 +3943,17 @@ export class AgentSession {
 		}
 	}
 
-	private async _getLatestCompactionTimestamp(): Promise<number | undefined> {
-		if (!this.sessionManager.isPersisted()) {
-			const entry = getLatestCompactionEntry(this.sessionManager.getBranch());
+	private async _getLatestCompactionTimestamp(owner?: CompactionOwner): Promise<number | undefined> {
+		if (owner) this._assertCompactionOwner(owner);
+		const manager = owner?.manager ?? this.sessionManager;
+		if (!manager.isPersisted()) {
+			const entry = getLatestCompactionEntry(manager.getBranch());
 			return entry ? new Date(entry.timestamp).getTime() : undefined;
 		}
 		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
-		return this.sessionManager.readBranchHistory(async (view) => {
+		return manager.readBranchHistory(async (view) => {
 			const ref = (await view.branchBootstrap()).latestCompaction;
+			if (owner) this._assertCompactionOwner(owner);
 			if (!ref) {
 				this._compactionBoundaryCache = undefined;
 				return undefined;
@@ -3776,6 +3972,7 @@ export class AgentSession {
 			if (!hydrated || hydrated.entry.type !== "compaction")
 				throw new Error("Compaction bootstrap source is unavailable");
 			const timestamp = new Date(hydrated.entry.timestamp).getTime();
+			if (owner) this._assertCompactionOwner(owner);
 			this._compactionBoundaryCache = {
 				sessionId: view.source.sessionId,
 				sessionFile: view.source.sessionFile,
@@ -3787,40 +3984,50 @@ export class AgentSession {
 		});
 	}
 
-	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
+	private async _thresholdCompactionNeeded(
+		context: ShouldStopAfterTurnContext,
+		owner = this._captureCompactionOwner(),
+		goalOwner: GoalContinuationOwner = {
+			...this._captureGoalContinuationOwner(owner.signal),
+			checkpointOwner: owner,
+		},
+		autonomousOwner = this._captureThresholdAutonomousOwner(),
+	): Promise<boolean> {
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
-
 		const contextWindow = this.model?.contextWindow ?? 0;
-		const compactionTimestamp = await this._getLatestCompactionTimestamp();
-		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
-			return false;
-		}
-
+		const compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
+		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) return false;
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
-		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
-			return false;
+		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) return false;
+		// Keep the existing threshold-specific goal winner; do not import W74's natural wait policy here.
+		if (!this._isGoalContinuationOwnerCurrent(goalOwner)) return true;
+		if (!(await this._queueGoalContinuationForThresholdCompaction(context.message, goalOwner))) {
+			if (!this._isGoalContinuationOwnerCurrent(goalOwner))
+				return this._isCompactionOwnerCurrent(owner) && this._contextOptimizationAllowed();
+			if (!this._contextOptimizationAllowed()) return false;
+			await this._queueAutonomousContinuationForThresholdCompaction(context.message, owner, autonomousOwner);
 		}
-
-		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
-		if (await this._queueGoalContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		}
-		return true;
+		return this._isCompactionOwnerCurrent(owner) && this._contextOptimizationAllowed();
 	}
 
-	private _snapshotAutonomousRuntimeState(): AutonomousRuntimeSnapshot {
+	private _captureThresholdAutonomousOwner(): ThresholdAutonomousOwner {
 		return {
-			continuationsUsed: this._autonomousState.continuationsUsed,
-			gateAttempts: { ...this._autonomousState.gateAttempts },
-			lastGateFailure: this._autonomousState.lastGateFailure
-				? { ...this._autonomousState.lastGateFailure }
-				: undefined,
-			lastGateFailureSnapshot: this._autonomousState.lastGateFailureSnapshot
-				? { ...this._autonomousState.lastGateFailureSnapshot }
-				: undefined,
+			state: this._autonomousState,
+			snapshot: structuredClone(this._autonomousState),
+			cwd: this._cwd,
+			arrivalEpoch: this._sessionInputArrivalEpoch,
+		};
+	}
+
+	private _snapshotAutonomousRuntimeState(state = this._autonomousState): AutonomousRuntimeSnapshot {
+		return {
+			continuationsUsed: state.continuationsUsed,
+			gateAttempts: { ...state.gateAttempts },
+			lastGateFailure: state.lastGateFailure ? { ...state.lastGateFailure } : undefined,
+			lastGateFailureSnapshot: state.lastGateFailureSnapshot ? { ...state.lastGateFailureSnapshot } : undefined,
 		};
 	}
 
@@ -3835,159 +4042,181 @@ export class AgentSession {
 
 	private async _queueAutonomousContinuationForThresholdCompaction(
 		message: AssistantMessage,
-	): Promise<AgentMessage | undefined> {
-		const queuedMessage = this._queuedAutonomousThresholdContinuations.get(message);
-		if (queuedMessage && this._postCompactionContinuationMessages.includes(queuedMessage)) {
-			return queuedMessage;
+		owner = this._captureCompactionOwner(this.agent.signal),
+		capture = this._captureThresholdAutonomousOwner(),
+	): Promise<CheckpointAction | undefined> {
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
+		const queued = this._queuedAutonomousThresholdContinuations.get(message);
+		if (queued && this._checkpointActionPending(queued)) return queued;
+		const { state, snapshot: original, arrivalEpoch, cwd } = capture;
+		const before = this._snapshotAutonomousRuntimeState(original);
+		const candidate = structuredClone(original);
+		const current = () =>
+			this._isCompactionOwnerCurrent(owner) && this._autonomousState === state && isDeepStrictEqual(state, original);
+		if (!current()) return undefined;
+		let messageToQueue: UserMessage | undefined;
+		try {
+			messageToQueue = await nextAutonomousContinuation(candidate, message, { cwd, signal: owner.signal });
+		} catch (error) {
+			if (current()) this._restoreAutonomousRuntimeSnapshot(candidate);
+			throw error; // Preserve the actual command/orphan owner's primary failure even after replacement.
 		}
-		const snapshot = this._snapshotAutonomousRuntimeState();
-		const arrivalEpoch = this._sessionInputArrivalEpoch;
-		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, message, {
-			cwd: this._cwd,
-			signal: this.agent.signal,
+		if (!current() || !this._contextOptimizationAllowed()) return undefined;
+		if (messageToQueue && this._sessionInputArrivalEpoch !== arrivalEpoch) return undefined;
+		this._restoreAutonomousRuntimeSnapshot(candidate);
+		if (!messageToQueue) return undefined;
+		const normalized = normalizeMessageContent(messageToQueue.content);
+		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+			message: messageToQueue,
 		});
-		if (!autonomousMessage) {
+		const admitted = this._admitSessionInput(action);
+		if (!admitted.accepted || !admitted.ticket) {
+			this._restoreAutonomousRuntimeSnapshot(before);
 			return undefined;
 		}
-		if (this._sessionInputArrivalEpoch !== arrivalEpoch) {
-			this._restoreAutonomousRuntimeSnapshot(snapshot);
-			return undefined;
-		}
-		this._queuedAutonomousThresholdContinuations.set(message, autonomousMessage);
-		this._queuedAutonomousContinuationSnapshots.set(autonomousMessage, snapshot);
-		this._postCompactionContinuationMessages.push(autonomousMessage);
-		this._pendingThresholdCompactionAutonomousMessages.push(autonomousMessage);
-		const text =
-			typeof autonomousMessage.content === "string"
-				? autonomousMessage.content
-				: autonomousMessage.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-		this._admitSessionInput(
-			this._createPreparedTurnAction("followUp", text, undefined, {
-				message: autonomousMessage,
-			}),
-		);
-		return autonomousMessage;
+		const continuation: ThresholdAutonomousContinuation = {
+			action,
+			ticket: admitted.ticket,
+			owner,
+			state,
+			before,
+			after: structuredClone(state),
+		};
+		this._queuedAutonomousThresholdContinuations.set(message, continuation);
+		this._postCompactionContinuations.push(continuation);
+		this._pendingThresholdCompactionAutonomousContinuations.push(continuation);
+		return continuation;
 	}
 
-	// The role heuristic reads an assistant-last threshold stop as "task finished" and
-	// agent.continue() cannot resume from it, so the goal continuation is queued as a session input.
-	private async _queueGoalContinuationForThresholdCompaction(message: AssistantMessage): Promise<boolean> {
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
-			return false;
-		}
-		if (this._goalState.status !== "active" || !this._goalState.objective) {
-			return false;
-		}
-		const alreadyQueued = this._queuedGoalThresholdContinuation;
-		if (
-			alreadyQueued !== undefined &&
-			this._actionStore.unfinishedActions().some((action) => {
-				if (action.payload.kind !== "turn" || primaryDeliveryRecord(action).message !== alreadyQueued) return false;
-				// A running continuation may already need a successor; only undelivered actions deduplicate.
-				return (
-					action.lifecycle.state === "queued" ||
-					action.lifecycle.state === "selected" ||
-					action.lifecycle.state === "preparing" ||
-					action.lifecycle.state === "committing"
-				);
-			})
-		) {
-			return true;
-		}
+	private async _queueGoalContinuationForThresholdCompaction(
+		message: AssistantMessage,
+		owner: GoalContinuationOwner = {
+			...this._captureGoalContinuationOwner(this.agent.signal),
+			checkpointOwner: this._captureCompactionOwner(this.agent.signal),
+		},
+	): Promise<CheckpointAction | undefined> {
+		if (!this._isGoalContinuationOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
+		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
+		if (owner.goal.status !== "active" || !owner.goal.objective) return undefined;
+		const queued = this._queuedGoalThresholdContinuation;
+		if (queued && this._checkpointActionPending(queued)) return queued;
+		const before = owner.goal;
+		let counted = false;
 		try {
 			this._ensureGoalRuntimeActive();
-			await this._setGoalState({
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
-				lastReason: undefined,
-				lastError: undefined,
-			});
-			const goalMessage = createGoalContextMessage(this._goalState, "continuation");
-			const normalized = normalizeMessageContent(goalMessage.content);
-			this._admitSessionInput(
-				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
-					message: goalMessage,
-				}),
+			await this._setGoalState(
+				{
+					...before,
+					continuationsUsed: before.continuationsUsed + 1,
+					lastReason: undefined,
+					lastError: undefined,
+				},
+				{ continuationOwner: owner },
 			);
-			this._queuedGoalThresholdContinuation = goalMessage;
-			return true;
+			counted = true;
+			this._assertGoalContinuationOwner(owner);
+			if (!this._contextOptimizationAllowed()) {
+				await this._setGoalState(before, { continuationOwner: owner });
+				return undefined;
+			}
+			const messageToQueue = createGoalContextMessage(owner.goal, "continuation");
+			const normalized = normalizeMessageContent(messageToQueue.content);
+			const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+				message: messageToQueue,
+			});
+			const admitted = this._admitSessionInput(action);
+			if (!admitted.accepted || !admitted.ticket) {
+				await this._setGoalState(before, { continuationOwner: owner });
+				return undefined;
+			}
+			const continuation = { action, ticket: admitted.ticket, owner };
+			this._queuedGoalThresholdContinuation = continuation;
+			return continuation;
 		} catch {
-			return false;
+			if (counted && this._isGoalContinuationOwnerCurrent(owner)) {
+				try {
+					await this._setGoalState(before, { continuationOwner: owner });
+				} catch {
+					/* Keep the existing non-rejection policy. */
+				}
+			}
+			return undefined;
 		}
 	}
 
-	// Withdraws a goal continuation queued for a threshold compaction the user cancelled,
-	// rolling back the continuationsUsed increment so the next natural stop re-queues it.
 	private async _clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
-		queuedGoalContinuation: AgentMessage | undefined,
+		continuation: ThresholdGoalContinuation | undefined,
 	): Promise<void> {
-		if (queuedGoalContinuation === undefined) return;
+		if (
+			!continuation ||
+			!continuation.owner.checkpointOwner ||
+			!this._isCompactionSourceOwnerCurrent(continuation.owner.checkpointOwner) ||
+			!this._checkpointActionPending(continuation)
+		)
+			return;
 		const cancelled = this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === queuedGoalContinuation,
+			(action) => action === continuation.action,
 			new Error("Queued goal continuation was cleared before delivery."),
 		);
-		this._queuedGoalThresholdContinuation = undefined;
-		// A stale marker (continuation already consumed) matches no action; only an
-		// actual cancellation may roll back its queue-time continuationsUsed increment.
-		if (cancelled.length === 0) return;
-		await this._setGoalState({ ...this._goalState, continuationsUsed: this._goalState.continuationsUsed - 1 });
+		if (this._queuedGoalThresholdContinuation === continuation) this._queuedGoalThresholdContinuation = undefined;
+		if (
+			!cancelled.includes(continuation.action) ||
+			primaryDeliveryRecord(continuation.action).durable ||
+			!this._isGoalContinuationOwnerCurrent(continuation.owner)
+		)
+			return;
+		const owner = continuation.owner;
+		await this._setGoalState(
+			{ ...owner.goal, continuationsUsed: owner.goal.continuationsUsed - 1 },
+			{ continuationOwner: owner },
+		);
 		this._emitQueueUpdate();
 	}
 
 	private _clearQueuedAutonomousContinuations(
-		options: { restoreAutonomousState?: boolean; messages?: AgentMessage[] } = {},
+		options: { restoreAutonomousState?: boolean; continuations?: ThresholdAutonomousContinuation[] } = {},
 	): void {
-		const requestedMessages = options.messages ?? [...this._postCompactionContinuationMessages];
-		const requestedMessageSet = new Set(requestedMessages);
-		const queuedMessages = this._postCompactionContinuationMessages.filter((message) =>
-			requestedMessageSet.has(message),
+		const continuations = options.continuations ?? [...this._postCompactionContinuations];
+		const current = continuations.filter(
+			(continuation) =>
+				this._isCompactionSourceOwnerCurrent(continuation.owner) && this._checkpointActionPending(continuation),
 		);
-		if (queuedMessages.length === 0) {
-			return;
-		}
-		const queuedMessageSet = new Set(queuedMessages);
-		this._postCompactionContinuationMessages = this._postCompactionContinuationMessages.filter(
-			(message) => !queuedMessageSet.has(message),
-		);
-		this.agent.removeQueuedMessages((message) => queuedMessageSet.has(message));
-		this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && queuedMessageSet.has(primaryDeliveryRecord(action).message),
+		const actions = new Set(current.map((continuation) => continuation.action));
+		const cancelled = this._cancelSessionActions(
+			(action) => actions.has(action),
 			new Error("Queued autonomous continuation was cleared before delivery."),
 		);
-		this._emitQueueUpdate();
 		if (options.restoreAutonomousState) {
-			for (const queuedMessage of queuedMessages) {
-				const snapshot = this._queuedAutonomousContinuationSnapshots.get(queuedMessage);
-				if (snapshot) {
-					this._restoreAutonomousRuntimeSnapshot(snapshot);
-					break;
-				}
-			}
+			const continuation = current.find(
+				(candidate) =>
+					this._isCompactionOwnerCurrent(candidate.owner) &&
+					cancelled.includes(candidate.action) &&
+					!primaryDeliveryRecord(candidate.action).durable &&
+					this._autonomousState === candidate.state &&
+					isDeepStrictEqual(candidate.state, candidate.after),
+			);
+			if (continuation) this._restoreAutonomousRuntimeSnapshot(continuation.before);
 		}
-		for (const queuedMessage of queuedMessages) {
-			this._queuedAutonomousContinuationSnapshots.delete(queuedMessage);
-		}
-		this._pendingThresholdCompactionAutonomousMessages = this._pendingThresholdCompactionAutonomousMessages.filter(
-			(message) => !queuedMessageSet.has(message),
+		this._postCompactionContinuations = this._postCompactionContinuations.filter(
+			(item) => !continuations.includes(item),
 		);
-		if (options.messages === undefined) {
-			this._continueAfterThresholdCompaction = false;
-		}
-		if (!this.agent.hasQueuedMessages() && this.unfinishedActionCount === 0) {
+		this._pendingThresholdCompactionAutonomousContinuations =
+			this._pendingThresholdCompactionAutonomousContinuations.filter((item) => !continuations.includes(item));
+		if (cancelled.length > 0) this._emitQueueUpdate();
+		if (
+			!this.agent.hasQueuedMessages() &&
+			this.unfinishedActionCount === 0 &&
+			this._postCompactionContinuationSettlement?.resume.boundary?.state !== "pending"
+		)
 			this._cancelPostCompactionContinue();
-		}
 	}
 
 	private _clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 		shouldContinueAfterThreshold: boolean,
-		queuedMessages: AgentMessage[],
+		continuations: ThresholdAutonomousContinuation[],
 	): void {
-		if (shouldContinueAfterThreshold) {
-			this._clearQueuedAutonomousContinuations({
-				restoreAutonomousState: true,
-				messages: queuedMessages,
-			});
-		}
+		if (shouldContinueAfterThreshold)
+			this._clearQueuedAutonomousContinuations({ restoreAutonomousState: true, continuations });
 	}
 
 	/**
@@ -4054,18 +4283,18 @@ export class AgentSession {
 					};
 				}
 				const settings = { ...this.settingsManager.getCompactionSettings() };
-				const sessionId = this.sessionId;
-				const sessionFile = this.sessionFile;
-				const compaction = this.sessionManager.bindCompactionSink();
-				const captured = this.requests.capture(compaction);
+				const sourceOwner = this._invocationCompactionOwner ?? this._captureCompactionOwner(this.agent.signal);
+				const owner = { ...sourceOwner, pumpEpoch: this._sessionInputPumpEpoch };
+				this._assertCompactionOwner(owner);
+				const compaction = owner.manager.bindCompactionSink();
+				const captured = owner.requests.capture(compaction);
 				let branch: SessionEntry[];
 				let preparation: CompactionPreparation | undefined;
 				try {
 					branch = await compaction.readBranch();
-					if (sessionId !== this.sessionId || sessionFile !== this.sessionFile)
-						throw new Error("Session source changed during compact request");
+					this._assertCompactionOwner(owner);
 					preparation = this.isStreaming
-						? (await this._prepareCapturedCompaction(branch, settings, captured, compaction)).preparation
+						? (await this._prepareCapturedCompaction(branch, settings, captured, compaction, owner)).preparation
 						: undefined;
 				} catch (error) {
 					try {
@@ -4078,6 +4307,7 @@ export class AgentSession {
 					throw error;
 				}
 				await captured.dispose();
+				this._assertCompactionOwner(owner);
 				if (!this.isStreaming)
 					return {
 						scheduled: false,
@@ -4090,7 +4320,8 @@ export class AgentSession {
 						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
 					};
 				}
-				this._pendingRequestedCompaction = { customInstructions: instructions };
+				this._assertContextOptimizationAllowed();
+				this._pendingRequestedCompaction = { customInstructions: instructions, owner };
 				return {
 					scheduled: true,
 					note: "Compaction runs when the current turn ends; you resume automatically afterwards. Continue working normally.",
@@ -4626,7 +4857,20 @@ export class AgentSession {
 
 	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
 		if (event.type === "agent_end" && event.refusal) this._invocationOutputRefused = true;
-		if (event.type === "agent_start") this._invocationSuppressedAutonomousContinuation = false;
+		if (event.type === "agent_start") {
+			// Native input waits for its delivery ticket. Direct/generic Agent runs have actually started here.
+			if (
+				!this._actionStore
+					.activeActions()
+					.some((action) => action.payload.kind === "turn" && action.lifecycle.state === "committing")
+			) {
+				for (const resume of [this._pendingCheckpoint, this._postCompactionContinuationSettlement?.resume]) {
+					if (resume?.boundary && this._isCompactionOwnerCurrent(resume.owner)) resume.boundary.state = "consumed";
+				}
+			}
+			this._invocationSuppressedAutonomousContinuation = false;
+			this._invocationCompactionOwner = this._captureCompactionOwner(this.agent.signal);
+		}
 		if (
 			(event.type === "message_start" || event.type === "message_end") &&
 			this._autonomousContinuationSuppressedMessages.has(event.message)
@@ -4673,9 +4917,10 @@ export class AgentSession {
 				if (record) record.started = true;
 			}
 		}
+		const compactionOwner = event.type === "agent_end" ? this._invocationCompactionOwner : undefined;
 		const job = this._agentEventQueue.then(
-			() => this._processAgentEvent(event, nativeMessageWrite),
-			() => this._processAgentEvent(event, nativeMessageWrite),
+			() => this._processAgentEvent(event, nativeMessageWrite, compactionOwner),
+			() => this._processAgentEvent(event, nativeMessageWrite, compactionOwner),
 		);
 		this._agentEventQueue = job;
 		job.catch(() => {});
@@ -4738,7 +4983,11 @@ export class AgentSession {
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
 	}
 
-	private async _processAgentEvent(event: AgentEvent, nativeMessageWrite?: CapturedNativeMessageWrite): Promise<void> {
+	private async _processAgentEvent(
+		event: AgentEvent,
+		nativeMessageWrite?: CapturedNativeMessageWrite,
+		compactionOwner?: CompactionOwner,
+	): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
 			if (this.sessionManager.supportsCapturedHistoryReads())
@@ -4951,7 +5200,7 @@ export class AgentSession {
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
-			const compactionWillRetry = await this._checkCompaction(msg);
+			const compactionWillRetry = await this._checkCompaction(msg, true, true, compactionOwner);
 			if (compactionWillRetry && this._retryAttempt > 0) {
 				return;
 			}
@@ -7421,7 +7670,19 @@ export class AgentSession {
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
-					for (const action of turns) transitionSessionAction(action, { state: "committing" });
+					const checkpointBoundary =
+						this._postCompactionContinuationSettlement?.resume.boundary ?? this._pendingCheckpoint?.boundary;
+					for (const action of turns) {
+						transitionSessionAction(action, { state: "committing" });
+						if (checkpointBoundary?.state === "pending") {
+							void this._actionStore.ticketFor(action).ticket.delivered.then(
+								(delivery) => {
+									if (delivery.status === "delivered") checkpointBoundary.state = "consumed";
+								},
+								() => {},
+							);
+						}
+					}
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 					return turns.some((action) => action.suppressAutonomousContinuation)
@@ -7437,7 +7698,7 @@ export class AgentSession {
 			if (turns.some((action) => action.lifecycle.state !== "cancelled" && !primaryDeliveryRecord(action).durable)) {
 				throw new Error("Session input dispatch settled without durable delivery");
 			}
-			this._forgetConsumedPostCompactionContinuations(turns.map((action) => primaryDeliveryRecord(action).message));
+			this._forgetConsumedPostCompactionContinuations(turns);
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
@@ -8106,18 +8367,29 @@ export class AgentSession {
 		}
 	}
 
+	private _advanceCheckpointPauseEpoch(): void {
+		// A pause invalidates preparations, not already owned checkpoint work. Keep its original source predicate.
+		const owners = [
+			this._pendingRequestedCompaction?.owner,
+			this._pendingCheckpoint?.owner,
+			this._postCompactionContinuationSettlement?.resume.owner,
+		].filter((owner): owner is CompactionOwner => owner !== undefined && this._isCompactionOwnerCurrent(owner));
+		this._sessionInputPumpEpoch++;
+		for (const owner of owners) owner.pumpEpoch = this._sessionInputPumpEpoch;
+	}
+
 	acquireSessionInputPause(): { release(): void } {
 		const token = Symbol("session-input-admission-pause");
 		this._sessionInputAdmissionPauses.add(token);
 		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
+		this._advanceCheckpointPauseEpoch();
 		let released = false;
 		return {
 			release: () => {
 				if (released) return;
 				released = true;
 				this._sessionInputAdmissionPauses.delete(token);
-				this._sessionInputPumpEpoch++;
+				this._advanceCheckpointPauseEpoch();
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
 				this._scheduleGoalContinuationAfterRlmWork();
@@ -8130,7 +8402,7 @@ export class AgentSession {
 		const token = Symbol("queued-work-pause");
 		this._queuedWorkPauses.add(token);
 		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
+		this._advanceCheckpointPauseEpoch();
 		let released = false;
 		return {
 			release: () => {
@@ -8261,9 +8533,15 @@ export class AgentSession {
 	 * blocks daemon passivation).
 	 */
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
-		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
+		const owner = settlement?.resume.owner;
+		const current = () => !owner || this._isCompactionOwnerCurrent(owner);
+		while (current() && (settlement === undefined || this._postCompactionContinuationSettlement === settlement)) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
+				if (
+					this._sessionInputPumpSuspended ||
+					this._queuedWorkPauses.size > 0 ||
+					(settlement && this._sessionInputAdmissionPauses.size > 0)
+				) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;
@@ -8280,14 +8558,18 @@ export class AgentSession {
 			}
 			const pump = this._sessionInputPump;
 			await pump;
-			await this.agent.waitForIdle();
+			if (!current()) return;
+			await (owner?.agent ?? this.agent).waitForIdle();
+			if (!current()) return;
 			const agentEventQueue = this._agentEventQueue;
 			await agentEventQueue;
+			if (!current()) return;
 			const goalResumeOperation = this._goalResumeOperation;
 			await goalResumeOperation;
-			const requestSettlement = this.requests.waitForIdle();
+			if (!current()) return;
+			const requestSettlement = (owner?.requests ?? this.requests).waitForIdle();
 			await (settlement ? Promise.race([requestSettlement, settlement.promise]) : requestSettlement);
-			if (settlement && this._postCompactionContinuationSettlement !== settlement) return;
+			if (!current() || (settlement && this._postCompactionContinuationSettlement !== settlement)) return;
 			if (
 				pump === this._sessionInputPump &&
 				agentEventQueue === this._agentEventQueue &&
@@ -8724,10 +9006,12 @@ export class AgentSession {
 		});
 	}
 
-	private async _syncKernelStateAfterCompaction(): Promise<void> {
-		const provisioner = this._ipythonKernelProvisioner;
+	private async _syncKernelStateAfterCompaction(owner = this._captureCompactionOwner()): Promise<void> {
+		this._assertCompactionOwner(owner);
+		const provisioner = owner.provisioner;
 		if (!provisioner?.hasRunningKernel) return;
 		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
+		this._assertCompactionOwner(owner);
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
@@ -8737,6 +9021,7 @@ export class AgentSession {
 		} finally {
 			clearTimeout(timer);
 		}
+		this._assertCompactionOwner(owner);
 		if (names === null && !provisioner.hasRunningKernel) return;
 		const detail =
 			names === null
@@ -8760,13 +9045,9 @@ export class AgentSession {
 			display: false,
 			timestamp: Date.now(),
 		} satisfies CustomMessage;
-		await this.sessionManager.appendCustomMessageEntry(
-			message.customType,
-			message.content,
-			message.display,
-			undefined,
-		);
-		const messages = this.agent.state.messages;
+		await owner.manager.appendCustomMessageEntry(message.customType, message.content, message.display, undefined);
+		this._assertCompactionOwner(owner);
+		const messages = owner.agent.state.messages;
 		const last = messages[messages.length - 1];
 		const insertBeforeError = last?.role === "assistant" && (last as AssistantMessage).stopReason === "error";
 		if (insertBeforeError) {
@@ -8855,17 +9136,40 @@ export class AgentSession {
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
+		const sourceOwner = this._captureCompactionOwner();
 		const consumedRequest = this._pendingRequestedCompaction;
-		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
-		const continueAfterSessionInput = this._postCompactionContinuationSettlement?.continueAfterSessionInput ?? false;
+		const requestedWasCurrent =
+			consumedRequest !== undefined && this._isCompactionOwnerCurrent(consumedRequest.owner);
+		const savedResume = this._postCompactionContinuationScheduled
+			? this._postCompactionContinuationSettlement?.resume
+			: undefined;
+		const carryResume = savedResume !== undefined && this._isCompactionOwnerCurrent(savedResume.owner);
 		this._disconnectFromAgent();
+		// Only this operation's own abort advances its control epoch. Do not adopt an epoch after the wait.
+		const originalOwner = carryResume ? savedResume.owner : requestedWasCurrent ? consumedRequest.owner : sourceOwner;
+		const owner = {
+			...originalOwner,
+			signal: undefined,
+			pumpEpoch: sourceOwner.pumpEpoch + (options.skipAbort ? 0 : 1),
+		};
 		if (!options.skipAbort) await this.abort();
+		if (!this._isCompactionOwnerCurrent(owner)) {
+			if (this._isCompactionSourceOwnerCurrent(owner)) this._reconnectToAgent();
+			this._assertCompactionOwner(owner);
+		}
+		const resume = carryResume ? { ...savedResume, owner } : undefined;
+		const checkpoint = resume ?? { owner, actions: [] };
+		this._pendingCheckpoint = checkpoint;
+		if (requestedWasCurrent && this._pendingRequestedCompaction === consumedRequest) {
+			consumedRequest.owner = { ...consumedRequest.owner, pumpEpoch: owner.pumpEpoch, signal: undefined };
+		}
 		let didCompact = false;
 		let requests: InferenceCoordinator | undefined;
 		let compaction: BoundCompactionSink | undefined;
 		let committed: CompactionCommit | undefined;
 		let failure: unknown;
-		this._compactionAbortController = new AbortController();
+		const abort = new AbortController();
+		this._compactionAbortController = abort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -8885,11 +9189,13 @@ export class AgentSession {
 
 			const { model, thinkingLevel } = selected;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
-			const semanticEdges = this._semanticEdges;
-			compaction = this.sessionManager.bindCompactionSink();
-			requests = this.requests.capture(compaction);
+			const semanticEdges = owner.semanticEdges;
+			compaction = owner.manager.bindCompactionSink();
+			requests = owner.requests.capture(compaction);
 			const pathEntries = await compaction.readBranch();
+			this._assertCompactionOwner(owner);
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+			this._assertCompactionOwner(owner);
 			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
@@ -8898,14 +9204,18 @@ export class AgentSession {
 				requests,
 				compaction,
 				semanticEdges,
+				owner,
 				apiKey,
 				headers,
 				customInstructions,
-				signal: this._compactionAbortController.signal,
+				signal: abort.signal,
 			});
 
 			const result = committed.result;
-			await requests.dispose();
+			await this._releaseCompactionCapture(requests, compaction, undefined, owner);
+			requests = undefined;
+			compaction = undefined;
+			this._assertCompactionOwner(owner);
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -8928,9 +9238,10 @@ export class AgentSession {
 					: error;
 			if (failure instanceof CompactionCommittedError) {
 				if (this._pendingRequestedCompaction === consumedRequest) this._pendingRequestedCompaction = undefined;
-				this._reportCommittedCompactionFailure(failure, "manual", customInstructions);
+				this._reportCommittedCompactionFailure(failure, "manual", customInstructions, owner);
 				throw failure;
 			}
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			const skipped = error instanceof CompactionSkippedError;
@@ -8947,25 +9258,28 @@ export class AgentSession {
 			throw error;
 		} finally {
 			try {
-				await this._releaseCompactionCapture(requests, compaction, failure);
+				await this._releaseCompactionCapture(requests, compaction, failure, owner);
 			} finally {
-				this._compactionAbortController = undefined;
-				this._reconnectToAgent();
+				if (this._pendingCheckpoint === checkpoint) this._pendingCheckpoint = undefined;
+				if (this._compactionAbortController === abort) this._compactionAbortController = undefined;
+				if (this._isCompactionSourceOwnerCurrent(owner)) this._reconnectToAgent();
 				if (this._compactionOperation === compactionOperation) {
 					this._compactionOperation = undefined;
 				}
 				resolveCompactionOperation();
-				this._notifySessionInputCheckpointChange();
-				this._scheduleSessionInputPump();
-				if (didCompact) {
+				if (this._isCompactionOwnerCurrent(owner)) {
+					this._notifySessionInputCheckpointChange();
+					this._scheduleSessionInputPump();
+				}
+				if (didCompact && this._isCompactionOwnerCurrent(owner)) {
 					this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
-					if (hadPostCompactionContinue) {
-						this._schedulePostCompactionContinue(continueAfterSessionInput);
+					if (resume) {
+						this._schedulePostCompactionContinue(resume);
 					}
 					// Queued agent or session-owned inputs resume the loop; defer refine
 					// behind them instead of interleaving it before their turns.
 					this._scheduleAutoRefineAfterCompaction(
-						hadPostCompactionContinue || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
+						resume !== undefined || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
 					);
 				}
 			}
@@ -8978,18 +9292,23 @@ export class AgentSession {
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
 		requests: InferenceCoordinator,
 		compaction: BoundCompactionSink,
+		owner = this._captureCompactionOwner(),
 	): Promise<{
 		preparation: CompactionPreparation | undefined;
 		messages?: readonly AgentMessage[];
 		resource?: OwnedResourceCapture;
 		maxSourceBytes: number;
 	}> {
+		this._assertCompactionOwner(owner);
 		const limits = this.settingsManager.getCanonicalContextLimits();
 		const resource = this._captureKernelResource();
-		if (!(await compaction.source).persistent)
+		const source = await compaction.source;
+		this._assertCompactionOwner(owner);
+		if (!source.persistent)
 			return { preparation: prepareCompaction(pathEntries, settings), maxSourceBytes: limits.maxSourceBytes };
 		return requests.readHistory(async (view) => {
 			const messages = await new CanonicalContextCompiler().compile(view, limits, undefined, {}, resource);
+			this._assertCompactionOwner(owner);
 			const context = getCanonicalEpochContext(messages)!;
 			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
 				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
@@ -9030,6 +9349,7 @@ export class AgentSession {
 		requests: InferenceCoordinator;
 		compaction: BoundCompactionSink;
 		semanticEdges: SemanticEdgeRecorder;
+		owner?: CompactionOwner;
 		pathEntries: Awaited<ReturnType<SessionManager["readBranch"]>>;
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
 	}): Promise<CompactionCommit> {
@@ -9045,9 +9365,11 @@ export class AgentSession {
 			semanticEdges,
 			pathEntries,
 			settings,
+			owner = this._captureCompactionOwner(),
 		} = options;
 
-		const prepared = await this._prepareCapturedCompaction(pathEntries, settings, requests, compaction);
+		const prepared = await this._prepareCapturedCompaction(pathEntries, settings, requests, compaction, owner);
+		this._assertCompactionOwner(owner);
 		if (prepared.resource) assertResourceCurrent(prepared.resource);
 		const preparation = prepared.preparation;
 		if (!preparation) {
@@ -9072,8 +9394,8 @@ export class AgentSession {
 		let usage: CompactionResult["usage"];
 		let savedCompactionId: string;
 		try {
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const result = (await this._extensionRunner.emit({
+			if (owner.extensions.hasHandlers("session_before_compact")) {
+				const result = (await owner.extensions.emit({
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
@@ -9081,6 +9403,7 @@ export class AgentSession {
 					signal,
 				})) as SessionBeforeCompactResult | undefined;
 
+				this._assertCompactionOwner(owner);
 				if (result?.cancel) {
 					throw new Error("Compaction cancelled");
 				}
@@ -9139,7 +9462,7 @@ export class AgentSession {
 					summaryFailure = error;
 					throw error;
 				} finally {
-					await this._releaseCompactionCapture(summaryRequests, undefined, summaryFailure);
+					await this._releaseCompactionCapture(summaryRequests, undefined, summaryFailure, owner);
 				}
 			}
 
@@ -9147,6 +9470,7 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
+			this._assertCompactionOwner(owner);
 			const result: CompactionResult = JSON.parse(
 				JSON.stringify({ summary, firstKeptEntryId, tokensBefore, details }),
 			);
@@ -9200,23 +9524,28 @@ export class AgentSession {
 			throw error;
 		}
 		try {
-			this.agent.state.messages = (
-				await readSessionBootstrap(this.sessionManager, this.settingsManager.getCanonicalContextLimits())
-			).context.messages;
+			this._assertCompactionOwner(owner);
+			const bootstrap = await readSessionBootstrap(owner.manager, this.settingsManager.getCanonicalContextLimits());
+			this._assertCompactionOwner(owner);
+			owner.agent.state.messages = bootstrap.context.messages;
 			this._contextOmissions = undefined;
-			this._mergeUnpersistedOutcomes(this.agent.state.messages);
+			this._mergeUnpersistedOutcomes(owner.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
 
-			const savedCompactionEntry = await this.sessionManager.readEntry(savedCompactionId);
+			const savedCompactionEntry = await owner.manager.readEntry(savedCompactionId);
+			this._assertCompactionOwner(owner);
 			if (savedCompactionEntry?.type === "compaction") {
-				await this._extensionRunner.emit({
+				await owner.extensions.emit({
 					type: "session_compact",
 					compactionEntry: savedCompactionEntry,
 					fromExtension,
 				});
 			}
-			if (!prepared.resource) await this._syncKernelStateAfterCompaction();
+			this._assertCompactionOwner(owner);
+			if (!prepared.resource) await this._syncKernelStateAfterCompaction(owner);
+			this._assertCompactionOwner(owner);
 			await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+			this._assertCompactionOwner(owner);
 		} catch (error) {
 			throw new CompactionCommittedError(committed!.entryId, committed!.result, error);
 		}
@@ -9227,7 +9556,9 @@ export class AgentSession {
 		error: CompactionCommittedError,
 		reason: CompactionReason,
 		customInstructions?: string,
+		owner?: CompactionOwner,
 	): void {
+		if (owner && !this._isCompactionSourceOwnerCurrent(owner)) return;
 		this._compactionSetupFailure = error;
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
@@ -9252,6 +9583,7 @@ export class AgentSession {
 		requests: InferenceCoordinator | undefined,
 		compaction: BoundCompactionSink | undefined,
 		failure: unknown,
+		owner?: CompactionOwner,
 	): Promise<void> {
 		try {
 			if (requests) await requests.dispose();
@@ -9264,7 +9596,8 @@ export class AgentSession {
 					failure.result,
 					new AggregateError([failure.cause, cleanupError], "Compaction setup and source release failed"),
 				);
-				this._compactionSetupFailure = combined;
+				if ((!owner || this._isCompactionSourceOwnerCurrent(owner)) && this._compactionSetupFailure === failure)
+					this._compactionSetupFailure = combined;
 				throw combined;
 			}
 			if (failure !== undefined && failure !== cleanupError)
@@ -9304,6 +9637,7 @@ export class AgentSession {
 
 	private _settlePostCompactionContinue(error?: Error): void {
 		if (!error && this._postCompactionContinuationScheduled) return;
+		if (error) this._postCompactionContinuationScheduled = false;
 		const settlement = this._postCompactionContinuationSettlement;
 		if (!settlement || settlement.settled) return;
 		settlement.settled = true;
@@ -9315,7 +9649,6 @@ export class AgentSession {
 
 	private _cancelPostCompactionContinue(): void {
 		this._postCompactionContinuationScheduled = false;
-		this._scheduledPostCompactionContinuationMessages = [];
 		this._settlePostCompactionContinue();
 	}
 
@@ -9410,32 +9743,35 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _schedulePostCompactionContinue(continueAfterSessionInput = false): void {
+	private _schedulePostCompactionContinue(resume: CheckpointResume): void {
+		if (!this._isCompactionOwnerCurrent(resume.owner)) return;
+		const previous = this._postCompactionContinuationSettlement;
+		if (previous && !this._isCompactionOwnerCurrent(previous.resume.owner)) this._cancelPostCompactionContinue();
 		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
-			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
+			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement(resume);
 		}
 		const settlement = this._postCompactionContinuationSettlement;
-		settlement.continueAfterSessionInput ||= continueAfterSessionInput;
-		if (this._postCompactionContinuationScheduled) {
-			return;
-		}
+		settlement.resume = resume;
+		if (this._postCompactionContinuationScheduled) return;
 		this._postCompactionContinuationScheduled = true;
-		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		void this._runScheduledPostCompactionContinue(settlement)
-			.catch(() => undefined)
+			.catch((error: unknown) => {
+				if (this._postCompactionContinuationSettlement === settlement)
+					this._settlePostCompactionContinue(this._asError(error));
+			})
 			.finally(() => {
-				if (this._postCompactionContinuationSettlement === settlement) {
-					this._settlePostCompactionContinue();
-				}
+				if (this._postCompactionContinuationSettlement === settlement) this._settlePostCompactionContinue();
 			});
 	}
 
-	private _sessionOwnsScheduledContinuations(continuationMessages: AgentMessage[]): boolean {
-		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
-	}
-
 	private async _waitForQueuedWorkResume(settlement: PostCompactionContinuationSettlement): Promise<void> {
-		while (this._queuedWorkPauses.size > 0 && this._postCompactionContinuationSettlement === settlement) {
+		const resume = settlement.resume;
+		while (
+			(this._queuedWorkPauses.size > 0 || this._sessionInputAdmissionPauses.size > 0) &&
+			this._postCompactionContinuationSettlement === settlement &&
+			settlement.resume === resume &&
+			this._isCompactionOwnerCurrent(resume.owner)
+		) {
 			let resume = () => {};
 			const resumed = new Promise<void>((resolve) => {
 				resume = resolve;
@@ -9451,105 +9787,96 @@ export class AgentSession {
 
 	private async _runScheduledPostCompactionContinue(settlement: PostCompactionContinuationSettlement): Promise<void> {
 		while (this._postCompactionContinuationScheduled && this._postCompactionContinuationSettlement === settlement) {
-			await this.agent.waitForIdle();
+			const resume = settlement.resume;
+			const owner = resume.owner;
+			const current = () =>
+				this._postCompactionContinuationSettlement === settlement &&
+				settlement.resume === resume &&
+				this._isCompactionOwnerCurrent(owner);
+			if (!current()) {
+				this._cancelPostCompactionContinue();
+				return;
+			}
+			await owner.agent.waitForIdle();
+			if (!current()) continue;
 			await this.waitForRetry();
-			await this._waitForRefineIdle();
+			if (!current()) continue;
+			const refine = this._refineInFlight;
+			if (refine) await refine;
+			if (!current()) continue;
 			await this._waitForQueuedWorkResume(settlement);
+			if (!current()) continue;
 			const compactionOperation = this._compactionOperation;
 			if (compactionOperation) {
 				await Promise.race([compactionOperation, settlement.promise]);
 				continue;
 			}
-
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let continuation: Promise<void> | undefined;
-			let continuationMessages: AgentMessage[] = [];
 			let waitForSessionInput = false;
 			try {
-				await this.agent.waitForIdle();
+				if (!current()) continue;
+				await owner.agent.waitForIdle();
+				if (!current()) continue;
 				if (
-					!this._postCompactionContinuationScheduled ||
-					this._postCompactionContinuationSettlement !== settlement
-				) {
-					return;
-				}
-
-				if (this._queuedWorkPauses.size > 0 || this._compactionOperation || this._refineInFlight) {
+					this._queuedWorkPauses.size > 0 ||
+					this._sessionInputAdmissionPauses.size > 0 ||
+					this._compactionOperation ||
+					this._refineInFlight
+				)
 					continue;
-				}
-
-				continuationMessages = [...this._scheduledPostCompactionContinuationMessages];
-				if (continuationMessages.length > 0 && !this._sessionOwnsScheduledContinuations(continuationMessages)) {
-					this._cancelPostCompactionContinue();
-					this._scheduleAutoRefineAfterAgentEnd();
-					return;
-				}
 				if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
 					this._scheduleSessionInputPump();
 					waitForSessionInput = true;
 				} else {
+					// A released row is not a receipt. The retained ticket settles delivery and completion separately.
+					for (const { action, ticket } of resume.actions) {
+						if (action.lifecycle.state === "cancelled") continue;
+						if (action.lifecycle.state !== "completed" && action.lifecycle.state !== "failed") {
+							throw new Error(`Checkpoint action ${ticket.id} has not settled`);
+						}
+						await ticket.completed;
+						const delivered = await ticket.delivered;
+						if (delivered.status !== "delivered")
+							throw new Error(`Checkpoint action ${ticket.id} was not delivered`);
+						if (!current()) break;
+					}
+					if (!current()) continue;
+					if (this.hasPendingSessionWork || this._sessionInputPumpRequested) continue;
 					this._postCompactionContinuationScheduled = false;
-					continuation = this.agent.continue();
+					if (resume.boundary?.state === "pending" || owner.agent.hasQueuedMessages()) {
+						continuation = owner.agent.continue();
+					} else {
+						this._scheduleAutoRefineAfterAgentEnd();
+						return;
+					}
 				}
 			} finally {
 				commitFence.release();
 			}
-
 			if (waitForSessionInput) {
 				await this._waitForIdleOrSettlement(settlement);
-				if (this._postCompactionContinuationSettlement !== settlement) return;
-				const shouldContinue =
-					(settlement.continueAfterSessionInput && continuationMessages.length === 0) ||
-					this._sessionOwnsScheduledContinuations(continuationMessages);
-				if (shouldContinue) {
-					this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
-					continue;
-				}
-				this._postCompactionContinuationScheduled = false;
-				this._scheduledPostCompactionContinuationMessages = [];
-				this._scheduleAutoRefineAfterAgentEnd();
-				return;
+				continue; // The input dispatch, not queue removal, consumes the old boundary.
 			}
-
 			try {
 				await continuation;
-				if (this._postCompactionContinuationSettlement === settlement) {
-					this._forgetConsumedPostCompactionContinuations(continuationMessages);
-				}
 				return;
 			} catch (error) {
-				const code = error instanceof AgentContinueError ? error.code : undefined;
-				if (code === "busy") {
-					if (this._postCompactionContinuationSettlement === settlement) {
-						this._postCompactionContinuationScheduled = true;
-						this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
-					}
+				if (error instanceof AgentContinueError && error.code === "busy") {
+					if (current()) this._postCompactionContinuationScheduled = true;
 					continue;
 				}
-				if (code !== "nothing-to-continue" && this._postCompactionContinuationSettlement === settlement) {
+				// A valid directive must not rely on a stale-tail/nothing-to-continue error to decide completion.
+				if (this._postCompactionContinuationSettlement === settlement)
 					this._settlePostCompactionContinue(this._asError(error));
-				}
 				return;
 			}
 		}
 	}
 
-	private _forgetConsumedPostCompactionContinuations(continuationMessages: AgentMessage[]): void {
-		if (continuationMessages.length === 0) {
-			return;
-		}
-		const continuationMessageSet = new Set(continuationMessages);
-		const stillQueued = new Set(this.agent.removeQueuedMessages((message) => continuationMessageSet.has(message)));
-		for (const message of stillQueued) {
-			this.agent.followUp(message);
-		}
-		for (const message of continuationMessages) {
-			if (!stillQueued.has(message)) {
-				this._queuedAutonomousContinuationSnapshots.delete(message);
-			}
-		}
-		this._postCompactionContinuationMessages = this._postCompactionContinuationMessages.filter(
-			(message) => !continuationMessageSet.has(message) || stillQueued.has(message),
+	private _forgetConsumedPostCompactionContinuations(actions: QueuedSessionAction[]): void {
+		this._postCompactionContinuations = this._postCompactionContinuations.filter(
+			(continuation) => !actions.includes(continuation.action) || this._checkpointActionPending(continuation),
 		);
 	}
 
@@ -10248,13 +10575,27 @@ export class AgentSession {
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
+		invocationOwner?: CompactionOwner,
 	): Promise<boolean> {
 		if (this._compactionSetupFailure) return false;
+		if (invocationOwner && !this._isCompactionSourceOwnerCurrent(invocationOwner)) return false;
+		const owner =
+			this._pendingCheckpoint?.owner ??
+			(invocationOwner
+				? { ...invocationOwner, pumpEpoch: this._sessionInputPumpEpoch }
+				: this._captureCompactionOwner());
+		if (!this._isCompactionSourceOwnerCurrent(owner)) return false;
+		if (assistantMessage.stopReason !== "aborted" && !this._isCompactionOwnerCurrent(owner)) return false;
+		const goalOwner = { ...this._captureGoalContinuationOwner(owner.signal), checkpointOwner: owner };
+		const autonomousOwner = this._captureThresholdAutonomousOwner();
+		const pending = this._pendingRequestedCompaction;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) this._pendingRequestedCompaction = undefined;
 		if (!this._contextOptimizationAllowed() && this._pendingRequestedCompaction === undefined) return false;
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
 			this._pendingRequestedCompaction = undefined;
+			this._pendingCheckpoint = undefined;
 			// An abort also drops any pending explicit refine.run request: the
 			// turn that would service it (non-serialized: _consumePendingRequestedRefine
 			// at agent_end; serialized: the shouldStopAfterTurn checkpoint) never
@@ -10287,7 +10628,8 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionTimestamp = await this._getLatestCompactionTimestamp();
+		const compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
 
@@ -10306,6 +10648,7 @@ export class AgentSession {
 						"overflow",
 						"failed",
 						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+						{ owner },
 					);
 				}
 				return false;
@@ -10318,14 +10661,16 @@ export class AgentSession {
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this._removeLastAssistantFromContext();
 			}
-			return await this._runAutoCompaction("overflow", true);
+			return await this._runAutoCompaction("overflow", true, owner);
 		}
 
 		if (this._pendingRequestedCompaction !== undefined) {
-			return await this._runAutoCompaction("requested", false);
+			return await this._runAutoCompaction("requested", false, owner);
 		}
 
-		if (!settings.enabled || assistantIsFromBeforeCompaction) return false;
+		if (!this._contextOptimizationAllowed() || !settings.enabled || assistantIsFromBeforeCompaction) return false;
+		// A native turn already made its typed decision. Do not synthesize a new policy winner at agent_end.
+		if (invocationOwner && !this._pendingCheckpoint) return false;
 
 		// Case 3: Threshold - context is getting large.
 		// Use the full-session estimate so messages appended after the last successful
@@ -10333,18 +10678,16 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (
-				queueAutonomousContinuation &&
-				(await this._queueGoalContinuationForThresholdCompaction(assistantMessage))
-			) {
-				this._continueAfterThresholdCompaction = true;
-			} else if (
-				queueAutonomousContinuation &&
-				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
-			) {
-				this._continueAfterThresholdCompaction = true;
+			if (!this._pendingCheckpoint && queueAutonomousContinuation) {
+				if (
+					!(await this._queueGoalContinuationForThresholdCompaction(assistantMessage, goalOwner)) &&
+					this._isGoalContinuationOwnerCurrent(goalOwner)
+				) {
+					await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage, owner, autonomousOwner);
+				}
 			}
-			return await this._runAutoCompaction("threshold", false);
+			if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
+			return await this._runAutoCompaction("threshold", false, owner);
 		}
 		return false;
 	}
@@ -10361,9 +10704,12 @@ export class AgentSession {
 			aborted?: boolean;
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
+			owner?: CompactionOwner;
 		} = {},
 	): Promise<void> {
-		await this._persistCompactionOutcome(reason, outcome, message);
+		const owner = options.owner ?? this._captureCompactionOwner();
+		await this._persistCompactionOutcome(reason, outcome, message, owner);
+		this._assertCompactionSourceOwner(owner);
 		this._emit({
 			type: "compaction_end",
 			reason,
@@ -10381,19 +10727,22 @@ export class AgentSession {
 		reason: CompactionOutcomeReason,
 		outcome: CompactionOutcome,
 		message: string,
+		owner = this._captureCompactionOwner(),
 	): Promise<void> {
+		this._assertCompactionSourceOwner(owner);
 		let outcomeMessage = createCompactionOutcomeMessage(message, {
 			reason,
 			outcome,
 		});
 		try {
-			await this.sessionManager.appendCustomMessageEntryWithRollback(
+			await owner.manager.appendCustomMessageEntryWithRollback(
 				outcomeMessage.customType,
 				outcomeMessage.content,
 				outcomeMessage.display,
 				outcomeMessage.details,
 			);
 		} catch (error) {
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw error;
 			const persistenceError = error instanceof Error ? error.message : String(error);
 			outcomeMessage = createCompactionOutcomeMessage(
 				`${message}\n\nThis compaction outcome could not be saved to session history: ${persistenceError}`,
@@ -10402,7 +10751,8 @@ export class AgentSession {
 			// Not in the session file, so context rebuilds would drop the disclosure.
 			this._unpersistedOutcomes.push(outcomeMessage);
 		}
-		this.agent.state.messages.push(outcomeMessage);
+		this._assertCompactionSourceOwner(owner);
+		owner.agent.state.messages.push(outcomeMessage);
 		this._emit({ type: "message_start", message: outcomeMessage });
 		this._emit({ type: "message_end", message: outcomeMessage });
 	}
@@ -10410,35 +10760,42 @@ export class AgentSession {
 	private async _runAutoCompaction(
 		reason: "overflow" | "threshold" | "requested",
 		willRetry: boolean,
+		capturedOwner?: CompactionOwner,
 	): Promise<boolean> {
-		// Any compaction consumes a pending model request and honors its instructions
-		// (overflow recovery can fire first and take the request with it).
+		const checkpoint = this._pendingCheckpoint;
 		const pending = this._pendingRequestedCompaction;
+		const owner = checkpoint?.owner ?? pending?.owner ?? capturedOwner ?? this._captureCompactionOwner();
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
+		if (reason === "threshold" && !this._contextOptimizationAllowed()) return false;
+		if (checkpoint && !this._isCompactionOwnerCurrent(checkpoint.owner)) return false;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) return false;
 		this._pendingRequestedCompaction = undefined;
 		const customInstructions = pending?.customInstructions;
-		const shouldContinueAfterCompaction =
-			(reason === "threshold" || reason === "requested") && this._continueAfterThresholdCompaction;
+		const resume =
+			reason === "overflow"
+				? this._captureCheckpointResume(owner, { kind: "overflow", state: "pending" })
+				: (checkpoint ?? this._captureCheckpointResume(owner));
+		this._pendingCheckpoint = resume;
+		const shouldContinueAfterCompaction = this._checkpointHasResume(resume);
 		const queuedAutonomousContinuationsForThisCompaction =
 			reason === "threshold" && shouldContinueAfterCompaction
-				? this._pendingThresholdCompactionAutonomousMessages.splice(0)
+				? this._pendingThresholdCompactionAutonomousContinuations.splice(0)
 				: [];
 		const queuedGoalContinuationForThisCompaction =
 			reason === "threshold" && shouldContinueAfterCompaction ? this._queuedGoalThresholdContinuation : undefined;
-		this._continueAfterThresholdCompaction = false;
-
-		// Requested/threshold stop the loop on purpose, so a failed or skipped compaction must not stall it.
-		// Overflow stays excluded: a failed overflow recovery must not re-issue the overflowing request.
 		const resumeAfterFailure = () => {
 			if (
 				(reason === "requested" || reason === "threshold") &&
-				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
+				this._isCompactionOwnerCurrent(owner) &&
+				(this._checkpointHasResume(resume) || owner.agent.hasQueuedMessages() || this.hasPendingSessionWork)
 			) {
-				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
+				this._schedulePostCompactionContinue(resume);
 			}
 		};
 
 		this._emit({ type: "compaction_start", reason, customInstructions });
-		this._autoCompactionAbortController = new AbortController();
+		const abort = new AbortController();
+		this._autoCompactionAbortController = abort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -10448,17 +10805,18 @@ export class AgentSession {
 		let compaction: BoundCompactionSink | undefined;
 		let committed: CompactionCommit | undefined;
 		let failure: unknown;
-
 		try {
 			const selected = this._resolveCompactionModel();
 			const model = selected?.model;
 			const thinkingLevel = selected?.thinkingLevel ?? this.thinkingLevel;
 			const settings = { ...this.settingsManager.getCompactionSettings() };
-			const semanticEdges = this._semanticEdges;
-			compaction = this.sessionManager.bindCompactionSink();
-			requests = this.requests.capture(compaction);
+			const semanticEdges = owner.semanticEdges;
+			compaction = owner.manager.bindCompactionSink();
+			requests = owner.requests.capture(compaction);
 			const pathEntries = await compaction.readBranch();
+			this._assertCompactionOwner(owner);
 			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
+			this._assertCompactionOwner(owner);
 			if (!model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
 					!model || !authResult
@@ -10466,7 +10824,7 @@ export class AgentSession {
 						: authResult.ok
 							? "no API key is available"
 							: authResult.error;
-				await this._endCompactionUnsuccessfully(reason, "failed", `Compaction failed: ${detail}`);
+				await this._endCompactionUnsuccessfully(reason, "failed", `Compaction failed: ${detail}`, { owner });
 				this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 					reason === "threshold" && shouldContinueAfterCompaction,
 					queuedAutonomousContinuationsForThisCompaction,
@@ -10474,7 +10832,6 @@ export class AgentSession {
 				resumeAfterFailure();
 				return false;
 			}
-
 			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
@@ -10483,45 +10840,29 @@ export class AgentSession {
 				requests,
 				compaction,
 				semanticEdges,
+				owner,
 				apiKey: authResult.apiKey,
 				headers: authResult.headers,
 				customInstructions,
-				signal: this._autoCompactionAbortController.signal,
+				signal: abort.signal,
 			});
-
 			const result = committed.result;
-			await requests.dispose();
-			this._emit({
-				type: "compaction_end",
-				reason,
-				result,
-				aborted: false,
-				willRetry,
-				customInstructions,
-			});
-			// Queued work lives in both the agent queues and the session-owned queues.
-			const hasQueuedMessages = this.agent.hasQueuedMessages() || this.hasPendingSessionWork;
-			const willContinueAfterCompaction = willRetry || shouldContinueAfterCompaction || hasQueuedMessages;
-
+			// Release this captured source before arming success. A later release failure still carries the ACK.
+			await this._releaseCompactionCapture(requests, compaction, undefined, owner);
+			requests = undefined;
+			compaction = undefined;
+			this._assertCompactionOwner(owner);
+			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry, customInstructions });
+			const hasQueuedWork = owner.agent.hasQueuedMessages() || this.hasPendingSessionWork;
+			const willContinue = willRetry || this._checkpointHasResume(resume) || hasQueuedWork;
 			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
-					this._removeLastAssistantFromContext();
-				}
-
-				this._schedulePostCompactionContinue(true);
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
-				return true;
-			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
-				// Compaction can intentionally stop a tool loop between turns.
-				// Queued follow-up/steering/custom messages can also be waiting.
-				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
-			} else {
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
+				const messages = owner.agent.state.messages;
+				const last = messages[messages.length - 1];
+				if (last?.role === "assistant" && last.stopReason === "error") this._removeLastAssistantFromContext();
 			}
-			return false;
+			if (willContinue) this._schedulePostCompactionContinue(resume);
+			this._scheduleAutoRefineAfterCompaction(willContinue);
+			return willRetry; // Existing overflow retry contract; false is not a failed checkpoint.
 		} catch (error) {
 			const primaryCommit = primaryCommittedCompactionError(error);
 			const knownCommit = primaryCommit ?? committed;
@@ -10530,16 +10871,19 @@ export class AgentSession {
 					? new CompactionCommittedError(knownCommit.entryId, knownCommit.result, error)
 					: error;
 			if (failure instanceof CompactionCommittedError) {
-				this._reportCommittedCompactionFailure(failure, reason, customInstructions);
+				this._reportCommittedCompactionFailure(failure, reason, customInstructions, owner);
 				throw failure;
 			}
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw failure;
 			this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 				reason === "threshold" && shouldContinueAfterCompaction,
 				queuedAutonomousContinuationsForThisCompaction,
 			);
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
-				errorMessage === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+				errorMessage === "Compaction cancelled" ||
+				(error instanceof Error && error.name === "AbortError") ||
+				abort.signal.aborted;
 			if (aborted) {
 				await this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
 					queuedGoalContinuationForThisCompaction,
@@ -10548,7 +10892,7 @@ export class AgentSession {
 					reason,
 					"cancelled",
 					`${reason === "requested" ? "Requested c" : "C"}ompaction cancelled`,
-					{ aborted: true, customInstructions },
+					{ aborted: true, customInstructions, owner },
 				);
 				return false;
 			}
@@ -10559,34 +10903,34 @@ export class AgentSession {
 					reason === "requested"
 						? `Requested compaction skipped: ${errorMessage}`
 						: `Auto-compaction skipped: ${errorMessage}`,
-					{ errorSeverity: "warning", customInstructions },
+					{ errorSeverity: "warning", customInstructions, owner },
 				);
-				resumeAfterFailure();
-				return false;
+			} else {
+				await this._endCompactionUnsuccessfully(
+					reason,
+					"failed",
+					reason === "overflow"
+						? `Context overflow recovery failed: ${errorMessage}`
+						: reason === "requested"
+							? `Requested compaction failed: ${errorMessage}`
+							: `Auto-compaction failed: ${errorMessage}`,
+					{ customInstructions, owner },
+				);
 			}
-			await this._endCompactionUnsuccessfully(
-				reason,
-				"failed",
-				reason === "overflow"
-					? `Context overflow recovery failed: ${errorMessage}`
-					: reason === "requested"
-						? `Requested compaction failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
-				{ customInstructions },
-			);
 			resumeAfterFailure();
 			return false;
 		} finally {
 			try {
-				await this._releaseCompactionCapture(requests, compaction, failure);
+				await this._releaseCompactionCapture(requests, compaction, failure, owner);
 			} finally {
-				this._autoCompactionAbortController = undefined;
-				if (this._compactionOperation === compactionOperation) {
-					this._compactionOperation = undefined;
-				}
+				if (this._pendingCheckpoint === resume) this._pendingCheckpoint = undefined;
+				if (this._autoCompactionAbortController === abort) this._autoCompactionAbortController = undefined;
+				if (this._compactionOperation === compactionOperation) this._compactionOperation = undefined;
 				resolveCompactionOperation();
-				this._notifySessionInputCheckpointChange();
-				this._scheduleSessionInputPump();
+				if (this._isCompactionOwnerCurrent(owner)) {
+					this._notifySessionInputCheckpointChange();
+					this._scheduleSessionInputPump();
+				}
 			}
 		}
 	}

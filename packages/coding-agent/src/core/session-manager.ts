@@ -2470,6 +2470,23 @@ export class SessionManager {
 		return this._bindHistorySource(createBranchHistoryReadView);
 	}
 
+	/** Capture ownership, not a history frontier: ordinary appends may finish before the checkpoint capture. */
+	captureCompactionSourceOwner(): () => boolean {
+		const state = this.writeState;
+		const owner = state.owner;
+		const sessionId = this.sessionId;
+		const sessionFile = this.sessionFile;
+		const selectionRevision = state.branchSelectionRevision;
+		return () =>
+			this.writeState === state &&
+			state.owner === owner &&
+			!state.retired &&
+			!state.closed &&
+			this.sessionId === sessionId &&
+			this.sessionFile === sessionFile &&
+			state.branchSelectionRevision === selectionRevision;
+	}
+
 	bindCompactionSink(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): BoundCompactionSink {
 		const state = this.writeState;
 		const owner = state.owner;

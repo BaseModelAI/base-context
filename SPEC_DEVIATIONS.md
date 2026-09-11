@@ -1581,3 +1581,89 @@ installation or publication run occurred. The existing command-result retention
 and callback-abort limits remain explicit. W72 defaults are still unapproved;
 whole G11 completion, current-native gains and overall goal completion are not
 claimed.
+
+## W75 / G11 — explicit checkpoint-to-resume ownership
+
+The native compatible-turn checkpoint producer carries explicit control through
+the existing Agent/loop stop, accepted compaction and post-compaction input-pump
+settlement. Its resume directive identifies interrupted tool work and existing
+accepted actions/tickets rather than last-message role, payload presence or array
+membership. The existing generic boolean stop hook and W74 natural continuation
+callback retain their distinct positions and behavior; no duplicate callback call
+or unused checkpoint variant is added to the natural-stop hook.
+
+The native producer honors the loop's finalized all-terminate decision and the
+existing context-optimization admission gate. A terminating tool batch alone does
+not authorize another model request. Automatic threshold work does not stop/queue
+while optimization is off or a pending transition closes that gate. Separately
+accepted goal/autonomous/input work and previously accepted explicit compaction
+requests keep their existing authority. Ordinary completed-turn compaction without
+more work still finishes. This fixes the identified native control mismatches;
+the lookup finding itself was source evidence, not a runtime failure receipt.
+
+The current compaction sink/epoch append remains the only checkpoint ACK owner.
+The intent is not an ACK, and the legacy auto-compaction boolean is not a success
+receipt. Success resumption follows owned ACK/setup/release. Known committed
+checkpoint plus later setup/release error remains distinct, with pump suspension
+and no second summary or automatic resume. Recoverable skipped/ordinary failed
+requested/threshold compaction retains its existing interrupted/queued-work resume
+policy; absence of an ACK does not assert absence of a write. Abort does not resume;
+overflow retains its separate one-retry owner.
+
+Captured manager/session/file, branch/pump ownership and actual action consumption
+carry the directive through waits. Queued inputs go first; a real input invocation
+that takes the interrupted boundary cannot leave a stale extra continuation.
+Missing or released action data alone does not establish successful delivery.
+Existing settlement identity, action-commit fence, finalization, serialized refine,
+manual save/reschedule/cancel, EOF/disposal and headless-idle owners remain. No wait
+for the current invocation's own idle barrier, new queue/registry, converter,
+summary engine, model call, quota or persisted resume protocol is introduced.
+
+The adjacent threshold bookkeeping reuses W74's scoped goal/autonomous ownership.
+Its accepted autonomous command-output and callback-abort limitations remain; no
+new result store or all-callback-drained guarantee is claimed. The related compaction
+guide now uses owned identity/settings and distinguishes native capture, resident
+legacy fallback, nullable estimates, context.mode and runtime uncertainty.
+
+Schema45/min45 (`protocol-11-schema-45-checkpoint-transitions`) fences older loaded
+native workers. Protocol11/history-index16/kernel4/bootstrap11, accepted epoch and
+queued-action formats are unchanged. Pending checkpoint intents remain transient;
+no cross-restart recovery, whole G11 completion or current-native gain is claimed.
+W72 auxiliary-budget defaults remain unapproved and untouched.
+
+Five other existing private-interface fixtures are maintained with the same
+scenarios after removal of the old boolean/zero-argument scheduler assumptions.
+This is fixture maintenance, not five new scenarios or five extra executed cases.
+The two agreed real-path selectors remain the focused runtime scope.
+
+Focused validation used actual Node22.12, the isolated six-variable environment,
+network/PID/proc isolation and the package Vitest runner. The existing real skip/
+resume case passed in the first two-case run (4029294); it was not rerun. The happy
+case initially failed its new order assertion. The first observer counted
+`Agent.continue()` method entries rather than actual run admission. Switching to
+raw `agent_start` still showed intent/resume/ACK. A bounded same-case diagnostic
+(4033863) then recorded a threshold skip (`Session is too short to compact — try
+again once it grows`) followed by overflow compaction, not success-first threshold
+compaction. No production control failure or busy-return cause was inferred from
+the original method-entry trace.
+
+A prior completed canonical user/assistant pair alone was insufficient (4034293).
+Source inspection found that `prepareViewCompaction` with keepRecentTokens1 hits
+the last tool result, finds no following eligible cut, and uses the earliest cut.
+The same happy fixture now has a larger completed prefix, keepRecentTokens10001
+for its 10000-token-estimate tool result plus call, and a 12000-token model window.
+It still uses the actual big tool, canonical ACK, extension summary and native
+loop; no extra model call, case or harness was added. The strict
+intent → canonical ACK → actual run-admission order is unchanged.
+
+The affected happy-only run4036149 passed (1pass/9skip, 4.698449845192954s). Required
+check4036154 passed (5.016415226040408s, 1046files/no fixes, types, installer and
+browser checks). Earlier failure receipts4029294/4031979/4033863/4034293 and passing
+checks4029299/4031984/4034298 remain in the work logs. Post-integration corrections
+were fixture-only; the production candidate did not change. Five existing
+private-interface fixtures were maintained but not executed as extra cases.
+
+These cases do not certify real-provider summarization, all lifecycle races,
+installed binaries, crash recovery or platforms. No new provider/benchmark/install/
+publication approval is implied. W72 remains a separate pending policy decision;
+the overall objective remains active.

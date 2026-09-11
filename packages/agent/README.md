@@ -139,6 +139,29 @@ const stream = agentLoop(prompts, context, {
 
 `shouldStopAfterTurn` runs after `turn_end` is emitted and after the assistant response and any tool executions have completed normally. If it returns `true`, the loop emits `agent_end` and exits before polling steering or follow-up queues, and before starting another LLM call. It does not abort the provider stream, does not cancel running tools, and does not alter the assistant message stop reason.
 
+### Native checkpoint control
+
+At the same completed-turn boundary, `Agent` and `AgentLoopConfig` can use
+`getTurnOutcome(context, signal)` instead of the boolean stop hook. Its
+`GetTurnOutcomeContext` includes `hasMoreToolCalls`, the loop's finalized tool-batch
+decision. An all-terminate batch sets this to `false`; the last message's role is
+not a substitute.
+
+The callback returns `AgentTurnOutcome`, synchronously or asynchronously:
+`proceed`, `finish`, `checkpoint_then_continue` or `cancelled`. Only `proceed`
+continues the ordinary queue-polling policy. The other results end this invocation.
+When the typed callback is present, the loop does not also call
+`shouldStopAfterTurn`. The boolean API remains available otherwise.
+
+The native session consumes checkpoint intent through its existing compaction
+and input-dispatch owners. `checkpoint_then_continue` is not a checkpoint ACK.
+Normal success resumption follows the canonical write and owned setup/release.
+Recoverable skip/failure retains the existing resume policy; abort does not resume.
+A known ACK plus later setup or release failure retains the checkpoint and blocks automatic
+resumption. Accepted queued input takes priority and can consume the interrupted
+boundary without leaving an extra continuation. This is transient control, not a
+new persisted restart protocol. See the [compaction guide](../coding-agent/docs/compaction.md).
+
 ### Native continuation control
 
 At a natural stop, `Agent` and `AgentLoopConfig` can use the optional

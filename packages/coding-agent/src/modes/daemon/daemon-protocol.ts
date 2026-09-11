@@ -96,8 +96,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 42 honors explicit branch-summary model and effort selection.
 // Revision 43 requires bounded saved-session query pages on the native catalog path.
 // Revision 44 uses typed native natural-turn continuation outcomes.
-export const DAEMON_SCHEMA_REVISION = 44;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-44-turn-outcomes";
+// Revision 45 carries owned checkpoint/resume transitions through the native loop.
+export const DAEMON_SCHEMA_REVISION = 45;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-45-checkpoint-transitions";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -742,7 +743,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 44,
+	minSchemaRevision: 45,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

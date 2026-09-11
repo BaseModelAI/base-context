@@ -4,7 +4,7 @@
  * resume it. BUG B: an assistant-text-turn threshold stop reads as "task finished", so an
  * active goal queues its continuation as a session input before compaction.
  */
-import type { AgentMessage, ShouldStopAfterTurnContext } from "@ponythewhite/base-context-agent";
+import type { AgentMessage, AgentTurnOutcome, ShouldStopAfterTurnContext } from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
@@ -15,7 +15,14 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
+import { appendContextEpoch } from "../../src/core/context-epoch.js";
 import { createHarness, type Harness } from "./harness.js";
+
+type CheckpointDirective = {
+	owner: object;
+	boundary?: { kind: "tool" | "overflow"; state: "pending" | "consumed" };
+	actions: unknown[];
+};
 
 type SessionInternals = {
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
@@ -27,7 +34,10 @@ type SessionInternals = {
 		customInstructions?: string;
 		signal: AbortSignal;
 	}) => Promise<unknown>;
-	_continueAfterThresholdCompaction: boolean;
+	_pendingCheckpoint: CheckpointDirective | undefined;
+	_captureCompactionOwner: () => object;
+	_captureCheckpointResume: (owner: object, boundary?: CheckpointDirective["boundary"]) => CheckpointDirective;
+	_schedulePostCompactionContinue: (directive: CheckpointDirective) => void;
 };
 
 function createUsage(totalTokens: number): Usage {
@@ -125,10 +135,10 @@ describe("compaction continuation", () => {
 		const internals = harness.session as unknown as SessionInternals;
 		const context = midToolLoopContext(harness);
 
-		// toolResult-last makes the session stop the loop for compaction AND continue afterwards.
+		// The direct stop adapter retains the interrupted tool boundary for the checkpoint.
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._continueAfterThresholdCompaction).toBe(true);
+		expect(internals._pendingCheckpoint?.boundary).toEqual({ kind: "tool", state: "pending" });
 
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
@@ -152,7 +162,10 @@ describe("compaction continuation", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionInternals;
 		midToolLoopContext(harness);
-		internals._continueAfterThresholdCompaction = true;
+		internals._pendingCheckpoint = internals._captureCheckpointResume(internals._captureCompactionOwner(), {
+			kind: "tool",
+			state: "pending",
+		});
 
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
@@ -181,6 +194,15 @@ describe("compaction continuation", () => {
 			persistSession: true,
 		});
 		harnesses.push(harness);
+		const outcomes: AgentTurnOutcome["kind"][] = [];
+		const getTurnOutcome = harness.session.agent.getTurnOutcome!;
+		harness.session.agent.getTurnOutcome = async (context, signal) => {
+			const outcome = await getTurnOutcome(context, signal);
+			outcomes.push(outcome.kind);
+			return outcome;
+		};
+		const legacyStop = vi.spyOn(harness.session.agent, "shouldStopAfterTurn");
+		const continueAgent = vi.spyOn(harness.session.agent, "continue");
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("big", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("final answer after the tool call"),
@@ -194,6 +216,12 @@ describe("compaction continuation", () => {
 		expect(harness.eventsOfType("compaction_start").map((event) => event.reason)).toContain("threshold");
 		expect(harness.eventsOfType("compaction_end")[0]?.errorMessage).toContain("skipped");
 		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(outcomes[0]).toBe("checkpoint_then_continue");
+		expect(legacyStop).not.toHaveBeenCalled();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
+		expect(
+			(await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction" && entry.summary),
+		).toEqual([]);
 	});
 
 	it("headless idle includes a successful post-compaction continuation", async () => {
@@ -209,8 +237,9 @@ describe("compaction continuation", () => {
 		};
 		const harness = await createHarness({
 			tools: [bigTool],
-			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 6_000 }],
+			// Retain the 10k-token tool result plus its call; the earlier completed turn is summarized.
+			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 10_001 } },
+			models: [{ id: "faux-1", contextWindow: 12_000 }],
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
@@ -226,6 +255,51 @@ describe("compaction continuation", () => {
 			],
 		});
 		harnesses.push(harness);
+		// A prior completed turn gives the first threshold checkpoint a whole group to summarize.
+		const earlierUser = {
+			role: "user" as const,
+			content: "Earlier context to retain.\n".repeat(600),
+			timestamp: Date.now() - 2_000,
+		};
+		const earlierAssistant = createAssistant(harness, { stopReason: "stop", timestamp: Date.now() - 1_000 });
+		earlierAssistant.content = [{ type: "text", text: "The earlier work is complete." }];
+		await harness.sessionManager.appendMessage(earlierUser);
+		await harness.sessionManager.appendMessage(earlierAssistant);
+		harness.session.agent.state.messages.push(earlierUser, earlierAssistant);
+		const transitions: string[] = [];
+		const getTurnOutcome = harness.session.agent.getTurnOutcome!;
+		harness.session.agent.getTurnOutcome = async (context, signal) => {
+			const outcome = await getTurnOutcome(context, signal);
+			if (outcome.kind === "checkpoint_then_continue") {
+				expect(context.hasMoreToolCalls).toBe(true);
+				transitions.push("checkpoint_then_continue");
+			}
+			return outcome;
+		};
+		const legacyStop = vi.spyOn(harness.session.agent, "shouldStopAfterTurn");
+		const bindCompactionSink = harness.sessionManager.bindCompactionSink.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((...args) => {
+			const sink = bindCompactionSink(...args);
+			const appendEpoch = sink[appendContextEpoch].bind(sink);
+			vi.spyOn(sink, appendContextEpoch).mockImplementation(async (...values) => {
+				const id = await appendEpoch(...values);
+				if (values[0].includeSummary) transitions.push("checkpoint_ack");
+				return id;
+			});
+			const append = sink.appendCompaction.bind(sink);
+			vi.spyOn(sink, "appendCompaction").mockImplementation(async (...values) => {
+				const id = await append(...values);
+				transitions.push("checkpoint_ack");
+				return id;
+			});
+			return sink;
+		});
+		let initialRun = true;
+		harness.session.agent.subscribe((event) => {
+			if (event.type !== "agent_start") return;
+			if (initialRun) initialRun = false;
+			else transitions.push("resume");
+		});
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("big", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("final answer after successful compaction"),
@@ -237,18 +311,28 @@ describe("compaction continuation", () => {
 		expect(harness.eventsOfType("compaction_end").find((event) => event.result)?.result).toBeDefined();
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.session.getLastAssistantText()).toBe("final answer after successful compaction");
+		expect(transitions).toEqual(["checkpoint_then_continue", "checkpoint_ack", "resume"]);
+		expect(legacyStop).not.toHaveBeenCalled();
+		expect(
+			(await harness.sessionManager.readEntries()).filter(
+				(entry) => entry.type === "compaction" && entry.summary === "auto compacted",
+			),
+		).toHaveLength(1);
 	});
 
 	it("rejects headless idle waiters when a continuation cannot start", async () => {
 		vi.useFakeTimers();
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-		};
+		const sessionInternals = harness.session as unknown as SessionInternals;
+		midToolLoopContext(harness);
+		const directive = sessionInternals._captureCheckpointResume(sessionInternals._captureCompactionOwner(), {
+			kind: "tool",
+			state: "pending",
+		});
 		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
 
-		sessionInternals._schedulePostCompactionContinue();
+		sessionInternals._schedulePostCompactionContinue(directive);
 		const idle = harness.session.waitForHeadlessIdle();
 		const rejectedIdle = expect(idle).rejects.toThrow("continuation failed");
 		await vi.advanceTimersByTimeAsync(100);
@@ -260,12 +344,15 @@ describe("compaction continuation", () => {
 		vi.useFakeTimers();
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-		};
+		const sessionInternals = harness.session as unknown as SessionInternals;
+		midToolLoopContext(harness);
+		const directive = sessionInternals._captureCheckpointResume(sessionInternals._captureCompactionOwner(), {
+			kind: "tool",
+			state: "pending",
+		});
 		vi.spyOn(harness.session.agent, "continue").mockRejectedValueOnce(new Error("continuation failed"));
 
-		sessionInternals._schedulePostCompactionContinue();
+		sessionInternals._schedulePostCompactionContinue(directive);
 		await vi.advanceTimersByTimeAsync(100);
 
 		await expect(harness.session.waitForHeadlessIdle()).resolves.toBeUndefined();
@@ -335,7 +422,8 @@ describe("compaction continuation", () => {
 
 		const shouldStop = await internals._shouldStopAfterTurn(context);
 		expect(shouldStop).toBe(true);
-		expect(internals._continueAfterThresholdCompaction).toBe(true);
+		expect(internals._pendingCheckpoint?.boundary).toEqual({ kind: "tool", state: "pending" });
+		expect(internals._pendingCheckpoint?.actions).toHaveLength(1);
 
 		expect(harness.session.queuedActionCount).toBe(1);
 		expect(harness.session.goalState.continuationsUsed).toBe(1);

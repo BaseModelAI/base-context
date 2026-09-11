@@ -26,10 +26,12 @@ import type {
 	AgentOwnedStreamFn,
 	AgentState,
 	AgentTool,
+	AgentTurnOutcome,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
 	FinalizedToolExchange,
 	GetContinuationMessagesContext,
+	GetTurnOutcomeContext,
 	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
@@ -125,6 +127,10 @@ export interface AgentOptions {
 	onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
 	onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
 	shouldStopBeforeTurn?: () => boolean;
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 	getContinuationOutcome?: (
@@ -289,6 +295,10 @@ export class Agent {
 	}
 
 	public shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	public getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
 	public shouldStopBeforeTurn?: () => boolean;
 	public getContinuationMessages?: (
 		context: GetContinuationMessagesContext,
@@ -318,6 +328,7 @@ export class Agent {
 		this.onToolInvocationStarting = options.onToolInvocationStarting;
 		this.onToolExchangeFinalized = options.onToolExchangeFinalized;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
+		this.getTurnOutcome = options.getTurnOutcome;
 		this.shouldStopBeforeTurn = options.shouldStopBeforeTurn;
 		this.getContinuationMessages = options.getContinuationMessages;
 		this.getContinuationOutcome = options.getContinuationOutcome;
@@ -583,6 +594,7 @@ export class Agent {
 				await onToolExchangeFinalized?.(exchange, signal);
 			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
+			getTurnOutcome: this.getTurnOutcome?.bind(this),
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
 			beforeContextBuild: async () => this.contextOwner?.(),
 			onContextAdopted: (messages) => {

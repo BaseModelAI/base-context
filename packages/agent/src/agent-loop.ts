@@ -480,14 +480,14 @@ async function runLoop(
 				newMessages,
 			};
 
+			const turnContext = { ...lastTurn, newMessages: output?.copy() ?? newMessages };
 			const shouldStopResult = await settlePostTurn(
 				maybePromiseWithAbort(
-					config.shouldStopAfterTurn?.({
-						message,
-						toolResults,
-						context: currentContext,
-						newMessages: output?.copy() ?? newMessages,
-					}) ?? false,
+					config.getTurnOutcome
+						? config.getTurnOutcome({ ...turnContext, hasMoreToolCalls }, signal)
+						: Promise.resolve(config.shouldStopAfterTurn?.(turnContext) ?? false).then((stop) => ({
+								kind: stop ? ("finish" as const) : ("proceed" as const),
+							})),
 					signal,
 				),
 				signal,
@@ -499,7 +499,7 @@ async function runLoop(
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
-			if (shouldStopResult.value || shouldStopBeforeTurn()) {
+			if (shouldStopResult.value.kind !== "proceed" || shouldStopBeforeTurn()) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}

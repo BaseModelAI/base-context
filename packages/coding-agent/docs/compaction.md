@@ -1,6 +1,6 @@
 # Compaction & Branch Summarization
 
-LLMs have limited context windows. When conversations grow too long, Prime Agent uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
+LLMs have limited context windows. When conversations grow too long, Base Context uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files:**
 - [`compaction.ts`](../src/core/compaction/compaction.ts) - Auto-compaction logic
@@ -9,11 +9,11 @@ LLMs have limited context windows. When conversations grow too long, Prime Agent
 - [`session-manager.ts`](../src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
 - [`extensions/types.ts`](../src/core/extensions/types.ts) - Extension event types
 
-For TypeScript definitions in your project, inspect `node_modules/@earendil-works/pi-coding-agent/dist/`.
+The linked source files define the current Base Context API. Package availability and source installation are described in the [package README](../README.md).
 
 ## Overview
 
-Prime Agent has two summarization mechanisms:
+Base Context has two summarization mechanisms:
 
 | Mechanism | Trigger | Purpose |
 |-----------|---------|---------|
@@ -21,6 +21,15 @@ Prime Agent has two summarization mechanisms:
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
 Both use the same structured summary format and track file operations cumulatively.
+
+The diagrams below describe summary-and-tail mechanics, not an exact native provider
+request. Native context also uses captured source, accepted epochs, required replay
+groups and bounded recovery. A missing source or boundary can refuse rather than
+silently produce an incomplete context.
+
+Compaction does not establish whether a Python kernel, its variables or background
+jobs are still available. Use current runtime reports; do not infer either survival
+or loss from a summary alone.
 
 ## Compaction
 
@@ -32,13 +41,13 @@ Auto-compaction triggers when:
 contextTokens > contextWindow - reserveTokens
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.prime/agent/settings.json` or `<project-dir>/.prime/agent/settings.json`). This leaves room for the LLM's response.
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.base-context/settings.json` or `<project-dir>/.base-context/settings.json`). This leaves room for the LLM's response.
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary — for example `/compact focus on the auth refactor, remember the exact migration command`. The instructions are passed to the summarization prompt with high priority, persisted on the `CompactionEntry`, and shown on the `[compaction]` message in the TUI.
 
 ### How It Works
 
-1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.prime/agent/settings.json` or `<project-dir>/.prime/agent/settings.json`) is reached
+1. **Find cut point**: Walk backwards from newest message, accumulating token estimates until `keepRecentTokens` (default 20k, configurable in `~/.base-context/settings.json` or `<project-dir>/.base-context/settings.json`) is reached
 2. **Extract messages**: Collect messages from the previous kept boundary (or session start) up to the cut point
 3. **Generate summary**: Call LLM to summarize with structured format, passing the previous summary as iterative context when present
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
@@ -76,7 +85,14 @@ What the LLM sees:
     prompt   from cmp          messages from firstKeptEntryId
 ```
 
-On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Prime Agent also recalculates `tokensBefore` from the rebuilt session context before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced.
+On repeated compactions, the resident `prepareCompaction` helper starts at the
+previous `firstKeptEntryId` when that entry is present. Its legacy fallback starts
+after the previous compaction entry. This helper fallback is not a promise that
+native captured-history reads accept an unavailable retained boundary.
+
+`tokensBefore` records a prior-context estimate, or `null` when the original
+context is not measurable. It is not an exact serialized-provider token count or
+a guarantee that the reconstructed context matches a previous request.
 
 ### Split Turns
 
@@ -102,7 +118,7 @@ Split turn (one huge turn exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-For split turns, Prime Agent generates two summaries and merges them:
+For split turns, Base Context generates two summaries and merges them:
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
 
@@ -124,11 +140,11 @@ Defined in [`session-manager.ts`](../src/core/session-manager.ts):
 interface CompactionEntry<T = unknown> {
   type: "compaction";
   id: string;
-  parentId: string;
-  timestamp: number;
+  parentId: string | null;
+  timestamp: string;
   summary: string;
   firstKeptEntryId: string;
-  tokensBefore: number;
+  tokensBefore: number | null;
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: T;         // implementation-specific data
   customInstructions?: string;  // user instructions from /compact <instructions>
@@ -145,11 +161,36 @@ Extensions can store any JSON-serializable data in `details`. The default compac
 
 See [`prepareCompaction()` and `compact()`](../src/core/compaction/compaction.ts) for the implementation.
 
+### Stop and Resume Ownership
+
+At a compatible turn boundary, native checkpoint control uses the loop's finalized
+tool-batch decision and existing accepted session inputs. The last message's role
+is not a resume instruction. If every finalized tool result requests termination,
+that batch does not request an automatic follow-up. Separately accepted goal,
+autonomous or user input can still own more work.
+
+Automatic threshold admission respects the existing context-optimization gate.
+An explicit request accepted while permitted retains its existing ownership; this
+does not grant new compaction permission while optimization is off.
+
+A `checkpoint_then_continue` intent does not mean that a checkpoint has committed.
+The existing compaction owner records the accepted checkpoint and completes its
+setup/release before normal success resumption. Queued inputs go first. An input
+invocation that consumes the interrupted boundary must not leave an extra resume
+behind. Ordinary completed-turn compaction with no further work finishes normally.
+
+The existing policy can resume interrupted work after a skipped compaction or an
+ordinary failure. No ACK is not proof that no write occurred. Abort does not resume.
+A known checkpoint ACK followed by setup or release failure remains a committed
+checkpoint plus a later failure, not a reason to repeat the summary or auto-resume.
+The transient resume intent does not add crash recovery or change accepted queued
+input and epoch formats.
+
 ## Branch Summarization
 
 ### When It Triggers
 
-When you use `/tree` to navigate to a different branch, Prime Agent offers to summarize the work you're leaving. This injects context from the left branch into the new branch.
+When you use `/tree` to navigate to a different branch, Base Context offers to summarize the work you're leaving. This injects context from the left branch into the new branch.
 
 ### How It Works
 
@@ -178,7 +219,7 @@ After navigation with summary:
 
 ### Cumulative File Tracking
 
-Both compaction and branch summarization track files cumulatively. When generating a summary, Prime Agent extracts file operations from:
+Both compaction and branch summarization track files cumulatively. When generating a summary, Base Context extracts file operations from:
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 
@@ -374,7 +415,7 @@ See `SessionBeforeTreeEvent` and `TreePreparation` in the types file.
 
 ## Settings
 
-Configure compaction in `~/.prime/agent/settings.json` or `<project-dir>/.prime/agent/settings.json`:
+Configure compaction in `~/.base-context/settings.json` or `<project-dir>/.base-context/settings.json`:
 
 ```json
 {
@@ -389,7 +430,13 @@ Configure compaction in `~/.prime/agent/settings.json` or `<project-dir>/.prime/
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable auto-compaction |
-| `reserveTokens` | `16384` | Tokens to reserve for LLM response |
-| `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
+| `reserveTokens` | `16384` | Headroom used by the compaction threshold |
+| `keepRecentTokens` | `20000` | Estimated recent-token target for the retained tail |
 
-Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.
+Disable automatic compaction with `"compaction": { "enabled": false }`. Manual
+`/compact` remains available while `context.mode` is `"on"`. Setting `context.mode`
+to `"off"` disables context optimization, including manual compaction; logging,
+recovery, limits and other non-optimization ownership remain active.
+
+These threshold and tail settings are not a complete provider-request token limit
+or a spending quota.

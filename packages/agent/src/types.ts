@@ -184,6 +184,14 @@ export interface ShouldStopAfterTurnContext {
 	newMessages: AgentMessage[];
 }
 
+/** The finalized loop decision, not a guess from the rendered message tail. */
+export interface GetTurnOutcomeContext extends ShouldStopAfterTurnContext {
+	hasMoreToolCalls: boolean;
+}
+
+/** Control before queue polling; proceed keeps the ordinary loop policy. */
+export type AgentTurnOutcome = { kind: "proceed" | "finish" | "checkpoint_then_continue" | "cancelled" };
+
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 /** Runtime control at a natural turn boundary; message payload does not decide whether to restart. */
@@ -279,6 +287,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Throwing interrupts the low-level agent loop without producing a normal event sequence.
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+
+	/** When present, this typed owner replaces shouldStopAfterTurn; it does not replace natural continuation. */
+	getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
 
 	/**
 	 * Called synchronously after a completed turn and before polling work for another turn.
