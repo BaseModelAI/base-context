@@ -7,13 +7,14 @@
 
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model, Usage } from "@ponythewhite/base-context-ai";
-import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
+import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
+import type { NativeBranchRequestOutputWriter } from "../request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import type { SessionEntry } from "../session-manager.js";
 import { estimateTokens } from "./compaction.js";
@@ -33,6 +34,22 @@ export interface BranchSummaryResult {
 	aborted?: boolean;
 	error?: string;
 	usage?: Usage;
+}
+
+// A result must come from this native completion and retain its actual composed text projection.
+const nativeBranchResults = new WeakMap<
+	BranchSummaryResult,
+	{ summary: string; write: NativeBranchRequestOutputWriter }
+>();
+
+export function takeNativeBranchSummaryWrite(
+	result: BranchSummaryResult | undefined,
+	summary: string,
+): NativeBranchRequestOutputWriter | undefined {
+	const captured = result ? nativeBranchResults.get(result) : undefined;
+	if (result) nativeBranchResults.delete(result);
+	// Check only an already privately bound projection; never discover a request by matching text.
+	return captured?.summary === summary ? captured.write : undefined;
 }
 
 /** Details stored in BranchSummaryEntry.details for file tracking */
@@ -268,7 +285,7 @@ export async function generateBranchSummary(
 			timestamp: Date.now(),
 		},
 	];
-	const response = await completeInference(
+	const completion = completeInference(
 		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
@@ -286,6 +303,7 @@ export async function generateBranchSummary(
 			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
 		},
 	);
+	const response = await completion;
 	if (response.stopReason === "aborted") {
 		return { aborted: true };
 	}
@@ -301,10 +319,16 @@ export async function generateBranchSummary(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
 
-	return {
+	const result = {
 		summary: summary || "No summary generated",
 		readFiles,
 		modifiedFiles,
 		usage: response.usage,
 	};
+	const write =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takeBranchOutput.call(requests, completion)
+			: undefined;
+	if (write) nativeBranchResults.set(result, { summary: result.summary, write });
+	return result;
 }

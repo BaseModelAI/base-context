@@ -250,6 +250,28 @@ The native parser reports `compaction_request_associations` with the compaction
 entry ID and per-part recorded request matches. Missing, ineligible or unmatched
 data is `null` (unknown), not rejected or zero committed output.
 Only understood part labels are listed; the list is not complete-output coverage.
-These are historical
-recorded associations, not current authority or delivery completeness. Branch
-summary/learning outputs and downstream delivery remain separate coverage.
+These are historical recorded associations, not current authority or delivery
+completeness. Learning outputs and downstream delivery remain separate coverage.
+
+### Native Branch-Summary Request Output Links
+
+A native built-in `branch_summary` entry can record `requestOutput`: the actual
+returned request's `operationId`, admitted `attemptIds` and captured `source`.
+This links the text projection, including its existing preamble and file-operation
+suffix, not a stored whole provider message or a producing attempt. Literal text
+without a model request has no link.
+
+The request's input source is separate from `parentId` and `fromId`, which describe
+the destination branch. Native invocation/result identity and the original source
+owner must reach the same append for a link. Missing or changed ownership remains
+unassociated through ordinary append behavior; it does not prove rejection.
+Extension/standalone results and copied labels cannot create this native binding.
+Metadata stays outside provider/replay bodies and does not change qualification,
+physical accounting, branch selection or ACK handling. Leaf selection advances
+only after the existing summary append ACK. Later caller errors do not undo it.
+
+The native parser reports `branch_summary_request_associations` with the branch
+summary entry ID and its recorded `summary`/`branch` request match, or `null` for
+unknown/ineligible data. It does not use destination fields as the input source.
+Recorded source presence, historical append API ACK and later caller delivery are
+separate facts. Imported or mismatched data does not establish native authority.

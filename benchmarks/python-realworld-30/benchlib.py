@@ -517,6 +517,7 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     assistant_usage: list[dict[str, Any]] = []
     assistant_sources: list[tuple[dict[str, Any], bool]] = []
     compaction_sources: list[tuple[dict[str, Any], bool]] = []
+    branch_summary_sources: list[tuple[dict[str, Any], bool]] = []
     association_requests: dict[str, list[dict[str, Any]]] = {}
     original_header = False
     native = False
@@ -604,6 +605,10 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                         if isinstance(output, dict) and output.get("part") in ("history", "turn-prefix")
                     ] if isinstance(outputs, list) else None,
                 }, compaction_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
+            elif entry_type == "branch_summary":
+                branch_summary_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("requestOutput"),
+                }, original_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
             elif entry_type == "custom" and entry.get("customType") == "prime-agent.refinement":
                 refinement_entries += 1
             if entry_type != "message":
@@ -689,6 +694,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
              "recorded_requests": _recorded_compaction_requests(entry, header, association_requests)
              if original_header and original else None}
             for entry, original in compaction_sources
+        ],
+        "branch_summary_request_associations": [
+            {"branch_summary_entry_id": entry.get("id"), "recorded_request": _recorded_request_output(
+                entry, header, association_requests, purpose="summary", purpose_detail="branch",
+             ) if original_header and original else None}
+            for entry, original in branch_summary_sources
         ],
         **accounting,
     }
@@ -795,6 +806,11 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "compaction_request_associations": [
             {"session_id": item["session_id"], "path": item["path"],
              "associations": item.get("compaction_request_associations")}
+            for item in sessions
+        ],
+        "branch_summary_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("branch_summary_request_associations")}
             for item in sessions
         ],
         "observed_accounting_scope": "solver_messages",

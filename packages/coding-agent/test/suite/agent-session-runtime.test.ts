@@ -23,7 +23,7 @@ import {
 	SEMANTIC_EDGES_LEDGER_FILENAME,
 } from "../../src/core/semantic-edges.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
-import { type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
+import { type RequestJournalEntry, type SessionEntry, SessionManager } from "../../src/core/session-manager.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -1176,7 +1176,10 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 		expect(sessionManager.getLeafId()).toBe(result.summaryEntry?.id);
 		expect(await sessionManager.readEntry(result.summaryEntry!.id)).toEqual(result.summaryEntry);
-		expect(session.messages.some((message) => message.role === "branchSummary")).toBe(true);
+		const branchMessage = session.messages.find((message) => message.role === "branchSummary");
+		expect(branchMessage).toBeDefined();
+		expect(JSON.stringify(branchMessage)).not.toContain('"requestOutput"');
+		expect(JSON.stringify(bodies)).not.toContain('"requestOutput"');
 		expect(session.model).toEqual(mainModel);
 		expect(session.thinkingLevel).toBe(mainEffort);
 		expect(auth.mock.calls.map(([model]) => [model.provider, model.id])).toEqual([
@@ -1189,9 +1192,17 @@ describe("AgentSessionRuntime characterization", () => {
 			}),
 		]);
 		const receipts: RequestJournalEntry[] = [];
-		for await (const { entry: record } of readSessionJournal(sessionManager.getSessionFile()!)) {
-			const entry = record as RequestJournalEntry;
+		let recordedSummary: typeof result.summaryEntry;
+		for await (const { entry: record, retention, qualification } of readSessionJournal(
+			sessionManager.getSessionFile()!,
+		)) {
+			const entry = record as SessionEntry;
 			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+			if (entry.type === "branch_summary" && entry.id === result.summaryEntry?.id) {
+				recordedSummary = entry;
+				expect(retention).toBeUndefined();
+				expect(qualification).toBeUndefined();
+			}
 		}
 		expect(receipts).toHaveLength(1);
 		expect(receipts[0]?.request).toMatchObject({
@@ -1202,6 +1213,16 @@ describe("AgentSessionRuntime characterization", () => {
 			modelContract: { provider: branchSummaryModel.provider, model: branchSummaryModel.id },
 			receipt: { model: branchSummaryModel.id, effort: "high", outcome: "completed" },
 		});
+		const request = receipts[0]?.request;
+		if (request?.type !== "attempt_settled") throw new Error("Missing settled branch request");
+		expect(recordedSummary).toEqual(result.summaryEntry);
+		expect(recordedSummary?.requestOutput).toEqual({
+			operationId: request.operationId,
+			attemptIds: [request.attemptId],
+			source: request.source,
+		});
+		expect(recordedSummary?.fromId).toBe("root");
+		expect(recordedSummary?.requestOutput?.source.leafId).not.toBe(recordedSummary?.parentId);
 	}, 120000);
 
 	it("should handle abort during summarization", async () => {
@@ -1213,6 +1234,7 @@ describe("AgentSessionRuntime characterization", () => {
 		await session.prompt("Continue");
 		await session.waitForIdle();
 		const branchBefore = await sessionManager.readBranch();
+		const summariesBefore = (await sessionManager.readEntries()).filter((entry) => entry.type === "branch_summary");
 		const leafBefore = sessionManager.getLeafId();
 		const target = branchBefore.find((entry) => entry.type === "message" && entry.message.role === "user");
 		if (!target) throw new Error("Missing original user navigation target");
@@ -1275,6 +1297,9 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(result.summaryEntry).toBeUndefined();
 		// Native attempt rows may settle, but the selected transcript branch must not change.
 		expect(await sessionManager.readBranch()).toEqual(branchBefore);
+		expect((await sessionManager.readEntries()).filter((entry) => entry.type === "branch_summary")).toEqual(
+			summariesBefore,
+		);
 		expect(sessionManager.getLeafId()).toBe(leafBefore);
 		expect(session.model).toEqual(mainModel);
 		expect(session.thinkingLevel).toBe(mainEffort);

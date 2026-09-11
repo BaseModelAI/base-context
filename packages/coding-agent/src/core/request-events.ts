@@ -4,6 +4,7 @@ import type {
 	Provider,
 	ProviderAttemptInfo,
 	ProviderAttemptReceipt,
+	Usage,
 } from "@ponythewhite/base-context-ai";
 import type { SessionHistoryReadView } from "./session-history-index.js";
 
@@ -39,6 +40,18 @@ export type NativeRequestOutputWriter = (owner: object, message: AssistantMessag
 export type NativeRequestOutputSource = (
 	association: NativeRequestOutputAssociation,
 ) => NativeRequestOutputWriter | undefined;
+
+/** Internal owner-bound append. Undefined means no write was started or a known pre-write stale capture. */
+export type NativeBranchRequestOutputWriter = (
+	owner: object,
+	branchFromId: string | null,
+	summary: string,
+	details?: unknown,
+	usage?: Usage,
+) => Promise<string | undefined> | undefined;
+export type NativeBranchRequestOutputSource = (
+	association: NativeRequestOutputAssociation,
+) => NativeBranchRequestOutputWriter | undefined;
 
 export type RequestPurpose = "main" | "summary" | "refine" | "learning" | "child" | "native-control" | "other";
 

@@ -52,6 +52,7 @@ import {
 import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
 import type {
 	ContextEpochEntryRef,
+	NativeBranchRequestOutputSource,
 	NativeCompactionRequestOutputAssociation,
 	NativeRequestEvent,
 	NativeRequestOutputAssociation,
@@ -161,6 +162,7 @@ type NativeOutputCapture = (association: NativeRequestOutputAssociation) => Nati
 interface NativeOutputSource {
 	capture: NativeOutputCapture;
 	main: NativeRequestOutputSource;
+	branch: NativeBranchRequestOutputSource;
 	compaction?: true;
 }
 const nativeRequestOutputSources = new WeakMap<object, NativeOutputSource>();
@@ -174,6 +176,11 @@ export function captureNativeRequestOutputSource(sink: object): NativeRequestOut
 export function captureNativeCompactionOutputSource(sink: object): NativeOutputCapture | undefined {
 	const source = nativeRequestOutputSources.get(sink);
 	return source?.compaction ? source.capture : undefined;
+}
+
+/** Genuine writer ownership only; native branch invocation eligibility belongs to its captured coordinator. */
+export function captureNativeBranchOutputSource(sink: object): NativeBranchRequestOutputSource | undefined {
+	return nativeRequestOutputSources.get(sink)?.branch;
 }
 
 export interface SessionHeader {
@@ -311,6 +318,8 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 	type: "branch_summary";
+	/** Descriptive built-in projected-output link, not native task authority, append ACK or caller delivery. */
+	requestOutput?: NativeRequestOutputAssociation;
 	fromId: string;
 	summary: string;
 	details?: T;
@@ -2841,6 +2850,29 @@ export class SessionManager {
 			};
 			nativeRequestOutputSources.set(sink, {
 				capture,
+				branch: (association) => {
+					const requestOutput = capture(association);
+					if (!requestOutput) return undefined;
+					return (manager, branchFromId, summary, details, usage) => {
+						if (manager !== this || !ownsOutputSource()) return undefined;
+						const stale = new Error("Native branch summary source changed before append");
+						const assertCurrent = () => {
+							if (!ownsOutputSource()) throw stale;
+						};
+						return (async () => {
+							try {
+								return await this._branchWithSummary(branchFromId, summary, details, false, usage, {
+									requestOutput,
+									assertCurrent,
+								});
+							} catch (error) {
+								// Only our final pre-write stale signal permits the ordinary unassociated append.
+								if (error === stale) return undefined;
+								throw error;
+							}
+						})();
+					};
+				},
 				main: (association) => {
 					const requestOutput = capture(association);
 					if (!requestOutput) return undefined;
@@ -4140,12 +4172,23 @@ export class SessionManager {
 		this.writeState.reservedLeaf = null;
 	}
 
-	async branchWithSummary(
+	branchWithSummary(
 		branchFromId: string | null,
 		summary: string,
 		details?: unknown,
 		fromHook?: boolean,
 		usage?: Usage,
+	): Promise<string> {
+		return this._branchWithSummary(branchFromId, summary, details, fromHook, usage);
+	}
+
+	private async _branchWithSummary(
+		branchFromId: string | null,
+		summary: string,
+		details?: unknown,
+		fromHook?: boolean,
+		usage?: Usage,
+		output?: { requestOutput: NativeRequestOutputAssociation; assertCurrent(): void },
 	): Promise<string> {
 		const state = this.writeState;
 		if (!this.indexed && branchFromId !== null && !this.byId.has(branchFromId)) {
@@ -4161,6 +4204,7 @@ export class SessionManager {
 			details,
 			fromHook,
 			usage,
+			...(output ? { requestOutput: output.requestOutput } : {}),
 		};
 		await this._appendEntry(
 			entry,
@@ -4174,6 +4218,8 @@ export class SessionManager {
 						}
 					}
 				: undefined,
+			undefined,
+			output?.assertCurrent,
 		);
 		return entry.id;
 	}

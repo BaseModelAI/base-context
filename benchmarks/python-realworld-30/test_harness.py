@@ -49,7 +49,7 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
 
 def native_journal(
     path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
-    compaction_output: bool = False,
+    compaction_output: bool = False, branch_output: bool = False,
 ) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
@@ -67,12 +67,16 @@ def native_journal(
                         "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
         },
     }
-    if request_output or compaction_output:
+    if request_output or compaction_output or branch_output:
         # A recorded original path need not be the archive path being parsed.
         metadata["source"]["sessionFile"] = "/recorded/original-session.jsonl"
     if compaction_output:
         metadata["purpose"] = "summary"
         metadata["purposeDetail"] = "compaction"
+    if branch_output:
+        metadata["purpose"] = "summary"
+        metadata["purposeDetail"] = "branch"
+        metadata["source"]["leafId"] = "input-leaf"
     usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
     if incomplete:
         usage.pop("cacheWrite")
@@ -110,6 +114,18 @@ def native_journal(
             "tokensBefore": 100, "fromHook": False,
             "requestOutputs": [{"part": "history", **recorded}, {"part": "turn-prefix", **recorded}],
         })
+    if branch_output:
+        recorded = {"operationId": metadata["operationId"], "attemptIds": ["physical-attempt"],
+                    "source": dict(metadata["source"])}
+        branch = {
+            "type": "branch_summary", "id": "recorded-branch-summary", "parentId": "destination-leaf",
+            "fromId": "destination-leaf", "timestamp": timestamp, "fromHook": False,
+            "summary": "Branch preamble, projected text and file-operation suffix", "requestOutput": recorded,
+        }
+        entries.extend([branch, {
+            **branch, "id": "mismatched-branch-summary",
+            "requestOutput": {**recorded, "source": {**recorded["source"], "leafId": "destination-leaf"}},
+        }])
     # Accounting consumes the documented payload envelope, not frame-integrity validation.
     path.write_text("".join(json.dumps({"journalFrame": 1, "payload": entry}) + "\n" for entry in entries))
 
@@ -169,6 +185,20 @@ class HarnessComparisonTests(unittest.TestCase):
             compaction_metrics = aggregate_sessions([compacted])
             self.assertEqual(compaction_metrics["compaction_request_associations"][0]["associations"],
                              [compaction_association])
+            native_journal(root / "branch.jsonl", branch_output=True)
+            branched = parse_session_file(root / "branch.jsonl")
+            branch_associations = branched["branch_summary_request_associations"]
+            self.assertEqual(branch_associations, [
+                {"branch_summary_entry_id": "recorded-branch-summary", "recorded_request": {
+                    **association["recorded_request"],
+                    "source": {**association["recorded_request"]["source"], "leafId": "input-leaf"},
+                }},
+                # Destination facts cannot replace the original request's input leaf.
+                {"branch_summary_entry_id": "mismatched-branch-summary", "recorded_request": None},
+            ])
+            branch_metrics = aggregate_sessions([branched])
+            self.assertEqual(branch_metrics["branch_summary_request_associations"][0]["associations"],
+                             branch_associations)
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})

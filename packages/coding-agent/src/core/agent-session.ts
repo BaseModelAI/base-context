@@ -114,6 +114,7 @@ import {
 	readCanonicalContextMode,
 } from "./canonical-context.js";
 import {
+	type BranchSummaryResult,
 	COMPACT_SKILL_NAME,
 	type CompactionPreparation,
 	type CompactionResult,
@@ -126,6 +127,7 @@ import {
 	prepareViewCompaction,
 	serializeConversation,
 	shouldCompact,
+	takeNativeBranchSummaryWrite,
 } from "./compaction/index.js";
 import {
 	appendContextEpoch,
@@ -202,6 +204,7 @@ import {
 } from "./goals.js";
 import type { IpythonSentMessagesCursor } from "./history-index.js";
 import {
+	captureNativeBranchRequests,
 	captureNativeCompactionRequests,
 	InferenceCoordinator,
 	type SessionRuntimeServices,
@@ -14232,6 +14235,7 @@ export class AgentSession {
 
 			assertSource();
 			let summaryText: string | undefined;
+			let nativeBranchSummary: BranchSummaryResult | undefined;
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
@@ -14239,7 +14243,8 @@ export class AgentSession {
 				const model = { ...selectedModel, cost: { ...selectedModel.cost } };
 				const branchSummarySettings = { ...this.settingsManager.getBranchSummarySettings() };
 				const summaryEntries = structuredClone(entriesToSummarize);
-				const requests = this.requests.capture();
+				const summaryManager = this.sessionManager;
+				const requests = this.requests[captureNativeBranchRequests](summaryManager.bindRequestSink());
 				try {
 					const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 					const result = await generateBranchSummary(summaryEntries, {
@@ -14259,6 +14264,7 @@ export class AgentSession {
 					if (result.error) {
 						throw new Error(result.error);
 					}
+					nativeBranchSummary = result;
 					summaryText = result.summary;
 					summaryUsage = result.usage;
 					summaryDetails = {
@@ -14296,13 +14302,12 @@ export class AgentSession {
 			assertSource();
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
-				const summaryId = await this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					summaryUsage,
-				);
+				const manager = this.sessionManager;
+				const write = !fromExtension ? takeNativeBranchSummaryWrite(nativeBranchSummary, summaryText) : undefined;
+				const pending = write?.(manager, newLeafId, summaryText, summaryDetails, summaryUsage);
+				const summaryId =
+					(pending ? await pending : undefined) ??
+					(await manager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension, summaryUsage));
 				summaryEntry = (await this.sessionManager.readEntry(summaryId)) as BranchSummaryEntry;
 
 				if (label) {

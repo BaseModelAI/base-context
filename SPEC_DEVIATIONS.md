@@ -1912,3 +1912,38 @@ TS2454 on the self-referencing completion declaration. Root changed only the loc
 declaration/assignment; the affected required check then passed,1046/no fixes.
 Passing native/parser cases were not rerun. No real models, installation/bootstrap,
 new campaigns, publication or full-G17/delivery claim follows from these checks.
+
+
+### W96 — native branch-summary request/output association
+
+Native built-in branch summaries can retain flat `requestOutput` metadata on the
+same `BranchSummaryEntry`: the actual returned operation/admitted-attempt/source
+association, not producing-attempt attribution or stored whole provider messages.
+The original text projection/preamble/file-operation suffix and accounting remain.
+A separate private invocation capture, genuine original source/manager generation,
+exact completion and built-in result identity reach the existing branch append.
+No generic capture inheritance, extension/standalone/copy-label authority, borrowed
+qualification or new branch policy/semantic gate is added. Missing/stale ownership
+permits only the ordinary unassociated path before any source append; real write,
+ACK and derived errors propagate, never trigger replay or relabel physical outcome.
+The explicit target parent/fromId is not the input source; leaf publication remains
+after the existing source ACK. Recorded presence, API ACK and later delivery remain
+separate. Native parser `branch_summary_request_associations` joins exact unqualified
+original summary/branch requests, retaining only source-link metadata. Ineligible or
+unmatched data remains unknown. Epoch/schema/budget policy, frozen campaigns, Sol,
+W94 private archives and all installation/bootstrap/publication holds are unchanged.
+
+The existing native happy/abort cases passed on actual Node22.12: the happy case
+links the same unqualified/unretained saved branch entry to its one fake-HTTP
+Responses request, distinguishes input source from destination, and keeps metadata
+out of current request/replay bodies. The existing abort case retains all prior
+branch summaries and selected history while its request settles cancelled. Model
+selection/effort, usage and prior assertions remain. The existing Python case passed
+for a different-destination match and an input-source mismatch staying unknown,
+with aggregate propagation and prior MAIN/compaction/accounting assertions intact.
+Required check passed,1046/no fixes, including types/installer/browser. All first
+passes; no project correction or rerun. Owner-replacement, extension/standalone and
+post-ACK fault behavior are source-reviewed, not new executed scenarios. No new
+model requests/cases, real provider, installation/bootstrap, campaign, publication
+or full-G17/current-efficiency claim. A preparation-only doubled test-path lookup
+was corrected before any project command; it was not a project test failure.

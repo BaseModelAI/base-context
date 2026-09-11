@@ -18,6 +18,7 @@ import {
 import type {
 	BoundRequestSink,
 	ContextEpochEntryRef,
+	NativeBranchRequestOutputWriter,
 	NativeCompactionRequestOutputAssociation,
 	NativeRequestMetadata,
 	NativeRequestOutputWriter,
@@ -38,7 +39,11 @@ import {
 } from "./request-view-selection.js";
 import { hashTurnBody, MODEL_REQUEST_ID_HEADER, unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
 import type { SessionHistoryReadView } from "./session-history-index.js";
-import { captureNativeCompactionOutputSource, captureNativeRequestOutputSource } from "./session-manager.js";
+import {
+	captureNativeBranchOutputSource,
+	captureNativeCompactionOutputSource,
+	captureNativeRequestOutputSource,
+} from "./session-manager.js";
 
 export interface InferenceRequestOptions {
 	readonly purpose: RequestPurpose;
@@ -60,6 +65,11 @@ export interface InferenceSettlement {
 export interface NativeCompactionOutputBinding {
 	readonly sink: BoundRequestSink;
 	readonly output: NativeCompactionRequestOutputAssociation;
+}
+
+interface NativeBranchOutputBinding {
+	readonly owner: InferenceCoordinator;
+	readonly write: NativeBranchRequestOutputWriter;
 }
 
 export interface InferenceRun {
@@ -87,6 +97,8 @@ interface BoundOperation {
 const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
 /** Internal AgentSession built-in compaction entry, not a public inference option. */
 export const captureNativeCompactionRequests = Symbol("base-context.native-compaction-requests");
+/** Internal AgentSession built-in branch-summary invocation, never inherited by generic capture. */
+export const captureNativeBranchRequests = Symbol("base-context.native-branch-requests");
 interface StreamBinding {
 	readonly coordinator: InferenceCoordinator;
 	readonly inner: StreamFn;
@@ -139,6 +151,7 @@ export function createNativeInferenceStream(
 /** Routes physical observations to the source writer. It owns no receipt store. */
 export class InferenceCoordinator {
 	#nativeCompactionOutput = false;
+	#nativeBranchOutput = false;
 	private retryTurn = false;
 	private requestViewBoundary?: CapturedRequestViewBoundary;
 	private active = new Set<Promise<void>>();
@@ -153,6 +166,8 @@ export class InferenceCoordinator {
 		mainOutputs: new WeakMap<AssistantMessage, NativeRequestOutputWriter>(),
 		compactionSettlements: new WeakMap<InferenceSettlement, NativeCompactionOutputBinding>(),
 		compactionCompletions: new WeakMap<Promise<AssistantMessage>, NativeCompactionOutputBinding>(),
+		branchSettlements: new WeakMap<InferenceSettlement, NativeBranchOutputBinding>(),
+		branchCompletions: new WeakMap<Promise<AssistantMessage>, NativeBranchOutputBinding>(),
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
@@ -195,6 +210,19 @@ export class InferenceCoordinator {
 		const captured = InferenceCoordinator.prototype.capture.call(this);
 		captured.#nativeCompactionOutput = true;
 		return captured;
+	}
+
+	[captureNativeBranchRequests](sink: BoundRequestSink): InferenceCoordinator {
+		const captured = InferenceCoordinator.prototype.capture.call(this, sink);
+		captured.#nativeBranchOutput = true;
+		return captured;
+	}
+
+	takeBranchOutput(completion: Promise<AssistantMessage>): NativeBranchRequestOutputWriter | undefined {
+		const binding = this.work.branchCompletions.get(completion);
+		this.work.branchCompletions.delete(completion);
+		if (!binding || !this.#nativeBranchOutput || binding.owner !== this) return undefined;
+		return binding.write;
 	}
 
 	/** Only the original completion promise and captured source can supply a projected-output link. */
@@ -397,6 +425,13 @@ export class InferenceCoordinator {
 			this.#nativeCompactionOutput && part && this.capturedSink?.sink === operation.binding.sink
 				? captureNativeCompactionOutputSource(operation.binding.sink)
 				: undefined;
+		const branchSource =
+			this.#nativeBranchOutput &&
+			operation.metadata.purpose === "summary" &&
+			operation.metadata.purposeDetail === "branch" &&
+			this.capturedSink?.sink === operation.binding.sink
+				? captureNativeBranchOutputSource(operation.binding.sink)
+				: undefined;
 		let outputSourceRef: SourceSnapshotRef | undefined;
 		let release!: (completion?: PromiseLike<void>) => void;
 		const pending = new Promise<void>((resolve) => {
@@ -454,6 +489,14 @@ export class InferenceCoordinator {
 						sink: operation.binding.sink,
 						output: { ...output, part },
 					});
+			}
+			if (branchSource && outputSourceRef) {
+				const write = branchSource({
+					operationId: settlement.operationId,
+					attemptIds: settlement.attemptIds,
+					source: outputSourceRef,
+				});
+				if (write) this.work.branchSettlements.set(settlement, { owner: this, write });
 			}
 			return settlement;
 		};
@@ -678,6 +721,9 @@ export class InferenceCoordinator {
 			const binding = this.work.compactionSettlements.get(settlement);
 			this.work.compactionSettlements.delete(settlement);
 			if (binding) this.work.compactionCompletions.set(completion, binding);
+			const branchBinding = this.work.branchSettlements.get(settlement);
+			this.work.branchSettlements.delete(settlement);
+			if (branchBinding) this.work.branchCompletions.set(completion, branchBinding);
 			return settlement.message;
 		})();
 		return completion;
