@@ -15,6 +15,7 @@ import {
 } from "@ponythewhite/base-context-tui";
 import { APP_TITLE, appendRotatingLog, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
+import { stringifyBoundedJson } from "../../core/bounded-json.js";
 import { KeybindingsManager } from "../../core/keybindings.js";
 import { SessionManager } from "../../core/session-manager.js";
 import {
@@ -39,12 +40,20 @@ import {
 } from "../daemon/daemon-protocol.js";
 import { resolveAttachModelFallbackMessage, type SessionSummary } from "../daemon/daemon-session-list.js";
 import { listDaemonHeartbeats } from "../daemon/heartbeat-catalog.js";
+import type { SavedSessionClientPage } from "../daemon/saved-session-catalog.js";
 import {
 	type DaemonSavedSessionCatalogContext,
 	deleteDaemonSavedSession,
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import {
+	captureSavedSessionOrderingContext,
+	captureSavedSessionPageQuery,
+	SAVED_SESSION_PAGE_MAX_BYTES,
+	type SavedSessionPageHints,
+	type SavedSessionPageQuery,
+} from "../daemon/saved-session-page.js";
 import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
@@ -103,6 +112,10 @@ import {
 import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-store.js";
 import { matchesSearchText } from "./session-view-search.js";
 
+type SavedPageState =
+	| Omit<Extract<SavedSessionClientPage, { status: "page" }>, "sessions">
+	| Extract<SavedSessionClientPage, { status: "refused" }>;
+
 const HEARTBEAT_POLL_INTERVAL_MS = 15000;
 const RECONNECT_TIMEOUT_MS = 120000;
 const RECONNECT_RETRY_MS = 1000;
@@ -141,7 +154,7 @@ export type AgentsViewRunResult =
 			selection: SessionSummary;
 			expandedAncestorSessionIds: string[];
 			returnChat?: SessionSummary;
-			hasChildren: boolean;
+			hasChildren?: boolean;
 	  }
 	| {
 			type: "open";
@@ -176,6 +189,9 @@ export type AgentsViewPersistentState = {
 	savedCatalogLoaded?: boolean;
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
+	savedPage?: SavedPageState;
+	savedPageKey?: string;
+	savedPageCursor?: SavedSessionPageQuery["cursor"];
 	heartbeats?: AgentConnectionHeartbeat[];
 };
 
@@ -674,6 +690,18 @@ export class AgentsViewMode implements Component, Focusable {
 	private savedCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
+	private savedPage: SavedPageState | undefined;
+	private savedPagePump: Promise<boolean> | undefined;
+	private savedPagePumpOwner: object | undefined;
+	private savedPageWanted:
+		| {
+				query: SavedSessionPageQuery;
+				context: DaemonSavedSessionCatalogContext;
+				client: DaemonClient;
+				generation: number;
+				options: { duringReconnect?: boolean; preserveStatusOnError?: boolean };
+		  }
+		| undefined;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
 	// The program key toggles each agent shown ↔ hidden.
@@ -731,6 +759,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.savedCatalogReady = persistentState.savedCatalogLoaded === true;
 		this.heartbeats = persistentState.heartbeats ?? [];
 		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
+		this.savedPage = persistentState.savedPage;
 		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
 		persistentState.expandedSubagentParents = this.expandedSubagentParents;
 		this.programShownParents = persistentState.programShownParents ?? new Set();
@@ -800,11 +829,7 @@ export class AgentsViewMode implements Component, Focusable {
 			if (result && scopeRoot) {
 				this.finish({
 					...result,
-					hasChildren: hasUnifiedSessionChildren(
-						this.unifiedRecords,
-						getAgentsViewSelectionKey(scopeRoot),
-						this.unifiedIndex,
-					),
+					hasChildren: this.hasKnownSessionChildren(getAgentsViewSelectionKey(scopeRoot)),
 				});
 			}
 			// Global view has no hierarchy parent: consume Left without opening chat.
@@ -822,11 +847,7 @@ export class AgentsViewMode implements Component, Focusable {
 						? {
 								type: "open",
 								summary: backSession,
-								hasChildren: hasUnifiedSessionChildren(
-									this.unifiedRecords,
-									getAgentsViewSelectionKey(backSession),
-									this.unifiedIndex,
-								),
+								hasChildren: this.hasKnownSessionChildren(getAgentsViewSelectionKey(backSession)),
 							}
 						: { type: "exit" },
 				);
@@ -858,6 +879,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
+		this.resetSavedPageIfOrderingChanged();
 		this.persistentState.rosterClient ??= new DaemonClient(this.requireSocketPath());
 		const client = this.persistentState.rosterClient;
 		this.client = client;
@@ -1015,6 +1037,7 @@ export class AgentsViewMode implements Component, Focusable {
 		// it must remain usable when a short viewport or wrapped notices exhaust the
 		// header. Trim optional header chrome first and reserve one session-list row.
 		const promptLines = this.renderPrompt(width);
+		promptLines.push(theme.fg("dim", truncateToWidth(this.savedPageNotice(), width, "")));
 		const listGap = height >= promptLines.length + 2 ? 1 : 0;
 		const headerRows = Math.max(0, height - promptLines.length - listGap - 1);
 		const lines = headerLines.slice(0, headerRows);
@@ -1082,10 +1105,16 @@ export class AgentsViewMode implements Component, Focusable {
 			return true;
 		}
 		if (this.keybindings.matches(data, "tui.select.pageUp")) {
+			if (this.selectedIndex === this.getSelectableRowIndexes()[0] && this.changeSavedPage("previous")) return true;
 			this.moveSelection(-Math.max(1, this.visibleListRows()));
 			return true;
 		}
 		if (this.keybindings.matches(data, "tui.select.pageDown")) {
+			if (
+				(this.rows.length === 0 || this.selectedIndex === this.getSelectableRowIndexes().at(-1)) &&
+				this.changeSavedPage("next")
+			)
+				return true;
 			this.moveSelection(Math.max(1, this.visibleListRows()));
 			return true;
 		}
@@ -1275,6 +1304,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private queryChanged(): void {
 		this.persistentState.query = this.editor.getText();
+		this.resetSavedPageIfOrderingChanged();
 		this.armSavedSearchFetch();
 		this.rebuildRows();
 		// Typing must not claim the visible fallback row while the restored
@@ -1283,8 +1313,26 @@ export class AgentsViewMode implements Component, Focusable {
 		this.ui.requestRender();
 	}
 
+	private hasKnownSessionChildren(scope: AgentsViewScopeKey): boolean | undefined {
+		if (hasUnifiedSessionChildren(this.unifiedRecords, scope, this.unifiedIndex)) return true;
+		const record =
+			(scope.activeSessionId ? this.unifiedIndex.byKey.get(`active:${scope.activeSessionId}`) : undefined) ??
+			this.unifiedIndex.byKey.get(`session:${scope.sessionId}`);
+		if (!record || this.savedPage?.status !== "page") return undefined;
+		return this.savedPage.hints.allChildren.includes(record.identity);
+	}
+
+	private savedPageHints(): SavedSessionPageHints | undefined {
+		return this.savedPage?.status === "page" ? this.savedPage.hints : undefined;
+	}
+
 	private getFilteredRecords(): UnifiedSessionRecord[] {
 		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+		const hints = this.savedPageHints();
+		if (hints)
+			return this.scopedRecords.filter(
+				(record) => record.saved !== undefined || hints.liveMatches.includes(record.identity),
+			);
 		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
 	}
 
@@ -1298,6 +1346,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.scopeKey,
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
+			this.savedPageHints(),
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -1397,11 +1446,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.finish({
 			type: "open",
 			summary: row.summary,
-			hasChildren: hasUnifiedSessionChildren(
-				this.unifiedRecords,
-				getAgentsViewSelectionKey(row.summary),
-				this.unifiedIndex,
-			),
+			hasChildren: this.hasKnownSessionChildren(getAgentsViewSelectionKey(row.summary)),
 		});
 	}
 
@@ -1485,11 +1530,7 @@ export class AgentsViewMode implements Component, Focusable {
 				type: "open",
 				summary: row.summary,
 				expandedAncestorSessionIds,
-				hasChildren: hasUnifiedSessionChildren(
-					this.unifiedRecords,
-					getAgentsViewSelectionKey(row.summary),
-					this.unifiedIndex,
-				),
+				hasChildren: this.hasKnownSessionChildren(getAgentsViewSelectionKey(row.summary)),
 			});
 			return;
 		}
@@ -1503,7 +1544,7 @@ export class AgentsViewMode implements Component, Focusable {
 				row.summary,
 				root.summary,
 				expandedAncestorSessionIds,
-				hasUnifiedSessionChildren(this.unifiedRecords, getAgentsViewSelectionKey(root.summary), this.unifiedIndex),
+				this.hasKnownSessionChildren(getAgentsViewSelectionKey(root.summary)),
 			),
 		);
 	}
@@ -2147,7 +2188,10 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private refreshSavedSessionsIfLoaded(): void {
-		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
+		if (this.persistentState.savedCatalogLoaded) {
+			this.persistentState.savedPageCursor = undefined;
+			void this.refreshSavedSessions({ preserveStatusOnError: true });
+		}
 	}
 
 	private async refreshSessions(): Promise<void> {
@@ -2159,7 +2203,10 @@ export class AgentsViewMode implements Component, Focusable {
 	private applySessionList(sessions: SessionSummary[], successful = false): void {
 		this.lastListedSummaries = sessions;
 		if (successful) this.persistentState.lastSuccessfulLiveSummaries = sessions;
-		this.reconcileCatalogs();
+		// Invalidate first: an old page must not decide a new scope is missing.
+		if (this.resetSavedPageIfOrderingChanged())
+			this.armSavedSearchFetch({ duringReconnect: Boolean(this.reconnectPromise) });
+		else this.reconcileCatalogs();
 	}
 
 	private reconcileCatalogs(): void {
@@ -2167,6 +2214,20 @@ export class AgentsViewMode implements Component, Focusable {
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
+		const enrichment = this.savedPageHints()?.liveEnrichment ?? [];
+		this.lastVisibleSummaries = this.lastVisibleSummaries.map((row) => {
+			const extra = enrichment.find((item) => item.identity === getSummaryIdentity(row));
+			return extra
+				? {
+						...row,
+						sessionName: row.sessionName ?? extra.sessionName,
+						firstMessage: row.firstMessage ?? extra.firstMessage,
+						created: row.created ?? extra.created,
+						modified: row.modified ?? extra.modified,
+						lastActivityAt: row.lastActivityAt ?? extra.lastActivityAt,
+					}
+				: row;
+		});
 		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
@@ -2192,6 +2253,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.scopeKey,
 			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
 			this.anchorSessionId,
+			this.savedPageHints(),
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
@@ -2202,65 +2264,198 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
 	}
 
-	private async refreshSavedSessions(
-		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
-	): Promise<boolean> {
-		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) {
-			this.rearmSavedSearchFetch();
-			return false;
-		}
-		const generation = ++this.savedCatalogGeneration;
-		this.persistentState.savedCatalogGeneration = generation;
-		this.savedCatalogRefreshPending = true;
-		this.savedCatalogReady = false;
-		const successfulSessions = this.lastSuccessfulSavedSessions;
-		const progressiveSessions = new Map(
-			successfulSessions.map((session) => [resolvePath(canonicalizePath(session.path)), session]),
+	private savedPageRequest(): {
+		query: SavedSessionPageQuery;
+		context: DaemonSavedSessionCatalogContext;
+		key: string;
+	} {
+		const visible = this.withPendingDeleteSession(
+			this.lastListedSummaries.filter((row) =>
+				shouldShowAgentsViewSession(row, this.inactiveAgentIdentities.has(getSummaryIdentity(row))),
+			),
 		);
+		const context = { ...this.getSavedSessionCatalogContext() };
+		const query = captureSavedSessionPageQuery({
+			text: this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText(),
+			live: captureSavedSessionOrderingContext(reconcileUnifiedSessions(visible, [], this.heartbeats)),
+			anchorSessionId: this.anchorSessionId,
+			subtree: this.scopeKey ? { ...this.scopeKey } : undefined,
+			cursor: this.persistentState.savedPageCursor,
+		});
+		const key = stringifyBoundedJson({ context, ...query, cursor: undefined }, SAVED_SESSION_PAGE_MAX_BYTES);
+		return { context, query, key };
+	}
+
+	private releaseSavedPage(): void {
+		this.savedCatalogGeneration++;
+		this.persistentState.savedCatalogGeneration = this.savedCatalogGeneration;
+		this.savedSessions = [];
+		this.lastSuccessfulSavedSessions = [];
+		this.persistentState.savedSessions = [];
+		this.persistentState.lastSuccessfulSavedSessions = [];
+		this.savedPage = undefined;
+		this.persistentState.savedPage = undefined;
+		this.savedCatalogReady = false;
+		this.persistentState.savedCatalogLoaded = false;
+		this.savedSearchFetchStarted = false;
+	}
+
+	private refuseSavedPage(error: unknown, preserveStatus = false): void {
+		this.releaseSavedPage();
+		const refusal: Extract<SavedPageState, { status: "refused" }> = {
+			status: "refused",
+			reason: "page_unavailable",
+			message: error instanceof Error ? error.message : String(error),
+		};
+		this.savedPage = refusal;
+		this.persistentState.savedPage = refusal;
+		this.reconcileCatalogs();
+		if (!preserveStatus && !this.reconnectPromise)
+			this.setStatusMessage(`Saved page unavailable: ${refusal.message}`, { tone: "error" });
+	}
+
+	private resetSavedPageIfOrderingChanged(): boolean {
 		try {
-			const onSession = (session: AgentConnectionSavedSessionInfo) => {
-				if (generation !== this.savedCatalogGeneration) return;
-				progressiveSessions.set(resolvePath(canonicalizePath(session.path)), session);
-				this.savedSessions = [...progressiveSessions.values()];
-				this.persistentState.savedSessions = this.savedSessions;
-				this.reconcileCatalogs();
-			};
-			const sessions = await listDaemonSavedSessions(
-				this.requireClient(),
-				this.getSavedSessionCatalogContext(),
-				"all",
-				{
-					onSession,
-				},
-			);
-			if (generation !== this.savedCatalogGeneration) return false;
-			this.savedSessions = sessions;
-			this.lastSuccessfulSavedSessions = sessions;
-			this.savedCatalogReady = true;
-			this.persistentState.lastSuccessfulSavedSessions = sessions;
-			this.persistentState.savedSessions = sessions;
-			this.persistentState.savedCatalogLoaded = true;
+			const { key } = this.savedPageRequest();
+			if (key === this.persistentState.savedPageKey) return false;
+			this.persistentState.savedPageKey = key;
+			this.persistentState.savedPageCursor = undefined;
+			this.releaseSavedPage();
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
-			if (generation === this.savedCatalogGeneration) {
-				this.savedSessions = successfulSessions;
-				this.persistentState.savedSessions = successfulSessions;
-				// Treat a terminal failure as settled so scope fallback cannot soft-lock.
-				this.savedCatalogReady = true;
-				this.rearmSavedSearchFetch();
-				this.reconcileCatalogs();
-				if (!options.preserveStatusOnError && !this.reconnectPromise && !this.daemonShutdownReceived) {
-					this.setStatusMessage(formatError("Failed to load saved sessions", error));
+			this.refuseSavedPage(error);
+			return false;
+		}
+	}
+
+	private refreshSavedSessions(
+		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
+	): Promise<boolean> {
+		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived || this.stopped) {
+			this.rearmSavedSearchFetch();
+			return Promise.resolve(false);
+		}
+		try {
+			this.resetSavedPageIfOrderingChanged();
+			const { query, context } = this.savedPageRequest();
+			const client = this.requireClient();
+			this.releaseSavedPage();
+			this.savedPageWanted = { query, context, client, generation: this.savedCatalogGeneration, options };
+			this.savedSearchFetchStarted = true;
+			this.savedCatalogRefreshPending = true;
+			this.reconcileCatalogs();
+			if (!this.savedPagePump) {
+				const owner = {};
+				this.savedPagePumpOwner = owner;
+				this.savedPagePump = this.drainSavedPages(owner);
+			}
+			// Return the shared operation directly: typing does not retain one async waiter/frame per key.
+			return this.savedPagePump;
+		} catch (error) {
+			this.refuseSavedPage(error);
+			return Promise.resolve(false);
+		}
+	}
+
+	private async drainSavedPages(owner: object): Promise<boolean> {
+		await Promise.resolve(); // Install the single pump owner before draining the latest request.
+		let successful = false;
+		try {
+			while (this.savedPageWanted && !this.stopped && !this.daemonShutdownReceived) {
+				const request = this.savedPageWanted;
+				this.savedPageWanted = undefined;
+				successful = false;
+				try {
+					const page = await listDaemonSavedSessions(request.client, request.context, "all", {
+						page: request.query,
+					});
+					if (request.generation !== this.savedCatalogGeneration || request.client !== this.client) continue;
+					if (page.status === "refused") {
+						this.savedPage = page;
+						this.persistentState.savedPage = page;
+						if (!request.options.preserveStatusOnError && !this.reconnectPromise)
+							this.setStatusMessage(`Saved page ${page.reason}: ${page.message}`, { tone: "error" });
+						this.reconcileCatalogs();
+						continue;
+					}
+					const { sessions, ...state } = page;
+					this.savedPage = state;
+					this.persistentState.savedPage = state;
+					this.savedSessions = sessions;
+					this.lastSuccessfulSavedSessions = sessions;
+					this.persistentState.savedSessions = sessions;
+					this.persistentState.lastSuccessfulSavedSessions = sessions;
+					this.savedCatalogReady = true;
+					this.persistentState.savedCatalogLoaded = true;
+					this.reconcileCatalogs();
+					// Expansion/program identities from released archive pages must not accumulate forever.
+					for (const key of this.expandedSubagentParents)
+						if (!this.unifiedIndex.byKey.has(key)) this.expandedSubagentParents.delete(key);
+					for (const key of this.programShownParents)
+						if (!this.unifiedIndex.byKey.has(key)) this.programShownParents.delete(key);
+					if (request.query.cursor) {
+						const key = request.query.cursor.direction === "previous" ? page.after : page.before;
+						const record = key ? this.unifiedIndex.byKey.get(key) : undefined;
+						if (record) {
+							const selected = summaryForUnifiedRecord(record);
+							for (const id of getUnifiedSessionAncestorSessionIds(
+								this.unifiedRecords,
+								getAgentsViewSelectionKey(selected),
+								this.unifiedIndex,
+							)) {
+								const parent = this.unifiedIndex.byKey.get(`session:${id}`);
+								if (parent) this.expandedSubagentParents.add(parent.identity);
+							}
+							this.rebuildRows();
+						}
+						const target = this.rows.findIndex((row) => row.identity === key);
+						if (target >= 0) {
+							this.selectedIndex = target;
+							this.syncSelectedRowState();
+						}
+					}
+					successful = true;
+				} catch (error) {
+					if (request.generation === this.savedCatalogGeneration && request.client === this.client)
+						this.refuseSavedPage(error, request.options.preserveStatusOnError);
 				}
 			}
-			return false;
+			return successful;
 		} finally {
-			if (generation === this.savedCatalogGeneration) {
+			// Clear synchronously before this promise settles; a later request cannot lose a wake-up.
+			if (this.savedPagePumpOwner === owner) {
+				this.savedPagePumpOwner = undefined;
+				this.savedPagePump = undefined;
 				this.savedCatalogRefreshPending = false;
+				if (this.stopped || this.daemonShutdownReceived) this.savedPageWanted = undefined;
 				this.resolveMissingSelectionAnchor();
 			}
 		}
+	}
+
+	private changeSavedPage(direction: "next" | "previous"): boolean {
+		if (this.savedCatalogRefreshPending) return true;
+		const page = this.savedPage;
+		if (page?.status === "page") {
+			if (!(direction === "next" ? page.moreAfter : page.moreBefore)) return false;
+			const identity = direction === "next" ? page.after : page.before;
+			if (!identity) return false;
+			this.persistentState.savedPageCursor = { identity, direction };
+		} else {
+			this.persistentState.savedPageCursor = undefined;
+		}
+		void this.refreshSavedSessions();
+		return true;
+	}
+
+	private savedPageNotice(): string {
+		if (this.savedCatalogRefreshPending) return "Saved page loading · archive totals unknown";
+		if (this.savedPage?.status === "refused")
+			return `Saved page unavailable · ${keyText("tui.select.pageDown")} retries`;
+		if (this.savedPage?.status !== "page") return "Saved archive not loaded";
+		const page = this.savedPage;
+		return `Saved page · costs/#sub loaded only${page.moreBefore ? ` · ${keyText("tui.select.pageUp")} ←` : ""}${page.moreAfter ? ` · ${keyText("tui.select.pageDown")} →` : ""} at list edges`;
 	}
 
 	private async refreshHeartbeats(options: { duringReconnect?: boolean } = {}): Promise<boolean> {
@@ -2271,6 +2466,7 @@ export class AgentsViewMode implements Component, Focusable {
 			if (generation !== this.heartbeatCatalogGeneration) return false;
 			this.heartbeats = heartbeats;
 			this.persistentState.heartbeats = heartbeats;
+			if (this.resetSavedPageIfOrderingChanged()) this.armSavedSearchFetch(options);
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
@@ -2486,7 +2682,15 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private getAgentCountsText(): string {
 		const counts = countRowsBySection(this.rows);
-		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
+		const saved =
+			this.savedPage?.status === "page"
+				? `${counts.inactive} loaded inactive`
+				: this.savedCatalogRefreshPending
+					? "saved loading"
+					: this.savedPage?.status === "refused"
+						? "saved unavailable"
+						: "saved not loaded";
+		return `${counts.running} running, ${counts.idle} idle, ${saved}`;
 	}
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
@@ -2607,7 +2811,14 @@ export class AgentsViewMode implements Component, Focusable {
 		const suffixes = [statusLabel, modelLabel, summaryText].filter(
 			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
 		);
-		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;
+		const contextOnly =
+			this.savedPage?.status === "page" &&
+			row.record?.saved !== undefined &&
+			row.record.daemon === undefined &&
+			!this.savedPage.primary.includes(row.identity);
+		const pageTitle = contextOnly ? `${title} ${theme.fg("dim", "(page context)")}` : title;
+		const titleContent =
+			suffixes.length > 0 ? `${pageTitle} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : pageTitle;
 		const titleCell = formatTableCell(titleContent, titleWidth);
 		const cells = [
 			icon,
@@ -2624,7 +2835,8 @@ export class AgentsViewMode implements Component, Focusable {
 	// its columns sit exactly above the row columns.
 	private renderSectionHeading(section: AgentsViewSection, width: number, legend: string): string {
 		const counts = countRowsBySection(this.rows);
-		const title = `${sectionTitle(section)} (${counts[section]})`;
+		const title = `${sectionTitle(section)} (${counts[section]}${this.savedPage?.status === "page" && section === "inactive" ? " loaded" : ""})`;
+		if (this.savedPage?.status === "page" && legend) legend = `Loaded ${legend}`;
 		const gap = width - visibleWidth(title) - visibleWidth(legend);
 		if (legend.length === 0 || gap < 2) {
 			return theme.bold(truncateToWidth(title, width, ""));

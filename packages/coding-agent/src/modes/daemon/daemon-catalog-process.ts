@@ -10,6 +10,13 @@ import { stringifyBoundedJson } from "../../core/bounded-json.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import type { AgentConnectionSavedSessionScope } from "../agent-connection/types.js";
+import {
+	captureSavedSessionPageQuery,
+	readSavedSessionPage,
+	type SavedSessionPage,
+	type SavedSessionPageQuery,
+} from "./saved-session-page.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_CATALOG";
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
@@ -40,7 +47,17 @@ interface SessionInfoWire extends Omit<SessionInfo, "created" | "modified"> {
 }
 
 type CatalogRequest =
-	| { type: "request"; id: string; command: "list"; cwd?: string; sessionDir?: string }
+	| {
+			type: "request";
+			id: string;
+			command: "list";
+			cwd?: string;
+			sessionDir?: string;
+			page?: SavedSessionPageQuery;
+			agentDir?: string;
+			ledgerSessionDir?: string;
+			scope?: AgentConnectionSavedSessionScope;
+	  }
 	| { type: "request"; id: string; command: "resolve"; selector: string; cwd: string; sessionDir?: string }
 	| { type: "request"; id: string; command: "rename"; sessionPath: string; name: string }
 	| { type: "request"; id: string; command: "delete"; sessionPath: string }
@@ -66,6 +83,13 @@ type CatalogOutbound =
 	| { type: "session"; id: string; session: SessionInfoWire }
 	| { type: "response"; id: string; success: true; data?: unknown }
 	| { type: "response"; id: string; success: false; error: string };
+
+interface CatalogPageOptions {
+	page: SavedSessionPageQuery;
+	agentDir: string;
+	ledgerSessionDir: string;
+	scope: AgentConnectionSavedSessionScope;
+}
 
 interface CatalogListCallbacks {
 	onProgress?: (loaded: number, total: number) => void;
@@ -197,6 +221,21 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 	try {
 		switch (request.command) {
 			case "list": {
+				if (request.page !== undefined) {
+					const page = await readSavedSessionPage(
+						{
+							cwd: request.cwd,
+							sessionDir: request.sessionDir,
+							agentDir: request.agentDir,
+							ledgerSessionDir: request.ledgerSessionDir,
+							scope: request.scope ?? "all",
+						},
+						request.page,
+					);
+					sendCatalogMessage({ type: "response", id: request.id, success: true, data: page });
+					return;
+				}
+				// Existing explicit array-returning SDK/resolve callers keep their full-list semantics.
 				const callbacks = {
 					onProgress: (loaded: number, total: number) =>
 						sendCatalogMessage({ type: "progress", id: request.id, loaded, total }),
@@ -356,10 +395,32 @@ export class DaemonCatalogClient {
 		return this.starting;
 	}
 
-	async list(cwd?: string, sessionDir?: string, callbacks?: CatalogListCallbacks): Promise<SessionInfo[]> {
+	list(
+		cwd: string | undefined,
+		sessionDir: string | undefined,
+		options: CatalogPageOptions,
+	): Promise<SavedSessionPage>;
+	list(cwd?: string, sessionDir?: string, callbacks?: CatalogListCallbacks): Promise<SessionInfo[]>;
+	async list(
+		cwd?: string,
+		sessionDir?: string,
+		options?: CatalogListCallbacks | CatalogPageOptions,
+	): Promise<SessionInfo[] | SavedSessionPage> {
+		if (options && "page" in options)
+			return this.request<SavedSessionPage>({
+				type: "request",
+				id: randomUUID(),
+				command: "list",
+				cwd,
+				sessionDir,
+				page: captureSavedSessionPageQuery(options.page),
+				agentDir: options.agentDir,
+				ledgerSessionDir: options.ledgerSessionDir,
+				scope: options.scope,
+			});
 		const data = await this.request<{ sessions: SessionInfoWire[] }>(
 			{ type: "request", id: randomUUID(), command: "list", cwd, sessionDir },
-			callbacks,
+			options,
 		);
 		return data.sessions.map(deserializeSessionInfo);
 	}

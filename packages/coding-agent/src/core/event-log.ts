@@ -75,6 +75,7 @@ export class EventLog {
 	private scan<T>(
 		contents: Buffer,
 		parse: (line: string, index: number) => T | undefined,
+		requireCompleteTail = false,
 	): { events: T[]; keep: number; records: number; cursor: JournalCursor; format: "empty" | "legacy" | "framed" } {
 		const events: T[] = [];
 		let start = 0;
@@ -87,6 +88,7 @@ export class EventLog {
 			if ((end < 0 ? contents.length : end + 1) - start > this.maxRecordBytes)
 				throw new Error("Event log record byte limit exceeded");
 			if (end < 0) {
+				if (requireCompleteTail) throw new Error("Event log has an incomplete final record");
 				this.options.log?.("ignored torn final line");
 				break;
 			}
@@ -124,7 +126,10 @@ export class EventLog {
 	}
 
 	/** Readers never repair or expose an unterminated record, even when its JSON parses. */
-	replaySync<T>(parse: (line: string, index: number) => T | undefined): T[] {
+	replaySync<T>(
+		parse: (line: string, index: number) => T | undefined,
+		options: { requireCompleteTail?: boolean } = {},
+	): T[] {
 		let fd: number;
 		try {
 			fd = openSync(this.path, "r");
@@ -132,7 +137,10 @@ export class EventLog {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
 			throw error;
 		}
-		return withJournalDescriptorSync(fd, () => this.scan(readAllSync(fd, this.maxBytes, this.path), parse).events);
+		return withJournalDescriptorSync(
+			fd,
+			() => this.scan(readAllSync(fd, this.maxBytes, this.path), parse, options.requireCompleteTail).events,
+		);
 	}
 
 	private validate = (line: string, index: number): undefined => {

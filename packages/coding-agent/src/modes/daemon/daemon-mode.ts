@@ -228,14 +228,13 @@ import {
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 	rlmLedgerPath,
 	tombstoneSavedSessionDelete,
-	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
 	rlmSubagentDisplayPath,
 	writeRlmSubagentDisplayEntry,
 } from "./rlm-subagent-display.js";
-import { serializeSavedSessionInfo } from "./saved-session-info.js";
+import { captureSavedSessionPageQuery, readSavedSessionPage } from "./saved-session-page.js";
 import {
 	createSnapshotTranscriptChunks,
 	SNAPSHOT_TARGET_CHUNK_BYTES,
@@ -1069,20 +1068,6 @@ export class AgentDaemon {
 			await this.rlmJournalOwner?.close();
 		})();
 		return this.rlmJournalClosePromise;
-	}
-
-	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
-	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
-		if (sessionDir === undefined || resolve(sessionDir) === resolve(this.rlmLedgerSessionsDir())) {
-			return this.rlmSpawnLedger();
-		}
-		return new RlmSpawnLedger(
-			this.agentDir,
-			sessionDir,
-			createRlmLedgerRegistrySeedSource(),
-			(message) => this.log(message),
-			{ mode: "reader" },
-		);
 	}
 
 	/**
@@ -4087,53 +4072,28 @@ export class AgentDaemon {
 			}
 
 			case "list_saved_sessions": {
-				let activeSessionId: string | undefined;
+				const pageQuery = captureSavedSessionPageQuery(command.page ?? {});
 				let cwd: string;
 				let sessionDir: string | undefined;
 				if ("activeSessionId" in command) {
-					activeSessionId = command.activeSessionId;
-					const sessionManager = this.getSessionState(activeSessionId).runtime.session.sessionManager;
+					const sessionManager = this.getSessionState(command.activeSessionId).runtime.session.sessionManager;
 					cwd = sessionManager.getCwd();
 					sessionDir = sessionManager.getSessionDir();
 				} else {
 					cwd = resolve(command.cwd);
 					sessionDir = command.sessionDir;
 				}
-				const callbacks = command.id
-					? {
-							onProgress: (loaded: number, total: number) => {
-								this.write(client, {
-									id: command.id,
-									type: "session_list_progress",
-									command: "list_saved_sessions",
-									...(activeSessionId ? { activeSessionId } : {}),
-									loaded,
-									total,
-								});
-							},
-							onSession: (session: SessionInfo) => {
-								this.write(client, {
-									id: command.id,
-									type: "session_list_item",
-									command: "list_saved_sessions",
-									...(activeSessionId ? { activeSessionId } : {}),
-									session: serializeSavedSessionInfo(session),
-								});
-							},
-						}
-					: undefined;
-				const savedSessions =
-					command.scope === "current"
-						? await SessionManager.list(cwd, sessionDir, callbacks)
-						: await SessionManager.listAll(callbacks, sessionDir);
-				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedgerFor(sessionDir), {
-					...(command.scope === "current" ? { cwd } : {}),
-					...(callbacks ? { onSession: callbacks.onSession } : {}),
-					log: (message) => this.log(message),
-				});
-				return success(command.id, "list_saved_sessions", {
-					sessions: sessions.map(serializeSavedSessionInfo),
-				});
+				const page = await readSavedSessionPage(
+					{
+						cwd,
+						sessionDir,
+						agentDir: this.agentDir,
+						ledgerSessionDir: sessionDir ?? this.rlmLedgerSessionsDir(),
+						scope: command.scope,
+					},
+					pageQuery,
+				);
+				return success(command.id, "list_saved_sessions", page);
 			}
 
 			case "create": {

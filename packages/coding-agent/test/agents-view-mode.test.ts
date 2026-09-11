@@ -20,7 +20,9 @@ import {
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 } from "../src/modes/agents-view/agents-view-state.js";
+import type { DaemonCommand } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import type { SavedSessionPage } from "../src/modes/daemon/saved-session-page.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -450,78 +452,161 @@ describe("AgentsViewMode", () => {
 	});
 
 	it("does not discard scope while the saved-session refresh is in flight", async () => {
-		let finishRefresh: ((value: { success: true; data: { sessions: unknown[] } }) => void) | undefined;
+		let finishRefresh: ((value: { success: true; data: SavedSessionPage }) => void) | undefined;
 		const request = vi.fn(
-			() =>
-				new Promise<{ success: true; data: { sessions: unknown[] } }>((resolve) => {
+			(_command: DaemonCommand) =>
+				new Promise<{ success: true; data: SavedSessionPage }>((resolve) => {
 					finishRefresh = resolve;
 				}),
 		);
+		const client = { request };
+		let query = "";
 		const scopeSummary = summary();
 		const persistentState: AgentsViewPersistentState = {
 			scopeFrames: [{ scope: { sessionId: scopeSummary.sessionId, activeSessionId: scopeSummary.activeSessionId } }],
 		};
-		const self: Record<string, unknown> = {
+		// Reuse the existing consumer fixture, running its real refresh/search/navigation methods.
+		const self: Record<string, unknown> = Object.assign(Object.create(AgentsViewMode.prototype), {
 			options: { config: { cwd: "/tmp" } },
 			persistentState,
+			client,
 			savedCatalogGeneration: 0,
 			savedCatalogReady: true,
 			savedCatalogRefreshPending: false,
 			lastSuccessfulSavedSessions: [],
 			savedSessions: [],
-			requireClient: () => ({ request }),
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
-			reconcileCatalogs: vi.fn(),
-			resolveMissingSelectionAnchor: vi.fn(),
-		};
-
-		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
-		await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
-		expect(self.savedCatalogReady).toBe(false);
-
-		Object.assign(self, {
 			lastListedSummaries: [],
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
-			pendingDeleteAgent: undefined,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
 			programShownParents: new Set(),
-			editor: { getText: () => "" },
-			getFilteredRecords: () => Reflect.get(self, "scopedRecords"),
+			selectedIndex: 0,
+			editor: { getText: () => query },
+			keybindings: new KeybindingsManager(),
+			getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
+			requireClient: () => client,
 			applyPendingAncestorExpansion: vi.fn(),
 			restoreSelection: vi.fn(),
+			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
 			setStatusMessage: vi.fn(),
 			withPendingDeleteSession: (sessions: SessionSummary[]) => sessions,
 		});
-		self.reconcileCatalogs = () => invoke("reconcileCatalogs", self);
-		invoke("reconcileCatalogs", self);
+		const refresh = invoke("refreshSavedSessions", self) as Promise<boolean>;
+		await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+		expect(self.savedCatalogReady).toBe(false);
 		expect(persistentState.scopeFrames).toHaveLength(1);
 
-		const saved: AgentConnectionSavedSessionInfo = {
+		const root = {
 			path: "/tmp/scope.jsonl",
 			id: "scope-session",
 			cwd: "/tmp",
-			created: new Date("2026-01-01T00:00:00Z"),
-			modified: new Date("2026-01-01T00:00:00Z"),
+			rlmDepth: 0,
+			created: "2026-01-01T00:00:00.000Z",
+			modified: "2026-01-01T00:00:00.000Z",
 			messageCount: 1,
 			firstMessage: "scope",
 			allMessagesText: "scope",
 		};
-		finishRefresh?.({
-			success: true,
-			data: {
-				sessions: [
-					{
-						...saved,
-						created: saved.created.toISOString(),
-						modified: saved.modified.toISOString(),
-					},
-				],
+		const emptyPage: Extract<SavedSessionPage, { status: "page" }> = {
+			status: "page",
+			sessions: [root],
+			primary: [],
+			sourceOrder: [{ path: root.path, source: "catalog", ordinal: 0 }],
+			moreBefore: false,
+			moreAfter: false,
+			limited: true,
+			hints: {
+				liveMatches: [],
+				liveEnrichment: [],
+				busyAncestors: [],
+				moreChildren: [],
+				allChildren: [],
+				groups: [],
 			},
-		});
+		};
+		finishRefresh?.({ success: true, data: emptyPage });
 		await expect(refresh).resolves.toBe(true);
+		expect(persistentState.scopeFrames).toHaveLength(1);
+
+		query = "needle";
+		invoke("queryChanged", self);
+		await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+		query = "latest";
+		invoke("queryChanged", self);
+		expect(request).toHaveBeenCalledTimes(2); // One outstanding call; only the latest search is queued locally.
+		finishRefresh?.({ success: true, data: emptyPage });
+		await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(3));
+		expect(request.mock.calls[2]?.[0]).toMatchObject({ type: "list_saved_sessions", page: { text: "latest" } });
+		expect(self.savedSessions).toEqual([]); // The stale search did not repopulate the released page.
+
+		const first = {
+			...root,
+			path: "/tmp/first.jsonl",
+			id: "first",
+			parentSessionPath: root.path,
+			rlmDepth: 1,
+			firstMessage: "latest one",
+			allMessagesText: "latest one",
+		};
+		const firstPage: Extract<SavedSessionPage, { status: "page" }> = {
+			...emptyPage,
+			sessions: [root, first],
+			primary: ["file:/tmp/first.jsonl"],
+			before: "file:/tmp/first.jsonl",
+			after: "file:/tmp/first.jsonl",
+			sourceOrder: [...emptyPage.sourceOrder, { path: first.path, source: "catalog", ordinal: 1 }],
+			moreAfter: true,
+		};
+		finishRefresh?.({ success: true, data: firstPage });
+		await vi.waitFor(() => expect(self.savedCatalogRefreshPending).toBe(false));
+		expect((self.savedSessions as AgentConnectionSavedSessionInfo[]).map((row) => row.path)).toEqual([
+			root.path,
+			first.path,
+		]);
+		self.selectedIndex = 0;
+		invoke("handleListNavigation", self, "\x1b[6~");
+		await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(4));
+		expect(request.mock.calls[3]?.[0]).toMatchObject({
+			page: { text: "latest", cursor: { identity: firstPage.after, direction: "next" } },
+		});
+
+		const second = {
+			...first,
+			path: "/tmp/second.jsonl",
+			id: "second",
+			firstMessage: "latest two",
+			allMessagesText: "latest two",
+		};
+		const secondPage: Extract<SavedSessionPage, { status: "page" }> = {
+			...emptyPage,
+			sessions: [root, second],
+			primary: ["file:/tmp/second.jsonl"],
+			before: "file:/tmp/second.jsonl",
+			after: "file:/tmp/second.jsonl",
+			sourceOrder: [...emptyPage.sourceOrder, { path: second.path, source: "catalog", ordinal: 2 }],
+			moreBefore: true,
+		};
+		finishRefresh?.({ success: true, data: secondPage });
+		await vi.waitFor(() => expect(self.savedCatalogRefreshPending).toBe(false));
+		expect((self.savedSessions as AgentConnectionSavedSessionInfo[]).map((row) => row.path)).toEqual([
+			root.path,
+			second.path,
+		]);
+		self.selectedIndex = 0;
+		invoke("handleListNavigation", self, "\x1b[5~");
+		await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(5));
+		expect(request.mock.calls[4]?.[0]).toMatchObject({
+			page: { cursor: { identity: secondPage.before, direction: "previous" } },
+		});
+		finishRefresh?.({ success: true, data: firstPage });
+		await vi.waitFor(() => expect(self.savedCatalogRefreshPending).toBe(false));
+		expect((self.savedSessions as AgentConnectionSavedSessionInfo[]).map((row) => row.path)).toEqual([
+			root.path,
+			first.path,
+		]);
+		expect(invoke("savedPageNotice", self)).toContain("loaded only");
 		expect(persistentState.scopeFrames).toHaveLength(1);
 	});
 

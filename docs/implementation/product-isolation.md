@@ -10,7 +10,7 @@ is Base Context 0.1.0, with Prime Agent v0.9.3 ancestry retained.
 - Commands: `base-context` and the separately installed `base-context-ai` helper.
 - State: user/project `.base-context`, explicit validated `BASE_CONTEXT_*` overrides,
   separate Python distribution/environment, and product-owned diagnostic paths.
-- Daemon: `base-context.daemon`, protocol 11, schema revision 42 (`protocol-11-schema-42-branch-summary-model`), home/install-scoped
+- Daemon: `base-context.daemon`, protocol 11, schema revision 43 (`protocol-11-schema-43-saved-session-pages`), home/install-scoped
   endpoints and rejection of foreign handshakes. Native work requires owned inference;
   older Base8 permits only explicitly passive inspection, not graceful cleanup.
 - Auth: supported API-key/bearer routes remain. Copied, custom and MCP OAuth routes

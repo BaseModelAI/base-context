@@ -1,16 +1,16 @@
 # Sessions
 
-Prime Agent saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
+Base Context saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
 
 ## Session Storage
 
-Sessions auto-save to `~/.prime/agent/sessions/`. Each session is a JSONL file with a tree structure.
+Sessions use the owned `~/.base-context/sessions/` tree by default. `BASE_CONTEXT_HOME` and the existing session-directory settings can change that location. Native sessions use owned journals and derived indexes; a `.jsonl` filename does not imply an ordinary editable JSONL file.
 
 ```bash
-prime-agent --continue          # Continue the most recent session
-prime-agent --resume [path|id]  # Browse past sessions or resume one directly
-prime-agent --no-session        # Ephemeral mode; do not save
-prime-agent --fork <path|id>    # Fork a session file or partial session ID into a new session
+base-context --continue          # Continue the most recent session
+base-context --resume [path|id]  # Browse past sessions or resume one directly
+base-context --no-session        # Ephemeral mode; do not save
+base-context --fork <path|id>    # Fork a session file or partial session ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session file, session ID, and message count. Use `/usage` for token, cost, and context usage.
@@ -35,11 +35,33 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 
 ## Resuming and Deleting Sessions
 
-`/resume` opens an interactive session picker for the current project. `prime-agent --resume` opens the same picker at startup, and `prime-agent --resume <path|id>` resumes a specific session.
+In a running session, `/resume` opens the agents view. Its live roster is separate
+from saved-session browsing. `base-context --resume` opens startup session selection,
+and `base-context --resume <path|id>` resumes a specific session.
 
-An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `prime-agent --resume -- "continue this work"`.
+Saved-session results in the agents view are queried and paged by the existing
+catalog. A page holds at most 64 saved rows, including required ancestor/context
+rows, and 1MiB of encoded page data. Search and scope apply before page selection.
+New pages replace old pages; browsing does not retain the whole archive. Page counts
+and partial rollups are not totals for all saved sessions. The separate live roster
+is outside this saved-page budget.
 
-In the picker you can:
+Paging preserves the agents view's existing hierarchy and ranking, including its
+empty-session, anchor, heartbeat and busy-descendant rules. Continuations use that
+order, not modification time alone. Relevant ordering-context changes reset the
+saved page. This is a live listing, not a frozen snapshot; metadata changes can
+require a refresh. Metadata traversal can still scale with the total session count.
+The page limit is not a global heap/RSS, latency or directory-size guarantee.
+
+Use PageUp/PageDown at the first/last selectable row to request the previous/next
+saved page. Away from those edges, the keys keep their viewport-navigation role.
+The view displays the configured bindings and marks repeated ancestor rows as
+page context. Search keeps one active query plus its latest replacement.
+
+
+An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `base-context --resume -- "continue this work"`.
+
+The startup picker has separate controls:
 
 - search by typing
 - toggle path display with Ctrl+P
@@ -48,7 +70,6 @@ In the picker you can:
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-When available, Prime Agent uses the `trash` CLI for deletion instead of permanently removing files.
 
 ## Naming Sessions
 
@@ -58,7 +79,7 @@ Use `/name <name>` to set a human-readable session name:
 /name Refactor auth module
 ```
 
-Named sessions are easier to find in `/resume` and `prime-agent --resume`.
+Named sessions are easier to find in `/resume` and `base-context --resume`.
 
 ## Branching with `/tree`
 

@@ -70,6 +70,7 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import { activeActivityForSession, type SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
+import type { SavedSessionPage, SavedSessionPageQuery } from "../src/modes/daemon/saved-session-page.js";
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 
 describe("daemon mode helpers", () => {
@@ -7992,53 +7993,69 @@ describe("daemon mode helpers", () => {
 				} as unknown as Socket,
 			};
 
-			const response = (await internals.handleCommand(client, {
-				id: "list-1",
-				type: "list_saved_sessions",
-				cwd: tempDir,
-				sessionDir,
-				scope: "current",
-			})) as {
-				data: {
-					sessions: Array<{
-						id: string;
-						agentStatus?: {
-							summary: string;
-							taskState?: "needs_input" | "completed";
-							basedOnMessageCount: number;
-						};
-					}>;
-				};
+			const requestPage = async (page: SavedSessionPageQuery = {}): Promise<SavedSessionPage> => {
+				const response = (await internals.handleCommand(client, {
+					id: "list-1",
+					type: "list_saved_sessions",
+					cwd: tempDir,
+					sessionDir,
+					scope: "current",
+					page,
+				})) as { data: SavedSessionPage };
+				return response.data;
 			};
-			const updates = writes.map((line) => JSON.parse(line) as { type: string; activeSessionId?: string });
-
-			expect(response.data.sessions).toEqual([
+			const initial = await requestPage();
+			expect(initial.status).toBe("page");
+			if (initial.status !== "page") throw new Error(initial.message);
+			expect(initial.sessions).toEqual([
 				expect.objectContaining({
 					id: session.getSessionId(),
 					agentStatus: { summary: "Finished the task", taskState: "completed", basedOnMessageCount: 0 },
 				}),
 			]);
-			expect(updates).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({
-						id: "list-1",
-						type: "session_list_progress",
-						command: "list_saved_sessions",
-						loaded: 1,
-						total: 1,
-					}),
-					expect.objectContaining({
-						id: "list-1",
-						type: "session_list_item",
-						command: "list_saved_sessions",
-						session: expect.objectContaining({
-							id: session.getSessionId(),
-							agentStatus: { summary: "Finished the task", taskState: "completed", basedOnMessageCount: 0 },
-						}),
-					}),
-				]),
-			);
-			expect(updates.every((update) => update.activeSessionId === undefined)).toBe(true);
+			expect(writes).toEqual([]); // No all-row progress stream on the native page route.
+
+			const fixture = await makePersistedRlmDaemonFixture(tempDir);
+			const parent = trackSession(await SessionManager.open(fixture.parentSessionFile));
+			await parent.appendMessage({ role: "user", content: "parent task", timestamp: 1 });
+			await parent.close();
+			await fixture.openJournal();
+			const first = await requestPage({ limit: 3 });
+			if (first.status !== "page") throw new Error(first.message);
+			// Existing UI rank puts a nonempty tree ahead of the newer empty row; ancestry precedes children.
+			expect(first.sessions.map((row) => row.path)).toEqual([
+				fixture.parentSessionFile,
+				fixture.childSessionFile,
+				fixture.grandchildSessionFile,
+			]);
+			expect(first.moreAfter).toBe(true);
+			expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(1024 * 1024);
+			const next = await requestPage({ limit: 3, cursor: { identity: first.after!, direction: "next" } });
+			if (next.status !== "page") throw new Error(next.message);
+			expect(next.sessions.map((row) => row.id)).toEqual([session.getSessionId()]);
+			expect(next.moreBefore).toBe(true);
+			const previous = await requestPage({ limit: 3, cursor: { identity: next.before!, direction: "previous" } });
+			if (previous.status !== "page") throw new Error(previous.message);
+			expect(previous.primary).toEqual(first.primary);
+
+			const matched = await requestPage({ text: "nested", limit: 3 });
+			if (matched.status !== "page") throw new Error(matched.message);
+			expect(matched.sessions.map((row) => row.path)).toEqual([
+				fixture.parentSessionFile,
+				fixture.childSessionFile,
+				fixture.grandchildSessionFile,
+			]);
+			expect(matched.sessions[1]).toMatchObject({ parentSessionPath: fixture.parentSessionFile, rlmDepth: 1 });
+			expect(matched.sessions[2]).toMatchObject({ parentSessionPath: fixture.childSessionFile, rlmDepth: 2 });
+			expect(fixture.createRuntime).not.toHaveBeenCalled();
+
+			// The same required source closure now exceeds the byte budget; no partial ancestor metadata is returned.
+			for (const path of [fixture.parentSessionFile, fixture.childSessionFile, fixture.grandchildSessionFile]) {
+				const manager = trackSession(await SessionManager.open(path));
+				await manager.appendSessionInfo("Large saved title ".padEnd(400_000, "x"));
+				await manager.close();
+			}
+			expect(await requestPage({ text: "nested" })).toMatchObject({ status: "refused", reason: "closure_bytes" });
 		} finally {
 			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });

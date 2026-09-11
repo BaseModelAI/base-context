@@ -1,19 +1,12 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="../../assets/brand/prime-butterfly.svg">
-      <img alt="Prime Intellect butterfly mark" src="../../assets/brand/prime-butterfly-black.svg" width="96">
-    </picture>
-  </a>
-</p>
-
-<h1 align="center">Prime Agent CLI</h1>
+<h1 align="center">Base Context CLI</h1>
 
 <p align="center">
   RLM-native terminal coding and research harness.
 </p>
 
-Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently. This workspace retains inherited `@earendil-works/pi-*` source package identifiers, the `pi` package manifest key, and a source-package `pi` bin entry for internal compatibility. Public releases are currently versioned tarball artifacts installed by the scripts below; release packaging rewrites the application package and command to `prime-agent`. Do not use the inherited npm package as the Prime Agent install path.
+Base Context is a pre-release fork of [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), which descends from [pi-mono](https://github.com/badlogic/pi-mono). This application package is `@ponythewhite/base-context`, and its command is `base-context`. The workspace also contains `@ponythewhite/base-context-ai`, `@ponythewhite/base-context-agent`, and `@ponythewhite/base-context-tui`. The inherited `pi` package manifest key and Python import `rlm` remain unchanged.
+
+**A public Base Context release has not been approved or published.** Do not expect an npm package, release binary, or installer endpoint to be available. Upstream Prime Agent installers do not install Base Context. Use the [source setup in the owned repository README](https://github.com/BaseModelAI/base-context#getting-started).
 
 ## Table of Contents
 
@@ -35,48 +28,35 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
   - [MCP Integrations](#mcp-integrations)
   - [Extensions](#extensions)
   - [Themes](#themes)
-  - [Prime Agent Packages](#prime-agent-packages)
+  - [Base Context Packages](#base-context-packages)
 - [Programmatic Usage](#programmatic-usage)
 - [Upstream](#upstream)
 - [CLI Reference](#cli-reference)
 
 ## Quick Start
 
-```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
-```
+Follow the [source build instructions](https://github.com/BaseModelAI/base-context#getting-started) for Node requirements, build commands, and the source-built CLI invocation. Examples below use `base-context` as shorthand; for a source build, use the documented Node invocation instead.
 
-To install the beta built from the latest commit on `main`:
+Base Context uses its own `~/.base-context` state. `BASE_CONTEXT_HOME` overrides that directory. Do not copy upstream credential stores into it. Configure a supported API-key or explicit subscription route as described in the [provider guide](docs/providers.md) and [SDK authentication guide](docs/sdk.md); copied OAuth clients are not globally authorized.
 
-```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
-```
-
-Authenticate with an API key:
+For example, after building from source and configuring a supported API-key route:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-prime-agent
+base-context
 ```
 
-Or use your existing subscription:
+The persistent Python kernel runs file operations, commands, edits, and data analysis through `ipython`. Native context also provides the `prime_context` selection/recovery route described under [Skills](#skills). Add capabilities through skills, prompt templates, and trusted extensions.
 
-```bash
-prime-agent
-/login  # Then select provider
-```
+See [owned installer and rollback](https://github.com/BaseModelAI/base-context#owned-installer-and-rollback) for the **Base-Context** installer design; its release endpoints remain unpublished. Non-owned runtime setup can bootstrap Python on first use. `BASE_CONTEXT_KERNEL_PYTHON` selects an existing environment with a current `base-context-runtime`; the Python import remains `rlm`. See [Python-backed skills](docs/skills.md#python-backed-skills) for owned release-local environments and manual overrides.
 
-Then just talk to Prime Agent. By default, Prime Agent gives the model one tool: `ipython`. The model uses the persistent kernel to read files, run commands, edit code, and inspect data. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [Prime Agent packages](#prime-agent-packages).
-
-The Python kernel runtime is set up automatically on first invocation. Set `PRIME_AGENT_KERNEL_PYTHON` to use an existing Python environment with `prime-agent-runtime`.
-
-**Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
+**Terminal notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md). These inherited notes are not Base Context platform certification.
 
 ## Providers & Models
 
-For each built-in provider, Prime Agent maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
+Base Context includes provider adapters and model definitions. Configure an authorized route before selecting a model with `/model` (or Ctrl+L). The provider identities below are not a claim that copied OAuth applications are authorized; follow the authentication guides linked above.
 
-**Subscriptions:**
+**Subscription provider identities:**
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
@@ -112,11 +92,13 @@ For each built-in provider, Prime Agent maintains a list of tool-capable models,
 
 See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 
-**Custom providers & models:** Add providers via `~/.prime/agent/models.json` if they speak a supported API (OpenAI, Anthropic, Google). For custom APIs or OAuth, use extensions. See [docs/models.md](docs/models.md) and [docs/custom-provider.md](docs/custom-provider.md).
+**Custom providers & models:** Add providers via `~/.base-context/models.json` if they speak a supported API (OpenAI, Anthropic, Google). For custom APIs or OAuth, use extensions. See [docs/models.md](docs/models.md) and [docs/custom-provider.md](docs/custom-provider.md).
 
 ## Interactive Mode
 
 <p align="center"><img src="docs/images/interactive-mode.png" alt="Interactive Mode" width="600"></p>
+
+*Historical screenshot inherited through Prime Agent, not a current Base Context capture.*
 
 The interface from top to bottom:
 
@@ -167,11 +149,11 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
-| `/quit` | Quit Prime Agent |
+| `/quit` | Quit Base Context |
 
 ### Keyboard Shortcuts
 
-See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).
+See `/hotkeys` for the full list. Customize via `~/.base-context/keybindings.json`. See [docs/keybindings.md](docs/keybindings.md).
 
 **Commonly used:**
 
@@ -198,23 +180,23 @@ Submit messages while the agent is working:
 - While browsing, **Enter** applies the edit as steering input and **Alt+Enter** applies it as a follow-up; submitting an empty edit deletes the item
 - **Ctrl+Alt+Up / Ctrl+Alt+Down** move the selected item earlier or later within its queue
 
-On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Prime Agent can receive the follow-up shortcut.
+On Windows Terminal, `Alt+Enter` is fullscreen by default. Remap it in [docs/terminal-setup.md](docs/terminal-setup.md) so Base Context can receive the follow-up shortcut.
 
 Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUpMode` can be `"one-at-a-time"` (default, waits for response) or `"all"` (delivers all queued at once). `transport` selects provider transport preference (`"sse"`, `"websocket"`, or `"auto"`) for providers that support multiple transports.
 
 ## Sessions
 
-Sessions are stored as JSONL files with a tree structure. Each entry has an `id` and `parentId`, enabling in-place branching without creating new files. See [docs/session-format.md](docs/session-format.md) for file format.
+Saved sessions use native session journals with a tree structure. Entries have an `id` and `parentId`, enabling in-place branching. Do not treat the journal as plain JSONL or edit it as a text log. See [docs/session-format.md](docs/session-format.md) for the format.
 
 ### Management
 
-Sessions auto-save as flat JSONL files under `~/.prime/agent/sessions/`. Each session header records its working directory, which the searchable session view uses to identify and open saved sessions.
+Sessions auto-save under `~/.base-context/sessions/`. Each session header records its working directory. Use the native saved-session view to search and reopen them.
 
 ```bash
-prime-agent -c                  # Continue most recent session
-prime-agent -r [path|id]        # Browse past sessions or resume one directly
-prime-agent --no-session        # Ephemeral mode (don't save)
-prime-agent --fork <path|id>    # Fork specific session file or ID into a new session
+base-context -c                  # Continue most recent session
+base-context -r [path|id]        # Browse past sessions or resume one directly
+base-context --no-session        # Ephemeral mode (don't save)
+base-context --fork <path|id>    # Fork specific session file or ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--resume <id>` or `--fork <id>`.
@@ -224,6 +206,8 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 **`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file.
 
 <p align="center"><img src="docs/images/tree-view.png" alt="Tree View" width="600"></p>
+
+*Historical screenshot inherited through Prime Agent, not a current Base Context capture.*
 
 - Search by typing, fold/unfold and jump between branches with Ctrl+←/Ctrl+→ or Alt+←/Alt+→, page with ←/→
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
@@ -243,7 +227,7 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+Compaction is lossy; it does not delete the retained source history. Use `/tree` to revisit it. `compaction.model` and `branchSummary.model` can select independent summary models and effort; their absent-setting behavior differs. See [settings](docs/settings.md#compaction) and [compaction internals](docs/compaction.md).
 
 ## Settings
 
@@ -251,21 +235,21 @@ Use `/settings` to modify common options, or edit JSON files directly:
 
 | Location | Scope |
 |----------|-------|
-| `~/.prime/agent/settings.json` | Global (all projects) |
-| `.prime/agent/settings.json` | Project (overrides global) |
+| `~/.base-context/settings.json` | Global (all projects) |
+| `.base-context/settings.json` | Project (overrides global) |
 
 See [docs/settings.md](docs/settings.md) for all options.
 
 ### Update checks
 
-Prime Agent stable builds fetch `https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/latest.json` to check whether a newer version exists. Beta builds fetch `beta.json` and remain on the beta channel. Override the base URL with `PRIME_AGENT_DOWNLOAD_BASE_URL`. Disable version checks with `PI_SKIP_VERSION_CHECK=1`.
+Update lookup uses the owned `@ponythewhite/base-context` package by default. A private release destination requires explicit `BASE_CONTEXT_DOWNLOAD_BASE_URL`; there is no inherited upstream download destination. This does not imply that a public release is available. See [update settings](docs/settings.md#update-checks).
 
-Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, including update checks and package update checks.
+Set `BASE_CONTEXT_SKIP_VERSION_CHECK=1` to skip version checks. Use `--offline` or `BASE_CONTEXT_OFFLINE=1` to disable startup network operations, including version and package update checks.
 
 ## Context Files
 
-Prime Agent loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
-- `~/.prime/agent/AGENTS.md` (global)
+Base Context loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
+- `~/.base-context/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
 
@@ -275,7 +259,7 @@ Disable context file loading with `--no-context-files` (or `-nc`).
 
 ### System Prompt
 
-Replace the default system prompt with `.prime/agent/SYSTEM.md` (project) or `~/.prime/agent/SYSTEM.md` (global). Append without replacing via `APPEND_SYSTEM.md`.
+Replace the default system prompt with `.base-context/SYSTEM.md` (project) or `~/.base-context/SYSTEM.md` (global). Append without replacing via `APPEND_SYSTEM.md`.
 
 ## Customization
 
@@ -284,19 +268,23 @@ Replace the default system prompt with `.prime/agent/SYSTEM.md` (project) or `~/
 Reusable prompts as Markdown files. Type `/name` to expand.
 
 ```markdown
-<!-- ~/.prime/agent/prompts/review.md -->
+<!-- ~/.base-context/prompts/review.md -->
 Review this code for bugs, security issues, and performance problems.
 Focus on: {{focus}}
 ```
 
-Place in `~/.prime/agent/prompts/`, `.prime/agent/prompts/`, or a [Prime Agent package](#prime-agent-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
+Place in `~/.base-context/prompts/`, `.base-context/prompts/`, or a [Base Context package](#base-context-packages) to share with others. See [docs/prompt-templates.md](docs/prompt-templates.md).
 
 ### Skills
 
-On-demand capability packages following the [Agent Skills standard](https://agentskills.io). At startup, Prime Agent gives the model each visible skill's name, type, description, and location. The full `SKILL.md` stays out of context until the model inspects it with `ipython` or you explicitly invoke `/skill:name`.
+On-demand capability packages follow the [Agent Skills standard](https://agentskills.io). Startup metadata advertises visible skill names, types, descriptions, and locations. Full instructions load on demand.
+
+**Native epochs:** select an advertised skill with `prime_context` using `{"action":"skill","name":"..."}`. The result supplies the captured instructions and a canonical source reference. Use that returned ref and field with `action="read"` for bounded recovery. Do not reopen the mutable location to replace a selected version. A committed epoch retains its selected descriptor and instruction body; a later selection after a new epoch commits can capture updated content. File edits alone do not replace an active selection, and its captured body remains recoverable after rotation.
+
+Native model-invocable skills are advertised only when the configured tools permit that selection/recovery route. A disabled, replaced, or disallowed tool is not enabled implicitly. Explicit `/skill:name` invocation remains available. **Generic non-native requests** retain the existing `ipython` file-read path. See [how skills work](docs/skills.md#how-skills-work).
 
 ```markdown
-<!-- ~/.prime/agent/skills/my-skill/SKILL.md -->
+<!-- ~/.base-context/skills/my-skill/SKILL.md -->
 ---
 name: my-skill
 description: Use this skill when the user asks about X.
@@ -309,11 +297,11 @@ description: Use this skill when the user asks about X.
 2. Then that
 ```
 
-Skills can also be Python-backed. A Python skill is a normal skill directory with `SKILL.md` plus a Python package at `src/<import_name>/`. Prime Agent installs it into the persistent Python kernel and exposes it by import name, so the model can call it directly, inspect it with `help()`, or use any console scripts the skill declares.
+Skills can also be Python-backed, with `SKILL.md`, `pyproject.toml`, and `src/<import_name>/`. Normal kernel setup installs these packages editable and exposes their import names. Owned installations use the selected release-local runtime; manual Python overrides have separate setup requirements. Captured skill instructions are not immutable snapshots of Python packages or filesystem contents. See [Python-backed skills](docs/skills.md#python-backed-skills).
 
-Place in `~/.prime/agent/skills/`, `~/.agents/skills/`, `.prime/agent/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Prime Agent package](#prime-agent-packages) to share with others. See [docs/skills.md](docs/skills.md).
+Place in `~/.base-context/skills/`, `~/.agents/skills/`, `.base-context/skills/`, or `.agents/skills/` (from `cwd` up through parent directories) or a [Base Context package](#base-context-packages) to share with others. See [docs/skills.md](docs/skills.md).
 
-Prime Agent ships with a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
+Base Context includes a built-in `websearch` skill (Google search via the [Serper](https://serper.dev) API). It loads by default; run `/login`, switch to **MCP Connections**, and choose "Serper (web search)" to add your key. Disable it with `bundledSkills.websearch: false`, or override it with your own `websearch` skill in any location above. See [docs/skills.md#built-in-skills](docs/skills.md#built-in-skills).
 
 ### MCP Integrations
 
@@ -333,12 +321,12 @@ Built-in integrations for Linear and Notion ship disabled. **Logging in enables 
 /mcp logout <name>   disconnect
 ```
 
-Credentials are stored once in `~/.prime/agent/auth.json` (under `mcp:<name>`); the kernel reads them directly and the host refreshes expired tokens. Enablement is derived from whether valid credentials exist, so there is no separate on/off switch.
+Credentials are stored once in `~/.base-context/auth.json` (under `mcp:<name>`); the kernel reads them directly and the host refreshes expired tokens. Enablement is derived from whether valid credentials exist, so there is no separate on/off switch.
 
 **Add your own server.** Declare it under `mcpServers` in settings, then ship a tiny Python skill package that subclasses `McpIntegration`:
 
 ```jsonc
-// ~/.prime/agent/settings.json
+// ~/.base-context/settings.json
 {
   "mcpServers": {
     "acme": { "type": "http", "url": "https://mcp.acme.com/mcp", "oauth": true }
@@ -347,7 +335,7 @@ Credentials are stored once in `~/.prime/agent/auth.json` (under `mcp:<name>`); 
 ```
 
 ```python
-# ~/.prime/agent/skills/acme/src/acme/__init__.py
+# ~/.base-context/skills/acme/src/acme/__init__.py
 from rlm import McpIntegration
 
 class Acme(McpIntegration):
@@ -368,9 +356,13 @@ See [docs/mcp-integrations.md](docs/mcp-integrations.md) for the full authoring 
 
 <p align="center"><img src="docs/images/doom-extension.png" alt="Doom Extension" width="600"></p>
 
-TypeScript modules that extend Prime Agent with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
+*Historical screenshot inherited through Prime Agent, not a current Base Context capture.*
+
+TypeScript modules that extend Base Context with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
 
 ```typescript
+import type { ExtensionAPI } from "@ponythewhite/base-context";
+
 export default function (pi: ExtensionAPI) {
   pi.registerTool({ name: "deploy", ... });
   pi.registerCommand("stats", { ... });
@@ -378,7 +370,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-The default export can also be `async`. Prime Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
+The default export can also be `async`. Base Context waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
@@ -390,49 +382,48 @@ The default export can also be `async`. Prime Agent waits for async extension fa
 - Git checkpointing and auto-commit
 - SSH and sandbox execution
 - MCP server integration
-- Make Prime Agent look like Claude Code
+- Make Base Context look like Claude Code
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
-Place in `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, or a [Prime Agent package](#prime-agent-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
+Place in `~/.base-context/extensions/`, `.base-context/extensions/`, or a [Base Context package](#base-context-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).
 
 ### Themes
 
-Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Prime Agent immediately applies changes.
+Built-in: `dark`, `light`. Themes hot-reload: modify the active theme file and Base Context immediately applies changes.
 
-Place in `~/.prime/agent/themes/`, `.prime/agent/themes/`, or a [Prime Agent package](#prime-agent-packages) to share with others. See [docs/themes.md](docs/themes.md).
+Place in `~/.base-context/themes/`, `.base-context/themes/`, or a [Base Context package](#base-context-packages) to share with others. See [docs/themes.md](docs/themes.md).
 
-### Prime Agent Packages
+### Base Context Packages
 
-Bundle and share extensions, skills, prompts, and themes via npm or git.
+Bundle extensions, skills, prompts, and themes through npm or git sources you control. The example sources below are placeholders, not published Base Context release artifacts.
 
-> **Security:** Prime Agent packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
+> **Security:** Base Context packages run with full system access. Extensions execute arbitrary code, and skills can instruct the model to perform any action including running executables. Review source code before installing third-party packages.
 
 ```bash
-prime-agent package install npm:@foo/prime-agent-tools
-prime-agent package install npm:@foo/prime-agent-tools@1.2.3  # pinned version
-prime-agent package install git:github.com/user/repo
-prime-agent package install git:github.com/user/repo@v1       # tag or commit
-prime-agent package install git:git@github.com:user/repo
-prime-agent package install https://github.com/user/repo
-prime-agent package install ssh://git@github.com/user/repo
-prime-agent package remove npm:@foo/prime-agent-tools
-prime-agent package list
-prime-agent package update                                  # update packages, except pinned versions
-prime-agent package update npm:@foo/prime-agent-tools       # update one package
-prime-agent update                                          # update Prime Agent
-prime-agent update --force                                  # reinstall Prime Agent even if current
-prime-agent config                                          # enable/disable package resources
+base-context package install npm:@foo/agent-tools
+base-context package install npm:@foo/agent-tools@1.2.3  # pinned version
+base-context package install git:github.com/user/repo
+base-context package install git:github.com/user/repo@v1       # tag or commit
+base-context package install git:git@github.com:user/repo
+base-context package install https://github.com/user/repo
+base-context package install ssh://git@github.com/user/repo
+base-context package remove npm:@foo/agent-tools
+base-context package list
+base-context package update                                  # update packages, except pinned versions
+base-context package update npm:@foo/agent-tools       # update one package
+base-context update                                          # update Base Context
+base-context update --force                                  # reinstall Base Context even if current
+base-context config                                          # enable/disable package resources
 ```
 
-Packages install to `~/.prime/agent/git/` (git) or global npm. Use `--local` for project-local installs (`.prime/agent/git/`, `.prime/agent/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@20", "--", "npm"]`.
+Packages install to `~/.base-context/git/` (git) or global npm. Use `--local` for project-local installs (`.base-context/git/`, `.base-context/npm/`). Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@22.12.0", "--", "npm"]`.
 
 Create a package by adding the inherited `pi` manifest key to `package.json`:
 
 ```json
 {
-  "name": "my-prime-agent-package",
-  "keywords": ["prime-agent-package"],
+  "name": "my-agent-package",
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"],
@@ -442,7 +433,7 @@ Create a package by adding the inherited `pi` manifest key to `package.json`:
 }
 ```
 
-Without a `pi` manifest, Prime Agent auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
+Without a `pi` manifest, Base Context auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
 
 See [docs/packages.md](docs/packages.md).
 
@@ -450,8 +441,10 @@ See [docs/packages.md](docs/packages.md).
 
 ### SDK
 
+These imports refer to the built source workspace packages, not an available public npm release.
+
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "prime-agent";
+import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@ponythewhite/base-context";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
@@ -473,7 +466,7 @@ See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
 For non-Node.js integrations, use RPC mode over stdin/stdout:
 
 ```bash
-prime-agent --mode rpc
+base-context --mode rpc
 ```
 
 RPC mode uses strict LF-delimited JSONL framing. Clients must split records on `\n` only. Do not use generic line readers like Node `readline`, which also split on Unicode separators inside JSON payloads.
@@ -482,30 +475,28 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 ## Upstream
 
-Prime Agent is forked from [pi-mono](https://github.com/badlogic/pi-mono) by Mario Zechner and keeps MIT attribution in the root license.
-
-The package architecture, extension model, and source package names still reflect that upstream lineage while the distributed command and release artifacts are branded for Prime Agent.
+Base Context descends from [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), which forked [pi-mono](https://github.com/badlogic/pi-mono) by Mario Zechner. The package architecture and extension model retain that lineage, including the `pi` manifest key. Copyright and MIT attribution remain in the [root license](../../LICENSE). Historical screenshots in this README are inherited through Prime Agent; they are not current Base Context captures.
 
 ## CLI Reference
 
 ```bash
-prime-agent [options] [@files...] [messages...]
+base-context [options] [@files...] [messages...]
 ```
 
-Run `prime-agent help` for the command list and `prime-agent help <command>` for details.
+Run `base-context help` for the command list and `base-context help <command>` for details.
 
 ### Agent Commands
 
 ```bash
-prime-agent agents                         # Search running, idle, and inactive sessions
-prime-agent list [--all]                   # List active or saved agents
-prime-agent attach <agent>                 # Attach the interactive UI
-prime-agent stop <agent>                   # Stop one agent
-prime-agent rename <agent> <name>          # Rename an agent
-prime-agent send <agent> <message>         # Send an agent-to-agent message
-prime-agent status                         # Show background service status
-prime-agent doctor [--fix]                 # Inspect or safely clean up background services
-prime-agent shutdown [--force]             # Stop every agent, worker, and background service
+base-context agents                         # Search running, idle, and inactive sessions
+base-context list [--all]                   # List active or saved agents
+base-context attach <agent>                 # Attach the interactive UI
+base-context stop <agent>                   # Stop one agent
+base-context rename <agent> <name>          # Rename an agent
+base-context send <agent> <message>         # Send an agent-to-agent message
+base-context status                         # Show background service status
+base-context doctor [--fix]                 # Inspect or safely clean up background services
+base-context shutdown [--force]             # Stop every agent, worker, and background service
 ```
 
 `shutdown` asks for confirmation. `shutdown --force` skips confirmation and kills unresponsive workers and their tracked child processes.
@@ -513,9 +504,9 @@ prime-agent shutdown [--force]             # Stop every agent, worker, and backg
 ### Scheduled Prompts
 
 ```bash
-prime-agent schedule list [--all] [agent]
-prime-agent schedule add <agent> <schedule> -- <message>
-prime-agent schedule cancel <job-id>
+base-context schedule list [--all] [agent]
+base-context schedule add <agent> <schedule> -- <message>
+base-context schedule cancel <job-id>
 ```
 
 Schedules run prompts later or repeatedly. A schedule can be a supported one-time expression such as `in 5m` or a cron expression.
@@ -525,12 +516,12 @@ Schedules run prompts later or repeatedly. A schedule can be a supported one-tim
 Packages bundle capabilities such as extensions, skills, prompts, and themes.
 
 ```bash
-prime-agent package install <source> [--local]
-prime-agent package remove <source> [--local]
-prime-agent package list
-prime-agent package update [source]
-prime-agent update [--force]                   # Update Prime Agent itself
-prime-agent config                             # Enable/disable package resources
+base-context package install <source> [--local]
+base-context package remove <source> [--local]
+base-context package list
+base-context package update [source]
+base-context update [--force]                   # Update Base Context itself
+base-context config                             # Enable/disable package resources
 ```
 
 ### Modes
@@ -542,10 +533,10 @@ prime-agent config                             # Enable/disable package resource
 | `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
 
-In print mode, Prime Agent also reads piped stdin and merges it into the initial prompt:
+In print mode, Base Context also reads piped stdin and merges it into the initial prompt:
 
 ```bash
-cat README.md | prime-agent -p "Summarize this text"
+cat README.md | base-context -p "Summarize this text"
 ```
 
 ### Model Options
@@ -555,10 +546,10 @@ cat README.md | prime-agent -p "Summarize this text"
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
-| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (subject to model support) |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
 
-Use `prime-agent model list [search]` to list available models.
+Use `base-context model list [search]` to list available models.
 
 ### Session Options
 
@@ -570,7 +561,7 @@ Use `prime-agent model list [search]` to list available models.
 | `--session-dir <dir>` | Custom session storage directory |
 | `--no-session` | Ephemeral mode (don't save) |
 
-Use `prime-agent session export <file> [output]` to export a saved session to HTML.
+Use `base-context session export <file> [output]` to export a saved session to HTML.
 
 ### Tool Options
 
@@ -580,7 +571,7 @@ Use `prime-agent session export <file> [output]` to export a saved session to HT
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `ipython`
+The persistent kernel tool is `ipython`. Native context selection and recovery use `prime_context` when permitted for the request. Tool allowlists also affect native skill advertisement; see [Skills](#skills).
 
 ### Resource Options
 
@@ -630,75 +621,74 @@ Gates run before the continuation, turn, token, and wall-clock limits are evalua
 Prefix files with `@` to include in the message:
 
 ```bash
-prime-agent @prompt.md "Answer this"
-prime-agent -p @screenshot.png "What's in this image?"
-prime-agent @code.ts @test.ts "Review these files"
+base-context @prompt.md "Answer this"
+base-context -p @screenshot.png "What's in this image?"
+base-context @code.ts @test.ts "Review these files"
 ```
 
 ### Examples
 
 ```bash
 # Interactive with initial prompt
-prime-agent "List all .ts files in src/"
+base-context "List all .ts files in src/"
 
 # Non-interactive
-prime-agent -p "Summarize this codebase"
+base-context -p "Summarize this codebase"
 
 # Non-interactive with piped stdin
-cat README.md | prime-agent -p "Summarize this text"
+cat README.md | base-context -p "Summarize this text"
 
 # Different model
-prime-agent --provider openai --model gpt-4o "Help me refactor"
+base-context --provider openai --model gpt-4o "Help me refactor"
 
 # Model with provider prefix (no --provider needed)
-prime-agent --model openai/gpt-4o "Help me refactor"
+base-context --model openai/gpt-4o "Help me refactor"
 
 # Model with thinking level shorthand
-prime-agent --model sonnet:high "Solve this complex problem"
+base-context --model sonnet:high "Solve this complex problem"
 
 # Limit model cycling
-prime-agent --models "claude-*,gpt-4o"
+base-context --models "claude-*,gpt-4o"
 
 # Restrict to the built-in Python REPL tool
-prime-agent --tools ipython -p "Review the code"
+base-context --tools ipython -p "Review the code"
 
 # High thinking level
-prime-agent --thinking high "Solve this complex problem"
+base-context --thinking high "Solve this complex problem"
 ```
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory (default: `~/.prime/agent`) |
-| `PRIME_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
-| `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
-| `PI_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
-| `PI_OFFLINE` | Disable startup network operations, including update checks and package update checks |
-| `PI_SKIP_VERSION_CHECK` | Skip the Prime Agent version update check at startup. This prevents the release manifest request |
-| `PRIME_AGENT_TELEMETRY` | Override pseudonymous aggregate usage analytics with `1`/`true`/`yes` or `0`/`false`/`no` |
-| `PRIME_AGENT_TELEMETRY_ENDPOINT` | Override the aggregate analytics ingestion endpoint |
+| `BASE_CONTEXT_HOME` | Absolute global state directory (default: `~/.base-context`) |
+| `BASE_CONTEXT_SESSION_DIR` | Session storage directory (overridden by `--session-dir`) |
+| `BASE_CONTEXT_PACKAGE_DIR` | Package directory override |
+| `BASE_CONTEXT_OFFLINE` | Disable startup network operations, including version and package update checks |
+| `BASE_CONTEXT_SKIP_VERSION_CHECK` | Skip the Base Context version update check |
+| `BASE_CONTEXT_DOWNLOAD_BASE_URL` | Explicit private release manifest and tarball destination; not evidence of a published release |
+| `BASE_CONTEXT_TELEMETRY` | Opt in to or disable aggregate usage analytics; off by default |
+| `BASE_CONTEXT_TELEMETRY_ENDPOINT` | Explicit aggregate analytics endpoint |
+| `BASE_CONTEXT_TELEMETRY_API_KEY` | Dedicated aggregate analytics credential |
 | `DO_NOT_TRACK` | Disable aggregate usage analytics when set to `1`/`true`/`yes` |
-| `PRIME_AGENT_DOWNLOAD_BASE_URL` | Override the Prime Agent release manifest and tarball base URL |
-| `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
-| `PRIME_API_KEY` | Prime Inference API key; also used for trace sharing if it has `agent_traces` scope |
-| `PRIME_AGENT_TRACES_API_KEY` | Prime API key used only for opt-in trace sharing |
-| `PRIME_AGENT_TRACES_BASE_URL` | Override the Prime Agent trace upload API base URL |
-| `PRIME_AGENT_KERNEL_PYTHON` | Use an existing Python environment with `prime-agent-runtime` instead of auto-bootstrapping `~/.prime/agent/kernel-venv` |
+| `PI_CACHE_RETENTION` | Provider-layer cache preference; `long` requests extended retention where supported |
+| `PRIME_API_KEY` | Prime Inference API key |
+| `BASE_CONTEXT_KERNEL_PYTHON` | Existing Python with a current `base-context-runtime`; manual override outside default owned pairing |
+| `BASE_CONTEXT_KERNEL_VENV` | Select a different Python venv |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
-The remaining `PI_*` variables in this table are compatibility names still read by the current runtime. They do not change the application name, command, or default `~/.prime/agent` configuration path.
+Provider and shared environment names retain their own contracts. They are not product-state aliases. See [settings](docs/settings.md) for update and analytics policy, and [skills](docs/skills.md#python-backed-skills) for Python environment behavior.
 
 ## Contributing & Development
 
-See [docs/development.md](docs/development.md) for setup and debugging.
+Use the [Base Context repository](https://github.com/BaseModelAI/base-context) for project information and [discussions](https://github.com/BaseModelAI/base-context/discussions) for questions. Follow the owned [contribution guidelines](../../CONTRIBUTING.md) and [security policy](../../SECURITY.md). See [docs/development.md](docs/development.md) for source setup and debugging.
 
 ## License
 
-MIT
+[MIT](../../LICENSE). Preserve the upstream copyright and license notices.
 
 ## See Also
 
-- [Prime Agent AI](../ai): Core LLM toolkit
-- [Prime Agent Core](../agent): Agent framework
-- [Prime Agent TUI](../tui): Terminal UI components
+- [`@ponythewhite/base-context-ai`](../ai): Core LLM toolkit
+- [`@ponythewhite/base-context-agent`](../agent): Agent framework
+- [`@ponythewhite/base-context-tui`](../tui): Terminal UI components

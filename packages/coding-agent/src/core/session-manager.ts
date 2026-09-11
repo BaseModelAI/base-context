@@ -9,8 +9,8 @@ import type {
 	Usage,
 } from "@ponythewhite/base-context-ai";
 import { randomUUID } from "crypto";
-import { existsSync, readdirSync, readFileSync, realpathSync, type Stats, statSync } from "fs";
-import { open as openFile, stat } from "fs/promises";
+import { type Dir, existsSync, readdirSync, readFileSync, realpathSync, type Stats, statSync } from "fs";
+import { opendir, open as openFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
@@ -883,6 +883,45 @@ function sessionCatalogFiles(sessionDir: string): string[] {
 		for (const entry of readdirSync(directory)) if (entry.endsWith(".jsonl")) paths.push(join(directory, entry));
 	}
 	return paths;
+}
+
+/** Native catalog pages visit the existing directories without an all-paths array. */
+export async function* iterateSessionCatalogFiles(sessionDir: string): AsyncGenerator<string> {
+	const entries = async function* (directory: string) {
+		let handle: Dir;
+		try {
+			handle = await opendir(directory);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
+		}
+		for await (const entry of handle) yield entry;
+	};
+	for await (const entry of entries(sessionDir)) if (entry.name.endsWith(".jsonl")) yield join(sessionDir, entry.name);
+	// Match the existing catalog's root-files, project-directories, legacy-files order.
+	for await (const entry of entries(sessionDir)) {
+		if (entry.isDirectory() && /^--.+--$/.test(entry.name)) {
+			const directory = join(sessionDir, entry.name);
+			for await (const child of entries(directory))
+				if (child.name.endsWith(".jsonl")) yield join(directory, child.name);
+		}
+	}
+	if (resolve(sessionDir) === resolve(getSessionsDir())) {
+		for await (const entry of entries(getDefaultAgentDir()))
+			if (entry.name.endsWith(".jsonl")) yield join(getDefaultAgentDir(), entry.name);
+	}
+}
+
+/** Directory membership only; the existing source reader still decides readability. */
+export function isSessionCatalogFile(path: string, sessionDir: string): boolean {
+	const directory = dirname(resolve(path));
+	const root = resolve(sessionDir);
+	return (
+		path.endsWith(".jsonl") &&
+		(directory === root ||
+			(dirname(directory) === root && /^--.+--$/.test(basename(directory))) ||
+			(root === resolve(getSessionsDir()) && directory === resolve(getDefaultAgentDir())))
+	);
 }
 
 export function findMostRecentSession(sessionDir: string): string | null {

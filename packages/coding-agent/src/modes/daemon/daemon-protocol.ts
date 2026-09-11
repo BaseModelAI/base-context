@@ -6,6 +6,9 @@ import type {
 	AgentSessionMessageSafetyStatus,
 } from "../../core/agent-messages.js";
 import type { SessionActionRecoverySnapshot } from "../../core/agent-session.js";
+import type { SavedSessionPage, SavedSessionPageQuery } from "./saved-session-page.js";
+export type DaemonSavedSessionPage = SavedSessionPage;
+
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -91,8 +94,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 40 requires selected-skill epochs and scoped queued skill bindings.
 // Revision 41 honors explicit compaction model and effort selection.
 // Revision 42 honors explicit branch-summary model and effort selection.
-export const DAEMON_SCHEMA_REVISION = 42;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-42-branch-summary-model";
+// Revision 43 requires bounded saved-session query pages on the native catalog path.
+export const DAEMON_SCHEMA_REVISION = 43;
+export const DAEMON_SCHEMA_ID = "protocol-11-schema-43-saved-session-pages";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -404,13 +408,20 @@ export interface DaemonUpdateRestartManifest {
 }
 
 export type DaemonSavedSessionListCommand =
-	| { id?: string; type: "list_saved_sessions"; activeSessionId: string; scope: AgentConnectionSavedSessionScope }
+	| {
+			id?: string;
+			type: "list_saved_sessions";
+			activeSessionId: string;
+			scope: AgentConnectionSavedSessionScope;
+			page?: SavedSessionPageQuery;
+	  }
 	| {
 			id?: string;
 			type: "list_saved_sessions";
 			cwd: string;
 			sessionDir?: string;
 			scope: AgentConnectionSavedSessionScope;
+			page?: SavedSessionPageQuery;
 	  };
 
 export type DaemonCommand =
@@ -730,7 +741,7 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
 	minProtocol: 11,
-	minSchemaRevision: 42,
+	minSchemaRevision: 43,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 

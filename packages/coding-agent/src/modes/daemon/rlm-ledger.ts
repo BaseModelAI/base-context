@@ -580,12 +580,18 @@ export class RlmSpawnLedger {
 	}
 
 	/** Live edges reconciled by stat, exactly like family(): a dead parent or child drops the edge. */
-	liveEdges(): Promise<RlmLedgerEdge[]> {
-		return this.enqueue(() => this.liveEdgesUnlocked());
+	liveEdges(options: { strict?: boolean } = {}): Promise<RlmLedgerEdge[]> {
+		return this.enqueue(() =>
+			this.liveEdgesUnlocked(
+				[...this.replaySync(options.strict).values()].filter((edge) => !edge.deleted),
+				options.strict,
+			),
+		);
 	}
 
 	private async liveEdgesUnlocked(
 		edges = [...this.replaySync().values()].filter((edge) => !edge.deleted),
+		strict = false,
 	): Promise<RlmLedgerEdge[]> {
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
@@ -594,7 +600,9 @@ export class RlmSpawnLedger {
 			let ok = false;
 			try {
 				ok = (await stat(path)).isFile();
-			} catch {
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (strict && code !== "ENOENT" && code !== "ENOTDIR") throw error;
 				ok = false;
 			}
 			statCache.set(path, ok);
@@ -842,15 +850,19 @@ export class RlmSpawnLedger {
 		});
 	}
 
-	private replaySync(): Map<string, RlmLedgerEdge> {
+	private replaySync(strict = false): Map<string, RlmLedgerEdge> {
 		const edges = new Map<string, RlmLedgerEdge>();
-		const records = this.eventLog.replaySync((line, index) => {
-			const record = parseLedgerLine(line, index);
-			if (record === undefined) {
-				this.log(`RLM ledger: skipped record with unknown op on line ${index + 1}`);
-			}
-			return record;
-		});
+		const records = this.eventLog.replaySync(
+			(line, index) => {
+				const record = parseLedgerLine(line, index);
+				if (record === undefined) {
+					if (strict) throw new Error(`Unsupported RLM ledger operation on line ${index + 1}`);
+					this.log(`RLM ledger: skipped record with unknown op on line ${index + 1}`);
+				}
+				return record;
+			},
+			{ requireCompleteTail: strict },
+		);
 		for (const record of records) {
 			if (record.op === "meta") continue;
 			const key = edgeKey(record.childId, record.child);

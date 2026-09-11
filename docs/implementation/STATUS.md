@@ -2394,3 +2394,85 @@ Required `npm run check` passed first (PID3917521,5.427920550107956s;
 was needed. No live provider, benchmark, installed lifecycle or publication run was
 made. Source results do not establish cost/efficiency gains, physical billing or
 completion of the active implementation/release objective.
+
+## W71 / G08 — bounded native saved-session pages
+
+The native saved-session catalog and agents-view consumer use bounded query pages
+rather than collecting, merging, sending and retaining the whole saved archive.
+The existing `list_saved_sessions`/catalog operation remains the route. Its saved
+page budget is at most64 rows, including required ancestor/context rows, and1MiB
+encoded page data. The separate live roster remains outside that saved-page budget.
+Source iteration still uses W55 indexed per-journal summaries and its bounded
+optional cache; this does not reopen or replace W55's native history-read path.
+
+Search/scope filtering, passive-descendant identities/dedup and needed relationships
+are part of page selection. Relevant colliding saved file/session aliases refuse
+explicitly as ambiguous sources; no full alias-group reconstruction or archive
+alias index is claimed. Required parents, cursor and bounded display facts share
+that refusal boundary. An oversized required row/closure is an explicit scoped
+refusal, not clipped relationships, false absence or a full-array fallback. Page
+selection does not keep all paths, all rows, a full presence set or an all-results
+sort under another name. The consumer replaces/releases pages and bounds pending
+query work instead of accumulating progress rows, pages or cursor history.
+Page-derived counts/rollups are not presented as whole-archive totals.
+
+Root chose preservation of the actual agents-view order: section, empty-session/
+anchor, heartbeat and busy-descendant priorities, then the existing activity,
+creation, title and ID ordering within the hierarchy. Modified/path alone is not
+that order. Continuation uses the existing ordering context and row identities;
+relevant context changes reset the saved page. No new snapshot registry, index,
+cache, hash or ranking scheme is added. This is live paging, not a frozen snapshot
+or completeness claim across concurrent metadata changes. Refresh may be needed.
+
+Metadata traversal can revisit sources for ancestry and ordering. These
+page/request/component limits do not establish global heap/RSS, bounded latency,
+disk or live-roster size. Generic `SessionManager.list`/`listAll`, internal array
+callers and `DaemonAgentConnection.listSavedSessions` retain full-array contracts;
+collecting native pages into an explicit generic array is not a bounded-retention
+claim. Generic row callbacks run after page receipt; old per-file scan progress/totals
+are not fabricated. The actual agents view consumes/replaces pages directly.
+The existing per-ledger projection remains limited to32MiB/100,000 records; native
+page reads require complete tails and known operations, without changing generic
+readers or write/repair owners. Existing catalog
+queue/shutdown ownership and source-read errors remain explicit; no index-error-as-
+absence or legacy full-history scan fallback is introduced. No model call is used
+to search or page sessions.
+
+Daemon schema/minimum43 (`protocol-11-schema-43-saved-session-pages`) fences the
+changed native catalog request/reply contract. Protocol11, per-journal history
+index16, kernel4/bootstrap11, epoch and queued-action formats stay unchanged.
+W70/W69/W68/W67 and all frozen campaigns are settled. No provider, benchmark,
+installed lifecycle or publication run is authorized; the overall objective
+remains active and incomplete.
+
+The separate known package-README correction replaces upstream product install/
+control/state/package guidance with owned Base Context guidance and source-only
+availability. It distinguishes native captured Skill instructions from generic
+mutable Python/file reads. Existing provider wire/env names, inherited conventions,
+Python `rlm` import, legal ancestry and historical screenshots remain. No installer,
+provider/auth behavior, Sol prompt, publication or platform-support decision is
+changed by that documentation correction.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx and package Vitest (PID3958288,29.356284932000563s;
+2passed/216skipped). The source/direct-daemon case used real session journals and
+the existing persisted RLM fixture for page/default/order/next/previous/search/
+ancestor paths, no all-row progress, encoded-byte refusal and no runtime hydration.
+The agents-view case used real consumer methods with a mock transport for scope
+retention, one-active/one-latest search, stale-result rejection, next/previous page
+replacement and loaded-only notice. No new cases, suite, matrix or harness were
+added. The ambiguity-refusal boundary is source implementation, not a claim of
+separate runtime coverage. These cases do not measure archive-scale latency or
+certify global memory, a frozen snapshot, or every transport path.
+
+Required `npm run check` passed first (PID3958293,5.054459482897073s;
+1046files/one formatting fix, types, installer/browser checks). No failing case or
+check, runtime correction or focused rerun occurred. Source review before applying
+identified the saved-alias ambiguity; one refreshed private alternative fixed that
+boundary and removed the unused local. Only the refreshed full alternative was
+applied. The original artifact was never applied.
+
+The known package README correction was integrated in the same change without a
+separate pipeline. No live provider, benchmark, installed lifecycle or publication
+run occurred. No current-native overall accuracy/cost/efficiency or complete G08
+claim follows from this bounded listing path; the overall objective remains open.
