@@ -66,6 +66,28 @@ Existing npm/pnpm/yarn/bun global installations stay externally owned. Their nor
 updater remains supported, but they do not gain this paired rollback guarantee.
 The owned installer does not convert or overwrite those global installations.
 
+For an unpublished local package set, use the dedicated installer from the matching,
+freshly built and extracted main package. Supply the other first-party tarballs
+explicitly; the installer does not scan adjacent files or rewrite dependency origins:
+
+```bash
+PACKS=/absolute/path/to/pack
+node /absolute/path/to/extracted-main/package/dist/installer.mjs install \
+  /absolute/path/to/new-install-root null \
+  "$PACKS/ponythewhite-base-context-0.1.0.tgz" 0.1.0 \
+  --local-dependency "$PACKS/ponythewhite-base-context-ai-0.1.0.tgz" \
+  --local-dependency "$PACKS/ponythewhite-base-context-tui-0.1.0.tgz" \
+  --local-dependency "$PACKS/ponythewhite-base-context-agent-0.1.0.tgz"
+```
+
+Use `null` only for a new, unselected owned root. Each repeated option names a local
+regular file; relative paths use the invocation's original working directory.
+Use a private HOME and install root for an isolated check. The dedicated entry skips
+agent/model/auth startup, but npm scripts and Python bootstrap still run and can
+download dependencies. This is not an offline install. Preparation must still finish
+before the CLI/Python pair becomes selected. Extraction alone is not installation
+or activation, and old package sets do not acquire this new installer option.
+
 Base Context uses its own `~/.base-context` state. Copied OAuth clients are not globally
 authorized. Supported explicit credential routes and the narrow read-only existing OpenAI
 subscription API are documented in the [SDK guide](packages/coding-agent/docs/sdk.md).

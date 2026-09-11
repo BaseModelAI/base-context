@@ -40,7 +40,20 @@ async function main(): Promise<void> {
 				? captureOwnedUpdate(ownInstallation)
 				: readInstallSelection(root);
 	if (command === "install" && args[2] && args[3]) {
-		const result = await installOwnedRelease({ root, expected, installSpec: args[2], version: args[3] });
+		const localDependencyTarballs: string[] = [];
+		for (let index = 4; index < args.length; index += 2) {
+			const dependency = args[index + 1];
+			if (args[index] !== "--local-dependency" || !dependency || dependency.startsWith("-"))
+				throw new Error("Expected --local-dependency <path> after the install operands.");
+			localDependencyTarballs.push(dependency);
+		}
+		const result = await installOwnedRelease({
+			root,
+			expected,
+			installSpec: args[2],
+			version: args[3],
+			...(localDependencyTarballs.length > 0 ? { localDependencyTarballs } : {}),
+		});
 		activation = result;
 		console.log(`Base-Context activated: ${result.installation.packageDir}`);
 	} else if (command === "rollback" && expected) {
@@ -51,7 +64,7 @@ async function main(): Promise<void> {
 		);
 	} else {
 		throw new Error(
-			"Usage: base-context-install install <root> <original-selection-json> <package> <version> | rollback [root]",
+			"Usage: base-context-install install <root> <original-selection-json> <package> <version> [--local-dependency <path>]... | rollback [root]",
 		);
 	}
 }

@@ -2,7 +2,7 @@ import type * as ChildProcessModule from "node:child_process";
 import type { SpawnSyncOptions } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
 import {
@@ -441,11 +441,21 @@ describe("self-update daemon restart", () => {
 		});
 	}
 
-	function useOwnedProcessBoundary(root: string, version: string): void {
+	function useOwnedProcessBoundary(
+		root: string,
+		version: string,
+		localInstall?: { dependencies: readonly string[]; main: string },
+	): void {
 		mockState.ownedBoundary = (command, args, environment, cwd) => {
 			expect(environment.BASE_CONTEXT_KERNEL_PYTHON).toBeUndefined();
 			expect(environment.BASE_CONTEXT_KERNEL_VENV).toBeUndefined();
 			if (command === "npm") {
+				expect(args[0]).toBe("install");
+				if (localInstall) {
+					expect(args.slice(args.indexOf("--"))).toEqual(["--", ...localInstall.dependencies, localInstall.main]);
+				} else {
+					expect(args.slice(args.indexOf("--"))).toEqual(["--", args.at(-1)]);
+				}
 				expect(args).not.toContain("-g");
 				expect(args).toContain(`--allow-scripts=${args.at(-1)}`);
 				expect(environment.BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL).toBe("0");
@@ -477,24 +487,47 @@ describe("self-update daemon restart", () => {
 		};
 	}
 
-	async function createOwnedFixture(): Promise<OwnedActivation> {
+	async function createOwnedFixture(localDependencyTarballs?: string[]): Promise<OwnedActivation> {
 		// Keep activation on this test's actual Node22.12; npm and Python remain the existing offline boundaries.
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
 		const root = join(tempDir, "owned");
-		useOwnedProcessBoundary(root, "1.0.0");
+		const cwd = process.cwd();
+		useOwnedProcessBoundary(
+			root,
+			"1.0.0",
+			localDependencyTarballs
+				? {
+						dependencies: localDependencyTarballs.map((path) => resolve(cwd, path)),
+						main: "base-context-old.tgz",
+					}
+				: undefined,
+		);
 		const operation = {
 			root,
 			expected: null as InstallSelection | null,
 			installSpec: "base-context-old.tgz",
 			version: "1.0.0",
+			...(localDependencyTarballs ? { localDependencyTarballs } : {}),
 		};
+		const callsStart = mockState.calls.length;
 		const pending = installOwnedRelease(operation);
 		// The operation owns its original inputs while its npm boundary is pending.
 		operation.root = join(tempDir, "not-the-original-root");
 		operation.expected = { generation: "not-the-original-generation", active: "other", previous: null };
 		operation.installSpec = "not-the-original-package.tgz";
 		operation.version = "2.0.0";
-		return pending;
+		if (localDependencyTarballs) {
+			localDependencyTarballs.splice(0, localDependencyTarballs.length, "not-the-original-dependency.tgz");
+			operation.localDependencyTarballs = ["late-dependency.tgz"];
+			process.chdir(tempDir);
+		}
+		try {
+			const activated = await pending;
+			expect(mockState.calls.slice(callsStart).filter((call) => call.startsWith("spawn:npm "))).toHaveLength(1);
+			return activated;
+		} finally {
+			process.chdir(cwd);
+		}
 	}
 
 	function createAcceptedRecoveryManifest(nextTurn: MockCustomMessage[] = []): MockUpdateRestartManifest {
@@ -767,6 +800,31 @@ describe("self-update daemon restart", () => {
 					false,
 				);
 				expect(errorSpy.mock.calls.at(-1)?.[0]).toContain("Base-Context preparation failed");
+
+				// The same preparation failure with local dependencies cannot select a different pair.
+				const dependency = join(projectDir, "local-sdk-failed.tgz");
+				writeFileSync(dependency, "offline local dependency fixture");
+				useOwnedProcessBoundary(previous.installation.root, "999.0.0", {
+					dependencies: [dependency],
+					main: "base-context-local.tgz",
+				});
+				mockState.spawnExitCodes = [0, 23];
+				const localCallsStart = mockState.calls.length;
+				await expect(
+					installOwnedRelease({
+						root: previous.installation.root,
+						expected: previous.selection,
+						installSpec: "base-context-local.tgz",
+						version: "999.0.0",
+						localDependencyTarballs: [dependency],
+					}),
+				).rejects.toThrow("Base-Context preparation failed");
+				expect(mockState.calls.slice(localCallsStart).filter((call) => call.startsWith("spawn:npm "))).toHaveLength(
+					1,
+				);
+				expect(readFileSync(join(previous.installation.root, "current.json"), "utf8")).toBe(originalSelection);
+				expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");
+				expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
 			} finally {
 				physical.mockRestore();
 				if (oldPythonOverride === undefined) delete process.env.BASE_CONTEXT_KERNEL_PYTHON;
@@ -1074,7 +1132,14 @@ describe("self-update daemon restart", () => {
 			expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(0o600);
 
 			// The real installation owner commits both selections; npm/Python alone are offline boundaries.
-			const previous = await createOwnedFixture();
+			const dependencies = ["local-sdk-core.tgz", "local-sdk agent.tgz"];
+			for (const dependency of dependencies) {
+				// Regular-file operands only; fake npm does not extract these inert fixture bytes.
+				writeFileSync(join(projectDir, dependency), "offline local dependency fixture");
+			}
+			const previous = await createOwnedFixture(dependencies);
+			expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");
+			expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
 			const physical = vi
 				.spyOn(configModule, "getPhysicalPackageDir")
 				.mockReturnValue(previous.installation.packageDir);

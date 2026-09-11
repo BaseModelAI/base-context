@@ -1853,3 +1853,29 @@ The controlled stop is not a new actual output-limit admission fault injection.
 Required `npm run check` passed with 1046 files/no fixes. No corrections or case
 reruns were needed. Parser retention adds only link metadata, not full assistant
 bodies or duplicate full request descriptors/receipts.
+
+## W93 — explicit local dependency inputs for the owned installer
+
+The existing single-spec owned installer gains optional captured local dependency
+tarballs and repeatable CLI `--local-dependency` operands. It passes these explicit
+files alongside the main package to its one existing npm install. With no extra
+inputs the prior command remains unchanged. Original cwd/array/path capture occurs
+before waits or owned-root effects; files are not an immutable byte snapshot.
+Owned root/expected selection, main identity, prepared CLI/Python pairing, activation
+and failure retention stay with the existing owners. No bundle manifest, dependency
+origin rewrite, registry fallback, wrapper, extra quota or format change is added.
+Normal dependency resolution/scripts and Python preparation still apply; this is
+not an offline-install promise. W91 private tarballs remain their original W90
+candidate; they are not silently updated. Real installation/bootstrap, provider,
+benchmark and publication approval remain separate. W72 remains unapproved.
+
+The two existing owned-install/update cases passed on actual Node22.12 with the
+existing fake npm/Python boundary and real activation worker: captured relative
+local inputs (including a space), one npm operation/main-last, caller/cwd mutation,
+unchanged default inputs and prior CLI/Python selection after preparation failure.
+The repeatable CLI parser is source-reviewed, not executed by these API cases.
+Inert fixture files are not installed tarballs or bootstrap/package-resolution
+acceptance. Required `npm run check` passed, 1046 files/no fixes. No post-execution
+correction or rerun was needed. Before execution, Root corrected the test's default
+separator expectation: existing npm argv already contained `--`; production did
+not change that separator. Format-only changes remain separate from test results.

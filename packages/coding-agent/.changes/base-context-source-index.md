@@ -156,3 +156,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - RPC/SDK examples now declare protocol11 and use owned startup paths; the typed-client floor is documented as schema45. The Node sample reports terminal refusals. The existing valid/missing/old-marker argument case and required check passed; no example clients were launched.
 
 - Native main-response assistant entries can retain their original request/source association. The parser reports exact recorded links separately from physical accounting; missing links, output attribution and caller delivery are not inferred.
+
+- Add optional captured local dependency tarballs and repeatable installer `--local-dependency` operands to the same owned npm install; preserve default input, activation and failure behavior. Two existing Node22.12 API cases/required check passed; fake npm/Python, not actual installation or CLI-parser execution.

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -269,13 +269,24 @@ export async function installOwnedRelease(options: {
 	expected: InstallSelection | null;
 	installSpec: string;
 	version: string;
+	/** Explicit local npm inputs; normal external/transitive dependency resolution remains enabled. */
+	localDependencyTarballs?: readonly string[];
 }): Promise<OwnedActivation> {
 	const { root: rootInput, expected: expectedInput, installSpec, version } = options;
+	const cwd = process.cwd();
+	const dependencyInputs = [...(options.localDependencyTarballs ?? [])];
 	const expected = expectedInput ? { ...expectedInput } : null;
-	const root = resolve(rootInput);
+	const root = resolve(cwd, rootInput);
 	const executable = "bun" in process.versions ? "node" : process.execPath;
 	const environment = { ...process.env };
 	const activate = captureActivationOwner(executable);
+	const localDependencyTarballs = dependencyInputs.map((input) => {
+		if (typeof input !== "string" || input.length === 0)
+			throw new Error("Local dependency tarball must be a nonempty file path.");
+		const tarball = resolve(cwd, input);
+		if (!statSync(tarball).isFile()) throw new Error(`Local dependency tarball is not a file: ${tarball}`);
+		return tarball;
+	});
 	assertSelection(root, expected);
 	initializeRoot(root);
 	const installation = ownedVersion(root, `${version}-${randomUUID()}`);
@@ -304,6 +315,7 @@ export async function installOwnedRelease(options: {
 			"--no-audit",
 			"--allow-remote=all",
 			"--",
+			...localDependencyTarballs,
 			installSpec,
 		],
 		environment,
