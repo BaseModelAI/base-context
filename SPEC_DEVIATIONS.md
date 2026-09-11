@@ -1984,3 +1984,33 @@ passes, no project correction/rerun. Owner/proposal/baseline mutation, standalon
 rollback producer and post-ACK-fault matrices were not executed; baseline reference
 identity is not deep immutability or conflict correctness. No real provider,
 installation/bootstrap, new campaign, publication or full-G17/efficiency claim.
+
+
+### W98 — observed OpenAI cache writes and estimate coverage
+
+The shared Responses event reader now retains reported
+`usage.input_tokens_details.cache_write_tokens` on physical usage. Reported writes
+are removed from ordinary input and priced once in the existing assistant usage
+calculation, including its existing service-tier adjustment. Raw events, inputTotal,
+settlement timing and completeness handling remain unchanged. Unreported physical
+write counts remain unknown; legacy UI defaults and the existing remainder when
+writes are absent do not establish zero writes or a complete token breakdown.
+Two existing offline SDK-retry cases cover reported writes and missing writes,
+while preserving capacity/refusal, source ordering and request-budget observations.
+This is a working observation/pricing component, not a claim of verified invoices,
+complete current API-equivalent tariff selection, long-context adjustments, or
+new experiment readiness. Sol/Astra benchmark transport remains the existing
+ChatGPT subscription; requested cost figures are API-equivalent estimates.
+DeepSeek uses its API and API prices. Anthropic is outside the current cost scope.
+
+The benchmark estimator now treats an explicitly zero recorded tariff as a zero
+estimated charge without fabricating the missing token count. Nonzero-priced
+missing quantities, missing rates and incomplete/unsettled totals stay unknown.
+Estimate coverage and token-breakdown completeness remain separate. Cache reuse
+uses observed inputTotal and cacheRead. Existing report columns now explicitly
+label recorded/API-rate estimates, not subscription charges or verified API debits.
+No rate/profile, long-context/tier/billing-window selection, primary/retry math,
+new store, quota or frozen-result rewrite is included.
+OpenAI native2 and Python2 existing cases passed first; required check passed
+1046/no fixes, types/installer/browser. No project failure or native/Python rerun.
+No new inference, benchmark, installation or publication occurred.

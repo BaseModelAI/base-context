@@ -1069,7 +1069,7 @@ def aggregate_bucket(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict
     usage = {key: sum_known((item.get("provider_usage") or {}).get(key) for item in metrics) for key in USAGE_KEYS}
     cost = {key: sum_known((item.get("api_cost") or {}).get(key) for item in metrics) for key in COST_KEYS}
     cost["total"] = sum_known(attempt_cost(attempt) for attempt in attempts)
-    prompt_denominator = sum_known(usage.get(key) for key in ("input", "cacheRead", "cacheWrite"))
+    prompt_denominator = usage.get("inputTotal")
     peak_values = [item.get("peak_provider_bound_token_estimate") for item in metrics]
     prompt_peaks = [item.get("peak_provider_prompt_tokens") for item in metrics]
     zero_values = [item.get("zero_extra_call") for item in metrics]
@@ -1096,7 +1096,8 @@ def aggregate_bucket(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict
         "usage_complete": all(item.get("usage_complete") is not False for item in metrics) and all(value is not None for value in usage.values()),
         "cost_complete": cost["total"] is not None,
         "cost_bases": sorted({item["cost_basis"] for item in metrics if item.get("cost_basis")}),
-        "prompt_cache_reuse": usage["cacheRead"] / prompt_denominator if prompt_denominator else None,
+        "prompt_cache_reuse": usage["cacheRead"] / prompt_denominator
+        if usage["cacheRead"] is not None and prompt_denominator else None,
         "peak_provider_bound_token_estimate": max(peak_values) if peak_values and None not in peak_values else None,
         "mean_peak_provider_bound_token_estimate": sum(peak_values) / len(peak_values) if peak_values and None not in peak_values else None,
         "peak_provider_prompt_tokens": max(prompt_peaks) if prompt_peaks and None not in prompt_peaks else None,
@@ -1249,9 +1250,9 @@ def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
         "metric_priority": ["completion_progress_and_success", "agent_wall_seconds", "api_cost"],
         "metric_limitations": [
             "Vanilla does not expose Prime Context auxiliary accounting; unavailable fields remain null rather than estimated.",
-            "Actual provider prompt tokens use input + cache-read + cache-write per solver call; tokens are supporting data, while cost is the cost-efficiency gate.",
-            "Task correctness and efficiency use only the primary valid attempt. All retained attempts, including failures and capacity invalidations, keep their time and spend.",
-            "Missing usage, cost, or timing remains null/incomplete and cannot establish an efficiency win. Native costs are labelled catalog-rate estimates, not billed invoices.",
+            "Cache reuse uses reported cache-read and total-input tokens; unreported cache-write quantities stay unknown. Efficiency costs are recorded-rate estimates.",
+            "Task correctness and efficiency use only the primary valid attempt. All retained attempts, including failures and capacity invalidations, keep their time and cost estimates.",
+            "Missing required price inputs or timing leave efficiency incomplete. Unreported token fields stay unknown even when a zero rate makes their estimated charge computable. Native costs are catalog-rate estimates, not invoices.",
         ],
         "by_variant": by_variant,
         "by_pressure": by_pressure,
@@ -1271,11 +1272,14 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
         f"Publication ready: {'yes' if summary.get('publication_ready') else 'no'}.", "",
         f"Publication protocol blockers: {', '.join(summary.get('publication_blockers') or []) or 'none'}.", "",
         "Headlines use the first valid attempt, including failures. Strict-failure retries are diagnostic only.",
-        "Confirmed provider-capacity invalidations do not consume the retry allowance. All retained time and spend remain below.",
-        "Unknown metrics are n/a, not zero. Metric priority: completion/progress, then agent time, then cost.", "",
+        "Confirmed provider-capacity invalidations do not consume the retry allowance. All retained time and cost estimates remain below.",
+        "Unknown metrics are n/a, not zero. Metric priority: completion/progress, then agent time, then API-priced estimates.",
+        "Cost columns are estimates in USD using the recorded price basis, not proof of current tariffs or verified charges.",
+        "OpenAI subscription calls: API-equivalent estimates are not subscription cash charges. DeepSeek API calls: tariff estimates are not verified debits.",
+        "Unobserved cash or marginal charges remain unknown, not zero; estimate computability does not establish complete token breakdowns.", "",
         "## Metric limitations", "", *[f"- {item}" for item in summary.get("metric_limitations", [])], "",
         "## Variant summary", "",
-        "| Variant | Tasks | Primary strict | Progress | Retained attempts | Capacity invalid | All agent s | Model attempts | Tool calls | Provider tokens | Cache reuse | All cost | Cost/primary completion |",
+        "| Variant | Tasks | Primary strict | Progress | Retained attempts | Capacity invalid | All agent s | Model attempts | Tool calls | Provider tokens | Cache reuse | All API estimate USD | Estimate/primary completion USD |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for variant, item in summary["by_variant"].items():
@@ -1294,8 +1298,8 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
         purposes = ", ".join(f"{kind}={metric_text(value, 0)}" for kind, value in total["model_calls_by_purpose"].items()) or "n/a"
         lines.append(
             f"- **{variant}**: auxiliary {auxiliary}; native purposes {purposes}; "
-            f"cost basis={','.join(total['cost_bases']) or 'unavailable'}; "
-            f"usage complete={total['usage_complete']}; cost complete={total['cost_complete']}; "
+            f"estimate basis={','.join(total['cost_bases']) or 'unavailable'}; "
+            f"usage complete={total['usage_complete']}; estimate computable={total['cost_complete']}; "
             f"zero-extra-call-share={metric_text(total['zero_extra_call_share'])}; "
             f"compactions={metric_text(total['compaction_completions'], 0)}/{metric_text(total['compaction_requests'], 0)} "
             f"(failures={metric_text(total['compaction_failures'], 0)}); child sessions={metric_text(total['child_sessions'], 0)}; "
@@ -1310,7 +1314,7 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
         )
     lines.extend([
         "", "## Pressure classes", "",
-        "| Pressure | Variant | Tasks | Primary strict | Retained attempts | Capacity invalid | All agent s | All cost |",
+        "| Pressure | Variant | Tasks | Primary strict | Retained attempts | Capacity invalid | All agent s | All API estimate USD |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ])
     for pressure, variants in summary["by_pressure"].items():
@@ -1322,7 +1326,7 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
             )
     lines.extend([
         "", "## Task results", "",
-        "| Task | Variant | Retained attempts | Primary attempt | Primary strict | Progress | Primary agent s | Primary cost | All agent s | All cost |",
+        "| Task | Variant | Retained attempts | Primary attempt | Primary strict | Progress | Primary agent s | Primary API estimate USD | All agent s | All API estimate USD |",
         "|---:|---|---:|---:|---|---:|---:|---:|---:|---:|",
     ])
     for result in sorted(results, key=lambda item: (item["task_id"], item["variant"])):
@@ -1353,8 +1357,8 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
         lines.append("| — | — | — | — |")
     lines.extend([
         "", "## Matched strict-pass primary comparisons", "",
-        "Unknown time or cost leaves the efficiency comparison incomplete, not a win.", "",
-        "| Task | Baseline | Current−baseline agent s | Current−baseline cost | Current−baseline tokens | Complete |",
+        "Unknown time or estimated cost leaves the efficiency comparison incomplete, not a win.", "",
+        "| Task | Baseline | Current−baseline agent s | Current−baseline API estimate USD | Current−baseline tokens | Complete |",
         "|---:|---|---:|---:|---:|---|",
     ])
     for item in summary["matched_strict_pass_comparisons"]:

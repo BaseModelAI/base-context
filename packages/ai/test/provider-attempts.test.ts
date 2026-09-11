@@ -39,7 +39,7 @@ function requestProfile() {
 }
 
 const rawUsage = { input_tokens: 10, output_tokens: 2, total_tokens: 12, input_tokens_details: { cached_tokens: 3 } };
-function response(): Response {
+function response(usage = rawUsage): Response {
 	const events = [
 		{ type: "response.created", response: { id: "response-1", model: "test-model", status: "in_progress" } },
 		{
@@ -59,7 +59,7 @@ function response(): Response {
 				model: "test-model",
 				status: "completed",
 				service_tier: "priority",
-				usage: rawUsage,
+				usage,
 			},
 		},
 	];
@@ -79,6 +79,15 @@ describe("physical provider attempts", () => {
 	it.each(["Selected model is at capacity.", "retry"])(
 		"admits each SDK retry and retains only confirmed capacity: %s",
 		async (providerMessage) => {
+			const written = providerMessage === "retry" ? 4 : undefined;
+			const reportedUsage = {
+				...rawUsage,
+				input_tokens_details: {
+					...rawUsage.input_tokens_details,
+					...(written === undefined ? {} : { cache_write_tokens: written }),
+				},
+			};
+			const pricedModel = { ...model, cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1.25 } };
 			const order: string[] = [];
 			const receipts: ProviderAttemptReceipt[] = [];
 			const profile = requestProfile();
@@ -135,11 +144,11 @@ describe("physical provider attempts", () => {
 								},
 							},
 						)
-					: response();
+					: response(reportedUsage);
 			});
 			vi.stubGlobal("fetch", fetch);
 			const stream = streamOpenAIResponses(
-				model,
+				pricedModel,
 				{ messages: [] },
 				{
 					apiKey: "not-receipt-metadata",
@@ -175,7 +184,19 @@ describe("physical provider attempts", () => {
 			const listener = stream[Symbol.asyncIterator]();
 			await listener.next();
 			await listener.return?.();
-			expect((await stream.result()).stopReason).toBe("stop");
+			const result = await stream.result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.usage).toMatchObject({
+				input: 7 - (written ?? 0),
+				output: 2,
+				cacheRead: 3,
+				cacheWrite: written ?? 0,
+				totalTokens: 12,
+			});
+			expect(result.usage.cost.total).toBeCloseTo(
+				(2 * (7 - (written ?? 0) + 2 * 2 + 3 * 0.5 + (written ?? 0) * 1.25)) / 1_000_000,
+				12,
+			);
 			expect(order).toEqual(["admit:1", "send", "settle:1", "admit:2", "send", "settle:2"]);
 			expect(receipts[0]).toMatchObject({
 				attemptId: "attempt-1",
@@ -193,10 +214,15 @@ describe("physical provider attempts", () => {
 				providerRequestId: "request-1",
 				providerResponseId: "response-1",
 				effectiveServiceTier: "priority",
-				rawUsage: [rawUsage],
-				usage: { input: 7, output: 2, cacheRead: 3, totalTokens: 12 },
+				rawUsage: [reportedUsage],
+				usage: { input: 7 - (written ?? 0), inputTotal: 10, output: 2, cacheRead: 3, totalTokens: 12 },
 				usageCompleteness: "complete",
 			});
+			if (written === undefined) {
+				expect(receipts[1].usage.cacheWrite).toBeUndefined();
+			} else {
+				expect(receipts[1].usage.cacheWrite).toBe(written);
+			}
 			expect(receipts[0].capacityConfirmed).toBe(
 				providerMessage === "Selected model is at capacity." ? true : undefined,
 			);
@@ -228,7 +254,7 @@ describe("physical provider attempts", () => {
 			expect(budget.measure(lastRequest).calibration).toMatchObject({ state: "unknown", samples: 0 });
 			budget.observe(receipts[1]);
 			const observed = budget.measure(lastRequest);
-			expect(receipts[1].usage.inputTotal).toBe(10); // Includes the three cached input tokens.
+			expect(receipts[1].usage.inputTotal).toBe(10); // Includes cache reads and any reported cache writes.
 			expect(observed.calibration).toEqual({
 				state: "observed",
 				samples: 1,

@@ -577,15 +577,22 @@ export function observeResponsesEvent(event: ResponseStreamEvent, attempts?: Pro
 			event.type === "response.incomplete";
 		if (response.usage) {
 			const usage = response.usage;
-			const cached = usage.input_tokens_details?.cached_tokens;
+			const details: { cached_tokens?: number; cache_write_tokens?: number } | undefined =
+				usage.input_tokens_details;
+			const cached = details?.cached_tokens;
+			const written = details?.cache_write_tokens;
 			attempts?.usage(
 				response.usage,
 				{
+					// Remove reported cache writes from ordinary input. Unreported writes remain unknown.
 					input:
-						cached !== undefined && usage.input_tokens !== undefined ? usage.input_tokens - cached : undefined,
+						cached !== undefined && usage.input_tokens !== undefined
+							? usage.input_tokens - cached - (written ?? 0)
+							: undefined,
 					inputTotal: usage.input_tokens,
 					output: usage.output_tokens,
 					cacheRead: cached,
+					cacheWrite: written,
 					totalTokens: usage.total_tokens,
 				},
 				terminal ? "complete" : "partial",
@@ -813,13 +820,16 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+				const details: { cached_tokens?: number; cache_write_tokens?: number } | undefined =
+					response.usage.input_tokens_details;
+				const cachedTokens = details?.cached_tokens || 0;
+				const cacheWriteTokens = details?.cache_write_tokens || 0;
 				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
+					// OpenAI includes cache reads and writes in input_tokens; price each bucket once.
+					input: (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens,
 					output: response.usage.output_tokens || 0,
 					cacheRead: cachedTokens,
-					cacheWrite: 0,
+					cacheWrite: cacheWriteTokens,
 					totalTokens: response.usage.total_tokens || 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};

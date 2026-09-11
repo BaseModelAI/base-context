@@ -407,8 +407,10 @@ def _native_request_accounting(requests: dict[str, dict[str, Any]]) -> dict[str,
         rates = pricing.get("catalogRates") or {}
         if pricing.get("status") != "unvalidated" or pricing.get("currency") != "USD" or pricing.get("unit") != "million-tokens":
             rates = {}
+        # A zero tariff charge does not imply an observed zero token quantity.
         item_cost = {
-            key: item[key] * rates[key] / 1_000_000
+            key: 0 if type(rates.get(key)) in (int, float) and rates[key] == 0
+            else item[key] * rates[key] / 1_000_000
             if item[key] is not None and rates.get(key) is not None else None
             for key in COST_KEYS[:-1]
         }

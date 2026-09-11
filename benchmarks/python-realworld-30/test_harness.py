@@ -50,6 +50,7 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
 def native_journal(
     path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
     compaction_output: bool = False, branch_output: bool = False, planner_output: bool = False,
+    zero_priced_missing_write: bool = False,
 ) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
@@ -81,8 +82,11 @@ def native_journal(
         metadata["purpose"] = "refine"
         metadata["purposeDetail"] = "plan"
     usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
-    if incomplete:
+    if incomplete or zero_priced_missing_write:
         usage.pop("cacheWrite")
+    if zero_priced_missing_write:
+        # Hypothetical tariff only; this is not an OpenAI price or physical-write observation.
+        metadata["modelContract"]["pricing"]["catalogRates"]["cacheWrite"] = 0
     receipt = {
         **descriptor, "attemptId": "physical-attempt", "outcome": "failed" if incomplete else "completed",
         "rawUsage": [], "usage": usage, "usageCompleteness": "partial" if incomplete else "complete",
@@ -165,8 +169,8 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertFalse(summary["publication_ready"])
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
-            native_journal(root / "root.jsonl", request_output=True)
-            native_journal(root / "fork.jsonl", session_id="fork", request_output=True)
+            native_journal(root / "root.jsonl", request_output=True, zero_priced_missing_write=True)
+            native_journal(root / "fork.jsonl", session_id="fork", request_output=True, zero_priced_missing_write=True)
             original = parse_session_file(root / "root.jsonl")
             copied = parse_session_file(root / "fork.jsonl")
             association = original["assistant_request_associations"][0]
@@ -226,6 +230,17 @@ class HarnessComparisonTests(unittest.TestCase):
             planner_metrics = aggregate_sessions([planned])
             self.assertEqual(planner_metrics["refinement_planner_associations"][0]["associations"],
                              planner_associations)
+            priced_attempt = {**current["attempts"][0], "metrics": metrics}
+            priced_result = result("current", priced_attempt)
+            priced_summary = benchmark.comprehensive_summary([vanilla, priced_result])
+            self.assertAlmostEqual(priced_summary["by_variant"]["current"]["all_attempts"]["prompt_cache_reuse"], 0.2)
+            report_path = root / "priced-summary.md"
+            benchmark.write_summary_markdown(report_path, priced_summary, [vanilla, priced_result])
+            report = report_path.read_text()
+            self.assertIn("All API estimate USD", report)
+            self.assertIn("not subscription cash charges", report)
+            self.assertIn("not verified debits", report)
+            self.assertIn("usage complete=False; estimate computable=True", report)
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})
@@ -233,6 +248,10 @@ class HarnessComparisonTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["api_cost"]["total"], 0.0001425)
         self.assertEqual(metrics["cost_basis"], "catalog_estimate")
         self.assertTrue(metrics["cost_complete"])
+        self.assertEqual(metrics["api_cost"]["cacheWrite"], 0)
+        self.assertFalse(metrics["usage_complete"])
+        self.assertIsNone(metrics["provider_usage"]["cacheWrite"])
+        self.assertNotIn("cacheWrite", metrics["physical_attempts"][0]["receipt"]["usage"])
         self.assertFalse(metrics["provider_capacity_confirmed"])
         # The actual runner gates compaction on its matched response, not a
         # nonexistent needs_input/extra agent_end event. This is mocked RPC,
@@ -421,10 +440,11 @@ class HarnessComparisonTests(unittest.TestCase):
                 slower = benchmark.run_case("current", root, {"id": 2, "slug": "slower", "pressure": "N"}, root, argparse.Namespace(retry_failed=1))
             self.assertEqual(run.call_count, 1)  # A valid pass never triggers a performance retry.
             self.assertEqual(slower["retry_triggers"], [])
-            native_journal(root / "partial.jsonl", incomplete=True)
+            native_journal(root / "partial.jsonl", incomplete=True, zero_priced_missing_write=True)
             metrics = aggregate_sessions([parse_session_file(root / "partial.jsonl")])
             self.assertTrue(metrics["provider_capacity_confirmed"])
             self.assertIsNone(metrics["provider_usage"]["cacheWrite"])
+            self.assertEqual(metrics["api_cost"]["cacheWrite"], 0)
             self.assertIsNone(metrics["api_cost"]["total"])
             self.assertFalse(metrics["cost_complete"])
             legacy_path = root / "legacy.jsonl"
