@@ -144,9 +144,11 @@ only an explicit successful `base-context package install <source>` activates on
 Review and trust a declaration before installing it. An explicit
 `BASE_CONTEXT_SESSION_DIR` still controls session storage separately.
 
-Auth files, model credentials, executable/instruction paths, autonomous jobs, daemon
-state and kernel snapshots are excluded. Session history itself is retained data,
-not scrubbed for secrets and not execution authority. Attachment/artifact and external
+Auth files, model credentials, executable/instruction paths, scheduling/daemon/runtime
+files and kernel snapshots are excluded. Historical goal entries remain in retained
+history, but the goal restore readers do not reactivate retained-import goals. Explicit
+new goals and autonomy remain available. History is not scrubbed for secrets and may
+influence a future model conversation. Attachment/artifact and external
 reference remapping, paused-job import, opaque replay and trusted runtime resume are
 not provided by this command. Its report lists supported and excluded coverage;
 this is not a complete migration of every legacy feature. Binary selection is unchanged.

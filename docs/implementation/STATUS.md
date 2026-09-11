@@ -3351,3 +3351,17 @@ This demonstrates the local owned install/update/rollback path. Public npm/GitHu
 publication still requires benchmark review and final approval. Local release
 artifact preparation does not grant publication permission or establish hosted
 endpoint availability.
+
+
+### W128 — Retained goals are history, not restored active work
+
+The existing goal restore owners already exclude retained-import entries, both
+in indexed branch bootstrap and in AgentSession's indexed/resident restore paths.
+Historical thread_goal_state records can remain in imported journals; they are
+not physically absent and are not reactivated. Fresh autonomy comes from explicit
+configuration, not those journal labels. Pending actions/messages use separate
+snapshot/recovery inputs. Scheduler, daemon-recovery and runtime files are not
+copied by the root importer. No new owner guard or runtime test was added for this
+source-confirmed path. CLI coverage text and README now state the distinction.
+Retained history is not secret-scrubbed or asserted unable to influence a future
+model conversation; explicit new goals/autonomy remain available.

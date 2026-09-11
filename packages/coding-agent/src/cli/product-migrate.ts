@@ -18,8 +18,9 @@ import { assertProductStatePath } from "../runtime-paths.js";
 const COVERAGE = [
 	"Input must be an externally produced coherent offline/filesystem export; this command does not create a live snapshot or detect every custom live root.",
 	"Only supported flat sessions/*.jsonl legacy journals are imported. Native-framed inputs, nested/external session directories and artifact/reference remapping are unsupported.",
-	"Credentials, models.json, executable/resource paths, instructions, harness activation, cron/heartbeats/jobs, daemon state and kernel snapshots are excluded; originals are retained.",
-	"Session history is retained data, not scrubbed or granted execution authority. Imported package declarations remain inactive until explicit install.",
+	"Scheduling/daemon/runtime files, credentials, models.json and executable/instruction paths are excluded; originals are retained.",
+	"Session history is not scrubbed and may influence future model context. Imported package declarations remain inactive until explicit install.",
+	"Historical goals remain as retained history, but goal restore excludes retained-import goals. Explicit new goals and autonomy remain available.",
 	"This is not full migration, trusted runtime resume, provider-lineage restoration or binary/schema rollback.",
 ];
 const STRING_PREFS = ["defaultProvider", "defaultModel", "theme"] as const;
