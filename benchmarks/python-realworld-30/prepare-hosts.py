@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare local H 0.9.3 and frozen native Base Context benchmark hosts."""
+"""Prepare local H 0.9.3 or public Prime Agent 0.9.4 with a frozen native Base Context host."""
 from __future__ import annotations
 
 import argparse
@@ -15,6 +15,14 @@ from typing import Any
 HOSTS_SCHEMA = "prime-context.python-realworld-hosts/v2"
 H_VERSION = "0.9.3"
 H_PACKAGES = ("pi-coding-agent", "pi-agent-core", "pi-ai", "pi-tui")
+PUBLIC_VERSION = "0.9.4"
+# Release archive/metadata names differ from the compiled dependency import keys.
+PUBLIC_PACKAGES = {
+    "prime-agent": "prime-agent",
+    "@earendil-works/pi-agent-core": "prime-agent-core",
+    "@earendil-works/pi-ai": "prime-agent-ai",
+    "@earendil-works/pi-tui": "prime-agent-tui",
+}
 NATIVE_PACKAGES = ("base-context", "base-context-agent", "base-context-ai", "base-context-tui")
 CORE_SCOPES = ("@earendil-works", "@ponythewhite")
 CLI_PATH = "dist/bundle/cli.js"
@@ -64,6 +72,31 @@ def read_h_artifacts(directory: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
     return packages
 
 
+def read_public_artifacts(directory: Path) -> dict[str, tuple[Path, dict[str, Any]]]:
+    packages = {}
+    for import_key, name in PUBLIC_PACKAGES.items():
+        path = directory / f"{name}-{PUBLIC_VERSION}.tgz"
+        with tarfile.open(path, "r:gz") as archive:
+            metadata_file = archive.extractfile("package/package.json")
+            if metadata_file is None:
+                raise ValueError(f"missing package metadata: {path}")
+            metadata = json.load(metadata_file)
+            if (metadata.get("name") != name or metadata.get("version") != PUBLIC_VERSION
+                    or metadata.get("type") != "module"):
+                raise ValueError(f"expected ESM {name}@{PUBLIC_VERSION}: {path}")
+            if any(member.name != "package" and not member.name.startswith("package/") for member in archive):
+                raise ValueError(f"archive must contain only package/: {path}")
+            if not archive.getmember("package/dist/index.js").isfile():
+                raise ValueError(f"missing public SDK entrypoint: {path}")
+            if name == "prime-agent":
+                if metadata.get("bin", {}).get("prime-agent") != CLI_PATH:
+                    raise ValueError(f"unexpected public published bin: {path}")
+                if not archive.getmember(f"package/{CLI_PATH}").isfile():
+                    raise ValueError(f"missing public published entrypoint: {path}")
+        packages[import_key] = (path, metadata)
+    return packages
+
+
 def read_candidate(candidate: Path, dependency_root: Path) -> tuple[str, dict[str, Path], dict[str, dict[str, Any]]]:
     inspection = read_json(candidate / "package-inspection.json")
     commit = inspection["commit"]
@@ -101,7 +134,7 @@ def require_dependencies(packages: dict[str, dict[str, Any]], dependency_root: P
         for name in package.get("dependencies", {}):
             if name in packages:
                 continue
-            if name.split("/", 1)[0] in CORE_SCOPES:
+            if name.split("/", 1)[0] in CORE_SCOPES or name in PUBLIC_PACKAGES.values():
                 raise ValueError(f"unmapped private core dependency: {name}")
             if not (dependency_root / name / "package.json").is_file():
                 raise ValueError(f"missing installed dependency: {dependency_root / name}")
@@ -110,7 +143,8 @@ def require_dependencies(packages: dict[str, dict[str, Any]], dependency_root: P
 def link_dependencies(source: Path, destination: Path) -> None:
     destination.mkdir(parents=True)
     for entry in sorted(source.iterdir()):
-        if entry.name.startswith(".") or entry.name in CORE_SCOPES or not entry.is_dir():
+        if (entry.name.startswith(".") or entry.name in CORE_SCOPES
+                or entry.name in PUBLIC_PACKAGES.values() or not entry.is_dir()):
             continue
         if entry.name.startswith("@"):
             scope = destination / entry.name
@@ -123,21 +157,25 @@ def link_dependencies(source: Path, destination: Path) -> None:
 
 
 def prepare_hosts(
-    h_artifacts: Path, candidate_root: Path, dependency_root: Path, node: Path, root: Path,
+    h_artifacts: Path | None, candidate_root: Path, dependency_root: Path, node: Path, root: Path,
+    *, public_artifacts: Path | None = None,
 ) -> dict[str, Any]:
     """Use local artifacts only. The sole executed command is Node --version."""
-    h_artifacts = Path(h_artifacts).expanduser().resolve(strict=True)
+    if (h_artifacts is None) == (public_artifacts is None):
+        raise ValueError("provide exactly one of h_artifacts or public_artifacts")
+    public = public_artifacts is not None
+    artifact_root = Path(public_artifacts if public else h_artifacts).expanduser().resolve(strict=True)
     candidate_root = Path(candidate_root).expanduser().resolve(strict=True)
     dependency_root = Path(dependency_root).expanduser().resolve(strict=True)
     root = Path(root).expanduser().resolve()
     if root.exists():
         raise FileExistsError(f"host root must be fresh: {root}")
-    for source in (h_artifacts, candidate_root, dependency_root):
+    for source in (artifact_root, candidate_root, dependency_root):
         if root.is_relative_to(source):
             raise ValueError(f"host root must be outside input directories: {source}")
-    h_packages = read_h_artifacts(h_artifacts)
+    stock_packages = read_public_artifacts(artifact_root) if public else read_h_artifacts(artifact_root)
     commit, native_roots, native_metadata = read_candidate(candidate_root, dependency_root)
-    require_dependencies({name: item[1] for name, item in h_packages.items()}, dependency_root)
+    require_dependencies({name: item[1] for name, item in stock_packages.items()}, dependency_root)
     require_dependencies(native_metadata, dependency_root)
     node, node_version = require_node(Path(node))
 
@@ -145,15 +183,15 @@ def prepare_hosts(
     modules = root / "node_modules"
     link_dependencies(dependency_root, modules)
     (modules / "@earendil-works").mkdir()
-    h_roots = {}
-    for name, (archive_path, _) in h_packages.items():
-        destination = root / "unpacked" / name.split("/", 1)[1]
+    stock_roots = {}
+    for name, (archive_path, metadata) in stock_packages.items():
+        destination = root / "unpacked" / metadata["name"].rsplit("/", 1)[-1]
         destination.mkdir(parents=True)
         with tarfile.open(archive_path, "r:gz") as archive:
             archive.extractall(destination, filter="data")
         package_root = destination / "package"
         (modules / name).symlink_to(package_root, target_is_directory=True)
-        h_roots[name] = package_root
+        stock_roots[name] = package_root
 
     def host(kind: str, name: str, version: str, package_root: Path) -> dict[str, Any]:
         entrypoint = package_root / CLI_PATH
@@ -167,6 +205,7 @@ def prepare_hosts(
         }
 
     native_name = "@ponythewhite/base-context"
+    stock_name = "prime-agent" if public else "@earendil-works/pi-coding-agent"
     manifest = {
         "schema": HOSTS_SCHEMA,
         "prepared_at": datetime.now(timezone.utc).isoformat(),
@@ -176,7 +215,10 @@ def prepare_hosts(
         "dependency_root": str(dependency_root),
         "candidate_commit": commit,
         "hosts": {
-            "vanilla": host("h093", "@earendil-works/pi-coding-agent", H_VERSION, h_roots["@earendil-works/pi-coding-agent"]),
+            "vanilla": host(
+                "public-prime-agent" if public else "h093", stock_name,
+                PUBLIC_VERSION if public else H_VERSION, stock_roots[stock_name],
+            ),
             "current": host("native-base-context", native_name, native_metadata[native_name]["version"], native_roots[native_name]),
         },
     }
@@ -186,13 +228,18 @@ def prepare_hosts(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--h-artifacts", type=Path, required=True, help="directory containing the four local H 0.9.3 archives")
+    artifacts = parser.add_mutually_exclusive_group(required=True)
+    artifacts.add_argument("--h-artifacts", type=Path, help="directory containing the four local H 0.9.3 archives")
+    artifacts.add_argument("--public-artifacts", type=Path, help="directory containing the four public Prime Agent 0.9.4 release archives")
     parser.add_argument("--candidate-root", type=Path, required=True, help="frozen native candidate with package-inspection.json")
     parser.add_argument("--dependency-root", type=Path, required=True, help="existing installed third-party node_modules directory")
     parser.add_argument("--node", type=Path, required=True, help="absolute Node >=22.8.0 executable")
     parser.add_argument("--root", type=Path, required=True, help="new host directory; existing directories are never replaced")
     args = parser.parse_args()
-    manifest = prepare_hosts(args.h_artifacts, args.candidate_root, args.dependency_root, args.node, args.root)
+    manifest = prepare_hosts(
+        args.h_artifacts, args.candidate_root, args.dependency_root, args.node, args.root,
+        public_artifacts=args.public_artifacts,
+    )
     print(f"prepared {Path(manifest['root']) / 'hosts.json'}")
     return 0
 

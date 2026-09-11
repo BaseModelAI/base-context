@@ -30,3 +30,29 @@ export function createHostSubscriptionBackend() {
     },
   };
 }
+
+// This read-only mount exists only in the provider process, never a tool or service.
+export function createDeepSeekApiBackend() {
+  let key;
+  try {
+    key = readFileSync("/run/host-deepseek-api-key", "utf8").trim();
+  } catch {
+    throw new Error("Cannot read the explicit DeepSeek benchmark API key; no credential fallback is allowed");
+  }
+  if (!key) throw new Error("The explicit DeepSeek benchmark API key is empty");
+  return {
+    apiKey: key,
+    // Stored key strings can be interpreted as commands/environment names by stock.
+    // Keep storage empty; the caller supplies the literal via setRuntimeApiKey.
+    backend: {
+      withLock(callback) {
+        const { result, next } = callback("{}");
+        if (next !== undefined) throw new Error("DeepSeek benchmark credential storage is read-only");
+        return result;
+      },
+      async withLockAsync(_callback) {
+        throw new Error("DeepSeek benchmark credentials do not use OAuth refresh");
+      },
+    },
+  };
+}

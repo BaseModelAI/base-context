@@ -1,9 +1,9 @@
 import { join } from "node:path";
 import benchmarkBashExtension from "./bash-tool.mjs";
-import { createHostSubscriptionBackend } from "./host-subscription-backend.mjs";
+import { createDeepSeekApiBackend, createHostSubscriptionBackend } from "./host-subscription-backend.mjs";
 
 export async function runSubscriptionRpc(host, options) {
-  const { variant, cwd, agentDir, sessionDir, modelId, thinkingLevel } = options;
+  const { variant, agentDir, modelId } = options;
   if (!["vanilla", "current"].includes(variant) || !["gpt-5.6-sol", "gpt-6-astra"].includes(modelId)) {
     throw new Error("Unsupported benchmark arm or exact Sol/Astra model");
   }
@@ -18,9 +18,44 @@ export async function runSubscriptionRpc(host, options) {
   // Local exact catalog lookup only. Do not discover models or choose a fallback.
   const model = modelRegistry.find("openai-codex", modelId);
   if (!model || model.id !== modelId || model.provider !== "openai-codex" || model.api !== "openai-codex-responses" ||
-      !modelRegistry.hasConfiguredAuth(model)) {
+      model.baseUrl !== "https://chatgpt.com/backend-api" || !modelRegistry.hasConfiguredAuth(model)) {
     throw new Error("Packaged host does not authorize the exact OpenAI Codex subscription route");
   }
+  return runConfiguredRpc(host, options, authStorage, modelRegistry, model, {
+    id: "benchmark-native-codex",
+    url: "https://chatgpt.com/backend-api/codex/responses",
+    authMode: "existing-openai-codex-subscription",
+    templateRevision: "base-context-codex-responses/1", replayFamily: "responses-replay-v1",
+  });
+}
+
+export async function runDeepSeekRpc(host, options) {
+  const { variant, agentDir, modelId } = options;
+  if (!["vanilla", "current"].includes(variant) || modelId !== "deepseek-flash") {
+    throw new Error("Unsupported benchmark arm or exact DeepSeek model");
+  }
+  const { apiKey, backend } = createDeepSeekApiBackend();
+  const authStorage = host.AuthStorage.fromStorage(backend, { usePrimeCliConfig: false });
+  authStorage.setRuntimeApiKey("deepseek", apiKey);
+  if (authStorage.drainErrors().length > 0) {
+    throw new Error("The explicit DeepSeek API credential could not be loaded");
+  }
+  const modelRegistry = host.ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+  const model = modelRegistry.find("deepseek", modelId);
+  if (!model || model.id !== modelId || model.provider !== "deepseek" || model.api !== "openai-completions" ||
+      model.baseUrl !== "https://api.deepseek.com" || !modelRegistry.hasConfiguredAuth(model)) {
+    throw new Error("Packaged host does not authorize the exact DeepSeek API route");
+  }
+  return runConfiguredRpc(host, options, authStorage, modelRegistry, model, {
+    id: "benchmark-native-deepseek",
+    url: "https://api.deepseek.com/chat/completions",
+    authMode: "deepseek-api-key",
+    templateRevision: "base-context-deepseek-completions/1", replayFamily: "deepseek-completions-replay-v1",
+  });
+}
+
+async function runConfiguredRpc(host, options, authStorage, modelRegistry, model, profile) {
+  const { variant, cwd, agentDir, sessionDir, thinkingLevel } = options;
   const services = await host.createAgentSessionServices({
     cwd, agentDir, authStorage, modelRegistry, telemetryDisabled: true,
     resourceLoaderOptions: {
@@ -36,11 +71,8 @@ export async function runSubscriptionRpc(host, options) {
       ...(variant === "current" ? { requestTokenBudget: {
         mode: "enforce",
         profiles: [{
-          id: "benchmark-native-codex", revision: "1",
-          api: model.api, provider: model.provider,
-          url: "https://chatgpt.com/backend-api/codex/responses", model: model.id,
-          authMode: "existing-openai-codex-subscription",
-          templateRevision: "base-context-codex-responses/1", replayFamily: "responses-replay-v1",
+          ...profile, revision: "1",
+          api: model.api, provider: model.provider, model: model.id,
           contextTokens: model.contextWindow, outputCeilingTokens: model.maxTokens,
           estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 1024 },
         }],

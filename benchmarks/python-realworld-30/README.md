@@ -230,3 +230,61 @@ receipts, recorded catalog rates, original emitted usage/cost observations and
 primary/all-retained-attempt selection remain unchanged. The new three-model
 schedule, latest-public host and DeepSeek credential route are separate work;
 this pricing option alone does not make that experiment ready.
+
+
+## Three-model comparison with public Prime Agent 0.9.4
+
+`--three-model-campaign` selects all 30 tasks on Sol, Astra and canonical
+DeepSeek V4.1 Flash. Each `(model, task)` worker runs the two arms sequentially.
+Arm order reverses when `(task_index + model_index)` is odd. A fixed two-task
+window has at most six workers total and two per model. The next window waits
+for all its workers. All LOW work and reports finish before MEDIUM starts.
+`--max-workers` accepts 1..6; the old `--group-size` does not control this mode.
+The existing single-model mode is unchanged.
+
+Prepare a fresh host root with `prepare-hosts.py --public-artifacts PATH` and the
+four official `prime-agent{,-ai,-core,-tui}-0.9.4.tgz` release assets. The public
+packages retain their branded metadata names and original scoped import keys.
+Do not rename stock imports or reuse another arm's first-party modules. The
+preparer still needs a fresh clean native candidate, its installed third-party
+dependencies and an appropriate pinned Node. It does not install dependencies,
+bootstrap Python, download artifacts or establish SDK compatibility. Old H
+inputs, hosts and campaigns are not rewritten.
+
+The campaign requires that public baseline, both arms, all tasks and an explicit
+`--api-price-profiles` snapshot. It also requires the existing admission flag,
+isolation checks and a fresh output directory. After host and SDK readiness:
+
+```sh
+python3.12 run.py --three-model-campaign --tasks all --variants vanilla,current \
+  --max-workers 6 --hosts-manifest /ABSOLUTE/fresh-hosts/hosts.json \
+  --host-openai-codex-auth-file ~/.prime/agent/auth.json \
+  --host-deepseek-api-key-file /PRIVATE/deepseek-key \
+  --api-price-profiles api-price-profiles.json --output /FRESH/results \
+  --admit-provider-calls
+```
+
+OpenAI continues to use the existing read-only ChatGPT subscription. DeepSeek
+uses its own API key file. Only the selected provider's credential is mounted
+under `/run` in its provider process. Tool, service and judge sandboxes do not
+receive either credential mount. No key is forwarded through their environment
+or written into model/settings/session files. DeepSeek storage stays empty;
+its literal key enters the SDK through `setRuntimeApiKey`, not stock's stored
+key command/environment resolver. No shared OAuth refresh is allowed.
+
+Stock already includes exact Sol and Astra IDs. Only DeepSeek needs a normal
+`models.json` entry for `deepseek-flash`, including its explicit thinking map and
+`max_tokens` compatibility field. No stock SDK code or stream wrapper is added.
+Current-only request-token profiles remain explicit. Image capability does not
+remove native media-budget refusal.
+
+Results live under `OUTPUT/low|medium/sol|astra|deepseek`. Each root has separate
+attempts, results and reports. Requested DeepSeek medium maps to wire high;
+configuration labels are not observed effort. Pricing remains declared OpenAI
+STANDARD API-equivalent estimates and DeepSeek peak API estimates. Stock's
+missing write split and hidden-call coverage remain unknown. Partial subtotals
+and intervals are not complete-cost comparisons or verified debits.
+
+The offline scheduler and local setup fixtures do not establish a prepared SDK
+working path, live availability or benchmark readiness. Complete those remaining
+steps before starting the comparison. No new benchmark result is claimed here.

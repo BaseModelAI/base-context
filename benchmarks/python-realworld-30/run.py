@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import copy
 import json
 import os
 import queue
@@ -45,6 +46,7 @@ from benchlib import (
 
 ROOT = Path(__file__).resolve().parent
 H_VERSION = "0.9.3"
+PUBLIC_VERSION = "0.9.4"
 NATIVE_PACKAGE = "@ponythewhite/base-context"
 VARIANTS = ("vanilla", "current")
 AUXILIARY_KINDS = ("semantic-distill", "task-scout", "stall-recovery", "knowledge-compile")
@@ -324,7 +326,7 @@ def prepare_agent_home(run_dir: Path, args: argparse.Namespace) -> dict[str, Pat
     roots["launcher"] = create_sandbox_scripts(run_dir, args)
     # No auth file, OAuth copy, package resolution, or inherited user settings.
     settings = {
-        "defaultProvider": "openai-codex",
+        "defaultProvider": args.provider,
         "defaultModel": args.model,
         "defaultThinkingLevel": args.thinking,
         "shellPath": str(roots["launcher"]),
@@ -332,7 +334,30 @@ def prepare_agent_home(run_dir: Path, args: argparse.Namespace) -> dict[str, Pat
         "packages": [],
     }
     json_dump(roots["config"] / "settings.json", settings)
-    json_dump(roots["config"] / "models.json", {})
+    # Stock already has Sol/Astra. Add only the canonical DeepSeek contract when selected.
+    models = {}
+    if args.provider == "deepseek":
+        models = {'providers': {'deepseek': {'models': [{'id': 'deepseek-flash',
+                                                'name': 'DeepSeek-V4.1-Flash',
+                                                'api': 'openai-completions',
+                                                'reasoning': True,
+                                                'thinkingLevelMap': {'minimal': 'low',
+                                                                     'low': 'low',
+                                                                     'medium': 'high',
+                                                                     'high': 'high',
+                                                                     'xhigh': 'high',
+                                                                     'max': 'max'},
+                                                'input': ['text', 'image'],
+                                                'contextWindow': 1000000,
+                                                'maxTokens': 393216,
+                                                'cost': {'input': 0.3,
+                                                         'output': 1.2,
+                                                         'cacheRead': 0.006,
+                                                         'cacheWrite': 0},
+                                                'compat': {'thinkingFormat': 'deepseek',
+                                                           'requiresReasoningContentOnAssistantMessages': True,
+                                                           'maxTokensField': 'max_tokens'}}]}}}
+    json_dump(roots["config"] / "models.json", models)
     return roots
 
 
@@ -363,10 +388,11 @@ def agent_command(
         "variant": variant, "cwd": str(workspace), "agentDir": str(roots["config"]),
         "sessionDir": str(roots["sessions"]), "modelId": args.model, "thinkingLevel": args.thinking,
     }
+    entry = {"openai-codex": "runSubscriptionRpc", "deepseek": "runDeepSeekRpc"}[args.provider]
     bootstrap.write_text(
         f"import * as host from {json.dumps((package / 'dist/index.js').as_uri())};\n"
-        f"import {{ runSubscriptionRpc }} from {json.dumps((ROOT / 'subscription-rpc.mjs').as_uri())};\n"
-        f"await runSubscriptionRpc(host, {json.dumps(options)});\n"
+        f"import {{ {entry} }} from {json.dumps((ROOT / 'subscription-rpc.mjs').as_uri())};\n"
+        f"await {entry}(host, {json.dumps(options)});\n"
     )
     return [*args.hosts[variant]["argv"][:-1], str(bootstrap)]
 
@@ -395,9 +421,13 @@ def isolated_agent_command(
     for name in ("bash-tool.mjs", "subscription-rpc.mjs", "host-subscription-backend.mjs"):
         adapter = ROOT / name
         result.extend(["--ro-bind", str(adapter), str(adapter)])
-    # Agent-only mount. The Bash, service, and judge sandboxes never mount /run.
-    result.extend(["--dir", "/run", "--ro-bind", str(args.host_openai_codex_auth_file),
-                   "/run/host-openai-codex-auth.json", "--bind", str(run_dir), str(run_dir),
+    # Only the selected provider credential is mounted. Tools/services/judges never mount /run.
+    credential, destination = {
+        "openai-codex": (args.host_openai_codex_auth_file, "/run/host-openai-codex-auth.json"),
+        "deepseek": (args.host_deepseek_api_key_file, "/run/host-deepseek-api-key"),
+    }[args.provider]
+    result.extend(["--dir", "/run", "--ro-bind", str(credential), destination,
+                   "--bind", str(run_dir), str(run_dir),
                    "--chdir", str(run_dir / "workspace"), "--", "/usr/bin/env", "-u", "PWD", *command])
     return result
 
@@ -1409,6 +1439,131 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
     path.write_text("\n".join(lines) + "\n")
 
 
+CAMPAIGN_MODELS = (
+    ("sol", "openai-codex", "gpt-5.6-sol", "openai-codex-responses", "existing-host-openai-codex-subscription"),
+    ("astra", "openai-codex", "gpt-6-astra", "openai-codex-responses", "existing-host-openai-codex-subscription"),
+    ("deepseek", "deepseek", "deepseek-flash", "openai-completions", "deepseek-api"),
+)
+
+
+def case_error_result(variant: str, scenario: dict[str, Any], exc: Exception) -> dict[str, Any]:
+    return {
+        "variant": variant, "task_id": scenario["id"], "task_slug": scenario["slug"], "pressure": scenario["pressure"],
+        "primary_attempt": 0, "retry_triggers": [],
+        "attempts": [{"error": f"{type(exc).__name__}: {exc}", "judge": {"status": "error", "progress_level": 0}, "metrics": {}}],
+    }
+
+
+def save_results(output: Path, results: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+    results.sort(key=lambda item: (item["task_id"], item["variant"]))
+    summary = comprehensive_summary(results)
+    summary["publication_protocol"] = manifest["publication_protocol"]
+    summary["publication_blockers"] = manifest["publication_blockers"]
+    summary["publication_ready"] = bool(
+        summary["publication_ready"] and manifest["publication_protocol"]
+    )
+    json_dump(output / "results.json", results)
+    json_dump(output / "summary.json", summary)
+    write_summary_markdown(output / "SUMMARY.md", summary, results)
+    manifest["completed_at"] = utc_now()
+    json_dump(output / "invocation.json", manifest)
+    return summary
+
+
+def run_model_task(
+    model_index: int, task_index: int, task_dir: Path, scenario: dict[str, Any],
+    output: Path, args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    """One task slot runs its paired arms in counterbalanced, sequential order."""
+    variants = list(VARIANTS)
+    if (task_index + model_index) % 2:
+        variants.reverse()
+    results = []
+    for variant in variants:
+        try:
+            result = run_case(variant, task_dir, scenario, output, args)
+        except Exception as exc:
+            result = case_error_result(variant, scenario, exc)
+        results.append(result)
+    return results
+
+
+def run_campaign(
+    args: argparse.Namespace, scenarios: dict[int, tuple[Path, dict[str, Any]]],
+    task_ids: list[int], manifest: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Main owns real-run admission/host checks; small task sets serve offline scheduler fixtures."""
+    if not 1 <= args.max_workers <= 6:
+        raise ValueError("--max-workers must be 1..6")
+    task_ids = sorted(task_ids)
+    campaign = copy.deepcopy(manifest)
+    # These single-model declarations cannot describe a mixed-model campaign.
+    for key in ("provider", "model", "thinking", "group_size", "auth_route", "provider_api"):
+        campaign.pop(key, None)
+    campaign.update({
+        "mode": "three-model-campaign", "phases": ["low", "medium"], "tasks": task_ids, "task_window_size": 2,
+        "worker_unit": "model,task with sequential arms", "max_workers": args.max_workers, "variants": list(VARIANTS),
+        "models": [{"label": label, "provider": provider, "model": model,
+                    "expected_provider_api": api, "expected_auth_route": route}
+                   for label, provider, model, api, route in CAMPAIGN_MODELS],
+        "arm_order": "sequential; reverse vanilla,current when (task_index + model_index) is odd",
+        "effort_note": "Expected wire effort is declared configuration, not measured; actual observations remain in request/session metrics or unknown.",
+    })
+    model_outputs = []
+    json_dump(args.output / "invocation.json", campaign)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
+        for phase in ("low", "medium"):
+            results_by_model = {model[0]: [] for model in CAMPAIGN_MODELS}
+            model_args = {}
+            model_manifests = {}
+            for label, provider, model, api, route in CAMPAIGN_MODELS:
+                configured = copy.deepcopy(args)
+                configured.provider, configured.model, configured.thinking = provider, model, phase
+                configured.output = args.output / phase / label
+                model_args[label] = configured
+                model_manifest = copy.deepcopy(campaign)
+                model_manifest.update({
+                    "provider": provider, "model": model, "thinking": phase, "campaign_phase": phase,
+                    "expected_provider_api": api, "expected_auth_route": route,
+                    "expected_wire_effort": "high" if provider == "deepseek" and phase == "medium" else phase,
+                })
+                model_manifests[label] = model_manifest
+                json_dump(configured.output / "invocation.json", model_manifest)
+            for offset in range(0, len(task_ids), 2):
+                window = task_ids[offset:offset + 2]
+                print(f"starting {phase} three-model window for tasks {window}", flush=True)
+                futures = {}
+                # Task-major order interleaves models even when fewer than six slots are configured.
+                for task_index, task_id in enumerate(window, start=offset):
+                    for model_index, (label, *_rest) in enumerate(CAMPAIGN_MODELS):
+                        configured = copy.deepcopy(model_args[label])
+                        future = executor.submit(
+                            run_model_task, model_index, task_index, scenarios[task_id][0],
+                            copy.deepcopy(scenarios[task_id][1]), configured.output, configured,
+                        )
+                        futures[future] = (label, task_id)
+                # All six (or the final fixture window's fewer) jobs finish before any next-window admission.
+                for future in concurrent.futures.as_completed(futures):
+                    label, task_id = futures[future]
+                    try:
+                        paired_results = future.result()
+                    except Exception as exc:
+                        paired_results = [case_error_result(variant, scenarios[task_id][1], exc) for variant in VARIANTS]
+                    results_by_model[label].extend(paired_results)
+                    json_dump(model_args[label].output / "results.partial.json", results_by_model[label])
+            for label, provider, model, _api, _route in CAMPAIGN_MODELS:
+                output = model_args[label].output
+                results = results_by_model[label]
+                summary = save_results(output, results, model_manifests[label])
+                model_outputs.append({"phase": phase, "provider": provider, "model": model, "output": str(output),
+                                      "runs": len(results), "regressions": len(summary["regressions"])})
+            # The entire low phase, including failures and its reports, precedes medium.
+    campaign["model_outputs"] = model_outputs
+    campaign["completed_at"] = utc_now()
+    json_dump(args.output / "invocation.json", campaign)
+    return model_outputs
+
+
 def parse_variants(value: str) -> list[str]:
     variants = [part.strip() for part in value.split(",") if part.strip()]
     unknown = sorted(set(variants) - set(VARIANTS))
@@ -1436,12 +1591,15 @@ def apply_hosts_manifest(args: argparse.Namespace) -> dict[str, Any]:
     for variant, host in hosts.items():
         package = Path(host["package_root"]).resolve(strict=True)
         metadata = json.loads((package / "package.json").read_text())
-        expected_name = "@earendil-works/pi-coding-agent" if variant == "vanilla" else NATIVE_PACKAGE
+        expected_name = ("prime-agent" if host.get("package_name") == "prime-agent" else
+                         "@earendil-works/pi-coding-agent") if variant == "vanilla" else NATIVE_PACKAGE
         if (metadata.get("name") != expected_name or host.get("package_name") != metadata.get("name")
                 or metadata.get("version") != host.get("version")):
             raise ValueError(f"{variant} host package metadata mismatch")
-        if variant == "vanilla" and metadata["version"] != H_VERSION:
-            raise ValueError(f"vanilla requires pinned local H{H_VERSION}")
+        if variant == "vanilla":
+            version = PUBLIC_VERSION if expected_name == "prime-agent" else H_VERSION
+            if metadata["version"] != version:
+                raise ValueError(f"vanilla requires pinned {expected_name} {version}")
         if variant == "current":
             info = json.loads((package / "dist/build-info.json").read_text())
             if info.get("sourceDirty") is not False or info.get("sourceCommit") != manifest.get("candidate_commit"):
@@ -1515,15 +1673,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=("openai-codex",), default="openai-codex")
     parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-5.6-sol")
     parser.add_argument("--thinking", default="medium")
+    parser.add_argument("--three-model-campaign", action="store_true",
+                        help="run all 30 tasks on Sol/Astra/DeepSeek, low then medium, paired arms sequentially in two-task windows")
     parser.add_argument("--api-price-profiles", dest="api_price_profiles_file", type=Path,
                         help="optional JSON price-profile snapshot for new experiment estimates; omitted uses recorded catalog prices")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
-    parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--group-size", type=int, default=2,
+                        help="single-model mode comparison-group size; campaign mode always uses a two-task window")
     parser.add_argument("--max-workers", type=int, default=6)
     parser.add_argument("--retry-failed", type=int, choices=(0, 1), default=1)
-    parser.add_argument("--hosts-manifest", type=Path, help="local-only H0.9.3/native manifest from prepare-hosts.py")
+    parser.add_argument("--hosts-manifest", type=Path, help="local prepared H0.9.3 or public Prime Agent0.9.4/native manifest from prepare-hosts.py")
     parser.add_argument("--host-openai-codex-auth-file", type=Path, help="existing host OpenAI Codex subscription auth; agent-only readonly mount")
-    parser.add_argument("--admit-provider-calls", action="store_true", help="explicitly admit subscription inference for this run")
+    parser.add_argument("--host-deepseek-api-key-file", type=Path, help="explicit DeepSeek API key file; selected provider process only, read-only mount")
+    parser.add_argument("--admit-provider-calls", action="store_true", help="explicitly admit the configured subscription/API inference for this run")
     parser.add_argument("--bwrap", default=shutil.which("bwrap") or "", help="bubblewrap executable for RPC and tool isolation")
     parser.add_argument("--validate-only", action="store_true")
     return parser
@@ -1537,8 +1699,10 @@ def main() -> int:
         not isinstance(args.api_price_profiles, list) or any(not isinstance(item, dict) for item in args.api_price_profiles)
     ):
         raise ValueError("--api-price-profiles must contain a JSON array of profile objects")
+    if args.three_model_campaign and args.api_price_profiles is None:
+        raise ValueError("--three-model-campaign requires --api-price-profiles with an explicit snapshot")
     require_python312()
-    if not (1 <= args.group_size <= 2):
+    if not args.three_model_campaign and not (1 <= args.group_size <= 2):
         raise SystemExit("--group-size must be 1..2")
     if not (1 <= args.max_workers <= 6):
         raise SystemExit("--max-workers must be 1..6")
@@ -1549,7 +1713,16 @@ def main() -> int:
     hosts_manifest = apply_hosts_manifest(args)
     task_ids = parse_task_ids(args.tasks, scenarios)
     variants = parse_variants(args.variants)
-    if args.group_size != len(variants):
+    if args.three_model_campaign:
+        baseline = hosts_manifest["hosts"]["vanilla"]
+        if baseline["package_name"] != "prime-agent" or baseline["version"] != PUBLIC_VERSION:
+            raise ValueError(f"--three-model-campaign requires public Prime Agent {PUBLIC_VERSION}")
+        if len(task_ids) != 30 or sorted(task_ids) != sorted(scenarios):
+            raise ValueError("--three-model-campaign requires all 30 task IDs")
+        if sorted(variants) != sorted(VARIANTS):
+            raise ValueError("--three-model-campaign requires exactly vanilla,current")
+        task_ids, variants = sorted(task_ids), list(VARIANTS)
+    elif args.group_size != len(variants):
         raise SystemExit("--group-size must equal the number of selected variants so each task runs as one comparison group")
     if not args.bwrap:
         raise SystemExit("bubblewrap (bwrap) is required for hermetic tool execution")
@@ -1561,6 +1734,12 @@ def main() -> int:
     args.host_openai_codex_auth_file = args.host_openai_codex_auth_file.expanduser().resolve(strict=True)
     if not args.host_openai_codex_auth_file.is_file():
         raise ValueError("host subscription auth must be an existing file")
+    if args.three_model_campaign:
+        if args.host_deepseek_api_key_file is None:
+            raise ValueError("--three-model-campaign requires --host-deepseek-api-key-file")
+        args.host_deepseek_api_key_file = args.host_deepseek_api_key_file.expanduser().resolve(strict=True)
+        if not args.host_deepseek_api_key_file.is_file():
+            raise ValueError("DeepSeek API key must be an existing file")
     for variant in variants:
         if variant not in hosts_manifest["hosts"]:
             raise ValueError(f"host not prepared: {variant}")
@@ -1569,15 +1748,16 @@ def main() -> int:
         publication_blockers.append("tasks must contain all 30 scenarios")
     if variants != list(VARIANTS):
         publication_blockers.append("variants must be vanilla,current")
-    if args.provider != "openai-codex":
-        publication_blockers.append("provider must be openai-codex")
-    if args.model not in {"gpt-5.6-sol", "gpt-6-astra"}:
-        publication_blockers.append("model must be an exact supported Sol/Astra ID")
-    if args.thinking != "medium":
-        publication_blockers.append("thinking must be medium")
+    if not args.three_model_campaign:
+        if args.provider != "openai-codex":
+            publication_blockers.append("provider must be openai-codex")
+        if args.model not in {"gpt-5.6-sol", "gpt-6-astra"}:
+            publication_blockers.append("model must be an exact supported Sol/Astra ID")
+        if args.thinking != "medium":
+            publication_blockers.append("thinking must be medium")
     if args.timeout_seconds != 1800:
         publication_blockers.append("timeout-seconds must be 1800")
-    if args.group_size != 2 or args.max_workers != 6:
+    if not args.three_model_campaign and (args.group_size != 2 or args.max_workers != 6):
         publication_blockers.append("group-size/max-workers must be 2/6")
     if args.retry_failed != 1:
         publication_blockers.append("retry-failed must be 1")
@@ -1612,10 +1792,14 @@ def main() -> int:
         "provider_calls_admitted": args.admit_provider_calls,
         "rpc_adapter": "external-sdk-runtime",
         "rpc_process_isolation": "private PID/mount view; read-only package inputs; allowlisted environment",
-        "host_version": H_VERSION,
+        "host_version": hosts_manifest["hosts"]["vanilla"]["version"],
         "publication_protocol": not publication_blockers,
         "publication_blockers": publication_blockers,
     }
+    if args.three_model_campaign:
+        outputs = run_campaign(args, scenarios, task_ids, manifest)
+        print(json.dumps({"output": str(args.output), "model_outputs": outputs}, sort_keys=True))
+        return 0
     json_dump(args.output / "invocation.json", manifest)
     results: list[dict[str, Any]] = []
     tasks_per_wave = max(1, args.max_workers // args.group_size)
@@ -1633,30 +1817,11 @@ def main() -> int:
                 try:
                     result = future.result()
                 except Exception as exc:
-                    result = {
-                        "variant": variant,
-                        "task_id": task_id,
-                        "task_slug": scenarios[task_id][1]["slug"],
-                        "pressure": scenarios[task_id][1]["pressure"],
-                        "primary_attempt": 0,
-                        "retry_triggers": [],
-                        "attempts": [{"error": f"{type(exc).__name__}: {exc}", "judge": {"status": "error", "progress_level": 0}, "metrics": {}}],
-                    }
+                    result = case_error_result(variant, scenarios[task_id][1], exc)
                 results.append(result)
                 json_dump(args.output / "results.partial.json", results)
                 print(f"finished task {task_id:02d} {variant}: progress {((primary_attempt(result) or {}).get('judge') or {}).get('progress_level', 0)}", flush=True)
-    results.sort(key=lambda item: (item["task_id"], item["variant"]))
-    summary = comprehensive_summary(results)
-    summary["publication_protocol"] = manifest["publication_protocol"]
-    summary["publication_blockers"] = manifest["publication_blockers"]
-    summary["publication_ready"] = bool(
-        summary["publication_ready"] and manifest["publication_protocol"]
-    )
-    json_dump(args.output / "results.json", results)
-    json_dump(args.output / "summary.json", summary)
-    write_summary_markdown(args.output / "SUMMARY.md", summary, results)
-    manifest["completed_at"] = utc_now()
-    json_dump(args.output / "invocation.json", manifest)
+    summary = save_results(args.output, results, manifest)
     print(json.dumps({"output": str(args.output), "runs": len(results), "regressions": len(summary["regressions"])}, sort_keys=True))
     return 0
 

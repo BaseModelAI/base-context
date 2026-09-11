@@ -3119,3 +3119,36 @@ No live provider/key read, benchmark, installation or publication occurred.
 Benchmark API-key delivery, latest-public host and balanced scheduling remain
 separate work. This is a working offline native path, not availability, tokenizer,
 vision-budget, billing, performance or full-spec acceptance.
+
+
+### W109 — Three-model comparison setup
+
+Added an opt-in six-slot campaign: the same two task IDs across Sol, Astra and
+DeepSeek, paired arms sequentially and counterbalanced, complete window barriers,
+and all LOW work before MEDIUM. Per-model/phase outputs preserve existing attempt,
+retry, primary, failure and partial-result handling. The campaign requires all
+30 tasks, both arms, the pinned public baseline and explicit API-price profiles.
+The old single-model path remains available.
+
+Fresh public-host preparation accepts the official branded Prime Agent 0.9.4
+archives while preserving their scoped core import keys and ESM identities. It
+excludes ambient first-party modules and preserves existing native candidate,
+fresh-root and v2 manifest checks. Official assets were downloaded without
+scripts, installation or bootstrap. Source metadata shows existing ordinary
+direct dependencies fit their declared ranges; this is not runtime compatibility.
+
+Provider launch uses separate SDK entrypoints and selected-only read-only mounts.
+OpenAI keeps the existing subscription backend. DeepSeek uses a private API-key
+file and an empty stored backend plus a literal runtime override, avoiding stock
+stored-key command/environment interpretation. Stock already has Sol/Astra;
+only canonical DeepSeek is configured. Current native budgets remain explicit.
+No real DeepSeek key was read. Tool/service/judge credential isolation is unchanged.
+
+The first scheduler command failed discovery because the two new methods were
+placed in CodexAdapterTests. Neither body ran. Moving the unchanged methods to
+HarnessComparisonTests fixed the two affected cases. The separate public-layout
+and provider-command happy fixture and wrong-public-metadata edge passed first.
+The JS syntax checks passed. These checks do not execute the prepared SDKs or
+establish live availability. A clean current image, actual host preparation and
+an offline SDK working path remain before any new live campaign. No benchmark,
+owned installation, publication, complete-cost win or full-spec claim is made.

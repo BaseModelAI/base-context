@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import io
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +14,10 @@ from benchlib import aggregate_sessions, collect_sessions, parse_session_file
 
 import run as benchmark
 import run_codex as codex_benchmark
+
+host_spec = importlib.util.spec_from_file_location("host_setup", Path(__file__).with_name("prepare-hosts.py"))
+host_setup = importlib.util.module_from_spec(host_spec)
+host_spec.loader.exec_module(host_setup)
 
 
 def attempt(*, wall: float, cost: float | None, progress: int = 5) -> dict:
@@ -608,6 +614,215 @@ class HarnessComparisonTests(unittest.TestCase):
             output = root / "summary.md"
             benchmark.write_summary_markdown(output, summary, [vanilla, current])
             self.assertIn("n/a", output.read_text())
+
+
+    def test_campaign_balances_windows_models_and_effort_phases(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            args = argparse.Namespace(output=root, max_workers=2, group_size=99,
+                                      provider="openai-codex", model="gpt-5.6-sol", thinking="medium",
+                                      api_price_profiles=[{"marks": []}])
+            scenarios = {number: (root / f"source-{number}", {"id": number, "slug": f"example-{number}",
+                                                          "pressure": "N", "scratch": []}) for number in range(1, 5)}
+            manifest = {"publication_protocol": False, "publication_blockers": ["offline fixture"],
+                        "auth_route": "existing-host-openai-codex-subscription", "provider_api": "openai-codex-responses"}
+            submitted, completed, calls, paths = [], [], [], set()
+            first_calls = set()
+
+            def run_case(variant, task_dir, scenario, output, configured):
+                key = (configured.thinking, configured.model, scenario["id"])
+                if key not in first_calls:
+                    self.assertEqual(configured.api_price_profiles[0]["marks"], [])
+                    self.assertEqual(scenario["scratch"], [])
+                    first_calls.add(key)
+                configured.api_price_profiles[0]["marks"].append(variant)
+                scenario["scratch"].append(variant)
+                calls.append((*key, variant))
+                paths.add(output / f"task-{scenario['id']:02d}-{scenario['slug']}" / variant / "attempt-1")
+                return {**result(variant, attempt(wall=1, cost=0.1)), "task_id": scenario["id"], "task_slug": scenario["slug"]}
+
+            def submit(function, *values):
+                # The next six-job window cannot even be submitted until the previous one finishes.
+                if len(submitted) % 6 == 0:
+                    self.assertEqual(len(completed), len(submitted))
+                configured, scenario = values[-1], values[3]
+                key = (configured.thinking, scenario["id"], configured.model)
+                submitted.append(key)
+                future = Mock()
+
+                def finish():
+                    value = function(*values)
+                    completed.append(key)
+                    return value
+
+                future.result.side_effect = finish
+                return future
+
+            with patch.object(benchmark, "run_case", side_effect=run_case), \
+                 patch.object(benchmark.concurrent.futures, "ThreadPoolExecutor") as pool, \
+                 patch.object(benchmark.concurrent.futures, "as_completed", side_effect=lambda values: reversed(list(values))):
+                pool.return_value.__enter__.return_value.submit.side_effect = submit
+                outputs = benchmark.run_campaign(args, scenarios, list(scenarios), manifest)
+            pool.assert_called_once_with(max_workers=2)
+            models = ["gpt-5.6-sol", "gpt-6-astra", "deepseek-flash"]
+            self.assertEqual(submitted, [(phase, task_id, model) for phase in ("low", "medium")
+                                         for task_id in range(1, 5) for model in models])
+            for phase in ("low", "medium"):
+                for model_index, model in enumerate(models):
+                    for task_id in range(1, 5):
+                        order = [entry[3] for entry in calls if entry[:3] == (phase, model, task_id)]
+                        self.assertEqual(order, ["current", "vanilla"] if (task_id - 1 + model_index) % 2 else ["vanilla", "current"])
+            self.assertEqual(len(paths), 48)
+            self.assertEqual(len(outputs), 6)
+            self.assertTrue(all(item["runs"] == 8 for item in outputs))
+            for item in outputs:
+                rows = json.loads((Path(item["output"]) / "results.json").read_text())
+                self.assertEqual(len(rows), 8)
+                self.assertEqual({row["task_id"] for row in rows}, {1, 2, 3, 4})
+            configured = json.loads((root / "medium/deepseek/invocation.json").read_text())
+            self.assertEqual(configured["thinking"], "medium")
+            self.assertEqual(configured["expected_wire_effort"], "high")
+            self.assertEqual(configured["expected_auth_route"], "deepseek-api")
+            self.assertNotIn("auth_route", configured)
+            self.assertNotIn("observed_wire_effort", configured)
+            self.assertEqual(args.api_price_profiles, [{"marks": []}])
+            self.assertTrue(all(not scenario["scratch"] for _, scenario in scenarios.values()))
+            self.assertEqual(args.model, "gpt-5.6-sol")
+            self.assertEqual(args.group_size, 99)  # Campaign windows do not use the single-model setting.
+
+    def test_campaign_retains_failed_arm_and_continues_other_work(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            args = argparse.Namespace(output=root, max_workers=6, api_price_profiles=[])
+            scenarios = {number: (root / f"source-{number}", {"id": number, "slug": f"example-{number}", "pressure": "N"})
+                         for number in (1, 2)}
+            manifest = {"publication_protocol": False, "publication_blockers": ["offline fixture"]}
+            calls = []
+
+            def run_case(variant, task_dir, scenario, output, configured):
+                key = (configured.thinking, configured.model, scenario["id"], variant)
+                calls.append(key)
+                if key == ("low", "gpt-5.6-sol", 1, "vanilla"):
+                    raise RuntimeError("first arm failed")
+                return {**result(variant, attempt(wall=1, cost=0.1)), "task_id": scenario["id"], "task_slug": scenario["slug"]}
+
+            def submit(function, *values):
+                future = Mock()
+                future.result.side_effect = lambda: function(*values)
+                return future
+
+            with patch.object(benchmark, "run_case", side_effect=run_case), \
+                 patch.object(benchmark.concurrent.futures, "ThreadPoolExecutor") as pool, \
+                 patch.object(benchmark.concurrent.futures, "as_completed", side_effect=lambda values: list(values)):
+                pool.return_value.__enter__.return_value.submit.side_effect = submit
+                outputs = benchmark.run_campaign(args, scenarios, [1, 2], manifest)
+                with self.assertRaisesRegex(ValueError, "--max-workers must be 1..6"):
+                    benchmark.run_campaign(argparse.Namespace(**{**vars(args), "max_workers": 7}), scenarios, [1, 2], manifest)
+            pool.assert_called_once_with(max_workers=6)
+            rows = json.loads((root / "low/sol/results.partial.json").read_text())
+            by_case = {(row["task_id"], row["variant"]): row for row in rows}
+            self.assertEqual(by_case[(1, "vanilla")]["attempts"][0]["error"], "RuntimeError: first arm failed")
+            self.assertEqual(by_case[(1, "current")]["attempts"][0]["judge"]["status"], "pass")
+            self.assertEqual(len(calls), 24)
+            self.assertEqual(len(outputs), 6)
+            self.assertIn(("medium", "deepseek-flash", 2, "current"), calls)
+            self.assertTrue(all(item["runs"] == 4 for item in outputs))
+
+
+    def test_public_host_layout_and_selected_provider_launch(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            artifacts, candidate, dependencies = (root / name for name in ("artifacts", "candidate", "dependencies"))
+            for path in (artifacts, candidate, dependencies):
+                path.mkdir()
+            for name in (*host_setup.PUBLIC_PACKAGES.values(), "@earendil-works", "@ponythewhite", "ordinary"):
+                (dependencies / name).mkdir()
+            for import_key, name in host_setup.PUBLIC_PACKAGES.items():
+                metadata = {"name": name, "version": "0.9.4", "type": "module", "dependencies": {}}
+                if name == "prime-agent":
+                    metadata["bin"] = {"prime-agent": host_setup.CLI_PATH}
+                    metadata["dependencies"] = {"@earendil-works/pi-ai": "https://example.invalid/fixture-ai.tgz"}
+                files = {"package/package.json": json.dumps(metadata), "package/dist/index.js": "export {};",
+                         "package/" + host_setup.CLI_PATH: "export {};"}
+                with tarfile.open(artifacts / f"{name}-0.9.4.tgz", "w:gz") as archive:
+                    for path, content in files.items():
+                        data = content.encode()
+                        member = tarfile.TarInfo(path)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+            native = candidate / "unpacked/base-context/package"
+            (native / "dist/bundle").mkdir(parents=True)
+            native_metadata = {"name": benchmark.NATIVE_PACKAGE, "version": "0.1.0", "dependencies": {}}
+            benchmark.json_dump(native / "package.json", native_metadata)
+            benchmark.json_dump(native / "dist/build-info.json", {"sourceDirty": False, "sourceCommit": "fixture"})
+            (native / host_setup.CLI_PATH).write_text("export {};")
+            node = root / "node"
+            node.write_text("fixture, never executed")
+            output = root / "hosts"
+            with patch.object(host_setup, "read_candidate", return_value=(
+                    "fixture", {benchmark.NATIVE_PACKAGE: native}, {benchmark.NATIVE_PACKAGE: native_metadata})),                  patch.object(host_setup, "require_node", return_value=(node, "22.12.0")):
+                manifest = host_setup.prepare_hosts(None, candidate, dependencies, node, output, public_artifacts=artifacts)
+            self.assertEqual(manifest["hosts"]["vanilla"]["package_name"], "prime-agent")
+            self.assertEqual(manifest["hosts"]["vanilla"]["version"], "0.9.4")
+            self.assertEqual(manifest["hosts"]["vanilla"]["kind"], "public-prime-agent")
+            for key, name in host_setup.PUBLIC_PACKAGES.items():
+                self.assertEqual((output / "node_modules" / key).resolve(), output / "unpacked" / name / "package")
+            self.assertFalse((output / "node_modules/@ponythewhite").exists())
+            self.assertFalse((output / "node_modules/prime-agent-ai").exists())
+            self.assertEqual((output / "node_modules/ordinary").resolve(), dependencies / "ordinary")
+            args = argparse.Namespace(hosts_manifest=output / "hosts.json", bwrap="/usr/bin/bwrap",
+                                      host_openai_codex_auth_file=root / "subscription.json",
+                                      host_deepseek_api_key_file=root / "deepseek-key", thinking="medium")
+            benchmark.apply_hosts_manifest(args)
+            args.host_deepseek_api_key_file.write_text("fixture-provider-secret")
+            for provider, model, variant, entry, mount, excluded in (
+                ("deepseek", "deepseek-flash", "vanilla", "runDeepSeekRpc", "/run/host-deepseek-api-key", "/run/host-openai-codex-auth.json"),
+                ("openai-codex", "gpt-5.6-sol", "current", "runSubscriptionRpc", "/run/host-openai-codex-auth.json", "/run/host-deepseek-api-key"),
+            ):
+                args.provider, args.model = provider, model
+                run_dir = root / provider
+                roots = benchmark.prepare_agent_home(run_dir, args)
+                workspace = run_dir / "workspace"
+                workspace.mkdir()
+                command = benchmark.agent_command(variant, workspace, roots, args)
+                bootstrap = Path(command[-1]).read_text()
+                self.assertIn(f"await {entry}(host,", bootstrap)
+                self.assertNotIn("fixture-provider-secret", bootstrap)
+                settings = json.loads((roots["config"] / "settings.json").read_text())
+                self.assertEqual(settings["defaultProvider"], provider)
+                models = json.loads((roots["config"] / "models.json").read_text())
+                if provider == "deepseek":
+                    configured = models["providers"]["deepseek"]["models"][0]
+                    self.assertEqual(configured["id"], model)
+                    self.assertEqual(configured["thinkingLevelMap"]["medium"], "high")
+                    self.assertEqual(configured["compat"]["maxTokensField"], "max_tokens")
+                    self.assertNotIn("apiKey", models["providers"]["deepseek"])
+                else:
+                    self.assertEqual(models, {})
+                isolated = benchmark.isolated_agent_command(command, args.hosts[variant], run_dir, args)
+                self.assertIn(mount, isolated)
+                self.assertNotIn(excluded, isolated)
+                shell = roots["launcher"].read_text()
+                self.assertNotIn(mount, shell)
+                self.assertNotIn(str(args.host_deepseek_api_key_file), shell)
+
+    def test_public_host_rejects_foreign_package_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            root = Path(directory)
+            artifacts, candidate, dependencies = (root / name for name in ("artifacts", "candidate", "dependencies"))
+            for path in (artifacts, candidate, dependencies):
+                path.mkdir()
+            data = json.dumps({"name": "@earendil-works/pi-coding-agent", "version": "0.9.4", "type": "module"}).encode()
+            with tarfile.open(artifacts / "prime-agent-0.9.4.tgz", "w:gz") as archive:
+                member = tarfile.TarInfo("package/package.json")
+                member.size = len(data)
+                archive.addfile(member, io.BytesIO(data))
+            output = root / "hosts"
+            with patch.object(host_setup, "require_node") as node:
+                with self.assertRaisesRegex(ValueError, "expected ESM prime-agent@0.9.4"):
+                    host_setup.prepare_hosts(None, candidate, dependencies, root / "node", output, public_artifacts=artifacts)
+            node.assert_not_called()
+            self.assertFalse(output.exists())
 
 
 class CodexAdapterTests(unittest.TestCase):
