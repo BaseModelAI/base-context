@@ -3327,3 +3327,27 @@ and kernel snapshots are excluded. History contents are retained, not secret-scr
 Attachment/artifact/external-reference remapping, paused jobs, opaque replay and
 trusted runtime resume remain unsupported. This is useful partial migration, not
 full G12/F16 closure. The benchmark image remains W113, and publication stays held.
+
+
+### W127 — Real owned update, rollback and restoration
+
+The owned installation was updated from source `a7a8841b0` to `ca5510863` using
+fresh local packages, normal npm scripts/downloads and a new release-local Python
+environment. Activation completed successfully with the original release retained
+as previous. The actual stable installer then rolled back to that original pair
+and restored the updated pair in two explicit, successful operations, each using
+the observed selection as its expectation. These were planned lifecycle actions,
+not retries or automatic rollback after an uncertain result. Old versions and the
+initial failed installation candidate were retained.
+
+The updated release is active again. Its actual installed stable launcher handles
+`help migrate`. No user data was migrated, no source writers were stopped, and
+Prime Agent and the frozen benchmark images were unchanged. Both release venvs
+need their retained private installation HOMEs, which hold their freshly installed
+uv-managed Python interpreters. Binary selection is not a schema/data rollback or
+a claim about the health of already-running owners.
+
+This demonstrates the local owned install/update/rollback path. Public npm/GitHub
+publication still requires benchmark review and final approval. Local release
+artifact preparation does not grant publication permission or establish hosted
+endpoint availability.
