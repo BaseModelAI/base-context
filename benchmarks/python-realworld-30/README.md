@@ -201,3 +201,32 @@ H raw sessions use their observed assistant accounting. Unavailable physical
 request coverage and auxiliary/refinement fields remain unknown. Neither arm
 reads the old Prime Context accounting sidecar or archive directory. Provider
 prompt anchors count input, cache-read, and cache-write tokens, excluding output.
+
+### Explicit API-price estimates for new runs
+
+The optional `--api-price-profiles PATH` flag reads a JSON snapshot once. The
+supplied `api-price-profiles.json` covers Sol and Astra on the existing ChatGPT
+subscription and `deepseek-flash` on the DeepSeek API. Omitting the flag keeps
+the existing recorded-catalog path. This flag changes estimates, not credentials
+or permission to start a benchmark.
+
+OpenAI uses the declared **STANDARD API-equivalent** rates, including separate
+ordinary-input, cache-read, cache-write and output charges. Gross input above
+272,000 tokens selects long-context rates for the entire request. This is not
+subscription cash spend or applied priority/flex billing. DeepSeek uses a declared
+**peak API estimate**, not an inferred billing window or verified debit.
+
+The report groups estimates by profile and observation source. Native estimates
+use deduplicated physical receipts. Stock v0.9.4 combines ordinary input and cache
+writes in its normalized input count; its synthetic write-zero is not evidence.
+The report therefore shows a conditional price interval, not a guessed split.
+DeepSeek normalized counts can give a conditional point estimate. These figures
+cover only priced observations. Missing/default-only observations remain unpriced;
+hidden retries, fallback and auxiliary usage are not counted as zero. Conditional
+ranges are not guaranteed whole-run bounds or complete-cost comparisons.
+
+The profile snapshot is recorded in the existing `invocation.json`. Physical
+receipts, recorded catalog rates, original emitted usage/cost observations and
+primary/all-retained-attempt selection remain unchanged. The new three-model
+schedule, latest-public host and DeepSeek credential route are separate work;
+this pricing option alone does not make that experiment ready.

@@ -2048,3 +2048,23 @@ same two cases then passed on Python3.11.15. Required check passed first1046/no 
 types/installer/browser; it was not rerun for the fixture-only correction apart
 from mandatory commit hooks. Other auth/transport cases remain unrun. No real SDK
 session, auth/network call, installation, benchmark or publication was performed.
+
+
+### W105 — Explicit API-price estimates in the benchmark report
+
+The new optional profile snapshot flows from runner invocation through existing
+session parsing, physical-request deduplication and report aggregation. Sol/Astra
+use declared STANDARD API-equivalent four-component rates, with whole-request
+long pricing strictly above272000 gross input tokens. DeepSeek uses a declared
+peak API estimate. Transport, credentials and canonical receipts are unchanged.
+Missing/ambiguous profiles and unknown nonzero-priced quantities stay unpriced.
+Stock normalized OpenAI input has an unknown ordinary/write split: the report
+shows a conditional interval. DeepSeek can have a conditional point. Seen
+subtotals and unpriced-seen counts do not measure hidden calls or bound whole-run
+charges. Profile/source groups stay separate; no complete-cost win is inferred.
+Omitted profiles retain the old catalog path; old campaigns remain untouched.
+Two existing Python3.12.3 happy/edge cases passed first, including long pricing,
+copy deduplication, missing writes, duplicate profiles and conditional reporting.
+No SDK observer, model call, credential read, new schedule or benchmark ran. The
+canonical DeepSeek catalog and native projection are separate work, not established
+by these price calculations. Owned installation/publication and W72 remain held.

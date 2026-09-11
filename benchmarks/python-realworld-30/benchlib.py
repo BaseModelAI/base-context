@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -389,7 +390,96 @@ def sum_known(values: Iterable[int | float | None]) -> int | float | None:
     return sum(items) if items and all(value is not None for value in items) else None
 
 
-def _native_request_accounting(requests: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _price_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _profile_estimate(
+    identity: dict[str, Any], usage: dict[str, Any], profiles: list[dict[str, Any]], *,
+    stock: bool = False, complete: bool = True,
+) -> dict[str, Any]:
+    """Price one existing observation, not a new provider receipt."""
+    matches = [item for item in profiles if all(
+        identity.get(key) is not None and identity.get(key) == item.get(key)
+        for key in ("provider", "api", "model")
+    )]
+    profile = matches[0] if len(matches) == 1 else None
+    cost = {key: None for key in COST_KEYS}
+    interval = None
+    if profile and profile.get("currency") == "USD" and profile.get("unit") == "million-tokens":
+        rates = dict(profile.get("rates") or {})
+        stock_openai = stock and identity.get("api") == "openai-codex-responses"
+        gross_input = usage.get("inputTotal")
+        if stock_openai:
+            input_parts = [usage.get(key) for key in ("input", "cacheRead")]
+            gross_input = sum(input_parts) if all(_price_number(value) for value in input_parts) else None
+        long_rule = profile.get("long_input")
+        if long_rule:
+            if not _price_number(gross_input):
+                rates = {}
+            elif gross_input > long_rule["above_tokens"]:
+                rates = {key: value * long_rule["multipliers"][key]
+                         if _price_number(value) else None for key, value in rates.items()}
+        # Stock zero defaults have no raw presence/completeness evidence.
+        stock_values = [usage.get(key) for key in ("input", "cacheRead", "output")]
+        if not stock or (all(_price_number(value) for value in stock_values) and any(stock_values)):
+            for key in COST_KEYS[:-1]:
+                rate, quantity = rates.get(key), usage.get(key)
+                if _price_number(rate):
+                    cost[key] = 0 if rate == 0 else quantity * rate / 1_000_000 if _price_number(quantity) else None
+            if stock_openai:
+                # v0.9.4 combines ordinary input and writes in input. Its write=0 is synthetic.
+                cost["input"] = cost["cacheWrite"] = None
+                ordinary, write = rates.get("input"), rates.get("cacheWrite")
+                remainder = sum_known(cost[key] for key in ("cacheRead", "output"))
+                if _price_number(ordinary) and _price_number(write) and remainder is not None:
+                    interval = {
+                        "lower": usage["input"] * min(ordinary, write) / 1_000_000 + remainder,
+                        "upper": usage["input"] * max(ordinary, write) / 1_000_000 + remainder,
+                    }
+            cost["total"] = sum_known(cost[key] for key in COST_KEYS[:-1]) if complete else None
+    return {
+        "profile_id": profile.get("id") if profile else None,
+        "basis": profile.get("basis") if profile else None,
+        "coverage": "stock_messages_conditional" if stock else "native_recorded_attempts",
+        "models": [{key: identity[key] for key in ("provider", "api", "model", "responseModel") if key in identity}],
+        "observations": 1,
+        "unpriced_observations": int(cost["total"] is None and interval is None),
+        "known_subtotal": cost["total"],
+        "conditional_range": interval,
+        "cost": cost,
+    }
+
+
+def aggregate_api_price_estimates(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group only like profiles, bases and quantity sources; missing rows are not zero-priced."""
+    groups: dict[tuple, dict[str, Any]] = {}
+    for item in items:
+        key = (item["profile_id"], item["basis"], item["coverage"])
+        if key not in groups:
+            groups[key] = {
+                "profile_id": key[0], "basis": key[1], "coverage": key[2], "models": [],
+                "observations": 0, "unpriced_observations": 0, "known_subtotal": None, "conditional_range": None,
+            }
+        group = groups[key]
+        group["observations"] += item["observations"]
+        group["unpriced_observations"] += item["unpriced_observations"]
+        for model in item["models"]:
+            if model not in group["models"]:
+                group["models"].append(dict(model))
+        if item["known_subtotal"] is not None:
+            group["known_subtotal"] = (group["known_subtotal"] or 0) + item["known_subtotal"]
+        if item["conditional_range"] is not None:
+            if group["conditional_range"] is None:
+                group["conditional_range"] = {"lower": 0, "upper": 0}
+            for bound in ("lower", "upper"):
+                group["conditional_range"][bound] += item["conditional_range"][bound]
+    return list(groups.values())
+
+
+def _native_request_accounting(
+    requests: dict[str, dict[str, Any]], profiles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Measure existing physical records; keep no separate accounting store."""
     usages: list[dict[str, Any]] = []
     costs: list[dict[str, Any]] = []
@@ -398,24 +488,32 @@ def _native_request_accounting(requests: dict[str, dict[str, Any]]) -> dict[str,
     unsettled_attempts = 0
     capacity_confirmed = False
     final_response_tokens = None
+    price_estimates = []
     for request in requests.values():
         receipt = request.get("receipt") or {}
         item = {key: (receipt.get("usage") or {}).get(key) for key in USAGE_KEYS}
         usages.append(item)
-        pricing = (request.get("modelContract") or {}).get("pricing") or {}
-        # ResolvedModelContract exposes unvalidated catalog estimates, not bills.
-        rates = pricing.get("catalogRates") or {}
-        if pricing.get("status") != "unvalidated" or pricing.get("currency") != "USD" or pricing.get("unit") != "million-tokens":
-            rates = {}
-        # A zero tariff charge does not imply an observed zero token quantity.
-        item_cost = {
-            key: 0 if type(rates.get(key)) in (int, float) and rates[key] == 0
-            else item[key] * rates[key] / 1_000_000
-            if item[key] is not None and rates.get(key) is not None else None
-            for key in COST_KEYS[:-1]
-        }
         complete = request.get("type") == "attempt_settled" and receipt.get("usageCompleteness") == "complete"
-        item_cost["total"] = sum_known(item_cost.values()) if complete else None
+        if profiles is None:
+            pricing = (request.get("modelContract") or {}).get("pricing") or {}
+            # ResolvedModelContract exposes unvalidated catalog estimates, not bills.
+            rates = pricing.get("catalogRates") or {}
+            if pricing.get("status") != "unvalidated" or pricing.get("currency") != "USD" or pricing.get("unit") != "million-tokens":
+                rates = {}
+            # A zero tariff charge does not imply an observed zero token quantity.
+            item_cost = {
+                key: 0 if type(rates.get(key)) in (int, float) and rates[key] == 0
+                else item[key] * rates[key] / 1_000_000
+                if item[key] is not None and rates.get(key) is not None else None
+                for key in COST_KEYS[:-1]
+            }
+            item_cost["total"] = sum_known(item_cost.values()) if complete else None
+        else:
+            contract = request.get("modelContract") or {}
+            identity = {key: receipt.get(key, contract.get(key)) for key in ("provider", "api", "model", "responseModel")}
+            estimate = _profile_estimate(identity, item, profiles, complete=complete)
+            price_estimates.append(estimate)
+            item_cost = estimate["cost"]
         costs.append(item_cost)
         usage_complete = usage_complete and complete
         unsettled_attempts += int(request.get("type") != "attempt_settled")
@@ -427,9 +525,13 @@ def _native_request_accounting(requests: dict[str, dict[str, Any]]) -> dict[str,
             final_response_tokens = item["output"]
     usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
     cost = {key: sum_known(item[key] for item in costs) for key in COST_KEYS}
+    bases = {item["basis"] for item in price_estimates}
+    if profiles is not None and len(bases) > 1:
+        cost = {key: None for key in COST_KEYS}
     return {
         "accounting_source": "native_request_receipts",
-        "cost_basis": "catalog_estimate",
+        "cost_basis": "catalog_estimate" if profiles is None else next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None,
+        **({"api_price_estimates": aggregate_api_price_estimates(price_estimates)} if profiles is not None else {}),
         "usage_complete": usage_complete and all(value is not None for value in usage.values()),
         "cost_complete": usage_complete and all(value is not None for value in cost.values()),
         "provider_capacity_confirmed": capacity_confirmed,
@@ -513,10 +615,11 @@ def _recorded_compaction_requests(
     ]
 
 
-def parse_session_file(path: Path) -> dict[str, Any] | None:
+def parse_session_file(path: Path, profiles: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     header: dict[str, Any] | None = None
     requests: dict[str, dict[str, Any]] = {}
     assistant_usage: list[dict[str, Any]] = []
+    assistant_price_observations: list[dict[str, Any]] = []
     assistant_sources: list[tuple[dict[str, Any], bool]] = []
     compaction_sources: list[tuple[dict[str, Any], bool]] = []
     branch_summary_sources: list[tuple[dict[str, Any], bool]] = []
@@ -626,6 +729,11 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                     "id": entry.get("id"), "requestOutput": entry.get("requestOutput"),
                 }, original_frame))
                 assistant_usage.append(message.get("usage") or {})
+                if profiles is not None and not native:
+                    assistant_price_observations.append({
+                        **{key: message[key] for key in ("provider", "api", "model", "responseModel") if key in message},
+                        "usage": {key: (message.get("usage") or {}).get(key) for key in USAGE_KEYS},
+                    })
                 capacity_confirmed = capacity_confirmed or (
                     message.get("stopReason") == "error"
                     and message.get("errorMessage") == "Selected model is at capacity."
@@ -649,8 +757,17 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
         usages.append(usage_item)
     observed_usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
     observed_cost = {key: sum_known((item.get("cost") or {}).get(key) for item in assistant_usage) for key in COST_KEYS}
+    observed_basis = "assistant_usage_cost"
+    stock_estimates = []
+    if profiles is not None and not native:
+        stock_estimates = [_profile_estimate(item, item["usage"], profiles, stock=True)
+                           for item in assistant_price_observations]
+        bases = {item["basis"] for item in stock_estimates}
+        observed_basis = next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None
+        observed_cost = {key: sum_known(item["cost"][key] for item in stock_estimates)
+                         if len(bases) == 1 else None for key in COST_KEYS}
     if native:
-        accounting = _native_request_accounting(requests)
+        accounting = _native_request_accounting(requests, profiles)
         accounting["_native_requests"] = requests
         accounting["accounting_incomplete"] = incomplete
         if incomplete:
@@ -671,13 +788,15 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
             "cost": {key: None for key in COST_KEYS},
             "final_response_tokens": assistant_usage[-1].get("output") if assistant_usage else None,
             "provider_prompt_token_samples": [item["inputTotal"] for item in usages],
+            **({"api_price_estimates": aggregate_api_price_estimates(stock_estimates)} if profiles is not None else {}),
         }
     accounting.update({
         "assistant_usage_observations": assistant_usage,
         "observed_model_calls": len(assistant_usage),
         "observed_provider_usage": observed_usage,
         "observed_api_cost": observed_cost,
-        "observed_cost_basis": "assistant_usage_cost",
+        "observed_cost_basis": observed_basis,
+        **({"assistant_price_observations": assistant_price_observations} if profiles is not None else {}),
     })
     return {
         "path": str(path),
@@ -717,12 +836,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     }
 
 
-def collect_sessions(root: Path) -> list[dict[str, Any]]:
+def collect_sessions(root: Path, profiles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     # Keep native receipts across copies; assistant exports cannot replace them.
     paths = sorted(root.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime_ns)
     for path in paths:
-        parsed = parse_session_file(path)
+        parsed = parse_session_file(path, profiles)
         if not parsed:
             continue
         session_id = str(parsed["session_id"])
@@ -738,7 +857,7 @@ def collect_sessions(root: Path) -> list[dict[str, Any]]:
                     requests.setdefault(attempt_id, request)
             incomplete = previous.get("accounting_incomplete") is True or parsed.get("accounting_incomplete") is True
             capacity_confirmed = previous.get("provider_capacity_confirmed") is True or parsed.get("provider_capacity_confirmed") is True
-            parsed.update(_native_request_accounting(requests))
+            parsed.update(_native_request_accounting(requests, profiles))
             parsed["provider_capacity_confirmed"] = parsed["provider_capacity_confirmed"] or capacity_confirmed
             parsed["_native_requests"] = requests
             parsed["accounting_incomplete"] = incomplete
@@ -748,7 +867,9 @@ def collect_sessions(root: Path) -> list[dict[str, Any]]:
     return list(by_id.values())
 
 
-def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
+def aggregate_sessions(
+    sessions: list[dict[str, Any]], profiles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     incomplete = not sessions or any(item.get("accounting_incomplete") is True for item in sessions)
     requests: dict[str, dict[str, Any]] = {}
     accounting = []
@@ -764,7 +885,7 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
             else:
                 requests.setdefault(attempt_id, request)
     if requests:
-        accounting.append(_native_request_accounting(requests))
+        accounting.append(_native_request_accounting(requests, profiles))
     usage = {key: sum_known(item["usage"].get(key) for item in accounting) if not incomplete else None for key in USAGE_KEYS}
     cost = {key: sum_known(item["cost"].get(key) for item in accounting) if not incomplete else None for key in COST_KEYS}
     roots = [item for item in sessions if not item["rlm_depth"]]
@@ -781,7 +902,11 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
     samples = [sample for item in accounting for sample in item["provider_prompt_token_samples"]]
     sample_total = sum_known(samples)
     sources = {item["accounting_source"] for item in sessions}
-    bases = {item["cost_basis"] for item in sessions if item.get("cost_basis")}
+    bases = {item["cost_basis"] for item in (sessions if profiles is None else accounting) if item.get("cost_basis")}
+    observed_bases = {item.get("observed_cost_basis") for item in sessions}
+    observed_sources = {item.get("accounting_source") for item in sessions}
+    if profiles is not None and len(bases) > 1:
+        cost = {key: None for key in COST_KEYS}
     purposes: dict[str, int] = {}
     for item in accounting:
         for purpose, count in item["model_calls_by_purpose"].items():
@@ -793,7 +918,14 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "cost_basis": next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None,
         "accounting_incomplete": incomplete,
         "usage_complete": not incomplete and bool(accounting) and all(item["usage_complete"] for item in accounting),
-        "cost_complete": not incomplete and bool(accounting) and all(item["cost_complete"] for item in accounting),
+        "cost_complete": not incomplete and bool(accounting) and all(item["cost_complete"] for item in accounting)
+        and (profiles is None or len(bases) == 1),
+        **({"api_price_estimates": aggregate_api_price_estimates(
+            estimate for item in accounting for estimate in item.get("api_price_estimates", [])
+        ), "assistant_price_observations": [
+            {"session_id": item["session_id"], "path": item["path"], "observations": item.get("assistant_price_observations", [])}
+            for item in sessions
+        ]} if profiles is not None else {}),
         "provider_capacity_confirmed": any(item["provider_capacity_confirmed"] for item in sessions + accounting),
         "unsettled_attempts": sum_known(item["unsettled_attempts"] for item in accounting),
         "physical_attempts": list(requests.values()),
@@ -803,9 +935,12 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
             key: sum_known(item["observed_provider_usage"].get(key) for item in sessions) for key in USAGE_KEYS
         },
         "observed_api_cost": {
-            key: sum_known(item["observed_api_cost"].get(key) for item in sessions) for key in COST_KEYS
+            key: sum_known(item["observed_api_cost"].get(key) for item in sessions)
+            if profiles is None or (len(observed_bases) == 1 and len(observed_sources) == 1) else None
+            for key in COST_KEYS
         },
-        "observed_cost_basis": "assistant_usage_cost" if sessions else None,
+        "observed_cost_basis": ("assistant_usage_cost" if sessions else None) if profiles is None
+        else next(iter(observed_bases)) if len(observed_bases) == 1 else "mixed" if observed_bases else None,
         "assistant_usage_observations": [
             {"session_id": item["session_id"], "path": item["path"], "usage": item["assistant_usage_observations"]}
             for item in sessions

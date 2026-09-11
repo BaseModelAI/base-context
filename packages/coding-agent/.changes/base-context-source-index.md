@@ -170,3 +170,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Port upstream24519c30856965a832551206b3e9ed87e814d602: substitute prompt arguments in one literal-safe callback pass. Two existing cases passed; literal-style warnings were corrected without changing values or rerunning passing cases. Record the32-commit upstream disposition in docs/implementation/upstream-0.9.4.md. Sol and native source/ACK/policy owners are unchanged.
 
 - Port the MCPv2 input_schema leaf at the existing _ensure_tools adapter, retaining inputSchema on the wire. Existing fake-session happy/unknown-tool cases passed after correcting their stale path-helper fixture; required check passed first. No auth, SDK-session or invocation-policy change.
+
+- Add optional captured API-price profiles to benchmark parsing/reports: STANDARD OpenAI API-equivalent per-request long pricing and DeepSeek peak estimates, with separately labeled stock conditional ranges/subtotals. Preserve unknowns, receipts and primary/all-attempt selection. Existing Python happy/edge cases passed; no new benchmark or credential path.

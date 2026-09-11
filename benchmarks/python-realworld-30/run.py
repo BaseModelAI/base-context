@@ -22,6 +22,7 @@ from typing import Any
 
 from benchlib import (
     RUN_SCHEMA,
+    aggregate_api_price_estimates,
     aggregate_sessions,
     COST_KEYS,
     USAGE_KEYS,
@@ -881,7 +882,8 @@ def run_rpc(
                 service_events.append({"kind": service.name.replace("-", "_"), "event": "stopped", "at": utc_now()})
             stop_attempt_processes(run_dir)
 
-    metrics = aggregate_sessions(collect_sessions(roots["sessions"]))
+    profiles = getattr(args, "api_price_profiles", None)
+    metrics = aggregate_sessions(collect_sessions(roots["sessions"], profiles), profiles)
     metrics.update({
         "compaction_requests": len(compaction_requests),
         "compaction_completions": sum(1 for item in compaction_events if item["event"] == "end" and not item["aborted"] and not item["error"]),
@@ -966,7 +968,8 @@ def safe_run_attempt(
         return run_attempt(variant, task_dir, scenario, attempt_dir, args)
     except Exception as exc:
         attempt_dir.mkdir(parents=True, exist_ok=True)
-        metrics = aggregate_sessions(collect_sessions(attempt_dir / "sessions"))
+        profiles = getattr(args, "api_price_profiles", None)
+        metrics = aggregate_sessions(collect_sessions(attempt_dir / "sessions", profiles), profiles)
         result = {
             "schema": RUN_SCHEMA,
             "variant": variant,
@@ -1069,6 +1072,9 @@ def aggregate_bucket(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict
     usage = {key: sum_known((item.get("provider_usage") or {}).get(key) for item in metrics) for key in USAGE_KEYS}
     cost = {key: sum_known((item.get("api_cost") or {}).get(key) for item in metrics) for key in COST_KEYS}
     cost["total"] = sum_known(attempt_cost(attempt) for attempt in attempts)
+    profiled = any("api_price_estimates" in item for item in metrics)
+    if profiled and len({(item.get("cost_basis"), item.get("accounting_source")) for item in metrics}) > 1:
+        cost = {key: None for key in COST_KEYS}
     prompt_denominator = usage.get("inputTotal")
     peak_values = [item.get("peak_provider_bound_token_estimate") for item in metrics]
     prompt_peaks = [item.get("peak_provider_prompt_tokens") for item in metrics]
@@ -1096,6 +1102,9 @@ def aggregate_bucket(items: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict
         "usage_complete": all(item.get("usage_complete") is not False for item in metrics) and all(value is not None for value in usage.values()),
         "cost_complete": cost["total"] is not None,
         "cost_bases": sorted({item["cost_basis"] for item in metrics if item.get("cost_basis")}),
+        **({"api_price_estimates": aggregate_api_price_estimates(
+            estimate for item in metrics for estimate in item.get("api_price_estimates", [])
+        )} if profiled else {}),
         "prompt_cache_reuse": usage["cacheRead"] / prompt_denominator
         if usage["cacheRead"] is not None and prompt_denominator else None,
         "peak_provider_bound_token_estimate": max(peak_values) if peak_values and None not in peak_values else None,
@@ -1216,11 +1225,16 @@ def comprehensive_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
                 "current_edge_check_passed": bool(current_accuracy[2]),
             })
         if strict_pass(current) and strict_pass(vanilla):
+            price_metrics = [value.get("metrics") or {} for value in (current, vanilla)]
+            same_price_basis = not any("api_price_estimates" in value for value in price_metrics) or len({
+                (value.get("cost_basis"), value.get("accounting_source")) for value in price_metrics
+            }) == 1
             comparison = {
                 "task_id": task_id,
                 "baseline": "vanilla",
                 "agent_wall_delta_current_minus_baseline": difference_known(current.get("agent_wall_seconds"), vanilla.get("agent_wall_seconds")),
-                "api_cost_delta_current_minus_baseline": difference_known(attempt_cost(current), attempt_cost(vanilla)),
+                "api_cost_delta_current_minus_baseline": difference_known(attempt_cost(current), attempt_cost(vanilla))
+                if same_price_basis else None,
                 "provider_tokens_delta_current_minus_baseline": difference_known(((current.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens"), ((vanilla.get("metrics") or {}).get("provider_usage") or {}).get("totalTokens")),
             }
             comparison["complete"] = all(comparison[key] is not None for key in ("agent_wall_delta_current_minus_baseline", "api_cost_delta_current_minus_baseline"))
@@ -1312,6 +1326,24 @@ def write_summary_markdown(path: Path, summary: dict[str, Any], results: list[di
             f"archive writes/bytes={metric_text(total['archive_writes'], 0)}/{metric_text(total['archive_bytes'], 0)}; "
             f"visible tool-result bytes={metric_text(total['tool_result_bytes_shown'], 0)}."
         )
+    if any("api_price_estimates" in item["all_attempts"] for item in summary["by_variant"].values()):
+        lines.extend([
+            "", "### Explicit API price profiles", "",
+            "Groups keep price profiles and quantity sources separate. Subtotals and ranges cover only priced, seen observations.",
+            "Unpriced counts count seen observations, not hidden requests. Stock estimates and ranges are conditional on returned normalized counts, not guaranteed whole-run bounds.",
+            "Stock synthetic cache-write zeros are not observations. Unknown full totals stay n/a; conditional figures do not establish a complete-cost win.",
+            "| Variant | Profile | Basis | Coverage | Seen | Unpriced seen | Known subtotal USD | Conditional seen range USD |",
+            "|---|---|---|---|---:|---:|---:|---|",
+        ])
+        for variant, item in summary["by_variant"].items():
+            for estimate in item["all_attempts"].get("api_price_estimates", []):
+                interval = estimate["conditional_range"]
+                range_text = f"{metric_text(interval['lower'], 6)}–{metric_text(interval['upper'], 6)}" if interval else "n/a"
+                lines.append(
+                    f"| {variant} | {estimate['profile_id'] or 'unmatched'} | {estimate['basis'] or 'unpriced'} | "
+                    f"{estimate['coverage']} | {estimate['observations']} | {estimate['unpriced_observations']} | "
+                    f"{metric_text(estimate['known_subtotal'], 6)} | {range_text} |"
+                )
     lines.extend([
         "", "## Pressure classes", "",
         "| Pressure | Variant | Tasks | Primary strict | Retained attempts | Capacity invalid | All agent s | All API estimate USD |",
@@ -1483,6 +1515,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=("openai-codex",), default="openai-codex")
     parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-5.6-sol")
     parser.add_argument("--thinking", default="medium")
+    parser.add_argument("--api-price-profiles", dest="api_price_profiles_file", type=Path,
+                        help="optional JSON price-profile snapshot for new experiment estimates; omitted uses recorded catalog prices")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--group-size", type=int, default=2)
     parser.add_argument("--max-workers", type=int, default=6)
@@ -1497,6 +1531,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    # Read once into detached data; concurrent attempts never reread or modify the file/profile snapshot.
+    args.api_price_profiles = json.loads(args.api_price_profiles_file.read_text()) if args.api_price_profiles_file else None
+    if args.api_price_profiles is not None and (
+        not isinstance(args.api_price_profiles, list) or any(not isinstance(item, dict) for item in args.api_price_profiles)
+    ):
+        raise ValueError("--api-price-profiles must contain a JSON array of profile objects")
     require_python312()
     if not (1 <= args.group_size <= 2):
         raise SystemExit("--group-size must be 1..2")
@@ -1556,6 +1596,7 @@ def main() -> int:
         "provider": args.provider,
         "model": args.model,
         "thinking": args.thinking,
+        **({"api_price_profiles": args.api_price_profiles} if args.api_price_profiles is not None else {}),
         "timeout_seconds": args.timeout_seconds,
         "group_size": args.group_size,
         "max_workers": args.max_workers,

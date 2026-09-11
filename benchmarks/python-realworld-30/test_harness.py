@@ -51,18 +51,20 @@ def native_journal(
     path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
     compaction_output: bool = False, branch_output: bool = False, planner_output: bool = False,
     zero_priced_missing_write: bool = False,
+    model_identity: dict[str, str] | None = None, token_usage: dict[str, int] | None = None,
 ) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
         "api": "openai-completions", "provider": "openai", "model": "fixture",
         "transport": "http", "ordinal": 1, "kind": "initial",
+        **(model_identity or {}),
     }
     metadata = {
         "operationId": "operation",
         "source": {"sessionId": "root", "leafId": None, "sourceSequence": 0, "persistent": True},
         "owner": {"sessionId": "root"}, "purpose": "main",
         "modelContract": {
-            "api": "openai-completions", "provider": "openai", "model": "fixture",
+            **{key: descriptor[key] for key in ("api", "provider", "model")},
             "profile": {"id": "native-default", "status": "unvalidated"},
             "pricing": {"status": "unvalidated", "currency": "USD", "unit": "million-tokens",
                         "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
@@ -81,7 +83,9 @@ def native_journal(
     if planner_output:
         metadata["purpose"] = "refine"
         metadata["purposeDetail"] = "plan"
-    usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
+    usage = dict(token_usage) if token_usage is not None else {
+        "input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145,
+    }
     if incomplete or zero_priced_missing_write:
         usage.pop("cacheWrite")
     if zero_priced_missing_write:
@@ -241,6 +245,41 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertIn("not subscription cash charges", report)
             self.assertIn("not verified debits", report)
             self.assertIn("usage complete=False; estimate computable=True", report)
+            profiles = json.loads(Path(__file__).with_name("api-price-profiles.json").read_text())
+            sol = next(item for item in profiles if item["model"] == "gpt-5.6-sol")
+            identity = {key: sol[key] for key in ("provider", "api", "model")}
+            profiled_dir = root / "profiled"
+            profiled_dir.mkdir()
+            long_usage = {"input": 210000, "inputTotal": 272001, "cacheRead": 60000,
+                          "cacheWrite": 2001, "output": 1000, "totalTokens": 273001}
+            native_journal(profiled_dir / "root.jsonl", model_identity=identity, token_usage=long_usage)
+            native_journal(profiled_dir / "fork.jsonl", session_id="fork", model_identity=identity, token_usage=long_usage)
+            native_price = aggregate_sessions(collect_sessions(profiled_dir, profiles), profiles)
+            self.assertEqual(native_price["all_model_calls"], 1)
+            self.assertAlmostEqual(native_price["api_cost"]["total"], 1.77801)
+            self.assertAlmostEqual(native_price["api_cost"]["output"], 0.03)
+            self.assertTrue(native_price["cost_complete"])
+            self.assertEqual(native_price["physical_attempts"][0]["modelContract"]["pricing"]["catalogRates"]["input"], 1)
+            self.assertEqual(native_price["api_price_estimates"][0]["observations"], 1)
+            stock_path = root / "stock-sol.jsonl"
+            stock_usage = {"input": 212001, "cacheRead": 60000, "cacheWrite": 0, "output": 1000, "totalTokens": 273001}
+            stock_path.write_text(json.dumps({"type": "session", "id": "stock", "version": 3}) + "\n" +
+                                  json.dumps({"type": "message", "message": {**identity, "role": "assistant", "usage": stock_usage}}) + "\n")
+            stock_price = aggregate_sessions([parse_session_file(stock_path, profiles)], profiles)
+            conditional = stock_price["api_price_estimates"][0]
+            self.assertEqual(conditional["coverage"], "stock_messages_conditional")
+            self.assertAlmostEqual(conditional["conditional_range"]["lower"], 1.774008)
+            self.assertAlmostEqual(conditional["conditional_range"]["upper"], 2.19801)
+            self.assertIsNone(stock_price["observed_api_cost"]["total"])
+            self.assertFalse(stock_price["cost_complete"])
+            self.assertEqual(stock_price["assistant_price_observations"][0]["observations"][0]["usage"]["cacheWrite"], 0)
+            native_result = result("current", {**attempt(wall=8, cost=None), "metrics": native_price})
+            stock_result = result("vanilla", {**attempt(wall=10, cost=None), "metrics": stock_price})
+            profile_summary = benchmark.comprehensive_summary([native_result, stock_result])
+            self.assertFalse(profile_summary["matched_strict_pass_comparisons"][0]["complete"])
+            benchmark.write_summary_markdown(report_path, profile_summary, [native_result, stock_result])
+            self.assertIn("Conditional seen range USD", report_path.read_text())
+            self.assertIn("not guaranteed whole-run bounds", report_path.read_text())
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})
@@ -462,6 +501,37 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertEqual(legacy["observed_provider_usage"]["totalTokens"], 145)
             self.assertEqual(legacy["assistant_usage_observations"][0]["usage"], [observed_usage])
             self.assertTrue(legacy["provider_capacity_confirmed"])
+            profiles = json.loads(Path(__file__).with_name("api-price-profiles.json").read_text())
+            sol = next(item for item in profiles if item["model"] == "gpt-5.6-sol")
+            identity = {key: sol[key] for key in ("provider", "api", "model")}
+            missing_path = root / "unreported-writes.jsonl"
+            native_journal(missing_path, model_identity=identity, zero_priced_missing_write=True)
+            missing = aggregate_sessions([parse_session_file(missing_path, profiles)], profiles)
+            self.assertIsNone(missing["api_cost"]["total"])
+            self.assertIsNone(missing["provider_usage"]["cacheWrite"])
+            duplicate_profiles = profiles + [sol]
+            ambiguous = aggregate_sessions([parse_session_file(missing_path, duplicate_profiles)], duplicate_profiles)
+            self.assertIsNone(ambiguous["api_price_estimates"][0]["profile_id"])
+            self.assertEqual(ambiguous["api_price_estimates"][0]["unpriced_observations"], 1)
+            deepseek = next(item for item in profiles if item["model"] == "deepseek-flash")
+            returned = {key: deepseek[key] for key in ("provider", "api", "model")}
+            deepseek_path = root / "stock-deepseek.jsonl"
+            stock_rows = [
+                {"type": "session", "id": "deepseek", "version": 3},
+                {"type": "message", "message": {**returned, "role": "assistant", "usage": observed_usage}},
+                {"type": "message", "message": {**returned, "role": "assistant", "stopReason": "error",
+                                                "usage": {key: 0 for key in observed_usage if key != "cost"}}},
+            ]
+            deepseek_path.write_text("".join(json.dumps(item) + "\n" for item in stock_rows))
+            partial_price = aggregate_sessions([parse_session_file(deepseek_path, profiles)], profiles)
+            group = partial_price["api_price_estimates"][0]
+            self.assertEqual(group["basis"], "deepseek-peak-normalized-api")
+            self.assertEqual(group["observations"], 2)
+            self.assertEqual(group["unpriced_observations"], 1)
+            self.assertAlmostEqual(group["known_subtotal"], 0.00005415)
+            self.assertIsNone(partial_price["observed_api_cost"]["total"])
+            self.assertIsNone(partial_price["api_cost"]["total"])
+            self.assertFalse(partial_price["cost_complete"])
 
             # Native host selection remains authoritative when no native receipts exist,
             # even if both RPC and a legacy assistant observation say capacity.

@@ -1,0 +1,80 @@
+[
+  {
+    "id": "openai-standard-sol-2026-09-11",
+    "provider": "openai-codex",
+    "api": "openai-codex-responses",
+    "model": "gpt-5.6-sol",
+    "basis": "openai-standard-api-equivalent",
+    "currency": "USD",
+    "unit": "million-tokens",
+    "rates": {
+      "input": 4,
+      "cacheRead": 0.4,
+      "cacheWrite": 5,
+      "output": 20
+    },
+    "long_input": {
+      "above_tokens": 272000,
+      "multipliers": {
+        "input": 2,
+        "cacheRead": 2,
+        "cacheWrite": 2,
+        "output": 1.5
+      }
+    },
+    "source_urls": [
+      "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+      "https://developers.openai.com/api/docs/guides/prompt-caching"
+    ],
+    "note": "Current published Sol promotional standard API rates, through at least November 21. Full-request long-input scaling; not a promise of later rates or subscription cash charges."
+  },
+  {
+    "id": "openai-standard-astra-2026-09-11",
+    "provider": "openai-codex",
+    "api": "openai-codex-responses",
+    "model": "gpt-6-astra",
+    "basis": "openai-standard-api-equivalent",
+    "currency": "USD",
+    "unit": "million-tokens",
+    "rates": {
+      "input": 10,
+      "cacheRead": 1,
+      "cacheWrite": 12.5,
+      "output": 50
+    },
+    "long_input": {
+      "above_tokens": 272000,
+      "multipliers": {
+        "input": 2,
+        "cacheRead": 2,
+        "cacheWrite": 2,
+        "output": 1.5
+      }
+    },
+    "source_urls": [
+      "https://developers.openai.com/api/docs/models/gpt-6-astra",
+      "https://developers.openai.com/api/docs/guides/prompt-caching"
+    ],
+    "note": "Standard API-equivalent estimate for subscription usage, with full-request long-input scaling. Not priority/flex pricing or actual subscription charges."
+  },
+  {
+    "id": "deepseek-flash-peak-2026-09-11",
+    "provider": "deepseek",
+    "api": "openai-completions",
+    "model": "deepseek-flash",
+    "basis": "deepseek-peak-normalized-api",
+    "currency": "USD",
+    "unit": "million-tokens",
+    "rates": {
+      "input": 0.3,
+      "cacheRead": 0.006,
+      "cacheWrite": 0,
+      "output": 1.2
+    },
+    "source_urls": [
+      "https://api-docs.deepseek.com/quick_start/pricing",
+      "https://api-docs.deepseek.com/guides/kv_cache"
+    ],
+    "note": "Normalized published PEAK estimate, not a chosen billing window or verified debit. Off-peak rates are half; peak is Monday-Friday 01:00-04:00 and 06:00-10:00 UTC. No crossing-window billing rule is assumed; zero write price is not a write-token observation."
+  }
+]
