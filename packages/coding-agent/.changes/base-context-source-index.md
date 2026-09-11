@@ -178,3 +178,4 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Add opt-in balanced Sol/Astra/DeepSeek comparison scheduling, pinned public Prime Agent 0.9.4 host preparation, and selected-only provider credential/SDK launch routing. Offline scheduling and local setup cases passed; actual prepared SDK readiness and new benchmarks remain pending. OpenAI subscription billing, conditional API estimates, and release holds remain unchanged.
 
 - Include the existing Absolute Prohibition block unchanged in every main Base Context system prompt, including custom-prompt builds. No Sol-only switch or project prompt file is required. Stock public prompts and auxiliary request policy are unchanged.
+- Added approved native per-invocation provider-attempt caps: compaction 4 shared across both parts, branch/reviewer/planner 2; nested captures share allowance without output authority, and failed attempts do not refund it. Running benchmark images are unchanged.

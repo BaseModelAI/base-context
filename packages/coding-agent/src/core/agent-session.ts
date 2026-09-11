@@ -207,6 +207,7 @@ import {
 	captureNativeBranchRequests,
 	captureNativeCompactionRequests,
 	captureNativePlannerRequests,
+	captureNativeReviewerRequests,
 	InferenceCoordinator,
 	type SessionRuntimeServices,
 } from "./inference-coordinator.js";
@@ -10119,7 +10120,7 @@ export class AgentSession {
 		const messages = structuredClone(this.agent.state.messages);
 		const harnessState = this._loadMergedHarnessState();
 		const reviewContext = { ...context };
-		const requests = this.requests.capture();
+		const requests = this.requests[captureNativeReviewerRequests]();
 		try {
 			const history = await this._loadRefinementHistory();
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);

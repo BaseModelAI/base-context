@@ -2163,3 +2163,40 @@ Two existing main-prompt cases passed on Node 22.12.0: the default/custom IPytho
 and Bash paths include the policy, and custom replacement still retains it.
 The required check passed. No prompt-behavior or efficiency gain is inferred
 from these string/path checks. The passing prepared-SDK exercise was not rerun.
+
+
+### W119 — Approved native auxiliary attempt caps
+
+The user approved fixed per-operation caps: compaction 4, branch summary 2,
+learning reviewer 2, and planner 2. This supersedes earlier W72 approval holds.
+These count provider-attempt admissions, not tokens, spend, or successful calls.
+A compaction invocation shares its four attempts across history and turn-prefix
+summaries. Nested captures and logical retries share the same private allowance;
+they do not inherit native output-association authority. A fresh native
+invocation starts a fresh allowance. Ordinary root MAIN, child, standalone and
+generic captures remain uncapped by this policy.
+
+Admission debits synchronously after existing prechecks and before source
+persistence. Failed attempts, admitted cancellations and persistence failures
+do not refund it. Exhaustion latches the existing completion failure before
+transport, including when the adapter returns an error message. Source/ACK,
+settlement and native-output ownership are unchanged. No request-token profile,
+settings schema, receipt store or token-budget default was added.
+
+Two focused cases passed first on Node 22.12.0 using the real Responses adapter,
+SessionManager and split-turn compaction helper with HTTP mocked: shared/nested
+caps and new-invocation reset; two admitted SDK failures followed by pre-send
+refusal, no logical-retry refund, and a fresh successful invocation. The run
+retained expected adapter error logs and a MaxListenersExceededWarning; it was
+not a live provider or runtime-cleanliness check. Branch/planner entry assignment
+and admitted cancellation/persistence-failure behavior were source-reviewed,
+not separately executed. The running W113/public-0.9.4 campaign stays frozen;
+these caps apply to the next build, not its results.
+
+The user also approved real owned installation/bootstrap and keeping the npm
+namespace `@ponythewhite/base-context*` with `BaseModelAI/base-context` GitHub
+Releases downloads. The first real owned install stopped during npm preparation:
+`EALLOWSCRIPTS`, because `--allow-scripts` is invalid for project-scoped installs.
+The owned selection was absent afterward; the failed candidate was retained.
+A minimal installer fix is pending. Actual publication still needs final approval
+after benchmark review. Whole-root/settings/package migration remains separate.

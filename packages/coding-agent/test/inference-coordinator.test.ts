@@ -7,8 +7,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
 import { ProviderAttemptTracker } from "../../ai/src/utils/provider-attempts.js";
 import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
+import { type CompactionPreparation, compact } from "../src/core/compaction/compaction.js";
+import { createFileOps } from "../src/core/compaction/utils.js";
 import {
 	bindAuxiliaryInferenceStream,
+	captureNativeCompactionRequests,
+	captureNativeReviewerRequests,
 	createNativeInferenceStream,
 	InferenceCoordinator,
 } from "../src/core/inference-coordinator.js";
@@ -350,7 +354,148 @@ afterEach(async () => {
 	}
 });
 
+function auxiliaryResponse(): Response {
+	const item = {
+		type: "message",
+		id: "msg_auxiliary",
+		role: "assistant",
+		status: "completed",
+		content: [{ type: "output_text", text: "OK", annotations: [] }],
+	};
+	const events = [
+		{ type: "response.output_item.added", output_index: 0, item: { ...item, status: "in_progress", content: [] } },
+		{ type: "response.output_item.done", output_index: 0, item },
+		{
+			type: "response.completed",
+			response: {
+				id: "resp_auxiliary",
+				model: model.id,
+				status: "completed",
+				usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11, input_tokens_details: { cached_tokens: 0 } },
+			},
+		},
+	];
+	return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+async function auxiliaryFixture() {
+	const dir = mkdtempSync(join(tmpdir(), "base-context-auxiliary-caps-"));
+	fixtureDirs.push(dir);
+	const manager = await SessionManager.create(dir, dir);
+	managers.push(manager);
+	await manager.appendMessage(context.messages[0]!);
+	return { manager, requests: new InferenceCoordinator(() => manager.bindRequestSink()) };
+}
+
 describe("native inference coordination", () => {
+	it("shares native auxiliary attempt caps across captures and resets on a new invocation", async () => {
+		const { manager, requests } = await auxiliaryFixture();
+		const captures: InferenceCoordinator[] = [];
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => auxiliaryResponse());
+		const options = { apiKey: "offline-auxiliary-key", maxRetries: 0 };
+		try {
+			const summaries = requests[captureNativeCompactionRequests]();
+			captures.push(summaries);
+			const preparation: CompactionPreparation = {
+				firstKeptEntryId: manager.getLeafId()!,
+				messagesToSummarize: [context.messages[0]!],
+				turnPrefixMessages: [context.messages[0]!],
+				isSplitTurn: true,
+				tokensBefore: 20,
+				fileOps: createFileOps(),
+				settings: { enabled: true, reserveTokens: 16, keepRecentTokens: 10 },
+			};
+			const summarize = (capture: InferenceCoordinator) =>
+				compact(preparation, model, options.apiKey, undefined, undefined, undefined, undefined, undefined, capture);
+			// Each real compact() fans out to history and turn-prefix native Responses calls.
+			await summarize(summaries);
+			await summarize(summaries);
+			expect(offlineFetch).toHaveBeenCalledTimes(4);
+			const nested = summaries.capture();
+			const nestedNative = nested[captureNativeReviewerRequests]();
+			captures.push(nested, nestedNative);
+			for (const capture of [summaries, nested, nestedNative]) {
+				await expect(capture.complete(model, context, options, { purpose: "other" })).rejects.toThrow(
+					"Native auxiliary operation attempt limit exhausted",
+				);
+			}
+			expect(offlineFetch).toHaveBeenCalledTimes(4);
+			const fresh = requests[captureNativeCompactionRequests]();
+			captures.push(fresh);
+			await summarize(fresh);
+			expect(offlineFetch).toHaveBeenCalledTimes(6);
+
+			// Labels cannot mint a quota; ordinary root captures and MAIN/child remain uncapped.
+			const generic = requests.capture();
+			captures.push(generic);
+			for (const purpose of ["summary", "summary", "summary", "summary", "summary", "main", "child"] as const) {
+				await expect(
+					generic.complete(model, context, options, { purpose, purposeDetail: "compaction" }),
+				).resolves.toMatchObject({
+					stopReason: "stop",
+				});
+			}
+			expect(offlineFetch).toHaveBeenCalledTimes(13);
+		} finally {
+			await Promise.all(captures.map((capture) => capture.dispose()));
+			await requests.dispose();
+		}
+	});
+
+	it("charges admitted SDK retries before refusing transport and permits a fresh auxiliary invocation", async () => {
+		const { manager, requests } = await auxiliaryFixture();
+		const captures: InferenceCoordinator[] = [];
+		let failing = true;
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+			failing
+				? new Response(JSON.stringify({ error: { message: "offline retry failure", type: "server_error" } }), {
+						status: 503,
+						headers: { "content-type": "application/json", "retry-after-ms": "1" },
+					})
+				: auxiliaryResponse(),
+		);
+		const request = { purpose: "refine", purposeDetail: "auto-refine-review" } as const;
+		const options = { apiKey: "offline-auxiliary-key", maxRetries: 2 };
+		try {
+			const review = requests[captureNativeReviewerRequests]();
+			captures.push(review);
+			// The real OpenAI SDK retries below its stream API. Its third send must never reach fetch.
+			await expect(review.complete(model, context, options, request)).rejects.toThrow(
+				"Native auxiliary operation attempt limit exhausted",
+			);
+			expect(offlineFetch).toHaveBeenCalledTimes(2);
+			failing = false;
+			// A new logical completion on that same capture cannot refund either failed admission.
+			await expect(review.complete(model, context, { ...options, maxRetries: 0 }, request)).rejects.toThrow(
+				"Native auxiliary operation attempt limit exhausted",
+			);
+			expect(offlineFetch).toHaveBeenCalledTimes(2);
+			const facts: NativeRequestEvent[] = [];
+			for await (const record of readSessionJournal(manager.getSessionFile()!)) {
+				const entry = record.entry as SessionEntry | SessionHeader;
+				if (entry.type === "request") facts.push(entry.request);
+			}
+			expect(
+				facts.filter((event) => event.type === "attempt_admitted").map((event) => event.descriptor.kind),
+			).toEqual(["initial", "retry"]);
+			expect(
+				facts.filter((event) => event.type === "attempt_settled").map((event) => event.receipt.outcome),
+			).toEqual(["failed", "failed"]);
+			const fresh = requests[captureNativeReviewerRequests]();
+			captures.push(fresh);
+			await expect(fresh.complete(model, context, { ...options, maxRetries: 0 }, request)).resolves.toMatchObject({
+				stopReason: "stop",
+			});
+			expect(offlineFetch).toHaveBeenCalledTimes(3);
+		} finally {
+			await Promise.all(captures.map((capture) => capture.dispose()));
+			await requests.dispose();
+		}
+	});
+
 	it("admits all purposes before transport and stores only physical facts", async () => {
 		const facts: NativeRequestEvent[] = [];
 		const dir = mkdtempSync(join(tmpdir(), "base-context-inference-"));

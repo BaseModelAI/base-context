@@ -108,6 +108,8 @@ export const captureNativeCompactionRequests = Symbol("base-context.native-compa
 export const captureNativeBranchRequests = Symbol("base-context.native-branch-requests");
 /** Internal native AgentSession planner capture, never inherited by generic capture. */
 export const captureNativePlannerRequests = Symbol("base-context.native-planner-requests");
+/** Internal native AgentSession reviewer invocation. */
+export const captureNativeReviewerRequests = Symbol("base-context.native-reviewer-requests");
 interface StreamBinding {
 	readonly coordinator: InferenceCoordinator;
 	readonly inner: StreamFn;
@@ -162,6 +164,7 @@ export class InferenceCoordinator {
 	#nativeCompactionOutput = false;
 	#nativeBranchOutput = false;
 	#nativePlannerOutput = false;
+	#auxiliaryAttempts?: { remaining: number };
 	private retryTurn = false;
 	private requestViewBoundary?: CapturedRequestViewBoundary;
 	private active = new Set<Promise<void>>();
@@ -217,16 +220,18 @@ export class InferenceCoordinator {
 		return write?.(owner, message);
 	}
 
-	/** Opt in only this new native invocation capture. Ordinary capture() deliberately does not inherit it. */
+	/** Opt this native invocation into output association; ordinary captures do not inherit that authority. */
 	[captureNativeCompactionRequests](): InferenceCoordinator {
 		const captured = InferenceCoordinator.prototype.capture.call(this);
 		captured.#nativeCompactionOutput = true;
+		captured.#auxiliaryAttempts ??= { remaining: 4 };
 		return captured;
 	}
 
 	[captureNativeBranchRequests](sink: BoundRequestSink): InferenceCoordinator {
 		const captured = InferenceCoordinator.prototype.capture.call(this, sink);
 		captured.#nativeBranchOutput = true;
+		captured.#auxiliaryAttempts ??= { remaining: 2 };
 		return captured;
 	}
 
@@ -240,6 +245,13 @@ export class InferenceCoordinator {
 	[captureNativePlannerRequests](sink: BoundRequestSink): InferenceCoordinator {
 		const captured = InferenceCoordinator.prototype.capture.call(this, sink);
 		captured.#nativePlannerOutput = true;
+		captured.#auxiliaryAttempts ??= { remaining: 2 };
+		return captured;
+	}
+
+	[captureNativeReviewerRequests](): InferenceCoordinator {
+		const captured = InferenceCoordinator.prototype.capture.call(this);
+		captured.#auxiliaryAttempts ??= { remaining: 2 };
 		return captured;
 	}
 
@@ -324,6 +336,8 @@ export class InferenceCoordinator {
 			() => owner,
 		);
 		captured.work = this.work;
+		// Nested captures share the invocation's allowance, not its native output authority.
+		captured.#auxiliaryAttempts = this.#auxiliaryAttempts;
 		captured.capturedSink = binding;
 		captured.captureReserved = true;
 		let release!: () => void;
@@ -679,6 +693,14 @@ export class InferenceCoordinator {
 						if (assessment) descriptor = { ...descriptor, requestBudget: assessment };
 					}
 					measuredForAdmission = false;
+					if (this.#auxiliaryAttempts) {
+						if (this.#auxiliaryAttempts.remaining === 0) {
+							budgetFailure ??= new Error("Native auxiliary operation attempt limit exhausted");
+							throw budgetFailure;
+						}
+						// Reserve synchronously before persistence; failures and cancellation do not refund it.
+						this.#auxiliaryAttempts.remaining--;
+					}
 					const attemptId = randomUUID();
 					const contextEpoch = selectedContextEpoch ? Object.freeze({ ...selectedContextEpoch }) : undefined;
 					const write = operation.binding.sink.persist({
