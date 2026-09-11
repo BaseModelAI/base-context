@@ -53,6 +53,15 @@ export type NativeBranchRequestOutputSource = (
 	association: NativeRequestOutputAssociation,
 ) => NativeBranchRequestOutputWriter | undefined;
 
+/** Internal append of the existing session refinement result only. */
+export type NativePlannerRequestOutputWriter = (
+	owner: object,
+	result: unknown,
+) => Promise<string | undefined> | undefined;
+export type NativePlannerRequestOutputSource = (
+	association: NativeRequestOutputAssociation,
+) => NativePlannerRequestOutputWriter | undefined;
+
 export type RequestPurpose = "main" | "summary" | "refine" | "learning" | "child" | "native-control" | "other";
 
 export interface RequestOwnerRef {

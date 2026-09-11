@@ -13,13 +13,15 @@ import {
 } from "node:fs";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { readSessionHistoryImage } from "../export-html/history.js";
-import { completeInference, type InferenceCoordinator } from "../inference-coordinator.js";
+import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
 import { convertToLlm } from "../messages.js";
+import type { NativePlannerRequestOutputWriter } from "../request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import type { SessionHistoryReadLimits } from "../session-history-index.js";
 import type { CustomEntry } from "../session-manager.js";
@@ -865,6 +867,8 @@ export function applyRefinementProposal(
 	proposal: RefinementProposal,
 	options: { id: string; rollbackOf?: string; scope?: HarnessScope; baselineState?: HarnessState },
 ): RefinementResult {
+	const application = nativePlannerApplications.get(proposal);
+	nativePlannerApplications.delete(proposal);
 	const appliedEdits: AppliedRefinementEdit[] = [];
 	const proposalModifiedKeys = new Set<string>();
 	for (const edit of proposal.edits) {
@@ -945,7 +949,7 @@ export function applyRefinementProposal(
 		created_at: now(),
 	});
 
-	return {
+	const result = {
 		id: options.id,
 		summary: proposal.summary,
 		rationale: proposal.rationale,
@@ -955,6 +959,21 @@ export function applyRefinementProposal(
 		rollbackOf: options.rollbackOf,
 		scope: options.scope,
 	};
+	if (
+		application &&
+		state === application.state &&
+		options.id === application.native.id &&
+		options.scope === application.scope &&
+		options.rollbackOf === undefined &&
+		options.baselineState === application.native.baselineState &&
+		matchesNativePlannerPlan(application.plan, application.native) &&
+		matchesPlannerOptions(application.options, application.native.options) &&
+		isDeepStrictEqual(proposal, application.projection)
+	) {
+		// Baseline/state references are the existing host inputs, not deep-immutability or conflict-correctness claims.
+		nativePlannerResults.set(result, { native: application.native, scope: application.scope, edits: appliedEdits });
+	}
+	return result;
 }
 
 function rollbackProposal(target: RefinementResult): RefinementProposal {
@@ -1007,6 +1026,125 @@ export interface RefinementPlan {
 	rollbackScope?: HarnessScope;
 	/** Target-scope state captured before planning, used to reject conflicting edits at apply time. */
 	baselineState?: HarnessState;
+}
+
+interface NativePlannerPlan {
+	readonly proposal: RefinementProposal;
+	readonly projection: RefinementProposal;
+	readonly id: string;
+	readonly options: RefineOptions;
+	readonly baselineState?: HarnessState;
+	readonly write: NativePlannerRequestOutputWriter;
+}
+interface NativePlannerApplication {
+	readonly plan: RefinementPlan;
+	readonly native: NativePlannerPlan;
+	readonly state: HarnessState;
+	readonly options: RefineOptions;
+	readonly scope: HarnessScope;
+	readonly projection: RefinementProposal;
+}
+const nativePlannerPlans = new WeakMap<RefinementPlan, NativePlannerPlan>();
+const nativePlannerApplications = new WeakMap<RefinementProposal, NativePlannerApplication>();
+const nativePlannerResults = new WeakMap<
+	RefinementResult,
+	{ native: NativePlannerPlan; scope: HarnessScope; edits: AppliedRefinementEdit[] }
+>();
+
+function matchesNativePlannerPlan(plan: RefinementPlan, native: NativePlannerPlan): boolean {
+	return (
+		plan.proposal === native.proposal &&
+		plan.id === native.id &&
+		plan.rollbackOf === undefined &&
+		plan.rollbackScope === undefined &&
+		plan.baselineState === native.baselineState &&
+		isDeepStrictEqual(plan.proposal, native.projection)
+	);
+}
+
+function matchesPlannerOptions(options: RefineOptions, captured: RefineOptions): boolean {
+	return (
+		options.instructions === captured.instructions &&
+		options.global === captured.global &&
+		options.rollbackId === captured.rollbackId
+	);
+}
+
+/** Preserve the actual AS baseline composition, not a copied or replacement plan's labels. */
+export function withRefinementBaseline(plan: RefinementPlan, baselineState: HarnessState): RefinementPlan {
+	const composed = { ...plan, baselineState };
+	const native = nativePlannerPlans.get(plan);
+	nativePlannerPlans.delete(plan);
+	if (native && native.baselineState === undefined && matchesNativePlannerPlan(plan, native)) {
+		nativePlannerPlans.set(composed, { ...native, baselineState });
+	}
+	return composed;
+}
+
+function lowerRefinementProposal(proposal: RefinementProposal): RefinementProposal {
+	return {
+		...proposal,
+		edits: proposal.edits.map((edit) => {
+			const localPrefix = "local:";
+			const globalPrefix = "global:";
+			return {
+				...edit,
+				id: edit.id?.startsWith(localPrefix)
+					? edit.id.slice(localPrefix.length)
+					: edit.id?.startsWith(globalPrefix)
+						? edit.id.slice(globalPrefix.length)
+						: edit.id,
+			};
+		}),
+	};
+}
+
+/** The existing application projection; metadata alone also retains its actual state/control identities. */
+export function prepareRefinementApplication(
+	plan: RefinementPlan,
+	state: HarnessState,
+	options: RefineOptions,
+	scope: HarnessScope,
+): RefinementProposal {
+	const proposal = lowerRefinementProposal(plan.proposal);
+	const native = nativePlannerPlans.get(plan);
+	nativePlannerPlans.delete(plan);
+	if (
+		native?.baselineState &&
+		matchesNativePlannerPlan(plan, native) &&
+		matchesPlannerOptions(options, native.options) &&
+		scope === (native.options.global ? "global" : "local")
+	) {
+		nativePlannerApplications.set(proposal, {
+			plan,
+			native,
+			state,
+			options,
+			scope,
+			projection: lowerRefinementProposal(native.projection),
+		});
+	}
+	return proposal;
+}
+
+/** Only the actual computed result can reach the existing session result append. */
+export function takeNativePlannerRequestWrite(
+	result: RefinementResult,
+): ((manager: object) => Promise<string | undefined> | undefined) | undefined {
+	const captured = nativePlannerResults.get(result);
+	nativePlannerResults.delete(result);
+	if (
+		!captured ||
+		result.id !== captured.native.id ||
+		result.scope !== captured.scope ||
+		result.rollbackOf !== undefined ||
+		result.summary !== captured.native.projection.summary ||
+		result.rationale !== captured.native.projection.rationale ||
+		result.expectedOutcome !== captured.native.projection.expectedOutcome ||
+		result.appliedEdits !== captured.edits
+	)
+		return undefined;
+	return (manager) => captured.native.write(manager, result);
 }
 
 /**
@@ -1069,7 +1207,12 @@ export async function planRefinement(
 
 	// Preserve legacy omitted effort for JSON requests. Only an explicit learning-model
 	// contract opts into a captured effort; omission does not certify provider behavior.
-	const response = await completeInference(
+	const plannerOptions = {
+		instructions: options.instructions,
+		global: options.global,
+		rollbackId: options.rollbackId,
+	};
+	const completion = completeInference(
 		requests,
 		model,
 		{
@@ -1090,6 +1233,7 @@ export async function planRefinement(
 			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
 		},
 	);
+	const response = await completion;
 
 	if (response.stopReason === "error") {
 		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
@@ -1102,7 +1246,21 @@ export async function planRefinement(
 		.filter((content): content is { type: "text"; text: string } => content.type === "text")
 		.map((content) => content.text)
 		.join("\n");
-	return { proposal: parseProposal(text), id };
+	const plan = { proposal: parseProposal(text), id };
+	const write =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takePlannerOutput.call(requests, completion)
+			: undefined;
+	if (write) {
+		nativePlannerPlans.set(plan, {
+			proposal: plan.proposal,
+			projection: structuredClone(plan.proposal),
+			id,
+			options: plannerOptions,
+			write,
+		});
+	}
+	return plan;
 }
 
 function parseAutoRefineReview(text: string): AutoRefineReview {

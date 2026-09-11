@@ -54,6 +54,7 @@ import type {
 	ContextEpochEntryRef,
 	NativeBranchRequestOutputSource,
 	NativeCompactionRequestOutputAssociation,
+	NativePlannerRequestOutputSource,
 	NativeRequestEvent,
 	NativeRequestOutputAssociation,
 	NativeRequestOutputSource,
@@ -163,6 +164,7 @@ interface NativeOutputSource {
 	capture: NativeOutputCapture;
 	main: NativeRequestOutputSource;
 	branch: NativeBranchRequestOutputSource;
+	planner: NativePlannerRequestOutputSource;
 	compaction?: true;
 }
 const nativeRequestOutputSources = new WeakMap<object, NativeOutputSource>();
@@ -181,6 +183,11 @@ export function captureNativeCompactionOutputSource(sink: object): NativeOutputC
 /** Genuine writer ownership only; native branch invocation eligibility belongs to its captured coordinator. */
 export function captureNativeBranchOutputSource(sink: object): NativeBranchRequestOutputSource | undefined {
 	return nativeRequestOutputSources.get(sink)?.branch;
+}
+
+/** Original writer ownership; native planner invocation eligibility is held by its captured coordinator. */
+export function captureNativePlannerOutputSource(sink: object): NativePlannerRequestOutputSource | undefined {
+	return nativeRequestOutputSources.get(sink)?.planner;
 }
 
 export interface SessionHeader {
@@ -329,6 +336,8 @@ export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 
 export interface CustomEntry<T = unknown> extends SessionEntryBase {
 	type: "custom";
+	/** Native planner contribution on prime-agent.refinement only; not whole-output, effect or ACK authority. */
+	plannerRequest?: NativeRequestOutputAssociation;
 	customType: string;
 	data?: T;
 }
@@ -2850,6 +2859,36 @@ export class SessionManager {
 			};
 			nativeRequestOutputSources.set(sink, {
 				capture,
+				planner: (association) => {
+					const request = capture(association);
+					if (!request) return undefined;
+					return (manager, result) => {
+						if (manager !== this || !ownsOutputSource()) return undefined;
+						const stale = new Error("Native planner source changed before result append");
+						const assertCurrent = () => {
+							if (!ownsOutputSource()) throw stale;
+						};
+						return (async () => {
+							try {
+								return await this._appendCustomEntry(
+									"prime-agent.refinement",
+									result,
+									undefined,
+									undefined,
+									undefined,
+									{
+										request,
+										assertCurrent,
+									},
+								);
+							} catch (error) {
+								// Only this final pre-write stale signal permits the ordinary unassociated append.
+								if (error === stale) return undefined;
+								throw error;
+							}
+						})();
+					};
+				},
 				branch: (association) => {
 					const requestOutput = capture(association);
 					if (!requestOutput) return undefined;
@@ -3286,11 +3325,13 @@ export class SessionManager {
 		nativeOrigin?: NativeEntryOrigin,
 		qualification?: NativeEntryQualification,
 		selection?: { maxSourceBytes: number; assertCurrent: () => void },
+		plannerOutput?: { request: NativeRequestOutputAssociation; assertCurrent: () => void },
 	): Promise<string> {
 		const entry: CustomEntry = {
 			type: "custom",
 			customType,
 			data,
+			...(customType === "prime-agent.refinement" && plannerOutput ? { plannerRequest: plannerOutput.request } : {}),
 			...(nativeOrigin ? { nativeOrigin } : {}),
 			id: this.indexed ? "" : generateId(this.byId),
 			parentId: this.leafId,
@@ -3305,7 +3346,7 @@ export class SessionManager {
 					}
 				: undefined,
 			undefined,
-			selection?.assertCurrent,
+			plannerOutput?.assertCurrent ?? selection?.assertCurrent,
 		);
 		return entry.id;
 	}

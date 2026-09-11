@@ -518,6 +518,7 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
     assistant_sources: list[tuple[dict[str, Any], bool]] = []
     compaction_sources: list[tuple[dict[str, Any], bool]] = []
     branch_summary_sources: list[tuple[dict[str, Any], bool]] = []
+    refinement_planner_sources: list[tuple[dict[str, Any], bool]] = []
     association_requests: dict[str, list[dict[str, Any]]] = {}
     original_header = False
     native = False
@@ -611,6 +612,9 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                 }, original_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
             elif entry_type == "custom" and entry.get("customType") == "prime-agent.refinement":
                 refinement_entries += 1
+                refinement_planner_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("plannerRequest"),
+                }, original_frame and isinstance(entry.get("data"), dict) and "rollbackOf" not in entry["data"]))
             if entry_type != "message":
                 continue
             message = entry.get("message") or {}
@@ -700,6 +704,12 @@ def parse_session_file(path: Path) -> dict[str, Any] | None:
                 entry, header, association_requests, purpose="summary", purpose_detail="branch",
              ) if original_header and original else None}
             for entry, original in branch_summary_sources
+        ],
+        "refinement_planner_associations": [
+            {"refinement_entry_id": entry.get("id"), "recorded_request": _recorded_request_output(
+                entry, header, association_requests, purpose="refine", purpose_detail="plan",
+             ) if original_header and original else None}
+            for entry, original in refinement_planner_sources
         ],
         **accounting,
     }
@@ -811,6 +821,11 @@ def aggregate_sessions(sessions: list[dict[str, Any]]) -> dict[str, Any]:
         "branch_summary_request_associations": [
             {"session_id": item["session_id"], "path": item["path"],
              "associations": item.get("branch_summary_request_associations")}
+            for item in sessions
+        ],
+        "refinement_planner_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("refinement_planner_associations")}
             for item in sessions
         ],
         "observed_accounting_scope": "solver_messages",

@@ -275,3 +275,28 @@ summary entry ID and its recorded `summary`/`branch` request match, or `null` fo
 unknown/ineligible data. It does not use destination fields as the input source.
 Recorded source presence, historical append API ACK and later caller delivery are
 separate facts. Imported or mismatched data does not establish native authority.
+
+
+### Native Refinement-Planner Associations
+
+An existing `custom` / `prime-agent.refinement` result entry can record a top-level
+`plannerRequest` with the actual native planner request's `operationId`, admitted
+`attemptIds` and captured `source`. It is outside `data: RefinementResult`, harness
+state, global history, outcome messages and provider/replay bodies. The generated
+refinement ID is not the request operation ID.
+
+This describes a normalized planner proposal's contribution to the actual computed
+result. Edits can be applied or skipped, including on conflicts. It does not mean
+whole provider output was saved, every edit succeeded, or `expectedOutcome` happened.
+Native plan/result and original source ownership establish the binding; copied,
+changed-proposal, extension, rollback and standalone labels cannot create it.
+Existing baseline references are retained, not certified deeply immutable. The link
+does not prove unchanged host state or certify conflict decisions. Existing state,
+history, source-record and outcome/error ordering remain unchanged. Later errors
+do not undo already-applied effects or known source ACKs.
+
+The native parser reports `refinement_planner_associations` for exact `refine` /
+`plan` request matches, or `null` for unknown/ineligible data. Recorded source
+presence, historical append API ACK and later delivery remain separate. REVIEW is
+an input gate for a separate planner call, not a newly saved review response or an
+attributed part of this result. These links do not establish full-workflow delivery.

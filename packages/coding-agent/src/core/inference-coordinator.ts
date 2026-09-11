@@ -20,6 +20,7 @@ import type {
 	ContextEpochEntryRef,
 	NativeBranchRequestOutputWriter,
 	NativeCompactionRequestOutputAssociation,
+	NativePlannerRequestOutputWriter,
 	NativeRequestMetadata,
 	NativeRequestOutputWriter,
 	RequestOwnerRef,
@@ -42,6 +43,7 @@ import type { SessionHistoryReadView } from "./session-history-index.js";
 import {
 	captureNativeBranchOutputSource,
 	captureNativeCompactionOutputSource,
+	captureNativePlannerOutputSource,
 	captureNativeRequestOutputSource,
 } from "./session-manager.js";
 
@@ -72,6 +74,11 @@ interface NativeBranchOutputBinding {
 	readonly write: NativeBranchRequestOutputWriter;
 }
 
+interface NativePlannerOutputBinding {
+	readonly owner: InferenceCoordinator;
+	readonly write: NativePlannerRequestOutputWriter;
+}
+
 export interface InferenceRun {
 	readonly events: Awaited<ReturnType<StreamFn>>;
 	readonly settled: Promise<InferenceSettlement>;
@@ -99,6 +106,8 @@ const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
 export const captureNativeCompactionRequests = Symbol("base-context.native-compaction-requests");
 /** Internal AgentSession built-in branch-summary invocation, never inherited by generic capture. */
 export const captureNativeBranchRequests = Symbol("base-context.native-branch-requests");
+/** Internal native AgentSession planner capture, never inherited by generic capture. */
+export const captureNativePlannerRequests = Symbol("base-context.native-planner-requests");
 interface StreamBinding {
 	readonly coordinator: InferenceCoordinator;
 	readonly inner: StreamFn;
@@ -152,6 +161,7 @@ export function createNativeInferenceStream(
 export class InferenceCoordinator {
 	#nativeCompactionOutput = false;
 	#nativeBranchOutput = false;
+	#nativePlannerOutput = false;
 	private retryTurn = false;
 	private requestViewBoundary?: CapturedRequestViewBoundary;
 	private active = new Set<Promise<void>>();
@@ -168,6 +178,8 @@ export class InferenceCoordinator {
 		compactionCompletions: new WeakMap<Promise<AssistantMessage>, NativeCompactionOutputBinding>(),
 		branchSettlements: new WeakMap<InferenceSettlement, NativeBranchOutputBinding>(),
 		branchCompletions: new WeakMap<Promise<AssistantMessage>, NativeBranchOutputBinding>(),
+		plannerSettlements: new WeakMap<InferenceSettlement, NativePlannerOutputBinding>(),
+		plannerCompletions: new WeakMap<Promise<AssistantMessage>, NativePlannerOutputBinding>(),
 		listeners: new Set<() => void>(),
 		admissionOpen: true,
 		cancellation: new AbortController(),
@@ -222,6 +234,19 @@ export class InferenceCoordinator {
 		const binding = this.work.branchCompletions.get(completion);
 		this.work.branchCompletions.delete(completion);
 		if (!binding || !this.#nativeBranchOutput || binding.owner !== this) return undefined;
+		return binding.write;
+	}
+
+	[captureNativePlannerRequests](sink: BoundRequestSink): InferenceCoordinator {
+		const captured = InferenceCoordinator.prototype.capture.call(this, sink);
+		captured.#nativePlannerOutput = true;
+		return captured;
+	}
+
+	takePlannerOutput(completion: Promise<AssistantMessage>): NativePlannerRequestOutputWriter | undefined {
+		const binding = this.work.plannerCompletions.get(completion);
+		this.work.plannerCompletions.delete(completion);
+		if (!binding || !this.#nativePlannerOutput || binding.owner !== this) return undefined;
 		return binding.write;
 	}
 
@@ -432,6 +457,13 @@ export class InferenceCoordinator {
 			this.capturedSink?.sink === operation.binding.sink
 				? captureNativeBranchOutputSource(operation.binding.sink)
 				: undefined;
+		const plannerSource =
+			this.#nativePlannerOutput &&
+			operation.metadata.purpose === "refine" &&
+			operation.metadata.purposeDetail === "plan" &&
+			this.capturedSink?.sink === operation.binding.sink
+				? captureNativePlannerOutputSource(operation.binding.sink)
+				: undefined;
 		let outputSourceRef: SourceSnapshotRef | undefined;
 		let release!: (completion?: PromiseLike<void>) => void;
 		const pending = new Promise<void>((resolve) => {
@@ -497,6 +529,14 @@ export class InferenceCoordinator {
 					source: outputSourceRef,
 				});
 				if (write) this.work.branchSettlements.set(settlement, { owner: this, write });
+			}
+			if (plannerSource && outputSourceRef) {
+				const write = plannerSource({
+					operationId: settlement.operationId,
+					attemptIds: settlement.attemptIds,
+					source: outputSourceRef,
+				});
+				if (write) this.work.plannerSettlements.set(settlement, { owner: this, write });
 			}
 			return settlement;
 		};
@@ -724,6 +764,9 @@ export class InferenceCoordinator {
 			const branchBinding = this.work.branchSettlements.get(settlement);
 			this.work.branchSettlements.delete(settlement);
 			if (branchBinding) this.work.branchCompletions.set(completion, branchBinding);
+			const plannerBinding = this.work.plannerSettlements.get(settlement);
+			this.work.plannerSettlements.delete(settlement);
+			if (plannerBinding) this.work.plannerCompletions.set(completion, plannerBinding);
 			return settlement.message;
 		})();
 		return completion;

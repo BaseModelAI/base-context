@@ -2964,3 +2964,40 @@ post-ACK fault behavior are source-reviewed, not new executed scenarios. No new
 model requests/cases, real provider, installation/bootstrap, campaign, publication
 or full-G17/current-efficiency claim. A preparation-only doubled test-path lookup
 was corrected before any project command; it was not a project test failure.
+
+
+### W97 — native planner contribution on the existing refinement result
+
+The existing `custom` / `prime-agent.refinement` source entry can retain a top-level
+`plannerRequest` association for the actual native `refine`/`plan` request. It is
+outside `data: RefinementResult`, state/global history/outcome messages and provider
+bodies. The normalized proposal contributes to an actual computed result, including
+applied/skipped edits; neither whole provider output, all-applied changes nor the
+predicted expectedOutcome is certified. Generated refinement IDs are not request IDs.
+Only the native plan/baseline composition/application/result path and original source
+owner can supply this metadata. Baseline reference identity is not deep immutability
+or a conflict-decision certificate. Existing mutation targets, conflicts and state,
+history, result/outcome/error ordering remain unchanged; later errors do not roll back
+known effects or source ACKs. Missing/ineligible owner or proposal binding leaves the
+ordinary result record unassociated; uncertain write errors are never replayed.
+The parser reports `refinement_planner_associations` from original unqualified frames,
+object-valued data without explicit rollbackOf, and exact referenced planner requests;
+unknown is not rejected/zero/no-effect. REVIEW stays a consumed gate, with no newly
+saved review response or inferred planner attribution. No schema/epoch/budget change,
+new store, live campaign, installation/bootstrap or publication follows from this work.
+
+The two existing fallback/extension native cases passed on Node22.12. The original
+main-model Faux review/planner pair remains; the two existing learning-model Faux
+calls were replaced by offline Responses without adding logical calls or cases.
+The actual reviewer is still only a gate. The actual planner creates one applied
+memory edit and one skipped invalid edit; its same unqualified/unretained source
+result links to the exact planner receipt, not review or generated refinement ID.
+Metadata stays outside result/state/current request/outcome bodies; the extension
+result remains unassociated. Original model/effort and caller assertions remain.
+The existing Python case passed for the planner match and known rollback staying
+unknown, with unchanged prior MAIN/compaction/branch/accounting assertions.
+Required check passed,1046/no fixes, including types/installer/browser. All first
+passes, no project correction/rerun. Owner/proposal/baseline mutation, standalone,
+rollback producer and post-ACK-fault matrices were not executed; baseline reference
+identity is not deep immutability or conflict correctness. No real provider,
+installation/bootstrap, new campaign, publication or full-G17/efficiency claim.

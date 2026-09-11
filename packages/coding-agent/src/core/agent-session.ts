@@ -206,6 +206,7 @@ import type { IpythonSentMessagesCursor } from "./history-index.js";
 import {
 	captureNativeBranchRequests,
 	captureNativeCompactionRequests,
+	captureNativePlannerRequests,
 	InferenceCoordinator,
 	type SessionRuntimeServices,
 } from "./inference-coordinator.js";
@@ -253,11 +254,14 @@ import {
 	mergeRefinementHistory,
 	normalizeRefinementProposal,
 	planRefinement,
+	prepareRefinementApplication,
 	REFINE_SKILL_NAME,
 	type RefinementPlan,
 	type RefinementResult,
 	reviewAutoRefine,
 	saveHarnessState,
+	takeNativePlannerRequestWrite,
+	withRefinementBaseline,
 } from "./refinement/index.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
@@ -10345,7 +10349,8 @@ export class AgentSession {
 			requestedScope === "global"
 				? globalPlanningState
 				: mergeHarnessStates(globalPlanningState, localPlanningState);
-		const requests = this.requests.capture();
+		const plannerManager = this.sessionManager;
+		const requests = this.requests[captureNativePlannerRequests](plannerManager.bindRequestSink());
 		try {
 			const history = await this._loadRefinementHistory();
 			const rollbackTarget = requestOptions.rollbackId
@@ -10411,7 +10416,7 @@ export class AgentSession {
 			if (this._disposed || signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			return { ...plan, baselineState };
+			return withRefinementBaseline(plan, baselineState);
 		} finally {
 			await requests.dispose();
 		}
@@ -10481,21 +10486,7 @@ export class AgentSession {
 			// Re-read the target state immediately before applying so concurrent kernel
 			// (`rlm.harness`) writes during the LLM pass are not clobbered.
 			const state = loadHarnessState(targetHarnessStateDir, targetScope);
-			const proposal = {
-				...plan.proposal,
-				edits: plan.proposal.edits.map((edit) => {
-					const localPrefix = "local:";
-					const globalPrefix = "global:";
-					return {
-						...edit,
-						id: edit.id?.startsWith(localPrefix)
-							? edit.id.slice(localPrefix.length)
-							: edit.id?.startsWith(globalPrefix)
-								? edit.id.slice(globalPrefix.length)
-								: edit.id,
-					};
-				}),
-			};
+			const proposal = prepareRefinementApplication(plan, state, options, targetScope);
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
@@ -10511,7 +10502,12 @@ export class AgentSession {
 			}
 			let refinementAuditAppendError: { error: unknown } | undefined;
 			try {
-				await this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+				const manager = this.sessionManager;
+				const write = takeNativePlannerRequestWrite(result);
+				const pending = write?.(manager);
+				if ((pending ? await pending : undefined) === undefined) {
+					await manager.appendCustomEntry("prime-agent.refinement", result);
+				}
 			} catch (error) {
 				refinementAuditAppendError = { error };
 			}

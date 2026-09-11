@@ -49,7 +49,7 @@ def result(variant: str, value: dict, attempts: list[dict] | None = None) -> dic
 
 def native_journal(
     path: Path, *, session_id: str = "root", incomplete: bool = False, request_output: bool = False,
-    compaction_output: bool = False, branch_output: bool = False,
+    compaction_output: bool = False, branch_output: bool = False, planner_output: bool = False,
 ) -> None:
     timestamp = "2026-09-07T00:00:00.000Z"
     descriptor = {
@@ -67,7 +67,7 @@ def native_journal(
                         "catalogRates": {"input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25}},
         },
     }
-    if request_output or compaction_output or branch_output:
+    if request_output or compaction_output or branch_output or planner_output:
         # A recorded original path need not be the archive path being parsed.
         metadata["source"]["sessionFile"] = "/recorded/original-session.jsonl"
     if compaction_output:
@@ -77,6 +77,9 @@ def native_journal(
         metadata["purpose"] = "summary"
         metadata["purposeDetail"] = "branch"
         metadata["source"]["leafId"] = "input-leaf"
+    if planner_output:
+        metadata["purpose"] = "refine"
+        metadata["purposeDetail"] = "plan"
     usage = {"input": 100, "inputTotal": 125, "output": 20, "cacheRead": 25, "cacheWrite": 0, "totalTokens": 145}
     if incomplete:
         usage.pop("cacheWrite")
@@ -125,6 +128,18 @@ def native_journal(
         entries.extend([branch, {
             **branch, "id": "mismatched-branch-summary",
             "requestOutput": {**recorded, "source": {**recorded["source"], "leafId": "destination-leaf"}},
+        }])
+    if planner_output:
+        result_data = {"id": "partial-refinement-result", "summary": "Projected partial planner result"}
+        refinement = {
+            "type": "custom", "customType": "prime-agent.refinement", "id": "recorded-refinement-entry",
+            "parentId": None, "timestamp": timestamp, "data": result_data,
+            "plannerRequest": {"operationId": metadata["operationId"], "attemptIds": ["physical-attempt"],
+                               "source": dict(metadata["source"])},
+        }
+        entries.extend([refinement, {
+            **refinement, "id": "rollback-refinement-entry",
+            "data": {**result_data, "id": "rollback-result", "rollbackOf": result_data["id"]},
         }])
     # Accounting consumes the documented payload envelope, not frame-integrity validation.
     path.write_text("".join(json.dumps({"journalFrame": 1, "payload": entry}) + "\n" for entry in entries))
@@ -199,6 +214,18 @@ class HarnessComparisonTests(unittest.TestCase):
             branch_metrics = aggregate_sessions([branched])
             self.assertEqual(branch_metrics["branch_summary_request_associations"][0]["associations"],
                              branch_associations)
+            native_journal(root / "planner.jsonl", planner_output=True)
+            planned = parse_session_file(root / "planner.jsonl")
+            planner_associations = planned["refinement_planner_associations"]
+            self.assertEqual(planner_associations, [
+                {"refinement_entry_id": "recorded-refinement-entry",
+                 "recorded_request": association["recorded_request"]},
+                # A known rollback is ineligible even with a matching copied plannerRequest.
+                {"refinement_entry_id": "rollback-refinement-entry", "recorded_request": None},
+            ])
+            planner_metrics = aggregate_sessions([planned])
+            self.assertEqual(planner_metrics["refinement_planner_associations"][0]["associations"],
+                             planner_associations)
         self.assertEqual(metrics["accounting_source"], "native_request_receipts")
         self.assertEqual(metrics["all_model_calls"], 1)
         self.assertEqual(metrics["model_calls_by_purpose"], {"main": 1})
