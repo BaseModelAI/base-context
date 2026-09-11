@@ -1,8 +1,8 @@
-> Prime Agent can help you use the SDK. Ask it to build an integration for your use case.
+> Base Context can help you use the SDK. Ask it to build an integration for your use case.
 
 # SDK
 
-The SDK provides programmatic access to Prime Agent's capabilities. Use it to embed Prime Agent in other applications, build custom interfaces, or integrate with automated workflows.
+The SDK provides programmatic access to Base Context's capabilities. Use it to embed Base Context in other applications, build custom interfaces, or integrate with automated workflows.
 
 **Example use cases:**
 - Build a custom UI (web, desktop, mobile)
@@ -16,7 +16,7 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 ## Quick Start
 
 ```typescript
-import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@ponythewhite/base-context";
 
 // Set up credential storage and model registry
 const authStorage = AuthStorage.create();
@@ -37,13 +37,16 @@ session.subscribe((event) => {
 await session.prompt("What files are in the current directory?");
 ```
 
-## Installation
+## Source setup
 
-```bash
-npm install @earendil-works/pi-coding-agent
-```
+The SDK is not published to npm. Follow [Getting started](../../../README.md#getting-started) for this branch's source setup and build.
 
-The SDK is included in the main package. No separate installation needed.
+The examples use the built workspace packages:
+- `@ponythewhite/base-context` — the SDK
+- `@ponythewhite/base-context-agent` — the core `Agent`
+- `@ponythewhite/base-context-ai` — model and provider helpers
+
+Run the examples where these local workspace packages resolve. Provider examples require your own supported model and credentials; they do not establish availability or entitlement.
 
 ## Core Concepts
 
@@ -54,7 +57,7 @@ The main factory function for a single `AgentSession`.
 `createAgentSession()` uses a `ResourceLoader` to supply extensions, skills, prompt templates, themes, and context files. If you do not provide one, it uses `DefaultResourceLoader` with standard discovery.
 
 ```typescript
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession } from "@ponythewhite/base-context";
 
 // Minimal: defaults with DefaultResourceLoader
 const { session } = await createAgentSession();
@@ -132,7 +135,7 @@ import {
   createAgentSessionServices,
   getAgentDir,
   SessionManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -150,7 +153,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 ```
 
@@ -247,7 +250,7 @@ Both `steer()` and `followUp()` expand file-based prompt templates but error on 
 
 ### Agent and AgentState
 
-The `Agent` class (from `@earendil-works/pi-agent-core`) handles the core LLM interaction. Access it via `session.agent`.
+The `Agent` class (from `@ponythewhite/base-context-agent`) handles the core LLM interaction. Access it via `session.agent`.
 
 ```typescript
 // Access current state
@@ -346,28 +349,32 @@ session.subscribe((event) => {
 ### Directories
 
 ```typescript
+import { createAgentSession, getAgentDir } from "@ponythewhite/base-context";
+
 const { session } = await createAgentSession({
   // Working directory for DefaultResourceLoader discovery
   cwd: process.cwd(), // default
   
-  // Global config directory
-  agentDir: "~/.prime/agent", // default (expands ~)
+  // Product state root: BASE_CONTEXT_HOME, or ~/.base-context by default
+  agentDir: getAgentDir(),
 });
 ```
 
+`getAgentDir()` resolves `BASE_CONTEXT_HOME` when set, otherwise `~/.base-context`. `BASE_CONTEXT_SESSION_DIR` can override the session root independently. Pass an explicit directory path when overriding the SDK's `agentDir` option.
+
 `cwd` is used by `DefaultResourceLoader` for:
-- Project extensions (`.prime/agent/extensions/`)
+- Project extensions (`.base-context/extensions/`)
 - Project skills:
-  - `.prime/agent/skills/`
+  - `.base-context/skills/`
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
-- Project prompts (`.prime/agent/prompts/`)
+- Project prompts (`.base-context/prompts/`)
 - Context files (`AGENTS.md` walking up from cwd)
 - Session storage resolution
 
 `agentDir` is used by `DefaultResourceLoader` for:
 - Global extensions (`extensions/`)
 - Global skills:
-  - `skills/` under `agentDir` (for example `~/.prime/agent/skills/`)
+  - `skills/` under `agentDir` (for example `~/.base-context/skills/`)
   - `~/.agents/skills/`
 - Global prompts (`prompts/`)
 - Global context file (`AGENTS.md`)
@@ -380,9 +387,11 @@ When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control 
 
 ### Model
 
+Example model IDs, costs and configured limits do not establish availability, entitlement, tokenizer support or replay capabilities.
+
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { getModel } from "@ponythewhite/base-context-ai";
+import { AuthStorage, ModelRegistry } from "@ponythewhite/base-context";
 
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
@@ -448,9 +457,9 @@ API key resolution priority (handled by AuthStorage):
 4. Fallback resolver (for custom provider keys from `models.json`)
 
 ```typescript
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { AuthStorage, ModelRegistry } from "@ponythewhite/base-context";
 
-// Default: uses ~/.prime/agent/auth.json and ~/.prime/agent/models.json
+// Default: auth.json and models.json under getAgentDir() (BASE_CONTEXT_HOME or ~/.base-context)
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
@@ -484,7 +493,7 @@ const simpleRegistry = ModelRegistry.inMemory(authStorage);
 Use a `ResourceLoader` to override the system prompt:
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "@ponythewhite/base-context";
 
 const loader = new DefaultResourceLoader({
   systemPromptOverride: () => "You are a helpful assistant.",
@@ -553,7 +562,7 @@ import {
   createIpythonToolDefinition,
   createBashToolDefinition,
   createEditToolDefinition,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const cwd = "/path/to/project";
 
@@ -568,7 +577,7 @@ const { session } = await createAgentSession({
 ```
 
 **When you don't need factories:**
-- If you omit `tools`, Prime Agent automatically creates them with the correct `cwd`
+- If you omit `tools`, Base Context automatically creates them with the correct `cwd`
 - If you use `process.cwd()` as your `cwd`, the pre-built instances work fine
 
 **When you must use factories:**
@@ -580,7 +589,7 @@ const { session } = await createAgentSession({
 
 ```typescript
 import { Type } from "typebox";
-import { createAgentSession, defineTool } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, defineTool } from "@ponythewhite/base-context";
 
 // Inline custom tool
 const myTool = defineTool({
@@ -801,10 +810,10 @@ provider cache-hit, whole-process memory or hidden-state continuity certificatio
 
 ## Extensions
 
-Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.prime/agent/extensions/`, `.prime/agent/extensions/`, and `settings.json` extension sources.
+Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.base-context/extensions/`, `.base-context/extensions/`, and `settings.json` extension sources.
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "@ponythewhite/base-context";
 
 const loader = new DefaultResourceLoader({
   additionalExtensionPaths: ["/path/to/my-extension.ts"],
@@ -826,7 +835,7 @@ Extensions can register tools, subscribe to events, add commands, and more. See 
 **Event Bus:** Extensions can communicate via `pi.events`. Pass a shared `eventBus` to `DefaultResourceLoader` if you need to emit or listen from outside:
 
 ```typescript
-import { createEventBus, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { createEventBus, DefaultResourceLoader } from "@ponythewhite/base-context";
 
 const eventBus = createEventBus();
 const loader = new DefaultResourceLoader({
@@ -846,7 +855,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type Skill,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const customSkill: Skill = {
   name: "my-skill",
@@ -872,7 +881,7 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 ### Context Files
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader } from "@ponythewhite/base-context";
 
 const loader = new DefaultResourceLoader({
   agentsFilesOverride: (current) => ({
@@ -896,7 +905,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type PromptTemplate,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const customCommand: PromptTemplate = {
   name: "deploy",
@@ -931,7 +940,7 @@ import {
   createAgentSessionServices,
   getAgentDir,
   SessionManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 // In-memory (no persistence)
 const { session } = await createAgentSession({
@@ -940,12 +949,12 @@ const { session } = await createAgentSession({
 
 // New persistent session
 const { session: persisted } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 // Continue most recent
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-  sessionManager: SessionManager.continueRecent(process.cwd()),
+  sessionManager: await SessionManager.continueRecent(process.cwd()),
 });
 if (modelFallbackMessage) {
   console.log("Note:", modelFallbackMessage);
@@ -953,7 +962,7 @@ if (modelFallbackMessage) {
 
 // Open specific file
 const { session: opened } = await createAgentSession({
-  sessionManager: SessionManager.open("/path/to/session.jsonl"),
+  sessionManager: await SessionManager.open("/path/to/session.jsonl"),
 });
 
 // List sessions
@@ -977,7 +986,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 // Replace the active session with a fresh one
@@ -1027,7 +1036,7 @@ Owned sessions keep indexed metadata rather than historical message arrays. Comp
 ### Settings Management
 
 ```typescript
-import { createAgentSession, SettingsManager, SessionManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SettingsManager, SessionManager } from "@ponythewhite/base-context";
 
 // Default: loads from files (global + project merged)
 const { session } = await createAgentSession({
@@ -1061,8 +1070,8 @@ const { session } = await createAgentSession({
 **Project-specific settings:**
 
 Settings load from two locations and merge:
-1. Global: `~/.prime/agent/settings.json`
-2. Project: `<cwd>/.prime/agent/settings.json`
+1. Global: `<getAgentDir()>/settings.json` (`~/.base-context/settings.json` by default; `BASE_CONTEXT_HOME` overrides the root)
+2. Project: `<cwd>/.base-context/settings.json`
 
 Project overrides global. Nested objects merge keys. Setters modify global settings by default.
 
@@ -1083,7 +1092,7 @@ Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and
 import {
   DefaultResourceLoader,
   getAgentDir,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const loader = new DefaultResourceLoader({
   cwd,
@@ -1124,7 +1133,7 @@ interface LoadExtensionsResult {
 ## Complete Example
 
 ```typescript
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import {
  AuthStorage,
@@ -1134,7 +1143,7 @@ import {
   ModelRegistry,
   SessionManager,
   SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 // Set up auth storage (custom location)
 const authStorage = AuthStorage.create("/custom/agent/auth.json");
@@ -1219,7 +1228,7 @@ import {
   getAgentDir,
   InteractiveMode,
   SessionManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -1232,7 +1241,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 const mode = new InteractiveMode(runtime, {
@@ -1259,7 +1268,7 @@ import {
   getAgentDir,
   runPrintMode,
   SessionManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -1272,7 +1281,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 await runPrintMode(runtime, {
@@ -1296,7 +1305,7 @@ import {
   getAgentDir,
   runRpcMode,
   SessionManager,
-} from "@earendil-works/pi-coding-agent";
+} from "@ponythewhite/base-context";
 
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
@@ -1309,7 +1318,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 await runRpcMode(runtime);
@@ -1322,7 +1331,7 @@ See [RPC documentation](rpc.md) for the JSON protocol.
 For subprocess-based integration without building with the SDK, use the CLI directly:
 
 ```bash
-prime-agent --mode rpc --no-session
+base-context --mode rpc --no-session
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.

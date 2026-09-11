@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -31,6 +31,15 @@ describe("Base Context identity and paths", () => {
 		expect(paths.sessions).toBe(join(paths.home, "sessions"));
 		expect(paths.auth).toBe(join(paths.home, "auth.json"));
 		expect(resolveRuntimePaths({ BASE_CONTEXT_HOME: "~/custom" }, home, cwd).home).toBe(join(home, "custom"));
+
+		const guide = readFileSync(new URL("../docs/sdk.md", import.meta.url), "utf8");
+		expect(guide).toContain('from "@ponythewhite/base-context"');
+		expect(guide).toContain("../../../README.md#getting-started");
+		expect(guide).toContain("agentDir: getAgentDir()");
+		expect(guide).toContain("`BASE_CONTEXT_SESSION_DIR`");
+		expect(guide).toContain("sessionManager: await SessionManager.create(process.cwd())");
+		expect(guide).not.toMatch(/sessionManager:\s*SessionManager\.(?:create|open|continueRecent)\(/);
+		expect(guide).not.toMatch(/@earendil-works\/pi-|\.prime\/agent/);
 	});
 
 	test("rejects ambiguous paths and legacy state aliases before writing", () => {

@@ -150,3 +150,5 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Extension guidance now uses Base Context paths, commands and owned SDK imports, with source-only availability stated. Its actual Quick Start loads through the extension loader. Two existing cases and the required check passed.
 
 - Package guidance now uses Base Context commands, state paths and SDK peers, states source-only availability, and matches existing dependency-install/update behavior. Actual guide source arguments and the unchanged local-path edge passed in two existing parser cases; the required check passed.
+
+- SDK guidance now uses owned packages/state and source setup, resolves its state directory with `getAgentDir()`, and awaits async SessionManager factories in eight examples. Two existing identity/path cases and the required check passed; model examples were not executed.

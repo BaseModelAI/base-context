@@ -1802,3 +1802,19 @@ Two existing offline parser cases passed (2 passed/93 skipped). The documentatio
 case parses the actual eight install-source arguments and retains its earlier
 fixtures; dot-relative paths remain local. Required `npm run check` passed with
 1046 files/no fixes. No package install, clone, provider or other network case ran.
+
+
+## W87 / G13 — SDK guide uses owned imports and resolved managers
+
+The SDK guide now uses owned package names and state paths, links to source setup
+instead of an unpublished npm install, and uses `getAgentDir()` in its directory
+example. Eight examples now await asynchronous SessionManager factories before
+passing a manager to the SDK. `inMemory`, provider examples and runtime APIs are
+unchanged. These guide fixes do not certify whole-example execution or native
+epoch ownership for generic/in-memory examples.
+
+Two existing fake-home/env identity cases passed, including the current SDK guide's
+owned path/import and awaited-factory text. The legacy-alias refusal case remains
+unchanged. Required `npm run check` passed with 1046 files/no fixes. These cases do
+not execute SDK factories, registry/services, credentials, model examples or
+installs, and do not compile the guide's snippets.
