@@ -10645,7 +10645,14 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		let compactionTimestamp: number | undefined;
+		try {
+			compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		} catch (error) {
+			// A manual checkpoint can supersede this optional check after agent_end was emitted.
+			if (error instanceof StaleCompactionOwnerError && !this._isCompactionOwnerCurrent(owner)) return false;
+			throw error;
+		}
 		if (!this._isCompactionOwnerCurrent(owner)) return false;
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;

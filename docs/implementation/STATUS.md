@@ -3365,3 +3365,30 @@ copied by the root importer. No new owner guard or runtime test was added for th
 source-confirmed path. CLI coverage text and README now state the distinction.
 Retained history is not secret-scrubbed or asserted unable to influence a future
 model conversation; explicit new goals/autonomy remain available.
+
+
+## W136 — Superseded post-turn compaction checks
+
+A manual compact can begin after the public `agent_end` event while an older
+optional compaction check still awaits indexed metadata. Its stale-owner error
+could reject the event tail; the next input pump then repeatedly awaited and
+rescheduled that rejection. A private real-owner reproduction exposed the CPU
+loop. A bounded V8 profile located the pump/event-tail cycle, and a read-only
+observer captured `Compaction owner changed` from the timestamp lookup.
+
+`_checkCompaction` now skips that lookup only for `StaleCompactionOwnerError` when
+its original captured owner is actually stale. Other errors still propagate.
+The strict shared reader, input pump, event tail, ACK timing, native request/output
+ownership and provider policy are unchanged. No new epoch is adopted on error.
+
+The persisted-session/real-Responses fake-HTTP case now completes two immediate
+agent-end/manual-compact boundaries and starts the next real model request. It
+passed in 705 ms. The existing genuine source-byte-budget error case passed on
+its first execution. The original CPU hang and two test-fixture corrections are
+retained separately; the passing edge was not rerun. This isolates the local
+owner race, not the full Codex/refinement/budget benchmark stack or every timeout.
+
+The ongoing campaign keeps its W113 image, first primaries and all failures.
+The hung offline diagnostic occupied one CPU during part of that campaign; its
+effect on comparative timing is unknown. No capacity classification is changed.
+Publication remains held for completed benchmark review and final approval.

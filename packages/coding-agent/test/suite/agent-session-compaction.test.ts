@@ -106,6 +106,168 @@ describe("AgentSession compaction characterization", () => {
 		}
 	});
 
+	it("starts accepted next prompts after manual compaction at the real agent-end boundary", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [],
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "owner-reproduction-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "owner-reproduction-key");
+		await harness.session.setModel(compactionModel);
+		await harness.session.setThinkingLevel("low");
+		const bodies: unknown[] = [];
+		// Only transport is fake. MAIN and summary use the real adapter and persistent owners.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const text = `Owner scheduling fixture reply ${bodies.length}.`;
+			const item = {
+				type: "message",
+				id: `msg_owner_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text, annotations: [] }],
+			};
+			const events = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_owner_${bodies.length}`,
+						model: compactionModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 100,
+							output_tokens: 16,
+							total_tokens: 116,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			];
+			return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const control = harness.session as unknown as {
+			_sessionInputPumpEpoch: number;
+			_sessionInputPumpRequested: boolean;
+			_sessionInputPumpSuspended: boolean;
+			_queuedWorkPauses: Set<unknown>;
+			_sessionInputAdmissionPauses: Set<unknown>;
+			_refineInFlight?: Promise<void>;
+			_pendingCheckpoint?: unknown;
+		};
+		const bounded = <T>(work: Promise<T>, phase: string): Promise<T> =>
+			new Promise((resolve, reject) => {
+				const timer = setTimeout(
+					() =>
+						reject(
+							new Error(
+								`Owner reproduction stalled at ${phase}: ${JSON.stringify({
+									epoch: control._sessionInputPumpEpoch,
+									pumpRequested: control._sessionInputPumpRequested,
+									pumpSuspended: control._sessionInputPumpSuspended,
+									queuedWorkPauses: control._queuedWorkPauses.size,
+									admissionPauses: control._sessionInputAdmissionPauses.size,
+									refineInFlight: control._refineInFlight !== undefined,
+									pendingCheckpoint: control._pendingCheckpoint !== undefined,
+									streaming: harness.session.isStreaming,
+									compacting: harness.session.isCompacting,
+									unfinishedActions: harness.session.unfinishedActionCount,
+									starts: harness.eventsOfType("agent_start").length,
+									ends: harness.eventsOfType("agent_end").length,
+									providerRequests: bodies.length,
+								})}`,
+							),
+						),
+					10_000,
+				);
+				work.then(
+					(value) => {
+						clearTimeout(timer);
+						resolve(value);
+					},
+					(error) => {
+						clearTimeout(timer);
+						reject(error);
+					},
+				);
+			});
+		const completedRuns: Array<Promise<{ error?: unknown }>> = [];
+		const runToTerminalBoundary = async (text: string) => {
+			const accepted = createDeferred<void>();
+			const terminal = createDeferred<void>();
+			const observed = Promise.all([accepted.promise, terminal.promise]);
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "agent_end") terminal.resolve();
+			});
+			const run = harness.session.prompt(text, {
+				source: "rpc",
+				preflightResult: (success) => {
+					if (success) accepted.resolve();
+					else accepted.reject(new Error(`Prompt was not accepted: ${text}`));
+				},
+			});
+			completedRuns.push(
+				run.then(
+					() => ({}),
+					(error) => {
+						accepted.reject(error);
+						terminal.reject(error);
+						return { error };
+					},
+				),
+			);
+			try {
+				// Match the observed event boundary; do NOT drain the previous prompt/pump here.
+				await bounded(observed, text);
+			} finally {
+				unsubscribe();
+			}
+		};
+		await bounded(harness.session.prompt("seed enough history for a real manual summary"), "seed");
+		await runToTerminalBoundary("owner-stage-initial");
+		const first = await bounded(harness.session.compact(), "first manual compact");
+		expect(first.summary).not.toBe("");
+		await runToTerminalBoundary("owner-stage-recovered");
+		// Ordinary prompt-to-prompt delivery waits for the lower agent, not the session pump.
+		// Both manual compactions still start at agent_end without draining their prompt.
+		await harness.session.agent.waitForIdle();
+		await runToTerminalBoundary("owner-stage-clock-offsets");
+		const second = await bounded(harness.session.compact(), "second manual compact");
+		expect(second.summary).not.toBe("");
+		const afterCompactionRequests = bodies.length;
+		await runToTerminalBoundary("owner-stage-stream-monitor");
+		const outcomes = await bounded(Promise.all(completedRuns), "prior prompt settlements");
+		for (const outcome of outcomes) if ("error" in outcome) throw outcome.error;
+		expect(harness.eventsOfType("agent_start")).toHaveLength(5);
+		expect(harness.eventsOfType("agent_end")).toHaveLength(5);
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.result && !event.aborted)).toHaveLength(2);
+		expect(bodies.length).toBeGreaterThan(afterCompactionRequests);
+		expect(JSON.stringify(bodies.slice(afterCompactionRequests))).toContain("owner-stage-stream-monitor");
+		expect(
+			harness
+				.eventsOfType("message_end")
+				.some(
+					(event) =>
+						event.message.role === "user" && getMessageText(event.message) === "owner-stage-stream-monitor",
+				),
+		).toBe(true);
+	}, 60_000);
+
 	it("manually compacts using an extension-provided summary", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },

@@ -182,3 +182,8 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Corrected owned npm project installs to write candidate-local `allowScripts` permissions instead of the rejected CLI flag; normal dependency scripts and fresh Python bootstrap remain enabled.
 - Routed shell release discovery through owned npm tags and versioned package assets through GitHub Releases, while preserving native update-manifest redirect rules.
 - Added explicit offline legacy-root preview/import through retained session/settings owners; package declarations stay outside active packages until explicit installation, and unsupported live/native/artifact migration remains refused or reported.
+
+- Compaction: skip an obsolete post-agent-end timestamp check only for a typed
+  stale owner that is still noncurrent. Keep genuine read failures and the shared
+  strict reader unchanged. The next prompt can start after manual compaction;
+  no input-pump, ACK, provider or persisted protocol changes.
