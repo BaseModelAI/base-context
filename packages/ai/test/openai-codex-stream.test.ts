@@ -1262,6 +1262,170 @@ describe("openai-codex streaming", () => {
 		expect(refusals).toHaveLength(1);
 	});
 
+	it("falls back to SSE when a Codex websocket never opens before its connection deadline", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const deadline = vi.spyOn(globalThis, "setTimeout");
+		const controller = new AbortController();
+		const receipts: ProviderAttemptReceipt[] = [];
+		const admit = vi.fn(async () => "http-attempt");
+		let created!: () => void;
+		const socketCreated = new Promise<void>((resolve) => {
+			created = resolve;
+		});
+		let socket!: PendingWebSocket;
+		class PendingWebSocket extends EventTarget {
+			close = vi.fn();
+			send = vi.fn();
+			constructor() {
+				super();
+				socket = this;
+				created();
+			}
+		}
+		globalThis.WebSocket = PendingWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => {
+			expect(admit).toHaveBeenCalledTimes(1);
+			expect(socket.close).toHaveBeenCalledWith(1000, "connection_timeout");
+			return new Response(buildSSEPayload({ status: "completed" }), { status: 200 });
+		}) as typeof fetch;
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const stream = streamSimpleOpenAICodexResponses(
+			model,
+			{
+				messages: [{ role: "user", content: "Hello", timestamp: 1 }],
+			},
+			{
+				apiKey: mockToken(),
+				transport: "auto",
+				sessionId: "opening-timeout",
+				timeoutMs: 25,
+				signal: controller.signal,
+				attempts: {
+					admit,
+					async settle(receipt) {
+						receipts.push(receipt);
+					},
+				},
+			},
+		);
+		try {
+			await socketCreated;
+			const removeListener = vi.spyOn(socket, "removeEventListener");
+			expect(deadline).toHaveBeenCalledWith(expect.any(Function), 25);
+			expect(admit).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(24);
+			expect(global.fetch).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(1);
+			const result = await stream.result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find((block) => block.type === "text")?.text).toBe("Hello");
+			expect(global.fetch).toHaveBeenCalledTimes(1);
+			expect(socket.send).not.toHaveBeenCalled();
+			expect(receipts).toHaveLength(1);
+			expect(receipts[0]).toMatchObject({
+				attemptId: "http-attempt",
+				ordinal: 1,
+				transport: "http",
+				kind: "transport-fallback",
+				outcome: "completed",
+			});
+			for (const event of ["open", "error", "close"]) {
+				expect(removeListener).toHaveBeenCalledWith(event, expect.any(Function));
+			}
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			controller.abort();
+			await stream.result();
+			deadline.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
+	it("cancels a Codex websocket opening without SSE fallback and clears its default deadline", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const deadline = vi.spyOn(globalThis, "setTimeout");
+		const controller = new AbortController();
+		const admit = vi.fn(async () => "unexpected-attempt");
+		const settle = vi.fn(async () => {});
+		let created!: () => void;
+		const socketCreated = new Promise<void>((resolve) => {
+			created = resolve;
+		});
+		let socket!: PendingWebSocket;
+		class PendingWebSocket extends EventTarget {
+			close = vi.fn();
+			send = vi.fn();
+			constructor() {
+				super();
+				socket = this;
+				created();
+			}
+		}
+		globalThis.WebSocket = PendingWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => {
+			throw new Error("Aborted socket opening reached SSE");
+		}) as typeof fetch;
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const stream = streamSimpleOpenAICodexResponses(
+			model,
+			{
+				messages: [{ role: "user", content: "Hello", timestamp: 1 }],
+			},
+			{
+				apiKey: mockToken(),
+				transport: "auto",
+				sessionId: "opening-abort",
+				signal: controller.signal,
+				attempts: { admit, settle },
+			},
+		);
+		try {
+			await socketCreated;
+			const removeListener = vi.spyOn(socket, "removeEventListener");
+			expect(deadline).toHaveBeenCalledWith(expect.any(Function), 30_000);
+			controller.abort();
+			expect((await stream.result()).stopReason).toBe("aborted");
+			expect(socket.close).toHaveBeenCalledWith(1000, "aborted");
+			expect(socket.close).toHaveBeenCalledTimes(1);
+			for (const event of ["open", "error", "close"]) {
+				expect(removeListener).toHaveBeenCalledWith(event, expect.any(Function));
+			}
+			expect(vi.getTimerCount()).toBe(0);
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(global.fetch).not.toHaveBeenCalled();
+			expect(socket.send).not.toHaveBeenCalled();
+			expect(admit).not.toHaveBeenCalled();
+			expect(settle).not.toHaveBeenCalled();
+		} finally {
+			controller.abort();
+			await stream.result();
+			deadline.mockRestore();
+			vi.useRealTimers();
+		}
+	});
+
 	it("settles physical websocket fallback and SSE retry attempts without a stream listener", async () => {
 		const receipts: ProviderAttemptReceipt[] = [];
 		let admitted = 0;

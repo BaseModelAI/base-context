@@ -843,7 +843,12 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
 
-async function connectWebSocket(url: string, headers: Headers, signal?: AbortSignal): Promise<WebSocketLike> {
+async function connectWebSocket(
+	url: string,
+	headers: Headers,
+	signal?: AbortSignal,
+	timeoutMs = 30_000,
+): Promise<WebSocketLike> {
 	const WebSocketCtor = getWebSocketConstructor();
 	if (!WebSocketCtor) {
 		throw new Error("WebSocket transport is not available in this runtime");
@@ -891,7 +896,17 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 			reject(new Error("Request was aborted"));
 		};
 
+		// This deadline covers only opening the socket, not generating a response.
+		const timeout = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			closeWebSocketSilently(socket, 1000, "connection_timeout");
+			reject(new Error(`WebSocket connection timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+
 		const cleanup = () => {
+			clearTimeout(timeout);
 			socket.removeEventListener("open", onOpen);
 			socket.removeEventListener("error", onError);
 			socket.removeEventListener("close", onClose);
@@ -910,6 +925,7 @@ async function acquireWebSocket(
 	headers: Headers,
 	sessionId: string | undefined,
 	signal?: AbortSignal,
+	timeoutMs?: number,
 ): Promise<{
 	socket: WebSocketLike;
 	entry?: CachedWebSocketConnection;
@@ -917,7 +933,7 @@ async function acquireWebSocket(
 	release: (options?: { keep?: boolean }) => void;
 }> {
 	if (!sessionId) {
-		const socket = await connectWebSocket(url, headers, signal);
+		const socket = await connectWebSocket(url, headers, signal, timeoutMs);
 		return {
 			socket,
 			reused: false,
@@ -955,7 +971,7 @@ async function acquireWebSocket(
 			};
 		}
 		if (cached.busy) {
-			const socket = await connectWebSocket(url, headers, signal);
+			const socket = await connectWebSocket(url, headers, signal, timeoutMs);
 			return {
 				socket,
 				reused: false,
@@ -970,7 +986,7 @@ async function acquireWebSocket(
 		}
 	}
 
-	const socket = await connectWebSocket(url, headers, signal);
+	const socket = await connectWebSocket(url, headers, signal, timeoutMs);
 	const entry: CachedWebSocketConnection = { socket, url, busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
@@ -1234,7 +1250,13 @@ async function processWebSocketStream(
 		retainedPrefix?: ProviderRequestRepresentation["retainedPrefix"],
 	) => Promise<RequestBody>,
 ): Promise<void> {
-	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
+	const { socket, entry, reused, release } = await acquireWebSocket(
+		url,
+		headers,
+		options?.sessionId,
+		options?.signal,
+		options?.timeoutMs,
+	);
 	let keepConnection = true;
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
