@@ -3392,3 +3392,21 @@ The ongoing campaign keeps its W113 image, first primaries and all failures.
 The hung offline diagnostic occupied one CPU during part of that campaign; its
 effect on comparative timing is unknown. No capacity classification is changed.
 Publication remains held for completed benchmark review and final approval.
+
+
+## W138 — Captured build environment in release metadata
+
+The existing build-info.json retains source identity and now records the actual
+build Node, npm, tsgo and resolved esbuild versions, plus the build host platform
+and architecture. The source build captures this once and writes the same object
+to all four packages. The release packer reads the prepared main-package object
+before output changes and carries it unchanged as manifest.build. It does not
+substitute the later pack host or Git state for the original build facts.
+
+These are build-host facts, not a supported-target matrix or a new installer gate.
+Existing package engines, runtime/bootstrap and daemon/storage contracts remain
+with their current owners. This adds no schema, doctor, hash, compatibility layer,
+wheel claim or full reproducibility claim. The runtime is still supplied as source
+and receives a fresh environment at installation. Full G15 coverage remains open.
+The already installed 1fc87 liveness fix does not need another installation merely
+for this descriptor change. Previous private release bundles remain frozen.

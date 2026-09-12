@@ -242,6 +242,7 @@ function main() {
 	for (const releasePackage of releasePackages) {
 		requireBuiltPackage(releasePackage.packageDir);
 	}
+	const buildInfo = readJson(join(packagePath("coding-agent"), "dist", "build-info.json"));
 
 	// Package names and dependency keys match the compiled source graph.
 	// Only artifact filenames and explicit download URLs vary for private distribution.
@@ -324,6 +325,7 @@ function main() {
 	writeJson(join(artifactsDir, manifestName), {
 		version: `v${releaseVersion}`,
 		package: publicPackageName,
+		build: buildInfo,
 		tarball: `releases/download/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
 		tarballs: tarballs.map((tarball) => ({
 			package: tarball.name,

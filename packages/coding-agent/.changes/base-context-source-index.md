@@ -187,3 +187,7 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
   stale owner that is still noncurrent. Keep genuine read failures and the shared
   strict reader unchanged. The next prompt can start after manual compaction;
   no input-pump, ACK, provider or persisted protocol changes.
+
+- Release metadata: capture the actual build toolchain/host once in existing
+  build-info.json files; pack the saved object without replacing it with pack-host
+  facts. Installer, runtime/storage versions and supported-platform policy stay unchanged.
