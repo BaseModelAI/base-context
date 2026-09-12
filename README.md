@@ -84,7 +84,10 @@ The owned installer does not convert or overwrite those global installations.
 
 For an unpublished local package set, use the dedicated installer from the matching,
 freshly built and extracted main package. Supply the other first-party tarballs
-explicitly; the installer does not scan adjacent files or rewrite dependency origins:
+explicitly; the installer does not scan adjacent files or modify archive bytes.
+It reads each supplied archive's package name with `tar` and writes candidate-local
+npm dependencies and overrides, so matching transitive references use those local
+inputs even when the release archives name unpublished GitHub downloads:
 
 ```bash
 PACKS=/absolute/path/to/pack
@@ -97,7 +100,8 @@ node /absolute/path/to/extracted-main/package/dist/installer.mjs install \
 ```
 
 Use `null` only for a new, unselected owned root. Each repeated option names a local
-regular file; relative paths use the invocation's original working directory.
+archive containing `package/package.json`; relative paths use the invocation's
+original working directory. The `tar` command must be available for local inputs.
 Use a private HOME and install root for an isolated check. The dedicated entry skips
 agent/model/auth startup, but npm scripts and Python bootstrap still run and can
 download dependencies. This is not an offline install. Preparation must still finish

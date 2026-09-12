@@ -2463,3 +2463,25 @@ acceptance or a final comparison. A fresh clean package and the packaged Sol RPC
 path with actual default refinement enabled and a real 30-second opening deadline
 must pass before a fresh all-30 LOW-then-MEDIUM campaign. Publication still needs
 completed benchmark review and separate final approval.
+
+
+## W175 — Explicit local release dependency resolution
+
+A real private installation of the release archives failed before activation:
+npm fetched an unpublished GitHub dependency despite the supplied local tarballs.
+The installed selection stayed unchanged. The failed candidate and its bootstrap
+HOME were retained; publication was not used as a workaround.
+
+For explicitly supplied local dependency inputs, the installer now reads the actual
+package name with `tar -xOf ... package/package.json` before owned-root effects.
+The existing private candidate manifest declares their direct `file:` dependencies
+and matching npm `$name` overrides. Only those supplied identities replace matching
+transitive resolution. Archive bytes stay unchanged. The default path, script
+policy, one npm installation, fresh Python preparation and activation CAS remain
+with their existing owners.
+
+The two existing native installer cases passed. Their tar/npm boundaries are fake;
+the corrected release-archive installation is still the required working check.
+The unchanged WebSocket/RPC path already passed on f99702981 and is not rerun for
+this installer-only change. The fresh benchmark campaign remains unstarted until
+the corrected private installation succeeds.

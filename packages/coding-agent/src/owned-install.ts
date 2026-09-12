@@ -269,7 +269,7 @@ export async function installOwnedRelease(options: {
 	expected: InstallSelection | null;
 	installSpec: string;
 	version: string;
-	/** Explicit local npm inputs; normal external/transitive dependency resolution remains enabled. */
+	/** Explicit local npm inputs override matching dependency resolution; other dependencies remain normal. */
 	localDependencyTarballs?: readonly string[];
 }): Promise<OwnedActivation> {
 	const { root: rootInput, expected: expectedInput, installSpec, version } = options;
@@ -280,11 +280,30 @@ export async function installOwnedRelease(options: {
 	const executable = "bun" in process.versions ? "node" : process.execPath;
 	const environment = { ...process.env };
 	const activate = captureActivationOwner(executable);
+	const localDependencies = new Map<string, string>();
 	const localDependencyTarballs = dependencyInputs.map((input) => {
 		if (typeof input !== "string" || input.length === 0)
 			throw new Error("Local dependency tarball must be a nonempty file path.");
 		const tarball = resolve(cwd, input);
 		if (!statSync(tarball).isFile()) throw new Error(`Local dependency tarball is not a file: ${tarball}`);
+		const metadata = spawnSync("tar", ["-xOf", tarball, "package/package.json"], {
+			cwd,
+			env: environment,
+			encoding: "utf8",
+		});
+		if (metadata.error) throw metadata.error;
+		if (metadata.status !== 0)
+			throw new Error(`Could not read local dependency package metadata: ${tarball}. ${metadata.stderr.trim()}`);
+		const manifest: unknown = JSON.parse(metadata.stdout);
+		if (
+			!manifest ||
+			typeof manifest !== "object" ||
+			!("name" in manifest) ||
+			typeof manifest.name !== "string" ||
+			!manifest.name
+		)
+			throw new Error(`Local dependency tarball has no package name: ${tarball}`);
+		localDependencies.set(manifest.name, `file:${tarball}`);
 		return tarball;
 	});
 	assertSelection(root, expected);
@@ -297,6 +316,12 @@ export async function installOwnedRelease(options: {
 		join(directory, "package.json"),
 		`${JSON.stringify({
 			private: true,
+			...(localDependencies.size > 0
+				? {
+						dependencies: Object.fromEntries(localDependencies),
+						overrides: Object.fromEntries([...localDependencies.keys()].map((name) => [name, `$${name}`])),
+					}
+				: {}),
 			allowScripts: Object.fromEntries([installSpec, ...localDependencyTarballs].map((spec) => [spec, true])),
 		})}\n`,
 		{ flag: "wx", mode: 0o600 },

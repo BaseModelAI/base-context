@@ -212,6 +212,13 @@ vi.mock("child_process", async (importOriginal) => {
 			return child;
 		}),
 		spawnSync: vi.fn((command: string, args: readonly string[] = [], options?: SpawnSyncOptions) => {
+			if (command === "tar") {
+				expect(args[0]).toBe("-xOf");
+				expect(args[2]).toBe("package/package.json");
+				expect(options?.cwd).toBe(process.cwd());
+				// Local metadata boundary only; these fixture files are not real archives.
+				return { status: 0, stdout: readFileSync(args[1], "utf8"), stderr: "" };
+			}
 			if (
 				args.includes("--experimental-sqlite") &&
 				args.some((arg) => /owned-install-worker\.(?:js|ts)$/.test(arg))
@@ -461,10 +468,21 @@ describe("self-update daemon restart", () => {
 				expect(environment.BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL).toBe("0");
 				expect(environment.BASE_CONTEXT_BOOTSTRAP_TOOLS_ON_INSTALL).toBe("0");
 				const directory = args[args.indexOf("--prefix") + 1];
+				const localDependencies = (localInstall?.dependencies ?? []).map((tarball) => [
+					JSON.parse(readFileSync(tarball, "utf8")).name as string,
+					`file:${tarball}`,
+				]);
 				expect(JSON.parse(readFileSync(join(directory, "package.json"), "utf8"))).toEqual({
 					private: true,
+					...(localDependencies.length > 0
+						? {
+								dependencies: Object.fromEntries(localDependencies),
+								overrides: Object.fromEntries(localDependencies.map(([name]) => [name, `$${name}`])),
+							}
+						: {}),
 					allowScripts: Object.fromEntries(args.slice(args.indexOf("--") + 1).map((spec) => [spec, true])),
 				});
+				expect(statSync(join(directory, "package.json")).mode & 0o777).toBe(0o600);
 				expect(cwd).toBe(directory);
 				expect(dirname(directory)).toBe(join(root, "versions"));
 				const candidatePackage = join(directory, "node_modules", PACKAGE_NAME);
@@ -807,7 +825,7 @@ describe("self-update daemon restart", () => {
 
 				// The same preparation failure with local dependencies cannot select a different pair.
 				const dependency = join(projectDir, "local-sdk-failed.tgz");
-				writeFileSync(dependency, "offline local dependency fixture");
+				writeFileSync(dependency, JSON.stringify({ name: "@ponythewhite/base-context-ai", version: "999.0.0" }));
 				useOwnedProcessBoundary(previous.installation.root, "999.0.0", {
 					dependencies: [dependency],
 					main: "base-context-local.tgz",
@@ -1137,9 +1155,15 @@ describe("self-update daemon restart", () => {
 
 			// The real installation owner commits both selections; npm/Python alone are offline boundaries.
 			const dependencies = ["local-sdk-core.tgz", "local-sdk agent.tgz"];
-			for (const dependency of dependencies) {
-				// Regular-file operands only; fake npm does not extract these inert fixture bytes.
-				writeFileSync(join(projectDir, dependency), "offline local dependency fixture");
+			for (const [index, dependency] of dependencies.entries()) {
+				// Names come from fake tar metadata, not these unrelated filenames.
+				writeFileSync(
+					join(projectDir, dependency),
+					JSON.stringify({
+						name: ["@ponythewhite/base-context-ai", "@ponythewhite/base-context-agent"][index],
+						version: "1.0.0",
+					}),
+				);
 			}
 			const previous = await createOwnedFixture(dependencies);
 			expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");

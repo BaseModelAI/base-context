@@ -204,3 +204,9 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
   stays abort-only. Native fallback/cancellation and paused-import cases passed;
   the stopped Sol wait's actual cause remains unknown. Fresh packaged readiness
   and a complete new benchmark campaign are still required before release.
+
+- Owned local installation: read explicit tarball package names before owned writes;
+  declare matching direct file inputs and candidate-local npm overrides so pinned
+  release URLs use those inputs. Preserve archives, normal preparation and CAS.
+  Two existing native cases passed; actual release-archive installation remains
+  the working check after the retained preactivation npm404 failure.
