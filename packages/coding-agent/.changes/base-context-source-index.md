@@ -191,3 +191,16 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
 - Release metadata: capture the actual build toolchain/host once in existing
   build-info.json files; pack the saved object without replacing it with pack-host
   facts. Installer, runtime/storage versions and supported-platform policy stay unchanged.
+
+- Offline migration: map supported top-level cron/user-heartbeat/recurring RLM declarations directly to
+  existing paused per-session records, without dispatches. Add explicit daemon-free
+  metadata listing. Unsupported ownership/resume paths remain explicit; no new store/schema.
+- Port the linked quickstart/usage/session/background/provider guides to owned CLI,
+  paths and runtime settings; document framed storage and bounded async reads,
+  limited paused migration and actual kernel-state limitations.
+
+- Codex WebSocket setup: use the supplied timeoutMs or a 30-second opening deadline,
+  close a stalled connection and use existing auto-to-SSE fallback. Cancellation
+  stays abort-only. Native fallback/cancellation and paused-import cases passed;
+  the stopped Sol wait's actual cause remains unknown. Fresh packaged readiness
+  and a complete new benchmark campaign are still required before release.

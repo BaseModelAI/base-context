@@ -144,14 +144,28 @@ only an explicit successful `base-context package install <source>` activates on
 Review and trust a declaration before installing it. An explicit
 `BASE_CONTEXT_SESSION_DIR` still controls session storage separately.
 
-Auth files, model credentials, executable/instruction paths, scheduling/daemon/runtime
-files and kernel snapshots are excluded. Historical goal entries remain in retained
-history, but the goal restore readers do not reactivate retained-import goals. Explicit
-new goals and autonomy remain available. History is not scrubbed for secrets and may
-influence a future model conversation. Attachment/artifact and external
-reference remapping, paused-job import, opaque replay and trusted runtime resume are
-not provided by this command. Its report lists supported and excluded coverage;
-this is not a complete migration of every legacy feature. Binary selection is unchanged.
+Matched top-level cron, user-heartbeat and recurring RLM-heartbeat declarations are
+imported paused, with new session/job identities and no pending dispatches. Inspect their metadata without starting
+a daemon or resuming work:
+
+```sh
+BASE_CONTEXT_HOME=/path/to/new-root base-context schedule list --offline --json
+```
+
+Subagent, unmatched, ambiguous, completed, cancelled and one-shot RLM schedules are skipped.
+Generic cron resume is not added; one-shot jobs require explicit rescheduling.
+Heartbeat resume remains an explicit existing runtime action after normal session
+registration. RLM list/update uses the new job IDs from the newly bound session; old
+job handles and kernel state are not restored. Retained schedule prompts are not
+executed or secret-scrubbed.
+
+Auth files, model credentials, executable/instruction paths, daemon/runtime state
+and kernel snapshots are excluded. Historical goal entries remain in retained history,
+but the goal restore readers do not reactivate retained-import goals. Explicit new
+goals and autonomy remain available. History is not scrubbed for secrets and may
+influence a future model conversation. Attachment/artifact and external-reference
+remapping, opaque replay and trusted runtime resume are not provided. This is not a
+complete migration of every legacy feature. Binary selection is unchanged.
 
 ## Built for Long-Running Work
 Base Context is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.

@@ -1,6 +1,6 @@
 # Providers
 
-Prime Agent supports subscription-based providers via OAuth and API key providers via environment variables or the auth file. Its built-in model catalog is updated with each Prime Agent release.
+Base Context resolves providers through their actual API and credential routes. API keys can come from environment variables or the owned auth file. A model catalog entry does not establish subscription entitlement, OAuth-client permission or native context capabilities.
 
 ## Table of Contents
 
@@ -13,27 +13,23 @@ Prime Agent supports subscription-based providers via OAuth and API key provider
 
 ## Subscriptions
 
-Use `/login` in interactive mode, then select a provider:
+Use only the provider/auth routes authorized for your setup. `/login` exposes the available configured routes; a fork does not inherit permission to use upstream OAuth clients. Where writable credential storage is supported, it belongs under `~/.base-context/auth.json` (or `BASE_CONTEXT_HOME`), not Prime's root. Login, refresh and logout behavior follows the selected route's permissions.
 
-- ChatGPT Plus/Pro (Codex)
-- Claude Pro/Max
-- GitHub Copilot
-
-Use `/logout` to clear credentials. Tokens are stored in `~/.prime/agent/auth.json` and auto-refresh when expired.
+Do not copy a Prime credential store or enable an API-key billing fallback to bypass a subscription refusal. The offline migration command excludes credentials.
 
 ### OpenAI Codex
 
-- Requires ChatGPT Plus or Pro subscription
-- Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
+An existing authorized OpenAI Codex subscription can be supplied to an individual SDK instance through an explicitly injected read-only backend. See [SDK authentication](sdk.md#api-keys-and-oauth).
+
+That mode uses the official `openai-codex` / `openai-codex-responses` route. It refuses missing, stale or expired credentials and disables login, refresh, credential writes and API-key fallback. Keep the backend outside tools. This is an instance-scoped permission, not a global OAuth-client approval or an OpenAI endorsement of this fork.
 
 ### Claude Pro/Max
 
-Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
+Use this route only where the exact client and account are authorized. This guide does not establish Claude subscription access, included usage or billing terms for the fork. An Anthropic API key is a separate credential route.
 
 ### GitHub Copilot
 
-- Press Enter for github.com, or enter your GitHub Enterprise Server domain
-- If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+If the authorized Copilot login route is available, use the correct github.com or GitHub Enterprise domain. Model availability also depends on the account and enabled models. This guide does not grant the fork access to a Copilot subscription.
 
 ## API Keys
 
@@ -43,7 +39,7 @@ Use `/login` in interactive mode and select a provider to store an API key in `a
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-prime-agent
+base-context
 ```
 
 | Provider | Environment Variable | `auth.json` key |
@@ -79,7 +75,7 @@ Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](..
 
 #### Auth File
 
-Store credentials in `~/.prime/agent/auth.json`:
+Store credentials in the owned `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` selects another product root):
 
 ```json
 {
@@ -117,7 +113,7 @@ The `key` field supports three formats:
   { "type": "api_key", "key": "sk-ant-..." }
   ```
 
-OAuth credentials are also stored here after `/login` and managed automatically.
+Writable OAuth storage is used only when the configured route permits it. The read-only existing-Codex subscription mode does not write this file or refresh credentials. Shell-backed API-key entries execute commands; use only trusted local configuration, never unreviewed imported instructions.
 
 ### Prime Inference
 
@@ -160,14 +156,14 @@ export AWS_REGION=us-west-2
 Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE`).
 
 ```bash
-prime-agent --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
+base-context --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
 Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
 
 ```bash
 export AWS_BEDROCK_FORCE_CACHE=1
-prime-agent --provider amazon-bedrock --model arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
+base-context --provider amazon-bedrock --model arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123
 ```
 
 If you are connecting to a Bedrock API proxy, the following environment variables can be used:
@@ -191,7 +187,7 @@ export AWS_BEDROCK_FORCE_HTTP1=1
 export CLOUDFLARE_API_KEY=...           # or use /login
 export CLOUDFLARE_ACCOUNT_ID=...
 export CLOUDFLARE_GATEWAY_ID=...        # create at dash.cloudflare.com → AI → AI Gateway
-prime-agent --provider cloudflare-ai-gateway --model "claude-sonnet-4-5"
+base-context --provider cloudflare-ai-gateway --model "claude-sonnet-4-5"
 ```
 
 Routes to OpenAI and Anthropic through Cloudflare AI Gateway. OpenAI uses the OpenAI passthrough route (`/openai`) with native OpenAI model IDs such as `gpt-5.1`. Anthropic uses the Anthropic passthrough route (`/anthropic`) with native Anthropic model IDs such as `claude-sonnet-4-5`. Cloudflare-hosted `@cf/...` models are available through the separate `cloudflare-workers-ai` provider.
@@ -205,7 +201,7 @@ AI Gateway authentication uses `CLOUDFLARE_API_KEY` as `cf-aig-authorization`. U
 | Stored BYOK | Cloudflare token only | Cloudflare injects provider keys stored in the AI Gateway dashboard |
 | Inline BYOK | Cloudflare token plus upstream `Authorization` header | The request supplies the upstream provider key |
 
-For normal Prime Agent usage, prefer unified billing or stored BYOK. Inline BYOK requires configuring an additional upstream `Authorization` header for the Cloudflare AI Gateway provider, for example via a `models.json` provider/model override.
+For normal Base Context usage, prefer unified billing or stored BYOK. Inline BYOK requires configuring an additional upstream `Authorization` header for the Cloudflare AI Gateway provider, for example via a `models.json` provider/model override.
 
 ### Cloudflare Workers AI
 
@@ -214,10 +210,10 @@ For normal Prime Agent usage, prefer unified billing or stored BYOK. Inline BYOK
 ```bash
 export CLOUDFLARE_API_KEY=...           # or use /login
 export CLOUDFLARE_ACCOUNT_ID=...
-prime-agent --provider cloudflare-workers-ai --model "@cf/moonshotai/kimi-k2.6"
+base-context --provider cloudflare-workers-ai --model "@cf/moonshotai/kimi-k2.6"
 ```
 
-Prime Agent automatically sets `x-session-affinity` for [prefix caching](https://developers.cloudflare.com/workers-ai/features/prompt-caching/) discounts.
+Base Context automatically sets `x-session-affinity` for [prefix caching](https://developers.cloudflare.com/workers-ai/features/prompt-caching/) discounts.
 
 ### Google Vertex AI
 

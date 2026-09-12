@@ -59,8 +59,10 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["schedule", "list"],
-		usage: "schedule list [--all] [agent] [--json]",
+		usage: "schedule list [--all] [agent] [--json] | schedule list --offline [--all] [--json]",
 		summary: "List scheduled prompts",
+		description:
+			"--offline reads per-session schedule files under BASE_CONTEXT_HOME without a daemon. It lists metadata only; retained instructions and expressions stay in the files. Imported schedules remain paused. Generic cron resume is unsupported here; one-shot jobs require explicit rescheduling. Matched top-level recurring RLM heartbeats are retained paused; subagent owners and one-shot RLM schedules are not imported.",
 	},
 	{
 		path: ["schedule", "add"],
@@ -166,7 +168,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		usage: "migrate --from-prime-agent <offline-export-root> [--dry-run] [--destination <new-root>]",
 		summary: "Import a supplied coherent offline Prime export into a new state root",
 		description:
-			"Requires an externally produced coherent offline/filesystem export, not a live Prime root. Apply requires a new destination; --dry-run writes nothing. Imports supported legacy JSONL and safe preferences; package declarations stay inactive. Credentials, executable paths, scheduling/daemon/runtime files, artifacts and native-framed journals are excluded. Historical goals remain retained, not reactivated. This command does not produce snapshots or complete all migration/replay coverage.",
+			"Requires an externally produced coherent offline/filesystem export, not a live Prime root. Apply requires a new destination; --dry-run writes nothing. Imports supported legacy JSONL and safe preferences; package declarations stay inactive. Matched top-level schedules are retained PAUSED in per-session files, without dispatches; top-level recurring RLM heartbeats use new job IDs and require explicit resume from the newly bound session. Subagent owners, one-shot RLM schedules and ambiguous targets are unsupported. Credentials, executable paths, daemon/runtime files, other artifacts and native-framed journals are excluded. Use schedule list --offline under the new BASE_CONTEXT_HOME; generic resume/one-shot rescheduling is not implemented here. Historical goals remain retained, not reactivated. This command does not produce snapshots or complete all migration/replay coverage.",
 	},
 	{
 		path: ["session"],

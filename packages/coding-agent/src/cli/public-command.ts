@@ -21,7 +21,7 @@ import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
 import { getProductDiagnostics } from "./product-doctor.js";
-import { runProductMigration } from "./product-migrate.js";
+import { runOfflineScheduleList, runProductMigration } from "./product-migrate.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -107,6 +107,10 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "send":
 			return runInternalAgentCommand("send", args.slice(1));
 		case "schedule":
+			if (args.includes("--offline")) {
+				runOfflineScheduleList(args.slice(1));
+				return HANDLED;
+			}
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));

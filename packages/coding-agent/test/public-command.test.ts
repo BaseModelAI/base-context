@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../src/config.js";
+import { AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { APPEND_NATIVE_ADMISSION, SessionJournalOwner } from "../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../src/core/session-journal-reader.js";
@@ -86,6 +87,25 @@ function offlineMigrationJournal(id: string, cwd: string): string {
 		.join("\n")}\n`;
 }
 
+function offlineMigrationSchedule(id: string, sessionId: string, file: string, cwd: string) {
+	return {
+		id,
+		status: "active",
+		source: "cron",
+		runtimeKind: "top-level",
+		activeSessionId: `old-active-${sessionId}`,
+		sessionId,
+		sessionFile: `/old/export/sessions/${file}`,
+		cwd,
+		prompt: "Retained schedule instruction",
+		schedule: { kind: "interval", expression: "every 5m", intervalMs: 300000 },
+		createdAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:00:00.000Z",
+		nextRunAt: "2026-01-01T00:05:00.000Z",
+		runCount: 3,
+	};
+}
+
 describe("public command routing", () => {
 	beforeEach(() => {
 		mocks.realSettings = false;
@@ -139,7 +159,36 @@ describe("public command routing", () => {
 			});
 			writeFileSync(join(source, "settings.json"), sourceSettings);
 			writeFileSync(join(source, "auth.json"), secret);
-			writeFileSync(join(source, "cron-jobs.json"), "[]");
+			const sourceSchedules = JSON.stringify({
+				jobs: [{ ...offlineMigrationSchedule("old-cron", "legacy-a", "a.jsonl", cwds[0]!), prompt: secret }],
+				dispatches: [
+					{
+						id: "old-dispatch",
+						jobId: "old-cron",
+						claimedAt: "2026-01-01T00:05:00.000Z",
+						scheduledFor: "2026-01-01T00:05:00.000Z",
+					},
+				],
+			});
+			writeFileSync(join(source, "cron-jobs.json"), sourceSchedules);
+			mkdirSync(join(source, "session-artifacts", "legacy-b"), { recursive: true });
+			const sourceHeartbeat = JSON.stringify({
+				jobs: [
+					{
+						...offlineMigrationSchedule("old-heartbeat", "legacy-b", "b.jsonl", cwds[1]!),
+						source: "heartbeat",
+						deliveryMode: "follow_up",
+						label: secret,
+					},
+					{
+						...offlineMigrationSchedule("old-rlm-heartbeat", "legacy-b", "b.jsonl", cwds[1]!),
+						source: "rlm_heartbeat",
+						runtimeKind: "top-level",
+					},
+				],
+				dispatches: [],
+			});
+			writeFileSync(join(source, "session-artifacts", "legacy-b", "scheduled-jobs.json"), sourceHeartbeat);
 			writeFileSync(join(source, "untrusted.ts"), 'throw new Error("must not load imported code");');
 			mkdirSync(join(source, "session-artifacts", "legacy-a"), { recursive: true });
 			writeFileSync(join(source, "session-artifacts", "legacy-a", "kernel-state.dill"), secret);
@@ -152,6 +201,8 @@ describe("public command routing", () => {
 			expect(preview).toMatchObject({
 				mode: "dry-run",
 				preparedSessions: 2,
+				pausedSchedules: 3,
+				skippedSchedules: 0,
 				inactivePackages: 1,
 				skippedPackages: 2,
 			});
@@ -160,11 +211,29 @@ describe("public command routing", () => {
 			expect(process.exitCode).toBeUndefined();
 			expect(imports).toHaveBeenCalledTimes(2);
 			expect(imports.mock.calls.every((call) => call[4] === "legacy-jsonl")).toBe(true);
+			const scheduleStore = AgentCronJobStore.forSessionArtifacts();
 			const reopenedCwds: string[] = [];
 			for (const name of readdirSync(join(destination, "sessions"))) {
 				if (!name.endsWith(".jsonl")) continue;
 				const manager = await SessionManager.open(join(destination, "sessions", name));
 				try {
+					const artifactDir = manager.getSessionArtifactDir()!;
+					scheduleStore.registerSessionArtifact(manager.getSessionId(), artifactDir);
+					const persisted = JSON.parse(readFileSync(join(artifactDir, "scheduled-jobs.json"), "utf8"));
+					expect(persisted.dispatches).toEqual([]);
+					expect(persisted.jobs).toHaveLength(manager.getCwd() === cwds[0] ? 1 : 2);
+					for (const job of persisted.jobs) {
+						expect(job).toMatchObject({
+							status: "paused",
+							activeSessionId: manager.getSessionId(),
+							sessionId: manager.getSessionId(),
+							sessionFile: manager.getSessionFile(),
+							cwd: manager.getCwd(),
+							runCount: 0,
+						});
+						expect(job).not.toHaveProperty("nextRunAt");
+						expect(job.id).not.toMatch(/^old-/);
+					}
 					reopenedCwds.push(manager.getCwd());
 					expect(manager.getLeafId()).toMatch(/^legacy-[ab]-message$/);
 					const history = await manager.materializeBranchHistory({ maxEntries: 8, maxSourceBytes: 16384 });
@@ -176,6 +245,29 @@ describe("public command routing", () => {
 				}
 			}
 			expect(reopenedCwds.sort()).toEqual([...cwds].sort());
+			expect(
+				scheduleStore
+					.list()
+					.map((job) => job.source)
+					.sort(),
+			).toEqual(["cron", "heartbeat", "rlm_heartbeat"]);
+			expect(scheduleStore.due(new Date("2100-01-01T00:00:00.000Z"))).toEqual([]);
+			vi.stubEnv(ENV_AGENT_DIR, destination);
+			await handlePublicCommand(["schedule", "list", "--offline", "--json"]);
+			expect(process.exitCode).toBeUndefined();
+			const listed = JSON.parse(String(vi.mocked(console.log).mock.calls.at(-1)?.[0]));
+			expect(listed.jobs).toHaveLength(3);
+			expect(listed.jobs.find((job: { source: string }) => job.source === "heartbeat").deliveryMode).toBe(
+				"follow_up",
+			);
+			expect(listed.jobs.every((job: { status: string }) => job.status === "paused")).toBe(true);
+			await handlePublicCommand(["schedule", "list", "--offline"]);
+			expect(String(vi.mocked(console.log).mock.calls.at(-1)?.[0])).toContain(" paused");
+			expect(mocks.daemonCommands).toEqual([]);
+			expect(readFileSync(join(source, "cron-jobs.json"), "utf8")).toBe(sourceSchedules);
+			expect(readFileSync(join(source, "session-artifacts", "legacy-b", "scheduled-jobs.json"), "utf8")).toBe(
+				sourceHeartbeat,
+			);
 			const settings = SettingsManager.create(destination, destination);
 			expect(settings.getGlobalSettings()).toMatchObject({
 				defaultProvider: "openai-codex",
@@ -228,6 +320,7 @@ describe("public command routing", () => {
 				inactivePackages: [],
 			});
 		} finally {
+			vi.unstubAllEnvs();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -250,6 +343,29 @@ describe("public command routing", () => {
 			expect(readFileSync(join(source, "sessions", "a.jsonl"), "utf8")).toBe(first);
 			expect(readFileSync(join(source, "sessions", "b.jsonl"), "utf8")).toBe(incomplete);
 			expect(mocks.packageCommands).toEqual([]);
+			expect(mocks.daemonCommands).toEqual([]);
+			// Valid journals do not make ambiguous, unmatched or RLM-owned schedules importable.
+			writeFileSync(join(source, "sessions", "b.jsonl"), `${incomplete}\n`);
+			const duplicate = offlineMigrationSchedule("collision", "legacy-a", "a.jsonl", join(root, "project-a"));
+			const rejectedSchedules = JSON.stringify({
+				jobs: [
+					duplicate,
+					{ ...duplicate },
+					{ ...duplicate, id: "unmapped", sessionId: "missing" },
+					{ ...duplicate, id: "rlm-owner", source: "rlm_heartbeat", runtimeKind: "subagent" },
+				],
+				dispatches: [],
+			});
+			writeFileSync(join(source, "cron-jobs.json"), rejectedSchedules);
+			process.exitCode = undefined;
+			await handlePublicCommand([...args, "--dry-run"]);
+			expect(process.exitCode).toBeUndefined();
+			expect(JSON.parse(String(vi.mocked(console.log).mock.calls.at(-1)?.[0]))).toMatchObject({
+				pausedSchedules: 0,
+				skippedSchedules: 4,
+			});
+			expect(existsSync(destination)).toBe(false);
+			expect(readFileSync(join(source, "cron-jobs.json"), "utf8")).toBe(rejectedSchedules);
 			expect(mocks.daemonCommands).toEqual([]);
 			process.exitCode = undefined;
 			mkdirSync(destination);

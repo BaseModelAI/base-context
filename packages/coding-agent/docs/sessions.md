@@ -4,7 +4,17 @@ Base Context saves conversations as sessions so you can continue work, branch fr
 
 ## Session Storage
 
-Sessions use the owned `~/.base-context/sessions/` tree by default. `BASE_CONTEXT_HOME` and the existing session-directory settings can change that location. Native sessions use owned journals and derived indexes; a `.jsonl` filename does not imply an ordinary editable JSONL file.
+Sessions use a flat owned directory by default, not a separate directory for each project:
+
+```text
+~/.base-context/
+  sessions/<session-id>.jsonl
+  session-artifacts/<session-id>/
+```
+
+`BASE_CONTEXT_HOME` selects the product root. `BASE_CONTEXT_SESSION_DIR` can select a different absolute sessions directory. The artifact root is the sibling `session-artifacts/` directory under that sessions directory's parent; use `SessionManager.getSessionArtifactDir()` for the actual owned path.
+
+Native sessions use canonical **native-framed journals** and derived indexes. The `.jsonl` extension is retained, but the file is not an ordinary editable transcript. Use native owners and bounded asynchronous reads, not `jq`, manual appends or text-editor changes. Legacy flat JSONL belongs on the explicit offline import path below, not in a manually assembled native journal.
 
 ```bash
 base-context --continue          # Continue the most recent session
@@ -15,7 +25,7 @@ base-context --fork <path|id>    # Fork a session file or partial session ID int
 
 Use `/session` in interactive mode to see the current session file, session ID, and message count. Use `/usage` for token, cost, and context usage.
 
-For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+For native journal storage and the SessionManager API, see [Session Format](session-format.md).
 
 ## Session Commands
 
@@ -35,7 +45,7 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 
 ## Importing an External Session
 
-Use an explicit file path to create a new owned session in the current project:
+Use an explicit path to a coherent offline source file to create a new owned session for the current project:
 
 ```bash
 base-context session import /path/to/session.jsonl
@@ -82,6 +92,29 @@ epoch activation, and reference/replay coverage are not assessed. For example,
 the native version6 tool-continuation refusal above remains on actual activation.
 A later import reads the source again and can still fail. Preview does not read
 legacy parent-session files to infer worker depth or inspect runtime ownership.
+
+## Importing an Offline Prime Root
+
+The separate root-migration command accepts an externally produced, coherent offline/filesystem export of a Prime root. It does not create a snapshot, attach to or stop Prime, or certify a changing source as coherent. Keep the original export. Do not point it at a live user root.
+
+```bash
+base-context migrate --from-prime-agent /exports/prime-offline --dry-run --destination /new/base-context-home
+base-context migrate --from-prime-agent /exports/prime-offline --destination /new/base-context-home
+```
+
+The destination must be a new, separate path; an existing destination is refused, not merged or overwritten. The command publishes the imported directory only. It does not select that root for future commands or start an agent. A failure can leave retained staging or an uncertain activation; do not assume rollback or retry/delete after an uncertain result.
+
+This route supports flat legacy JSONL session files only. It prepares all journals before staging and imports through the real session owners. Unlike the narrower `session import` route above, whole-root migration refuses native-framed journals. Qualified native epochs and artifact/external references can depend on original session paths and owners; copying or renaming files does not make them portable. Full native, opaque-runtime and artifact migration is not supported.
+
+Supported preferences are copied, and package declarations stay inactive until an explicit install. Credentials, model credential/configuration files, executable/resource activation, daemon recovery state, pending dispatches, Python processes and source artifact trees are not copied. Historical chat and goal entries remain retained data, not secret-scrubbed text. They can influence future model context, but imported goals are not reactivated; new explicit goals and autonomy remain available.
+
+The one supported artifact projection is paused schedule data. The importer reads only the known root `cron-jobs.json` and matched per-session `scheduled-jobs.json` files. Uniquely matched top-level cron jobs, user heartbeats and recurring RLM heartbeats become **paused** records with new job IDs, mapped destination session IDs/final journal paths/cwd, no old active-session identity, no `nextRunAt` and no imported dispatches. Completed/cancelled jobs and unsupported or ambiguous records are counted as skipped. Subagent/nonzero-depth owners, unmatched targets and one-shot RLM heartbeats remain unsupported.
+
+```bash
+BASE_CONTEXT_HOME=/new/base-context-home base-context schedule list --offline --json
+```
+
+This lists metadata through the real store without a daemon connection. Retained instruction, label and schedule-expression text is omitted from the output, not scrubbed from the stored declaration. Opening the new session does not resume paused schedules. After its normal runtime has actually bound the new session, existing heartbeat controls can explicitly resume a job. For RLM heartbeats, call `rlm_heartbeat.list()` in that session, then `rlm_heartbeat.update("<new-heartbeat-id>", status="resume")` with a new ID. Old handles and kernel state are not restored. Migration adds no generic cron resume; one-shot cron jobs need explicit rescheduling. See [Heartbeats and Scheduled Prompts](long-running-agents.md#heartbeats-and-scheduled-prompts).
 
 ## Resuming and Deleting Sessions
 
@@ -193,7 +226,7 @@ Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone`
 
 ## Branch Summaries
 
-When `/tree` switches away from one branch to another, Prime Agent can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
+When `/tree` switches away from one branch to another, Base Context can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
 
 When prompted, choose one of:
 
@@ -205,9 +238,30 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 ## Session Format
 
-Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
+Native `.jsonl` journals store framed canonical records, not plain transcript JSONL. Their payloads include message entries, model and thinking-level changes, labels, compactions, branch summaries and extension entries. The index is derived data, not a replacement for the canonical journal.
 
-For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).
+Use `SessionManager` through the actual owner. For a native session that you own and open directly, both opening and closing are asynchronous:
+
+```ts
+import { SessionManager } from "@ponythewhite/base-context";
+
+const manager = await SessionManager.open("/owned/base-context-home/sessions/<session-id>.jsonl");
+try {
+  const history = await manager.materializeBranchHistory({
+    maxEntries: 256,
+    maxSourceBytes: 1_048_576,
+  });
+  console.log(history.entries);
+} finally {
+  await manager.close();
+}
+```
+
+Opening a manager acquires native ownership and can maintain the derived index; it is not a raw read-only parser for arbitrary source files. If a runtime already owns the session, use its existing manager. `materializeBranchHistory` requires explicit entry/byte limits and refuses when the bounded materialization cannot fit. `readBranchHistory` and `readSourceHistory` provide asynchronous captured read scopes for selective access. Resident-only synchronous getters are not whole-archive readers for indexed sessions.
+
+Do not parse or rewrite native journals with `jq`, append hand-written records, edit frame payloads, or copy index/artifact files to manufacture a new session. Use explicit import for offline legacy JSONL. A retained import does not grant native epoch, tool-continuation, request-source or opaque-resource authority. A successful preview/import of supported data does not establish full reference portability or restore the original running process.
+
+For parsers, extensions, SDK usage and the full SessionManager API, see [Session Format](session-format.md).
 
 
 ### Native Main-Request Output Links

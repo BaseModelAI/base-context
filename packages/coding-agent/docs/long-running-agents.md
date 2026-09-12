@@ -1,6 +1,6 @@
 # Long-Running and Background Agents
 
-Prime Agent combines daemon-backed session workers with persistent state, scheduled prompts, direct agent messaging, goals, and bounded autonomous continuations. These features serve different purposes but share the same session and worker runtime.
+Base Context combines daemon-backed session workers with persistent state, scheduled prompts, direct agent messaging, goals, and bounded autonomous continuations. These features serve different purposes but share the same session and worker runtime.
 
 ## Runtime Flow
 
@@ -18,7 +18,7 @@ flowchart TD
         policy["Continuation policy"]
         queue["Session prompt queue"]
         session["AgentSession"]
-        kernel["Persistent Python kernel"]
+        kernel["Worker-owned Python kernel"]
         children["RLM child sessions"]
 
         heartbeat --> queue
@@ -31,13 +31,13 @@ flowchart TD
         session <--> children
     end
 
-    artifacts["JSONL transcript + session artifacts"]
+    artifacts["Native-framed journal + session artifacts"]
 
     client <-->|"attach · detach · commands"| supervisor
     peer -->|"direct message"| supervisor
     supervisor --> queue
     session --> artifacts
-    artifacts -. "restore after restart" .-> session
+    artifacts -. "supported recovery" .-> session
 ```
 
 The client can detach at any point. The resident worker continues to own the queue, schedules, session, kernel, descendants, and persisted state.
@@ -49,22 +49,24 @@ Normal interactive sessions run in resident worker processes managed by a local 
 Closing the terminal UI detaches the client; it does not stop the worker. List and reconnect to active agents with:
 
 ```bash
-prime-agent list
-prime-agent attach <agent>
+base-context list
+base-context attach <agent>
 ```
 
 Other lifecycle commands are:
 
 ```bash
-prime-agent agents                  # Open the agents view
-prime-agent rename <agent> <name>   # Give an agent a stable readable name
-prime-agent stop <agent>            # Stop one agent
-prime-agent status                  # Inspect background services
-prime-agent doctor [--fix]          # Diagnose or repair service state
-prime-agent shutdown [--force]      # Stop all agents and services
+base-context agents                 # Open the agents view
+base-context rename <agent> <name>   # Give an agent a stable readable name
+base-context stop <agent>            # Stop one agent
+base-context status                 # Inspect background services
+base-context doctor [--fix]          # Diagnose or repair service state
+base-context shutdown [--force]     # Stop all agents and services
 ```
 
-Workers persist transcripts as JSONL and store feature-specific state under the session artifact directory. A worker or supervisor restart can recover session state and schedules and rehydrate retained completed RLM children without treating a terminal client as the owner of the work.
+Workers persist native-framed journals and use derived indexes. The default flat paths are `~/.base-context/sessions/<session-id>.jsonl` and `~/.base-context/session-artifacts/<session-id>/`. `BASE_CONTEXT_HOME` selects the product root; `BASE_CONTEXT_SESSION_DIR` can select a different absolute sessions directory, with artifacts under its parent's `session-artifacts/` directory.
+
+The `.jsonl` extension does not make a native journal an editable transcript. Use the asynchronous, bounded SessionManager APIs described in [Sessions](sessions.md#session-format), not `jq`, manual appends or text edits. Recovery uses the native owners and supported artifacts. Copying a journal alone does not restore a worker, Python process, live children or pending dispatch authority.
 
 Daemon workers are process-isolated for lifecycle and failure containment, not security-sandboxed. They normally run with the same operating-system permissions as the client.
 
@@ -73,7 +75,7 @@ Daemon workers are process-isolated for lifecycle and failure containment, not s
 The daemon routes direct messages between active sessions and retained daemon-backed subagents. From a shell:
 
 ```bash
-prime-agent send <agent> "Please verify the latest migration"
+base-context send <agent> "Please verify the latest migration"
 ```
 
 From the Python kernel, use the preloaded `agent_message` Python skill:
@@ -111,13 +113,13 @@ A receipt is `delivered` when it reached an idle target's context or `queued` wh
 
 ## Heartbeats and Scheduled Prompts
 
-Prime Agent has three related scheduling surfaces:
+Base Context has three related scheduling surfaces:
 
 | Surface | Owner | Purpose |
 |---|---|---|
 | `/heartbeat` | User | One visible recurring instruction for the current session. |
 | `rlm_heartbeat` | Agent | Multiple programmatically managed recurring instructions internal to the current session. |
-| `prime-agent schedule` | User or automation | General one-time or cron prompts targeted at an agent. |
+| `base-context schedule` | User or automation | General one-time or cron prompts targeted at an agent. |
 
 ### User heartbeat
 
@@ -161,13 +163,34 @@ RLM heartbeats are distinct from the user's `/heartbeat`; the Python skill canno
 Schedule a one-time or recurring prompt for an addressable agent:
 
 ```bash
-prime-agent schedule add worker "in 30m" -- "Check the benchmark result"
-prime-agent schedule add worker "0 9 * * 1-5" -- "Review open work"
-prime-agent schedule list --all
-prime-agent schedule cancel <job-id>
+base-context schedule add worker "in 30m" -- "Check the benchmark result"
+base-context schedule add worker "0 9 * * 1-5" -- "Review open work"
+base-context schedule list --all
+base-context schedule cancel <job-id>
 ```
 
 Scheduled jobs are persisted per session and continue while the UI is detached. Due ticks are claimed before delivery so a crash does not replay an uncertain prompt, and missed ticks are coalesced rather than accumulated into an unbounded backlog.
+
+### Schedules retained by offline migration
+
+The [offline-root importer](sessions.md#importing-an-offline-prime-root) can retain uniquely matched top-level cron jobs, the user heartbeat, and recurring RLM heartbeats. It creates **paused** records in each new session's `scheduled-jobs.json`, with new job IDs and mapped destination session IDs, journal paths and cwd. It does not copy pending dispatches, the old active-session identity or `nextRunAt`.
+
+List imported schedule metadata without starting or connecting to a daemon:
+
+```bash
+BASE_CONTEXT_HOME=/new/base-context-home base-context schedule list --offline --json
+```
+
+The offline list omits retained instructions, labels and schedule-expression text. Retained text stays in the file as unexecuted data; it is not secret-scrubbed. Old run errors are not imported. Opening or listing an imported session does not resume its schedules.
+
+After the new session is actually bound to its normal runtime, use the existing heartbeat controls. For an RLM heartbeat, list the new IDs in that session, choose one, then explicitly resume it:
+
+```python
+await rlm_heartbeat.list()
+await rlm_heartbeat.update("<new-heartbeat-id>", status="resume")
+```
+
+Old job handles and Python/kernel state are not restored. Subagent or nonzero-depth owners, ambiguous/unmatched targets and one-shot RLM heartbeats are unsupported. Generic cron resume is not added by migration; a one-shot cron job needs explicit rescheduling. See the import limits in [Sessions](sessions.md#importing-an-offline-prime-root).
 
 ## Persistent Goals
 
@@ -194,11 +217,11 @@ state = await goal.get()
 await goal.complete()
 ```
 
-Goal state records token usage, elapsed time, continuation count, and an optional explicit token budget. The harness keeps prompting an active goal after ordinary assistant turns; only `goal.complete()` marks successful completion. Creating a persistent goal is an explicit user or host action, not something the agent should infer from every task.
+Goal state records token usage, elapsed time, continuation count, and an optional explicit token budget. The harness keeps prompting an active goal after ordinary assistant turns; only `goal.complete()` marks successful completion. Creating a persistent goal is an explicit user or host action, not something the agent should infer from every task. Imported historical goal entries remain retained data; importing them does not reactivate the goal.
 
 ## Autonomous Mode
 
-Autonomous mode is a bounded host policy for runs where no human input is expected. Prime Agent adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.
+Autonomous mode is a bounded host policy for runs where no human input is expected. Base Context adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.
 
 Enable it in an interactive session:
 
@@ -211,14 +234,14 @@ Enable it in an interactive session:
 Or configure a run from the CLI:
 
 ```bash
-prime-agent \
+base-context \
   --autonomous \
   --autonomous-gate "npm run check" \
   --autonomous-max-turns 20 \
   "Implement and verify the requested change"
 ```
 
-Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Prime Agent avoids rerunning the same failed gate when the workspace has not changed.
+Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Base Context avoids rerunning the same failed gate when the workspace has not changed.
 
 Goals and autonomous mode are complementary but different:
 
@@ -227,7 +250,7 @@ Goals and autonomous mode are complementary but different:
 
 ## Compaction and Continuity
 
-Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Prime Agent summarizes older messages, retains recent context, and continues. The Python kernel persists through compaction, so variables, imports, helper functions, and task state remain available.
+Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Base Context summarizes older messages, retains recent context, and continues. This changes the model's active context; it is not a guarantee that every Python object survives. Compaction can prune oversized variables from a running kernel. Persist important work in project files rather than relying on kernel memory or treating a session journal as a portable process snapshot.
 
 The agent can inspect or request compaction programmatically:
 
@@ -236,6 +259,6 @@ await compact.status()
 await compact.run("Preserve the failing tests and remaining migration steps")
 ```
 
-Compaction is not a completion signal. It does not stop goals, autonomous continuations, heartbeats, or existing child sessions; later parent turns continue from the compacted context.
+A successful compaction is not a completion signal. Goals, autonomous continuations, heartbeats and child sessions keep their own lifecycle rules; compaction alone does not mark them complete.
 
 For lower-level process and recovery behavior, see [Daemon Architecture](daemon.md). For recursive child lifecycle details, see [RLM Programming Model](rlm.md) and [RLM Runtime Architecture](rlm-runtime.md).

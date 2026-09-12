@@ -1,16 +1,21 @@
 # SPEC_DEVIATIONS
 
-## Current release status (W137)
+## Current release status (W157)
 
 The W26 assessment below is historical. Later implementation sections supersede
-its individual findings. The five benchmark prerequisites now have working native
-paths. Source `1fc87db0b` includes the post-compaction liveness correction, passed
-the required checks/build, and is active in the separate owned installation.
-Private release files are prepared; nothing is published. The pre-fix W113
-comparison was stopped and discarded after the liveness defect was confirmed.
-Benchmarking will restart only after fixes are complete. Final benchmark review
-and publication approval remain open. Offline migration remains partial. Multimodal budgeting and other-platform
-coverage remain unestablished.
+its individual findings. The five benchmark prerequisites have working native paths.
+The post-compaction liveness correction `1fc87db0b` passed its focused native checks
+and is active in the separate owned installation. The corrected comparison uses
+frozen `53d781639` packages, including that fix and captured build metadata; its
+packaged offline RPC sequence passed. The pre-fix W113 comparison was stopped and
+discarded. Final corrected benchmark review and publication approval remain open.
+Private release files are prepared; nothing is published.
+
+Offline migration remains partial. Paused top-level cron and heartbeat imports,
+including recurring RLM heartbeats, are integrated in source with checks pending
+outside the timed comparison. No imported job is implicitly resumed. Multimodal
+budgeting, complete artifact/runtime migration and other-platform coverage remain
+unestablished.
 
 ## Scope and executive summary
 
@@ -2405,3 +2410,56 @@ wheel claim or full reproducibility claim. The runtime is still supplied as sour
 and receives a fresh environment at installation. Full G15 coverage remains open.
 The already installed 1fc87 liveness fix does not need another installation merely
 for this descriptor change. Previous private release bundles remain frozen.
+
+
+## W152 — Paused schedule import and offline listing (source integrated)
+
+The offline importer now maps supported top-level cron/user-heartbeat/recurring RLM declarations
+through the existing AgentCronJobStore into paused per-session schedule files.
+It creates no active intermediate job, pending dispatch or daemon/runtime owner.
+Subagent, ambiguous/unmatched, completed/cancelled and one-shot RLM records are skipped.
+`BASE_CONTEXT_HOME=<root> base-context schedule list --offline [--all] [--json]`
+uses the existing reader before daemon routing and projects only known metadata.
+Retained prompts stay unexecuted data, not secret-scrubbed text. Generic cron resume,
+one-shot rescheduling, subagent ownership and full artifact migration remain outside
+this increment. Existing heartbeat resume still requires an explicit runtime action
+from the newly bound session; RLM callers must use the new job IDs. Old handles and
+kernel state are not restored.
+
+Source and the two existing migration cases are integrated. Both focused cases
+passed under isolated Node22.12 after restoring the saved changes. The corrected
+source53d campaign was stopped as a precaution; its frozen inputs remain unchanged.
+Its incomplete results are diagnostic only, not a completed comparison.
+
+The linked quickstart, usage, session, background-work and provider guides use the owned
+Base Context commands, paths and environment names. They distinguish native framed
+journals from legacy JSONL, use bounded async history owners, and describe the
+limited paused import without promising kernel survival or restored execution.
+Real provider identifiers, Python import names and upstream attribution remain.
+
+
+## W168 — Bounded Codex WebSocket opening; comparison remains stopped
+
+Codex WebSocket connection setup now uses `timeoutMs`, or 30 seconds when omitted.
+The deadline covers opening only, not response generation, native preparation or
+an entire run. It closes the connecting socket and rejects through the existing
+transport path, allowing normal auto-to-SSE fallback. Open/error/close/abort clear
+the timer and listeners. Attempt admission, cache/session identities and limits
+are unchanged; failed connection setup creates no fictitious inference receipt.
+
+The new native happy case first failed because no opening deadline was scheduled.
+With the fix, that case completes through SSE and the cancellation edge aborts
+without fallback. Both passed on isolated Node22.12. The two paused-import cases
+also passed; no additional migration matrix was added.
+
+The source53d comparison was stopped as a precaution after Sol's fourth run waited
+following two compactions. All 24 prior Sol receipts were completed WebSocket
+attempts. This does not exclude a new connection wait before admission, nor prove
+that connection setup caused the stall. No concrete local dependency cycle was
+established. The actual incident cause remains unknown.
+
+The older pre-fix campaign is discarded. Neither incomplete campaign is release
+acceptance or a final comparison. A fresh clean package and the packaged Sol RPC
+path with actual default refinement enabled and a real 30-second opening deadline
+must pass before a fresh all-30 LOW-then-MEDIUM campaign. Publication still needs
+completed benchmark review and separate final approval.
