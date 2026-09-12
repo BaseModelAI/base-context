@@ -4,10 +4,12 @@ This directory implements `prime-context-python-realworld-30-benchmark-spec.md`.
 It replaces the Docker synthetic corpus with 30 deterministic Python 3.12 tasks.
 Candidate solutions and all fixture code use only the Python standard library.
 
-The current Base Context campaign gate remains closed until the five benchmark
-prerequisites work. No early samples or model/auth/readiness probes are admitted.
-After that gate, run all 30 isolated tasks at low effort, then at medium effort,
-using the same existing session ChatGPT subscription and the exact Sol/Astra models.
+Live benchmarks require the five working context prerequisites and qualification
+of fixes for any discovered product bug. No early samples or model/auth/readiness
+probes bypass that gate. The current user-authorized plan is a fresh paired
+current/vanilla run of all 30 LOW tasks on Sol, Astra and DeepSeek after the stopped
+campaign's fixes. Preserve old results. MEDIUM is cancelled. OpenAI uses the same
+existing session ChatGPT subscription and exact Sol/Astra model IDs.
 
 ## Layout
 
@@ -18,7 +20,7 @@ using the same existing session ChatGPT subscription and the exact Sol/Astra mod
 - `run.py` is the paired H/native Base Context RPC runner for all tasks and variants.
 - `run_codex.py` is the stock Codex CLI runner.
 - `generate_charts.py` regenerates the published SVG scorecard and per-task advantage charts.
-- `bash-tool.mjs` is a neutral benchmark adapter that exposes the same isolated `bash` tool, including optional per-command millisecond timeouts, to all variants.
+- `bash-tool.mjs` is a neutral benchmark adapter that exposes the same isolated `bash` tool, including a 60000 ms default command deadline and explicit millisecond overrides, to all variants.
 
 The runner creates a separate workspace, HOME, config, session directory,
 temporary directory, daemon socket, and process for every attempt. Each RPC
@@ -40,14 +42,25 @@ standard library, and a small command set. It hides judges, later stages,
 credentials, package managers, and public network interfaces. Runner-managed
 services are replicated inside its loopback namespace. Future payloads are
 injected only between stages. Inputs are read-only; only declared candidate
-paths are editable. Judges run outside the measured agent interval.
+paths are editable. The Bash-visible cwd is `/workspace`; persistent scratch belongs
+there, not in the per-call `/tmp`. The inner shell has a normal private writable `/dev`.
+A command timeout sends TERM to its process group, then KILL after 1000 ms if needed;
+the tool promise does not wait indefinitely for inherited pipes. An explicit timeout
+overrides the 60000 ms default, not the enclosing scenario deadline. Judges run outside
+the measured agent interval.
+
+These shared adapter corrections change the setup used by the stopped campaign.
+Task 8's judge also now accepts both declared `python -m` entrypoint layouts: a module
+file or an executable package. Its functional assertions are unchanged. Retain original
+scores; any corrected-contract rescoring must be separate. Fresh paired runs under the
+corrected setup are authorized; old results are not a same-protocol cost baseline.
 
 RPC `agent_end` gates an ordinary stage. A matching `compact` response gates
 the next stage after manual compaction. The runner does not invent a
 `needs_input`, public `wait_for_idle`, or `shutdown` command. Final stdin EOF
 uses the product's wait-idle/dispose route, followed by actual process exit.
 
-The host needs `bwrap`, Python 3.12, and an explicit Node >=22.8.0 executable.
+The host needs `bwrap`, Python 3.12, and an explicit Node >=22.12.0 executable.
 The runner never installs or updates packages.
 
 ## Validate the corpus
@@ -235,10 +248,13 @@ this pricing option alone does not make that experiment ready.
 ## Three-model comparison with public Prime Agent 0.9.4
 
 `--three-model-campaign` selects all 30 tasks on Sol, Astra and canonical
-DeepSeek V4.1 Flash. Each `(model, task)` worker runs the two arms sequentially.
+DeepSeek V4.1 Flash. Each `(model, task)` worker runs its selected arms sequentially.
+`--variants current` selects current only; `--variants vanilla,current` selects both.
 Arm order reverses when `(task_index + model_index)` is odd. A fixed two-task
 window has at most six workers total and two per model. The next window waits
-for all its workers. All LOW work and reports finish before MEDIUM starts.
+for all its workers. `--efforts` defaults to `low`; `medium` or `low,medium` must be
+selected explicitly. Each selected phase and its reports finish before the next.
+Only LOW is currently authorized.
 `--max-workers` accepts 1..6; the old `--group-size` does not control this mode.
 The existing single-model mode is unchanged.
 
@@ -251,12 +267,13 @@ dependencies and an appropriate pinned Node. It does not install dependencies,
 bootstrap Python, download artifacts or establish SDK compatibility. Old H
 inputs, hosts and campaigns are not rewritten.
 
-The campaign requires that public baseline, both arms, all tasks and an explicit
+The hosts manifest still contains the public baseline and native candidate. The
+campaign executes only selected arms and requires all tasks plus an explicit
 `--api-price-profiles` snapshot. It also requires the existing admission flag,
 isolation checks and a fresh output directory. After host and SDK readiness:
 
 ```sh
-python3.12 run.py --three-model-campaign --tasks all --variants vanilla,current \
+python3.12 -E -S -B run.py --three-model-campaign --tasks all --variants vanilla,current --efforts low \
   --max-workers 6 --hosts-manifest /ABSOLUTE/fresh-hosts/hosts.json \
   --host-openai-codex-auth-file ~/.prime/agent/auth.json \
   --host-deepseek-api-key-file /PRIVATE/deepseek-key \
@@ -288,3 +305,51 @@ and intervals are not complete-cost comparisons or verified debits.
 The offline scheduler and local setup fixtures do not establish a prepared SDK
 working path, live availability or benchmark readiness. Complete those remaining
 steps before starting the comparison. No new benchmark result is claimed here.
+
+
+## Reusable live and completed comparisons
+
+`compare.py` reads existing campaign result JSON only. It does not start runs,
+contact providers, open session journals, or change campaign files. It uses the
+runner's existing primary-attempt, strict-pass and accounting helpers.
+
+```bash
+# All efforts and models declared by this run's invocation.json:
+python3.12 -E -S -B benchmarks/python-realworld-30/compare.py /path/to/results
+
+# Select MEDIUM and two model-directory labels, without changing the script:
+python3.12 -E -S -B benchmarks/python-realworld-30/compare.py /path/to/results \
+  --efforts medium --models sol,astra --candidate current --baseline vanilla
+
+# Use a LOW campaign, with machine-readable output:
+python3.12 -E -S -B benchmarks/python-realworld-30/compare.py /path/to/next-results \
+  --efforts low --format json > /tmp/model-harness-comparison.json
+
+# Compare a new current-only LOW run with retained vanilla results:
+python3.12 -E -S -B benchmarks/python-realworld-30/compare.py /path/to/current-results \
+  --baseline-results /path/to/retained-results --efforts low \
+  --candidate current --baseline vanilla > /tmp/current-vs-retained.md
+```
+
+Effort/model defaults and task counts come from `invocation.json`, not a fixed
+campaign, model count, commit or date. `--candidate` and `--baseline` select harness
+directory names; model selections are directory labels, not provider model IDs.
+`--baseline-results` reads only the baseline arm from another campaign, without
+copying or changing its results. Use retained runs from the same suite, model labels
+and benchmark protocol. The report labels separate-campaign comparisons: counts
+include retained baseline runs, elapsed time belongs to the candidate campaign,
+and the runs are not contemporaneous. The option does not establish equivalent
+runtime conditions. Without it, both arms come from the supplied results directory.
+The layout is `<results>/<effort>/<model>/task-*/<harness>/attempt-*/result.json`.
+Run the same command every five minutes using your scheduler. The script itself
+is one-shot and has no polling loop. Redirect Markdown to a file outside results
+when desired; `--format json` retains detailed accounting and coverage fields.
+
+Reports separate primary, all-retained and nonpass/error activity. A passing retry
+never replaces a failed first capacity-valid primary. Speed uses matched passing
+tasks, with a separate runtime-clean subset and a common cohort for cross-model
+comparison. Mid-write result files are listed and affected primaries withheld.
+Unfinished attempts have no final usage/cost yet. Incomplete reports are explicitly
+interim, not release acceptance. API-equivalent prices are not subscription debits;
+stock observations omit hidden requests/cache-write splits, and DeepSeek estimates
+are peak-normalized. Unknown values remain unknown, not zero.

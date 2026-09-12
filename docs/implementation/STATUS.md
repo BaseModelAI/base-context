@@ -3,13 +3,57 @@
 Base Context is being implemented from Prime Agent **v0.9.3**, commit
 `915c78f42c248b08238dd27fcd4bcab32c60beab`. This is not a certified release.
 
-## Current focus: full benchmarks and remaining spec details
+## Current focus: qualify the fixes, then run fresh paired LOW benchmarks
 
-The five benchmark prerequisites work on the supported source paths. Scope is now
-open to the remaining `SPEC_DEVIATIONS.md` backlog. Full isolated LOW comparisons
-for exact `gpt-5.6-sol` and `gpt-6-astra` use the existing ChatGPT subscription before
-any MEDIUM comparisons. Timed runs keep their frozen packages and scripts; source
-integration, checks and builds happen between runner invocations.
+The five benchmark prerequisites have working native paths, and the remaining
+`SPEC_DEVIATIONS.md` backlog is open. Installed source `08b24f28a` remains preserved.
+Its campaign stopped on a supported recovery-compaction defect at 144/180 LOW
+primaries: all six arms completed tasks 1–24; tasks 25–30 were not run. Two retries
+were unfinalized at stop. All artifacts and original outcomes are retained.
+
+The source fix gives newly accepted native recovery its own captured-source epoch
+ACK instead of reusing an older coverage boundary. Both native focused checks passed:
+accepted recovery then manual compaction, with ordinary tail reuse; and refusal of
+recovery that no containing request accepted. No replay guard was removed.
+
+Shared benchmark fixes restore the inner private `/dev`, state the Bash-visible cwd
+`/workspace`, and let task 8's judge execute either a module or an executable package.
+The shared Bash tool also has a 60-second default command deadline, explicit timeout
+overrides and bounded TERM/KILL cleanup. This is a disclosed policy change. Its two
+focused cases passed, as did the two scheduler cases for counterbalancing and LOW-only
+current selection. Required release qualification and a new frozen installation remain
+open before provider work.
+
+The user explicitly approved a fresh vanilla baseline after these shared changes.
+The next campaign will pair current and vanilla across all 30 LOW tasks on Sol, Astra
+and DeepSeek, with at most six workers, two-task window barriers and unchanged retry
+rules. MEDIUM remains cancelled. Targets are 100% task completion and substantial
+cost improvement; neither is established. Old results are not rewritten or reused as
+a same-protocol comparison. OpenAI keeps the authorized ChatGPT subscription route;
+DeepSeek keeps its separately authorized API credential. The earlier Sol13 wait's
+actual cause remains unknown.
+
+`benchmarks/python-realworld-30/compare.py` supports selected models, efforts and
+harnesses, and `--baseline-results` for explicitly noncontemporaneous retained data.
+Once new timing starts, keep runtime inputs frozen; do not run heavy checks or builds.
+Publication still requires completed benchmark review and separate final approval.
+
+### Current release coverage and limits
+
+The entries below separate observed working paths from remaining coverage. They do
+not replace the detailed implementation notes or the final benchmark review.
+
+| Area | Working path | Remaining limit |
+|---|---|---|
+| Owned installation | The `08b24f28a` release archives installed on Linux x64 with normal npm scripts and fresh Python preparation. | Other target platforms are not established by that installation. |
+| OpenAI subscription | Sol and Astra run through the authorized Codex subscription route. The packaged Sol RPC sequence exercised post-compaction prompts and connection-opening fallback. | The fresh corrected-setup paired LOW comparison remains open; MEDIUM is cancelled. A model catalog entry does not establish every provider feature. |
+| DeepSeek | Native text/tool requests and logical LOW/MEDIUM to wire low/high mapping have working paths. | MEDIUM has not been benchmarked and is cancelled; multimodal coverage is not established. |
+| Native context | TaskFrame injection, dependency closure, model-aware text/tool budgets, stable epochs and selective recovery have working native paths. | These paths do not establish general multimodal budgeting or unlimited scale coverage. |
+| Migration | Offline legacy-root import retains goals as history, keeps packages inactive and imports supported top-level schedules paused. | No live-export guarantee, complete artifact/runtime remapping, general cron resume or implicit kernel/schedule restart. |
+| Build | One captured source/build-host/toolchain descriptor is carried through all four packages and release metadata. | Build-host facts are not full reproducibility or a supported-target matrix; full G15 coverage remains open. |
+| Measurement | Native attempt receipts and reusable paired comparison reports retain failed primaries and retries. | Stock hidden calls/cache-write allocation remain unknown; API-equivalent estimates are not subscription cash charges. |
+| Distribution | Private archives and the branded installer are prepared. | Final benchmark review and separate publication approval remain required; nothing is published. |
+
 
 W28 added native/Python recovery, complete compiler dependency closure, same-source
 compaction commits and service budget forwarding. W29 adds actual plain-text Responses

@@ -15,6 +15,7 @@ import {
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompactionCommittedError } from "../../src/core/agent-session.js";
+import { CanonicalContextCompiler, getCanonicalViewUnits } from "../../src/core/canonical-context.js";
 import { readContextEpoch } from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
@@ -321,6 +322,210 @@ describe("AgentSession compaction characterization", () => {
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+	});
+
+	async function createRecoveryCompactionFixture() {
+		const model = getModel("deepseek", "deepseek-flash");
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			// Keep the built-in prime_context identity; an override would not produce native recovery.
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "ordinary_tail",
+						label: "Ordinary tail",
+						description: "Return an ordinary tool result after recovery.",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "ORDINARY_TAIL_RESULT" }], details: {} }),
+					});
+				},
+			],
+			requestTokenBudget: {
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-recovery-compaction",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://api.deepseek.com/chat/completions",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "deepseek-text-tools-fixture-v1",
+						replayFamily: "deepseek-completions",
+						contextTokens: 120000,
+						outputCeilingTokens: 393216,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+					},
+				],
+			},
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			baseUrl: model.baseUrl,
+			apiKey: "offline-deepseek-key",
+			models: [model],
+		});
+		harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		harness.session.setActiveToolsByName(["prime_context", "ordinary_tail"]);
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
+		});
+		const main: Array<{ epoch: CompactionEntry; request: RequestJournalEntry["request"] }> = [];
+		const summaries: unknown[] = [];
+		// Only HTTP is local. Recovery, request selection, append ACK and compaction use their native owners.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+			const body = JSON.parse(String(init?.body));
+			const entries = await harness.sessionManager.readEntries();
+			const admitted = entries
+				.flatMap((entry) =>
+					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+				)
+				.at(-1)!;
+			const summarizing = admitted.purpose === "summary";
+			if (summarizing) summaries.push(body);
+			else {
+				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+				expect(readContextEpoch(epoch.details, 2 * 1024 * 1024)?.replayContract).toBe("message-groups");
+				expect(admitted.contextEpoch).toEqual({
+					sessionId: harness.sessionManager.getSessionId(),
+					entryId: epoch.id,
+				});
+				main.push({ epoch, request: admitted });
+			}
+			const call = summarizing
+				? undefined
+				: main.length === 1
+					? {
+							id: "recovery_call",
+							name: "prime_context",
+							arguments: '{"action":"search","query":"RECOVERY_EVIDENCE"}',
+						}
+					: main.length === 2
+						? { id: "ordinary_call", name: "ordinary_tail", arguments: "{}" }
+						: undefined;
+			const delta = call
+				? {
+						role: "assistant",
+						reasoning_content: "Use the requested tool.",
+						tool_calls: [
+							{
+								index: 0,
+								id: call.id,
+								type: "function",
+								function: { name: call.name, arguments: call.arguments },
+							},
+						],
+					}
+				: {
+						role: "assistant",
+						reasoning_content: "Keep the recovered result.",
+						content: summarizing ? "Recovery compacted summary." : "Recovery and ordinary tail complete.",
+					};
+			const chunk = {
+				id: `recovery_reply_${main.length}_${summaries.length}`,
+				object: "chat.completion.chunk",
+				model: model.id,
+				choices: [{ index: 0, delta, finish_reason: call ? "tool_calls" : "stop" }],
+				usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const readRecovery = async () => {
+			const entries = await harness.sessionManager.readEntries();
+			const result = entries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "recovery_call",
+			)!;
+			expect(result).toMatchObject({ message: { toolName: "prime_context", isError: false } });
+			const source = await harness.sessionManager.readBranchHistory((history) => history.get(result.id));
+			expect(source).toMatchObject({ qualification: "native-recovery" });
+			return { result, source: source! };
+		};
+		return { harness, main, summaries, readRecovery };
+	}
+
+	it("renews recovery coverage at accepted ACK, reuses an ordinary tail, and manually compacts", async () => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
+		expect(main).toHaveLength(3);
+		const { result, source } = await readRecovery();
+		const initial = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
+		const accepted = readContextEpoch(main[1].epoch.details, 2 * 1024 * 1024)!;
+		expect(source.sequence).toBeGreaterThan(initial.source.sourceSequence);
+		expect(main[1].epoch.id).not.toBe(main[0].epoch.id);
+		expect(accepted.source).toEqual(main[1].request.source);
+		expect(accepted.source.leafId).toBe(result.id);
+		expect(accepted.source.sourceSequence).toBe(source.sequence);
+		expect(accepted.literalTailId).toBe(result.id);
+		// No unrelated policy/resource/task change can explain the new ACK.
+		expect(accepted.representation).toBe(initial.representation);
+		expect(accepted.resourceRevision).toBe(initial.resourceRevision);
+		expect(accepted.taskFrame?.material).toBe(initial.taskFrame?.material);
+		expect(main[2].request.source.sourceSequence).toBeGreaterThan(source.sequence);
+		expect(main[2].epoch.id).toBe(main[1].epoch.id);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toHaveLength(
+			2,
+		);
+
+		const before = await harness.sessionManager.readBranchHistory((history) =>
+			new CanonicalContextCompiler().compile(
+				history.branchContext,
+				harness.settingsManager.getCanonicalContextLimits(),
+			),
+		);
+		const beforeUnits = getCanonicalViewUnits(before)!;
+		const recoveryUnit = beforeUnits.find((unit) => unit.exactSources.includes(result.id))!;
+		const callerIndex = before.findIndex(
+			(message) =>
+				message.role === "assistant" &&
+				message.content.some((part) => part.type === "toolCall" && part.id === "recovery_call"),
+		);
+		expect(callerIndex).toBeGreaterThanOrEqual(0);
+		expect(recoveryUnit.requiredVisibleDependencies).toContain(beforeUnits[callerIndex].id);
+		const callerSource = beforeUnits[callerIndex].exactSources[0];
+		const compacted = await harness.session.compact();
+		expect(compacted.summary).toContain("Recovery compacted summary.");
+		expect(summaries.length).toBeGreaterThan(0);
+		const rebuilt = await harness.sessionManager.readBranchHistory((history) =>
+			new CanonicalContextCompiler().compile(
+				history.branchContext,
+				harness.settingsManager.getCanonicalContextLimits(),
+			),
+		);
+		const retained = getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources);
+		expect(retained).toEqual(expect.arrayContaining([result.id, callerSource]));
+	});
+
+	it("refuses manual compaction of native recovery before any containing candidate is accepted", async () => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+		const priorOutcome = harness.session.agent.getTurnOutcome;
+		harness.session.agent.getTurnOutcome = (context, signal) =>
+			context.toolResults.some((result) => result.toolCallId === "recovery_call")
+				? { kind: "finish" }
+				: (priorOutcome?.(context, signal) ?? { kind: "proceed" });
+		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
+		expect(main).toHaveLength(1); // The result exists, but no request containing it has reached acceptance.
+		const { source } = await readRecovery();
+		const checkpoint = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
+		expect(source.sequence).toBeGreaterThan(checkpoint.source.sourceSequence);
+		await expect(harness.session.compact()).rejects.toThrow(
+			"Recovery compaction requires an accepted replay contract for its selected results",
+		);
+		expect(summaries).toHaveLength(0);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([
+			main[0].epoch,
+		]);
 	});
 
 	it("continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload", async () => {

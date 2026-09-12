@@ -4,6 +4,9 @@ import argparse
 import importlib.util
 import io
 import json
+import os
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -621,6 +624,7 @@ class HarnessComparisonTests(unittest.TestCase):
             root = Path(directory)
             args = argparse.Namespace(output=root, max_workers=2, group_size=99,
                                       provider="openai-codex", model="gpt-5.6-sol", thinking="medium",
+                                      variants="vanilla,current", efforts="low,medium",
                                       api_price_profiles=[{"marks": []}])
             scenarios = {number: (root / f"source-{number}", {"id": number, "slug": f"example-{number}",
                                                           "pressure": "N", "scratch": []}) for number in range(1, 5)}
@@ -690,10 +694,13 @@ class HarnessComparisonTests(unittest.TestCase):
             self.assertEqual(args.model, "gpt-5.6-sol")
             self.assertEqual(args.group_size, 99)  # Campaign windows do not use the single-model setting.
 
-    def test_campaign_retains_failed_arm_and_continues_other_work(self) -> None:
+    def test_current_only_low_campaign_retains_failure_without_admitting_other_arms_or_phases(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
-            args = argparse.Namespace(output=root, max_workers=6, api_price_profiles=[])
+            args = benchmark.build_parser().parse_args([
+                "--three-model-campaign", "--variants", "current", "--output", str(root),
+            ])
+            args.api_price_profiles = []
             scenarios = {number: (root / f"source-{number}", {"id": number, "slug": f"example-{number}", "pressure": "N"})
                          for number in (1, 2)}
             manifest = {"publication_protocol": False, "publication_blockers": ["offline fixture"]}
@@ -702,7 +709,7 @@ class HarnessComparisonTests(unittest.TestCase):
             def run_case(variant, task_dir, scenario, output, configured):
                 key = (configured.thinking, configured.model, scenario["id"], variant)
                 calls.append(key)
-                if key == ("low", "gpt-5.6-sol", 1, "vanilla"):
+                if key == ("low", "gpt-5.6-sol", 1, "current"):
                     raise RuntimeError("first arm failed")
                 return {**result(variant, attempt(wall=1, cost=0.1)), "task_id": scenario["id"], "task_slug": scenario["slug"]}
 
@@ -721,12 +728,17 @@ class HarnessComparisonTests(unittest.TestCase):
             pool.assert_called_once_with(max_workers=6)
             rows = json.loads((root / "low/sol/results.partial.json").read_text())
             by_case = {(row["task_id"], row["variant"]): row for row in rows}
-            self.assertEqual(by_case[(1, "vanilla")]["attempts"][0]["error"], "RuntimeError: first arm failed")
-            self.assertEqual(by_case[(1, "current")]["attempts"][0]["judge"]["status"], "pass")
-            self.assertEqual(len(calls), 24)
-            self.assertEqual(len(outputs), 6)
-            self.assertIn(("medium", "deepseek-flash", 2, "current"), calls)
-            self.assertTrue(all(item["runs"] == 4 for item in outputs))
+            self.assertEqual(by_case[(1, "current")]["attempts"][0]["error"], "RuntimeError: first arm failed")
+            self.assertEqual(by_case[(2, "current")]["attempts"][0]["judge"]["status"], "pass")
+            self.assertEqual(len(calls), 6)
+            self.assertEqual(len(outputs), 3)
+            self.assertEqual({(phase, variant) for phase, _model, _task, variant in calls}, {("low", "current")})
+            self.assertIn(("low", "deepseek-flash", 2, "current"), calls)
+            self.assertTrue(all(item["runs"] == 2 for item in outputs))
+            campaign = json.loads((root / "invocation.json").read_text())
+            self.assertEqual(campaign["phases"], ["low"])
+            self.assertEqual(campaign["variants"], ["current"])
+            self.assertFalse((root / "medium").exists())
 
 
     def test_public_host_layout_and_selected_provider_launch(self) -> None:
@@ -806,6 +818,93 @@ class HarnessComparisonTests(unittest.TestCase):
                 self.assertNotIn(mount, shell)
                 self.assertNotIn(str(args.host_deepseek_api_key_file), shell)
 
+    def test_shared_bash_workspace_devices_and_timeout_recovery(self) -> None:
+        node = os.environ.get("PRIME_CONTEXT_BENCHMARK_NODE") or shutil.which("node")
+        bwrap = shutil.which("bwrap")
+        if not node or not bwrap:
+            self.skipTest("Node and bubblewrap are required for the shared Bash contract")
+        python = benchmark.python312()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            launcher = benchmark.create_sandbox_scripts(root, argparse.Namespace(bwrap=bwrap))
+            (root / "sandbox-runtime/services.json").write_text('{"services": []}')
+            script = r"""
+import assert from "node:assert/strict";
+const { default: extension } = await import(process.argv[1]);
+let tool;
+extension({ registerTool(value) { tool = value; } });
+const controller = new AbortController();
+const execute = (params) => tool.execute("contract-test", params, controller.signal, undefined, { cwd: process.argv[2] });
+const shell = process.env.PRIME_CONTEXT_BENCHMARK_SHELL;
+const happy = await execute({ command: "python -c 'import os; from pathlib import Path; assert os.getcwd() == \"/workspace\"; Path(\"scratch\").mkdir(); Path(\"scratch/persisted.txt\").write_text(\"saved\"); print(\"ok\")' 2>/dev/null" });
+assert.equal(happy.content[0].text.trim(), "ok");
+// Accelerate only the default deadline; exercise real process-group TERM -> KILL.
+process.env.PRIME_CONTEXT_BENCHMARK_SHELL = process.argv[3];
+const setTimer = globalThis.setTimeout;
+const delays = [];
+globalThis.setTimeout = (callback, delay, ...args) => {
+  delays.push(delay);
+  return setTimer(callback, delay === 60_000 ? 300 : delay, ...args);
+};
+try {
+  await assert.rejects(execute({ command: "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); signal.alarm(5); print('ready', flush=True); exec('while True: pass')" }), (error) => {
+    assert.match(error.message, /ready/);
+    assert.match(error.message, /Command timed out after 60000 ms/);
+    return true;
+  });
+} finally {
+  globalThis.setTimeout = setTimer;
+}
+assert.ok(delays.includes(60_000));
+assert.ok(delays.includes(1_000));
+await assert.rejects(execute({ command: "import signal; signal.alarm(5); exec('while True: pass')", timeout: 30 }), /Command timed out after 30 ms/);
+process.env.PRIME_CONTEXT_BENCHMARK_SHELL = shell;
+const recovered = await execute({ command: "python -c 'from pathlib import Path; print(Path(\"scratch/persisted.txt\").read_text())' 2>/dev/null" });
+assert.equal(recovered.content[0].text.trim(), "saved");
+console.log("shared Bash contract passed");
+"""
+            completed = subprocess.run(
+                [node, "--input-type=module", "--eval", script,
+                 Path(__file__).with_name("bash-tool.mjs").resolve().as_uri(), str(workspace), python],
+                cwd=workspace, capture_output=True, text=True, timeout=10,
+                env={"PATH": "/usr/bin:/bin", "PRIME_CONTEXT_BENCHMARK_SHELL": str(launcher)},
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("shared Bash contract passed", completed.stdout)
+
+    def test_itinerary_module_and_package_entrypoint_parity(self) -> None:
+        spec = importlib.util.spec_from_file_location(
+            "itinerary_judge", Path(__file__).parent / "tasks/08-travel-itinerary-repair/judge.py")
+        judge = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(judge)
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = Path(directory)
+            solution = candidate / "solution"
+            solution.mkdir()
+            (solution / "__init__.py").write_text("")
+            for layout in ("itinerary_check.py", "itinerary_check/__main__.py"):
+                with self.subTest(layout=layout):
+                    entrypoint = solution / layout
+                    entrypoint.parent.mkdir(exist_ok=True)
+                    entrypoint.write_text("print('entrypoint')\n")
+                    self.assertTrue(judge.has_entrypoint(candidate))
+                    _, run, temporary = judge.execute(candidate, "main")
+                    try:
+                        self.assertEqual(run.returncode, 0, run.stderr)
+                        self.assertEqual(run.stdout.strip(), "entrypoint")
+                    finally:
+                        temporary.cleanup()
+                        entrypoint.unlink()
+            self.assertFalse(judge.has_entrypoint(candidate))
+            (solution / "itinerary_check/__main__.py").write_text("raise RuntimeError('invalid entrypoint')\n")
+            _, run, temporary = judge.execute(candidate, "edge")
+            try:
+                self.assertNotEqual(run.returncode, 0)
+            finally:
+                temporary.cleanup()
+
     def test_public_host_rejects_foreign_package_before_creation(self) -> None:
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             root = Path(directory)
@@ -850,6 +949,77 @@ class CodexAdapterTests(unittest.TestCase):
             "npm_config_offline", "npm_config_audit", "npm_config_fund",
             "PYTHONUTF8", "PYTHONDONTWRITEBYTECODE",
         })
+
+
+class ComparisonReportTests(unittest.TestCase):
+    def write_attempt(self, root, effort, model, variant, number, value):
+        value = {**value, "task_id": 1, "variant": variant}
+        value.setdefault("error", None)
+        value.setdefault("capacity_invalid", False)
+        value["metrics"].setdefault("compaction_failures", 0)
+        path = root / effort / model / "task-01-example" / variant / f"attempt-{number}" / "result.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return path
+
+    def test_reusable_effort_model_and_harness_selection(self):
+        import compare
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "invocation.json").write_text(json.dumps({
+                "phases": ["low", "medium"], "models": [{"label": m} for m in ("sol", "astra", "deepseek")],
+                "tasks": [1], "candidate_commit": "future-build",
+            }))
+            baseline_root = root / "retained"
+            for model in ("sol", "astra", "deepseek"):
+                self.write_attempt(root, "medium", model, "optimized", 1, attempt(wall=10, cost=None))
+                self.write_attempt(root, "medium", model, "reference", 1, attempt(wall=999, cost=None))
+                self.write_attempt(baseline_root, "medium", model, "reference", 1, attempt(wall=20, cost=None))
+            report = compare.compare(root, efforts=["medium"], models=["sol", "astra"],
+                                     candidate="optimized", baseline="reference", baseline_results=baseline_root)
+            self.assertFalse(report["complete"])
+            self.assertEqual(report["candidate_commit"], "future-build")
+            self.assertEqual(report["baseline_root"], str(baseline_root))
+            self.assertEqual(report["completed_primary_runs"], 4)
+            self.assertEqual(report["expected_primary_runs"], 4)
+            self.assertEqual(report["common_matched_pass"]["medium"]["task_ids"], [1])
+            self.assertEqual(report["groups"][0]["matched_pass"]["candidate_over_baseline_time"], 0.5)
+            self.assertIsNone(report["groups"][0]["variants"]["reference"]["primary"]["all_model_calls"])
+            text = compare.markdown(report)
+            self.assertIn("MEDIUM progress", text)
+            self.assertNotIn("LOW progress", text)
+            self.assertIn("optimized", text)
+            self.assertIn("Retained baseline campaign:", text)
+            self.assertIn("not contemporaneous", text)
+
+    def test_keeps_failed_primary_retry_capacity_and_partial_write(self):
+        import compare
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "invocation.json").write_text(json.dumps({
+                "phases": ["low"], "models": [{"label": "sol"}, {"label": "astra"}], "tasks": [1],
+            }))
+            invalid = {**attempt(wall=1, cost=None), "capacity_invalid": True}
+            failed = {**attempt(wall=3, cost=None, progress=1), "error": "timeout"}
+            for number, value in enumerate((invalid, failed, attempt(wall=5, cost=None)), 1):
+                self.write_attempt(root, "low", "sol", "current", number, value)
+            self.write_attempt(root, "low", "sol", "vanilla", 1, attempt(wall=2, cost=None))
+            torn = self.write_attempt(root, "low", "astra", "current", 1, attempt(wall=1, cost=None))
+            torn.write_text("{")
+            report = compare.compare(root)
+            sol = report["groups"][0]
+            current = sol["variants"]["current"]
+            self.assertEqual(current["primary"]["strict_passes"], 0)
+            self.assertEqual(current["primary"]["agent_wall_seconds"], 3)
+            self.assertEqual(current["all_retained"]["runs"], 3)
+            self.assertEqual(current["all_retained"]["agent_wall_seconds"], 9)
+            self.assertEqual(current["nonpass_or_error"]["runs"], 2)
+            self.assertEqual(current["capacity_invalid"], 1)
+            self.assertEqual(current["valid_retries"], 1)
+            self.assertEqual(sol["lost_ids"], [1])
+            self.assertEqual(sol["matched_pass"]["task_ids"], [])
+            self.assertEqual(report["pending_read_files"], [str(torn)])
+            self.assertEqual(report["groups"][1]["variants"]["current"]["primary"]["runs"], 0)
 
 
 if __name__ == "__main__":

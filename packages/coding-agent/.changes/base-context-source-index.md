@@ -210,3 +210,13 @@ live provider/platform/billing and broader G17 coverage remain unestablished.
   release URLs use those inputs. Preserve archives, normal preparation and CAS.
   Two existing native cases passed; actual release-archive installation remains
   the working check after the retained preactivation npm404 failure.
+
+- Renew native epoch coverage when an accepted candidate includes newly recovered
+  results beyond its prior source boundary. Preserve strict replay admission,
+  ordinary tail reuse and the existing append/ACK path. Both native recovery/manual
+  compaction and genuinely unaccepted recovery cases passed.
+- Add explicit LOW/default effort and selected-arm scheduling, reusable retained-baseline
+  comparisons, and shared benchmark workspace/device/module-entrypoint corrections.
+  Shared Bash commands default to 60 seconds with explicit overrides and bounded
+  termination. Fresh paired LOW results are required after these setup changes;
+  the user approved new vanilla coverage while preserving all old outcomes.

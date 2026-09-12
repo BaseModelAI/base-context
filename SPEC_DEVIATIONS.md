@@ -1,21 +1,48 @@
 # SPEC_DEVIATIONS
 
-## Current release status (W157)
+## Current release status
 
 The W26 assessment below is historical. Later implementation sections supersede
 its individual findings. The five benchmark prerequisites have working native paths.
-The post-compaction liveness correction `1fc87db0b` passed its focused native checks
-and is active in the separate owned installation. The corrected comparison uses
-frozen `53d781639` packages, including that fix and captured build metadata; its
-packaged offline RPC sequence passed. The pre-fix W113 comparison was stopped and
-discarded. Final corrected benchmark review and publication approval remain open.
-Private release files are prepared; nothing is published.
+The separate owned installation and current comparison use `08b24f28a`, including
+the stale post-turn check fix, bounded Codex WebSocket opening, paused schedule
+migration and explicit local release-dependency resolution. Focused checks and a
+real release-archive installation passed. The unchanged runtime also passed the
+packaged Sol RPC path with default refinement enabled and a real 30-second opening
+fallback. This does not establish the cause of the earlier Sol13 wait.
 
-Offline migration remains partial. Paused top-level cron and heartbeat imports,
-including recurring RLM heartbeats, are integrated in source with checks pending
-outside the timed comparison. No imported job is implicitly resumed. Multimodal
-budgeting, complete artifact/runtime migration and other-platform coverage remain
-unestablished.
+The pre-fix W113 comparison is discarded. The later source53d comparison remains
+incomplete diagnostic data. The `08b24f28a` campaign was stopped at 144/180 LOW
+primaries: every model/arm completed tasks 1–24, but tasks 25–30 were not run.
+All current and vanilla artifacts remain unchanged; the stopped matrix is not
+release acceptance. A supported recovery-compaction path accepted recovery at source
+sequence 60 while reusing an epoch covering sequence 4, then refused compaction.
+The source fix renews the epoch only for newly accepted recovery. Two native checks
+passed: accepted recovery compacts and ordinary tails reuse the epoch; genuinely
+unaccepted recovery still refuses compaction. Fresh release qualification remains open.
+
+Parallel trace analysis also found shared benchmark contract defects: an unwritable
+inner `/dev`, a tool-visible cwd not stated in its description, and task 8's judge
+rejecting a valid executable package. Those paths are corrected. The shared Bash tool
+now defaults to a 60-second command deadline, with explicit overrides and bounded
+TERM/KILL cleanup. This deadline is a policy improvement, not proof of a product bug.
+Two focused shared-contract cases and two scheduler cases passed. The scheduler now
+supports selected arms and explicit effort phases, defaulting to LOW.
+
+The user approved a fresh vanilla run under the corrected shared setup. After fixes
+and qualification, run a new counterbalanced current/vanilla campaign across all 30
+LOW tasks on Sol, Astra and DeepSeek. Preserve all old results. MEDIUM remains
+cancelled. The targets are 100% task completion and substantial cost improvement,
+not established outcomes. `benchmarks/python-realworld-30/compare.py` generates
+read-only interim reports and supports a separately retained baseline, without
+claiming equivalent conditions. The next approved comparison instead uses fresh
+paired runs. Completed benchmark review and separate publication approval remain
+open. Nothing is published.
+
+Offline migration remains partial. Supported paused top-level cron, user heartbeat
+and recurring RLM imports passed their focused cases; no imported job is implicitly
+resumed. Multimodal budgeting, complete artifact/runtime migration and other-platform
+coverage remain unestablished.
 
 ## Scope and executive summary
 

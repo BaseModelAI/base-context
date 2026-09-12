@@ -194,6 +194,7 @@ try:
     completed = subprocess.run([
         "/usr/bin/bwrap", "--die-with-parent", "--unshare-pid",
         "--ro-bind", "/", "/",
+        "--dev", "/dev",
         "--proc", "/proc",
         "--bind", "/workspace", "/workspace",
         "--tmpfs", "/runner",
@@ -1474,8 +1475,8 @@ def run_model_task(
     model_index: int, task_index: int, task_dir: Path, scenario: dict[str, Any],
     output: Path, args: argparse.Namespace,
 ) -> list[dict[str, Any]]:
-    """One task slot runs its paired arms in counterbalanced, sequential order."""
-    variants = list(VARIANTS)
+    """One task slot runs its selected arms in counterbalanced, sequential order."""
+    variants = parse_variants(args.variants)
     if (task_index + model_index) % 2:
         variants.reverse()
     results = []
@@ -1496,29 +1497,33 @@ def run_campaign(
     if not 1 <= args.max_workers <= 6:
         raise ValueError("--max-workers must be 1..6")
     task_ids = sorted(task_ids)
+    selected_variants = parse_variants(args.variants)
+    variants = [variant for variant in VARIANTS if variant in selected_variants]
+    phases = args.efforts.split(",")
     campaign = copy.deepcopy(manifest)
     # These single-model declarations cannot describe a mixed-model campaign.
     for key in ("provider", "model", "thinking", "group_size", "auth_route", "provider_api"):
         campaign.pop(key, None)
     campaign.update({
-        "mode": "three-model-campaign", "phases": ["low", "medium"], "tasks": task_ids, "task_window_size": 2,
-        "worker_unit": "model,task with sequential arms", "max_workers": args.max_workers, "variants": list(VARIANTS),
+        "mode": "three-model-campaign", "phases": phases, "tasks": task_ids, "task_window_size": 2,
+        "worker_unit": "model,task with sequential selected arms", "max_workers": args.max_workers, "variants": variants,
         "models": [{"label": label, "provider": provider, "model": model,
                     "expected_provider_api": api, "expected_auth_route": route}
                    for label, provider, model, api, route in CAMPAIGN_MODELS],
-        "arm_order": "sequential; reverse vanilla,current when (task_index + model_index) is odd",
+        "arm_order": "sequential selected arms in vanilla,current order; reverse when (task_index + model_index) is odd",
         "effort_note": "Expected wire effort is declared configuration, not measured; actual observations remain in request/session metrics or unknown.",
     })
     model_outputs = []
     json_dump(args.output / "invocation.json", campaign)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.max_workers) as executor:
-        for phase in ("low", "medium"):
+        for phase in phases:
             results_by_model = {model[0]: [] for model in CAMPAIGN_MODELS}
             model_args = {}
             model_manifests = {}
             for label, provider, model, api, route in CAMPAIGN_MODELS:
                 configured = copy.deepcopy(args)
                 configured.provider, configured.model, configured.thinking = provider, model, phase
+                configured.variants = ",".join(variants)
                 configured.output = args.output / phase / label
                 model_args[label] = configured
                 model_manifest = copy.deepcopy(campaign)
@@ -1548,7 +1553,7 @@ def run_campaign(
                     try:
                         paired_results = future.result()
                     except Exception as exc:
-                        paired_results = [case_error_result(variant, scenarios[task_id][1], exc) for variant in VARIANTS]
+                        paired_results = [case_error_result(variant, scenarios[task_id][1], exc) for variant in variants]
                     results_by_model[label].extend(paired_results)
                     json_dump(model_args[label].output / "results.partial.json", results_by_model[label])
             for label, provider, model, _api, _route in CAMPAIGN_MODELS:
@@ -1557,7 +1562,7 @@ def run_campaign(
                 summary = save_results(output, results, model_manifests[label])
                 model_outputs.append({"phase": phase, "provider": provider, "model": model, "output": str(output),
                                       "runs": len(results), "regressions": len(summary["regressions"])})
-            # The entire low phase, including failures and its reports, precedes medium.
+            # Finish each selected phase, including failures and reports, before the next one.
     campaign["model_outputs"] = model_outputs
     campaign["completed_at"] = utc_now()
     json_dump(args.output / "invocation.json", campaign)
@@ -1674,7 +1679,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", choices=("gpt-5.6-sol", "gpt-6-astra"), default="gpt-5.6-sol")
     parser.add_argument("--thinking", default="medium")
     parser.add_argument("--three-model-campaign", action="store_true",
-                        help="run all 30 tasks on Sol/Astra/DeepSeek, low then medium, paired arms sequentially in two-task windows")
+                        help="run all 30 tasks on Sol/Astra/DeepSeek, selected arms sequentially in two-task windows")
+    parser.add_argument("--efforts", choices=("low", "medium", "low,medium"), default="low",
+                        help="three-model campaign phases; defaults to low, with medium only when explicitly selected")
     parser.add_argument("--api-price-profiles", dest="api_price_profiles_file", type=Path,
                         help="optional JSON price-profile snapshot for new experiment estimates; omitted uses recorded catalog prices")
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -1719,9 +1726,8 @@ def main() -> int:
             raise ValueError(f"--three-model-campaign requires public Prime Agent {PUBLIC_VERSION}")
         if len(task_ids) != 30 or sorted(task_ids) != sorted(scenarios):
             raise ValueError("--three-model-campaign requires all 30 task IDs")
-        if sorted(variants) != sorted(VARIANTS):
-            raise ValueError("--three-model-campaign requires exactly vanilla,current")
-        task_ids, variants = sorted(task_ids), list(VARIANTS)
+        task_ids = sorted(task_ids)
+        variants = [variant for variant in VARIANTS if variant in variants]
     elif args.group_size != len(variants):
         raise SystemExit("--group-size must equal the number of selected variants so each task runs as one comparison group")
     if not args.bwrap:

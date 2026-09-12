@@ -1642,8 +1642,17 @@ export class AgentSession {
 									throw new Error("Captured epoch request selection changed after acceptance");
 								return committedEntry;
 							}
+							// Stable request settings do not cover recovery added after the committed source.
+							const recoverySourceSequence = committed?.source.sourceSequence ?? -1;
+							const hasUncoveredRecovery = getCanonicalViewUnits(messages)!.some((unit, index) => {
+								const reference = epochContext.references[index];
+								return (
+									unit.kind === "recovery" && (!reference || reference.ref.sequence > recoverySourceSequence)
+								);
+							});
 							if (
 								!candidate.publicMessages &&
+								!hasUncoveredRecovery &&
 								committed?.representation === representation &&
 								committed.replayContract === replayContract &&
 								(committed.publicWindow === true) === publicWindow &&

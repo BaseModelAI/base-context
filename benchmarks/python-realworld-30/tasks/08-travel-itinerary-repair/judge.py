@@ -112,13 +112,17 @@ def outputs(root):
     if not isinstance(value,dict) or set(value)!={"issues"} or not isinstance(value.get("issues"),list) or not raw.endswith(b"\n"): raise ValueError("issues")
     return tr,tl,rr,rb,raw,value["issues"]
 
+def has_entrypoint(candidate):
+    return ((candidate/"solution/itinerary_check.py").is_file()
+            or (candidate/"solution/itinerary_check/__main__.py").is_file())
+
 def module_imports(root):
     result=subprocess.run([sys.executable,"-E","-S","-c","import solution.itinerary_check"],cwd=root,text=True,capture_output=True,timeout=10)
     return result.returncode==0
 
 def main():
     parser=argparse.ArgumentParser(); parser.add_argument("--workspace",required=True,type=Path); args=parser.parse_args(); candidate=args.workspace.resolve()
-    artifact=(candidate/"solution/itinerary_check.py").is_file(); checks=[False]*5; notes=[]; runnable=parseable=False; mt=et=None
+    artifact=has_entrypoint(candidate); checks=[False]*5; notes=[]; runnable=parseable=False; mt=et=None
     try:
         if artifact:
             root,run,mt=execute(candidate,"main"); runnable=run.returncode==0 or module_imports(root)

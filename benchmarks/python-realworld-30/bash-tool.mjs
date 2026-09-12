@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 
 const MAX_CHARS = 60_000;
 const KEEP_CHARS = 29_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
+const TERMINATION_GRACE_MS = 1_000;
 
 function appendBounded(current, chunk) {
   const merged = current + chunk;
@@ -25,13 +27,13 @@ export default function benchmarkBashExtension(pi) {
   pi.registerTool({
     name: "bash",
     label: "Bash",
-    description: "Run a Bash command in the isolated benchmark workspace. Use Python 3.12 standard library code for required transformations.",
-    promptSnippet: "Run Bash commands in the isolated workspace",
+    description: "Run Bash in /workspace, the tool-visible working directory. Python 3.12 is available as python or python3; use its standard library for transformations. Extra shell utilities are not guaranteed. Keep persistent scratch files under /workspace; /tmp and background processes do not survive tool calls. Commands default to a 60000 ms deadline; timeout overrides it, while the outer scenario deadline still applies.",
+    promptSnippet: "Run Bash in /workspace; use Python 3.12 standard library and workspace scratch files. Default command deadline: 60000 ms.",
     parameters: {
       type: "object",
       properties: {
         command: { type: "string", description: "Bash command to execute" },
-        timeout: { type: "integer", minimum: 1, description: "Optional timeout in milliseconds" },
+        timeout: { type: "integer", minimum: 1, description: "Command deadline in milliseconds; defaults to 60000 when omitted. Overrides the per-command default, not the outer scenario deadline." },
       },
       required: ["command"],
       additionalProperties: false,
@@ -50,25 +52,51 @@ export default function benchmarkBashExtension(pi) {
         let stderr = "";
         let truncated = false;
         let timedOut = false;
+        let killTimer;
+        const timeout = params.timeout ?? DEFAULT_TIMEOUT_MS;
         const append = (which, chunk) => {
           const result = appendBounded(which === "stdout" ? stdout : stderr, chunk.toString("utf8"));
           if (which === "stdout") stdout = result.text;
           else stderr = result.text;
           truncated ||= result.truncated;
         };
+        const outputText = () => {
+          const combined = stdout + (stderr ? `${stdout ? "\n" : ""}[stderr]\n${stderr}` : "");
+          const bounded = boundLines(combined);
+          truncated ||= bounded.truncated;
+          return bounded.text;
+        };
+        const withStatus = (status) => {
+          const text = outputText();
+          return `${text}${text ? "\n\n" : ""}${status}`;
+        };
         child.stdout.on("data", (chunk) => append("stdout", chunk));
         child.stderr.on("data", (chunk) => append("stderr", chunk));
         const stop = () => {
+          if (killTimer !== undefined) return;
           try { process.kill(-child.pid, "SIGTERM"); } catch {}
+          killTimer = setTimeout(() => {
+            try { process.kill(-child.pid, "SIGKILL"); } catch {}
+            cleanup();
+            // Do not wait indefinitely for inherited pipes or a delayed close event.
+            child.stdout.destroy();
+            child.stderr.destroy();
+            child.unref();
+            reject(new Error(withStatus(timedOut
+              ? `Command timed out after ${timeout} ms`
+              : "Command aborted")));
+          }, TERMINATION_GRACE_MS);
+          killTimer.unref();
         };
-        const timeoutTimer = params.timeout === undefined ? null : setTimeout(() => {
+        const timeoutTimer = setTimeout(() => {
           timedOut = true;
           stop();
-        }, params.timeout);
-        timeoutTimer?.unref();
+        }, timeout);
+        timeoutTimer.unref();
         const cleanup = () => {
           signal.removeEventListener("abort", stop);
-          if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+          clearTimeout(timeoutTimer);
+          if (killTimer !== undefined) clearTimeout(killTimer);
         };
         signal.addEventListener("abort", stop, { once: true });
         child.on("error", (error) => {
@@ -77,12 +105,8 @@ export default function benchmarkBashExtension(pi) {
         });
         child.on("close", (code, childSignal) => {
           cleanup();
-          const combined = stdout + (stderr ? `${stdout ? "\n" : ""}[stderr]\n${stderr}` : "");
-          const bounded = boundLines(combined);
-          truncated ||= bounded.truncated;
-          const withStatus = (status) => `${bounded.text}${bounded.text ? "\n\n" : ""}${status}`;
           if (timedOut) {
-            reject(new Error(withStatus(`Command timed out after ${params.timeout} ms`)));
+            reject(new Error(withStatus(`Command timed out after ${timeout} ms`)));
             return;
           }
           if (childSignal) {
@@ -94,7 +118,7 @@ export default function benchmarkBashExtension(pi) {
             return;
           }
           resolve({
-            content: [{ type: "text", text: bounded.text }],
+            content: [{ type: "text", text: outputText() }],
             details: { exitCode: code, signal: childSignal, truncated },
           });
         });
