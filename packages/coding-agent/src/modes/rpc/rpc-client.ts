@@ -228,11 +228,11 @@ export class RpcClient {
 
 	/**
 	 * Send a prompt to the agent.
-	 * Returns immediately after sending; use onEvent() to receive streaming events.
+	 * Resolves after admission succeeds; use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
 	 */
 	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+		this.getData(await this.send({ type: "prompt", message, images }));
 	}
 
 	/**
@@ -603,10 +603,15 @@ export class RpcClient {
 	 * Collect events until agent becomes idle.
 	 */
 	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
-		return new Promise((resolve, reject) => {
+		return this.createEventCollection(timeout).result;
+	}
+
+	private createEventCollection(timeout: number): { result: Promise<AgentEvent[]>; cancel: () => void } {
+		let cancel = () => {};
+		const result = new Promise<AgentEvent[]>((resolve, reject) => {
 			const events: AgentEvent[] = [];
 			const timer = setTimeout(() => {
-				unsubscribe();
+				cancel();
 				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
 			}, timeout);
 
@@ -614,27 +619,35 @@ export class RpcClient {
 				events.push(event);
 				const error = promptCompletionError(event);
 				if (error !== undefined) {
-					clearTimeout(timer);
-					unsubscribe();
+					cancel();
 					reject(new Error(error));
 					return;
 				}
 				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+					cancel();
 					resolve(events);
 				}
 			});
+			cancel = () => {
+				clearTimeout(timer);
+				unsubscribe();
+				cancel = () => {};
+			};
 		});
+		return { result, cancel: () => cancel() };
 	}
 
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
 	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentEvent[]> {
-		const eventsPromise = this.collectEvents(timeout);
-		await this.prompt(message, images);
-		const events = await eventsPromise;
+		const collection = this.createEventCollection(timeout);
+		let events: AgentEvent[];
+		try {
+			[, events] = await Promise.all([this.prompt(message, images), collection.result]);
+		} finally {
+			collection.cancel();
+		}
 		const terminal = events.find((event) => event.type === "agent_end");
 		if (terminal?.type === "agent_end" && terminal.refusal) throw new AgentOutputLimitError(terminal.refusal);
 		return events;

@@ -11,6 +11,9 @@
 - Fixed authentication failures to mark the credential used by the request rather than a replacement credential.
 - Restored final exact progress notification for explicit saved-session list requests.
 - Removed upstream-only Linear ticket checks and directed contribution links to Base Context.
+- Prevented uv bootstrap from editing shell profiles before the installer’s explicit PATH consent.
+- Prevented repeated installer runs from adding duplicate PATH entries for managed Node.js.
+- Propagated failed RPC prompt admission to SDK callers without treating successful acknowledgement as completion.
 
 ## [1.0.0] - 2026-09-15
 

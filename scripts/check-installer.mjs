@@ -230,13 +230,26 @@ fi
 [ "$1" = "$EXPECTED_ENTRY" ] && [ "$2" = install ] && [ "$3" = "$EXPECTED_ROOT" ] &&
 [ "$4" = "$EXPECTED_SELECTION" ] && [ "$5" = "$EXPECTED_TARBALL" ] && [ "$6" = 1.2.3 ]
 `, { mode: 0o755 });
+	const nodeDataDir = join(tempDir, "node data");
+	const standaloneNodeBin = join(nodeDataDir, "base-context-node", "current", "bin");
+	mkdirSync(standaloneNodeBin, { recursive: true });
+	writeFileSync(join(standaloneNodeBin, "node"), readFileSync(join(binDir, "node")), { mode: 0o755 });
 	for (const [name, args, expectNpmView] of [
 		["default stable", [], "1"],
 		["explicit version", ["v1.2.3"], "0"],
+		["standalone setup", ["v1.2.3"], "0"],
+		["standalone rerun", ["v1.2.3"], "0"],
 	]) {
-		const result = spawnSync("sh", [installHarnessPath, ...args], {
+		const standalone = name.startsWith("standalone");
+		if (name === "standalone setup") writeFileSync(profile, originalProfile, "utf8");
+		const shellArgs = name === "standalone rerun"
+			? ["-c", '. "$BASE_CONTEXT_SHELL_PROFILE"; exec sh "$@"', "sh", installHarnessPath, ...args]
+			: [installHarnessPath, ...args];
+		const result = spawnSync("sh", shellArgs, {
 			encoding: "utf8",
 			env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+				XDG_DATA_HOME: nodeDataDir,
+				BASE_CONTEXT_STANDALONE_NODE_BIN: name === "standalone setup" ? standaloneNodeBin : undefined,
 				BASE_CONTEXT_DOWNLOAD_BASE_URL: "https://github.com/BaseModelAI/base-context",
 				BASE_CONTEXT_INSTALL_ROOT: root, BASE_CONTEXT_PACKAGE: "@ponythewhite/base-context",
 				BASE_CONTEXT_SHELL_PROFILE: profile,
@@ -250,8 +263,12 @@ fi
 		const updatedProfile = readFileSync(profile, "utf8");
 		check(updatedProfile.startsWith(originalProfile), `${name} changed unrelated shell profile content`);
 		check(updatedProfile.split("# Synerise base-context").length === 2, `${name} should add one owned PATH entry`);
-		check(updatedProfile.includes(`export PATH='${root}/bin':"$PATH"`), `${name} omitted the owned launcher PATH`);
-		check(result.stdout.includes(`export PATH='${root}/bin':"$PATH" && base-context`), `${name} omitted the current-shell launch command`);
+		const ownedPath = `${root}/bin${standalone ? `${delimiter}${standaloneNodeBin}` : ""}`;
+		check(updatedProfile.includes(`export PATH='${ownedPath}':"$PATH"`), `${name} omitted the owned launcher PATH`);
+		check(result.stdout.includes(`export PATH='${ownedPath}':"$PATH" && base-context`), `${name} omitted the current-shell launch command`);
+		if (name === "standalone rerun") {
+			check(result.stdout.includes("PATH entry is already in"), "standalone rerun should reuse the sourced PATH entry");
+		}
 	}
 }
 

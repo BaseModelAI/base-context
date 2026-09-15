@@ -8,7 +8,7 @@ import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 
 const directories: string[] = [];
 
-function startup(schemaRevision: number) {
+function startup(schemaRevision: number, promptError?: string) {
 	const directory = mkdtempSync(join(tmpdir(), "rpc-schema-"));
 	directories.push(directory);
 	const cliPath = join(directory, "mock-rpc.mjs");
@@ -23,6 +23,11 @@ if (process.argv[process.argv.indexOf("--rpc-protocol-version") + 1] !== "${DAEM
 process.on("SIGTERM", () => { writeFileSync(${JSON.stringify(stopped)}, "stopped"); process.exit(0); });
 createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
+  if (command.type === "prompt" && ${JSON.stringify(promptError)}) {
+    process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false,
+      error: ${JSON.stringify(promptError)} }) + "\n");
+    return;
+  }
   if (command.type !== "get_state") throw new Error("Unexpected work before startup checks");
   process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true,
     data: { protocolVersion: ${DAEMON_PROTOCOL_VERSION}, schemaRevision: ${schemaRevision} } }) + "\n");
@@ -61,6 +66,21 @@ afterEach(() => {
 });
 
 describe("RpcClient completion", () => {
+	it("rejects failed prompt admission and cancels its completion waiter", async () => {
+		const failure = "No API key found for openai";
+		const server = startup(DAEMON_SCHEMA_REVISION, failure);
+		try {
+			await server.client.start();
+			await expect(server.client.prompt("work")).rejects.toThrow(failure);
+			vi.useFakeTimers();
+			await expect(server.client.promptAndWait("work")).rejects.toThrow(failure);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+			await server.client.stop();
+		}
+	});
+
 	it("returns the complete event collection after successful completion", async () => {
 		const { client, unsubscribe, events } = completion({ type: "agent_end", messages: [] });
 		await expect(client.promptAndWait("work")).resolves.toEqual(events);

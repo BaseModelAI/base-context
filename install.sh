@@ -121,6 +121,10 @@ main() {
 	rm -rf "$download_dir"
 	base_context_download_dir=
 
+	standalone_node_bin="$(node_standalone_base_dir)/current/bin"
+	if [ -z "${BASE_CONTEXT_STANDALONE_NODE_BIN:-}" ] && [ "$(command -v node)" = "$standalone_node_bin/node" ]; then
+		BASE_CONTEXT_STANDALONE_NODE_BIN="$standalone_node_bin"
+	fi
 	base_context_owned_path="$base_context_install_root/bin"
 	if [ -n "${BASE_CONTEXT_STANDALONE_NODE_BIN:-}" ]; then
 		base_context_owned_path="$base_context_owned_path:$BASE_CONTEXT_STANDALONE_NODE_BIN"
