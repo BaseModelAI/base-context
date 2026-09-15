@@ -7,6 +7,7 @@ export {
 	type AgentSessionConfig,
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
+	CompactionCommittedError,
 	type ModelCycleResult,
 	type PromptOptions,
 } from "./core/agent-session.js";
@@ -140,6 +141,13 @@ export {
 } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
+export {
+	InferenceCoordinator,
+	type InferenceRequestOptions,
+	type InferenceRun,
+	type InferenceSettlement,
+	type SessionRuntimeServices,
+} from "./core/inference-coordinator.js";
 export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
 export type {
@@ -157,6 +165,15 @@ export type {
 	RefinementProposal,
 	RefinementResult,
 } from "./core/refinement/index.js";
+export type {
+	BoundRequestSink,
+	NativeRequestEvent,
+	NativeRequestMetadata,
+	RequestOwnerRef,
+	RequestPurpose,
+	ResolvedModelContract,
+	SourceSnapshotRef,
+} from "./core/request-events.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
 // SDK for programmatic usage
@@ -184,10 +201,20 @@ export {
 	// Tool factories (for custom cwd)
 	createEditTool,
 	createIpythonTool,
+	createPrimeContextTool,
 	type PromptTemplate,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";
+export {
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryInput,
+	type NativeRecoveryLimits,
+	type NativeRecoveryResponse,
+	nativeRecoveryInputSchema,
+	nativeRecoveryToolSchema,
+} from "./core/selective-recovery.js";
 export type { SessionActionSnapshot } from "./core/session-action-store.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
@@ -242,6 +269,8 @@ export {
 	type SkillPythonMetadata,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
+export type { TaskStateView } from "./core/task-state-reader.js";
+export type { ReducedTaskItem, TaskStateReadLimits } from "./core/task-state-reducer.js";
 // Tools
 export {
 	type BashOperations,
@@ -254,6 +283,7 @@ export {
 	createEditToolDefinition,
 	createIpythonToolDefinition,
 	createLocalBashOperations,
+	createPrimeContextToolDefinition,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type EditOperations,
@@ -265,6 +295,9 @@ export {
 	type IpythonToolDetails,
 	type IpythonToolInput,
 	type IpythonToolOptions,
+	type PrimeContextToolDetails,
+	type PrimeContextToolOptions,
+	type ToolName,
 	type ToolsOptions,
 	type TruncationOptions,
 	type TruncationResult,

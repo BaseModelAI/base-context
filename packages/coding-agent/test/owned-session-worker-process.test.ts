@@ -1,8 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
 
 const fixturePath = resolve(__dirname, "fixtures/owned-session-worker-fixture.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -49,9 +50,9 @@ function spawnFrontend(
 		env: {
 			...process.env,
 			...environment,
-			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1",
-			PRIME_AGENT_TEST_OWNED_PID_PATH: pidPath,
-			...(keepAlive ? { PRIME_AGENT_TEST_KEEP_ALIVE: "1" } : {}),
+			BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1",
+			BASE_CONTEXT_TEST_OWNED_PID_PATH: pidPath,
+			...(keepAlive ? { BASE_CONTEXT_TEST_KEEP_ALIVE: "1" } : {}),
 			TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -136,7 +137,7 @@ describe("owned session worker processes", () => {
 				args,
 				pidPath,
 				tty === false,
-				tty === undefined ? {} : { PRIME_AGENT_TEST_STDIN_TTY: tty ? "1" : "0" },
+				tty === undefined ? {} : { BASE_CONTEXT_TEST_STDIN_TTY: tty ? "1" : "0" },
 			);
 			if (stdin !== undefined) frontend.stdin?.write(stdin);
 			const workerPid = await waitForWorkerPid(pidPath);
@@ -153,7 +154,10 @@ describe("owned session worker processes", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-owned-worker-test-"));
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
-		const frontend = spawnFrontend(["--mode", "rpc"], pidPath);
+		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "valid",
+		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString("utf8");
@@ -168,6 +172,12 @@ describe("owned session worker processes", () => {
 			`${JSON.stringify({ id: "request-1", type: "response", command: "get_state", success: true })}\n`,
 		);
 		await waitForProcessGone(workerPid);
+		const paths = JSON.parse(readFileSync(`${pidPath}.tracking`, "utf8")) as {
+			journalPath: string;
+			recoveryDescriptorPath: string;
+		};
+		expect(existsSync(paths.journalPath)).toBe(false);
+		expect(existsSync(paths.recoveryDescriptorPath)).toBe(false);
 	});
 
 	it("correlates overlapping anonymous RPC commands without exposing internal ids", async () => {
@@ -175,7 +185,7 @@ describe("owned session worker processes", () => {
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
-			PRIME_AGENT_TEST_REVERSE_RPC_RESPONSES: "1",
+			BASE_CONTEXT_TEST_REVERSE_RPC_RESPONSES: "1",
 		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {
@@ -200,7 +210,7 @@ describe("owned session worker processes", () => {
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
-			PRIME_AGENT_TEST_INVALID_RPC_OUTPUT: "1",
+			BASE_CONTEXT_TEST_INVALID_RPC_OUTPUT: "1",
 		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {
@@ -223,7 +233,7 @@ describe("owned session worker processes", () => {
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
-			PRIME_AGENT_TEST_CRASH_ON_ACK: "1",
+			BASE_CONTEXT_TEST_CRASH_ON_ACK: "1",
 		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {
@@ -249,9 +259,15 @@ describe("owned session worker processes", () => {
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
-			PRIME_AGENT_TEST_CRASH_ON_COMMAND: "get_state",
+			BASE_CONTEXT_TEST_CRASH_ON_COMMAND: "get_state",
+			TMPDIR: root,
+			BASE_CONTEXT_TEST_ORPHAN_TRACKING: "corrupt",
 		});
 		let stdout = "";
+		let stderr = "";
+		frontend.stderr?.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString("utf8");
+		});
 		frontend.stdout?.on("data", (chunk: Buffer) => {
 			stdout += chunk.toString("utf8");
 		});
@@ -271,6 +287,25 @@ describe("owned session worker processes", () => {
 			})}\n`,
 		);
 		await waitForProcessGone(workerPid);
+		expect(stderr).toContain("tracking is unknown");
+		const paths = JSON.parse(readFileSync(`${pidPath}.tracking`, "utf8")) as {
+			journalPath: string;
+			recoveryDescriptorPath: string;
+		};
+		expect(existsSync(paths.recoveryDescriptorPath)).toBe(true);
+		const corrupt = readFileSync(paths.journalPath, "utf8");
+		expect(corrupt.endsWith("{\n")).toBe(true);
+		expect(() => readActiveOrphanProcesses(paths.journalPath, workerPid)).toThrow(
+			"Malformed orphan process journal record",
+		);
+		expect(readFileSync(paths.journalPath, "utf8")).toBe(corrupt);
+		// An incomplete tail is also unknown, not a complete empty result; reading never repairs it.
+		const incompletePath = join(root, "incomplete.jsonl");
+		writeFileSync(incompletePath, "{");
+		expect(() => readActiveOrphanProcesses(incompletePath, workerPid)).toThrow(
+			"Incomplete orphan process journal tail",
+		);
+		expect(readFileSync(incompletePath, "utf8")).toBe("{");
 	});
 
 	it("fails pending RPC commands when the worker exits successfully without responding", async () => {
@@ -278,7 +313,7 @@ describe("owned session worker processes", () => {
 		tempDirs.push(root);
 		const pidPath = join(root, "worker.pid");
 		const frontend = spawnFrontend(["--mode", "rpc"], pidPath, false, {
-			PRIME_AGENT_TEST_EXIT_ZERO_ON_COMMAND: "get_state",
+			BASE_CONTEXT_TEST_EXIT_ZERO_ON_COMMAND: "get_state",
 		});
 		let stdout = "";
 		frontend.stdout?.on("data", (chunk: Buffer) => {

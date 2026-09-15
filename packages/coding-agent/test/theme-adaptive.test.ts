@@ -1,4 +1,4 @@
-import { clearDefaultTerminalColors, setDefaultTerminalColors } from "@earendil-works/pi-tui";
+import { clearDefaultTerminalColors, setDefaultTerminalColors } from "@ponythewhite/base-context-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getEditorTheme, initTheme, setThemeInstance, Theme, theme } from "../src/modes/interactive/theme/theme.js";
 

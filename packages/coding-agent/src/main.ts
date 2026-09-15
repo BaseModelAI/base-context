@@ -7,9 +7,9 @@
 
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
-import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
+import { type Api, type ImageContent, type Model, modelsAreEqual } from "@ponythewhite/base-context-ai";
+import { registerBuiltinMcpOAuthProviders } from "@ponythewhite/base-context-ai/mcp";
+import { ProcessTerminal, setKeybindings, TUI } from "@ponythewhite/base-context-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs } from "./cli/args.js";
 import { formatTopLevelHelp } from "./cli/command-registry.js";
@@ -61,6 +61,7 @@ import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
+import { readSessionBootstrap } from "./core/session-bootstrap.js";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -68,7 +69,7 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.js";
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
-import { SessionManager } from "./core/session-manager.js";
+import { findMostRecentSessionForCwd, getDefaultSessionDir, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
@@ -112,6 +113,7 @@ import { ExtensionSelectorComponent } from "./modes/interactive/components/exten
 import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
 import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
+import { assertProductStatePath } from "./runtime-paths.js";
 import { isLocalPath } from "./utils/paths.js";
 
 /**
@@ -362,12 +364,12 @@ async function promptConfirm(message: string): Promise<boolean> {
 const STARTUP_SESSION_LOSS_COPY: DaemonSessionLossCopy = {
 	busyDetail(count) {
 		const { noun, pronoun } = pluralizeSessions(count);
-		return `A background service from a different Prime Agent version is running with ${count} busy ${noun}. Stopping it will terminate ${pronoun}.`;
+		return `A background service from a different Base Context version is running with ${count} busy ${noun}. Stopping it will terminate ${pronoun}.`;
 	},
 	unlistableDetail:
-		"A background service from a different Prime Agent version is running and its sessions could not be listed. Stopping it may terminate active sessions.",
+		"A background service from a different Base Context version is running and its sessions could not be listed. Stopping it may terminate active sessions.",
 	question: "Stop it and continue?",
-	nonTtyHint: 'Run "prime-agent shutdown" to stop it, then retry.',
+	nonTtyHint: 'Run "base-context shutdown" to stop it, then retry.',
 };
 
 // The promise to keep after awaiting readiness. Wrapped in an object so it
@@ -389,7 +391,7 @@ async function takeOverStaleDaemonOrExit(socketPath: string): Promise<DaemonRead
 	}
 	if (!(await shutdownDaemonAndWait(socketPath))) {
 		console.error(
-			chalk.red(`Could not stop the background service on ${socketPath}. Run "prime-agent shutdown" and retry.`),
+			chalk.red(`Could not stop the background service on ${socketPath}. Run "base-context shutdown" and retry.`),
 		);
 		process.exit(1);
 	}
@@ -437,9 +439,9 @@ function validateForkFlags(parsed: Args): void {
 	}
 }
 
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
+async function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): Promise<SessionManager> {
 	try {
-		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
+		return await SessionManager.forkFrom(sourcePath, cwd, sessionDir);
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.error(chalk.red(`Error: ${message}`));
@@ -455,6 +457,7 @@ export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
+	options: { readOnlyExisting?: boolean } = {},
 ): Promise<SessionManager> {
 	const explicitCwdOverride = parsed.cwd ? cwd : undefined;
 
@@ -480,7 +483,9 @@ export async function createSessionManager(
 		switch (resolved.type) {
 			case "path":
 			case "local":
-				return SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
+				return options.readOnlyExisting
+					? SessionManager.openReadOnly(resolved.path, sessionDir, explicitCwdOverride)
+					: SessionManager.open(resolved.path, sessionDir, explicitCwdOverride);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -495,6 +500,10 @@ export async function createSessionManager(
 	}
 
 	if (parsed.continue) {
+		if (options.readOnlyExisting) {
+			const recent = findMostRecentSessionForCwd(sessionDir ?? getDefaultSessionDir(cwd), cwd);
+			return recent ? SessionManager.openReadOnly(recent, sessionDir, cwd) : SessionManager.create(cwd, sessionDir);
+		}
 		return SessionManager.continueRecent(cwd, sessionDir);
 	}
 
@@ -696,6 +705,8 @@ export function resolveRuntimeSessionOptions(
 	runtimeSessionOptions?: CreateAgentSessionOptions,
 ): CreateAgentSessionOptions {
 	return {
+		requestTokenBudget: runtimeSessionOptions?.requestTokenBudget ?? sessionOptions.requestTokenBudget,
+		contextMode: runtimeSessionOptions?.contextMode ?? sessionOptions.contextMode,
 		model: runtimeSessionOptions?.model ?? sessionOptions.model,
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
@@ -719,6 +730,7 @@ export function resolveRuntimeSessionOptions(
 		rlmSessionDir: runtimeSessionOptions?.rlmSessionDir,
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
+		rlmChildAdmission: runtimeSessionOptions?.rlmChildAdmission,
 		semanticParentSessionId: runtimeSessionOptions?.semanticParentSessionId,
 		semanticSpawnedByRequestId: runtimeSessionOptions?.semanticSpawnedByRequestId,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
@@ -738,6 +750,14 @@ export function createDefaultRuntimeFactory(
 		sessionConfig,
 		sessionOptions: runtimeSessionOptions,
 	}) => {
+		if (runtimeSessionOptions)
+			runtimeSessionOptions = { ...runtimeSessionOptions, contextMode: runtimeSessionOptions.contextMode };
+		if (runtimeSessionOptions?.requestTokenBudget) {
+			runtimeSessionOptions = {
+				...runtimeSessionOptions,
+				requestTokenBudget: structuredClone(runtimeSessionOptions.requestTokenBudget),
+			};
+		}
 		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
 		const prepared = await prepareRuntimeServices({
 			config,
@@ -767,9 +787,14 @@ export function createDefaultRuntimeFactory(
 			// Only seed initial goal for top-level sessions (rlmDepth 0).
 			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
 		});
-		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
+		try {
+			const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
+			if (created.session.model && cliThinkingOverride) {
+				await created.session.setThinkingLevel(created.session.thinkingLevel);
+			}
+		} catch (error) {
+			await created.session.disposeAsync().catch(() => undefined);
+			throw error;
 		}
 
 		return {
@@ -830,17 +855,18 @@ async function prepareRuntimeServices(options: {
 	const modelPatterns = config.models ?? settingsManager.getEnabledModels();
 	const scopedModels =
 		modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+	const hasExistingSession = sessionManager.supportsCapturedHistoryReads()
+		? await sessionManager.readBranchHistory(async (view) => (await view.branchBootstrap()).hasContextMessages)
+		: (
+				await readSessionBootstrap(sessionManager, settingsManager.getCanonicalContextLimits(), {
+					includeMessages: false,
+				})
+			).hasExistingSession;
 	const {
 		options: sessionOptions,
 		cliThinkingFromModel,
 		diagnostics: sessionOptionDiagnostics,
-	} = buildSessionOptions(
-		config,
-		scopedModels,
-		sessionManager.buildSessionContext().messages.length > 0,
-		modelRegistry,
-		settingsManager,
-	);
+	} = buildSessionOptions(config, scopedModels, hasExistingSession, modelRegistry, settingsManager);
 	diagnostics.push(...sessionOptionDiagnostics);
 
 	const effectiveSessionModel = options.sessionOptionsOverride?.model ?? sessionOptions.model;
@@ -870,8 +896,11 @@ async function resolvePreparedStartupModel(options: {
 }): Promise<{ model: Model<Api> | undefined; modelFallbackMessage: string | undefined }> {
 	const { prepared, sessionManager } = options;
 	const { modelRegistry, settingsManager } = prepared.services;
-	const existingSession = sessionManager.buildSessionContext();
-	const hasExistingSession = existingSession.messages.length > 0;
+	const { context: existingSession, hasExistingSession } = await readSessionBootstrap(
+		sessionManager,
+		settingsManager.getCanonicalContextLimits(),
+		{ includeMessages: false },
+	);
 
 	let model = prepared.sessionOptions.model;
 	let modelFallbackMessage: string | undefined;
@@ -914,7 +943,11 @@ async function promptForMissingSessionCwd(
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal(), settingsManager.getShowHardwareCursor());
+		const ui = new TUI(
+			new ProcessTerminal(),
+			settingsManager.getShowHardwareCursor(),
+			assertProductStatePath(join(getAgentDir(), "tui")),
+		);
 		ui.setClearOnShrink(settingsManager.getClearOnShrink());
 
 		let settled = false;
@@ -972,11 +1005,14 @@ async function findActiveDaemonSessionSummary(
 	}
 }
 
-function createSessionManagerForActiveDaemonSummary(summary: SessionSummary, fallbackCwd: string): SessionManager {
+async function createSessionManagerForActiveDaemonSummary(
+	summary: SessionSummary,
+	fallbackCwd: string,
+): Promise<SessionManager> {
 	const cwd = summary.cwd || fallbackCwd;
 	if (summary.sessionFile) {
 		try {
-			return SessionManager.open(summary.sessionFile, undefined, cwd);
+			return await SessionManager.openReadOnly(summary.sessionFile, undefined, cwd);
 		} catch {
 			return SessionManager.inMemory(cwd);
 		}
@@ -1107,10 +1143,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	// Client and daemon are separate processes; both need these in their registry.
 	registerBuiltinMcpOAuthProviders();
-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
+	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.BASE_CONTEXT_OFFLINE);
 	if (offlineMode) {
-		process.env.PI_OFFLINE = "1";
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.BASE_CONTEXT_OFFLINE = "1";
+		process.env.BASE_CONTEXT_SKIP_VERSION_CHECK = "1";
 	}
 
 	const publicCommand = await handlePublicCommand(args);
@@ -1204,9 +1240,9 @@ export async function main(args: string[], options?: MainOptions) {
 	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const startupBenchmark = isTruthyEnvFlag(process.env.BASE_CONTEXT_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
-		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
+		console.error(chalk.red("Error: BASE_CONTEXT_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
 	}
 	// Programmatic factories are process-local functions and cannot be serialized to a daemon worker.
@@ -1268,9 +1304,9 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	let sessionManager: SessionManager;
 	if (activeDaemonSessionSummary) {
-		sessionManager = createSessionManagerForActiveDaemonSummary(activeDaemonSessionSummary, cwd);
+		sessionManager = await createSessionManagerForActiveDaemonSummary(activeDaemonSessionSummary, cwd);
 	} else if (
-		useDaemonInteractive &&
+		(useDaemonInteractive || (appMode === "daemon" && parsed.listModels === undefined)) &&
 		shouldUseEphemeralSessionManagerForDaemonInteractive({
 			resume: parsed.resume,
 			continue: parsed.continue,
@@ -1280,7 +1316,9 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager = SessionManager.inMemory(cwd);
 	} else {
 		try {
-			sessionManager = await createSessionManager(parsed, cwd, sessionDir);
+			sessionManager = await createSessionManager(parsed, cwd, sessionDir, {
+				readOnlyExisting: useDaemonClient || (appMode === "daemon" && parsed.listModels === undefined),
+			});
 		} catch (error) {
 			if (!(error instanceof SessionSelectorError)) {
 				throw error;
@@ -1301,7 +1339,10 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+			await sessionManager.close();
+			sessionManager = useDaemonClient
+				? await SessionManager.openReadOnly(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd)
+				: await SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
 			process.exit(1);
@@ -1326,6 +1367,10 @@ export async function main(args: string[], options?: MainOptions) {
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);
 	const runtimeDefaultSessionConfig = appMode === "daemon" ? daemonDefaultSessionConfig : defaultSessionConfig;
+	// Daemon clients keep only local views; release the CLI writer before a worker opens this source.
+	if (useDaemonClient || (appMode === "daemon" && parsed.listModels === undefined)) {
+		await sessionManager.close();
+	}
 	const createRuntime = createDefaultRuntimeFactory(runtimeDefaultSessionConfig, options?.extensionFactories);
 	time("createRuntime");
 	// Daemon mode never uses the bootstrap runtime, so skip the heavy
@@ -1410,7 +1455,7 @@ export async function main(args: string[], options?: MainOptions) {
 				uiServices: daemonUiServices,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(daemonSocketPath),
 				createUiServicesForSession: async (summary) => {
-					const attachedSessionManager = createSessionManagerForActiveDaemonSummary(
+					const attachedSessionManager = await createSessionManagerForActiveDaemonSummary(
 						summary,
 						sessionManager.getCwd(),
 					);
@@ -1586,7 +1631,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		printTimings();
 		if (appMode === "rpc") {
-			return await runRpcModeWithConnection(connection);
+			return await runRpcModeWithConnection(connection, parsed.rpcProtocolVersion!);
 		}
 		if (appMode === "acp") {
 			return await runAcpModeWithConnection(connection);
@@ -1666,7 +1711,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (appMode === "rpc") {
 		printTimings();
-		await runRpcMode(runtime);
+		await runRpcMode(runtime, parsed.rpcProtocolVersion!);
 	} else if (appMode === "acp") {
 		printTimings();
 		await runAcpMode(runtime);

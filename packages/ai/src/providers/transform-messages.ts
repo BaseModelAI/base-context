@@ -65,7 +65,15 @@ export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+	pendingPublicMessageGroups: readonly (readonly number[])[] = [],
 ): Message[] {
+	// This option is supplied only by the native Responses projection path. It is not replay permission.
+	if (
+		pendingPublicMessageGroups.length > messages.length ||
+		pendingPublicMessageGroups.reduce((count, group) => count + group.length, 0) > messages.length
+	)
+		throw new Error("Pending public group item budget exceeded");
+	const publicAssistants = new Set(pendingPublicMessageGroups.map((group) => group[0]));
 	const toolCallIdMap = new Map<string, string>();
 	const imageAwareMessages = downgradeUnsupportedImages(messages, model);
 
@@ -150,11 +158,12 @@ export function transformMessages<TApi extends Api>(
 	// This preserves thinking signatures and satisfies API requirements
 	const result: Message[] = [];
 	let pendingToolCalls: ToolCall[] = [];
+	let pendingPublic = false;
 	let existingToolResultIds = new Set<string>();
 	const insertSyntheticToolResults = () => {
 		if (pendingToolCalls.length > 0) {
 			for (const tc of pendingToolCalls) {
-				if (!existingToolResultIds.has(tc.id)) {
+				if (!pendingPublic && !existingToolResultIds.has(tc.id)) {
 					result.push({
 						role: "toolResult",
 						toolCallId: tc.id,
@@ -189,6 +198,7 @@ export function transformMessages<TApi extends Api>(
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
 			if (toolCalls.length > 0) {
 				pendingToolCalls = toolCalls;
+				pendingPublic = publicAssistants.has(i);
 				existingToolResultIds = new Set();
 			}
 

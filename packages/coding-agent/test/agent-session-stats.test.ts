@@ -1,6 +1,9 @@
-import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, getModel, type Usage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { type AssistantMessage, getModel, type Usage } from "@ponythewhite/base-context-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -48,9 +51,16 @@ function createUserMessage(text: string, timestamp: number) {
 	};
 }
 
-function createSession() {
+const tempDirs: string[] = [];
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+async function createSession(persistent = false) {
 	const settingsManager = SettingsManager.inMemory();
-	const sessionManager = SessionManager.inMemory();
+	const dir = persistent ? mkdtempSync(join(tmpdir(), "bc-context-usage-")) : undefined;
+	if (dir) tempDirs.push(dir);
+	const sessionManager = dir ? await SessionManager.create(dir, join(dir, "sessions")) : SessionManager.inMemory();
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const session = new AgentSession({
@@ -70,7 +80,8 @@ function createSession() {
 		resourceLoader: createTestResourceLoader(),
 	});
 
-	return { session, sessionManager };
+	await session.initialize();
+	return { session, sessionManager, settingsManager };
 }
 
 function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
@@ -78,66 +89,92 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 describe("AgentSession.getSessionStats", () => {
-	it("exposes the current context usage alongside token totals", () => {
-		const { session, sessionManager } = createSession();
+	it("exposes the current context usage alongside token totals", async () => {
+		const { session, sessionManager } = await createSession();
 
 		try {
-			sessionManager.appendMessage(createUserMessage("hello", 1));
-			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			await sessionManager.appendMessage(createUserMessage("hello", 1));
+			await sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
 			syncAgentMessages(session, sessionManager);
 
-			const stats = session.getSessionStats();
-			expect(stats.contextUsage).toEqual(session.getContextUsage());
+			const stats = await session.getSessionStats();
+			expect(stats.contextUsage).toEqual(await session.getContextUsage());
 			expect(stats.contextUsage?.tokens).toBe(200);
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
 			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
 		} finally {
-			session.dispose();
+			await session.disposeAsync();
 		}
 	});
 
-	it("reports unknown current context usage immediately after compaction", () => {
-		const { session, sessionManager } = createSession();
+	it("reports unknown current context usage immediately after compaction", async () => {
+		const { session, sessionManager } = await createSession(true);
 
 		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
+			await sessionManager.appendMessage(createUserMessage("first", 1));
+			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
+			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
+			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
+			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.appendMessage(createUserMessage("third", 5));
 			syncAgentMessages(session, sessionManager);
 
-			const stats = session.getSessionStats();
+			const eagerBranch = vi.spyOn(sessionManager, "getBranch").mockImplementation(() => {
+				throw new Error("Unbounded context-usage branch scan");
+			});
+			const stats = await session.getSessionStats();
 			expect(stats.tokens.input).toBe(195_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBeNull();
 			expect(stats.contextUsage?.percent).toBeNull();
+			await sessionManager.appendMessage(createAssistantMessage("zero", 0, 0));
+			await sessionManager.appendMessage({ ...createAssistantMessage("error", 1, 0), stopReason: "error" });
+			expect((await session.getContextUsage())?.tokens).toBeNull();
+			expect(eagerBranch).not.toHaveBeenCalled();
 		} finally {
-			session.dispose();
+			vi.restoreAllMocks();
+			await session.disposeAsync();
 		}
 	});
 
-	it("uses post-compaction usage for current context instead of stale kept usage", () => {
-		const { session, sessionManager } = createSession();
+	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
+		const { session, sessionManager, settingsManager } = await createSession(true);
 
 		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
+			await sessionManager.appendMessage(createUserMessage("first", 1));
+			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
+			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
+			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
+			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.appendMessage(createUserMessage("third", 5));
+			const assistantId = await sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
 			syncAgentMessages(session, sessionManager);
 
-			const stats = session.getSessionStats();
+			const eagerBranch = vi.spyOn(sessionManager, "getBranch").mockImplementation(() => {
+				throw new Error("Unbounded context-usage branch scan");
+			});
+			const stats = await session.getSessionStats();
 			expect(stats.tokens.input).toBe(220_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
+			const limits = settingsManager.getCanonicalContextLimits();
+			settingsManager.applyOverrides({ canonicalContext: { ...limits, maxSourceBytes: 1 } });
+			try {
+				await expect(session.getContextUsage()).rejects.toThrow("Context usage source byte budget exceeded");
+			} finally {
+				settingsManager.applyOverrides({ canonicalContext: limits });
+			}
+			await sessionManager.appendMessage(createUserMessage("attribution branch", 7));
+			await sessionManager.appendChildUsageAttribution(assistantId, createUsage(0), createUsage(0));
+			sessionManager.branch(assistantId);
+			expect((await session.getContextUsage())?.tokens).toBeNull();
+			await sessionManager.appendChildUsageAttribution(assistantId, createUsage(1), createUsage(26_000));
+			expect((await session.getContextUsage())?.tokens).not.toBeNull();
+			expect(eagerBranch).not.toHaveBeenCalled();
 		} finally {
-			session.dispose();
+			vi.restoreAllMocks();
+			await session.disposeAsync();
 		}
 	});
 });

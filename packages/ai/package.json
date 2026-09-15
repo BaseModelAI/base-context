@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-ai",
-	"version": "0.9.3",
-	"description": "Unified LLM API with automatic model discovery and provider configuration",
+	"name": "@ponythewhite/base-context-ai",
+	"version": "1.0.0",
+	"description": "Synerise base-context unified LLM API and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -56,20 +56,22 @@
 		}
 	},
 	"bin": {
-		"pi-ai": "./dist/cli.js"
+		"base-context-ai": "./dist/cli.js"
 	},
 	"files": [
 		"dist",
-		"README.md"
+		"README.md",
+		"LICENSE",
+		"NOTICE"
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"generate-models": "npx tsx scripts/generate-models.ts",
-		"build": "npm run generate-models && tsgo -p tsconfig.build.json",
+		"build": "tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm --prefix ../.. run build:source"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",
@@ -94,19 +96,28 @@
 		"unified",
 		"api"
 	],
-	"author": "Mario Zechner",
+	"author": "Jacek Dąbrowski <jack.dabrowski@synerise.com>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/BaseModelAI/base-context.git",
 		"directory": "packages/ai"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": "^22.12.0 || >=23.3.0"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",
 		"vitest": "^4.1.10"
+	},
+	"contributors": [
+		"Mario Zechner",
+		"Prime Intellect",
+		"BaseModelAI"
+	],
+	"homepage": "https://github.com/BaseModelAI/base-context#readme",
+	"publishConfig": {
+		"access": "public"
 	}
 }

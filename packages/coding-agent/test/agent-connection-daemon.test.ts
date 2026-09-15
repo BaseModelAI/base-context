@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { getModel } from "@ponythewhite/base-context-ai";
 import { describe, expect, it, vi } from "vitest";
 import { MissingSessionCwdError } from "../src/core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../src/core/session-import-errors.js";
@@ -245,6 +245,19 @@ class FakeDaemonClient {
 							},
 						],
 						leafId: "user-1",
+					},
+				};
+			case "get_user_messages_for_forking":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: {
+						messages: [
+							{ entryId: "user-1", text: "hello" },
+							{ entryId: "offbranch", text: " firstsecond " },
+							{ entryId: "whitespace", text: " \t" },
+						],
 					},
 				};
 			case "get_tool_definition":
@@ -1760,7 +1773,7 @@ describe("DaemonAgentConnection", () => {
 		await expect(connection.listHeartbeats()).resolves.toEqual([]);
 		expect(fakeClient.requests).toEqual([]);
 		await expect(connection.manageHeartbeat("active-original", "job-1", "pause")).rejects.toThrow(
-			"requires a newer Prime Agent daemon",
+			"requires a newer Base Context daemon",
 		);
 		expect(fakeClient.requests).toEqual([]);
 	});
@@ -1960,7 +1973,7 @@ describe("DaemonAgentConnection", () => {
 		expect(closedEvents).toHaveLength(1);
 		expect(closedEvents[0]).toMatchObject({
 			type: "closed",
-			error: expect.stringContaining("The Prime Agent daemon shut down while this window was attached."),
+			error: expect.stringContaining("The Base Context daemon shut down while this window was attached."),
 		});
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
 		expect(closedError).toContain("Session ID: session-current.");
@@ -1985,7 +1998,7 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.reconnectCount).toBe(0);
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("The Prime Agent daemon shut down while this window was attached.");
+		expect(closedError).toContain("The Base Context daemon shut down while this window was attached.");
 	});
 
 	it.each([
@@ -2029,8 +2042,8 @@ describe("DaemonAgentConnection", () => {
 
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("Lost connection to the Prime Agent daemon. Cause: ECONNRESET");
-		expect(closedError).toContain("restart Prime Agent or reopen the session from Agents View");
+		expect(closedError).toContain("Lost connection to the Base Context daemon. Cause: ECONNRESET");
+		expect(closedError).toContain("restart Base Context or reopen the session from Agents View");
 		expect(closedError).toContain("Session file: /tmp/session-current.jsonl.");
 		expect(closedError).toContain("Diagnostic log:");
 	});
@@ -2052,7 +2065,7 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.reconnectCount).toBe(0);
 		expect(closedEvents).toHaveLength(1);
 		const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
-		expect(closedError).toContain("Lost connection to the Prime Agent daemon.");
+		expect(closedError).toContain("Lost connection to the Base Context daemon.");
 	});
 
 	it("does not emit a restored session after disposal begins", async () => {
@@ -2121,10 +2134,10 @@ describe("DaemonAgentConnection", () => {
 			expect(closedEvents).toHaveLength(1);
 			const closedError = closedEvents[0]?.type === "closed" ? closedEvents[0].error : undefined;
 			expect(closedError).toContain(
-				"The Prime Agent daemon restarted for an update, but this window could not reconnect",
+				"The Base Context daemon restarted for an update, but this window could not reconnect",
 			);
 			expect(closedError).toContain("Last error: daemon unavailable");
-			expect(closedError).toContain("restart Prime Agent and reopen it from Agents View");
+			expect(closedError).toContain("restart Base Context and reopen it from Agents View");
 			expect(closedError).toContain("Session ID: session-current.");
 			expect(closedError).toContain("Session file: /tmp/session-current.jsonl.");
 			expect(closedError).toContain("Diagnostic log:");
@@ -3367,21 +3380,6 @@ describe("DaemonAgentConnection", () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
 		await connection.attach();
-		fakeClient.emitMessage({
-			type: "session_event",
-			activeSessionId: "active-1",
-			event: {
-				type: "session_action_update",
-				actions: { queuedCount: 0, steering: [], followUps: [] },
-			},
-			meta: {
-				id: "active-1:13",
-				protocol: DAEMON_PROTOCOL_INFO,
-				activeSessionId: "active-1",
-				sequence: 13,
-				emittedAt: "2026-01-01T00:00:00.000Z",
-			},
-		});
 
 		await expect(connection.getSessionTree()).resolves.toEqual({
 			tree: [
@@ -3403,6 +3401,30 @@ describe("DaemonAgentConnection", () => {
 			type: "get_session_tree",
 			activeSessionId: "active-1",
 		});
+		vi.spyOn(fakeClient, "request").mockResolvedValueOnce({
+			type: "response",
+			command: "get_session_tree",
+			success: false,
+			error: "History source byte budget exceeded",
+		});
+		await expect(connection.getSessionTree()).rejects.toThrow("History source byte budget exceeded");
+		await expect(connection.getUserMessagesForForking()).resolves.toEqual([
+			{ entryId: "user-1", text: "hello" },
+			{ entryId: "offbranch", text: " firstsecond " },
+			{ entryId: "whitespace", text: " \t" },
+		]);
+		expect(fakeClient.requests.at(-1)).toEqual({
+			type: "get_user_messages_for_forking",
+			activeSessionId: "active-1",
+		});
+		vi.spyOn(fakeClient, "request").mockResolvedValueOnce({
+			type: "response",
+			command: "get_user_messages_for_forking",
+			success: false,
+			error: "History entry budget exceeded",
+		});
+		await expect(connection.getUserMessagesForForking()).rejects.toThrow("History entry budget exceeded");
+		await connection.dispose();
 	});
 
 	it("loads serializable tool metadata through the daemon protocol", async () => {

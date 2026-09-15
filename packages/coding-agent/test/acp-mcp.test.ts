@@ -38,6 +38,7 @@ describe("ACP MCP servers", () => {
 				protocolVersion: acp.PROTOCOL_VERSION,
 				clientCapabilities: {},
 			});
+			expect(initialized.agentInfo).toMatchObject({ name: "base-context", title: "Base Context" });
 			expect(initialized.agentCapabilities?.mcpCapabilities?.http).toBe(true);
 
 			const created = await handle.agent.request("session/new", {
@@ -93,7 +94,7 @@ describe("ACP MCP servers", () => {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);
 			await modeDone;
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	}, 30_000);
 
@@ -139,7 +140,7 @@ describe("ACP MCP servers", () => {
 			handle.close();
 			await toAgent.writable.close().catch(() => undefined);
 			await modeDone;
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	}, 30_000);
 

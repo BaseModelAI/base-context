@@ -1,28 +1,36 @@
-"""Persistent harness-state helpers for Prime Agent's RLM kernel.
+"""Persistent harness-state helpers for Base Context's RLM kernel.
 
 The state model is intentionally small: it records prompt notes, memory,
 skills, subagent specs, and refinement events in the session-local harness
 store by default; pass ``global_=True`` for the cross-session global store.
-Execution still belongs to Prime Agent's TypeScript host and the existing
+Execution still belongs to Base Context's TypeScript host and the existing
 ``rlm.run`` recursion bridge.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
+from os import fstat, linesep
 from pathlib import Path
 from typing import Any, Literal
+
+from .product import assert_product_state_path, product_env, product_state_path
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
 HarnessScope = Literal["local", "global"]
 
 _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
+_DEFAULT_MAX_ENTRIES = 16_384
+_DEFAULT_MAX_SOURCE_BYTES = 64 * 1024 * 1024
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
+
+
+class HarnessStateLimitError(ValueError):
+    """A persisted harness image exceeded its item or encoded-byte budget."""
 
 
 def _now() -> str:
@@ -33,15 +41,6 @@ def _slug(raw: str, fallback: str) -> str:
     normalized = "".join(ch.lower() if ch.isalnum() else "_" for ch in raw.strip())
     normalized = "_".join(part for part in normalized.split("_") if part)
     return (normalized or fallback)[:80]
-
-
-def _agent_dir() -> Path:
-    raw = (
-        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    return Path(raw).expanduser().resolve()
 
 
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
@@ -68,27 +67,26 @@ def _strip_scope_prefix(id: str | None, global_: bool) -> tuple[str | None, bool
     return id, global_
 
 
-def _env_dir(name: str) -> str | None:
-    # Set-but-empty env values must behave as unset; a bare "" would skip the
-    # session-dir fallback and land local writes in the global agent-dir default.
-    value = (os.environ.get(name) or "").strip()
+def _env_dir(suffix: str) -> str | None:
+    # Empty optional session paths remain unset; BASE_CONTEXT_HOME is stricter.
+    value = (product_env(suffix) or "").strip()
     return value or None
 
 
 def _state_file(state_dir: str | Path | None = None, *, global_: bool = False) -> Path:
     root: str | Path | None = state_dir
     if root is None:
-        root = _env_dir("RLM_GLOBAL_HARNESS_STATE_DIR") if global_ else _env_dir("RLM_HARNESS_STATE_DIR")
-    if root is None and not global_ and (session_dir := _env_dir("RLM_SESSION_DIR")):
+        root = _env_dir("GLOBAL_HARNESS_STATE_DIR") if global_ else _env_dir("HARNESS_STATE_DIR")
+    if root is None and not global_ and (session_dir := _env_dir("KERNEL_SESSION_DIR")):
         root = Path(session_dir) / _DEFAULT_HARNESS_DIR_NAME
     if root is None and not global_:
         raise RuntimeError(
-            "Local harness state requires RLM_HARNESS_STATE_DIR or RLM_SESSION_DIR. "
+            "Local harness state requires BASE_CONTEXT_HARNESS_STATE_DIR or BASE_CONTEXT_KERNEL_SESSION_DIR. "
             "Use get_harness_state(global_=True) for global state."
         )
     if root:
-        return Path(root).expanduser().resolve() / _DEFAULT_FILE_NAME
-    return _agent_dir() / _DEFAULT_HARNESS_DIR_NAME / _DEFAULT_FILE_NAME
+        return assert_product_state_path(Path(root).expanduser() / _DEFAULT_FILE_NAME)
+    return product_state_path(_DEFAULT_HARNESS_DIR_NAME, _DEFAULT_FILE_NAME)
 
 
 @dataclass
@@ -149,14 +147,21 @@ class HarnessState:
         in_memory: bool = False,
         scope: HarnessScope = "local",
         local_write_error: str | None = None,
+        max_entries: int = _DEFAULT_MAX_ENTRIES,
+        max_source_bytes: int = _DEFAULT_MAX_SOURCE_BYTES,
     ):
+        for name, value in (("max_entries", max_entries), ("max_source_bytes", max_source_bytes)):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        self._max_entries = max_entries
+        self._max_source_bytes = max_source_bytes
         # in_memory mode never resolves or touches a path. It is the safe fallback when
         # path resolution itself fails, so constructing it cannot re-raise that error.
         if in_memory:
             self.file_path: Path | None = None
         else:
             self.file_path = (
-                Path(file_path).expanduser().resolve()
+                assert_product_state_path(file_path)
                 if file_path
                 else _state_file(global_=(scope == "global"))
             )
@@ -196,15 +201,56 @@ class HarnessState:
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 
+    def _check_item_count(self, entries: object, refinements: object) -> None:
+        count = len(refinements) if isinstance(refinements, list) else 0
+        if isinstance(entries, dict):
+            for kind in _KINDS:
+                records = entries.get(kind)
+                if isinstance(records, dict):
+                    count += sum(isinstance(entry, (dict, HarnessEntry)) for entry in records.values())
+        if count > self._max_entries:
+            raise HarnessStateLimitError(f"Harness state exceeds max_entries={self._max_entries}")
+
     def load(self) -> "HarnessState":
+        if self.file_path is not None:
+            assert_product_state_path(self.file_path)
         if self.file_path is None or not self.file_path.exists():
             self._loaded_mtime = None
             return self
         mtime = self._disk_mtime()
+        admission_error: HarnessStateLimitError | None = None
         try:
-            with self.file_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
+            with self.file_path.open("rb", buffering=0) as f:
+                captured = fstat(f.fileno())
+                if captured.st_size > self._max_source_bytes:
+                    admission_error = HarnessStateLimitError(
+                        f"Harness state exceeds max_source_bytes={self._max_source_bytes}"
+                    )
+                    raise admission_error
+                # Read only this descriptor's captured span, not a growing EOF.
+                image = bytearray(captured.st_size)
+                with memoryview(image) as target:
+                    offset = 0
+                    while offset < len(image):
+                        count = f.readinto(target[offset : min(offset + 64 * 1024, len(image))])
+                        if count is None or count <= 0:
+                            raise OSError("Harness state ended before its captured size")
+                        offset += count
+                current = fstat(f.fileno())
+                if current.st_size > self._max_source_bytes:
+                    admission_error = HarnessStateLimitError(
+                        f"Harness state exceeds max_source_bytes={self._max_source_bytes}"
+                    )
+                    raise admission_error
+                if current.st_size != captured.st_size:
+                    raise OSError("Harness state size changed during capture")
+                mtime = captured.st_mtime_ns
+            data = json.loads(image.decode("utf-8"))
+        except (OSError, ValueError) as error:
+            if admission_error is not None:
+                if error is admission_error:
+                    raise
+                raise admission_error from error
             # A corrupt or unreadable state file must not crash the kernel or block
             # refinement. Treat it as empty; the next save() rewrites it cleanly.
             data = {}
@@ -212,6 +258,8 @@ class HarnessState:
         # string; coerce those to an empty object before attribute access.
         if not isinstance(data, dict):
             data = {}
+        # Refuse before replacing cached state; count candidates before normalization.
+        self._check_item_count(data.get("entries"), data.get("refinements"))
 
         entries: dict[HarnessKind, dict[str, HarnessEntry]] = {kind: {} for kind in _KINDS}
         raw_entries = data.get("entries", {})
@@ -284,9 +332,10 @@ class HarnessState:
 
     def save(self) -> "HarnessState":
         if self.file_path is None:
-            # in_memory fallback: nothing to persist.
+            # Volatile stores have no encoded image; their containers remain uncapped.
             return self
-        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        assert_product_state_path(self.file_path)
+        self._check_item_count(self.entries, self.refinements)
         data = {
             "schema": 1,
             "entries": {
@@ -295,8 +344,13 @@ class HarnessState:
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
-        with self.file_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Admission bounds the file, not asdict/JSON/UTF-8 transient allocations.
+        image = json.dumps(data, indent=2, ensure_ascii=False).replace("\n", linesep).encode("utf-8")
+        if len(image) > self._max_source_bytes:
+            raise HarnessStateLimitError(f"Harness state exceeds max_source_bytes={self._max_source_bytes}")
+        self.file_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.file_path.open("wb") as f:
+            f.write(image)
         self._loaded_mtime = self._disk_mtime()
         return self
 
@@ -364,6 +418,7 @@ class HarnessState:
 
         entry_id = id or _slug(title, kind)
         existing = self.entries[kind].get(entry_id)
+        previous_fields = vars(existing).copy() if existing else {}
         if existing:
             existing.title = title
             existing.content = content
@@ -397,7 +452,14 @@ class HarnessState:
                 source=source,
             )
             self.entries[kind][entry_id] = entry
-        self.save()
+        try:
+            self.save()
+        except HarnessStateLimitError:
+            if existing:
+                vars(existing).update(previous_fields)
+            else:
+                del self.entries[kind][entry_id]
+            raise
         return entry
 
     def get(self, kind: HarnessKind, id: str, *, global_: bool = False, **kwargs: Any) -> HarnessEntry | None:
@@ -419,8 +481,16 @@ class HarnessState:
             raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
         if id not in self.entries[kind]:
             return False
-        del self.entries[kind][id]
-        self.save()
+        records = self.entries[kind]
+        previous_records = records.copy()
+        del records[id]
+        try:
+            self.save()
+        except HarnessStateLimitError:
+            # Keep the original map object and insertion order on budget refusal.
+            records.clear()
+            records.update(previous_records)
+            raise
         return True
 
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
@@ -699,7 +769,11 @@ class HarnessState:
             outcome=outcome,
         )
         self.refinements.append(event)
-        self.save()
+        try:
+            self.save()
+        except HarnessStateLimitError:
+            self.refinements.pop()
+            raise
         return event
 
     def plan_refinement(
@@ -795,7 +869,7 @@ def get_harness_state(
     if state is None:
         state = HarnessState(file_path, scope=scope)
         # Recorded at construction only: an instance created from env defaults must
-        # keep targeting RLM_GLOBAL_HARNESS_STATE_DIR even when a later explicit
+        # keep targeting BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR even when a later explicit
         # state_dir call aliases the same local file. An explicit dir that merely
         # aliases the env resolution must not sandbox later global_=True writes
         # either, so pin only when the explicit dir actually diverges.
@@ -815,6 +889,7 @@ __all__ = [
     "HarnessKind",
     "HarnessScope",
     "HarnessState",
+    "HarnessStateLimitError",
     "RefinementEvent",
     "get_harness_state",
 ]

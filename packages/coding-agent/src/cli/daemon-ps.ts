@@ -10,29 +10,37 @@ import {
 	shouldReapOrphanProcess,
 } from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
-import { DaemonClient } from "../modes/daemon/daemon-client.js";
+import {
+	DaemonCapabilityUnavailableError,
+	DaemonClient,
+	DaemonProtocolMismatchError,
+} from "../modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	type DaemonRuntimeIdentity,
+	meetsDaemonCommandCompatibility,
+	NATIVE_WORK_COMPATIBILITIES,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
+import { DaemonWorkerClient, DaemonWorkerCompatibilityError } from "../modes/daemon/daemon-worker-client.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
 import { signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
+import { formatProductDiagnostics, type ProductDiagnostics } from "./product-doctor.js";
 
 /**
- * `daemon ps` discovers every prime-agent daemon on the machine, not just the
+ * `daemon ps` discovers every base-context daemon on the machine, not just the
  * one on a single socket. Discovery has two sources merged by socket path:
  *
- *  1. The OS list of listening unix sockets owned by a prime-agent process
+ *  1. The OS list of listening unix sockets owned by a base-context process
  *     (`ss -lxp` on Linux, `lsof` on macOS). Daemons set process.title to
  *     APP_NAME and carry nothing useful in argv, so the socket→pid mapping the
  *     kernel keeps is the only reliable way to find daemons on arbitrary
  *     `--daemon-socket` paths. This is the same data as `ss -lxp | grep
- *     prime-agent`, just parsed.
+ *     base-context`, just parsed.
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
@@ -88,7 +96,7 @@ function processNameMatches(name: string, appName: string): boolean {
 	return name === appName || appName.slice(0, MAX_COMM_LENGTH) === name;
 }
 
-/** Parse `ss -lxp` output into the prime-agent daemons listening on unix sockets. */
+/** Parse `ss -lxp` output into the base-context daemons listening on unix sockets. */
 export function parseSsListeners(stdout: string, appName: string): DiscoveredDaemonProcess[] {
 	const daemons: DiscoveredDaemonProcess[] = [];
 	for (const line of stdout.split("\n")) {
@@ -249,7 +257,7 @@ interface ProbeResult {
 	reachable: boolean;
 }
 
-async function probeDaemon(socketPath: string): Promise<ProbeResult> {
+export async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(300);
@@ -274,8 +282,9 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 			supervisorPid = hello.supervisorPid;
 			supervisorProcessStartId = hello.supervisorProcessStartId;
 			greeted = true;
-		} catch {
-			// Connected but no recognizable greeting: an old/foreign daemon.
+		} catch (error) {
+			if (error instanceof DaemonProtocolMismatchError) throw error;
+			// A silent peer is not evidence of a compatible command plane.
 		}
 		let sessionCount: number | undefined;
 		try {
@@ -286,7 +295,8 @@ async function probeDaemon(socketPath: string): Promise<ProbeResult> {
 					sessionCount = sessions.length;
 				}
 			}
-		} catch {
+		} catch (error) {
+			if (error instanceof DaemonProtocolMismatchError) throw error;
 			// Leave sessionCount undefined when the daemon will not answer list.
 		}
 		return {
@@ -401,12 +411,13 @@ export function sortDaemons(infos: DaemonInfo[]): DaemonInfo[] {
 	});
 }
 
-export async function runPs(json: boolean): Promise<void> {
+export async function runPs(json: boolean, report?: ProductDiagnostics): Promise<void> {
 	const daemons = await discoverDaemons();
 	if (json) {
-		console.log(JSON.stringify(daemons, null, 2));
+		console.log(JSON.stringify(report ? { ...report, daemons } : daemons, null, 2));
 		return;
 	}
+	if (report) console.log(formatProductDiagnostics(report));
 	if (daemons.length === 0) {
 		console.log("No background services found.");
 		return;
@@ -450,12 +461,19 @@ export function planReap(daemons: readonly DaemonInfo[], force: boolean): ReapAc
 		if (daemon.status === "orphan-file") {
 			return { kind: "remove-file", daemon };
 		}
+		if (daemon.protocolVersion !== undefined && daemon.protocolVersion !== DAEMON_PROTOCOL_VERSION) {
+			return {
+				kind: "skip",
+				daemon,
+				reason: `Keeping incompatible daemon protocol ${daemon.protocolVersion}; canonical session ownership requires protocol ${DAEMON_PROTOCOL_VERSION}. Use its own runtime for cleanup.`,
+			};
+		}
 		if (daemon.isDefault) {
 			return { kind: "skip", daemon, reason: "default background service" };
 		}
 		if (daemon.status === "unreachable") {
 			if (!force || daemon.pid === undefined) {
-				return { kind: "skip", daemon, reason: 'unreachable; use "prime-agent shutdown --force" to stop it' };
+				return { kind: "skip", daemon, reason: 'unreachable; use "base-context shutdown --force" to stop it' };
 			}
 			if ((pidCounts.get(daemon.pid) ?? 0) > 1) {
 				return {
@@ -477,6 +495,13 @@ export function planShutdownAll(daemons: readonly DaemonInfo[], force: boolean):
 	return daemons.map((daemon): ReapAction => {
 		if (daemon.status === "orphan-file") {
 			return { kind: "remove-file", daemon };
+		}
+		if (daemon.protocolVersion !== undefined && daemon.protocolVersion !== DAEMON_PROTOCOL_VERSION) {
+			return {
+				kind: "skip",
+				daemon,
+				reason: `Keeping incompatible daemon protocol ${daemon.protocolVersion}; canonical session ownership requires protocol ${DAEMON_PROTOCOL_VERSION}. Use its own runtime for cleanup.`,
+			};
 		}
 		if (daemon.status === "unreachable") {
 			if (daemon.pid === undefined) {
@@ -521,7 +546,7 @@ export async function runShutdownAll(json: boolean, force: boolean): Promise<voi
 						stopped: [],
 						failed: daemons.map(({ socketPath }) => ({
 							socketPath,
-							reason: 'confirmation required; use "prime-agent shutdown --force --json"',
+							reason: 'confirmation required; use "base-context shutdown --force --json"',
 						})),
 					},
 					null,
@@ -531,7 +556,7 @@ export async function runShutdownAll(json: boolean, force: boolean): Promise<voi
 			return;
 		case "tty-error":
 			throw new Error(
-				'Shutdown requires confirmation in an interactive terminal. Use "prime-agent shutdown --force".',
+				'Shutdown requires confirmation in an interactive terminal. Use "base-context shutdown --force".',
 			);
 		case "prompt": {
 			const confirmed = await promptYesNo(
@@ -618,11 +643,20 @@ async function runShutdownAllConverging(
 					);
 				} else if (isDaemonProcessListening(pid!, socketPath)) {
 					await assertAdmission();
-					await forceKillDaemon(pid!);
+					const refusal = await forceKillDaemon(pid!, socketPath);
+					if (refusal) {
+						failed.push({ socketPath, reason: refusal });
+						break;
+					}
 					handledPids.add(pid!);
 					await assertAdmission();
 					removeSocketFile(socketPath);
 					stopped.push({ socketPath, action: `killed unreachable background service (pid ${pid})` });
+				} else if (isProcessAlive(pid!)) {
+					failed.push({
+						socketPath,
+						reason: `Keeping live daemon pid ${pid}: compatibility is unknown/unverified`,
+					});
 				} else {
 					await assertAdmission();
 					removeSocketFile(socketPath);
@@ -814,6 +848,52 @@ function describeDaemonParent(pid: number): string {
 	return `; close parent PID ${match[1]} on ${match[2]} (${match[3]}) and retry shutdown`;
 }
 
+async function daemonCleanupRefusal(
+	socketPath: string,
+	pid: number,
+	processStartId: string | undefined,
+	worker = isWorkerSocketPath(socketPath),
+): Promise<string | undefined> {
+	const unknown = `Keeping live daemon pid ${pid}: compatibility is unknown/unverified`;
+	if (!processStartId || getProcessStartId(pid) !== processStartId) return unknown;
+	const ownsSocket = () => {
+		const owners = scanListeningDaemons().filter(
+			(listener) => listener.socketPath === normalizeSocketPath(socketPath),
+		);
+		return owners.length > 0 && owners.every((listener) => listener.pid === pid);
+	};
+	const socketOwnedAtEntry = ownsSocket();
+	const client = worker ? new DaemonWorkerClient(socketPath) : new DaemonClient(socketPath);
+	try {
+		await client.connect(300);
+		const hello = await client.waitForHello(1500);
+		const helloIdentifiesOwner =
+			!worker && hello.supervisorPid === pid && hello.supervisorProcessStartId === processStartId;
+		if (
+			getProcessStartId(pid) !== processStartId ||
+			(!helloIdentifiesOwner && !(socketOwnedAtEntry && ownsSocket()))
+		) {
+			return unknown;
+		}
+		const missing = NATIVE_WORK_COMPATIBILITIES.find(
+			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
+		);
+		return missing ? new DaemonCapabilityUnavailableError("shutdown", missing.capability).message : undefined;
+	} catch (error) {
+		if (
+			socketOwnedAtEntry &&
+			ownsSocket() &&
+			getProcessStartId(pid) === processStartId &&
+			(error instanceof DaemonProtocolMismatchError || error instanceof DaemonWorkerCompatibilityError)
+		) {
+			return error.message;
+		}
+		return `${unknown}: ${error instanceof Error ? error.message : String(error)}`;
+	} finally {
+		client.close();
+	}
+}
+
 async function terminateVerifiedListener(
 	listener: DiscoveredDaemonProcess,
 	failed: Array<{ socketPath: string; reason: string }>,
@@ -828,6 +908,11 @@ async function terminateVerifiedListener(
 			listener.socketPath,
 			`could not verify daemon process identity (pid ${listener.pid})`,
 		);
+		return false;
+	}
+	const refusal = await daemonCleanupRefusal(listener.socketPath, listener.pid, processStartId);
+	if (refusal) {
+		recordShutdownFailure(failed, reportedFailures, listener.socketPath, refusal);
 		return false;
 	}
 	if (getProcessStartId(listener.pid) !== processStartId) {
@@ -894,6 +979,10 @@ async function stopBackgroundService(
 	assertAdmission: () => Promise<void>,
 ): Promise<ReapOutcome> {
 	await assertAdmission();
+	if (pid !== undefined && isProcessAlive(pid)) {
+		const refusal = await daemonCleanupRefusal(socketPath, pid, getProcessStartId(pid));
+		if (refusal) return { skipped: refusal };
+	}
 	if (await shutdownDaemon(socketPath, force)) {
 		if (pid !== undefined) {
 			handledPids.add(pid);
@@ -901,6 +990,9 @@ async function stopBackgroundService(
 		return { reaped: `stopped background service${pid ? ` (pid ${pid})` : ""}` };
 	}
 	if (!(await canConnectToSocket(socketPath, 250))) {
+		if (pid !== undefined && isProcessAlive(pid)) {
+			return { skipped: `Keeping live daemon pid ${pid}: compatibility is unknown/unverified` };
+		}
 		await assertAdmission();
 		removeSocketFile(socketPath);
 		return { reaped: "background service already stopped" };
@@ -912,7 +1004,8 @@ async function stopBackgroundService(
 		return { skipped: "did not stop gracefully; retry with --force" };
 	}
 	await assertAdmission();
-	await forceKillDaemon(pid);
+	const refusal = await forceKillDaemon(pid, socketPath);
+	if (refusal) return { skipped: refusal };
 	handledPids.add(pid);
 	await assertAdmission();
 	removeSocketFile(socketPath);
@@ -931,6 +1024,18 @@ async function forceStopTrackedWorkers(
 	const failures: string[] = [];
 	for (const worker of findTrackedWorkers(supervisorSocketPath)) {
 		const { descriptor } = worker;
+		if (isProcessAlive(descriptor.pid)) {
+			const refusal = await daemonCleanupRefusal(
+				descriptor.socketPath,
+				descriptor.pid,
+				descriptor.processStartId,
+				true,
+			);
+			if (refusal) {
+				failures.push(`Worker ${descriptor.workerId}: ${refusal}`);
+				continue;
+			}
+		}
 		let cleanupWorkerRecords = await stopTrackedProcess(descriptor.pid, descriptor.processStartId, assertAdmission);
 		if (!cleanupWorkerRecords) {
 			failures.push(`could not safely stop worker ${descriptor.workerId} (pid ${descriptor.pid})`);
@@ -940,6 +1045,7 @@ async function forceStopTrackedWorkers(
 			try {
 				orphans = readActiveOrphanProcesses(descriptor.orphanProcessJournalPath, descriptor.pid);
 			} catch (error) {
+				cleanupWorkerRecords = false;
 				failures.push(`could not read child process records for worker ${descriptor.workerId}: ${String(error)}`);
 			}
 			for (const orphan of orphans) {
@@ -1091,7 +1197,7 @@ async function stopTrackedProcess(
 	return !isProcessAlive(pid);
 }
 
-export async function runReap(json: boolean, force: boolean): Promise<void> {
+export async function runReap(json: boolean, force: boolean, report?: ProductDiagnostics): Promise<void> {
 	const daemons = await discoverDaemons();
 	const reaped: Array<{ socketPath: string; action: string }> = [];
 	const skipped: Array<{ socketPath: string; reason: string }> = [];
@@ -1122,6 +1228,14 @@ export async function runReap(json: boolean, force: boolean): Promise<void> {
 				// defer to the session-aware shutdown path instead.
 				const recheck = await probeDaemon(socketPath);
 				if (!recheck.reachable) {
+					if (isProcessAlive(pid!)) {
+						const processStartId = getProcessStartId(pid!);
+						const refusal = await daemonCleanupRefusal(socketPath, pid!, processStartId);
+						if (refusal || getProcessStartId(pid!) !== processStartId) {
+							skipped.push({ socketPath, reason: refusal ?? "Daemon process identity changed before cleanup" });
+							break;
+						}
+					}
 					killDaemon(pid!);
 					removeSocketFile(socketPath);
 					reaped.push({ socketPath, action: `killed unreachable daemon (pid ${pid})` });
@@ -1137,9 +1251,10 @@ export async function runReap(json: boolean, force: boolean): Promise<void> {
 	}
 
 	if (json) {
-		console.log(JSON.stringify({ reaped, skipped }, null, 2));
+		console.log(JSON.stringify({ ...report, reaped, skipped }, null, 2));
 		return;
 	}
+	if (report) console.log(formatProductDiagnostics(report));
 	if (reaped.length === 0 && skipped.length === 0) {
 		console.log("No background services found.");
 		return;
@@ -1180,6 +1295,10 @@ async function reapReachableDaemon(socketPath: string, pid: number | undefined):
 	if (probe.sessionCount !== 0) {
 		return { skipped: `now has ${probe.sessionCount ?? "unknown"} session(s)` };
 	}
+	if (pid !== undefined && isProcessAlive(pid)) {
+		const refusal = await daemonCleanupRefusal(socketPath, pid, getProcessStartId(pid));
+		if (refusal) return { skipped: refusal };
+	}
 	return (await shutdownDaemon(socketPath, false))
 		? { reaped: `stopped idle background service${pid ? ` (pid ${pid})` : ""}` }
 		: { skipped: "shutdown request failed" };
@@ -1204,20 +1323,26 @@ function killDaemon(pid: number): void {
 	}
 }
 
-async function forceKillDaemon(pid: number): Promise<void> {
+async function forceKillDaemon(pid: number, socketPath: string): Promise<string | undefined> {
+	if (!isProcessAlive(pid)) return undefined;
+	const processStartId = getProcessStartId(pid);
+	const refusal = await daemonCleanupRefusal(socketPath, pid, processStartId);
+	if (refusal) return refusal;
+	if (getProcessStartId(pid) !== processStartId) return "Daemon process identity changed before cleanup";
 	killDaemon(pid);
 	const deadline = Date.now() + 1000;
 	while (Date.now() < deadline) {
-		if (!isProcessAlive(pid)) {
-			return;
-		}
+		if (!isProcessAlive(pid)) return undefined;
+		if (getProcessStartId(pid) !== processStartId) return "Daemon process identity changed during cleanup";
 		await delay(50);
 	}
+	if (getProcessStartId(pid) !== processStartId) return "Daemon process identity changed during cleanup";
 	try {
 		process.kill(pid, "SIGKILL");
 	} catch {
 		// Process already exited between the liveness check and the kill.
 	}
+	return undefined;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -1260,7 +1385,12 @@ async function shutdownDaemon(socketPath: string, force: boolean): Promise<boole
 	}
 	try {
 		await client.request({ type: "shutdown", force }, 1500);
-	} catch {
+	} catch (error) {
+		if (error instanceof DaemonProtocolMismatchError || error instanceof DaemonCapabilityUnavailableError)
+			throw error;
+		if (!client.hello) {
+			throw new Error("Daemon compatibility is unknown/unverified; shutdown was not admitted", { cause: error });
+		}
 		// The daemon may still stop; the connectivity check below is the source of truth.
 	} finally {
 		client.close();

@@ -52,6 +52,18 @@ describe("agent-message skill over the kernel host bridge", () => {
 						entries: [{ relationship: "sibling", name: "Beta", id: "session-beta", depth: 0, status: "idle" }],
 					};
 				},
+				"agent_message.send_result": async (payload) => {
+					requests.push({ type: "agent_message.send_result", payload });
+					return {
+						id: "agentmsg-result",
+						source: "agent_message",
+						target: { activeSessionId: "parent", sessionId: "session-parent" },
+						message: payload.summary,
+						deliveryStatus: "delivered",
+						deliveredAt: "2026-06-16T00:00:00.000Z",
+						resultRef: { sourceSessionId: "session-parent", ref: "result-report", field: "/data/findings" },
+					};
+				},
 				"agent_message.send": async (payload) => {
 					requests.push({ type: "agent_message.send", payload });
 					return {
@@ -74,7 +86,8 @@ agents = await agent_message.list_agents()
 receipt = await agent_message.send(
     "hello beta", receiver_role="sibling", receiver_name="beta"
 )
-print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
+result_receipt = await agent_message.send_result("Routing fix ready", "Full public routing report")
+print(json.dumps({"agents": agents, "receipt": receipt, "result_receipt": result_receipt}, sort_keys=True))
 `);
 
 		expect(result.status).toBe("ok");
@@ -97,6 +110,13 @@ print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
 				receiverRole: "sibling",
 				target: { activeSessionId: "beta", sessionId: "session-beta", sessionName: "Beta" },
 			},
+			{
+				id: "agentmsg-result",
+				message: "Routing fix ready",
+				deliveryStatus: "delivered",
+				receiverRole: "parent",
+				target: { activeSessionId: "parent", sessionId: "session-parent" },
+			},
 		]);
 		expect(requests[0]).toMatchObject({
 			type: "agent_message.list_agents",
@@ -112,6 +132,23 @@ print(json.dumps({"agents": agents, "receipt": receipt}, sort_keys=True))
 			},
 		});
 		expect(requests[1].payload).not.toHaveProperty("from");
+		expect(requests[2]).toMatchObject({
+			type: "agent_message.send_result",
+			payload: {
+				summary: "Routing fix ready",
+				findings: "Full public routing report",
+				receiver_role: "parent",
+				receiver_name: null,
+			},
+		});
+		expect(requests[2].payload).not.toHaveProperty("from");
+		expect(output.result_receipt).toMatchObject({
+			message: "Routing fix ready",
+			resultRef: { sourceSessionId: "session-parent", ref: "result-report", field: "/data/findings" },
+		});
+		expect(output.result_receipt).not.toHaveProperty("findings");
+		expect(result.stdout).not.toContain("Full public routing report");
+		expect(JSON.stringify(result.sentAgentMessages)).not.toContain("Full public routing report");
 	});
 
 	it("emits successful broadcast receipts and leaves short errors in the result", async () => {

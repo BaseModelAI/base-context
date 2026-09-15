@@ -3,6 +3,7 @@ import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
+import type { SavedSessionPageHints } from "../daemon/saved-session-page.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
 
@@ -57,7 +58,7 @@ export interface UnattachableChildOpenResult {
 	summary: SessionSummary;
 	selection: SessionSummary;
 	expandedAncestorSessionIds: string[];
-	hasChildren: boolean;
+	hasChildren?: boolean;
 	statusMessage: string;
 }
 
@@ -114,7 +115,7 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 
 // TODO(unify: #2055): replace with the shared user-content rule once it lands;
 // session summaries only carry message counts today.
-export function isEmptyAgentsViewSession(summary: SessionSummary): boolean {
+export function isEmptyAgentsViewSession(summary: Pick<SessionSummary, "messageCount">): boolean {
 	return summary.messageCount === 0;
 }
 
@@ -164,7 +165,7 @@ function savedIdentityAliases(saved: AgentConnectionSavedSessionInfo): string[] 
 	return [fileIdentity(saved.path), `session:${saved.id}`];
 }
 
-function createUnifiedSearchableText(
+export function createUnifiedSearchableText(
 	daemon: SessionSummary | undefined,
 	saved: AgentConnectionSavedSessionInfo | undefined,
 ): string {
@@ -327,7 +328,7 @@ export function createUnattachableChildOpenResult(
 	child: SessionSummary,
 	parent: SessionSummary,
 	expandedAncestorSessionIds: readonly string[],
-	hasChildren: boolean,
+	hasChildren: boolean | undefined,
 ): UnattachableChildOpenResult {
 	return {
 		type: "open",
@@ -474,7 +475,7 @@ export function computeRecursiveRollups(
  * the source's totals. Spawned subagents carry runtimeKind (resident) or a
  * deeper rlmDepth (saved) and do roll up.
  */
-function isSubagentDescendantRecord(child: UnifiedSessionRecord, parent: UnifiedSessionRecord): boolean {
+export function isSubagentDescendantRecord(child: UnifiedSessionRecord, parent: UnifiedSessionRecord): boolean {
 	if (child.daemon) {
 		return isSubagentSummary(child.daemon);
 	}
@@ -627,7 +628,7 @@ function findParentSummary(
 	return undefined;
 }
 
-function getParentKeys(summary: SessionSummary): string[] {
+export function getParentKeys(summary: SessionSummary): string[] {
 	return [
 		summary.parentActiveSessionId ? `active:${summary.parentActiveSessionId}` : undefined,
 		summary.parentSessionId ? `session:${summary.parentSessionId}` : undefined,
@@ -734,6 +735,7 @@ export function buildAgentsViewRows(
 	scope?: AgentsViewScopeKey,
 	recursiveRollups?: ReadonlyMap<UnifiedSessionRecord, AgentsViewRecursiveRollup>,
 	anchorSessionId?: string,
+	pageHints?: SavedSessionPageHints,
 ): AgentsViewRow[] {
 	const inputs = summariesOrRecords.map((input) =>
 		isUnifiedSessionRecord(input) ? { summary: summaryForUnifiedRecord(input), record: input } : { summary: input },
@@ -818,24 +820,40 @@ export function buildAgentsViewRows(
 	}
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
-	const compareRows = (a: AgentsViewRow, b: AgentsViewRow): number => compareAgentsViewRows(a, b, anchorSessionId);
+	const compareRows = (a: AgentsViewRow, b: AgentsViewRow): number =>
+		compareAgentsViewRows(
+			pageHints ? { ...a, runningSubagentCount: pageHints.busyAncestors.includes(a.identity) ? 1 : 0 } : a,
+			pageHints ? { ...b, runningSubagentCount: pageHints.busyAncestors.includes(b.identity) ? 1 : 0 } : b,
+			anchorSessionId,
+		);
 	const flattened: AgentsViewRow[] = [];
 	const emit = (row: MutableAgentsViewRow, depth: number): void => {
 		row.depth = depth;
 		flattened.push(row);
 		const children = childrenByParent.get(row) ?? [];
-		if (children.length === 0) {
+		const moreSaved = pageHints?.moreChildren.includes(row.identity) === true;
+		if (children.length === 0 && !moreSaved) {
 			return;
 		}
 		const childHasSpawnCode = children.some((child) => hasSpawnCode(child.summary));
 		const expanded = expandedSubagentParents.has(row.identity);
-		flattened.push(createSubagentSummaryRow(row, children, depth + 1, childHasSpawnCode, expanded));
+		const groupRow = createSubagentSummaryRow(row, children, depth + 1, childHasSpawnCode, expanded);
+		if (pageHints)
+			groupRow.title =
+				children.length === 0 && moreSaved
+					? "More saved subagents (not loaded)"
+					: `${groupRow.title} loaded${moreSaved ? " · more saved" : ""}`;
+		flattened.push(groupRow);
 		if (!expanded) {
 			return;
 		}
 		const showProgram = programShownParents.has(row.identity);
 		const groups = groupChildrenBySpawnCode(children.sort(compareRows));
-		for (const [groupIndex, group] of groups.entries()) {
+		const globalCodes = pageHints?.groups.find((item) => item.parent === row.identity)?.codes;
+		if (globalCodes)
+			groups.sort((a, b) => globalCodes.indexOf(a.spawnCode ?? null) - globalCodes.indexOf(b.spawnCode ?? null));
+		for (const [localIndex, group] of groups.entries()) {
+			const groupIndex = globalCodes ? globalCodes.indexOf(group.spawnCode ?? null) : localIndex;
 			if (showProgram && group.spawnCode) {
 				for (const codeRow of buildSpawnCodeRows(row, group.spawnCode, depth + 1, groupIndex)) {
 					flattened.push(codeRow);
@@ -966,7 +984,11 @@ function buildSpawnCodeRows(
 	return [makeRow("", "pad-top"), ...lines, makeRow("", "pad-bottom")];
 }
 
-function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow, anchorSessionId?: string): number {
+export type AgentsViewOrderRow = Pick<AgentsViewRow, "section" | "title" | "runningSubagentCount"> & {
+	summary: Pick<SessionSummary, "messageCount" | "sessionId" | "hasActiveHeartbeat" | "lastActivityAt" | "created">;
+};
+
+export function compareAgentsViewRows(a: AgentsViewOrderRow, b: AgentsViewOrderRow, anchorSessionId?: string): number {
 	const sectionDiff = sectionRank(a.section) - sectionRank(b.section);
 	if (sectionDiff !== 0) {
 		return sectionDiff;
@@ -1006,7 +1028,7 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow, anchorSession
 // Message-less sessions sink to the bottom of their section, except the session
 // the view was entered from: it keeps its recency slot so opening the agents
 // view from a fresh chat doesn't catapult that chat to the bottom.
-function emptySessionRank(row: AgentsViewRow, anchorSessionId: string | undefined): number {
+function emptySessionRank(row: AgentsViewOrderRow, anchorSessionId: string | undefined): number {
 	if (!isEmptyAgentsViewSession(row.summary) || row.summary.sessionId === anchorSessionId) {
 		return 0;
 	}

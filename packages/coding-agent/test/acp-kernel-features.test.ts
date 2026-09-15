@@ -7,7 +7,7 @@ import type { KernelClient } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 import { acpUpdatesForSessionEvent } from "../src/modes/acp/acp-events.js";
-import { PRIME_AGENT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
+import { BASE_CONTEXT_META_NAMESPACE } from "../src/modes/acp/acp-meta.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/types.js";
 
 /**
@@ -89,7 +89,7 @@ describe("ACP mode over a real Python kernel", () => {
 	}, async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [AGENT_MESSAGE_SKILL],
-			env: { RLM_GLOBAL_HARNESS_STATE_DIR: join(tempDir, "harness") },
+			env: { BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR: join(tempDir, "harness") },
 		});
 		const manager = await provisioner.ensure();
 
@@ -153,7 +153,7 @@ print(json.dumps({
 			},
 		} as AgentConnectionSessionEvent);
 		expect(refined[0]?._meta).toMatchObject({
-			[PRIME_AGENT_META_NAMESPACE]: { refinement: { status: "complete" } },
+			[BASE_CONTEXT_META_NAMESPACE]: { refinement: { status: "complete" } },
 		});
 	});
 
@@ -163,7 +163,7 @@ print(json.dumps({
 	}, async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
 			pythonSkills: [AGENT_MESSAGE_SKILL],
-			env: { RLM_DEPTH: "0", RLM_MAX_DEPTH: "1" },
+			env: { BASE_CONTEXT_RLM_DEPTH: "0", BASE_CONTEXT_RLM_MAX_DEPTH: "1" },
 			hostHandlers: {
 				"rlm.list_subagents": async () => ({
 					subagents: [
@@ -196,8 +196,8 @@ import json, os
 children = await rlm.list_subagents()
 removed = await rlm.delete_subagent(children[0])
 print(json.dumps({
-    "depth": os.environ.get("RLM_DEPTH"),
-    "max_depth": os.environ.get("RLM_MAX_DEPTH"),
+    "depth": os.environ.get("BASE_CONTEXT_RLM_DEPTH"),
+    "max_depth": os.environ.get("BASE_CONTEXT_RLM_MAX_DEPTH"),
     "names": [child.session_name for child in children],
     "removed": removed.session_name,
 }, sort_keys=True))
@@ -269,7 +269,7 @@ print(json.dumps({
 			message: sent,
 		} as AgentConnectionSessionEvent);
 		expect(updates[0]?._meta).toMatchObject({
-			[PRIME_AGENT_META_NAMESPACE]: { agentMessage: { toolCallId: "cell-msg", deliveryStatus: "queued" } },
+			[BASE_CONTEXT_META_NAMESPACE]: { agentMessage: { toolCallId: "cell-msg", deliveryStatus: "queued" } },
 		});
 	});
 });

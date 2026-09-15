@@ -5,7 +5,7 @@
  * Uses the last assistant message to generate a commit message.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -15,7 +15,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const entries = ctx.sessionManager.getEntries();
+		const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 		let lastAssistantText = "";
 		for (let i = entries.length - 1; i >= 0; i--) {
 			const entry = entries[i];

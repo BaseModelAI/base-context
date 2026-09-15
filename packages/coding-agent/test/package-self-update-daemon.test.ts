@@ -1,14 +1,18 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import type * as ChildProcessModule from "node:child_process";
+import type { SpawnSyncOptions } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as DaemonUpdateRestartModule from "../src/cli/daemon-update-restart.js";
 import {
 	acquireDaemonUpdateRestartCoordinator,
 	type DaemonUpdateRestartStatus,
 	DaemonUpdateRestartStatusWriter,
+	selectedUpdateInstallation,
 	waitForActiveDaemonUpdateRestartCoordinator,
 } from "../src/cli/daemon-update-restart.js";
+import * as configModule from "../src/config.js";
 import {
 	ENV_AGENT_DIR,
 	getDaemonUpdateRestartManifestPath,
@@ -19,8 +23,17 @@ import {
 	VERSION,
 } from "../src/config.js";
 import type { AgentSessionRuntimeMetadata } from "../src/core/agent-session-runtime.js";
+import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
 import type * as DaemonSocketModule from "../src/modes/daemon/daemon-socket.js";
+import { installOwnedRelease, type OwnedActivation, rollbackOwnedRelease } from "../src/owned-install.js";
+import {
+	type InstallSelection,
+	installedCli,
+	type OwnedInstallation,
+	ownedVersion,
+	readInstallSelection,
+} from "../src/owned-install-layout.js";
 import {
 	handlePackageCommand,
 	prepareDaemonUpdateRestart,
@@ -67,7 +80,7 @@ interface MockUpdateRestartSession {
 	config: Record<string, unknown>;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;
 	queue: {
-		actions: { formatVersion: 1; actions: MockRecoveryAction[] };
+		actions: { formatVersion: 1 | 2; actions: MockRecoveryAction[] };
 		nextTurn: MockCustomMessage[];
 	};
 	shouldResume: boolean;
@@ -160,6 +173,10 @@ const mockState = vi.hoisted(() => ({
 	successorProcessStartId: "replacement-start" as string | undefined,
 	successorSocketPath: undefined as string | undefined,
 	spawnExitCodes: [] as number[],
+	ownedBoundary: undefined as
+		| ((command: string, args: string[], env: NodeJS.ProcessEnv, cwd: string | undefined) => void)
+		| undefined,
+	coordinatorInstallation: undefined as OwnedInstallation | undefined,
 	shutdownResult: true,
 }));
 
@@ -175,46 +192,64 @@ function useFixedOwnerHello(): void {
 	};
 }
 
-vi.mock("child_process", () => ({
-	spawn: vi.fn((command: string, args: string[]) => {
-		mockState.calls.push(`spawn:${command} ${args.join(" ")}`);
-		const exitCode = mockState.spawnExitCodes.shift() ?? 0;
-		const child = {
-			on(event: string, listener: unknown) {
-				if (event === "close") {
-					queueMicrotask(() => {
-						(listener as (code: number | null, signal: string | null) => void)(exitCode, null);
-					});
-				}
-				return child;
-			},
-		};
-		return child;
-	}),
-	spawnSync: vi.fn(() => ({
-		status: 0,
-		stdout: `${mockState.globalPackageRoot}\n`,
-		stderr: "",
-	})),
-}));
+vi.mock("child_process", async (importOriginal) => {
+	const original = await importOriginal<typeof ChildProcessModule>();
+	return {
+		spawn: vi.fn((command: string, args: string[], options?: { env?: NodeJS.ProcessEnv; cwd?: string }) => {
+			mockState.calls.push(`spawn:${command} ${args.join(" ")}`);
+			mockState.ownedBoundary?.(command, args, options?.env ?? {}, options?.cwd);
+			const exitCode = mockState.spawnExitCodes.shift() ?? 0;
+			const child = {
+				on(event: string, listener: unknown) {
+					if (event === "close") {
+						queueMicrotask(() => {
+							(listener as (code: number | null, signal: string | null) => void)(exitCode, null);
+						});
+					}
+					return child;
+				},
+			};
+			return child;
+		}),
+		spawnSync: vi.fn((command: string, args: readonly string[] = [], options?: SpawnSyncOptions) => {
+			if (command === "tar") {
+				expect(args[0]).toBe("-xOf");
+				expect(args[2]).toBe("package/package.json");
+				expect(options?.cwd).toBe(process.cwd());
+				// Local metadata boundary only; these fixture files are not real archives.
+				return { status: 0, stdout: readFileSync(args[1], "utf8"), stderr: "" };
+			}
+			if (
+				args.includes("--experimental-sqlite") &&
+				args.some((arg) => /owned-install-worker\.(?:js|ts)$/.test(arg))
+			) {
+				return original.spawnSync(command, args, options);
+			}
+			return { status: 0, stdout: `${mockState.globalPackageRoot}\n`, stderr: "" };
+		}),
+	};
+});
 
 vi.mock("../src/cli/daemon-update-restart.js", async (importOriginal) => {
 	const original = await importOriginal<typeof DaemonUpdateRestartModule>();
 	return {
 		...original,
-		launchDaemonUpdateRestartCoordinator: vi.fn(async (options: { socketPath: string }) => {
-			mockState.calls.push(`launch-coordinator:${options.socketPath}`);
-			return {
-				version: 1,
-				requestId: "test-request",
-				socketPath: options.socketPath,
-				phase: "complete",
-				coordinator: { pid: process.pid },
-				counts: { total: 0, restored: 0, resumed: 0, failed: 0 },
-				startedAt: new Date().toISOString(),
-				updatedAt: new Date().toISOString(),
-			};
-		}),
+		launchDaemonUpdateRestartCoordinator: vi.fn(
+			async (options: { socketPath: string; installation?: OwnedInstallation }) => {
+				mockState.coordinatorInstallation = options.installation;
+				mockState.calls.push(`launch-coordinator:${options.socketPath}`);
+				return {
+					version: 1,
+					requestId: "test-request",
+					socketPath: options.socketPath,
+					phase: "complete",
+					coordinator: { pid: process.pid },
+					counts: { total: 0, restored: 0, resumed: 0, failed: 0 },
+					startedAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+				};
+			},
+		),
 	};
 });
 
@@ -413,6 +448,110 @@ describe("self-update daemon restart", () => {
 		});
 	}
 
+	function useOwnedProcessBoundary(
+		root: string,
+		version: string,
+		localInstall?: { dependencies: readonly string[]; main: string },
+	): void {
+		mockState.ownedBoundary = (command, args, environment, cwd) => {
+			expect(environment.BASE_CONTEXT_KERNEL_PYTHON).toBeUndefined();
+			expect(environment.BASE_CONTEXT_KERNEL_VENV).toBeUndefined();
+			if (command === "npm") {
+				expect(args[0]).toBe("install");
+				if (localInstall) {
+					expect(args.slice(args.indexOf("--"))).toEqual(["--", ...localInstall.dependencies, localInstall.main]);
+				} else {
+					expect(args.slice(args.indexOf("--"))).toEqual(["--", args.at(-1)]);
+				}
+				expect(args).not.toContain("-g");
+				expect(args).not.toContain(`--allow-scripts=${args.at(-1)}`);
+				expect(environment.BASE_CONTEXT_BOOTSTRAP_KERNEL_ON_INSTALL).toBe("0");
+				expect(environment.BASE_CONTEXT_BOOTSTRAP_TOOLS_ON_INSTALL).toBe("0");
+				const directory = args[args.indexOf("--prefix") + 1];
+				const localDependencies = (localInstall?.dependencies ?? []).map((tarball) => [
+					JSON.parse(readFileSync(tarball, "utf8")).name as string,
+					`file:${tarball}`,
+				]);
+				expect(JSON.parse(readFileSync(join(directory, "package.json"), "utf8"))).toEqual({
+					private: true,
+					...(localDependencies.length > 0
+						? {
+								dependencies: Object.fromEntries(localDependencies),
+								overrides: Object.fromEntries(localDependencies.map(([name]) => [name, `$${name}`])),
+							}
+						: {}),
+					allowScripts: Object.fromEntries(args.slice(args.indexOf("--") + 1).map((spec) => [spec, true])),
+				});
+				expect(statSync(join(directory, "package.json")).mode & 0o777).toBe(0o600);
+				expect(cwd).toBe(directory);
+				expect(dirname(directory)).toBe(join(root, "versions"));
+				const candidatePackage = join(directory, "node_modules", PACKAGE_NAME);
+				mkdirSync(join(candidatePackage, "dist", "bundle"), { recursive: true });
+				mkdirSync(join(candidatePackage, "dist", "base-context-runtime"), { recursive: true });
+				writeFileSync(join(candidatePackage, "package.json"), JSON.stringify({ name: PACKAGE_NAME, version }));
+				writeFileSync(join(candidatePackage, "dist", "bundle", "cli.js"), `CLI ${version}`);
+				writeFileSync(join(candidatePackage, "dist", "installer.mjs"), "offline preparation boundary");
+				writeFileSync(
+					join(candidatePackage, "dist", "base-context-runtime", "pyproject.toml"),
+					`payload ${version}`,
+				);
+			} else {
+				expect(command).toBe(process.execPath);
+				expect(args[1]).toBe("prepare");
+				const directory = dirname(dirname(dirname(dirname(dirname(args[0])))));
+				expect(cwd).toBe(directory);
+				expect(dirname(directory)).toBe(join(root, "versions"));
+				if ((mockState.spawnExitCodes[0] ?? 0) === 0) {
+					mkdirSync(join(directory, "runtime", "bin"), { recursive: true });
+					writeFileSync(join(directory, "runtime", "bin", "python"), `runtime ${version}`);
+				}
+			}
+		};
+	}
+
+	async function createOwnedFixture(localDependencyTarballs?: string[]): Promise<OwnedActivation> {
+		// Keep activation on this test's actual Node22.12; npm and Python remain the existing offline boundaries.
+		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+		const root = join(tempDir, "owned");
+		const cwd = process.cwd();
+		useOwnedProcessBoundary(
+			root,
+			"1.0.0",
+			localDependencyTarballs
+				? {
+						dependencies: localDependencyTarballs.map((path) => resolve(cwd, path)),
+						main: "base-context-old.tgz",
+					}
+				: undefined,
+		);
+		const operation = {
+			root,
+			expected: null as InstallSelection | null,
+			installSpec: "base-context-old.tgz",
+			version: "1.0.0",
+			...(localDependencyTarballs ? { localDependencyTarballs } : {}),
+		};
+		const callsStart = mockState.calls.length;
+		const pending = installOwnedRelease(operation);
+		// The operation owns its original inputs while its npm boundary is pending.
+		operation.root = join(tempDir, "not-the-original-root");
+		operation.expected = { generation: "not-the-original-generation", active: "other", previous: null };
+		operation.installSpec = "not-the-original-package.tgz";
+		operation.version = "2.0.0";
+		if (localDependencyTarballs) {
+			localDependencyTarballs.splice(0, localDependencyTarballs.length, "not-the-original-dependency.tgz");
+			operation.localDependencyTarballs = ["late-dependency.tgz"];
+			process.chdir(tempDir);
+		}
+		try {
+			const activated = await pending;
+			expect(mockState.calls.slice(callsStart).filter((call) => call.startsWith("spawn:npm "))).toHaveLength(1);
+			return activated;
+		} finally {
+			process.chdir(cwd);
+		}
+	}
+
 	function createAcceptedRecoveryManifest(nextTurn: MockCustomMessage[] = []): MockUpdateRestartManifest {
 		return {
 			formatVersion: 1,
@@ -500,6 +639,8 @@ describe("self-update daemon restart", () => {
 		mockState.restoreActionFailures = 0;
 		mockState.restoreNextTurnFailures = 0;
 		mockState.spawnExitCodes = [];
+		mockState.ownedBoundary = undefined;
+		mockState.coordinatorInstallation = undefined;
 		mockState.shutdownResult = true;
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(join(agentDir, "daemon-update-restarts"), { recursive: true });
@@ -507,13 +648,13 @@ describe("self-update daemon restart", () => {
 		mkdirSync(packageDir, { recursive: true });
 
 		originalAgentDir = process.env[ENV_AGENT_DIR];
-		originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+		originalPiPackageDir = process.env.BASE_CONTEXT_PACKAGE_DIR;
 		originalCwd = process.cwd();
 		originalExecPath = process.execPath;
 		originalExitCode = process.exitCode;
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
-		process.env.PI_PACKAGE_DIR = packageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 		process.chdir(projectDir);
 		Object.defineProperty(process, "execPath", {
 			value: join(packageDir, "dist", "cli.js"),
@@ -536,9 +677,9 @@ describe("self-update daemon restart", () => {
 			process.env[ENV_AGENT_DIR] = originalAgentDir;
 		}
 		if (originalPiPackageDir === undefined) {
-			delete process.env.PI_PACKAGE_DIR;
+			delete process.env.BASE_CONTEXT_PACKAGE_DIR;
 		} else {
-			process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+			process.env.BASE_CONTEXT_PACKAGE_DIR = originalPiPackageDir;
 		}
 		delete process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV];
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
@@ -569,7 +710,7 @@ describe("self-update daemon restart", () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ version: "0.2.6" })),
+			vi.fn(async () => Response.json({ version: VERSION })),
 		);
 
 		await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
@@ -608,6 +749,7 @@ describe("self-update daemon restart", () => {
 		mockState.spawnExitCodes = [23];
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update");
 
 		try {
 			await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
@@ -616,7 +758,104 @@ describe("self-update daemon restart", () => {
 			expect(mockState.calls).toContain("probe-daemon");
 			expect(mockState.calls.some((call) => call === "daemon-request:prepare_update_restart")).toBe(false);
 			expect(mockState.calls.some((call) => call === "shutdown-daemon")).toBe(false);
+
+			// Failed lookup must reach the CLI reporter unchanged, even with --force.
+			const callsBeforeLookup = [...mockState.calls];
+			const logsBeforeLookup = logSpy.mock.calls.length;
+			const lookupError = new Error("release lookup transport failed");
+			vi.stubGlobal("fetch", vi.fn().mockRejectedValueOnce(lookupError));
+			await expect(handlePackageCommand(["update", "--self", "--force"])).resolves.toBe(true);
+			expect(process.exitCode).toBe(1);
+			expect(errorSpy.mock.calls.at(-1)?.[0]).toContain(lookupError.message);
+			expect(mockState.calls).toEqual(callsBeforeLookup);
+			expect(logSpy.mock.calls).toHaveLength(logsBeforeLookup);
+
+			// Preserve an earlier accepted extension update; an unavailable release is NOT self-update success.
+			const extensionEffect = join(projectDir, "accepted-extension-update");
+			updateSpy.mockImplementationOnce(async () => {
+				writeFileSync(extensionEffect, "completed");
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response(null, { status: 503 })),
+			);
+			process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+			await expect(handlePackageCommand(["update", "--force"])).resolves.toBe(true);
+			expect(process.exitCode).toBe(1);
+			expect(errorSpy.mock.calls.at(-1)?.[0]).toContain(
+				"release lookup is unavailable; self-update was not attempted",
+			);
+			expect(mockState.calls).toEqual(callsBeforeLookup);
+			expect(readFileSync(extensionEffect, "utf8")).toBe("completed");
+			expect(logSpy.mock.calls.slice(logsBeforeLookup)).toHaveLength(1);
+			expect(logSpy.mock.calls.at(-1)?.[0]).toContain("Updated packages");
+
+			// A failed candidate runtime cannot replace the actual previously selected pair.
+			delete process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => Response.json({ version: "999.0.0" })),
+			);
+			const previous = await createOwnedFixture();
+			const originalSelection = readFileSync(join(previous.installation.root, "current.json"), "utf8");
+			const physical = vi
+				.spyOn(configModule, "getPhysicalPackageDir")
+				.mockReturnValue(previous.installation.packageDir);
+			process.env.BASE_CONTEXT_PACKAGE_DIR = previous.installation.packageDir;
+			const oldPythonOverride = process.env.BASE_CONTEXT_KERNEL_PYTHON;
+			const oldVenvOverride = process.env.BASE_CONTEXT_KERNEL_VENV;
+			process.env.BASE_CONTEXT_KERNEL_PYTHON = join(previous.installation.runtimeDir, "bin", "python");
+			process.env.BASE_CONTEXT_KERNEL_VENV = previous.installation.runtimeDir;
+			useOwnedProcessBoundary(previous.installation.root, "999.0.0");
+			mockState.spawnExitCodes = [0, 23];
+			const ownedCallsStart = mockState.calls.length;
+			try {
+				await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+				expect(process.exitCode).toBe(1);
+				expect(readFileSync(join(previous.installation.root, "current.json"), "utf8")).toBe(originalSelection);
+				expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");
+				expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
+				expect(readFileSync(extensionEffect, "utf8")).toBe("completed");
+				const calls = mockState.calls.slice(ownedCallsStart);
+				expect(calls.some((call) => call.includes("installer.mjs prepare"))).toBe(true);
+				expect(calls.some((call) => call.startsWith("launch-coordinator:") || call === "shutdown-daemon")).toBe(
+					false,
+				);
+				expect(errorSpy.mock.calls.at(-1)?.[0]).toContain("Base-Context preparation failed");
+
+				// The same preparation failure with local dependencies cannot select a different pair.
+				const dependency = join(projectDir, "local-sdk-failed.tgz");
+				writeFileSync(dependency, JSON.stringify({ name: "@ponythewhite/base-context-ai", version: "999.0.0" }));
+				useOwnedProcessBoundary(previous.installation.root, "999.0.0", {
+					dependencies: [dependency],
+					main: "base-context-local.tgz",
+				});
+				mockState.spawnExitCodes = [0, 23];
+				const localCallsStart = mockState.calls.length;
+				await expect(
+					installOwnedRelease({
+						root: previous.installation.root,
+						expected: previous.selection,
+						installSpec: "base-context-local.tgz",
+						version: "999.0.0",
+						localDependencyTarballs: [dependency],
+					}),
+				).rejects.toThrow("Base-Context preparation failed");
+				expect(mockState.calls.slice(localCallsStart).filter((call) => call.startsWith("spawn:npm "))).toHaveLength(
+					1,
+				);
+				expect(readFileSync(join(previous.installation.root, "current.json"), "utf8")).toBe(originalSelection);
+				expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");
+				expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
+			} finally {
+				physical.mockRestore();
+				if (oldPythonOverride === undefined) delete process.env.BASE_CONTEXT_KERNEL_PYTHON;
+				else process.env.BASE_CONTEXT_KERNEL_PYTHON = oldPythonOverride;
+				if (oldVenvOverride === undefined) delete process.env.BASE_CONTEXT_KERNEL_VENV;
+				else process.env.BASE_CONTEXT_KERNEL_VENV = oldVenvOverride;
+			}
 		} finally {
+			updateSpy.mockRestore();
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
 		}
@@ -624,10 +863,18 @@ describe("self-update daemon restart", () => {
 
 	it("defers the exact custom-socket restart to the interactive parent", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
+		// Force can reinstall a KNOWN same-version release, not bypass the lookup.
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ version: VERSION })),
+		);
 		const customSocketPath = join(tempDir, "custom", "daemon.sock");
 
-		await expect(handlePackageCommand(["update", "--self", "--daemon-socket", customSocketPath])).resolves.toBe(true);
+		await expect(
+			handlePackageCommand(["update", "--self", "--force", "--daemon-socket", customSocketPath]),
+		).resolves.toBe(true);
 
+		expect(process.exitCode).toBeUndefined();
 		expect(mockState.probeSocketPaths).toEqual([customSocketPath]);
 		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(true);
 		expect(mockState.calls.some((call) => call.startsWith("launch-coordinator:"))).toBe(false);
@@ -905,6 +1152,53 @@ describe("self-update daemon restart", () => {
 			expect(ensureIndex).toBeGreaterThan(releaseAdmissionIndex);
 			expect(ensureIndex).toBeGreaterThan(shutdownIndex);
 			expect(statSync(join(agentDir, "update-restarts", "test-status.json")).mode & 0o777).toBe(0o600);
+
+			// The real installation owner commits both selections; npm/Python alone are offline boundaries.
+			const dependencies = ["local-sdk-core.tgz", "local-sdk agent.tgz"];
+			for (const [index, dependency] of dependencies.entries()) {
+				// Names come from fake tar metadata, not these unrelated filenames.
+				writeFileSync(
+					join(projectDir, dependency),
+					JSON.stringify({
+						name: ["@ponythewhite/base-context-ai", "@ponythewhite/base-context-agent"][index],
+						version: "1.0.0",
+					}),
+				);
+			}
+			const previous = await createOwnedFixture(dependencies);
+			expect(readFileSync(installedCli(previous.installation), "utf8")).toBe("CLI 1.0.0");
+			expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
+			const physical = vi
+				.spyOn(configModule, "getPhysicalPackageDir")
+				.mockReturnValue(previous.installation.packageDir);
+			process.env.BASE_CONTEXT_PACKAGE_DIR = previous.installation.packageDir;
+			useOwnedProcessBoundary(previous.installation.root, "999.0.0");
+			const ownedCallsStart = mockState.calls.length;
+			try {
+				await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
+				expect(process.exitCode).toBeUndefined();
+				const selected = readInstallSelection(previous.installation.root)!;
+				expect(selected.active).not.toBe(previous.selection.active);
+				expect(selected.previous).toBe(previous.selection.active);
+				const current = ownedVersion(previous.installation.root, selected.active);
+				expect(readFileSync(installedCli(current), "utf8")).toBe("CLI 999.0.0");
+				expect(readFileSync(join(current.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 999.0.0");
+				expect(readFileSync(join(previous.installation.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 1.0.0");
+				expect(selectedUpdateInstallation()?.packageDir).toBe(current.packageDir);
+				expect(mockState.coordinatorInstallation?.packageDir).toBe(current.packageDir);
+				const calls = mockState.calls.slice(ownedCallsStart);
+				const prepared = calls.findIndex((call) => call.includes("installer.mjs prepare"));
+				expect(prepared).toBeGreaterThanOrEqual(0);
+				expect(calls.findIndex((call) => call.startsWith("launch-coordinator:"))).toBeGreaterThan(prepared);
+				const rolledBack = rollbackOwnedRelease(previous.installation.root, selected);
+				expect(rolledBack.selection.active).toBe(previous.selection.active);
+				expect(rolledBack.selection.previous).toBe(selected.active);
+				expect(rolledBack.selection.generation).not.toBe(previous.selection.generation);
+				expect(readFileSync(installedCli(current), "utf8")).toBe("CLI 999.0.0");
+				expect(readFileSync(join(current.runtimeDir, "bin", "python"), "utf8")).toBe("runtime 999.0.0");
+			} finally {
+				physical.mockRestore();
+			}
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
@@ -1311,6 +1605,11 @@ describe("self-update daemon restart", () => {
 			display: true,
 			timestamp: Date.now(),
 		};
+		const selectedSkillRef = {
+			sessionId: "session-1",
+			sessionFile: join(projectDir, "session.jsonl"),
+			entryId: "selected-skill-1",
+		};
 		const recoveredAction: MockRecoveryAction = {
 			id: "action-1",
 			source: "internal",
@@ -1321,6 +1620,7 @@ describe("self-update daemon restart", () => {
 			payload: {
 				kind: "turn",
 				text: "heartbeat body",
+				selectedSkillRef,
 				customMessage,
 				records: [
 					{
@@ -1346,7 +1646,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(projectDir, "session.jsonl"),
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: { actions: { formatVersion: 1, actions: [recoveredAction] }, nextTurn: [] },
+					queue: { actions: { formatVersion: 2, actions: [recoveredAction] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1365,8 +1665,60 @@ describe("self-update daemon restart", () => {
 			expect(mockState.requestPayloads).toContainEqual({
 				type: "restore_actions",
 				activeSessionId: "restored-active",
-				snapshot: { formatVersion: 1, actions: [recoveredAction] },
+				snapshot: { formatVersion: 2, actions: [recoveredAction] },
 			});
+			// The actual restart parser must reject an invalid ref and must not downgrade a binding to format 1.
+			const session = mockState.prepareManifest.sessions[0]!;
+			mockState.prepareResponse = {
+				success: true,
+				data: {
+					...mockState.prepareManifest,
+					sessions: [
+						{
+							...session,
+							queue: {
+								...session.queue,
+								actions: {
+									formatVersion: 2,
+									actions: [
+										{
+											...recoveredAction,
+											payload: {
+												...recoveredAction.payload,
+												selectedSkillRef: { ...selectedSkillRef, entryId: 7 },
+											},
+										},
+									],
+								},
+							},
+						},
+					],
+				},
+			};
+			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).rejects.toThrow(
+				"Daemon update restart response is missing session actions",
+			);
+			mockState.prepareResponse = {
+				success: true,
+				data: {
+					...mockState.prepareManifest,
+					sessions: [
+						{
+							...session,
+							queue: {
+								...session.queue,
+								actions: {
+									formatVersion: 1,
+									actions: [recoveredAction],
+								},
+							},
+						},
+					],
+				},
+			};
+			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).rejects.toThrow(
+				"Daemon update restart response is missing session actions",
+			);
 			mockState.prepareResponse = {
 				success: true,
 				data: { ...mockState.prepareManifest, formatVersion: 2 },

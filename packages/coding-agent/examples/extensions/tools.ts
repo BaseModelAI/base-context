@@ -9,9 +9,9 @@
  * 2. Use /tools to open the tool selector
  */
 
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, type SettingItem, SettingsList } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@ponythewhite/base-context";
+import { getSettingsListTheme } from "@ponythewhite/base-context";
+import { Container, type SettingItem, SettingsList } from "@ponythewhite/base-context-tui";
 
 // State persisted to session
 interface ToolsState {
@@ -36,11 +36,14 @@ export default function toolsExtension(pi: ExtensionAPI) {
 	}
 
 	// Find the last tools-config entry in the current branch
-	function restoreFromBranch(ctx: ExtensionContext) {
+	async function restoreFromBranch(ctx: ExtensionContext) {
 		allTools = pi.getAllTools();
 
 		// Get entries in current branch only
-		const branchEntries = ctx.sessionManager.getBranch();
+		const branchEntries = await ctx.sessionManager.readBranch(undefined, {
+			maxEntries: 16_384,
+			maxSourceBytes: 64 * 1024 * 1024,
+		});
 		let savedTools: string[] | undefined;
 
 		for (const entry of branchEntries) {
@@ -131,11 +134,11 @@ export default function toolsExtension(pi: ExtensionAPI) {
 
 	// Restore state on session start
 	pi.on("session_start", async (_event, ctx) => {
-		restoreFromBranch(ctx);
+		await restoreFromBranch(ctx);
 	});
 
 	// Restore state when navigating the session tree
 	pi.on("session_tree", async (_event, ctx) => {
-		restoreFromBranch(ctx);
+		await restoreFromBranch(ctx);
 	});
 }

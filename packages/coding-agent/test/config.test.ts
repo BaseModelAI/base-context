@@ -4,7 +4,6 @@ import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
-	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
 	getDaemonLogPath,
 	getSelfUpdateCommand,
@@ -16,7 +15,8 @@ import { getDefaultSessionDir } from "../src/core/session-manager.js";
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
 const originalPath = process.env.PATH;
-const originalPiPackageDir = process.env.PI_PACKAGE_DIR;
+const ENV_LEGACY_SESSION_DIR = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
+const originalPiPackageDir = process.env.BASE_CONTEXT_PACKAGE_DIR;
 const originalSessionDir = process.env[ENV_SESSION_DIR];
 const originalLegacySessionDir = process.env[ENV_LEGACY_SESSION_DIR];
 let tempDir: string | undefined;
@@ -38,9 +38,9 @@ afterEach(() => {
 		process.env.PATH = originalPath;
 	}
 	if (originalPiPackageDir === undefined) {
-		delete process.env.PI_PACKAGE_DIR;
+		delete process.env.BASE_CONTEXT_PACKAGE_DIR;
 	} else {
-		process.env.PI_PACKAGE_DIR = originalPiPackageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = originalPiPackageDir;
 	}
 	if (originalSessionDir === undefined) {
 		delete process.env[ENV_SESSION_DIR];
@@ -66,7 +66,7 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 	const packageDir = join(scopeDir, "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { prefix, packageDir };
 }
@@ -76,7 +76,7 @@ function createHomebrewInstall(): { packageDir: string } {
 	const packageDir = join(prefix, "Cellar", "prime-agent", "0.7.0", "libexec", "lib", "node_modules", "prime-agent");
 	mkdirSync(packageDir, { recursive: true });
 	tempDir = prefix;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
@@ -92,7 +92,7 @@ function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(
 		join(
 			root,
@@ -119,7 +119,7 @@ function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
 	chmodSync(join(binDir, process.platform === "win32" ? "yarn.cmd" : "yarn"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(globalDir, ".yarn", "@mariozechner", "pi-coding-agent", "dist", "cli.js"));
 	return { globalDir, packageDir };
 }
@@ -137,7 +137,7 @@ function createBunGlobalInstall(): { packageDir: string } {
 	chmodSync(join(bunBin, process.platform === "win32" ? "bun.cmd" : "bun"), 0o755);
 	tempDir = temp;
 	process.env.PATH = `${bunBin}${delimiter}${originalPath ?? ""}`;
-	process.env.PI_PACKAGE_DIR = packageDir;
+	process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
@@ -173,8 +173,8 @@ describe("detectInstallMethod", () => {
 		);
 
 		expect(detectInstallMethod()).toBe("pnpm");
-		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
-			"Run: pnpm install -g @earendil-works/pi-coding-agent",
+		expect(getUpdateInstruction("@ponythewhite/base-context")).toBe(
+			"Run: pnpm install -g @ponythewhite/base-context",
 		);
 	});
 
@@ -182,9 +182,9 @@ describe("detectInstallMethod", () => {
 		setExecPath("/usr/local/bin/node");
 
 		expect(detectInstallMethod()).toBe("unknown");
-		expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent")).toBeUndefined();
-		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
-			"Update @earendil-works/pi-coding-agent using the package manager, wrapper, or source checkout that provides this installation.",
+		expect(getSelfUpdateCommand("@ponythewhite/base-context")).toBeUndefined();
+		expect(getUpdateInstruction("@ponythewhite/base-context")).toBe(
+			"Update @ponythewhite/base-context using the package manager, wrapper, or source checkout that provides this installation.",
 		);
 	});
 
@@ -193,20 +193,20 @@ describe("detectInstallMethod", () => {
 
 		expect(detectInstallMethod()).toBe("homebrew");
 		expect(getSelfUpdateCommand("prime-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
-		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade prime-agent");
+		expect(getSelfUpdateUnavailableInstruction("prime-agent")).toBe("Update with: brew upgrade base-context");
+		expect(getUpdateInstruction("prime-agent")).toBe("Update with: brew upgrade base-context");
 	});
 
 	test("self-updates npm installs from custom prefixes", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+		const command = getSelfUpdateCommand("@ponythewhite/base-context");
 
 		expect(detectInstallMethod()).toBe("npm");
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "@earendil-works/pi-coding-agent"],
-			display: `npm --prefix ${prefix} install -g @earendil-works/pi-coding-agent`,
+			args: ["--prefix", prefix, "install", "-g", "@ponythewhite/base-context"],
+			display: `npm --prefix ${prefix} install -g @ponythewhite/base-context`,
 		});
 	});
 
@@ -238,7 +238,7 @@ describe("detectInstallMethod", () => {
 		const { prefix } = createNpmPrefixInstall();
 		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-0.73.0.tgz";
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", undefined, tarballUrl);
+		const command = getSelfUpdateCommand("@ponythewhite/base-context", undefined, tarballUrl);
 
 		expect(command).toEqual({
 			command: "npm",
@@ -251,12 +251,12 @@ describe("detectInstallMethod", () => {
 		const { prefix } = createNpmPrefixInstall();
 		const tarballUrl = "https://downloads.example.test/prime-agent/prime-agent-0.73.0.tgz";
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", undefined, tarballUrl, "prime-agent");
+		const command = getSelfUpdateCommand("@ponythewhite/base-context", undefined, tarballUrl, "prime-agent");
 
 		expect(command).toEqual({
 			command: "npm",
 			args: ["--prefix", prefix, "install", "-g", tarballUrl],
-			display: `npm --prefix ${prefix} install -g ${tarballUrl} && npm --prefix ${prefix} uninstall -g @earendil-works/pi-coding-agent`,
+			display: `npm --prefix ${prefix} install -g ${tarballUrl} && npm --prefix ${prefix} uninstall -g @ponythewhite/base-context`,
 			steps: [
 				{
 					command: "npm",
@@ -265,8 +265,8 @@ describe("detectInstallMethod", () => {
 				},
 				{
 					command: "npm",
-					args: ["--prefix", prefix, "uninstall", "-g", "@earendil-works/pi-coding-agent"],
-					display: `npm --prefix ${prefix} uninstall -g @earendil-works/pi-coding-agent`,
+					args: ["--prefix", prefix, "uninstall", "-g", "@ponythewhite/base-context"],
+					display: `npm --prefix ${prefix} uninstall -g @ponythewhite/base-context`,
 				},
 			],
 		});
@@ -275,52 +275,50 @@ describe("detectInstallMethod", () => {
 	test("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", ["npm", "--prefix", prefix]);
+		const command = getSelfUpdateCommand("@ponythewhite/base-context", ["npm", "--prefix", prefix]);
 
 		expect(command).toEqual({
 			command: "npm",
-			args: ["--prefix", prefix, "install", "-g", "@earendil-works/pi-coding-agent"],
-			display: `npm --prefix ${prefix} install -g @earendil-works/pi-coding-agent`,
+			args: ["--prefix", prefix, "install", "-g", "@ponythewhite/base-context"],
+			display: `npm --prefix ${prefix} install -g @ponythewhite/base-context`,
 		});
 	});
 
 	test("self-update treats empty npmCommand as unset", () => {
 		const { prefix } = createNpmPrefixInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent", []);
+		const command = getSelfUpdateCommand("@ponythewhite/base-context", []);
 
-		expect(command?.args).toEqual(["--prefix", prefix, "install", "-g", "@earendil-works/pi-coding-agent"]);
+		expect(command?.args).toEqual(["--prefix", prefix, "install", "-g", "@ponythewhite/base-context"]);
 	});
 
 	test("quotes npm self-update display paths", () => {
 		const { prefix } = createNpmPrefixInstall("pi prefix ");
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+		const command = getSelfUpdateCommand("@ponythewhite/base-context");
 
-		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g @earendil-works/pi-coding-agent`);
+		expect(command?.display).toBe(`npm --prefix "${prefix}" install -g @ponythewhite/base-context`);
 	});
 
 	test("does not infer Windows npm custom prefixes from package paths", () => {
 		const packageDir = "C:\\Users\\Admin\\npm prefix\\node_modules\\@earendil-works\\pi-coding-agent";
-		process.env.PI_PACKAGE_DIR = packageDir;
+		process.env.BASE_CONTEXT_PACKAGE_DIR = packageDir;
 		setExecPath(`${packageDir}\\dist\\cli.js`);
 
 		expect(detectInstallMethod()).toBe("npm");
-		expect(getUpdateInstruction("@earendil-works/pi-coding-agent")).toBe(
-			"Run: npm install -g @earendil-works/pi-coding-agent",
-		);
+		expect(getUpdateInstruction("@ponythewhite/base-context")).toBe("Run: npm install -g @ponythewhite/base-context");
 	});
 
 	test("self-updates bun global installs from bun pm bin", () => {
 		createBunGlobalInstall();
 
-		const command = getSelfUpdateCommand("@earendil-works/pi-coding-agent");
+		const command = getSelfUpdateCommand("@ponythewhite/base-context");
 
 		expect(detectInstallMethod()).toBe("bun");
 		expect(command).toEqual({
 			command: "bun",
-			args: ["install", "-g", "@earendil-works/pi-coding-agent"],
-			display: "bun install -g @earendil-works/pi-coding-agent",
+			args: ["install", "-g", "@ponythewhite/base-context"],
+			display: "bun install -g @ponythewhite/base-context",
 		});
 	});
 
@@ -403,8 +401,8 @@ describe("detectInstallMethod", () => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
 
-		expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent")).toContain(
+		expect(getSelfUpdateCommand("@ponythewhite/base-context")).toBeUndefined();
+		expect(getSelfUpdateUnavailableInstruction("@ponythewhite/base-context")).toContain(
 			"the install path is not writable",
 		);
 	});
@@ -412,7 +410,7 @@ describe("detectInstallMethod", () => {
 
 describe("session paths", () => {
 	test("uses the short app-prefixed session dir env var", () => {
-		expect(ENV_SESSION_DIR).toBe("PRIME_AGENT_SESSION_DIR");
+		expect(ENV_SESSION_DIR).toBe("BASE_CONTEXT_SESSION_DIR");
 	});
 
 	test("uses the session root env var when computing sessions dir", () => {
@@ -422,12 +420,12 @@ describe("session paths", () => {
 		expect(getSessionsDir("/agent")).toBe(sessionRoot);
 	});
 
-	test("uses the legacy coding agent session root env var when the new env var is unset", () => {
+	test("ignores the legacy coding agent session root env var", () => {
 		const sessionRoot = join(tmpdir(), `pi-legacy-session-root-${Date.now()}`);
 		delete process.env[ENV_SESSION_DIR];
 		process.env[ENV_LEGACY_SESSION_DIR] = sessionRoot;
 
-		expect(getSessionsDir("/agent")).toBe(sessionRoot);
+		expect(getSessionsDir("/agent")).toBe(join("/agent", "sessions"));
 	});
 
 	test("expands tilde in the session root env var", () => {

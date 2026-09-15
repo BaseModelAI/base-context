@@ -1,4 +1,5 @@
-import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
+import { registerSessionResourceCleanup } from "@ponythewhite/base-context-ai";
+import type { NativeRecoveryResponse } from "../selective-recovery.js";
 import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootstrap.js";
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 
@@ -25,7 +26,17 @@ export class KernelBusyAfterInterruptError extends Error {
  * Handles one typed request from Python code running in the kernel.
  * The returned record is delivered verbatim to the Python caller.
  */
-export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
+export interface HostRequestContext {
+	/** Actual active tool/cell cancellation; never read from the Python payload. */
+	signal?: AbortSignal;
+	/** A host-reserved share of this cell's aggregate recovery response budget. */
+	nativeRecovery?: { maxBytes: number };
+}
+
+export type HostRequestHandler = (
+	payload: Record<string, unknown>,
+	context?: HostRequestContext,
+) => Promise<Record<string, unknown>>;
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
@@ -66,6 +77,10 @@ export interface KernelStartOptions {
 }
 
 export interface ExecuteOptions {
+	/** Only a finalized ipython tool call can retain recovery output; not bootstrap/state cells. */
+	nativeRecovery?: boolean;
+	/** @internal Host-only closure captured by the admitted owned executor; never sent to Python. */
+	runNativeRecovery?: <T>(read: () => Promise<T>) => Promise<T>;
 	/** Aborting interrupts the kernel out-of-band. */
 	signal?: AbortSignal;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
@@ -126,6 +141,8 @@ export interface KernelSentAgentMessage {
 }
 
 export interface ExecuteResult {
+	/** Host-selected public data transferred once to the normal finalized ipython result. */
+	nativeRecoveries?: NativeRecoveryResponse[];
 	stdout: string;
 	stderr: string;
 	/** Text of the cell's trailing expression value, if the cell produced one. */
@@ -274,6 +291,20 @@ export function createDeferred<T>(): Deferred<T> {
 export interface KernelShutdownOptions {
 	snapshot?: boolean;
 	drainHostRequests?: boolean;
+}
+
+/** A bounded owned lifecycle observation, not a namespace, restore, or live-health assertion. */
+export interface KernelLifecycleState {
+	readonly source: "repl-manager" | "ipython-provisioner" | "unobserved";
+	readonly owner: string | null;
+	readonly generation: number | null;
+	readonly state: "idle" | "starting" | "running" | "shutdown" | "provisioning" | "disposed" | "unobserved";
+}
+
+export interface CapturedKernelLifecycle {
+	readonly snapshot: Readonly<KernelLifecycleState>;
+	/** Checks the original observation; it never probes or substitutes a newer snapshot. */
+	isCurrent(): boolean;
 }
 
 /** Public surface every kernel client exposes to the provisioner and session layer. */

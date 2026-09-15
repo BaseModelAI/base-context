@@ -10,7 +10,7 @@ import type {
 	TextContent,
 	Tool,
 	ToolResultMessage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import type { Static, TSchema } from "typebox";
 
 /**
@@ -25,6 +25,23 @@ import type { Static, TSchema } from "typebox";
 export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => ReturnType<typeof streamSimple> | Promise<ReturnType<typeof streamSimple>>;
+
+export interface AgentContextProjection {
+	messages: AgentMessage[];
+	/**
+	 * Adopt this complete working set in the owning Agent and loop, not only for inference.
+	 * It must include the current turn and pending tool closure. This is not a last-N tail.
+	 * Omitted/false preserves the existing inference-only projection behavior.
+	 */
+	adoptMessages?: boolean;
+	streamContext?: unknown;
+	release?: () => Promise<void>;
+}
+
+// biome-ignore lint/suspicious/noConfusingVoidType: this return contract accepts existing Promise<void> context barriers.
+export type AgentContextBuildResult = void | AgentContextProjection;
+
+export type AgentOwnedStreamFn = (...args: [...Parameters<StreamFn>, streamContext?: unknown]) => ReturnType<StreamFn>;
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -101,7 +118,61 @@ export interface AfterToolCallContext {
 	context: AgentContext;
 }
 
-/** Context passed to `shouldStopAfterTurn` and `getContinuationMessages`. */
+/** What is known about the actual invocation, independently of middleware result overrides. */
+export type ToolExecutionOutcome = "not_started" | "completed" | "failed" | "outcome_unknown";
+
+/** Immutable invocation admitted by the execution owner before the tool can run. */
+export interface ToolInvocation {
+	readonly executionId: string;
+	readonly sourceOrder: number;
+	readonly toolCallId: string;
+	readonly toolName: string;
+	/** Snapshot before argument preparation, validation, or tool middleware. */
+	readonly originalInput: unknown;
+	/** Arguments reserved for this invocation, not a live middleware object. */
+	readonly executedInput: unknown;
+	readonly toolExecution: ToolExecutionMode;
+}
+
+/** @internal Per-invocation owner closure; never serialized or supplied by result metadata. */
+export interface BoundToolExecution {
+	run(execute: () => Promise<AgentToolResult<unknown>>): Promise<AgentToolResult<unknown>>;
+	finalize(exchange: FinalizedToolExchange, signal?: AbortSignal): void | Promise<void>;
+}
+
+/** Finalized source evidence; parallel exchanges retain assistant call order via sourceOrder. */
+export interface FinalizedToolExchange extends Omit<ToolInvocation, "executedInput"> {
+	/** Snapshot at invocation; absent when execution never started. */
+	readonly executedInput?: unknown;
+	/** An aborted wait does not establish whether an external effect stopped. */
+	readonly executionOutcome: ToolExecutionOutcome;
+	readonly cancellationRequested: boolean;
+	/** Final middleware result, also used for the tool-result message. */
+	readonly result: ToolResultMessage;
+}
+
+/** Limits on the complete invocation result, not the working context or observer queues. */
+export interface AgentOutputLimits {
+	maxMessages: number;
+	maxSourceBytes: number;
+}
+
+export interface AgentOutputRefusal extends AgentOutputLimits {
+	kind: "output_limit";
+	limit: "messages" | "source_bytes" | "value_encoding";
+}
+
+export interface AgentOutputPolicy {
+	limits: AgentOutputLimits;
+	/** Optional native update feed. Its synchronous refresh never revokes an ACK or throws a quota error. */
+	bindUpdates?(refresh: (message: AgentMessage) => boolean): () => void;
+	/** Close update admission and join the updates already accepted at this terminal boundary. */
+	settleUpdates?(): Promise<void>;
+	/** Copy one finalized value within the supplied JSON-byte budget; undefined means it does not fit. */
+	snapshot(message: AgentMessage, maxSourceBytes: number): { message: AgentMessage; sourceBytes: number } | undefined;
+}
+
+/** Context passed to `shouldStopAfterTurn` and both continuation callbacks. */
 export interface ShouldStopAfterTurnContext {
 	/** Assistant message that completed the turn. */
 	message: AssistantMessage;
@@ -113,10 +184,40 @@ export interface ShouldStopAfterTurnContext {
 	newMessages: AgentMessage[];
 }
 
+/** The finalized loop decision, not a guess from the rendered message tail. */
+export interface GetTurnOutcomeContext extends ShouldStopAfterTurnContext {
+	hasMoreToolCalls: boolean;
+}
+
+/** Control before queue polling; proceed keeps the ordinary loop policy. */
+export type AgentTurnOutcome = { kind: "proceed" | "finish" | "checkpoint_then_continue" | "cancelled" };
+
 export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
+/** Runtime control at a natural turn boundary; message payload does not decide whether to restart. */
+export type AgentContinuationOutcome =
+	| { kind: "continue"; messages: AgentMessage[] }
+	| { kind: "finish" | "wait_for_owned_work" | "cancelled" };
+
 export interface AgentLoopConfig extends SimpleStreamOptions {
+	/** Opt-in bounded finalized results. Native sinks must join their message_end job. */
+	outputPolicy?: AgentOutputPolicy;
 	model: Model<any>;
+
+	/** Native owner barrier before transform/convert. Rejection stops context construction. */
+	beforeContextBuild?: () => Promise<AgentContextBuildResult>;
+
+	/** Internal state mirror for adopted working sets. Awaited and excluded from provider options. */
+	onContextAdopted?: (messages: AgentMessage[]) => void | Promise<void>;
+
+	/** Native owner recovery after an unsent request's projection has been released. */
+	recoverRequestPreparation?: (error: unknown, signal?: AbortSignal) => Promise<boolean>;
+
+	/** Retry a settled provider failure within this invocation and its output allowance. */
+	recoverProviderFailure?: (message: AssistantMessage, signal?: AbortSignal) => Promise<boolean>;
+
+	/** Copied native owner callback; excluded from configured/provider stream options. */
+	ownedStreamFn?: AgentOwnedStreamFn;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -193,6 +294,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 
+	/** When present, this typed owner replaces shouldStopAfterTurn; it does not replace natural continuation. */
+	getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
+
 	/**
 	 * Called synchronously after a completed turn and before polling work for another turn.
 	 * Return true to emit `agent_end` without starting another provider call. Work returned by
@@ -243,11 +350,44 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
 
 	/**
+	 * Authoritative runtime continuation control, after steering and explicit follow-ups.
+	 * When present, only this callback is called; getContinuationMessages is not polled.
+	 * Only continue restarts this invocation. Waiting leaves future work with its existing owner.
+	 */
+	getContinuationOutcome?: (
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContinuationOutcome>;
+
+	/**
 	 * Tool execution mode. Defaults to `"parallel"`.
 	 * Parallel mode preflights calls sequentially, executes allowed calls concurrently, emits
 	 * `tool_execution_end` in completion order, then emits tool-result messages in assistant source order.
 	 */
 	toolExecution?: ToolExecutionMode;
+
+	/**
+	 * Awaited before invoking the tool. Rejection prevents execution and stops the loop.
+	 * The owner records intent here; admission is not proof that an external effect occurred.
+	 */
+	onToolInvocationStarting?: (
+		invocation: ToolInvocation,
+		signal: AbortSignal | undefined,
+		tool: AgentTool,
+		execute: AgentTool["execute"],
+		assistantMessage?: AssistantMessage,
+	) => void | BoundToolExecution | Promise<void> | Promise<BoundToolExecution | undefined>;
+
+	/**
+	 * Native execution owner, awaited after final middleware and before observer/result events.
+	 * Persist source evidence here. Rejection stops publication; this is not an observer hook.
+	 * Cancellation does not skip settlement. The owner must bound its own persistence work.
+	 */
+	onToolExchangeFinalized?: (
+		exchange: FinalizedToolExchange,
+		signal?: AbortSignal,
+		owner?: BoundToolExecution,
+	) => void | Promise<void>;
 
 	/**
 	 * Called before a tool is executed, after arguments have been validated.
@@ -275,7 +415,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 /**
  * Thinking/reasoning level for models that support it.
  * Note: "xhigh" and "max" are only supported by selected model families. Use model
- * thinking-level metadata from @earendil-works/pi-ai to detect support for a concrete model.
+ * thinking-level metadata from @ponythewhite/base-context-ai to detect support for a concrete model.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -390,10 +530,19 @@ export interface AgentContext {
 export type AgentEvent =
 	/** Starts and ends one agent run; `agent_end` carries all messages produced by that run. */
 	| { type: "agent_start" }
-	| { type: "agent_end"; messages: AgentMessage[] }
+	| { type: "agent_end"; messages: AgentMessage[]; refusal?: never }
+	| { type: "agent_end"; refusal: AgentOutputRefusal; messages?: never }
 	/** One assistant response and its resulting tool calls. */
 	| { type: "turn_start" }
-	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	| {
+			type: "turn_end";
+			message: AgentMessage;
+			toolResults: ToolResultMessage[];
+			/** Always populated by native execution; historical observer events may omit it. */
+			toolExecution?: ToolExecutionMode;
+			/** Settled calls in source order. Absent historical evidence is not reconstructed. */
+			exchanges?: readonly FinalizedToolExchange[];
+	  }
 	/** Lifecycle events for user, assistant, and tool-result messages. */
 	| { type: "message_start"; message: AgentMessage }
 	/** Only emitted for assistant messages during streaming. */
@@ -402,4 +551,12 @@ export type AgentEvent =
 	/** Tool execution events; parallel calls may end in completion rather than source order. */
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| {
+			type: "tool_execution_end";
+			toolCallId: string;
+			toolName: string;
+			result: any;
+			isError: boolean;
+			/** Always populated by native execution; absent for older observer events. */
+			exchange?: FinalizedToolExchange;
+	  };

@@ -40,7 +40,7 @@ const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 
 function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
+	const value = process.env.BASE_CONTEXT_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
 }
@@ -88,6 +88,7 @@ export interface ConfiguredPackage {
 	source: string;
 	scope: "user" | "project";
 	filtered: boolean;
+	inactive?: boolean;
 	installedPath?: string;
 }
 
@@ -940,6 +941,19 @@ export class DefaultPackageManager implements PackageManager {
 			});
 		}
 
+		for (const [settings, scope] of [
+			[globalSettings, "user"],
+			[projectSettings, "project"],
+		] as const) {
+			for (const pkg of settings.inactivePackages ?? []) {
+				configuredPackages.push({
+					source: typeof pkg === "string" ? pkg : pkg.source,
+					scope,
+					filtered: typeof pkg === "object",
+					inactive: true,
+				});
+			}
+		}
 		return configuredPackages;
 	}
 
@@ -968,7 +982,24 @@ export class DefaultPackageManager implements PackageManager {
 
 	async installAndPersist(source: string, options?: { local?: boolean }): Promise<void> {
 		await this.install(source, options);
-		this.addSourceToSettings(source, options);
+		const scope = options?.local ? "project" : "user";
+		const settings = options?.local
+			? this.settingsManager.getProjectSettings()
+			: this.settingsManager.getGlobalSettings();
+		const inactive = settings.inactivePackages ?? [];
+		const selected = inactive.find((pkg) => this.packageSourcesMatch(pkg, source, scope));
+		if (!selected) {
+			this.addSourceToSettings(source, options);
+			return;
+		}
+		const packages = [...(settings.packages ?? [])];
+		if (!packages.some((pkg) => this.packageSourcesMatch(pkg, source, scope))) {
+			const normalized = this.normalizePackageSourceForSettings(source, scope);
+			packages.push(typeof selected === "string" ? normalized : { ...selected, source: normalized });
+		}
+		const remaining = inactive.filter((pkg) => !this.packageSourcesMatch(pkg, source, scope));
+		if (options?.local) this.settingsManager.setProjectPackages(packages, remaining);
+		else this.settingsManager.setPackages(packages, remaining);
 	}
 
 	async remove(source: string, options?: { local?: boolean }): Promise<void> {

@@ -3,8 +3,8 @@
  * Uses Kitty keyboard protocol for smooth movement (press/release detection)
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, Key, matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
+import { isKeyRelease, Key, matchesKey, visibleWidth } from "@ponythewhite/base-context-tui";
 
 const GAME_WIDTH = 60;
 const GAME_HEIGHT = 24;
@@ -535,7 +535,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Load saved state from session
-			const entries = ctx.sessionManager.getEntries();
+			const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 			let savedState: GameState | undefined;
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const entry = entries[i];

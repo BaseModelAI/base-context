@@ -6,8 +6,49 @@ import { buildChildAgentDoctrine, buildRlmPrompt, buildSubagentGuidance } from "
 import { formatHarnessStateForPrompt, type HarnessState, REFINE_SKILL_NAME } from "./refinement/index.js";
 import { formatSkillsForPrompt, getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 
+// User-approved policy shared by every main model, including custom system prompts.
+const ABSOLUTE_PROHIBITION = [
+	"## Absolute Prohibition: No Verification Theater / Proof Boilerplate",
+	"",
+	"You are FORBIDDEN from inventing, adding, or expanding any of the following unless the user explicitly requests them in the current message:",
+	"",
+	'- Proofs of correctness, formal verification, or "proof harnesses"',
+	'- Ledgers, audit logs, provenance tracking, or event sourcing "for safety"',
+	"- Cryptographic hashes, checksums, integrity checks, or signature schemes",
+	'- Review loops, multi-stage validation pipelines, or "ensure this works" rituals',
+	"- Extra test suites, property-based tests, or mutation testing that go beyond the minimal happy-path + one edge case",
+	"- Over-cautious guardrails, legacy-compatibility layers, or defensive code for failure modes the user did not mention",
+	"",
+	"### Core Rule",
+	"**Build the actual thing first.**  ",
+	"Your job is to ship working, minimal, readable code that solves the stated problem.  ",
+	"Do **not** turn a simple feature request into a research project on correctness.",
+	"",
+	"### Enforcement",
+	"1. If the task is a prototype, MVP, script, or simple project → write the direct implementation. Stop.",
+	'2. Only add verification mechanisms when the user says words like "prove", "formally verify", "add ledger", "hash everything", or "make it bulletproof".',
+	"3. If you feel the urge to add any of the banned items, rewrite the plan to remove them before writing any code.",
+	"4. Prefer deleting code over adding protective boilerplate.",
+	"5. When in doubt: less is more. KISS is mandatory.",
+	"",
+	"Violation of this rule is considered a failure. Re-plan and ship the real feature instead.",
+].join("\n");
+
+const IMPLEMENTATION_CONTRACT = [
+	"## Implementation scope",
+	"",
+	"Implement the full stated input domain and required outputs, not only the cases present in the supplied data. Do not invent additional input formats or compatibility branches beyond that contract.",
+	"Preserve earlier requirements unless later instructions replace them. Apply stated eligibility, priorities, and decision order literally, even when a different policy seems simpler or more sensible; reevaluate later decisions when earlier actions change their inputs.",
+	"The required commands must implement the stated workflow from its stated starting state, without development-only state or extra steps.",
+	"During tool-based inspection of large datasets, request schemas or small samples. Process full inputs in local code instead of printing entire datasets into the conversation.",
+	"Do not repeat a successful check without a concrete reason, such as changed input, an edit, or an observed failure.",
+	"Choose algorithms whose time and memory costs fit the stated input limits.",
+	"For constrained search, prune known-impossible partial states before expanding them; do not postpone all feasibility checks until completed candidates.",
+	"Choose numeric representations and arithmetic precision for the stated domain, not sample values or library defaults. Follow supplied formulas and operation order; use exact arithmetic for discrete decisions instead of rounded intermediates. Preserve each output field’s units, precision, rounding and required text format.",
+].join("\n");
+
 export interface BuildSystemPromptOptions {
-	/** Custom system prompt (replaces default). */
+	/** Custom system prompt (replaces the default body; shared main-prompt policy remains). */
 	customPrompt?: string;
 	/** Active tools. Tool schemas carry tool descriptions outside the prompt body. */
 	selectedTools?: string[];
@@ -25,6 +66,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/** Actual native recovery authorization at this owned prompt build. */
+	nativeSkillSelection?: "enabled" | "unavailable";
 	/** Whether to include the model-facing rlm recursion guidance. */
 	allowRecursion?: boolean;
 	/** Fixed recursive-agent depth for this session. */
@@ -63,17 +106,22 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 
 	const contextFiles = providedContextFiles ?? [];
-	const skills = providedSkills ?? [];
+	const skills = options.nativeSkillSelection === "unavailable" ? [] : (providedSkills ?? []);
 	const tools = selectedTools ?? ["ipython"];
 	const hasIpython = tools.includes("ipython");
 	const hasBash = tools.includes("bash");
+	// Admit and capture the catalog before constructing skill-derived prompt text.
+	const skillCatalog =
+		(options.nativeSkillSelection === "enabled" || hasIpython || hasBash) && skills.length > 0
+			? formatSkillsForPrompt(skills, options.nativeSkillSelection === "enabled")
+			: "";
 	const visibleSkills = skills.filter((skill) => !skill.disableModelInvocation);
 	const visiblePythonSkillImportNames = getPythonSkillRuntimeInfo(visibleSkills).map((skill) => skill.importName);
 	const hasRefineSkill = visibleSkills.some((skill) => skill.name === REFINE_SKILL_NAME);
 	const genericMcpSection = hasIpython ? formatGenericMcpGuidance(options.genericMcpServers) : "";
 
 	if (customPrompt) {
-		let prompt = customPrompt;
+		let prompt = `${customPrompt}\n\n${ABSOLUTE_PROHIBITION}\n\n${IMPLEMENTATION_CONTRACT}`;
 
 		// Append project context files
 		if (contextFiles.length > 0) {
@@ -84,12 +132,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			}
 		}
 
-		// Append skills section only when the model has a way to inspect skill files.
-		const customPromptHasFileAccess =
-			!selectedTools || selectedTools.includes("ipython") || selectedTools.includes("bash");
-		if (customPromptHasFileAccess && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
-		}
+		prompt += skillCatalog;
 
 		// Add date and working directory last
 		prompt += `\nCurrent date: ${date}`;
@@ -130,6 +173,8 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		parentAgent: options.rlmParentAgent,
 	});
 
+	prompt += `\n\n${ABSOLUTE_PROHIBITION}\n\n${IMPLEMENTATION_CONTRACT}`;
+
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
 	// menu, so the model reads when/why to delegate and then sees the concrete subagent
 	// specs it can match against — the same ordering as Claude Code's Agent tool.
@@ -166,11 +211,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
-	// Append skills section only when the model has a way to inspect skill files.
-	const hasFileAccess = tools.includes("ipython") || tools.includes("bash");
-	if (hasFileAccess && skills.length > 0) {
-		prompt += formatSkillsForPrompt(skills);
-	}
+	prompt += skillCatalog;
 
 	if (appendSection) {
 		prompt += appendSection;

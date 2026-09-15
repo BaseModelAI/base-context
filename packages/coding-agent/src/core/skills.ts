@@ -1,5 +1,5 @@
-import { getLogger } from "@earendil-works/pi-ai";
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { getLogger } from "@ponythewhite/base-context-ai";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "fs";
 import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
@@ -10,6 +10,76 @@ import type { ResourceDiagnostic } from "./diagnostics.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 
 const log = getLogger("coding-agent.skills");
+
+/** Raw UTF-8 byte admission limits, not token or model-fit estimates. */
+export const SKILL_METADATA_MAX_BYTES = 16 * 1024;
+export const SKILL_FILE_MAX_BYTES = 1024 * 1024;
+
+function captureSkillText(filePath: string, metadataOnly: boolean): string {
+	const fd = openSync(filePath, "r");
+	let captured: string;
+	try {
+		const size = fstatSync(fd, { bigint: true }).size;
+		const maxBytes = metadataOnly ? SKILL_METADATA_MAX_BYTES : SKILL_FILE_MAX_BYTES;
+		if (!metadataOnly && size > BigInt(maxBytes)) throw new Error("Skill file byte limit exceeded");
+		const buffer = Buffer.alloc(Number(size < BigInt(maxBytes) ? size : BigInt(maxBytes)));
+		let offset = 0;
+		let metadataEnd: number | undefined;
+		while (offset < buffer.length) {
+			const count = readSync(
+				fd,
+				buffer,
+				offset,
+				Math.min(metadataOnly ? 1024 : 64 * 1024, buffer.length - offset),
+				offset,
+			);
+			if (count === 0) throw new Error("Skill file changed during read");
+			offset += count;
+			if (metadataOnly) {
+				const prefix = buffer.subarray(0, offset);
+				if (offset >= 3 && (prefix[0] !== 45 || prefix[1] !== 45 || prefix[2] !== 45)) {
+					metadataEnd = 0;
+					break;
+				}
+				// Match parseFrontmatter's first normalized newline + --- prefix,
+				// including CRLF/bare CR and a closing marker with trailing text.
+				const lf = prefix.indexOf("\n---", 3);
+				const cr = prefix.indexOf("\r---", 3);
+				const end = lf < 0 ? cr : cr < 0 ? lf : Math.min(lf, cr);
+				if (end >= 0) {
+					metadataEnd = end + 4;
+					break;
+				}
+			}
+		}
+		if (metadataOnly) {
+			if (metadataEnd === undefined && size > BigInt(maxBytes))
+				throw new Error("Skill frontmatter byte limit exceeded");
+			// At most one 1 KiB chunk reads ahead. Discard body bytes, not metadata.
+			captured = buffer.subarray(0, metadataEnd ?? offset).toString("utf8");
+		} else {
+			const after = fstatSync(fd, { bigint: true }).size;
+			if (after > BigInt(maxBytes)) throw new Error("Skill file byte limit exceeded");
+			if (after !== size) throw new Error("Skill file changed during read");
+			captured = buffer.toString("utf8");
+		}
+	} catch (error) {
+		try {
+			closeSync(fd);
+		} catch (closeError) {
+			if (closeError === error) throw error;
+			throw new AggregateError([error, closeError], "Skill file read and close failed", { cause: error });
+		}
+		throw error;
+	}
+	closeSync(fd);
+	return captured;
+}
+
+/** Read one complete bounded capture for an explicitly selected skill. */
+export function readSkillFile(filePath: string): string {
+	return captureSkillText(filePath, false);
+}
 
 /** Max name length per spec */
 const MAX_NAME_LENGTH = 64;
@@ -390,7 +460,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
+		const rawContent = captureSkillText(filePath, true);
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
@@ -432,6 +502,10 @@ function loadSkillFromFile(
 	}
 }
 
+/** Admission limits for the rendered catalog only, not the whole system prompt. */
+export const SKILL_CATALOG_MAX_ITEMS = 32;
+export const SKILL_CATALOG_MAX_BYTES = 65536;
+
 /**
  * Format skills for inclusion in a system prompt.
  * Uses XML format per Agent Skills standard.
@@ -440,8 +514,13 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[]): string {
-	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
+export function formatSkillsForPrompt(skills: Skill[], nativeSelection = false): string {
+	const visibleSkills: Skill[] = [];
+	for (const skill of skills) {
+		if (skill.disableModelInvocation) continue;
+		if (visibleSkills.length === SKILL_CATALOG_MAX_ITEMS) throw new Error("Skill catalog item limit exceeded");
+		visibleSkills.push(skill);
+	}
 
 	if (visibleSkills.length === 0) {
 		return "";
@@ -449,37 +528,62 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
-		"Use ipython to inspect a skill's file when the task matches its description.",
+		nativeSelection
+			? 'Select a matching skill with the prime_context tool using {"action":"skill","name":"..."}. Re-read the returned canonical ref with action="read"; do not reopen its mutable location. A selected version is frozen for its committed epoch. A later accepted epoch permits a new selection.'
+			: "Use ipython to inspect a skill's file when the task matches its description.",
 		"Skills with a python_import are prepared in the persistent Python kernel when available and can be called directly by that import name.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
 		"",
 		"<available_skills>",
 	];
 
+	let renderedBytes = lines.reduce((bytes, line, index) => bytes + Buffer.byteLength(line) + (index ? 1 : 0), 0);
+	const appendLine = (line: string): void => {
+		const bytes = Buffer.byteLength(line) + 1;
+		if (bytes > SKILL_CATALOG_MAX_BYTES - renderedBytes) throw new Error("Skill catalog byte limit exceeded");
+		renderedBytes += bytes;
+		lines.push(line);
+	};
+	const appendField = (tag: string, value: string, escapeValue = true): void => {
+		const prefix = `    <${tag}>`;
+		const suffix = `</${tag}>`;
+		const available = SKILL_CATALOG_MAX_BYTES - renderedBytes - 1 - Buffer.byteLength(prefix + suffix);
+		const captured = escapeValue ? escapeXml(value, available) : value;
+		if (captured.length > available || Buffer.byteLength(captured) > available)
+			throw new Error("Skill catalog byte limit exceeded");
+		appendLine(prefix + captured + suffix);
+	};
+
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <type>${skill.kind}</type>`);
+		appendLine("  <skill>");
+		appendField("name", skill.name);
+		appendField("type", skill.kind, false);
 		if (skill.kind === "python") {
-			lines.push(`    <python_import>${escapeXml(skill.python.importName)}</python_import>`);
+			appendField("python_import", skill.python.importName);
 		}
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		appendField("description", skill.description);
+		appendField("location", skill.filePath);
+		appendLine("  </skill>");
 	}
 
-	lines.push("</available_skills>");
+	appendLine("</available_skills>");
 
 	return lines.join("\n");
 }
 
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
+function escapeXml(str: string, maxBytes: number): string {
+	// UTF-8 and XML escaping cannot use fewer bytes than the UTF-16 code-unit count.
+	if (str.length > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+	let bytes = Buffer.byteLength(str);
+	if (bytes > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+	const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" };
+	return str.replace(/[&<>"']/g, (character) => {
+		const escaped = entities[character]!;
+		bytes += escaped.length - 1;
+		// Reject before the replacement can assemble an over-budget escaped field.
+		if (bytes > maxBytes) throw new Error("Skill catalog byte limit exceeded");
+		return escaped;
+	});
 }
 
 export interface LoadSkillsOptions {

@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Component, MarkdownTheme, TUI } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { Component, MarkdownTheme, TUI } from "@ponythewhite/base-context-tui";
 import { isAgentSessionMessage } from "../../../core/agent-messages.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,

@@ -1,0 +1,2812 @@
+# SPEC_DEVIATIONS
+
+## Current release status
+
+**Latest quality-loop override (2026-09-13):** work is MEDIUM-only. The a820 CURRENT
+campaign completed 90 primaries: 84 passed and 89 were runtime-clean. All controllers
+exited; no benchmark is running. The earlier LOW gates and cancelled-MEDIUM notes
+below are historical. Vanilla and installed/pushed `52b203037` remain locked.
+
+The private recovery change keeps concrete transient provider retries inside the
+accepted invocation, with capped abortable delay and unchanged budgets/accounting.
+Owned auxiliary calls and side questions retain their source across recovery. CURRENT
+now waits for native invocation completion rather than an intermediate failed message.
+Focused native, provider, and caller checks passed; this is not a new benchmark result
+or a provider exclusion for Astra27, whose cause remains UNKNOWN. Fresh private build
+and CURRENT-only MEDIUM rerun are next. Cost comparison remains limited to jointly
+passed tasks; the established frozen baseline is LOW, not like-for-like MEDIUM.
+
+The W26 assessment below is historical. Later implementation sections supersede
+its individual findings. The five benchmark prerequisites have working native paths.
+Source `52b203037` is pushed and installed in the separate owned installation on
+Linux x64. Required source checks, normal commit hooks, a clean build, fresh private
+archives and normal npm/fresh-Python installation passed. Previous installations
+and archives are retained.
+
+The pre-fix W113 comparison is discarded. The later source53d comparison remains
+incomplete diagnostic data. The `08b24f28a` campaign was stopped at 144/180 LOW
+primaries: every model/arm completed tasks 1–24, but tasks 25–30 were not run.
+All current and vanilla artifacts remain unchanged; the stopped matrix is not
+release acceptance. A supported recovery-compaction path accepted recovery at source
+sequence 60 while reusing an epoch covering sequence 4, then refused compaction.
+The fix renews the epoch for newly accepted recovery. Two native checks passed:
+accepted recovery compacts and ordinary tails reuse the epoch; genuinely unaccepted
+recovery still refuses compaction. The new packaged DeepSeek LOW RPC path also
+passed real recovery, the following accepted MAIN request, manual compaction and a
+normal later prompt/EOF. Only HTTP was substituted. Default refinement remained
+enabled, but no reviewer, planner or completed refinement was exercised.
+
+Parallel trace analysis also found shared benchmark contract defects: an unwritable
+inner `/dev`, a tool-visible cwd not stated in its description, and task 8's judge
+rejecting a valid executable package. Those paths are corrected. The shared Bash tool
+now defaults to a 60-second command deadline, with explicit overrides and bounded
+TERM/KILL cleanup. This deadline is a policy improvement, not proof of a product bug.
+Two focused shared-contract cases and two scheduler cases passed. The scheduler now
+supports selected arms and explicit effort phases, defaulting to LOW.
+
+The qualified `52b203037` paired LOW campaign was stopped on 2026-09-12 at the
+user's new current-only quality gate. It retained 167/180 primaries, 152 functional
+passes, 122 runtime-clean primaries and 15 completed retries, with no capacity
+invalidations. One cancelled current DeepSeek27 attempt has no finalized result.
+The controller and owned descendants are stopped and its heartbeat is cancelled.
+All results remain unchanged. **Vanilla is locked: no more changes or runs.**
+MEDIUM remains cancelled. The earlier stopped Sol13 wait's cause remains unknown.
+
+**Current-only quality gate:** fix the major functional failures first, then all
+runtime-clean and efficiency problems. Iterate isolated failed current model/task
+pairs at LOW; run the full 30 current-only regression only after the problematic
+tasks pass cleanly. Other goal and release work stays deferred until current is
+flawless and efficient across the suite. Keep every attempt and report changed-policy
+current results against the locked historical vanilla without implying equal policy.
+
+Runtime commit `665f361da` adds real explicit manual compaction for eligible short
+sessions, a general implementation-contract prompt, and an SSE product default with
+explicit transport overrides preserved. Automatic compaction thresholds and the
+Sol/Absolute Prohibition text stay unchanged. Seven focused native cases and the
+required repository check passed. Commit `f6e30aa8f` adds current-only host preparation
+and selected-model/task campaigns; four focused runner checks, normal hooks and the
+clean candidate build passed.
+
+The first current-only LOW iteration stopped on a confirmed Sol6 product defect:
+`Context epoch view overlaps its literal tail`. DeepSeek5 and DeepSeek22 both passed
+and were runtime-clean, without retries. Sol6 failed and also hit a solver search
+and judge timeout. Sol5 was cancelled without a finalized result; Sol19 and Sol28
+were not admitted. The controller and scoped descendants are stopped; all outcomes
+remain retained. The manual compaction ACK itself succeeded. The compiler fix now
+chooses the newest source reference, not the last displayed tool result, and restores
+tool-call order before public rendering. Five focused native checks passed, including
+reversed completion and subsequent literal/public continuation. Existing overlap,
+source and dependency checks remain strict. Two general prompt rules discourage
+redundant successful checks and late feasibility checks in constrained search.
+The epoch fix shipped as `7f6644a03`; required checks, normal hooks, the clean build
+and fresh private current-only host preparation passed. Its isolated Sol6 LOW run
+was then stopped without a finalized result. The SDK prompt declared the host
+workspace path while Bash executed in `/workspace`; the trace repeatedly reports
+working-directory discrepancies despite successful unchanged commands. No epoch
+error was observed in this attempt. The controller and scoped descendants are
+stopped, and the unfinished outcome remains unknown. The current-only fix binds the
+workspace at `/workspace` in the SDK sandbox and starts the SDK there. A focused
+outer/inner sandbox probe passed shared-file access and unchanged fake vanilla
+behavior. Fresh current-only host preparation then passed.
+
+Candidate `f2348b4fb` then passed all six original major-failure pairs at LOW:
+Sol5, Sol6, Sol19, Sol28, DeepSeek5 and DeepSeek22. Every result was runtime-clean,
+with no retries or capacity invalidations. This clears the major functional-failure
+cohort, not the full-suite gate. Remaining compaction-refusal cases still need
+coverage. Sol6 remains inefficient: 415 seconds versus 146.4 for locked historical
+vanilla, with two recovered 60-second solver timeouts. Other measured gains are
+mixed, and comparisons use changed current policy and noncontemporaneous data.
+No complete-cost winner is established. Full-30 current-only regression and all
+other goal/release work remain held for the remaining quality and efficiency work.
+
+The next local change batches pending family messages at the session-to-agent
+handoff, including completions admitted during preparation. Full updates stay in
+arrival order. Ordinary user input, control actions and delivery lanes remain
+boundaries; there is no delay waiting for future messages. The targeted Sol runs
+used no subagents, so this is not attributed as their failure cause.
+
+Compaction suffix sizing also gains an upward calibration against observed usage.
+Dense public history can exceed the old chars/4 estimate: Sol6's completed manual
+compaction summarized only the initial request and retained the expensive history.
+The retained budget stays at 20,000 tokens. Source/cut boundaries, short-session
+refusals and summary append/ACK remain unchanged. This is an empirical estimate,
+not an exact tokenizer. Six focused native cases passed, including the queued-completion working path,
+ordinary user ordering, dense-history calibration and real short compaction. No
+new benchmark result or efficiency gain is claimed for either change.
+
+The `843efad81` targeted runtime round is complete: Sol 7/8, Astra 9/9 and
+DeepSeek 3/3 functional passes. All 20 attempts were runtime-clean, with no retries
+or capacity invalidations. Sol 23 remains a functional failure (3/5 main checks and
+the edge failed): the initial implementation formatted a quantity variance as
+money. That mistake predates compaction. The task and judge require field-specific
+quantity formatting; neither the judge nor retained solution was changed.
+
+The two existing implementation-policy lines are now clarified to preserve each
+output field's units, precision, rounding and text format, and not invent extra
+input formats or compatibility branches. This is general guidance, not a task
+answer or benchmark hint. Exact Sol custom text and the Absolute Prohibition stay
+unchanged. The focused default/custom prompt check passed (one existing case). Efficiency is still
+open: the native reports show higher estimated costs against visible locked
+historical activity. Actual refinement records showed local memories applied after the last public
+assistant message in all 13 inspected completed attempts. They did not change
+subsequent main-model behavior in those runs. Automatic learning is narrowed
+to supported reusable improvements, rather than copying mutable task progress,
+completion claims or checklists. Manual refinement, local memory support, the
+two-stage review/planner path and cooldown remain unchanged. The existing native positive reviewer/planner path and the negative no-planner
+path passed their focused checks (two cases). No efficiency gain from this
+change has been established yet.
+The full-30 current-only regression remains held until the failure is resolved.
+
+The full30 CURRENT-only LOW regression on `b8143921b` was stopped after a real
+Task17 evaluator defect was found. Standard Markdown `fees\_months:6` was rejected
+by a raw substring check even though the requested displayed liability value was
+correct. The native stopped reports retain 49 finalized results: 47 stored passes
+and 49 runtime-clean results, with three started cases unfinalized. This stopped
+round is not qualification. No stored result or Vanilla artifact was rewritten.
+
+The minimal judge fix normalizes Markdown-escaped punctuation before unchanged
+value and citation requirements. Its fresh native `check_main` test accepts the
+escaped expected value and rejects a wrong fee value. Any later Task17 grade
+change against the frozen old evaluator is an evaluation change, not evidence of
+an agent accuracy gain.
+
+DeepSeek5 is a separate real answer regression: an invented fixed donor/recipient
+partition excludes allowed transfers and uses initial needs rather than updated
+state. DeepSeek6 passed but used 1,148.3 agent seconds and 66 main calls, including
+expensive synthetic stress work. Sol13 remained unfinalized after four completed
+requests; native inspection found no fifth admission, so its pre-admission path is
+under investigation. Further benchmarks remain held pending these fixes and
+qualification. MEDIUM and release work remain deferred.
+
+The shared requirement-preservation rule now names exact eligibility, priorities
+and decision order, and reevaluation when earlier actions change later inputs.
+The existing default/custom prompt check passes. Captured DeepSeek6 request
+policies already contained the prohibition and scope rules in all 66 main calls;
+there is no prompt-routing bypass to fix. This change is not a claim that its
+excess stress work or all latency is solved.
+
+Sol13's fresh native request preparation rejects promptly: its native replay has
+unknown opaque-token coverage, and its public replay exceeds the declared budget.
+This does not prove the stopped run's exact cause. A separate failure-propagation
+defect is now fixed: after the connection acknowledges a prompt, later completion
+failures are published as `extension_error` / `<session-input>` / `prompt_completion`.
+Native RPC clients and the CURRENT-only benchmark consumer treat only this exact
+marker as terminal. Intent ACKs, early rejection, existing output-limit terminals,
+capacity classification and ordinary extension-event visibility are preserved.
+No synthetic assistant, successful `agent_end`, retry or budget/projection change
+is added. Five native cases passed, including a real persisted-session/RPC failure
+with stdin left open and no provider send; the exact-marker consumer edge passed.
+Normal hooks, source build, private packaging and CURRENT-only host preparation
+passed for `0ebb44ae9` before the fresh targeted run.
+
+The fresh `0ebb44ae9` CURRENT-only LOW follow-up finalized all four primaries,
+with no retries or capacity invalidations: Astra17 and Deep6 passed; Sol13 and
+Deep5 failed. Three runs were runtime-clean. All controllers finished, so timing
+freeze ended; no benchmark remains live and the full90 quality gate stays closed.
+Sol13 now reports its real request-projection failure instead of waiting silently
+(27.115 agent seconds; six main requests; no solution script). This verifies error
+propagation, not successful request fitting or the old stopped run's exact cause.
+Deep5 was runtime-clean but passed only 2/5 main checks plus the edge check. Its
+transfer floor and dynamic state updates are correct, and new inputs were read.
+Its purchase calculation instead uses a rounded Decimal intermediate despite the
+explicit direct formula. The existing numeric rule now clarifies formulas, order
+and exact discrete decisions; the existing default/custom builder case passed.
+This is not yet a measured accuracy improvement. Deep6 passed 5/5 plus edge but
+still took 1120.016 agent seconds (75 main, two refinement, two summary requests).
+Seventeen unrequested stress/profiling invocations consumed 400.303 seconds;
+compaction and refinement were small. No additional Deep6 runtime fix is claimed. Astra17's passing grade uses the corrected evaluator and
+must not be claimed as an agent accuracy gain against the locked old judge.
+Native comparison reports retain all failures and the frozen historical baseline;
+no retained answer or grade was changed. Both bounded diagnoses are complete.
+Sol13's fresh public replay measures OVER; native opaque coverage remains UNKNOWN.
+Lossless wrapper reduction still does not fit. The missing compaction handoff is
+now implemented for measured public OVER only: after releasing the unsent request,
+the native owner runs normal real compaction in the same agent invocation. Summary
+ACK and owner adoption precede one local reprepare, preserving output counters and
+completed tools. No prompt replay, fake assistant or successful agent_end is added.
+Two real native owner cases passed: recovery after summary ACK, and a short-session
+refusal without looping or sending a summary. Existing RPC completion cases passed.
+A skipped, failed or still-unfitting request retains a truthful terminal refusal.
+Normal hooks, clean build, private packages and CURRENT-only host preparation passed
+for `024d9c439`. Its fresh failure-first LOW round finalized Sol13 and Deep5 with no
+retries, invalidations or unfinished runs: both failed; Deep5 was runtime-clean.
+Sol13 completed one real automatic summary/ACK, then its next request preparation
+failed before another main admission (four main calls, one summary; 42.190 agent
+seconds). The reported zero compaction requests counts runner-issued explicit RPCs,
+not this observed automatic start/end. No recorded counter or grade was rewritten.
+Deep5 still failed 1/5 main checks plus edge PASS (262.200 agent seconds, 31 main
+calls); the numeric clarification has not demonstrated an accuracy gain. All runs
+and reports are complete. The post-summary diagnosis rebuilt the adopted summary
+and supported public tail, but the request remained OVER. The captured-view 20k
+suffix rule explains retaining the extra whole result; no sizing or adoption defect
+was established. Deep5 used exact purchase arithmetic, then deliberately replaced
+live recipient decisions with an initial snapshot because it preferred that policy.
+A narrow error change now preserves the original measured OVER when no conversion
+can be offered, without adding recovery or changing fit. A separate large-tool
+native case exposed a forward-cut bug: crossing 20k inside a tool result could keep
+no removable prefix or choose a later anchor that excluded the counted result.
+Both Base Context compaction paths now select the nearest preceding legal cut,
+retaining that whole tool group. This is not the cause of 024d Sol13's cut on an already-public result.
+The existing literal-rule wording is clarified, and general dataset-inspection guidance requests bounded
+samples while full inputs are processed in code. These are unqualified workflow
+changes, not claims that the old history fits or model accuracy has improved.
+Counters, reservations, 20k/source/tool closure, fixed inputs and Bash limits remain
+unchanged. No further benchmark is admitted; the full30 quality/efficiency gate stays
+open. The real post-summary refusal case passes with one compaction, no second
+main admission and no tool replay; the paired view/ordinary cut case, existing
+short refusal and shared prompt assertion also pass. Normal hooks, build, private
+packages and CURRENT-only host preparation passed for `639b9a51b` (clean, private;
+not installed or published). Its two LOW trials finalized without retries or
+invalidations: Deep5 passes all five main checks and the edge check, runtime-clean
+(175.191 agent seconds); Sol13 still fails before writing a solution, after one real
+automatic compaction (48.664 agent seconds, three main calls and one summary).
+The latter now reports the actual budget refusal, not a generic projection error.
+The history still does not fit; neither error specificity nor guidance is claimed
+to solve that failure. Native reports retain the failed activity and locked baseline.
+The completed public-artifact diagnosis found an explicit whole-log dump followed
+by an unbounded regex scan. Their two results account for 116,100 of 121,226 shown
+tool bytes; the existing small-sample guidance was not followed. A bounded read-only
+SDK check found that guidance, literal-rule priority and the Absolute Prohibition in
+all three main admissions' recorded Codex fixed configurations. No missing prompt
+wiring, large-body runtime duplication or new sizing defect was established. No more prompt changes
+or unchanged trials are selected. The user approved making 20k a preferred target
+only under confirmed public OVER. That path can now summarize more older complete
+exchanges, while retaining the latest complete tool exchange, whole source/tool
+groups and all durable source. Cut selection uses captured source roles even when
+public history displays them as custom text. The existing one-shot summary/ACK/adoption
+path, mandatory inputs, actual budgets and ordinary retention settings remain intact.
+Five focused native checks pass. The persisted two-exchange case resumes after one
+real summary ACK without replay; required-tail OVER and no-removable-prefix cases
+still refuse. After separate user approval, the new `822fa1990` CURRENT-only LOW
+Sol13 primary passed all 5 main checks and the edge check. It is runtime-clean:
+`error:null`, `capacity_invalid:false`, and zero compaction failures. It used
+987.9 agent seconds, 1036.3 lifecycle seconds and $1.51859 API-equivalent cost,
+not subscription cash charges. The 42 recorded model calls comprise 34 main,
+6 summary and 2 refinement calls; 39 tool calls were recorded. One automatic
+and two runner-requested compactions completed. The 37 recorded epochs are not
+37 summary operations. No retry was run.
+
+The official comparison retains the frozen baseline's failed first primary
+(`WebSocket closed 1006`) and its retry; it does not choose the best retry.
+There is no matched strict-passing pair for speed or cost. This is a new successful
+Sol13 outcome, not a revision of the historical failures or a complete-cost win.
+The full30 and efficiency gates remain open; Vanilla, MEDIUM, full-matrix runs
+and publication remain held. A bounded
+source check found no compatible existing full-text encoding switch: the summary
+serializer truncates tool text, and a new public-history layout needs versioned
+recipe handling. A size-only lower bound leaves just 1,272 bytes before remaining
+mandatory fields; it is not a fitted request. No encoding change was selected.
+
+The existing request selector keeps whole historical tool messages. Its public
+replay conversion is already connected, but it does not supply bounded tool
+excerpts. Native source recovery supports selected text/line windows; epoch
+references do not currently record a budgeted excerpt recipe. Therefore there is
+no small missing-connection fix that makes the oversized replay fit. The current
+budget refusal remains valid. This limitation stays open; no counter, reservation,
+fixed Bash limit, required source or projection check is weakened to hide it.
+
+Full-suite accuracy, runtime-clean and efficiency gains remain unestablished.
+No publication approval has been granted. Nothing is published.
+
+Offline migration remains partial. Supported paused top-level cron, user heartbeat
+and recurring RLM imports passed their focused cases; no imported job is implicitly
+resumed. Multimodal budgeting, complete artifact/runtime migration and other-platform
+coverage remain unestablished.
+
+The session-format guide now separates native framed/indexed journals and bounded
+owner APIs from offline legacy JSONL examples. It no longer describes manual text
+parsing, the Prime data root or implicit legacy migration as native storage behavior.
+This is a documentation-only correction; benchmark runtime inputs are unchanged.
+
+## Scope and executive summary
+
+**Contract:** `base-context-harness-spec.md`, all 1,634 lines. **Implementation snapshot:** `cefb478fcd2ec43ac0290b281afa16bcb5070f39` (W26). All implementation line anchors below refer to that immutable snapshot, not the changing worktree. This is a source-and-existing-evidence audit. It did not run tests, builds, imports, installers, providers, model discovery, credential probes, or benchmarks. The code-review graph was unavailable; targeted immutable Git source inspection was used instead. This document is the only audit file written.
+
+**Conclusion:** the snapshot is a substantial native source fork, but it is not the completed harness or a certified release. Native request/effect ownership, checked canonical journal storage, indexed history, scoped task authority, and several bounded readers are real. W26 also ships **actual native TaskFrame converter injection, stable sparse frame revisions, and ViewUnit/dependency metadata**. These are not merely external drafts. However, real provider-budgeted selection, complete committed epochs, and native selective recovery are unfinished. The ViewUnit closure helper is not yet the provider selection path.
+
+There are also source-confirmed deviations, not just missing test evidence: unchecked active recovery writes; absent effective one-child admission and tree-wide scheduling; unbounded saved-catalog and skill paths; automatic inference that can start during disposal; the unconditional Python-survival prompt; incomplete optimizer-off ownership; unsafe unknown-replay/default capability handling; upstream install/support instructions; updater activation gaps; and an advertised public export with no source implementation. Keep these distinct from unrun provider, platform, release, and performance gates.
+
+The map below accounts for every numbered normative subsection, W0–W13, the final directive, and **all 100 acceptance IDs**: P01–P14, C01–C18, X01–X14, R01–R14, and F01–F40. Coverage of a requirement is not satisfaction of it. No compliance percentage or new memory/performance threshold is supported.
+
+### Status and priority keys
+
+- **O — implemented + observed:** only the named component and executed evidence scope. Historical observations do not certify the entire W26 product.
+- **U — implementation-only / unverified:** source exists; the required execution or artifact evidence is absent.
+- **P — partial:** some required behavior exists; implementation or acceptance remains incomplete.
+- **M — missing:** the required product contract/path or its complete acceptance is absent. A narrower primitive is credited where present.
+- **D — actual deviation:** inspected source conflicts with a requirement. This does not assert an observed production incident.
+- **A — approved user override:** intentional and authorized; not a gap.
+
+Mixed labels preserve component credit without declaring a whole requirement passed. **P0** means an immediate prerequisite or safety blocker for the affected operation. **P1** means a high-priority implementation/release gap. **P2** means a bounded follow-up. These are work priorities, not measured risk scores.
+
+### Binding user overrides
+
+1. Exact Sol `gpt-5.6-sol` and Astra `gpt-6-astra` use the **SAME existing host OpenAI subscription**. **API keys are NOT a blocker.** Existing-login reuse is instance-scoped authorization, not global OAuth-client validation.
+2. **NO live benchmarks, including early samples, until TaskFrame injection, ViewUnit dependency closure, model-aware token budgets, stable epochs and selective recovery are finished.** W26's injection and helper work does not close the remaining gate.
+3. Preserve a stable KV prefix and place the most-changing material at the tail. Do not rewrite earlier views on every turn.
+4. H0.9.3 is approved. Keep actual H, supplied historical H, S, and D identities separate.
+5. Publication still requires approval.
+6. A confirmed provider capacity invalidation does not consume a valid failure retry. Retain invalidated attempts; do not judge them as model failures.
+
+Subscription implementations must retain the exact Codex provider/API/official endpoint, read-only instance permission, and no refresh, credential copying, shared writes, token environment/argv, token-as-key aliases, or proxy `StreamFn`. This audit did not open credentials. Entitlement, freshness, and live capacity remain unknown by design.
+
+### Source abbreviations
+
+`CORE/` = `packages/coding-agent/src/core/`; `CA/` = `packages/coding-agent/src/`; `DM/` = `packages/coding-agent/src/modes/daemon/`; `AI/` = `packages/ai/src/`; `AG/` = `packages/agent/src/`; `PY/` = `prime-agent-runtime/src/rlm/`; `TEST/` = `packages/coding-agent/test/`; `IMP/` = `docs/implementation/`; `BENCH/` = `benchmarks/python-realworld-30/`. Evidence IDs E01–E15 are defined near the end. Finding IDs G01–G20 provide shared source anchors for the coverage tables.
+
+## Prioritized deviations and bounded TODOs
+
+| ID / priority | Status and gap | Snapshot evidence and qualification | Bounded next action |
+|---|---|---|---|
+| **G01 / P0** | **D:** active recovery durability is not fixed globally. | `DM/command-recovery-journal.ts:174–180,201–208`, `DM/worker-recovery-journal.ts:95–112`, `CORE/orphan-process-journal.ts:34–47` ignore write counts or omit compaction persistence. Recovery loaders skip malformed middle rows (`command:128–171`, `worker:24–55`). Actual callers: supervisor `804,1888–1919,4083–4086`, daemon-mode `617–618`. Checked canonical owner and E01–E02 remain credited. | Reuse existing checked/framed owner behavior on these active writes. Fail explicitly on no progress/corruption and retain unknown outcomes; do not add another journal framework. |
+| **G02 / P0** | **D/M:** no effective conservative one-child guard or independent tree-wide capacity scheduler. | `CORE/agent-session.ts:9986–9990,11225–11374,11658–11663` checks depth/name, awaits resolution before tracking; inline `10294–10339`; runtime `334–388`; `DM/daemon-mode.ts:2612–2626,2702–2769`. `runtimeOpenGuard:2711` checks cancellation, not quota. Durable spawn ACK and environment scope are not reservations. | Enforce the one-child admission default on actual native paths until owned scheduling is ready. Add pre-await tree reservations and separate inference/resident/kernel/job/queue/result budgets, with idempotent settlement and parent-wait slot release. Preserve baseline semantics; do not silently delete delegation. |
+| **G03 / P0** | **D/P/M:** source caps and ViewUnit helpers are not model-aware provider selection. | `CORE/canonical-context.ts:23–27,82–163,208–224,293–359` has real injection and source admission; `view-units.ts:49–67,75–138` has closure metadata/helper, null token estimates, no provider selector caller. `compaction/compaction.ts:182–278` uses chars/4 and fixed media heuristics; the user-image branch counts text only. E09 observes seven distinct scoped W26 cases. | Use one captured adapter/template snapshot for actual serialized input, tools, media, retained state and output reservations. Connect mandatory-first budgeted selection to certified dependency closure and whole-group fallback/refusal. Preserve shipped stable frame slots. |
+| **G04 / P0** | **M/P:** complete committed epochs, portable/native checkpoints, and native selective recovery are absent. | `CORE/agent-session.ts:8110–8124,8209–8230` and `session-manager.ts:2602–2625` append ordinary summaries without expected-epoch CAS. `CORE/tools/index.ts:47–56` exposes ipython, not native `prime_context`; history index reads are internal substrate. `canonical-context.ts:141–148` is a summary frame reset, not recovered-view epoch ownership. | Finish one source-backed epoch/continuation owner, atomic candidate validation/publication and late-event handling. Add the stable bounded batch recovery API, explicit coverage outcomes, and retained recovered views within an epoch. Reuse existing indexes/readers; no second truth store. |
+| **G05 / P1** | **M/P/D:** unresolved profiles/capabilities/replay families; unsafe unknown-item and unknown-route defaults. | `CORE/inference-coordinator.ts:70–87` emits `native-default/unvalidated`; request-events `22–40` disclaims a full input contract. `AI/providers/openai-responses-shared.ts:165–210,332–355` handles known types only; transform-messages `85–108,154–170` applies lossy/incomplete-history transformations without the specified resolved replay contract. Responses `46–57,228–239` defaults optional long-retention support on unknown custom routes. | Resolve policy separately from provider/API/auth/endpoint/template/replay identity. Preserve required unknown canonical items or refuse/fallback safely. Keep unsupported advanced fields off. Add explicit generic-control/generic-balanced/Astra profiles and compatible model-switch/public fallback. No live malformed request or private-reasoning disclosure is claimed. |
+| **G06 / P1** | **D/M:** false kernel-survival assertion and incomplete resource freshness. | `CORE/compaction/compaction.ts:459–460,510` unconditionally promises variables/imports/helpers survive. Later `agent-session.ts:7912–7939` checks a running kernel, but no authoritative live/restored/restarted/absent/unknown generation view is provided. Task resource fields lack full generation/test/artifact freshness (`task-state.ts:87–113`). | Remove the promise and derive runtime/freshness facts from authoritative generations, including Bash-only and unknown state. Keep the W26 finding; the later prompt-only fix is listed separately below. |
+| **G07 / P1** | **D/M/P:** disposal can start new automatic inference; true off mode and independent auxiliary configuration are missing. | `CORE/agent-session.ts:4388–4398` drains before `_disposing=true`; `4424–4431` drains existing work, but `4498–4513,4520–4543` can start new due refinement. Conditions include persisted root, enabled policy, interval and cooldown. Settings `946–959` default it on. Reviewer/planner inherit main model/effort (`8708–8729,8923–8939`). No `context.mode` contract at settings `131–180,869–879`. | Stop new automatic inference during disposal; settle already-owned work under an explicit bounded policy. Add a valid-boundary optimizer switch and separate auxiliary model/effort/budgets. Keep logging, receipts, permissions, cancellation, limits and public recovery on. |
+| **G08 / P1** | **D/P:** aggregate hot memory is not bounded by the implemented component limits. | Native Manager clears full maps (`CORE/session-manager.ts:1628–1638`), but saved catalogs fully list/scan: `DM/daemon-catalog-process.ts:138–175,441–475`, saved-session-catalog `21–44`, Manager `1029–1135,1182–1213`. Unchanged size/mtime avoids scans; changed/uncached native **and** legacy journals still scan to EOF and accumulate maps/arrays. Journal reader has a per-frame, not total-file, cap. `PY/bash.py:48` live handles and aggregate/transient caches are outside the narrow caps. E04–E07 are not whole-harness memory proof. | Page saved catalogs from indexed summary deltas; cap aggregate cache/admission/pending/job buffers. Retain applied Manager, W21 state and W23 tree bounds. Later assess the complete process tree at the authorized scope; do not invent an RSS threshold. |
+| **G09 / P1** | **D/P:** skill catalogs/bodies and selected versions are not bounded/frozen as required. | `CORE/skills.ts:443–473` adds every visible description/location; per-name/description limits are not a catalog budget. `system-prompt.ts:66–72,87–92,169–172` wires it. `agent-session.ts:5637–5652` reads full selected SKILL.md without a total body cap/version pin. Harness overview bounds do not fix external skills. | Bound selected catalog/body bytes/items and freeze selected versions within implemented epochs. Keep instructions attributed and optional exact recovery available. Do not infer malicious-history learning safety from persistence fixtures. |
+| **G10 / P1** | **P/M:** archive publication, scoped retention/GC and unresolved-effect recovery are incomplete. | Source-before-index and bounded exact parts are real (`CORE/session-manager.ts:2100–2143,2393–2479`; history-index-worker `447–579,823–845,1519–1572`). Per-session deletion (`session-file-actions.ts:54–76`) is not root-tracing GC/tombstones. `AG/agent-loop.ts:1012–1087,1148–1176` records intent/results and cancellation unknowns; supervisor `4082–4164` holds uncertain work, but Manager `3391–3408` has no complete per-tool unresolved-intent reconciliation. | Complete publication/retention relationships using the same committed source IDs. Expose unresolved effects as unknown, reconcile only via real status/idempotency, and add explicit scope/deletion/availability outcomes before public recovery. |
+| **G11 / P1** | **D/P/M:** shared workspace/job/result ownership and explicit turn outcomes are unfinished. | Child inputs are concise but lack complete scoped evidence/result manifests (`CORE/agent-session.ts:11465–11515`). Runtime `340–359` and daemon-mode `2623–2638` share CWD; file-mutation-queue `4–38` covers same-process native edits only. Bash handles and child status dedup are not one job registry. `AG/agent-loop.ts:538–557` still continues based on nonempty continuation messages. | Isolate or centrally serialize conflicting cross-process/Bash/Python writes. Join existing job identities/status/wakeup ownership, commit attributed child results before publication, and use explicit continue/wait/checkpoint/finish outcomes. Preserve existing cancellation/passivation fixes. |
+| **G12 / P1** | **M/P:** no complete product migration and rollback workflow. | `CA/cli/public-command.ts:101–141` has no migrate command. `CA/migrations.ts:21–73,247–256` updates owned startup settings/auth, not legacy roots. `CORE/session-manager.ts:3826–3920` supplies bounded retained-journal copy; future-version and legacy-writer guards exist (`3741–3742,3786–3787,1966–1975`). No full entity/reference mapping, paused authority, trusted restore or dual-plugin pre-load fence is implemented. | Build the explicit non-destructive staged import on the retained-copy primitive: dry-run/live-source refusal or stable export, exact reference/coverage mapping, paused schedules/jobs/outboxes, opt-in credentials/trusted snapshots, compatible read/export and rollback. Refuse legacy dual context registration before execution. |
+| **G13 / P1** | **D/P:** user-facing installation/support identity is still upstream; doctor/docs are stale. | `README.md:56–68,79–85` directs upstream installer/commands. `SECURITY.md:7,25`, `CONTRIBUTING.md:1–13` route ownership/support upstream. `CA/cli/product-doctor.ts:46` says native context is not implemented; `IMP/product-isolation.md:13–15` says protocol9 while actual daemon protocol is11 (`DM/daemon-protocol.ts:57–60`). Native identity/runtime paths themselves are isolated. | Replace harmful install/control/security/support guidance with approved owned routes or explicit unavailable instructions. Update existing doctor/contract metadata. Preserve legal upstream attribution and real provider wire identities. |
+| **G14 / P1** | **D/P:** update validation, activation/rollback and public build surfaces are incomplete. | `CA/utils/version-check.ts:102–157` accepts arbitrary absolute artifact URLs/default redirects and only optional product metadata; no complete integrity/platform/schema check. Package-manager-cli `441–456` can continue owned-package installation after lookup failure; config `155–200` installs in place. No upstream namespace fallback is claimed. Coding-agent package `16–19` advertises `./hooks`, but snapshot has no `src/core/hooks/` source or generator. | Require the configured origin/product/compatibility contract before activation and retain the installed pair on lookup failure. Stage/rollback binary and runtime together. Remove the obsolete hooks export/alias or supply its intended source; later exercise exact installed imports. Installer download checks are not updater certification. |
+| **G15 / P1** | **P/U/M:** current release/artifact/platform evidence is insufficient. | Owned packages/build/catalog split and notice staging exist. Build-base-context `16–32` records commit/dirty; packer `324–332` lacks complete runtime/storage/platform/toolchain contract. GitHub workflow `build-binaries.yml:123–190,229–238` has a staged path, but npm publish/release scripts rebuild. E10 is W25 four-package packing, not extraction/installed bootstrap. Windows/network filesystem gates are unrun. | Use an exact tested release stage with pinned inputs and actual public-surface/runtime/license/compatibility evidence. Fix the npm post-test rebuild path. Declare unsupported/unverified platforms honestly; publication remains separately approval-gated. |
+| **G16 / P1** | **P/M:** native Sol preservation, a pinned generic deployment, and advanced Astra contracts are not certified. | Frozen controls/ports are documented; coordinator has only native-default. Ordinary known opaque replay, effort, Codex transport continuation and local parallel tools exist; they are not native compaction, async, steering, PTC or mid-turn effort protocols. No exact Sol/Astra or pinned Qwen deployment campaign exists. E11 is offline external setup only. | Finish the common five-feature prerequisites and explicit frozen generic-control first. Keep each advanced capability disabled/unpromoted until exact route/profile combinations and compatible fallback exist. Later run only authorized, separately attributed comparisons/ablations. |
+| **G17 / P1** | **P/D:** receipt coverage/metadata and native runner capacity authority are incomplete. | Native request/attempt owners and receipt-only parser are real (`CORE/inference-coordinator.ts:301–408`; `AI/utils/provider-attempts.ts:63–87,121–167,233–267`; `BENCH/benchlib.py:552–574`). Legacy assistant usage is observational. But `BENCH/run.py:75–88,880` can invalidate a native run from an RPC-only capacity marker. Receipt input/profile/epoch/commit/effort metadata remains incomplete (`request-events.ts:22–66`). | Preserve physical attempt authority and every attempt's known/unknown work. Align native runner invalidation with native receipt authority; retain RPC markers as observations rather than silently widening authority. Complete required metadata/commit associations without a second accounting store. |
+| **G18 / P1/P2** | **P/M:** final experimental populations, statistics, tariffs and ablations are not complete. | First capacity-valid primary and retained retry policy exist (`BENCH/run.py:982–1017`). Fixed ordered waves/concurrent arms (`1559–1567`) are not randomized repeated blocks. Catalog cost is explicitly an estimate (`benchlib.py:392–440`), not a bill. There is no authorized final campaign or per-model promotion report. | Keep the first valid primary immutable, one optional failure diagnostic, and capacity-invalidated attempts outside valid retries. Pin route/tariff/population/cache/timing conditions and expose unknowns. Implement the specified analysis only after the user gate; no early samples or winner selection. |
+| **G19 / P1/P2** | **P/M:** maintained-fork operations and truthful disposition/support claims are incomplete. | `IMP/patch-dispositions.csv:1–392` covers391 occurrences but all rows remain `AUDITED_SOURCE_NOT_IMPLEMENTED`; source ports now exist. `IMP/ports.md` records ancestry, not a reviewed-through intake/sample backport or owned support matrix. Upstream support routing remains in root docs. | Update the existing dispositions with actual owner/evidence status. Name approved support/security/subsystem responsibilities and support scope. Record a bounded selective backport with dependency closure and relevant evidence when undertaken; do not invent owners, cadence, or new review machinery. |
+| **G20 / P1/P2** | **O/P/M:** exact descriptive task state is improved, but broad facts and full acceptance remain incomplete. | `CORE/task-state.ts:284–320,370–444`, reducer `53–119`, reader `20–79` retain qualified exact authority, proposals and explicit ambiguity; E08/E09 exercise these pieces. The frame is a selective rendering, not a last-N truth store. Runtime artifact/test/job/resource-generation producers and 1,000 admitted constraints with real recovery are not established. | Preserve exact equality/supersession and source authority through the completed epoch/recovery path. Project only existing authoritative runtime facts with revisions. Show relevant stale/unfinished obligations without mandatory plans, proof packets, or routine model save/pin/ack work. |
+
+## Complete normative subsection map
+
+Each parent chapter is covered by all of its listed subsections. Chapter25 and the final directive have no numbered subsections and are covered explicitly after the table. References to G findings include the bounded action above.
+
+| Spec subsection / line | Status | Finding and limit | Source / evidence |
+|---|---|---|---|
+| **1.1 Binding decision** (L16) | U/A | Owned maintained-fork source replaces product patch surgery; H0.9.3 is approved. Independent installation and complete semantic ports remain open. | G15,G19; E09–E11 |
+| **1.2 Why a fork is warranted here** (L26) | P | Native ownership is warranted and real; finished bounded-harness, maintained-product and task efficiency goals are not established. | G03–G04,G08,G19 |
+| **1.3 Alternatives and rejection criteria** (L34) | U/A | Owned maintained-fork source replaces product patch surgery; H0.9.3 is approved. Independent installation and complete semantic ports remain open. | G15,G19; E09–E11 |
+| **1.4 What success means** (L46) | P | Native ownership is warranted and real; finished bounded-harness, maintained-product and task efficiency goals are not established. | G03–G04,G08,G19 |
+| **2.1 Freeze these distinct baselines** (L56) | P/A | Separate H/S/D freezes and ancestry corrections exist; executable-control/provider/pricing certification is not setup metadata. Historical source-availability claims are superseded only to the supported scope. | IMP/baselines.json:5–46,334–345; IMP/ports.md:8–26; E11 |
+| **2.2 What this revision actually verified** (L77) | P/A | Separate H/S/D freezes and ancestry corrections exist; executable-control/provider/pricing certification is not setup metadata. Historical source-availability claims are superseded only to the supported scope. | IMP/baselines.json:5–46,334–345; IMP/ports.md:8–26; E11 |
+| **2.3 New fork-specific findings** (L85) | P | 391 occurrences have source dispositions, not391 defects or completed ports. Preserve inherited, source-only, historical and newly observed evidence classes. | G19; IMP/patch-dispositions.csv:1–392 |
+| **2.4 How to classify inherited issues** (L96) | P | 391 occurrences have source dispositions, not391 defects or completed ports. Preserve inherited, source-only, historical and newly observed evidence classes. | G19; IMP/patch-dispositions.csv:1–392 |
+| **3.1 Keep the useful monorepo boundaries** (L106) | U/D | Four-package owned graph and extension aliases are real; the advertised hooks surface is dangling. Proposed directory names are not separate required abstractions. | G14–G15; packages/agent/package.json:19–21; CORE/extensions/bundled-modules.ts:11–38 |
+| **3.2 Ownership matrix** (L136) | P | Actual native compiler/exchange/request services are wired, not merely optional extension inventory. Full model/epoch/recovery and typed continuation/execution ownership remains incomplete. | G03–G05,G11,G17; CORE/agent-session.ts:1309–1352,1405–1412 |
+| **3.3 One native runtime, multiple optional extensions** (L151) | P | Actual native compiler/exchange/request services are wired, not merely optional extension inventory. Full model/epoch/recovery and typed continuation/execution ownership remains incomplete. | G03–G05,G11,G17; CORE/agent-session.ts:1309–1352,1405–1412 |
+| **3.4 Native service contracts** (L159) | P | Actual native compiler/exchange/request services are wired, not merely optional extension inventory. Full model/epoch/recovery and typed continuation/execution ownership remains incomplete. | G03–G05,G11,G17; CORE/agent-session.ts:1309–1352,1405–1412 |
+| **4.1 Required identity matrix** (L188) | P/D | Native identity/state/environment/doctor dispatch exists; upstream user instructions and stale doctor/protocol descriptions violate the identity contract. | G13; CA/product-identity.ts:13–33; runtime-paths.ts:21–89 |
+| **4.2 Daemon and process isolation** (L210) | P/U | Product/home/install-scoped daemon identities and foreign-product rejection exist. Earlier protocol8 coexistence does not certify current protocol11 or Windows. | DM/daemon-client.ts:473–481; daemon-socket.ts:286–309; daemon-supervisor-ownership.ts:39–51,200–221,436–453,614–626; E12 |
+| **4.3 Authentication, endpoints, and telemetry** (L218) | O/P/A | Dummy offline tests establish scoped read-only subscription behavior, not entitlement. Dedicated trace/telemetry credentials and opt-in endpoints exist; full startup/import/shutdown egress evidence is absent. | E13; CORE/auth-storage.ts:283–311,923–946; provider-contracts.ts:10–55; agent-traces.ts:838–856,909–921,1149–1151; telemetry.ts:326–335,414–424 |
+| **4.4 Licensing and distribution** (L226) | P | Source notices and staging are real; old four-tarball listings are not complete current binary/runtime/wheel/source-archive/SBOM certification or namespace/auth rights. | G15; LICENSE:3–15; NOTICE:1–12; E10 |
+| **5.1 Build a disposition ledger before porting** (L234) | P | Disposition coverage exists, but all rows retain planning status despite actual ports. Close logical capabilities against real ownership/evidence. | G19 |
+| **5.2 Initial source-port map** (L242) | P | Finalized original/executed capture, exact refs, TaskFrame and ViewUnit ports are real; full S fixed-view/recovery/utility behavior is not yet preserved natively. | G03–G04,G16,G20; AG/agent-loop.ts:1148–1177 |
+| **5.3 Mandatory common request boundary** (L263) | P | Native main/child/summary/refinement/branch requests use the owned coordinator. Full receipt fields, committed-output associations and actual-purpose coverage remain incomplete. | G17; CORE/agent-session.ts:1405–1412,8034,8715,8939,9389,12448 |
+| **5.4 Explicit turn transitions** (L271) | P/D | Await/cancellation exists, but nonempty continuation-message arrays still drive looping instead of the specified typed turn outcome. | G11; CORE/agent-session.ts:3747–3783 |
+| **6.1 One canonical history, derived indexes** (L281) | P | Native history is canonical and task/evidence/receipt refs derive from it; complete archive/epoch/job/retention relationships remain open. | G10,G17,G20; E01–E04 |
+| **6.2 Fix the short-write assumption** (L289) | O/D | Checked/framed canonical owner is observed; active recovery/orphan writes and middle-corruption handling still deviate. Windows directory fsync is explicitly a no-op, not certified durability. | G01; CORE/journal-io.ts:8–44; journal-frame.ts:37–106; E01–E02 |
+| **6.3 Publication protocol** (L299) | P | Source ACK precedes native publication and derived index coverage; full projected-reference/blob/checkpoint activation and rollback are not complete. | G10; CORE/session-history-index.ts:276–322; E02–E04 |
+| **6.4 Tool effects and crash ambiguity** (L315) | P | Intent-before-effect, cancellation unknowns and supervisor no-replay holds exist. Complete per-effect restart reconciliation and durable recovery writes remain open. | G01,G10; E02,E04,E12 |
+| **6.5 Bounded history is native, not cosmetic** (L321) | O/P/D | Activated Manager/indexed context owners and refusal bounds exist; saved catalogs still scan native and legacy histories and retain uncapped scalar reductions/queues. | G08; E04–E07 |
+| **7.1 A source fork must actually use its own source** (L329) | P/D | Owned modules/runtime payload and no upstream runtime fallback are implemented; public hooks export is absent and current installed-surface evidence is missing. | G14–G15; CORE/kernel/bootstrap.ts:54,623–641,671–694 |
+| **7.2 Reproducible catalog and build process** (L337) | P | Catalog refresh is separated from pinned normal builds. Full release inputs and exact tested npm publication are incomplete; a separate staged binary workflow does exist. | G15; packages/ai/package.json:67–69; AI/models.generated.ts:1–6 |
+| **7.3 Independent releases and updates** (L345) | D/P | Owned namespace alone does not validate artifact origin/redirect/identity/schema or supply fail-stay activation and paired rollback. | G14–G15 |
+| **7.4 Selective upstream intake** (L353) | M/D | Ancestry notes are not maintained-fork intake, sample backport, owned roles or support policy. Security/contribution routing still points upstream. | G13,G19 |
+| **7.5 Support ownership and scope control** (L363) | M/D | Ancestry notes are not maintained-fork intake, sample backport, owned roles or support policy. Security/contribution routing still points upstream. | G13,G19 |
+| **8.1 Explicit, non-destructive import** (L371) | P/M | Bounded retained-journal copy exists; no product dry-run/stable-live-source/staged entity import command. Startup migrations are owned-root settings work only. | G12 |
+| **8.2 Data and reference compatibility** (L385) | P | Retained entry/parent handling is narrower than complete archive/attachment/task/artifact reference mapping, tombstones, coverage and compatible replay. | G12; CORE/session-manager.ts:3855–3919 |
+| **8.3 Do not import execution authority implicitly** (L393) | M/P | No complete paused-import authority/trusted-resume workflow or explicit pre-load legacy context blocker. This is not an observed plugin double execution. | G12; CORE/extensions/loader.ts:329–355,381+ |
+| **8.4 Credentials and rollback** (L401) | P | Scoped auth, future-session refusal and legacy-writer safeguards exist; binary/schema/provider-lineage rollback and credential import are incomplete. | G12; E13 |
+| **8.5 Security boundaries across memory and execution** (L407) | P | Source-qualified task authority and runtime path fences exist; full recovery/child grants and cross-tenant cache/access validation do not follow from them. | G10,G12,G20; CA/runtime-paths.ts:50–65 |
+| **9.1 What must survive the migration** (L417) | P | Useful native capture/state/views are ported; frozen S recovery lifetime/fixed-view/skill policy equivalence remains incomplete. | G03–G04,G09,G16; IMP/ports.md:20–29 |
+| **9.2 Existing context defects remain in scope** (L425) | P/D | All twelve inherited findings remain individually classified below; they are not twelve newly executed full-system failures. | Inherited D01–D12 map below |
+| **9.3 Separate correctness, migration, and optimization** (L444) | P/A | S/D differences are recorded, but no full resolved policy comparison exists. Deferring benchmarks under the user gate is correct, not missing permission to use the subscription. | G16–G18; IMP/ports.md:20–29 |
+| **10.1 Information planes** (L452) | P | Evidence, descriptive state, request-local views and provider state exist as narrower planes; committed epochs/versioned continuation ownership remain incomplete. | G04,G10,G20 |
+| **10.2 Non-negotiable invariants** (L465) | P/D | Native source/effect authority is real; whole invariants fail on budgeting, lifecycle, replay, concurrency and remaining unbounded paths. | G01–G11 |
+| **10.3 Native service boundaries** (L485) | P | Captured source/branch frontiers exist, not one immutable epoch/task/resource/profile/template/policy/tool/render contract shared with the provider budget. | G03–G05,G17; CORE/request-events.ts:5–40 |
+| **11.1 Resolve behavior and protocol independently** (L495) | M/P | Metadata lacks a resolved policy/protocol tuple, tri-state support and feature-combination/replay/template predicates. Unknown advanced features must stay disabled. | G05,G16 |
+| **11.2 Capability representation** (L508) | M/P | Metadata lacks a resolved policy/protocol tuple, tri-state support and feature-combination/replay/template predicates. Unknown advanced features must stay disabled. | G05,G16 |
+| **11.3 Current capability facts that affect the split** (L547) | U/P | Known Responses/Codex opaque replay, transport state and cache options exist. Public Responses is not Codex, nor certification of required targets or Astra advanced features. | G05,G16; AI/providers/openai-codex-responses.ts:1135–1217 |
+| **11.4 Profile defaults and configuration migration** (L562) | M/P | Explicit generic-control/generic-balanced/Astra profile revisions, configuration migration and typed compatible switching are absent. | G05,G16; CORE/agent-session.ts:7667–7695 |
+| **12.1 Evolve the archive, do not discard it** (L576) | O/P | Exact raw source locators include short/user/tool/argument events and bounded parts. Complete typed public recovery/migrated envelopes/privacy/retention mappings remain incomplete. | G10,G12; E03–E04 |
+| **12.2 Index and schema** (L584) | P | Real derived SQLite/WAL worker, scoped lexical candidates and exact part reads exist. Full job/epoch/subject/resource semantic relationships and current packaged platform contracts remain incomplete. | CORE/history-index-worker.ts:42–141,715–845,1519–1572; G10,G15; E02–E03 |
+| **12.3 Atomic publication and recovery** (L606) | P | Verified source coverage and partial-index refusal exist; complete projected/checkpoint publication fault/rollback boundary remains open. | G10; E02–E04 |
+| **12.4 Bounded hot paths** (L625) | O/P/D | Applied W21 state/W23 request-tree and native index/Manager bounds are real. Catalog, aggregate admission and transient/whole-process coverage remain incomplete. | G08; CORE/context-tree.ts:40–103; E05–E07 |
+| **12.5 Retention, branching, and security** (L633) | P/M | Branch filtering/source authority exists; cross-project/child grant and root-tracing retention/deletion-tombstone contracts are incomplete. | G10,G12; CORE/history-index-worker.ts:722–750,765–845,1519–1572 |
+| **13.1 Replace bounded truth with a bounded rendering** (L643) | O/P | Exact source-backed truth is separate from bounded rendering; complete branch reads refuse rather than silently delete. Full1000-constraint native recovery acceptance is absent. | G20; E08–E09 |
+| **13.2 State authority** (L651) | O/P | Input/goal authority and proposal restrictions are real. Defined kinds alone do not wire artifact/test/job/resource-generation facts. | G20; CORE/task-state.ts:8–20,284–320,370–444 |
+| **13.3 Minimal task frame** (L670) | O/P | W26 actually injects selective TaskFrames through native conversion and preserves sparse revision slots. Byte limits are not full provider selection/epoch/recovery budgets. | G03,G20; CORE/messages.ts:500–514; E09 |
+| **13.4 Resource freshness and lifecycle** (L688) | D/M | Unconditional summary liveness conflicts with generation-aware resource reality; broad stale test/artifact/job facts remain unwired. | G06 |
+| **13.5 Completion without a proof bureaucracy** (L696) | P | Descriptive authority avoids mandatory model plans; freshness-aware relevant completion reminders are incomplete. No new proof/checklist bureaucracy is required. | G20; CORE/task-frame.ts:114–115 |
+| **14.1 One compiler, multiple rendering policies** (L704) | O/P | Real source-backed ViewUnit metadata and helper closure exist; full context is retained/refused rather than adapter-budget-selected. | G03; E09 |
+| **14.2 Layout and update policy** (L725) | O/P/A | Stable source-position frame revisions exist and stable KV prefix/most-changing tail is binding. Full versioned epoch/tool/template/policy layout is not done. | G03,G05; E09 |
+| **14.3 Budget accounting** (L741) | D/M | Chars/4 and incomplete media accounting are not serialized provider/template/tool/state/output budgeting with calibrated uncertainty. | G03 |
+| **14.4 Selection objective** (L751) | P/M | Task kind/recency ranking exists, not full mandatory-first dependency/freshness/failure/path-value selection or diagnostic reasons. | G03; CORE/task-frame.ts:70–79,127–154 |
+| **14.5 Delta, error, and media correctness** (L767) | P/D | Synthetic dependency closure and known blocks exist; delta baseline materialization, decisive failure/media recovery and unknown required replay safety remain incomplete. | G03,G05; E09 |
+| **14.6 Compiler cache correctness** (L775) | P | Revision cache/hydration/detached clones exist; full epoch/profile/adapter/template/tool identity and real budget-only purity remain incomplete. | G03–G05; CORE/canonical-context.ts:165–203,245–246,360–365 |
+| **15.1 Keep one stable recovery tool** (L783) | M/P | Internal bounded source/index reads are substrate, not stable model-facing batch recovery, planning/dedup/cursors and all coverage/access outcomes. | G04,G10 |
+| **15.2 Query planning** (L802) | M/P | Internal bounded source/index reads are substrate, not stable model-facing batch recovery, planning/dedup/cursors and all coverage/access outcomes. | G04,G10 |
+| **15.3 A small amount of selective push** (L810) | M/P | No implemented selective prefetch budget/reason or committed-epoch lifetime for recovered views. A summary frame reset is not recovery retention. | G04 |
+| **15.4 Retention within an epoch** (L816) | M/P | No implemented selective prefetch budget/reason or committed-epoch lifetime for recovered views. A summary frame reset is not recovery retention. | G04 |
+| **15.5 Evidence handles for large local data** (L822) | P/M | Exact handles and slices exist, not model-accessible evidence-local filter/count/join results with scanned/more-match coverage. Reuse current local execution, not another service. | G04,G10; CORE/history-index.ts:203–206,261–275 |
+| **16.1 Continuation modes** (L830) | P/M | One inherited summary publisher and attempted-summary accounting exist; three-mode ContinuationPlan/epoch ownership does not. | G04,G17; CORE/agent-session.ts:8110–8230 |
+| **16.2 Generic continuity policy** (L852) | P | Fork-owned inherited summary is current, not D reference-builder default. Frozen generic-control and separately measured balanced bridge remain incomplete. | G04,G16; CORE/compaction/compaction.ts:596–666,695–769 |
+| **16.3 Astra continuity policy** (L860) | P/M/D | No distinct Astra portable/native continuity policy or measured fallback; inherited W26 summary still makes the false Python promise. | G04,G06,G16 |
+| **16.4 Bounded portable checkpoint schema** (L866) | M | TaskFrame is not a bounded portable checkpoint schema. Source journal atomicity is not complete epoch coverage/resource/budget/CAS/late-event transaction acceptance. | G04 |
+| **16.5 Atomic checkpoint transaction** (L885) | M | TaskFrame is not a bounded portable checkpoint schema. Source journal atomicity is not complete epoch coverage/resource/budget/CAS/late-event transaction acceptance. | G04 |
+| **16.6 Native continuation rules** (L904) | P/M | Known opaque replay and Codex previous_response_id transport delta exist, not promoted standalone/stateful/in-request native-compaction canonical windows or public fallback. | G04–G05; AI/providers/openai-codex-responses.ts:1064–1115,1199–1217 |
+| **16.7 Rotation frequency and accounting** (L912) | P/M | Summary attempt accounting exists; separate rotation/summary/native events and cost-aware hysteresis are absent with the complete epoch controller. | G04,G17–G18 |
+| **17.1 Separate three caches** (L920) | P | Local view cache, transport delta and provider cache-read counters are distinct. No whole-path task timing/cost or physical KV-residency conclusion follows. | G18; CORE/canonical-context.ts:165–203; AI/providers/openai-responses-shared.ts:280–310 |
+| **17.2 Rendered-prefix identity** (L926) | P/U/D | Prefix pieces exist; full rendered identity and evidenced advanced-cache route gating are incomplete. Optional unknown-route retention defaults are unsafe under the required contract. | G03,G05; E09 |
+| **17.3 Keep-versus-rotate economics** (L934) | M | No keep-versus-rotate economic controller beyond a reserve threshold. Use deterministic conservative hysteresis before fitting allowed campaign observations. | G04,G18; CORE/compaction/compaction.ts:215–218 |
+| **17.4 Reasoning-context experiments are shared where supported** (L950) | P/M | Known opaque replay and ordinary effort mapping exist; replay-family compatibility, fallback and isolated shared reasoning-context experiments are not certified. | G05,G16; AI/models.ts:67–96 |
+| **18.1 Avoid generating expensive work** (L958) | P/U | Evidence-local/nonblocking procedure guidance and source handles exist, not measured work reuse or a valid deterministic execution cache. | CORE/prompts/rlm.ts:19–53; canonical-payload-parts.ts:80–119; G18 |
+| **18.2 Event-driven jobs instead of polling conversations** (L966) | P/M | Bash handles and child update dedup exist, not one bounded job/wakeup/result owner across Bash/children/native async or watcher folding. | G08,G11; PY/bash.py:109–117,236–264,522–548 |
+| **18.3 Skills as small procedures** (L974) | D/P | Full skill catalogs/bodies and missing immutable selected versions violate bounded/frozen skill requirements. | G09 |
+| **18.4 Auxiliary inference and learning** (L982) | D/P | Native auxiliary receipts are real; main-model inheritance, disposal-started automatic work and missing separate job/configuration budgets remain. | G07,G17 |
+| **18.5 Off mode and behavioral separation** (L990) | M/D | Compaction.enabled is not context.mode=off. Behavioral/skill injection and auto refinement remain separate; native safety owners should remain on. | G07 |
+| **19.1 What the fork ancestor does and does not establish** (L1000) | D/M | Ancestor lifecycle fixes and durable spawn ACK do not supply the mandatory one-child guard or pre-await independent tree-wide scheduler. | G02; E12 |
+| **19.2 Separate resource budgets** (L1006) | D/M | Ancestor lifecycle fixes and durable spawn ACK do not supply the mandatory one-child guard or pre-await independent tree-wide scheduler. | G02; E12 |
+| **19.3 Child input and return contracts** (L1018) | P/D | Concise child task/model selection and completion attribution exist; scoped evidence/result manifests and cross-process workspace safety are incomplete. | G11 |
+| **19.4 Passivation and restart** (L1026) | P | Idle passivation/rechecks, restore diagnostics and uncertain-work holds exist. Unified per-operation restart/live-handle guarantees and parallel speedup/cost evidence do not. | CORE/session-action-store.ts:373–401; DM/daemon-mode.ts:2772–2855; CORE/kernel/state-snapshot.ts:6–35; G02,G06,G11; E12 |
+| **20.1 Behavioral tuning** (L1036) | M | No separately versioned, benchmark-isolated Astra behavioral policy. Do not leak it into generic control or impose routine delegation/artifacts/tests. | G05,G16 |
+| **20.2 Effort configuration** (L1044) | P/M | Ordinary mapping is not a native effort timeline/update ordering/combination contract. No claim that required Astra actually received unsupported none/off values. | G05,G16; AI/models.ts:67–96; AI/providers/openai-responses.ts:258–272 |
+| **20.3 Native asynchronous tools** (L1052) | M/P | Local parallel tools are not provider-native async pending/original-ID/out-of-order/disconnect ownership. Keep advanced feature off. | G11,G16; AG/agent-loop.ts:850–905 |
+| **20.4 Mid-turn steering** (L1060) | M/P | Host turn-boundary queues and Codex response.create are not Astra update submit/ack/apply/reconcile or automatic continuation accounting. | G16–G17; CORE/agent-session.ts:7994–8001; AI/providers/openai-codex-responses.ts:1171–1196 |
+| **20.5 Programmatic tool calling** (L1068) | M | Local Python/Bash batching is not provider-native PTC/program/caller linkage and compatibility. Optional and independent of common memory. | G16; AI/providers/openai-responses-shared.ts:189–208,259–267 |
+| **21.1 Sol must not become a compatibility afterthought** (L1076) | P/M/A | Frozen S assets and inherited summary exist; native generic-control parity/golden requests/campaign do not. Exact existing-subscription targets are authorized, not certified. | G16,G18; E11,E13 |
+| **21.2 Qwen and other generic models** (L1084) | P/M | Generic adapter flags/tool validation exist, not a pinned real model/tokenizer/template/server/parser/context/hardware deployment contract or acceptance. | G16; AI/providers/openai-completions.ts:668–676; AG/agent-loop.ts:975 |
+| **22.1 Repair accounting before claiming optimization** (L1096) | P | Real source-bound physical attempts and normalized completeness exist; complete contract/permission/prefix/epoch/commit/effort metadata and all actual-purpose coverage remain open. | G17; E14 |
+| **22.2 Request receipt contract** (L1102) | P | Real source-bound physical attempts and normalized completeness exist; complete contract/permission/prefix/epoch/commit/effort metadata and all actual-purpose coverage remain open. | G17; E14 |
+| **22.3 Token and price normalization** (L1123) | P | Numeric usage validation and explicitly estimated catalog costs exist, not versioned route tariffs/tier/other-charge/local-compute or invoice certification. | G18; AI/utils/provider-attempts.ts:121–167 |
+| **22.4 Timing and context metrics** (L1139) | P | Attempt/setup/agent/judge/lifecycle clocks exist; archive metrics can be null. No full settlement critical path/context/whole-tree memory/queue/stall measurement. | G18; BENCH/run.py:869–877,900–935 |
+| **22.5 Freeze the experimental populations** (L1147) | P/A | H/S/D identities and exact H/current target route are pinned; complete executable B0-S/B0-D/generic/single-feature populations are not certified. | G16,G18; E11 |
+| **22.6 Retry and selection rules** (L1167) | O/P/D/A | Synthetic first-valid/failure-retry fairness is observed; native parser is receipt-only, but live runner RPC-only capacity authority still differs. Confirmed invalidations never spend valid retry. | G17–G18; E14 |
+| **22.7 Statistical interpretation** (L1175) | M/A | No final randomized repeated-block/held-out/uncertainty or required ablation campaign. Deferral is required by the user gate, not a reason to run early samples. | G18 |
+| **22.8 Required ablations** (L1183) | M/A | No final randomized repeated-block/held-out/uncertainty or required ablation campaign. Deferral is required by the user gate, not a reason to run early samples. | G18 |
+| **22.9 Targets, not promised results** (L1189) | P/A | Targets are not promised results; no new promotion margin or speed/cost/accuracy percentage is supportable. | G03,G16,G18 |
+| **23.1 How the coding agent must work** (L1201) | P | Source-owned native work and narrow existing observations are real; remaining product features must be built directly, not replaced with a proof/review framework. | G01–G20; E01–E14 |
+| **23.2 Dependencies and defaults** (L1321) | P/D/A | Logical dependencies permit independent edits, not conflicting ownership or premature promotion. Spec defaults are not met by current child admission/automatic auxiliary paths; five-feature benchmark gate remains binding. | G02,G07,G16; W0–W13 table |
+| **23.3 Review boundaries that prevent a failed rewrite** (L1336) | P | Separate source correctness/control/policy/provider/concurrency dimensions. No new campaign exists from which to infer isolated effects; each new feature still needs its specified owner/validity contract. | G16–G19 |
+| **24.1 Preservation, state, and recovery** (L1346) | P/D/M | All individual acceptance IDs are mapped below. Narrow observed components do not close whole requirements or current-snapshot certification. | Acceptance map; E01–E14 |
+| **24.2 Compiler, continuation, and provider contracts** (L1365) | P/D/M | All individual acceptance IDs are mapped below. Narrow observed components do not close whole requirements or current-snapshot certification. | Acceptance map; E01–E14 |
+| **24.3 Execution, lifecycle, and new controls** (L1388) | P/D/M | All individual acceptance IDs are mapped below. Narrow observed components do not close whole requirements or current-snapshot certification. | Acceptance map; E01–E14 |
+| **24.4 Storage, accounting, and release** (L1407) | P/D/M | All individual acceptance IDs are mapped below. Narrow observed components do not close whole requirements or current-snapshot certification. | Acceptance map; E01–E14 |
+| **24.5 Fork ownership, isolation, and crash safety** (L1426) | P/D/M | All individual acceptance IDs are mapped below. Narrow observed components do not close whole requirements or current-snapshot certification. | Acceptance map; E01–E14 |
+| **24.6 Long-horizon scenarios beyond the thirty tasks** (L1473) | M/P | Short synthetic state/closure cases exist, not ten rotations, sparse decisive recovery, conflicting generations, kernel restart, child-result race, native-switch and no-compaction long-horizon acceptance. | G03–G06,G11,G16,G18; E08–E09 |
+| **24.7 Stop and rollback conditions** (L1479) | P/D | Hold promotion for source-supported violations and missing owners; no paid invalid request, live data loss or accuracy regression is invented. Compatible archive/read/export rollback is not complete checkpoint rollback. | G01–G18 |
+| **26.1 Supplied Prime Context source** (L1503) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.2 Supplied Prime Agent source** (L1527) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.3 Public Prime Context material recorded by the prior review** (L1545) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.4 External primary technical documentation** (L1555) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.5 T1 — Earlier reproduced probes retained as evidence** (L1573) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.6 N — New fork-specific source audit and probes** (L1592) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+| **26.7 U — Upstream primary sources checked for this decision** (L1621) | U/P/A | Historical source register, prior T1/N probes and dated URLs are not new validation. Separate frozen-source corrections, supplied evidence, current implementation and mutable external contracts. No external page was revalidated in this audit. | Spec:1499–1630; IMP/baselines.json:12–38; E01–E15 |
+
+**§25, all paragraphs (L1485–1497): P/M.** The functional first release is not done. Native source ownership, exact storage and scoped auth exist; full migration, update/rollback, continuation/recovery, receipt contracts, installed artifacts, model policies/campaigns and maintained operations remain incomplete (G01–G20). The user-facing result must remain task/evidence/recovery, not source-ledger or save/pin/ack management. Source ancestry, product version, runtime/storage/daemon contracts and behavioral/provider support must be distinguished.
+
+**Final implementation directive (L1632–1634): P/A.** The maintained source fork and retirement of product patch surgery are real. Complete product isolation, preserved Sol behavior, all-work accounting, owned updates and evidence-based per-model promotion are not complete. All approved overrides and the benchmark/publication holds remain binding. The introductory title/decision framing (L1–13) is an objective, not an achieved performance claim.
+
+### Inherited defect inventory in §9.2
+
+These retain the confidence limits of the original observations. They are not twelve new runtime failures.
+
+| ID | W26 disposition |
+|---|---|
+| D01 | O/P: source-backed truth and bounded rendering replace small truth caps; full1000 native recovery gate remains open (G20). |
+| D02 | O/P: exact case/flags and explicit/ambiguous supersession are covered in scoped state fixtures; retain through recovery/rotation (G20). |
+| D03 | P/M: inherited summary remains, but resolved profile/adapter continuation gate is missing (G05,G16). |
+| D04 | M: no complete bounded portable checkpoint/coverage transaction; TaskFrame is not that packet (G04). |
+| D05 | D: unconditional W26 Python promise remains despite narrower later runtime checks (G06). |
+| D06 | P/M: known opaque replay exists; public/native compatibility and required unknown-item fallback remain incomplete (G05). |
+| D07 | P/D: incremental indexes are real; saved native/legacy catalogs still scan and retain unbounded reductions (G08). |
+| D08 | O/P/D: owned Manager clears full maps and bounded consumers exist; catalog/aggregate/whole-harness gaps remain (G08). |
+| D09 | D/M: no effective one-child admission or independent pre-await tree scheduler (G02). |
+| D10 | O/P/D: native receipt parser, honest legacy unknowns and first-valid policy are corrected; complete metadata/physical coverage and runner capacity authority remain open (G17–G18). |
+| D11 | P: revision-aware cache and detached clones exist; helper mutation is not evidence of a current live same-ID storage defect (G03,G05). |
+| D12 | D/M: disposal-started automatic work and absent optimizer-off boundary remain (G07). |
+
+## W0–W13 workstream and exit-gate map
+
+| Workstream / spec line | Status | Shipped scope and remaining exit gate |
+|---|---|---|
+| W0 — Freeze controls, audit ownership, establish a build (1209) | P/A | Separate H/S/D pins,391 dispositions, source build and offline setup exist. Exact executable control/model/tariff/platform inputs and complete artifact baseline remain unverified. H0.9.3 is approved (G15–G19; E09–E13). |
+| W1 — Product isolation (1217) | P/D | Owned identity/runtime/auth/daemon graph exists; harmful upstream docs, stale contract reporting, hooks export, updater and current installed coexistence gates remain (G13–G15). |
+| W2 — Semantic source ports (1225) | P | Native capture/coordinator/TaskFrame/ViewUnit ownership exists. Complete S semantic parity, explicit turn outcomes and disposition closure do not (G03–G05,G11,G16,G19). |
+| W3 — Reliable source/effects/receipts (1233) | O/P/D | Canonical owner/index/intent/receipt work is real; unchecked active recovery writes and complete unresolved-effect/publication contracts remain (G01,G10,G17; E01–E04). |
+| W4 — Durable state/exact index (1241) | O/P | Qualified exact state, indexed sources and refusal semantics exist. Full runtime facts,1000 admitted obligations and native recovery/retention acceptance remain (G10,G20; E03,E08–E09). |
+| W5 — Native history/hot memory (1249) | O/P/D | Activated indexed Manager and applied W21/W23 bounds exist. Saved catalogs/aggregate buffers and current whole-harness scale/platform evidence remain open. Old473 measurements are real storage-only observations (G08; E04–E07). |
+| W6 — Compiler/recovery/evidence-local execution (1257) | O/P/M | W26 native TaskFrame injection/stable revisions and ViewUnit helpers are shipped. Real provider budgets/selection, stable epochs, selective/batched recovery and evidence-local coverage outputs are not complete (G03–G04). |
+| W7 — Generic/Sol preservation (1265) | P/M | Frozen S external layout and inherited native summary exist, not certified native generic-control/golden requests, pinned generic deployment or campaign (G16; E11). |
+| W8 — Atomic checkpoints/native continuation (1273) | M/P | Ordinary summary/accounting and Codex transport continuation are substrate, not complete atomic epochs, canonical native modes or switching/expiry fallback (G04–G05). |
+| W9 — Astra/shared cache features (1281) | P/M | Ordinary known replay/cache/effort source exists. Advanced effort/async/steering/PTC predicates and exact-route feature/ablation evidence remain absent. No blanket enablement (G05,G16). |
+| W10 — Owned scheduling (1289) | M/D/P | Ancestor cancellation/passivation is credited; effective conservative child admission, independent reservations, workspace/result contracts and parallel performance gates are not complete (G02,G11). |
+| W11 — Non-destructive migration/recovery (1297) | M/P | Retained-journal copy/future-version guards exist. Product dry-run/staging/reference mapping/paused authority/trusted resume/rollback do not (G12). |
+| W12 — Release/model-policy certification (1305) | M/P/A | Source checks/builds and older packing are not current installed release/provider/platform/campaign certification. All live benchmarks remain barred until five prerequisites finish; publication needs approval (G15–G18). |
+| W13 — Maintained-fork operations (1313) | M/P/D | Ancestry/disposition notes exist, not owned support/security roles, reviewed-through intake/sample backport, support/rollback operations. Upstream user-routing docs are an actual deviation (G13,G19). |
+
+## Complete acceptance-ID coverage
+
+Each row names the exact spec acceptance ID. The status is scoped by its note and the linked finding/evidence; no row silently turns a source check or historical helper test into a full W26 acceptance pass.
+
+| ID — acceptance | Status | Assessment / remaining gate | Sources and evidence |
+|---|---|---|---|
+| **P01 — Exact Sol baseline diff** (spec:1350) | P/M | Frozen source/control metadata exists; native Sol golden-request and exact baseline certification is missing. | G16,G19; E11 |
+| **P02 — Source-port golden requests** (spec:1351) | P/M | Frozen source/control metadata exists; native Sol golden-request and exact baseline certification is missing. | G16,G19; E11 |
+| **P03 — Model-independent fixed views** (spec:1352) | P | Native fixed-view metadata is real; cross-profile adapter-certified selection is unfinished. | G03,G05; E09 |
+| **P04 — Thirteen and one thousand active constraints** (spec:1353) | P | Qualified short fixtures exist, not 1,000 admitted obligations with bounded rendering and model recovery. | G20; E08,E09 |
+| **P05 — Case-sensitive literals** (spec:1354) | O/P | Exact case, ambiguous updates and proposal authority observed in reducer/admission fixtures; full recovery/rotation acceptance remains partial. | G20; E08,E09 |
+| **P06 — Ambiguous updates** (spec:1355) | O/P | Exact case, ambiguous updates and proposal authority observed in reducer/admission fixtures; full recovery/rotation acceptance remains partial. | G20; E08,E09 |
+| **P07 — Descriptive state** (spec:1356) | O/P | Exact case, ambiguous updates and proposal authority observed in reducer/admission fixtures; full recovery/rotation acceptance remains partial. | G20; E08,E09 |
+| **P08 — Small literal history** (spec:1357) | P | Exact short-source locators exist; recovery after atomic checkpoint replacement is not implemented end to end. | G04,G10; E03,E09 |
+| **P09 — Recovered evidence** (spec:1358) | M | No native same-epoch recovery lifetime or single-call bounded recovery interface; internal readers are substrate only. | G04 |
+| **P10 — Single-call recovery** (spec:1359) | M | No native same-epoch recovery lifetime or single-call bounded recovery interface; internal readers are substrate only. | G04 |
+| **P11 — Retrieval completeness** (spec:1360) | P | Branch qualification and partial-index outcomes exist; complete access/deletion/injection-safe recovery contract is unfinished. | G04,G10,G12; E03,E08,E09 |
+| **P12 — Scope and injection** (spec:1361) | P | Branch qualification and partial-index outcomes exist; complete access/deletion/injection-safe recovery contract is unfinished. | G04,G10,G12; E03,E08,E09 |
+| **P13 — Freshness** (spec:1362) | P/M | Source revisions exist; automatic artifact/test/job/kernel freshness acceptance is missing. | G06,G20 |
+| **P14 — Skills** (spec:1363) | D/P | Catalog/body/version limits are absent on actual paths; no malicious-history learning acceptance is established. | G09 |
+| **C01 — Generic compaction gate** (spec:1369) | P | Inherited native summary exists; explicit frozen generic-control/continuation profile gate is missing. | G05,G16 |
+| **C02 — Stable prefix** (spec:1370) | O/P/A | Sparse frame slots observed; complete template/tool/profile/epoch prefix contract remains partial. Stable-prefix/tail override applies. | G03,G05; E09 |
+| **C03 — Same-ID mutation** (spec:1371) | P | Revision-aware cache and detached views exist; arbitrary same-ID canonical mutation/full identity acceptance is not established. | G03,G05; E09 |
+| **C04 — Budget-only purity** (spec:1372) | P/U | Read-only usage estimation is not a finished non-mutating provider-budget preflight over a committed epoch. | G03,G04 |
+| **C05 — Delta closure** (spec:1373) | P | Synthetic dependency closure/refusal helper observed; actual provider delta materialization/rebase is missing. | G03; E09 |
+| **C06 — Protocol closure** (spec:1374) | P | Known replay groups exist; complete adapter-certified protocol/native-program closure is unfinished. | G05 |
+| **C07 — Unknown block** (spec:1375) | D/M | Unknown required output items lack lossless preservation or explicit safe refusal/fallback; no malformed live request was observed. | G05 |
+| **C08 — Tokenizer diversity** (spec:1376) | D/M | Universal chars/4 and user-image omission are not model/template/media-aware budgets or diversity acceptance. | G03 |
+| **C09 — Huge required group** (spec:1377) | P/M | Source-byte/group helper refusals exist; real provider required-group budget fallback remains missing. | G03 |
+| **C10 — Bounded checkpoints** (spec:1378) | M | No complete bounded checkpoint/epoch transaction, late-event race or checkpoint-crash acceptance. | G04 |
+| **C11 — Checkpoint race** (spec:1379) | M | No complete bounded checkpoint/epoch transaction, late-event race or checkpoint-crash acceptance. | G04 |
+| **C12 — Checkpoint crash** (spec:1380) | M | No complete bounded checkpoint/epoch transaction, late-event race or checkpoint-crash acceptance. | G04 |
+| **C13 — Native canonical output** (spec:1381) | M | Codex transport continuation is not canonical output handling for promoted native-compaction modes. | G04,G05 |
+| **C14 — Public versus opaque continuity** (spec:1382) | P | Known opaque replay exists; public/opaque continuity and privacy-safe compatible fallback remain incomplete. | G05 |
+| **C15 — Model/route switching** (spec:1383) | M/P | Ordinary model switching/local continuation reset is not compatible-lineage or expired-state recovery acceptance. | G04,G05 |
+| **C16 — Kernel reality** (spec:1384) | D/M | W26 summary promises kernel survival without authoritative generation input; later fix is outside this snapshot. | G06 |
+| **C17 — Expired provider state** (spec:1385) | M/P | Ordinary model switching/local continuation reset is not compatible-lineage or expired-state recovery acceptance. | G04,G05 |
+| **C18 — Cache adapter** (spec:1386) | P/U/D | Optional cache fields/transport state exist; unknown-route gating gap and exact target wire/cache evidence remain. | G05,G16 |
+| **X01 — Simultaneous child spawns** (spec:1392) | M/D | No pre-await tree-wide capacity reservation/settlement or parent-wait slot contract; existing setup cleanup is narrower. | G02 |
+| **X02 — Spawn failure** (spec:1393) | M/D | No pre-await tree-wide capacity reservation/settlement or parent-wait slot contract; existing setup cleanup is narrower. | G02 |
+| **X03 — Parent waiting** (spec:1394) | M/D | No pre-await tree-wide capacity reservation/settlement or parent-wait slot contract; existing setup cleanup is narrower. | G02 |
+| **X04 — Nested cancellation** (spec:1395) | P | Visited-set nested cancellation exists; complete new scheduler/job acceptance is not established. | G02,G11; E06 |
+| **X05 — Passivation** (spec:1396) | P | Idle passivation predicates exist; real kernel/live-handle restart and scheduler ownership acceptance are incomplete. | G11; E06 |
+| **X06 — Unknown side effect** (spec:1397) | P | Intent/result storage and recovery holds exist; residual journal durability and per-effect unknown reconciliation remain. | G01,G10 |
+| **X07 — Parallel writes** (spec:1398) | D | Children share CWD; same-process native edit queue is not cross-worker/Bash/Python resource ownership. | G11 |
+| **X08 — Polling** (spec:1399) | P/M | Event-driven Bash handles and deduped child updates exist; unified wait/wakeup/watcher policy is missing. | G11 |
+| **X09 — Shutdown** (spec:1400) | D | Disposal can start new due automatic refinement under documented conditions, not merely drain existing work. | G07 |
+| **X10 — Off mode** (spec:1401) | M/D | No complete optimizer-off transition, behavioral/auxiliary switch and preserved public recovery contract. | G07 |
+| **X11 — Astra effort rules** (spec:1402) | P/M | Ordinary effort mapping exists; exact Astra update values/order/combination timeline is missing. | G05,G16 |
+| **X12 — Native async** (spec:1403) | M/P | Local parallel tools and turn-boundary queues are not native async or provider steering protocols. | G05,G16 |
+| **X13 — Steering** (spec:1404) | M/P | Local parallel tools and turn-boundary queues are not native async or provider steering protocols. | G05,G16 |
+| **X14 — Mixed-model children** (spec:1405) | P | Independent child model lookup exists; complete child contract, scoped evidence and mixed-model certification are absent. | G02,G05,G11,G16 |
+| **R01 — Archive fault injection** (spec:1411) | P | Helper/actor/index faults observed historically; not all active journals or full projected archive publication. | G01,G10; E01,E02,E03 |
+| **R02 — GC** (spec:1412) | M | Per-session deletion is not retained-root GC or explicit tombstone semantics. | G10 |
+| **R03 — Scale** (spec:1413) | O/P | Actual 10k/100k/1m storage-subset measurements exist at old473; W26 full scale acceptance remains incomplete. | G08; E07 |
+| **R04 — Hot memory** (spec:1414) | P/M | Applied component bounds and storage-group RSS are not whole-harness/process-tree hot-memory certification. | G08; E04,E05,E07 |
+| **R05 — Large exact reads** (spec:1415) | O/P | Bounded canonical source-fragment reads observed; legacy compressed-envelope/bomb acceptance remains incomplete. | G10; E03 |
+| **R06 — All inference purposes** (spec:1416) | P | Native main/auxiliary owners exist; fake purpose-enum tests do not establish every actual promoted provider purpose. | G17; E13 |
+| **R07 — Deduplication** (spec:1417) | O/P | Synthetic parser observations establish deduplication and unknown preservation, not complete actual root-child billing/usage. | G17; E13 |
+| **R08 — Unknown usage** (spec:1418) | O/P | Synthetic parser observations establish deduplication and unknown preservation, not complete actual root-child billing/usage. | G17; E13 |
+| **R09 — Late settlement** (spec:1419) | P/U | Settlement ownership exists; full output-commit/epoch associations and real late settlement acceptance remain incomplete. | G17 |
+| **R10 — Pricing** (spec:1420) | P | Normalization checks/catalog estimates exist; versioned route tariffs, tiers and billed/other-charge evidence do not. | G17,G18 |
+| **R11 — Retry fairness** (spec:1421) | O/P/D/A | First-valid primary/retained retries observed synthetically; native RPC-only capacity invalidation remains a distinct source issue. Capacity override applies. | G17,G18; E13 |
+| **R12 — Packaging** (spec:1422) | P/D | Owned build graph exists; hooks export is dangling and current installed SDK/declaration/daemon/bundle certification is absent. | G14,G15; E10,E14 |
+| **R13 — Real providers** (spec:1423) | M/A | Real provider and accuracy campaigns are missing and correctly deferred. Setup/dummy auth/faux tests are not these gates. | G16,G18; E11,E12,E13 |
+| **R14 — Accuracy** (spec:1424) | M/A | Real provider and accuracy campaigns are missing and correctly deferred. Setup/dummy auth/faux tests are not these gates. | G16,G18; E11,E12,E13 |
+| **F01 — Ancestry** (spec:1432) | P/A | Actual approved H ancestry and source identity recorded; complete selected-port/staged-release contract is not certified. | G19; E14 |
+| **F02 — Patch retirement** (spec:1433) | U | No legacy patcher on inspected native build/install paths; all installed lifecycle paths have not been exercised at W26. | G15,G19 |
+| **F03 — Dependency isolation** (spec:1434) | P/D | Owned dependencies/extension aliases exist; advertised hooks export lacks source, and installed isolation is unverified. | G14,G15; E10 |
+| **F04 — Native surface parity** (spec:1435) | P | Native owners really wire through SDK/session; all shipped-mode provider/permission/service parity is not established. | G03,G04,G17; E04,E09 |
+| **F05 — Identity matrix** (spec:1436) | D/P | Native product identity is real, but W26 README/support routes and doctor/protocol descriptions are wrong or stale. | G13 |
+| **F06 — Two-product coexistence** (spec:1437) | P/M | Older installed coexistence is scoped to an earlier checkpoint; no current install/update/uninstall coexistence evidence. | G13,G15; E15 |
+| **F07 — Cross-product handshake** (spec:1438) | U | Foreign-product rejection is in source; synthetic socket fixture/old coexistence is not current installed protocol11 proof. | G13,G15 |
+| **F08 — Worker fencing** (spec:1439) | P | Daemon token/generation/start fencing exists, not complete new scheduler/result/capacity lifecycle acceptance. | G02,G11; E06 |
+| **F09 — Runtime bootstrap** (spec:1440) | P | Owned bundled runtime bootstrap/refusal exists; pack listings are not current installed Python/kernel/pair compatibility. | G15; E10 |
+| **F10 — Environment parsing** (spec:1441) | U | Explicit path parsing/legacy alias fences exist; complete Unicode/whitespace/platform artifact cases are unverified. | G13,G15 |
+| **F11 — Update isolation** (spec:1442) | D | Updater origin/redirect/identity/compatibility and fail-stay/pair-rollback requirements are not met globally. | G14 |
+| **F12 — Catalog determinism** (spec:1443) | U/P | Catalog generation is separate and source is pinned; final refresh provenance/network-variation artifact evidence is incomplete. | G15; E14 |
+| **F13 — Real artifact notices** (spec:1444) | P | Notices appear in older four-package pack listings; no complete current extracted/binary/wheel/source/SBOM gate. | G15; E10 |
+| **F14 — No surprise network export** (spec:1445) | U/P | Dedicated opt-in export source exists; no actual complete startup/import/shutdown no-export evidence, and importer is absent. | G12,G13 |
+| **F15 — Auth contract** (spec:1446) | O/P/A | Read-only instance-only existing subscription observed with dummy OAuth; not login/refresh/entitlement/wire certification. API keys are not a blocker. | G13,G16; E12 |
+| **F16 — Dry-run migration** (spec:1447) | M/P | Product dry-run/staged interrupted import is missing; bounded retained-journal copy is narrower infrastructure. | G12 |
+| **F17 — Interrupted import** (spec:1448) | M/P | Product dry-run/staged interrupted import is missing; bounded retained-journal copy is narrower infrastructure. | G12 |
+| **F18 — Legacy reference mapping** (spec:1449) | P | Retained journal IDs/parents preserved in copy; complete observation/task/artifact/attachment mapping/tombstones are absent. | G12 |
+| **F19 — Paused imports** (spec:1450) | M | No product paused-import contract for schedules, heartbeats, jobs and outboxes. | G12 |
+| **F20 — Trusted restore** (spec:1451) | P/M | JSON journal copying does not execute snapshots; full trusted preview/import/resume contract is missing. | G12 |
+| **F21 — No dual context engine** (spec:1452) | M | No explicit legacy context-engine rejection before extension factory execution; no observed double execution is claimed. | G12 |
+| **F22 — Schema rollback** (spec:1453) | P | Future-version/legacy-writer guards and read-only paths exist, not complete installed schema/provider-lineage rollback. | G12 |
+| **F23 — Short writes** (spec:1454) | D/O | Checked canonical subset observed, but activated recovery/orphan writes and corruption handling still violate global requirements. | G01; E01,E02 |
+| **F24 — Zero-progress writes** (spec:1455) | D/O | Checked canonical subset observed, but activated recovery/orphan writes and corruption handling still violate global requirements. | G01; E01,E02 |
+| **F25 — Torn-tail repair** (spec:1456) | D/O | Checked canonical subset observed, but activated recovery/orphan writes and corruption handling still violate global requirements. | G01; E01,E02 |
+| **F26 — Journal/index gap** (spec:1457) | P | Source/index coverage recovery exists; all projection/checkpoint publication fault acceptance remains incomplete. | G10; E02,E03 |
+| **F27 — Bounded serialization** (spec:1458) | P/D | Frame/queue admission exists; recovery/catalog/skill/aggregate/transient paths remain outside complete bounds. | G01,G08,G09 |
+| **F28 — Canonical source** (spec:1459) | P | Task/evidence/receipt entries share native source identities; complete archive/epoch/job reconciliation remains missing. | G04,G10,G17,G20 |
+| **F29 — Effect ambiguity** (spec:1460) | P | Cancellation unknowns/recovery holds exist; durable per-tool crash reconciliation remains incomplete. | G01,G10 |
+| **F30 — Late checkpoint events** (spec:1461) | M | Captured reads and one summary append path are not complete atomic epoch ownership and late-event handling. | G04 |
+| **F31 — Independent epoch ownership** (spec:1462) | M | Captured reads and one summary append path are not complete atomic epoch ownership and late-event handling. | G04 |
+| **F32 — Multi-process budgets** (spec:1463) | M | No independent multi-process tree-wide capacity scheduler; expired ownership is not proof external work stopped. | G02 |
+| **F33 — Child result publication** (spec:1464) | P | Durable spawn/status/usage exist; complete committed child artifact/result publication and deduped parent consumption are absent. | G02,G11 |
+| **F34 — Parent/child workspace safety** (spec:1465) | D | Shared-CWD workers lack complete concurrent-write isolation or centralized ownership. | G11 |
+| **F35 — UI disconnection** (spec:1466) | P | Inherited disconnect/replay suppression exists; weak recovery writes and incomplete full native lifecycle remain. | G01,G11,G17; E06 |
+| **F36 — Optimizer mode transition** (spec:1467) | M/D | Optimizer transition cannot be certified by toggling compaction alone. | G07 |
+| **F37 — Small-task overhead** (spec:1468) | P/M | No mandatory paid ranker in compiler, but automatic work/catalog paths and small-task overhead evidence remain unresolved. | G07,G08,G18 |
+| **F38 — Platform/runtime floor** (spec:1469) | P/M | Older Linux/Node22.8 storage observations are real; current installed OS/Python/kernel/Windows/network-FS gates are not. | G15; E02,E07,E10 |
+| **F39 — Upstream intake** (spec:1470) | M | Ancestry correction is not a reviewed-through selective intake/sample backport with dependency closure and executed regression. | G19 |
+| **F40 — Published claims** (spec:1471) | D/P/M | Incorrect/stale user claims plus missing current release/model/platform evidence; no publication approval. | G13,G15,G16,G18,G19 |
+
+## Existing evidence register and limits
+
+All entries below were retained before this audit. Reading them is not rerunning them. Source inspection establishes wiring or a source-level conflict, not an executed failure. Parent-reported outcomes are labelled. Older checkpoints, external controls, installed artifacts, local faux streams and real provider calls are separate evidence populations.
+
+| Evidence | Retained location and observation | Limit |
+|---|---|---|
+| **E01 — historical journal helpers** | `.work/logs/w3-journal-close-errors.log` (17 cases across helper/sink/flush), `w3-journal-frame-codec.log` (2). `TEST/journal-io.test.ts:13–39` injects partial/EINTR/zero/ENOSPC; journal-frame `9–36` exercises codec. | Historical helper scope, not physical disk-full or all production writers. G01 active recovery writes remain outside it. |
+| **E02 — canonical owner processes** | `.work/logs/w3-session-journal-owner-process-tests.log`, `w3-session-journal-owner-physical-identity-tests.log`: the same two evolving cases with actual Node22.8 actor IPC, large upload, identity exclusion, torn repair/corruption and POSIX owner death. `TEST/session-journal-owner.test.ts:88–178,294–310`. | Not four distinct cases. POSIX signal portion skips Windows. Not complete checkpoint/effect/whole-system crash certification. |
+| **E03 — historical index/source reads** | `.work/w4-payload-index-e7vmatjj/test.log`, `.work/w5-bounded-history-1ojk305l/test.log` and handoffs: same evolving two index cases, bounded parts and branch/query restrictions. Current source `CORE/canonical-payload-parts.ts:6,80–119`; history-index-worker `1519–1572` reads bounded exact parts. | Old schemas5/8 observations do not certify every later assertion or current schema15. Not migrated compressed-envelope/public recovery acceptance. |
+| **E04 — activated native Manager/SDK** | `.work/w19-manager-residency-consumers-handoff.json`, `.work/w19-residency-consumers-yhzory8u/runtime/logs/test.log` (runtime PID3071053, two cases); `.work/w19-indexed-manager-backend-handoff.json`, `.work/logs/w19-indexed-manager-existing-two-tests.log` (Manager PID3071791, two cases). The later offline-replay happy retry is the same case. | Real native storage IPC/Manager binding and local faux SDK/fork behavior, not provider wire, kernel, current release or all lifecycle paths. Handoff build claims are Parent-reported where not independently logged. |
+| **E05 — applied per-store/request bounds** | `.work/logs/w21-harness-state-ts-existing-two-tests.log`, `w21-harness-state-python-existing-two-setup-retry.log`, `w23-tree-request-existing-two-tests.log`: two selected cases each execution. Source: `CORE/refinement/refinement.ts:297–442,475–540`, `PY/harness.py:26–29,214–244,349–352`, `CORE/context-tree.ts:40–103`. | These patches ARE applied at W26. Per-image/request/queue limits are not aggregate RSS, concurrent-request, transient heap or Python-cache bounds. Initial Python environment setup failure is not a runtime case. |
+| **E06 — historical process/lifecycle work** | `.work/w3-index-process-o13_rrub/output.log` includes actual ownership/recovery process work, but that invocation had39 passes/4 failures. `.work/w3-index-faux3-7sgwaval/output.log` and `.work/w3-index-final-test-results.json` record separate corrective/aggregate results. `.work/logs/w5-native-session-execution-binding-tests.log` and `w2-central-execution-tests.log` include narrow local-faux intent/result ownership cases. | Do not relabel an aggregate as one current green164-case run. Process ownership/cancellation observations are not tree-wide capacity, real external effects, kernel or provider certification. |
+| **E07 — actual historical storage scale measurements** | `.work/native-memory-gates-prep-2uxkj_vk/measurement-results.json`, `frozen-commands.json`, `runs/{10000,100000,1000000}`. Actual runs at `473c85ffcf51d80adf742e5eecebdbd34f8eb53d`, PIDs3092731/3094076/3095197, exit0:64 measured appends and64 exact reads per size. | These measurements DID run; the prep directory name does not mean unexecuted. Synthetic512-byte users/off-branch siblings/context markers are not model epochs. RSS covers storage actor/index/source-loader group only, not whole Agent/daemon/provider/kernel/children. No numeric pass threshold is inferred. |
+| **E08 — task state** | `.work/logs/w24-task-reducer-two-tests.log`, `w24-captured-task-reader-two-tests.log`; same evolving suite. `TEST/task-state-reducer.test.ts:26–136` exercises qualified requirements, amendment/case, proposal/ambiguity/legacy partial/refusal. | Short synthetic structured cases, not1,000 admitted native obligations or long-horizon model recovery. Exact reducer semantics are nevertheless real source progress. |
+| **E09 — W26 TaskFrame/ViewUnits** | `.work/logs/w26-view-unit-two-tests.log`, `w26-view-source-index-existing-two-tests.log`, `w26-taskframe-compiler-existing-two-tests.log`, `w26-taskframe-compiler-existing-happy-retry.log`, `w26-taskframe-native-existing-input-test.log`. **Seven distinct cases:**2 view helpers+2 indexed sources+2 compiler+1 actual native SDK/local-faux input case. | Initial compiler execution had1 pass/1 fail due an incorrect expanded-user authority expectation; corrected same happy case reran. It is not an eighth case. Compiler uses actual `convertToLlm` and two stable revisions; native input fixture preserves admitted task text. No provider or kernel; helper closure is not provider selection. |
+| **E10 — W25 four-package packing** | `.work/w26-subscription-candidate-066kpvy4/pack-command.txt`, `logs/pack.log`: offline `npm pack --ignore-scripts` of four core packages using W25 outputs, with notices in listings. | Not W26 extracted archives, installed SDK/bootstrap, platform binary, wheel, full license/SBOM or release certification. A directory named w26 does not change source provenance. |
+| **E11 — separate external frozen controls** | `.work/ds-frozen-layouts-gcnind2s/D/hosts.json`, `S/hosts.json` and their SETUP/receipts identify separate0.9.1 hosts/9.2.0 plugins and pinned Node22.22.1 layouts. Frozen H/D/S source assets and `IMP/baselines.json`/`ports.md` distinguish controls and ancestry. | Offline copy/patcher/layout completion only. No CLI/SDK/kernel/provider/model/entitlement or baseline/campaign certification. External Astra configuration is not static catalog, price or physical-profile proof. |
+| **E12 — existing-subscription auth** | `.work/logs/w25-subscription-auth-existing-two-tests.log`:2 passed/56 skipped. `TEST/auth-storage.test.ts:912–994`, provider-contracts `37+` use dummy/read-only backends. Actual source: `CORE/auth-storage.ts:283–311,923–946`, provider-contracts `10–55`, model-registry `1022–1035,1310+`; SDK `31–35,302–307`. | Instance-only existing subscription is implemented, with no refresh/key fallback and exact Codex endpoint gates. No real credentials were inspected and no wire entitlement was established. Normal/global OAuth restrictions remain; API keys are not the blocker. |
+| **E13 — accounting/runner fixtures** | `.work/logs/w25-subscription-benchmark-existing-two-tests.log`, `w25-benchmark-existing-happy-real-sandbox.log`. `BENCH/test_harness.py:103–201` uses synthetic receipts/mocked RPC and a real isolated Python workspace/dummy-host-file exclusion branch. | Two existing primary/accounting/capacity cases, plus same happy rerun; not new cases, a provider or a native kernel. Earlier sandbox repeat did not exercise the newly added branch. Native parse authority is fixed; G17 live runner path remains distinct. |
+| **E14 — W26 static/build association** | `.work/logs/w26-taskframe-view-units-full-check.log` reports1029 files/no fixes and static checks. `w26-clean-taskframe-view-units-build.log` reaches bundle; commit/push logs and `.work/namespace-state.json` `w26_current` retain source/build association and Parent-reported successful outcomes. | No audit rerun. Fullcheck/build/normal hooks/clean commit/push are not installed-artifact, protocol, provider, kernel, platform or campaign gates. |
+| **E15 — older installed/coexistence evidence** | `.work/namespace-state.json` older `installed_coexistence`/versioned receipts and `IMP/product-isolation.md:47–54`; Parent-reported installed lifecycle work belongs an earlier protocol checkpoint. | Not W26 protocol11 installation/update/uninstall/Windows certification. Windows and network-filesystem gates remain UNRUN per Parent; no newer whole-harness evidence was supplied. |
+
+Additional bounded-source evidence is not a hidden whole-process guarantee. Examples include journal/Manager queues32 items/64MiB; index32 items/4MiB and2MiB request cap; native full materializers16,384 entries/64MiB; tree requests256 nodes/4MiB metadata/16,384 directory entries;64KiB exact parts; SQLite's requested2MiB pager cache. These are implementation admission settings, **not** RSS thresholds or guarantees about total transient heap, aggregate caches, kernels or the process tree.
+
+## Post-W26 changes — not retroactive compliance
+
+Parent reports later live work. It does not alter any W26 finding above:
+
+- The compaction prompt's unconditional Python-survival statement was removed. `.work/logs/w27-compaction-runtime-note-existing-two-tests.log` reportedly passed the same two initial/update prompt cases (PID3188059, exit0;26 filtered). This is a prompt correction, not resource-generation or kernel-liveness completion. It was not committed/fullchecked at the earlier report.
+- Parent later reported W27 budget code applied, three AI cases and typecheck passed. This audit did not inspect or certify that later integration. External token-budget drafts and concurrent epoch work are also outside the frozen snapshot.
+- Parent reported live README install/management guidance, SECURITY and CONTRIBUTING ownership corrected, with explicit pre-release/unpublished state, owned repository routes and retained upstream acknowledgement. No installer/URL execution, platform/usability or release certification was claimed. W26's original documentation deviations remain in this audit.
+
+No later message supplies the missing complete W26 epoch/recovery, whole-harness memory, exact live provider, installed release or campaign evidence.
+
+## Current prerequisite implementation — W28/W29
+
+This update does not change the immutable W26 findings or line anchors above.
+Scope remains frozen to the five benchmark prerequisites; unrelated findings remain deferred.
+
+- **TaskFrame:** native source-qualified frames remain in provider context. W29 stores frozen frame text/anchors in source-backed epoch checkpoints and reconstructs them on same-journal reopen. This does not complete authoritative resource generations.
+- **ViewUnit closure/selection:** W28 applies complete replay/dependency closure to real compiler output. W29 selects historical plain assistant literals in the actual native OpenAI Responses request after one payload hook. Current users, latest assistant, TaskFrames, fixed views and genuine recovery units remain mandatory. Exact V1/legacy reply identities are supported; retained generated IDs may not shift. Tool-bearing, Codex and opaque projections remain unsupported/intact-or-refused.
+- **Model-aware budgets:** actual serialization uses an explicit route/model/profile and conservative estimates. Selection and admission share one captured evaluator across the checkpoint wait; ordinary receipt observations still feed future requests. No tokenizer, live cost/accuracy or deployment certification is implied.
+- **Committed epochs:** the existing compaction owner ACKs qualified source recipes, frozen TaskFrames and actual representation identity before adoption/send. Same-source CAS, restart reconstruction, stable service-request prefixes and ordinary-summary continuation have focused offline working paths. Cross-file/fork/import rebuilds, full replay/resource boundaries and ordinary-summary recovery retention remain open. Ownership/RPC schema32 rejects older source readers; protocol11 remains unchanged.
+- **Selective recovery:** native `prime_context` and active-cell `rlm.prime_context` return bounded selected source data in the actual finalized tool output. W29 qualifies only the selected executor entering the authorized reader. Forged markers/custom replacements cannot qualify; retained imports lose recovery-kind admission. This is producer provenance, not success, authority promotion or resource freshness.
+
+The five-feature benchmark gate is **still closed**. Once all five features work,
+run all 30 tasks at low effort, then medium effort, with the same existing session ChatGPT
+subscription and exact `gpt-5.6-sol` / `gpt-6-astra`. No live benchmark, model/auth/readiness
+probe or publication was performed for this milestone.
+
+## Current prerequisite implementation — W30
+
+The current source extends the five-feature paths with actual official Responses/Codex tool
+mapping, conservative replay permission, full-logical cached accounting, ordinary-summary
+recovery retention, and explicit destination epoch rebuilding. One compaction owner still
+commits recipes and summaries. Imports rebuild lowered TaskFrames and drop copied replay
+permission. Copied original usage is preserved; rebuild controls omit duplicated usage.
+Schema33/protocol11 is the new source boundary.
+
+Fourteen existing focused cases have passing outcomes across separate compiler2/services2/
+selector2/native-Python2/compaction4/RPC2 scopes; type checking passed. The service path retains
+genuine recovery through eviction, ordinary summary and same-journal reopening. The compiler
+cases exercise real destination rebuilding and native fake-fetch continuation from copied
+summaries. Earlier failed diagnostics and repeated invocations remain recorded. This section
+does not replace the W29 receipts or retroactively change the W26 audit.
+
+Remaining prerequisite blockers include opaque continuation after prefix-breaking summaries
+or rebuilds, complete resource/representation boundaries, and supported deployment profiles.
+Covered cached-prefix units cannot be evicted using stale token credit. No portable public-data
+renderer is implemented. The benchmark arm now forwards a declared enforced configured-limit
+profile; that wiring and its syntax check do not open the no-live-benchmark gate.
+
+## Current prerequisite implementation — W31
+
+W31 adds explicit adapter-permitted public summary windows and owned kernel resource views.
+The actual official request must have a supported stateless descriptor, closed groups and an
+exact allowed route. Public fallback is a deliberate summary transition before its existing ACK,
+not text inserted into opaque fields. V3 recipes preserve canonical originals, user roles and
+exact public evidence, including the old retained tail. Reopen/native fork/import rebuilds
+source references and cutoff metadata; destination permission is not copied. The next native
+send still requires actual final-body budget/projection and epoch acceptance.
+
+Kernel instance identity plus the actual lifecycle counter/state supplies bounded current
+provider data. An unchanged capture stays stable; changed state needs an ACK and a stale held
+capture refuses before send. Saved/imported revision markers never establish current liveness.
+Original concrete readers are bound before callbacks. Managed compaction no longer probes the
+namespace or announces survival. No-budget/no-epoch behavior stays unchanged. Schema34/protocol11
+is the source boundary. No new resource/body/journal store or model call was added.
+
+Fourteen existing cases pass across separate compiler2/services2/selector2/native-Python2/
+compaction4/RPC2 scopes; types pass. Service evidence covers actual opaque tail/public summary,
+reopen and native fork/import continuation (six main fake responses plus one summary). Native
+Python covers real startup/stability/restart/shutdown/new-owner and stale no-send. The separate
+Codex adapter phase covers full public dispatch after prefix loss without old pointer/opaque/
+credit. Initial selector fixture and two typing diagnostics, and affected repeats, remain
+recorded. This is not an extra set of W29/W30 runs or live provider certification.
+
+The gate remains closed. Unaccepted recovery groups, unsupported media/routes/native modes
+and opaque requests without a permitted transition still refuse. Automatic handling of every
+prefix-loss/unknown-budget state is not implemented by this explicit-summary milestone. Finish
+that source continuation path before opening the five-feature benchmark gate; do not substitute
+unauthorized readiness/auth/model probes for implementation. Broader job/artifact/scheduler
+freshness, full portable/native modes and deployment certification remain separate backlog.
+
+## Current prerequisite implementation — W32
+
+W32 implements request-time public fallback for supported official Responses/Codex requests.
+When ordinary selection cannot admit the native body, the actual adapter may encode whole
+completed groups as standalone public data. The same captured source recipes supply the
+candidate, final budget, existing canonical ACK and adopted messages. Original users and
+policy items remain unchanged. Canonical opaque originals remain archived. The normal
+converter and payload hook are not replayed, and no summary model call is added.
+
+V4 records this as a `portable-checkpoint`, not a fabricated summary. Its fixed public-tail
+cutoff does not convert later native messages. Native fork/import rebuilds destination refs
+and permission remains request-local. Null original input estimates stay null in the same
+compaction control and copies; ordinary summary estimates/usage remain unchanged. Direct
+prior-token displays label unknown explicitly. Schema35/protocol11 fences these readers.
+
+Fourteen existing cases and type checking pass on their first W32 invocations: separate
+compiler2/services2/selector2/native-Python2/compaction4/RPC2 scopes. The service path includes
+new opaque output plus genuine recovery, actual request fallback, exact adopted public text,
+null original estimate, close/reopen and native fork/import. It uses seven main fake responses
+and one ordinary summary. The separate AI-only Codex phase checks every post-callback budget
+measurement and the physical fake send for stale credit; its offline acceptance callback is
+not claimed as a canonical ACK. Root's service case supplies that actual ownership path.
+
+The five benchmark prerequisites now have working source paths: TaskFrame injection (W26),
+closed ViewUnit selection (W29/W30), actual-request conservative model budgets (W27/W32),
+stable source-backed epochs (W29/W31/W32), and native selective recovery (W28–W32). After this
+coherent source change is committed and built, proceed to the authorized benchmark phase:
+all 30 isolated tasks at LOW effort, then MEDIUM, using this session's same existing ChatGPT
+subscription and exact `gpt-5.6-sol` / `gpt-6-astra` routes. No early samples or readiness/auth/
+model probes are needed. The remaining audit findings are now the post-prerequisite backlog,
+not reasons to reopen settled feature work or repeat D/S setup.
+
+Unsupported routes, open groups, media and candidates that still exceed the budget may refuse
+explicitly; this is not a promise that every representation can fit. Source/fake-transport checks
+do not certify provider behavior, cache hits, tokenizer accuracy, installed platforms or the
+full remaining spec. No live benchmark, publication or goal-completion claim is made here.
+
+## Post-prerequisite implementation — W34
+
+The W26 audit above remains immutable. These changes address bounded parts of G01
+and G02 after the five supported benchmark prerequisites were completed.
+
+- **G01, command/worker recovery journals:** checked UTF8 writes reuse `writeFullySync`.
+  File sync precedes replacement and directory sync follows creation/replacement.
+  JSONL v1 remains unchanged. Malformed complete records refuse; a torn final fragment
+  exposes only its valid prefix and blocks later mutation until external recovery.
+  Uncertain writes retain their original failure. The recovery-local descriptor helper
+  retains distinct close errors without changing the canonical helper. Supervisor
+  receipt failure prevents dispatch; uncertain result persistence is not retried as a
+  conflicting result. Worker checkpoint failures propagate through existing cleanup.
+  The ready checkpoint is inside runtime binding cleanup. Orphan journals remain open.
+- **G02, conservative resident admission:** one actual live parent owns one pending
+  setup or resident child. Native spawn, direct factories and passive hydration reserve
+  before awaits and bind the actual constructor. Completed residency still counts;
+  successful `disposeAsync` plus setup settlement can release capacity. Unknown startup
+  or cleanup does not prove release. Parent disposal joins accepted setup and partial
+  children. Same-target hydration joins remain. No copied parent ID grants ownership.
+- Child runtime `newSession`, `switchSession`, `fork` and `importFromJsonl` refuse before
+  setup until owned replacement is implemented. Main/root replacement is unchanged.
+  This is not the full tree-wide/cross-worker scheduler, persistent reservation recovery,
+  separate resource budgets or fairness required by §19.2/W10.
+
+Four existing journal cases and two existing real runtime cases with the faux provider
+passed in separate first W34 invocations. The required full check passed after correcting
+three test-mock overload declarations; no focused case was rerun. These checks do not
+certify all daemon fault paths, historical
+synthetic/unlimited-sibling fixtures, platform durability or whole-process bounds.
+Frozen benchmark packages and runner scripts are unchanged by this source work.
+
+## Completed D/S setup handoff — setup only
+
+The earlier, separately authorized setup is complete and stopped. It is not an outstanding API-key/dependency blocker and is not a benchmark result.
+
+- **D manifest:** `private-qualification-archive/manifest.json`. Runner: `D/external-runner/benchmarks/python-realworld-30/run.py`; template: `D/models.json.template`; receipts/notes: `D/SETUP.md`, logs. The already-started final metadata write completed successfully (`D/logs/07-write-metadata.log`); no further receipt write was made after the stop instruction.
+- **S manifest:** `private-qualification-archive/manifest.json`. Runner: `S/runner/benchmarks/python-realworld-30/run.py`; template: `S/models-template/models.json`; receipts/notes: `S/SETUP.md`, `S/setup-output/commands.json`.
+
+Each uses private dependency copies, its unchanged frozen patcher and its own same-package SDK/RPC path. D and S remain distinct; explicit private Astra configuration is not stock-catalog or entitlement certification. No setup job remains. No new CLI, model, auth, provider, kernel or benchmark probe was launched by this audit.
+
+## Bounded completion order
+
+1. Close the active durability/admission/ownership deviations without undoing working native owners or silently changing the frozen generic control.
+2. Finish actual provider-budgeted closure selection, committed epochs and selective recovery. Preserve W26's real TaskFrame wiring and stable-prefix/tail policy.
+3. Finish scoped migration/retention, true off/shutdown/freshness contracts, and the remaining catalog/skill/job bounds on their existing owners.
+4. Correct user-facing identity, public exports and updater activation. Complete owned release/support/intake deliverables with explicit unsupported/unknown scope.
+5. Only after the user's five-feature gate and relevant implementation gates, obtain the specifically missing installed/platform/provider/control/accuracy evidence. Keep valid failures, unknown costs and all physical attempts visible. Publication remains separately approval-gated.
+
+These are bounded product tasks, not permission for new audit rounds, proof frameworks, extra artifacts, benchmark samples or speculative provider calls. The functional first-release definition and aggressive optimization promotion gates are **not met at W26**.
+
+
+## W35 update — native EOF refinement admission
+
+Native RPC EOF closes new opportunistic refinement before pending handlers and idle
+drain. Its runtime retains the closed gate across an already accepted session replacement.
+Disposal drains accepted refinement and genuine queued explicit `refine.run` requests;
+it no longer creates interval/compact reviews, promotes an approved review into new
+planning after closure, or recreates a failed background plan for disposal-only retry.
+The gate is separate from model-visible skills and explicit refinement eligibility.
+
+This closes the bounded G07 shutdown-admission path, not the full optimizer-off backlog.
+Accepted work can still exceed the runner's 30-second grace. No cancellation policy,
+generic AgentConnection protocol, model prompt, frozen control or result is changed.
+Sol's custom anti-overengineering prompt remains intact. The existing RPC happy/edge
+use local-faux native lifecycle phases; six directly contradictory legacy disposal
+expectations are aligned. Validation results are recorded in implementation STATUS.
+
+
+## W36 update — compact provider metadata
+
+New TaskFrame text exposes exact session/entry/field/revision coordinates and the
+captured horizon, without internal physical locators or journal paths. Full internal
+rows/material/origins, requirements/relations/authority/coverage and source capture
+remain unchanged. Matching material reuses frozen text verbatim; destination frames
+still rebuild through the destination reducer. Row selection and byte limits are unchanged.
+
+Recovery's provider-facing action unions use equivalent string enums. The strict
+input/parser, recovery semantics and canonical ACK path are unchanged. Sol's custom
+anti-overengineering prompt and all behavioral text are preserved verbatim. This is
+a bounded representation reduction, not a token, speed, cost or new benchmark claim.
+
+
+## W37 update — explicit request budgets in owned children
+
+Owned native child creation and passive hydration copy the actual parent's explicit
+request-budget configuration through existing runtime/daemon factories and the main
+creation whitelist. Defined trusted child options retain priority; absence remains
+absence. Each child has its own ordinary budget instance. Parent calibration, request
+observations, ACK-prefix credit, bodies, resource facts and authority are not inherited.
+
+This is request-policy forwarding, not tree-wide spend scheduling or profile synthesis.
+An unprofiled child model remains unknown under enforcement. W34 residency and W35
+shutdown admission remain unchanged. Validation scope is recorded in STATUS.
+
+## W38 update — selected skill text admission
+
+Skill discovery now reads at most 16 KiB of raw frontmatter with bounded 1 KiB
+read-ahead. Explicit selection captures at most 1 MiB of the complete SKILL.md,
+including frontmatter, or rejects. Known selected-file failures emit the existing
+skill error and stop the prompt; unknown commands still pass through. The parser,
+raw submitted clause, wrapper and actual captured input remain unchanged.
+
+These are local byte limits for §18.3, not complete G09 closure. Aggregate catalog
+size, directory traversal, Python module/version lifecycle and global heap/model-fit
+bounds remain open. No file-version store or same-size concurrent-write snapshot
+guarantee was added. Sol's custom prompt remains unchanged.
+
+## W39 update — retain unreadable orphan tracking
+
+Malformed complete records and incomplete orphan-journal tails now reject the read
+as unknown tracking, before owner filtering. The owned frontend retains the journal
+and recovery descriptor, attempts its existing uncertain-RPC replies, then rethrows
+before any replacement-worker decision. Reaping stays at its original location;
+distinct cleanup and reporting errors retain their order. Daemon cleanup also keeps
+associated records after a read error. Valid cleanup and signal/identity policy stay
+unchanged.
+
+G01 remains open: shared host/kernel writers still lack record-level serialization.
+No writer, Python enrollment gate, repair, format or ownership change is included.
+The reader remains unbounded in bytes. Detection and retention are not global
+durability or complete enrollment guarantees.
+
+## W40 update — selected skill catalog admission
+
+The existing system-prompt path now admits at most 32 visible skill items and
+65536 UTF-8 bytes for the exact rendered catalog section. It retains all selected
+entries in order or refuses explicitly. The unchanged introductory text, XML fields
+and newline separators count toward that limit. Admission occurs before unbounded
+escaped-field or complete-catalog assembly; the same captured section is appended
+at the existing default/custom prompt location without a second render.
+
+Disabled skills, legitimate empty catalogs and no-file-access gates keep their
+existing behavior. Inventory, SourceInfo and session selection are unchanged. This
+is not a discovery/inventory, full-system-prompt, wire-envelope, Python module/version
+or global heap bound. W38 readers and Sol/custom/behavioral instructions are intact.
+G09 remains open for those wider catalog/version requirements.
+
+## W41 update — remove an unimplemented public hooks subpath
+
+Removed the package `./hooks` export and its exact root/example TypeScript aliases.
+The tracked source has no corresponding implementation or build generator. The
+supported root API and actual ExtensionAPI lifecycle handlers remain unchanged.
+The real root-import case exposed a missing exact owned AI `/mcp` loader alias;
+it now resolves the published module through the existing workspace/package resolver.
+Native AI root sharing stays intact. No hooks facade, legacy subpath or replacement
+framework was added; bundled behavior was not inferred from this Node-path result.
+
+This closes that advertised source-surface mismatch only. The other G14/G15 updater,
+activation, build and installed-package requirements remain open.
+
+## W42 update — stop self-update after unknown release lookup
+
+Unavailable release metadata now rejects self-update explicitly. Thrown lookup
+errors reach the existing CLI error reporter instead of becoming an install plan.
+`--force` applies only after a known release result and still permits same-version
+reinstallation. Refusal precedes self-installer resolution, daemon probe and restart.
+Earlier accepted extension updates remain; no rollback or whole-command no-effects
+claim is made.
+
+This closes the G14 lookup-failure fallthrough only. Origin/product/schema policy,
+artifact validation and staged CLI/runtime activation or rollback remain open.
+
+## W43 update — release metadata origin boundary
+
+Release metadata fetches now refuse redirects. A configured-base manifest that
+advertises a resolved tarball on another origin is unavailable as a whole; the
+tarball is not stripped to permit a fallback package install. Existing relative
+resolution, same-origin absolute URLs and the normal owned registry path remain.
+The current publisher already advertises a relative tarball.
+
+This is only the metadata/advertised-URL boundary. It does not control npm or
+artifact-download redirects, add product/schema/integrity validation, or stage, activate
+or roll back a CLI/runtime pair. Other G14 requirements remain open.
+
+## W44 update — session-local context mode
+
+`context.mode` now seeds fresh sessions with on/off policy. The external
+`AgentSession.setContextMode()` path uses the existing serialized owner and a
+qualified policy epoch; committed policy wins on resume. Off retains the current
+canonical/public continuation and literal tail, explicit recovery, request/resource
+checks, receipts and cancellation. It omits generated TaskFrame/resource overlays
+and denies new automatic or manual refine/compact planning. Accepted work drains.
+Re-enable is an explicit successor from the retained baseline, not archive replay.
+Sol/custom/user/project/harness prompt text is unchanged.
+
+A v5 policy-only epoch is unmeasured (`representation:null`, `tokensBefore:null`),
+not a fabricated summary. Its small accepted adapter/route/model/replay contract
+stays in that same checkpoint. Only a genuinely fresh off owner may accept its
+first actual request contract once, before admission; missing legacy contracts get
+no generic grant. The final fixed request uses one real projection and does not
+select or learn another working set. Old v1–4 null rules remain unchanged.
+
+This policy is session-local. Newly admitted native children capture parent mode;
+existing independently owned children retain their accepted policy. Copy, child,
+re-enable and failure handling are source wiring unless separately exercised.
+Independent auxiliary model/effort/budget configuration and broader tree scheduling
+remain open G07/G08 work; this is not a global toggle or complete G07 closure.
+
+## W45 update — explicit learning model and effort
+
+`autoRefine.model` optionally selects one provider/model ID/effort contract for
+both the actual built-in reviewer and planner. Selection is captured before
+history/auth waits and uses the existing local registry and configured thinking
+level rules. Invalid explicit selection refuses before auth/send, without a
+main-model fallback. The same coordinator, purposes, receipts, cancellation and
+session budget remain in charge. W44's admission gates and protected prompt text
+are unchanged.
+
+The unconfigured legacy path inherits the main MODEL but omits request effort.
+The old helpers received thinkingLevel and deliberately discarded it; this was
+not wire inheritance of main effort. The new explicit contract reaches both
+helpers' real request options. Omitted effort still leaves provider defaults
+unknown; it does not establish no reasoning or a cost benefit.
+
+This does not supply independent learning budgets, bridge/semantic configuration,
+deployment/entitlement/pricing facts, or complete §18.4/G07. Configured effort
+validation is not deployment certification.
+
+## W46 update — root npm publication routing
+
+The root release/publication route checks before one `build:source`, then passes
+`--ignore-scripts` to workspace publication. Normal and dry publication routes
+match; a failed check stops before build/publication. Standalone workspace
+`prepublishOnly` hooks and the R2/private-distribution packer are unchanged.
+
+This closes the root route's redundant lifecycle rebuild seam, not exact tested
+tarball staging or installed/platform/publication evidence. The R2 stage rewrites
+dependencies to download URLs and is not treated as a registry npm stage.
+The two existing command-path cases observe controlled shell routing and flags,
+not real npm lifecycle internals, artifact identity or live publication. G15's
+remaining release work and publication approval stay open.
+
+## W47 update — daemon catalog request admission
+
+The existing client pending map and worker FIFO now admit at most 32 ordinary
+requests and 1 MiB of combined encoded UTF-8 request payload each. Requests are
+captured and charged before startup/queue waits; the same detached data is sent.
+Admission remains held until response/error/timeout/close or worker-handler
+settlement, not merely successful send or progress.
+
+One coalesced 128-byte shutdown control follows accepted work without competing
+for ordinary capacity. Stop closes new ordinary admission while it drains; its
+existing transport-failure policy and unknown-write outcomes are not converted
+into a successful-drain or rollback promise.
+
+This is local encoded REQUEST admission, not whole-catalog paging, scans, cache,
+response/progress/IPC buffers, caller memory, heap/RSS or a global aggregate bound.
+Those G08 gaps remain open. Two existing cases cover healthy real IPC/full-capacity
+shutdown drainage and the real client boundary with mocked startup transport.
+Inbound overflow/control and failure/restart branches remain source wiring.
+
+## W48 update — Responses long-retention route default
+
+The Responses request builder now defaults optional `prompt_cache_retention` on
+only for the resolved SDK client's exact official OpenAI Responses request URL.
+Other routes require explicit `compat.supportsLongCacheRetention: true`; explicit
+false still wins on the official route. Provider labels do not establish support.
+The existing post-onPayload final request URL/budget checks remain unchanged.
+
+The same two Responses cache cases use controlled pre-fetch stops and a rejecting
+fetch stub, instead of sending fake credentials to a proxy. They cover unknown
+default omission, retained official-route behavior, explicit opt-in and opt-out.
+These are request-builder observations, not live retention/cache-hit/tariff or
+deployment certification. Completions/Anthropic defaults, affinity headers and
+the remaining G05 profiles/replay/capability gaps are unchanged.
+
+## W49 update — per-kernel Bash handle admission
+
+The existing Python `_live_handles` set and lock now admit at most 32 live or
+unresolved Bash handles before shutdown-hook, pipe, process or worker setup.
+Normal release uses actual group/job absence and existing watcher, reader and
+worker settlement. Returned results, leader exit and delivered kill requests do
+not release capacity. Completed caller-owned results remain readable.
+
+Uncertain cleanup can retain admission until kernel exit. No reset, extra
+registry, polling process or reaper was added. Shutdown skips records without
+current signal authority, but keeps its original post-spawn cleanup while a
+constructor finishes. G01 journal writers/enrollment and the pre-execution gate
+are unchanged. This is a local handle-admission limit, not a descendant-process,
+caller-retained output, heap/RSS or successful-shutdown bound.
+
+Two existing cases retain their original phases and add 33 healthy completions
+with real reuse, and 32 real handles held at existing worker exit with excess
+refused before setup effects, followed by genuine settlement/reuse. Windows and
+cancellation/failure/shutdown branches remain source-only; no extra fault matrix
+or full G08/G01 closure is claimed.
+
+## W50 update — explicit release manifests require package identity
+
+A configured private download manifest must name the active package through its
+existing `package`/`packageName` field. Missing identity now makes the whole
+release unavailable before choosing its tarball; it is not treated as the current
+product. The existing release producer already writes `package`, so its manifest
+format is unchanged. The owned npm registry lookup keeps its existing behavior.
+
+The same manifest happy/refusal cases cover the new missing-identity refusal
+while retaining relative/absolute same-origin, registry, wrong-product, redirect
+and cross-origin phases. This is metadata admission through a controlled fetch,
+not artifact-content, schema/platform compatibility, activation/rollback or full
+G14 certification. No new integrity mechanism was added.
+
+## W51 update — doctor reports owned native epoch metadata
+
+The local doctor report no longer says native context is unimplemented. Its
+existing string field now uses the actual exported request/policy epoch renderer
+identifiers, and the existing text formatter shows the same metadata. This does
+not query a model, load credentials or establish session/runtime readiness.
+
+The product-isolation checkpoint now names the actual current protocol 11/schema
+36 contract, rather than its old protocol 9/schema 28 checkpoint. Frozen W32
+benchmark artifacts still use their own schema 35; they are not changed.
+
+The same two doctor cases retain owned paths, credential-value exclusion and
+invalid legacy-root refusal. The happy case additionally observes native epoch
+metadata and the real text formatter. No installed CLI, deployment or whole G13
+certification is implied by this local metadata correction.
+
+## W52 update — native benchmark capacity authority
+
+The selected host package identity is cross-checked against the existing admitted
+package metadata. Native capacity invalidation requires an existing parsed settled
+physical receipt with `capacityConfirmed: true`; RPC-only or legacy assistant
+markers cannot exempt a native attempt. Missing native accounting does not restore
+RPC authority or imply zero work. H/legacy retains its prior RPC-or-aggregate rule.
+
+RPC markers remain explicit `rpc_capacity_observed` observations with their errors.
+An exceptional attempt with no returned RPC observation records null. Existing
+judging, retained attempts, first-valid-primary selection, retry allowances, time
+and known/unknown costs stay on their original paths. No completed output or
+frozen H/D/S host, layout or external runner is rewritten or reclassified.
+
+This closes the native runner's capacity-authority seam, not all G17 metadata or
+receipt coverage. Selected-host metadata checking is source wiring; the two
+existing cases use mocked selected hosts/RPC/judges and actual native receipt
+parsing through the runner/attempt/case path. They do not establish live provider
+receipt production, installed artifact identity, billing or publication readiness.
+
+## W53 update — bounded retained session-info cache
+
+The existing derived `sessionInfoCache` Map now retains at most 256 entries and
+4MiB encoded key/stat/info metadata. Null results count too. Encoding is bounded
+before retention cloning; the byte metric projects created/modified Date values
+to ISO strings, while the stored and returned metadata retains real Date/types.
+This is not a heap/RSS limit. Hits become recent; only oldest derived cache entries
+evict. Byte usage is summed from this bounded Map, preserving the existing stale
+file deletion path without another accounting store.
+
+Actual reads detach retained metadata from callers. A hit-copy failure removes
+cache ownership before returning the complete old value. Oversized, unencodable
+or uncloneable successful scans return unchanged and uncached, never clipped or
+replaced by an empty list. Missing/stat/null behavior and the existing size/mtime
+snapshot rule remain. Same-size/mtime edits, scans, paging, IPC/output, other
+caches, transient/caller-held values and full G08 remain outside this local bound.
+
+## Post-prerequisite implementation — W54
+
+This closes one further G17 metadata seam, not all receipt/accounting coverage.
+The existing native request events gain an optional descriptive `contextEpoch`
+reference containing the session ID and exact accepted epoch entry ID. The
+compiler retains that ID only beside its already-qualified checkpoint. Actual
+selection/fixed preparation returns either that retained reference or the entry
+ID returned by the new epoch/first off-mode compatibility ACK. A source frontier,
+public/copied IDs, an unrelated purpose or a latest-leaf lookup is not a substitute.
+
+The coordinator copies the accepted reference when the physical attempt is
+admitted. Its existing transient attempt tracking retains the reference for that
+attempt's settlement; later source changes cannot replace it. No second owner,
+receipt store, history scan, descriptor budget/effort copy, profile promotion or
+new selection/replay authority is introduced. Original source capture, purpose,
+ACK/adoption/send order, resource checks, cancellation and error handling remain.
+Unsupported/unmanaged or unrelated auxiliary contexts remain unassociated.
+
+Two existing offline cases exercise the actual native service/canonical fake-SSE
+path with new/retained references and a late ordinary source entry, plus the
+existing unmanaged/child/auxiliary coordinator boundary. No provider call or test
+case is added. This is not live provider, installed/platform, complete lifecycle,
+billing or whole G17 certification. Frozen benchmark artifacts/runners and prior
+results are unchanged. Sol and other protected instruction text remain unchanged.
+
+
+### W55/W58 — native indexed catalog and explicit Node compatibility change
+
+The existing derived index owner now maintains a whole-source SessionInfo
+projection and same-index numeric usage rows under schema16. Discovery uses a
+real read-only index worker and one held SQLite snapshot, checked against the
+current source path/dev/ino/length and actual header/terminal frames. Selected
+metadata records use existing payload parts, then the source capture is checked
+again. Covered reads do not iterate the complete journal body history. Header,
+terminal and selected metadata records can still require complete bounded frame
+or payload reads; this is not a zero-body-read or constant-time claim.
+
+Actual native readSessionInfo/list/listAll consume the covered summary. Missing,
+stale and unsupported coverage remain explicit; SQL/open/read failures remain
+errors. Native failures escape list handling rather than becoming an empty or
+partial successful catalog. Already emitted progress is not rolled back. Normal
+source owners rebuild known older derived indexes; discovery does not acquire a
+writer, create/seed/repair/migrate the index or fall back to a native EOF scan.
+Legacy header scanning remains a separate path. Original public fields, Dates,
+text/search/preview limits, all-source metadata and the sole W53 optional cache
+remain. Cache hits require current native coverage. Complete oversized results
+are returned uncached; encoded cache charges include key/stat/capture/info data.
+
+Native usage now includes actual assistant/compaction/branch-summary usage even
+when a containing record exceeds the old scanner's text cutoff. This corrects
+that native omission without changing legacy scan behavior. Source-order target
+eligibility and aggregate replacement precede the original assistant order,
+summary addition and ordered clamped child subtraction. Numeric reduction uses
+128-row pages on relevant usage changes, not a per-message JS map or every
+unrelated append. Missing usage is not invented zero; incomplete/non-finite
+supplied usage makes projection coverage unsupported. Known observed zero and
+existing all-zero public summary omission are preserved. These are source usage
+summaries, not complete physical requests, billed cost or attribution causality.
+Indexing/reduction work and index disk size still grow with source history.
+
+Root explicitly selected `^22.12.0 || >=23.3.0` under spec343/586, with a README
+migration notice and matching five own package/lock engine entries. This replaces
+the inherited22.8 floor and excludes early23 releases that lack the read-only
+option. Older runtimes refuse read-only opening before database access; no
+writable/query_only fallback, alternate backend or capability probe is added.
+No third-party dependency versions change. This is Root's explicit engineering
+compatibility decision, not inferred user consent; release publication still
+requires approval. Actual minimum/current-runtime execution is required before
+claiming support. Current source protocol11/schema36 and canonical journal
+formats are unchanged; the derived history index alone advances15→16.
+
+No Sol/custom/behavior/system/developer/tool instructions, model/auth/runner/
+control artifacts, source-effect ownership, or frozen benchmark evidence change.
+G08 still has inventory/paging/output/global-resource limits open; this is not
+full G08, migration, installed/platform, lifecycle, billing or release closure.
+Validation passed: exactly the two existing W53 cases ran once on actual22.12
+and once on current22.22.1 (four isolated commands), all first-pass. These cover
+native writer projection, current covered read-only discovery, attribution order,
+large usage/text fields, cache ownership and unavailable-index refusal; they do
+not establish whole-process/global-resource or installed-platform behavior.
+Initial formatting found three unsafe-finally errors and one catch-assignment
+warning. Read outcomes now close outside finally before return/rethrow, preserving
+primary-first cleanup errors; the worker uses a local failure variable. The first
+required check then found entry-view, TextContent-import and fs.stat-overload type
+errors. Type-only corrections retained the full original payload and actual
+numeric Stats contract; runtime cases were not rerun. Corrected `npm run check`
+passed (1039 files, TypeScript, installer and browser smoke). Original failed
+format/check outputs are retained. No provider/auth probes were run.
+
+
+### G10 unresolved-effect boundary remains open
+
+Source inspection found that an ACKed tool intent advances the canonical branch,
+but an assistant call with no finalized result is refused as an incomplete replay
+group before actual provider/public-window admission. Ordinary tool-intent frames
+also lack a separate positive native-tool-owner qualification. Existing captured
+IDs support correlation, not effect reconciliation or a new replay permission.
+A working resumed path needs an explicit qualified incomplete-whole-group public
+continuation/admission rule and frozen-epoch treatment. No helper-only API,
+fabricated result, automatic replay/repair, stale-contract grant or weakened
+closure was added. This is a bounded source finding, not a new crash execution or
+full G10 closure. No G10 implementation or case change is included in this
+milestone; the separate continuation proposal remains unapplied.
+
+
+### G10 original-owner public tool continuation (source scope)
+
+A qualified intent records original selected-tool-owner admission after its
+assistant entry ACK and before execution. Per-invocation manager/source/write
+generation are captured before initialization and event-queue waits. All intent
+writes, including ordinary unqualified ones, use that captured writer; replaced
+owners and persisted native-source mismatches refuse rather than redirect.
+A recorded intent never proves execution, start, failure or rollback.
+
+The native compiler keeps the original RAW whole group with a mandatory public
+constraint. It correlates intent/finalized refs only through the held indexed
+branch/frontier and existing source/item bounds. Ordinary/imported/copied-label
+intentions do not qualify; absent finalized evidence remains outcome_unknown.
+Known finalized evidence must match the original invocation and be present in
+the same captured whole group; sibling/future results cannot be borrowed.
+
+Only the real Responses converter receives the bounded pending-group plan. Its
+one ordinary traversal suppresses synthetic missing results for those originals
+alone and validates original items, IDs, signatures and membership. Actual
+current official route/config and unchanged-onPayload checks must enable the
+existing public encoder. Every required member becomes descriptive public data,
+then the existing v6 epoch ACK precedes adoption and physical admission—even if
+the raw request fits budget. Default/unsupported/replaced adapters, actual mode
+off and incompatible recipes refuse. The producer checks the accepted public
+body; the coordinator separately requires the actual accepted epoch entry.
+
+Public literals retain stable session/entry/intent/result references, original
+public text and recorded outcomes, not a moving current leaf/sequence. Private
+executed arguments, tool arguments, signatures and reasoning are not rendered.
+Accepted source mode overrides creation or previous-branch preferences; defaults
+for summaries/exports do not gain the RAW native plan. v6 copy and older
+policy/recovery-summary recipes refuse rather than downgrade original ownership.
+No automatic execution/replay/reconciliation, new effect/receipt/job store,
+probe, production model call or prompt bookkeeping is added. Sol instructions
+and W54's exact per-attempt accepted-entry association remain unchanged.
+
+Schema37 (`protocol-11-schema-37-tool-continuation`) and canonical-owner minimum37
+use existing stale-daemon handling/incompatible-worker parking; protocol11,
+legacy inspection and index16 remain unchanged. There is no forced teardown,
+repair or claim that parser refusal alone fenced an old reused owner. Doctor
+metadata names actual request4/policy5/tool6 renderers, not runtime readiness.
+
+Two existing offline selectors ran at actual Node22.12.0. The canonical
+unqualified copied-label refusal passed first (3797206,3.3596966231707484s).
+The services path initially failed (3797201,3.2501375270076096s) because the task
+source envelope decoder still rejected the new qualification tag. Only that
+allowlist was extended; task authority remains native-admission-only. The same
+services selector then passed (3798155,6.975471487967297s), using genuine intent
+ACK → controlled post-ACK resource-class stop → real close/reopen → actual native
+fake-SSE public request, plus a normal follow-on. Saved-on mode wins creation-off;
+the unchanged public literal and exact per-attempt accepted epoch refs survive.
+No tool runs and no finalized result is fabricated. The first failure is retained;
+the already-passing negative selector was not rerun. Expected controlled budget
+refusal stderr is not a provider call or failed case.
+
+Initial formatting found a duplicate local publicBody in the existing services
+fixture; the new block was renamed publicToolBody before either case ran. Required
+check then found TS2339 for invocationId on the execution-evidence union. The
+existing required intent-reference check now narrows that variant; missing refs
+still refuse. No fallback, qualification grant or schema weakening was added.
+
+This is not a process-crash/external-effect/installed/platform or whole G10
+certification. The doctor expectation changes only with its metadata string;
+no extra runtime case or matrix is added.
+
+Corrected required `npm run check` passed (3798599,4.835714657092467s):
+1039 files/no fixes, TypeScript, installer and browser smoke. Initial failures
+remain recorded; no extra runtime cases or provider probes were run.
+
+
+
+### Final S Astra MEDIUM and completed frozen benchmark sequence
+
+Final frozen S `gpt-6-astra` MEDIUM exited0 after4676.512568940991s. S passed28/30
+versus stock26/30. There are60 immutable primaries and66 retained attempts
+(S32/stock34), zero capacity-invalid. All25 matched passing pairs are runtime-clean:
+4109.5781885349425s versus5805.029968667892s, −29.206598230913407%; S faster24/25.
+This is conditional paired time, not an all-task/all-attempt or billing claim.
+
+Failed primaries remain S6/S24 and stock12/17/21/24. Each has exactly one retained
+diagnostic, not a substitute. S6 and stock17 pass4/5 main checks and the edge but
+stop at progress3; stock17 names semantic check4. S24 has no allocations.csv,
+main0/edgefalse/progress0; stock24 main3/edgetrue/progress3. Stock21 fails audio,
+transcript and all-silence checks (main0/edgefalse/progress1). The sole runtime
+error across all66 attempts is stock12 primary `AgentError: WebSocket closed 1006`
+at123.30849059601314s; it fails main replay/idempotency (3/5, edge true, progress3).
+The error code does not establish a new causal diagnosis. Runner5 regression
+entries are not five distinct failed tasks. All original times/errors remain.
+
+Same25 passing pairs, S/stock observational solver calls275/314, tools220/259,
+recovery0/0, inputTotal2171943/3271801, uncached454951/652409,
+cacheRead1716992/2619392, output103064/151450, total2275007/3423251.
+Observed cacheWrite0 is not billing. Physical usage/spend remains incomplete.
+
+All12 frozen campaigns are complete:720 immutable primaries/771 retained attempts.
+All six LOW finished before MEDIUM began. H/native remains frozen W32/schema35;
+D/S remain frozen0.9.1. W55 and later source were not substituted. No overall
+current-native accuracy/cost/efficiency gain or stock Codex CLI certification is
+established. Fixed waves are not randomized repeats/significance evidence. LOW
+publication flags remain; MEDIUM has no protocol blockers but publication ready
+is still no. Completion of these campaigns grants no publication approval.
+
+
+## G12/F21 — known legacy context extension pre-load exclusion
+
+The existing extension loader resolves an entry with Jiti without importing it,
+then checks the physical entry's nearest package.json. The actual legacy package
+name `prime-agent-context` refuses before target import or factory execution.
+Its documented dist/index.js and src/index.ts entries share that owner. The error
+names the native replacement and tells the user to remove the old package/path
+from packages, extensions or -e/--extension. Ordinary extensions keep the current
+API and load-error flow. Prime source, archives, host and processes are untouched.
+
+This loader executes inside native daemon/session workers through runtime service
+creation and DefaultResourceLoader.reload. Schema38
+(`protocol-11-schema-38-native-extension-owner`) and canonical-owner minimum38
+therefore use the existing stale-daemon/worker compatibility path to reject an
+old selected loader. No new lifecycle mechanism, forced teardown or unpatcher is
+added. Protocol11, index16 and request4/policy5/tool6 renderers are unchanged.
+
+The exclusion uses known package identity, not authenticated code provenance or
+arbitrary source matching. Renamed/copied code, wrappers/transitive imports,
+caller-supplied inline factories, private monkey patches and hostile filesystem
+replacement are not detected or certified. This is not a sandbox, complete
+migration/rollback workflow or whole-G12 completion.
+
+Exactly two existing offline discovery selectors passed first at actual
+Node22.12.0 (3804410,1.2318190038204193s;2pass/25skip). One loads an ordinary
+manifest extension. The existing initializer-failure case retains its original
+phase, then checks known-legacy refusal and absence of a top-level file marker.
+The real Prime plugin is never imported. No new case/suite/matrix, provider call,
+probe or extra runtime dependency. Required `npm run check` also passed first:
+1039files/no fixes, TypeScript, installer and browser smoke. No runtime reruns.
+
+
+## W66 / G01 — serialize current orphan-process writers
+
+Current Node and Python orphan writers capture their original path/owner before
+bootstrap waits or command spawn. One existing-pattern SQLite sidecar mutex spans
+incomplete-tail admission, complete JSONL writes, file fsync and descriptor close.
+The connection closes last. SQLite stores no process/job/receipt data. A partial
+write stays in place; the next participating writer refuses it without repair.
+Write errors remain first, followed by distinct descriptor/owner cleanup errors.
+
+Node tracking is still post-spawn. Shell and autonomous commands install their
+existing timeout, abort, output and completion controls before the synchronous
+bridge. Registration failure retains the actual handle until settlement/cleanup,
+not a fictional unstarted command. Autonomous tracking errors escape before gate
+retry classification or unavailable-snapshot fallback; the error cause retains
+the observed result/status/signal/output. Ordinary execution errors keep their
+existing result behavior. The existing outer lifecycle diagnostic ends the run
+and is excluded by session retry admission; this is source evidence, not a claim
+of an unsynthesized outer refusal. Kernel startup keeps its original error and
+actual child cleanup. Retirement retains the original owner and existing drain.
+
+Python enrollment failure keeps its existing command gate closed and invokes the
+existing abort path. It retains the original I/O error, then cleanup errors. Only
+existing resource/group-absence state determines confirmed cleanup/quota release;
+failed enrollment alone does not establish that the spawned process was killed.
+Background retirement reports uncertainty without abandoning shutdown drain.
+
+Daemon schema39 (`protocol-11-schema-39-orphan-writer-owner`) and owner minimum39
+use existing stale-worker handling. TS/Python kernel protocol4 and bootstrap
+schema11/readiness4 use existing ready checks and installed-runtime reuse rules.
+Current fixture metadata follows those versions; deliberate old/mismatch inputs
+remain. Existing runtime source identity already covers the changed Python files.
+No extra cache/hash mechanism, dependency, PID registry, journal format, repair,
+append replay, forced teardown or lifecycle policy is added. The external-Node
+worker is included in the existing source/dist/native packaging paths.
+
+The mutex only coordinates participating writers. Old binaries can ignore it;
+read/clear still depends on existing accepted shutdown drain. Node's post-spawn,
+pre-registration crash window remains. The five-second lock wait/ten-second Node
+helper timeout can block the host thread, delaying timer delivery even with
+controls installed first. No hard-wall deadline, fairness, power-loss/directory
+persistence, universal filesystem/platform or whole-G01 completion is claimed.
+Sol instructions, Prime processes and all12 frozen campaigns are unchanged.
+
+Exactly two existing offline selectors now pass. Node registration/retirement
+passed first on actual22.12.0 (3825110,1.018226739950478s;1pass/4skip). It uses the
+real external-Node SQLite writer and retains its captured path after environment
+drift. Python gated short-write first failed (3825115,0.08898586686700583s): the
+fixture compared a canonical Path with a string, so it never injected the fault.
+The command was not demonstrated to stay gated by that failed case. Its later
+SQLite warning followed temporary-directory teardown, not a proved mutex defect.
+The fixture now compares canonical path strings. Only that affected selector was
+rerun (3825456,0.09537421888671815s;pass): original I/O error first, retained partial
+prefix, cleanup tail refusal, later-owner refusal, no command marker and actual
+process-group/admission cleanup. Production code did not change for this fix.
+Required `npm run check` passed first (3825461,4.9721702160313725s):1040files/no
+fixes, TypeScript, installer and browser smoke. No extra case, suite, live probe,
+Node reassurance rerun, installed/native-platform or whole-process claim.
+
+## W67 / G14 — owned POSIX installation and paired selection
+
+The user approved the owned layout and exact human-facing installer name
+**Base-Context**. Publication remains unapproved. The shell installer and owned
+self-update use one bundled installer owner rather than modifying an external
+package-manager global tree. A unique version directory contains the CLI, shipped
+runtime payload and release-local default Python environment. Candidate npm and
+runtime preparation run inside that directory. The candidate's bundled
+`installer.mjs prepare` must finish runtime/default-import readiness before selection;
+ambient Python/venv overrides cannot stand in for its prepared default runtime.
+
+One `current.json` records generation, active and previous together. The switch
+captures its expected selection before effects. An external Node worker, launched
+with child-only `--experimental-sqlite`, holds the SQLite mutex and compares the
+generation before rename. Node executable, environment, worker entry and original
+parent are captured before waits; Bun also uses external Node. Previous comes from
+the actual held selection. A returned accepted selection survives later helper or
+cleanup failures. Missing or malformed helper output stays uncertain, without
+candidate deletion or rollback. The synchronous bridge can block the caller;
+its timeout is not a hard-wall or fairness guarantee.
+Initial stable launchers are published as complete files under that same owner.
+Explicit `base-context-install rollback` selects the retained previous pair through
+the same switch. Failed preparation does not replace the old selection. Old and
+failed candidates remain on disk; there is no automatic garbage collection or new
+state table. A known accepted activation and a later cleanup failure remain separate
+facts, with the failed status retained rather than reported as complete success.
+
+Running owners remain bound to their physical package/runtime paths. The existing
+restart coordinator launches the selected physical CLI, uses that release's default
+daemon socket, and retains an exact explicit/custom socket. Its existing registry
+and lease use the stable owned root within the existing home/install scope; actual
+daemon sockets remain release-physical. The interactive updater captures one
+physical target after child settlement and before teardown/restart awaits, then
+uses that same target for restart and relaunch. Observing a different selected pair
+still requires predecessor coordination even when the child reports a failure; it
+does not establish which updater accepted that selection. Existing predecessor
+preparation, drain, fence and recovery remain authoritative. No daemon/schema,
+kernel/bootstrap or history-index version changes are needed for this route.
+
+The default owned root is `${XDG_DATA_HOME:-$HOME/.local/share}/base-context`, or
+`BASE_CONTEXT_INSTALL_ROOT`. Standalone Node stays in the separate `base-context-node`
+root. PATH guidance precedes Run guidance. Installer predicates and messages now
+match the shipped Node range `^22.12.0 || >=23.3.0`. CLI/package/environment names
+remain `base-context`, `@ponythewhite/base-context` and `BASE_CONTEXT_*`.
+
+**Scope limits:** existing npm/pnpm/yarn/bun global trees keep their own updater and
+are outside paired rollback. Running processes and session data are not rolled
+back. Normal Python Skill synchronization remains unchanged; retained venvs are not
+immutable snapshots or sandboxes. There is no Node rollback, Windows/Homebrew/binary
+installation guarantee, automatic repair, power-loss/universal-filesystem guarantee
+or complete migration claim. Frozen benchmarks, subscription auth, Prime state and
+Sol's custom instructions are unchanged. Whole G14 and release completion remain
+open outside this owned route.
+
+The first focused run (3851419,2.4425214750226587s) failed both existing selectors
+at `owned-install.ts:100`: `No such built-in module: node:sqlite`. Node22.12 needs
+`--experimental-sqlite`; this was a production activation-path gap, not a fixture
+failure. The first log is retained. The external-Node correction was formatted
+once (3859815,0.07831983803771436s;3files/fixed3). Only the same two affected selectors
+reran (3859954,2.7806692151352763s):2passed/26skipped, actual external Node22.12 and
+SQLite activation/rollback, captured request inputs and candidate cwd, retained old
+pair after failed preparation. npm and Python preparation remain offline boundaries;
+these fixtures are not a real package install or working-Python installation claim.
+
+Required `npm run check` passed first (3860215,4.877740819007158s):1044files/no fixes,
+types, installer and browser checks. No provider call, dependency download, actual
+installation, publication, new benchmark or earlier-milestone reassurance rerun.
+
+## W68 / G09 — selected Skill instruction versions in native epochs
+
+The genuine native `prime_context` route adds the fixed action
+`{"action":"skill","name":"..."}`. Explicit host-owned `/skill:name` uses the
+same captured descriptor/body owner. Full bodies are read only on selection or
+invocation, under the existing limits. Captures live in the existing canonical
+source, not a separate version registry, body cache or filesystem snapshot.
+
+Queued command captures are not active context. Their scoped reference becomes
+selected only when the actual primary input consumes its captured expansion.
+Queue edits and body replacements cannot add a binding from copied markup.
+Model capture records do not insert user messages inside assistant/tool-result
+replay groups. The actual tool result or explicit input carries the body; a small
+source-backed view carries selected refs. Ordinary and fixed/off request admission
+check those refs against the accepted epoch. Existing boundaries permit a later
+version selection. Rotation, cold recovery and supported source copies keep the
+original captured material available by reference. The existing v6 tool-continuation
+copy refusal remains unchanged.
+
+Root chose capability-based advertising as a technical decision: native model
+selection is not advertised when the genuine recovery definition is replaced,
+overridden, inactive or outside the allowlist. A disabled capability is not enabled
+implicitly, and otherwise valid native admission does not fail merely because skills
+are installed. Explicit `/skill` still supports hidden/disabled-model skills and the
+effective loader ordering. Generic non-native behavior stays unchanged. Existing
+selected source material is not erased when tool policy changes.
+
+Selection-bearing v4/v5/v6 epochs use `native-canonical-epoch/7`; older readers refuse
+that marker. Only queued snapshots carrying a selected source binding use action
+format2; unaffected snapshots keep format1. The real restart parser preserves the
+supported version and validates the binding before forwarding it. Binding use stays
+on the original session/file namespace; there is no cross-session queue rebinding.
+Daemon schema/minimum40 (`protocol-11-schema-40-selected-skill-epochs`) fences the new
+selector and queued field. Protocol11, history index16, kernel4 and bootstrap11 remain.
+Doctor reports the selected-skill renderer in addition to the existing variants.
+
+**Limits:** these are captured instruction bodies/descriptors, not frozen Python
+packages, scripts/assets or immutable venvs. Normal Python Skill synchronization
+and Sol's custom instructions are unchanged. Existing capture/recovery byte and
+item limits can refuse work. This is not complete malicious-history learning,
+filesystem isolation, platform, billing or full G09/goal certification. The skill
+guide uses the actual owned paths and runtime overrides instead of directing writes
+to Prime. W67 and all frozen campaigns remain settled; publication is unapproved.
+
+The two existing focused selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3898155,7.812779288971797s;2passed/32skipped). The services
+case used fake SSE for selection/source/ACK/version reuse and cold recovery. The
+restart case used its existing mocked endpoint to preserve action2 and refuse bad
+ref shapes/format1 bindings; it is not destination writer/body certification.
+Controlled budget-refusal stderr is fixture output, not a live provider incident.
+
+The first required check failed (PID3898703,4.407891002018005s): TS2339 for the
+nonexistent `Agent.setSystemPrompt` in agent-session.ts:1492, TS2322 for the broad
+ContextRef kind in selected-skills.ts:206, and TS18048 for an optional captured ref
+inside session-manager.ts:2918's callback. The first error identified a real bad
+method call in the policy-refresh branch; the focused case did not exercise that
+branch. It was replaced with the existing `agent.state.systemPrompt` assignment.
+The other corrections explicitly retain the narrowed custom-message kind and a
+local selected ref across callbacks. No parser, test matrix or unrelated source
+was changed. Only the affected services selector and required check were rerun.
+
+The affected services selector passed (PID3899017,9.221652266802266s;
+1passed/5skipped). The parser selector was not rerun. Corrected `npm run check`
+passed (PID3899022,5.343376633012667s;1045files/no fixes,
+types, installer and browser checks). Both runs used the existing isolated source
+environment. No live provider, benchmark, installed lifecycle or publication run
+was made. These receipts do not establish current-native overall gains or physical
+billing. The active implementation/release objective remains incomplete.
+
+## W69 / G07 — independent compaction model and effort
+
+An explicit `compaction.model` object selects `provider`, `modelId` and
+`thinkingLevel` together for the existing owned compaction summary path. All three
+fields are required when the setting is present. Resolution uses the local model
+registry and that model's existing effort rules. Invalid or unsupported choices
+refuse instead of silently falling back to the main model. With no setting, the
+existing main-model/current-effort behavior remains. Learning still uses the
+separate `autoRefine.model` setting from W45.
+
+The manual and automatic/model-requested compaction callers capture the selected
+model/effort before their authentication and summary-history waits. They do not
+change the main session model or its overflow trigger. The existing summary and
+split-turn-prefix generators use the passed choice, existing coordinator purpose,
+request measurement, cancellation and physical attempt receipts. Accepted summary
+adoption still requires the original captured source's canonical append ACK.
+No extra automatic call or parallel summary owner is added. Extension-provided
+summaries and generic standalone calls retain their existing behavior.
+
+An enforced request budget must explicitly cover the actual auxiliary API, provider,
+endpoint and model within the current supported API set (`openai-codex-responses`,
+`openai-responses`, `openai-completions`). The setting does not synthesize a profile,
+widen API support, infer availability from the main model or bypass an unknown/
+over-budget refusal. Configured model/effort support is not deployment entitlement
+or pricing evidence. This is not an independent spending/call-count budget,
+semantic-extraction configuration, branch-navigation summary setting or full G07
+completion. Context-off/shutdown admission, generic behavior and Sol text remain.
+
+Daemon schema/minimum41 (`protocol-11-schema-41-compaction-model`) prevents current
+native commands from reusing an older worker that ignores the explicit choice.
+Protocol11, history index16, kernel4/bootstrap11, epoch variants and queued-action
+formats do not change. No provider, benchmark, installed lifecycle or publication
+activity is authorized by this setting. W68/W67 and all frozen campaigns remain
+settled; the implementation/release objective is still active.
+
+Both agreed existing selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3908124,5.168437144020572s;2passed/36skipped).
+The happy path kept the main conversation on its local Faux model and sent both
+auxiliary summaries through the real OpenAI Responses adapter with only HTTP
+fetch replaced. It observed the explicit different model/high effort, captured
+settings across source-read work, owner-bound physical receipts, canonical summary
+adoption and unchanged main model/effort. That fixture retained its original absent-
+budget policy: it is not positive enforced-profile coverage or deployment evidence.
+
+The edge case retained the original missing-auth assertion. An unknown explicit
+model refused before auth/source binding. A known explicit model on the actual
+requested/automatic path refused under enforce with no covering profile, without
+fetch or accepted compaction. The controlled budget-refusal stderr is not a live
+provider incident. No new selector, suite, harness or test matrix was added; the
+existing harness only forwards the optional request budget.
+
+Required `npm run check` passed first (PID3908129,5.044830980943516s;
+1045files/no fixes, types, installer and browser checks). No correction or focused
+rerun was needed. No provider, benchmark, installed lifecycle or publication run
+occurred. These source receipts do not establish cost/efficiency gains, physical
+billing or completion of the active implementation/release objective.
+
+## W70 / G07 — independent branch-summary model and effort
+
+An optional `branchSummary.model` selects `provider`, `modelId` and `thinkingLevel`
+together for built-in tree-navigation summaries. Its explicit choice is separate
+from W69 `compaction.model` and W45 `autoRefine.model`. Invalid, unknown or unsupported
+explicit choices refuse rather than silently using the main model. An absent
+setting preserves the existing main-model and omitted-request-effort behavior;
+it does not forward the main session's effort or certify reasoning is disabled.
+
+The actual `navigateTree` summary path uses one captured choice with the existing
+`generateBranchSummary` producer, coordinator purpose `summary`/detail `branch`,
+request budget, cancellation, physical receipts and acknowledged destination
+adoption. It preserves original source/target ownership and does not change the
+main model/effort. Explicit effort follows existing provider option semantics.
+Extension-provided summaries, no-summary navigation and standalone omitted-effort
+calls retain their existing behavior. The change does not add automatic summaries
+or change branch-summary prompt/skip policy.
+
+Enforcement still requires explicit coverage for the actual supported auxiliary
+route/model. There is no profile synthesis, wider provider support, inferred
+entitlement, parallel summary owner or separate receipt store. This is not an
+independent auxiliary spending/call-count budget, semantic extraction or full G07
+completion. Existing Sol/custom prompt text remains unchanged.
+
+Daemon schema/minimum42 (`protocol-11-schema-42-branch-summary-model`) fences reuse
+of workers that ignore the explicit setting. Protocol11, history index16,
+kernel4/bootstrap11, epoch and queued-action formats remain unchanged. W69/W68/W67
+and all frozen campaigns stay settled. No live provider, benchmark, installed
+lifecycle or publication activity is authorized; the overall objective remains
+active and incomplete.
+
+The two agreed existing selectors passed first on actual Node22.12 through project
+tsx and package Vitest (PID3917516,5.488804213935509s;2passed/26skipped).
+They were relocated from the live-gated tree-navigation suite into its existing
+offline runtime suite. Old definitions were removed; the other eight live cases,
+their auth gate and setup were unchanged and unrun. No auth/environment change,
+new case, suite, matrix or harness was added.
+
+The happy path used a local Faux main conversation and the actual OpenAI Responses
+adapter/coordinator with HTTP fetch replaced. It observed the explicit different
+model/high effort, auxiliary-model auth, detached selection across a target read,
+owner-bound receipt and acknowledged root-destination summary, with the main model/
+effort unchanged. The second case retained in-flight cancellation and added an
+unknown explicit-model refusal before target read/auth. Its cancelled native receipt
+settled without a summary or transcript-branch/leaf change. These fixtures retain
+absent-budget policy; they are not positive enforced-profile, off-level deployment,
+independent spending-budget or live-provider evidence.
+
+Required `npm run check` passed first (PID3917521,5.427920550107956s;
+1045files/no fixes, types, installer/browser checks). No correction or focused rerun
+was needed. No live provider, benchmark, installed lifecycle or publication run was
+made. Source results do not establish cost/efficiency gains, physical billing or
+completion of the active implementation/release objective.
+
+## W71 / G08 — bounded native saved-session pages
+
+The native saved-session catalog and agents-view consumer use bounded query pages
+rather than collecting, merging, sending and retaining the whole saved archive.
+The existing `list_saved_sessions`/catalog operation remains the route. Its saved
+page budget is at most64 rows, including required ancestor/context rows, and1MiB
+encoded page data. The separate live roster remains outside that saved-page budget.
+Source iteration still uses W55 indexed per-journal summaries and its bounded
+optional cache; this does not reopen or replace W55's native history-read path.
+
+Search/scope filtering, passive-descendant identities/dedup and needed relationships
+are part of page selection. Relevant colliding saved file/session aliases refuse
+explicitly as ambiguous sources; no full alias-group reconstruction or archive
+alias index is claimed. Required parents, cursor and bounded display facts share
+that refusal boundary. An oversized required row/closure is an explicit scoped
+refusal, not clipped relationships, false absence or a full-array fallback. Page
+selection does not keep all paths, all rows, a full presence set or an all-results
+sort under another name. The consumer replaces/releases pages and bounds pending
+query work instead of accumulating progress rows, pages or cursor history.
+Page-derived counts/rollups are not presented as whole-archive totals.
+
+Root chose preservation of the actual agents-view order: section, empty-session/
+anchor, heartbeat and busy-descendant priorities, then the existing activity,
+creation, title and ID ordering within the hierarchy. Modified/path alone is not
+that order. Continuation uses the existing ordering context and row identities;
+relevant context changes reset the saved page. No new snapshot registry, index,
+cache, hash or ranking scheme is added. This is live paging, not a frozen snapshot
+or completeness claim across concurrent metadata changes. Refresh may be needed.
+
+Metadata traversal can revisit sources for ancestry and ordering. These
+page/request/component limits do not establish global heap/RSS, bounded latency,
+disk or live-roster size. Generic `SessionManager.list`/`listAll`, internal array
+callers and `DaemonAgentConnection.listSavedSessions` retain full-array contracts;
+collecting native pages into an explicit generic array is not a bounded-retention
+claim. Generic row callbacks run after page receipt; old per-file scan progress/totals
+are not fabricated. The actual agents view consumes/replaces pages directly.
+The existing per-ledger projection remains limited to32MiB/100,000 records; native
+page reads require complete tails and known operations, without changing generic
+readers or write/repair owners. Existing catalog
+queue/shutdown ownership and source-read errors remain explicit; no index-error-as-
+absence or legacy full-history scan fallback is introduced. No model call is used
+to search or page sessions.
+
+Daemon schema/minimum43 (`protocol-11-schema-43-saved-session-pages`) fences the
+changed native catalog request/reply contract. Protocol11, per-journal history
+index16, kernel4/bootstrap11, epoch and queued-action formats stay unchanged.
+W70/W69/W68/W67 and all frozen campaigns are settled. No provider, benchmark,
+installed lifecycle or publication run is authorized; the overall objective
+remains active and incomplete.
+
+The separate known package-README correction replaces upstream product install/
+control/state/package guidance with owned Base Context guidance and source-only
+availability. It distinguishes native captured Skill instructions from generic
+mutable Python/file reads. Existing provider wire/env names, inherited conventions,
+Python `rlm` import, legal ancestry and historical screenshots remain. No installer,
+provider/auth behavior, Sol prompt, publication or platform-support decision is
+changed by that documentation correction.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx and package Vitest (PID3958288,29.356284932000563s;
+2passed/216skipped). The source/direct-daemon case used real session journals and
+the existing persisted RLM fixture for page/default/order/next/previous/search/
+ancestor paths, no all-row progress, encoded-byte refusal and no runtime hydration.
+The agents-view case used real consumer methods with a mock transport for scope
+retention, one-active/one-latest search, stale-result rejection, next/previous page
+replacement and loaded-only notice. No new cases, suite, matrix or harness were
+added. The ambiguity-refusal boundary is source implementation, not a claim of
+separate runtime coverage. These cases do not measure archive-scale latency or
+certify global memory, a frozen snapshot, or every transport path.
+
+Required `npm run check` passed first (PID3958293,5.054459482897073s;
+1046files/one formatting fix, types, installer/browser checks). No failing case or
+check, runtime correction or focused rerun occurred. Source review before applying
+identified the saved-alias ambiguity; one refreshed private alternative fixed that
+boundary and removed the unused local. Only the refreshed full alternative was
+applied. The original artifact was never applied.
+
+The known package README correction was integrated in the same change without a
+separate pipeline. No live provider, benchmark, installed lifecycle or publication
+run occurred. No current-native overall accuracy/cost/efficiency or complete G08
+claim follows from this bounded listing path; the overall objective remains open.
+
+## W73 / G12 — explicit single-session retained import
+
+`base-context session import <file>` connects the existing public session command
+handler to `SessionManager.importRetainedFrom`. It accepts one explicit file path,
+uses the current destination cwd and normal owned session-directory default,
+reports the resulting path, closes the returned manager and returns before runtime
+creation. It does not discover a source by session ID or route through resume/fork.
+
+The existing copy owner handles both native-framed and supported legacy data with
+forced retained-import semantics. Copied labels do not establish native task
+admission. Existing conversion, entry/JSON-byte limits, acknowledged destination
+writer/index, copied epoch/resource rules and version6 tool-continuation refusal
+remain their owners. No second copy engine, index, authority store or checksum
+scheme is added.
+
+The explicit retained-import API now requires a supported header (missing/v1,
+v2, currentv3) and complete LF-terminated records within its captured descriptor/
+size. Future/invalid versions and incomplete tails refuse before destination
+construction. Ordinary captured-prefix readers and `--fork` retain their existing
+semantics. This is not an atomic writer snapshot or completeness guarantee across
+concurrent source mutations. The existing16,384entries-after-header/64MiB consumed
+JSON limit includes header bytes, not raw framing size or a global heap bound.
+
+The original source is read-only. A later copy/activation failure may leave an owned
+destination; no automatic deletion or rollback is added. A known successful import
+is not reclassified as rolled back if close/reporting then fails. No credential,
+settings, package, Python/kernel/process, whole-root migration or full G12 rollback
+workflow is claimed. No daemon protocol/schema, history-index, kernel/bootstrap,
+epoch or queued-action format change is required by this local command/API path.
+W72 auxiliary-budget defaults remain unapproved and unchanged.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx and package Vitest (PID3976053,2.857291626976803s;
+2passed/68skipped). The public-command case kept its existing export/model rewrites
+and exercised the real import owner using a native-framed admitted source. It
+observed retained-import on copied data, unchanged source bytes, the reported new
+owned path/new session ID, and reopening after the command closed its manager.
+Existing unrelated command mocks were not invoked. This is public-handler evidence,
+not a separately launched/installed CLI or platform certification.
+
+The existing LF-boundary case exercised incomplete-tail refusal before destination
+creation, retained the source unchanged, and confirmed that ordinary fork still
+accepts its captured complete prefix. Supported/future-version handling is source
+implementation, not a separate version-matrix runtime claim. No new cases, suite,
+matrix, harness or provider setup were added.
+
+Required `npm run check` passed first (PID3976058,5.054137552157044s;
+1046files/no fixes, types, installer/browser checks). No failing test/check,
+correction or focused rerun occurred. No user session, credential store, settings,
+package, Python/kernel/process migration, live provider, benchmark or publication
+run occurred. Whole-product migration/rollback, current-native gains and completion
+of the active objective remain unclaimed. W72 budget defaults are unchanged and
+still awaiting the user's decision.
+
+## W74 / G11 — explicit natural-turn continuation control
+
+The native AgentSession natural-stop producer uses typed continuation outcomes on
+the existing Agent/agent-loop callback path. Only `continue` authorizes another
+model turn. `wait_for_owned_work`, `finish` and `cancelled` end this low-level
+invocation. Descriptive `turn_end` events and message bodies do not gain control
+authority. The existing array callback retains its generic behavior when no typed
+owner is bound; a bound typed owner is not followed by a second callback invocation.
+
+Goal/autonomous policy and limits are unchanged. An actual outstanding goal
+deferral becomes `wait_for_owned_work` only when no existing continuation wins.
+Existing descendant settlement/terminal-notice delivery and the single goal-resume
+owner remain responsible for wakeup. Waiting is not a self-quiescence await,
+conversation polling, job cancellation or a new scheduler/registry. A final response
+and unfinished owned work remain separate facts.
+
+The original session/source and input-pump owner govern work across awaits. Accepted
+goal bookkeeping stays with its source, without requalifying it as native admission.
+Stale control cannot select a replacement's next turn or roll back a new goal.
+Existing stop-hook precedence, finalized tool results, all-tools terminate handling,
+steering/follow-up ordering, primary failures and cancellation/disposal/EOF owners
+remain in place. The result type does not make a second aborted assistant or hide
+an accepted write/late failure.
+
+The compaction/checkpoint producer is unchanged; no unused
+`checkpoint_then_continue` state is claimed. Shared workspaces, a whole job registry,
+strong descendant lifecycle drains, all G11 outcomes and global efficiency gains
+remain outside this bounded change. No new provider call, auxiliary budget default,
+wire message, journal, index, kernel/bootstrap, epoch or queued-action format is
+introduced. Schema44/min44 (`protocol-11-schema-44-turn-outcomes`) fences loaded
+native workers with older continuation behavior; protocol11 is unchanged.
+W72 auxiliary-budget defaults remain unapproved and untouched.
+
+The existing autonomous command result/abort and mutable gate-bookkeeping retention
+limits remain. This change does not add a durable command-result registry or claim
+complete output retention on stale/cancelled paths. Existing process settlement,
+orphan tracking and primary lifecycle errors are not converted into harmless finish
+outcomes. The existing goal-resume write/admission/compensation body reuses the same
+scoped ownership capture; its scheduling and wakeup policy are unchanged.
+The existing callback-abort race can finish the low-level invocation before the
+callback itself settles. No new all-callback drain or complete late-error visibility
+guarantee is claimed by these outcomes.
+
+The two agreed existing offline selectors passed first on actual Node22.12 through
+project tsx/package Vitest in fresh six-variable, network/PID-isolated environments.
+The persisted native-goal path (PID4006647,5.029995028162375s,
+1passed/42skipped) exercised real SessionManager/AgentSession/Agent/loop with the
+existing Faux provider and ipython host bridge. It observed typed
+continue/continue/finish, no legacy callback invocation, unchanged response counts,
+qualified goal creation/completion and ordinary unqualified bookkeeping. This is
+an actual native producer-to-loop fixture, not a live provider or kernel run.
+
+The completed-turn abort case (PID4006652,2.1680260528810322s,
+1passed/34skipped) left the typed callback pending, ended on abort, then released
+its late continue result. It retained exactly one completed assistant/agent_end,
+one model stream and no legacy fallback, second assistant or extra input. No new
+case, suite, matrix or harness was added. Real descendants, wakeup replacement,
+all concurrent goal/state changes and process-crash behavior have source-review
+scope here, not a separate runtime certification.
+
+Required `npm run check` passed first (PID4006658,5.189717738190666s;
+1046files/no fixes, types, installer/browser). There were no failing checks/cases,
+source corrections or focused reruns. No provider, benchmark, user-session migration,
+installation or publication run occurred. The existing command-result retention
+and callback-abort limits remain explicit. W72 defaults are still unapproved;
+whole G11 completion, current-native gains and overall goal completion are not
+claimed.
+
+## W75 / G11 — explicit checkpoint-to-resume ownership
+
+The native compatible-turn checkpoint producer carries explicit control through
+the existing Agent/loop stop, accepted compaction and post-compaction input-pump
+settlement. Its resume directive identifies interrupted tool work and existing
+accepted actions/tickets rather than last-message role, payload presence or array
+membership. The existing generic boolean stop hook and W74 natural continuation
+callback retain their distinct positions and behavior; no duplicate callback call
+or unused checkpoint variant is added to the natural-stop hook.
+
+The native producer honors the loop's finalized all-terminate decision and the
+existing context-optimization admission gate. A terminating tool batch alone does
+not authorize another model request. Automatic threshold work does not stop/queue
+while optimization is off or a pending transition closes that gate. Separately
+accepted goal/autonomous/input work and previously accepted explicit compaction
+requests keep their existing authority. Ordinary completed-turn compaction without
+more work still finishes. This fixes the identified native control mismatches;
+the lookup finding itself was source evidence, not a runtime failure receipt.
+
+The current compaction sink/epoch append remains the only checkpoint ACK owner.
+The intent is not an ACK, and the legacy auto-compaction boolean is not a success
+receipt. Success resumption follows owned ACK/setup/release. Known committed
+checkpoint plus later setup/release error remains distinct, with pump suspension
+and no second summary or automatic resume. Recoverable skipped/ordinary failed
+requested/threshold compaction retains its existing interrupted/queued-work resume
+policy; absence of an ACK does not assert absence of a write. Abort does not resume;
+overflow retains its separate one-retry owner.
+
+Captured manager/session/file, branch/pump ownership and actual action consumption
+carry the directive through waits. Queued inputs go first; a real input invocation
+that takes the interrupted boundary cannot leave a stale extra continuation.
+Missing or released action data alone does not establish successful delivery.
+Existing settlement identity, action-commit fence, finalization, serialized refine,
+manual save/reschedule/cancel, EOF/disposal and headless-idle owners remain. No wait
+for the current invocation's own idle barrier, new queue/registry, converter,
+summary engine, model call, quota or persisted resume protocol is introduced.
+
+The adjacent threshold bookkeeping reuses W74's scoped goal/autonomous ownership.
+Its accepted autonomous command-output and callback-abort limitations remain; no
+new result store or all-callback-drained guarantee is claimed. The related compaction
+guide now uses owned identity/settings and distinguishes native capture, resident
+legacy fallback, nullable estimates, context.mode and runtime uncertainty.
+
+Schema45/min45 (`protocol-11-schema-45-checkpoint-transitions`) fences older loaded
+native workers. Protocol11/history-index16/kernel4/bootstrap11, accepted epoch and
+queued-action formats are unchanged. Pending checkpoint intents remain transient;
+no cross-restart recovery, whole G11 completion or current-native gain is claimed.
+W72 auxiliary-budget defaults remain unapproved and untouched.
+
+Five other existing private-interface fixtures are maintained with the same
+scenarios after removal of the old boolean/zero-argument scheduler assumptions.
+This is fixture maintenance, not five new scenarios or five extra executed cases.
+The two agreed real-path selectors remain the focused runtime scope.
+
+Focused validation used actual Node22.12, the isolated six-variable environment,
+network/PID/proc isolation and the package Vitest runner. The existing real skip/
+resume case passed in the first two-case run (4029294); it was not rerun. The happy
+case initially failed its new order assertion. The first observer counted
+`Agent.continue()` method entries rather than actual run admission. Switching to
+raw `agent_start` still showed intent/resume/ACK. A bounded same-case diagnostic
+(4033863) then recorded a threshold skip (`Session is too short to compact — try
+again once it grows`) followed by overflow compaction, not success-first threshold
+compaction. No production control failure or busy-return cause was inferred from
+the original method-entry trace.
+
+A prior completed canonical user/assistant pair alone was insufficient (4034293).
+Source inspection found that `prepareViewCompaction` with keepRecentTokens1 hits
+the last tool result, finds no following eligible cut, and uses the earliest cut.
+The same happy fixture now has a larger completed prefix, keepRecentTokens10001
+for its 10000-token-estimate tool result plus call, and a 12000-token model window.
+It still uses the actual big tool, canonical ACK, extension summary and native
+loop; no extra model call, case or harness was added. The strict
+intent → canonical ACK → actual run-admission order is unchanged.
+
+The affected happy-only run4036149 passed (1pass/9skip, 4.698449845192954s). Required
+check4036154 passed (5.016415226040408s, 1046files/no fixes, types, installer and
+browser checks). Earlier failure receipts4029294/4031979/4033863/4034293 and passing
+checks4029299/4031984/4034298 remain in the work logs. Post-integration corrections
+were fixture-only; the production candidate did not change. Five existing
+private-interface fixtures were maintained but not executed as extra cases.
+
+These cases do not certify real-provider summarization, all lifecycle races,
+installed binaries, crash recovery or platforms. No new provider/benchmark/install/
+publication approval is implied. W72 remains a separate pending policy decision;
+the overall objective remains active.
+
+## W76 / G06,G20 — existing lifecycle view retained
+
+The bounded source trace found no change needed. The existing owned kernel
+lifecycle capture reaches native context with stale-generation checks. Bash busy
+flags and recorded command/task evidence are not promoted into process availability.
+This does not establish a complete live job inventory.
+
+## W77 / G08 — release cancelled Bash waiters
+
+`BashHandle._wait` now removes its own completion callback under the existing lock
+when the await exits. Previously a cancelled background await retained its future
+and event loop through that callback until the command finished. The existing
+2MiB head/tail output buffer and 32 live-handle admission limit already apply;
+neither prevented this waiter retention.
+
+Two existing Python cases passed first (4043706): completion/later-await returns
+the same result, and cancelling a released-handle await removes its callback while
+the command remains live. Required check4043788 passed: 1046 files/no fixes, types,
+installer and browser checks. The cases used the existing project Python environment
+and fresh six-variable, network/PID/proc-isolated state. No corrections or reruns.
+
+No new queue, limit, status producer or wire/state format is introduced. Callbacks
+already handed to completion or the event loop are not promised drained by this
+change. This is not a global memory bound or measured efficiency gain. W72 budgets,
+live benchmarks, installation and publication remain outside this change.
+
+## W78 / G12 — preview single-session source preparation
+
+`base-context session import --preview <file>` and
+`SessionManager.previewRetainedImport` share actual source preparation with retained
+import. The held bounded reader, input-version check, complete-tail rule, legacy
+conversion, retention lowering and git-parent relinking run before any destination
+constructor. Real import consumes the same prepared entries; there is no second
+parser, body store or preview/apply token.
+
+The report identifies the observed input format and pre-conversion version,
+decoded source records/JSON bytes, prepared retained-entry count and intended
+target directory. These are not physical-file bytes or final destination totals.
+It creates no destination or session ID. Destination creation/indexing, canonical
+epoch activation and reference/replay coverage remain explicitly unassessed.
+A later import recaptures the source and can still fail, including the existing
+version6 tool-continuation refusal. Legacy parent-depth reads and all destination
+ownership/activation remain on actual import, not preview.
+
+This is a limited source-preparation report, not full G12/F16 migration, a live
+source snapshot or a full import dry run. No whole-home, credential, schedule,
+job or runtime migration, new format, native-owner simulation or staging store.
+W72 auxiliary-budget defaults remain unapproved and unchanged.
+
+Two existing offline selectors passed first (4050312, 2 passed/68 skipped):
+`maps model listing and session export to the existing runtime flags` exercises
+native-framed preview without a destination, then real retained import/reopen;
+`only treats LF bytes as JSONL record boundaries` checks the original legacy
+input version and decoded bytes, then incomplete-tail preview/import refusal and
+the existing ordinary-fork prefix control. These used actual Node22.12, fresh
+six-variable state, network/PID/proc isolation and the package Vitest runner.
+Required check4050317 passed (1046 files/no fixes, types, installer and browser
+checks). No corrections or reruns. This is not installed-CLI, native epoch
+activation, full migration, live-provider or publication evidence.
+
+## W79 / G08 — existing autonomous output bounds retained
+
+The source-only lookup found existing per-stream capture limits and explicit
+truncation: 1,048,576 JavaScript characters by default and 6,000 for configured
+gate output. No output-buffer change was needed; this is not a global memory bound.
+
+## W80 / G16 — task-focused autonomous continuation text
+
+The shared default autonomous continuation no longer asks models to prove blockers
+or add verification work. It asks for the requested task, requested checks or
+configured gates, brief concrete blockers, and independent unblocked work within
+existing permissions. Required approvals remain required.
+
+The actual path remains default selection in `createAutonomousRuntimeState` →
+`nextAutonomousContinuation` → AgentSession's typed continuation. Only default
+text changes: configured gates/limits, continuation decisions, custom prompt
+selection and existing runtime state are not rewritten. Sol's special custom
+prompt and the standing user instruction are untouched. No new controller,
+permission mechanism, quota, wire/state format or startup requirement is added.
+This is not measured model behavior, efficiency or full G16 acceptance. W72
+auxiliary-budget defaults remain unapproved and unchanged.
+
+Two existing actual AgentSession/Faux selectors passed first (4054817, 2 passed/
+20 skipped): the help-question path injects the task-focused default, and the
+claimed-blocker path preserves an explicit custom continuation. The latter uses
+scripted assistant text; no credential check or provider call occurs. The original
+one-continuation/two-turn assertions remain. Tests used actual Node22.12, fresh
+six-variable state, network/PID/proc isolation and package Vitest. Required
+check4054822 passed (1046 files/no fixes, types, installer/browser). No corrections
+or reruns. Configured command-gate/process cases were not added to this scope.
+
+
+## W83 / G13 — bundled skill-creation guidance
+
+The packaged `skill-creator` skill and its Python reference now direct users to
+Base Context's project/global skill paths, runtime distribution and kernel
+variables. Owned installations use their release-local runtime; other installs
+use the configured state root. `rlm`, `rlm.skill:cli`, templates and provider
+identities remain unchanged. This changes newly loaded guidance, not runtime
+behavior, captured Skill versions, Sol's special prompt or budget policy.
+
+Two existing offline loader cases passed (2 passed/30 skipped): the valid-Skill
+case loads the actual bundled metadata, body and linked Python guide; the missing
+Python-package case retains its metadata-only fallback. Required `npm run check`
+passed with 1046 files/no fixes. No install, kernel launch or provider call was run.
+
+
+## W85 / G13 — extension guide uses owned paths and SDKs
+
+The extension guide now uses Base Context commands, extension directories and
+first-party SDK imports. It links to this branch's source setup and states that
+public packages/installers are not released. Third-party examples, provider
+identities, `pi` and API behavior are unchanged. This is a guide correction,
+not a broader extension API or platform assessment.
+
+Two existing offline cases passed (2 passed/25 skipped). The actual Quick Start
+loads through extension discovery and registers `greet` and `hello`; the existing
+missing-default-export case still refuses. Required `npm run check` passed with
+1046 files/no fixes. No install, model call or extension API behavior was tested
+beyond those loader paths.
+
+
+## W86 / G13 — package guide uses owned controls
+
+The linked package guide now uses Base Context commands, settings/resource paths
+and SDK peer names, with source-only availability stated. The Node wrapper example
+uses 22.12.0; git dependency installation and unavailable self-update lookup follow
+the existing behavior. The inherited `pi` manifest, `pi-package` keyword and
+third-party examples remain unchanged. No runtime or package policy changed.
+
+Two existing offline parser cases passed (2 passed/93 skipped). The documentation
+case parses the actual eight install-source arguments and retains its earlier
+fixtures; dot-relative paths remain local. Required `npm run check` passed with
+1046 files/no fixes. No package install, clone, provider or other network case ran.
+
+
+## W87 / G13 — SDK guide uses owned imports and resolved managers
+
+The SDK guide now uses owned package names and state paths, links to source setup
+instead of an unpublished npm install, and uses `getAgentDir()` in its directory
+example. Eight examples now await asynchronous SessionManager factories before
+passing a manager to the SDK. `inMemory`, provider examples and runtime APIs are
+unchanged. These guide fixes do not certify whole-example execution or native
+epoch ownership for generic/in-memory examples.
+
+Two existing fake-home/env identity cases passed, including the current SDK guide's
+owned path/import and awaited-factory text. The legacy-alias refusal case remains
+unchanged. Required `npm run check` passed with 1046 files/no fixes. These cases do
+not execute SDK factories, registry/services, credentials, model examples or
+installs, and do not compile the guide's snippets.
+
+
+## W88 / G13 — RPC examples declare the current startup contract
+
+RPC/SDK launch examples now supply protocol 11, including the SDK server call's
+second argument. The RPC guide uses owned paths/SDK identity and the actual typed
+client's minimum schema45. The Node example displays terminal success or refusal
+and marks a refusal with a nonzero exit status. No runtime, protocol, framing,
+stdin/abort or budget policy changed; source-only availability remains explicit.
+
+The existing RPC argument case passed (1 passed/101 skipped), covering valid,
+missing and old markers plus actual guide launch arguments. Required `npm run
+check` passed with 1046 files/no fixes. No RPC client, SDK server, model or network
+process was launched. The terminal-display snippet was source-reviewed only.
+
+
+## W90 / G17 — native main-output request/source association
+
+The native main-response path can attach its original request and admitted attempt
+IDs to the existing assistant source entry. The existing parser follows exact
+recorded session/source/request links; missing or ineligible links stay unknown.
+Admitted attempts are not labelled as output producers. This is not a new task
+qualification, provider outcome, output ACK or caller-delivery assertion. Source
+presence, a known append ACK and later invocation refusal remain distinct.
+
+The existing instrumented native service case passed with three real fake-HTTP
+request/source links, an unlinked manually seeded assistant, unchanged assistant
+qualification/provider messages, and the existing controlled post-ACK stop/reopen.
+Its physical receipts still report completed provider work. The existing Python
+parser case passed for recorded linkage, copied-header unknown state and aggregate
+propagation. These are two existing cases, not live provider/campaign execution.
+The controlled stop is not a new actual output-limit admission fault injection.
+Required `npm run check` passed with 1046 files/no fixes. No corrections or case
+reruns were needed. Parser retention adds only link metadata, not full assistant
+bodies or duplicate full request descriptors/receipts.
+
+## W93 — explicit local dependency inputs for the owned installer
+
+The existing single-spec owned installer gains optional captured local dependency
+tarballs and repeatable CLI `--local-dependency` operands. It passes these explicit
+files alongside the main package to its one existing npm install. With no extra
+inputs the prior command remains unchanged. Original cwd/array/path capture occurs
+before waits or owned-root effects; files are not an immutable byte snapshot.
+Owned root/expected selection, main identity, prepared CLI/Python pairing, activation
+and failure retention stay with the existing owners. No bundle manifest, dependency
+origin rewrite, registry fallback, wrapper, extra quota or format change is added.
+Normal dependency resolution/scripts and Python preparation still apply; this is
+not an offline-install promise. W91 private tarballs remain their original W90
+candidate; they are not silently updated. Real installation/bootstrap, provider,
+benchmark and publication approval remain separate. W72 remains unapproved.
+
+The two existing owned-install/update cases passed on actual Node22.12 with the
+existing fake npm/Python boundary and real activation worker: captured relative
+local inputs (including a space), one npm operation/main-last, caller/cwd mutation,
+unchanged default inputs and prior CLI/Python selection after preparation failure.
+The repeatable CLI parser is source-reviewed, not executed by these API cases.
+Inert fixture files are not installed tarballs or bootstrap/package-resolution
+acceptance. Required `npm run check` passed, 1046 files/no fixes. No post-execution
+correction or rerun was needed. Before execution, Root corrected the test's default
+separator expectation: existing npm argv already contained `--`; production did
+not change that separator. Format-only changes remain separate from test results.
+
+## W95 — native compaction request/output associations
+
+Native built-in history/prefix compaction can retain descriptive links from its
+actual returned requests through the text projections/composition into the same
+owned CompactionEntry. Optional per-part requestOutputs stay outside the epoch and
+provider bodies. Physical accounting, semantic ACK-gated commitment and W75
+continuation ownership are unchanged. Ordinary RAW source qualification stays
+absent; existing epoch compaction keeps native-context-epoch. Neither label alone
+proves native model-summary production. Extension, generic/copy lookalikes and
+stale/unmatched metadata remain unknown rather than rejected/zero output.
+The parser reports only understood recorded part associations, not complete-output
+coverage or producing-attempt attribution. Source presence, append ACK and later
+caller delivery/refusal remain separate. No new record/store/format, qualifier,
+policy, budget or integrity scheme is added. Branch/learning output and downstream
+delivery remain outside this change. W72 and real install/bootstrap approvals
+remain separate and ungranted.
+
+The existing native compaction case passed on Node22.12 with its two unchanged
+fake-HTTP Responses requests: exact history/prefix links, metadata outside current
+request/replay bodies, copied extension metadata and generic append left unlinked,
+and the original links retained through the later extension ACK/refresh failure.
+That is not native linked-summary post-ACK fault injection or an epoch/import matrix.
+The existing Python case passed for a RAW history match, prefix mismatch staying
+unknown, aggregate propagation and unchanged prior MAIN/accounting assertions.
+Before application, Root found standalone eligibility too broad; the original33
+fragments were never applied. The sole39-fragment refresh adds a private native
+session capture opt-in, not inherited by generic capture. That exclusion is source
+control, not a new standalone-helper execution case. Required check first failed
+TS2454 on the self-referencing completion declaration. Root changed only the local
+declaration/assignment; the affected required check then passed,1046/no fixes.
+Passing native/parser cases were not rerun. No real models, installation/bootstrap,
+new campaigns, publication or full-G17/delivery claim follows from these checks.
+
+
+### W96 — native branch-summary request/output association
+
+Native built-in branch summaries can retain flat `requestOutput` metadata on the
+same `BranchSummaryEntry`: the actual returned operation/admitted-attempt/source
+association, not producing-attempt attribution or stored whole provider messages.
+The original text projection/preamble/file-operation suffix and accounting remain.
+A separate private invocation capture, genuine original source/manager generation,
+exact completion and built-in result identity reach the existing branch append.
+No generic capture inheritance, extension/standalone/copy-label authority, borrowed
+qualification or new branch policy/semantic gate is added. Missing/stale ownership
+permits only the ordinary unassociated path before any source append; real write,
+ACK and derived errors propagate, never trigger replay or relabel physical outcome.
+The explicit target parent/fromId is not the input source; leaf publication remains
+after the existing source ACK. Recorded presence, API ACK and later delivery remain
+separate. Native parser `branch_summary_request_associations` joins exact unqualified
+original summary/branch requests, retaining only source-link metadata. Ineligible or
+unmatched data remains unknown. Epoch/schema/budget policy, frozen campaigns, Sol,
+W94 private archives and all installation/bootstrap/publication holds are unchanged.
+
+The existing native happy/abort cases passed on actual Node22.12: the happy case
+links the same unqualified/unretained saved branch entry to its one fake-HTTP
+Responses request, distinguishes input source from destination, and keeps metadata
+out of current request/replay bodies. The existing abort case retains all prior
+branch summaries and selected history while its request settles cancelled. Model
+selection/effort, usage and prior assertions remain. The existing Python case passed
+for a different-destination match and an input-source mismatch staying unknown,
+with aggregate propagation and prior MAIN/compaction/accounting assertions intact.
+Required check passed,1046/no fixes, including types/installer/browser. All first
+passes; no project correction or rerun. Owner-replacement, extension/standalone and
+post-ACK fault behavior are source-reviewed, not new executed scenarios. No new
+model requests/cases, real provider, installation/bootstrap, campaign, publication
+or full-G17/current-efficiency claim. A preparation-only doubled test-path lookup
+was corrected before any project command; it was not a project test failure.
+
+
+### W97 — native planner contribution on the existing refinement result
+
+The existing `custom` / `prime-agent.refinement` source entry can retain a top-level
+`plannerRequest` association for the actual native `refine`/`plan` request. It is
+outside `data: RefinementResult`, state/global history/outcome messages and provider
+bodies. The normalized proposal contributes to an actual computed result, including
+applied/skipped edits; neither whole provider output, all-applied changes nor the
+predicted expectedOutcome is certified. Generated refinement IDs are not request IDs.
+Only the native plan/baseline composition/application/result path and original source
+owner can supply this metadata. Baseline reference identity is not deep immutability
+or a conflict-decision certificate. Existing mutation targets, conflicts and state,
+history, result/outcome/error ordering remain unchanged; later errors do not roll back
+known effects or source ACKs. Missing/ineligible owner or proposal binding leaves the
+ordinary result record unassociated; uncertain write errors are never replayed.
+The parser reports `refinement_planner_associations` from original unqualified frames,
+object-valued data without explicit rollbackOf, and exact referenced planner requests;
+unknown is not rejected/zero/no-effect. REVIEW stays a consumed gate, with no newly
+saved review response or inferred planner attribution. No schema/epoch/budget change,
+new store, live campaign, installation/bootstrap or publication follows from this work.
+
+The two existing fallback/extension native cases passed on Node22.12. The original
+main-model Faux review/planner pair remains; the two existing learning-model Faux
+calls were replaced by offline Responses without adding logical calls or cases.
+The actual reviewer is still only a gate. The actual planner creates one applied
+memory edit and one skipped invalid edit; its same unqualified/unretained source
+result links to the exact planner receipt, not review or generated refinement ID.
+Metadata stays outside result/state/current request/outcome bodies; the extension
+result remains unassociated. Original model/effort and caller assertions remain.
+The existing Python case passed for the planner match and known rollback staying
+unknown, with unchanged prior MAIN/compaction/branch/accounting assertions.
+Required check passed,1046/no fixes, including types/installer/browser. All first
+passes, no project correction/rerun. Owner/proposal/baseline mutation, standalone,
+rollback producer and post-ACK-fault matrices were not executed; baseline reference
+identity is not deep immutability or conflict correctness. No real provider,
+installation/bootstrap, new campaign, publication or full-G17/efficiency claim.
+
+
+### W98 — observed OpenAI cache writes and estimate coverage
+
+The shared Responses event reader now retains reported
+`usage.input_tokens_details.cache_write_tokens` on physical usage. Reported writes
+are removed from ordinary input and priced once in the existing assistant usage
+calculation, including its existing service-tier adjustment. Raw events, inputTotal,
+settlement timing and completeness handling remain unchanged. Unreported physical
+write counts remain unknown; legacy UI defaults and the existing remainder when
+writes are absent do not establish zero writes or a complete token breakdown.
+Two existing offline SDK-retry cases cover reported writes and missing writes,
+while preserving capacity/refusal, source ordering and request-budget observations.
+This is a working observation/pricing component, not a claim of verified invoices,
+complete current API-equivalent tariff selection, long-context adjustments, or
+new experiment readiness. Sol/Astra benchmark transport remains the existing
+ChatGPT subscription; requested cost figures are API-equivalent estimates.
+DeepSeek uses its API and API prices. Anthropic is outside the current cost scope.
+
+The benchmark estimator now treats an explicitly zero recorded tariff as a zero
+estimated charge without fabricating the missing token count. Nonzero-priced
+missing quantities, missing rates and incomplete/unsettled totals stay unknown.
+Estimate coverage and token-breakdown completeness remain separate. Cache reuse
+uses observed inputTotal and cacheRead. Existing report columns now explicitly
+label recorded/API-rate estimates, not subscription charges or verified API debits.
+No rate/profile, long-context/tier/billing-window selection, primary/retry math,
+new store, quota or frozen-result rewrite is included.
+OpenAI native2 and Python2 existing cases passed first; required check passed
+1046/no fixes, types/installer/browser. No project failure or native/Python rerun.
+No new inference, benchmark, installation or publication occurred.
+
+
+### W99 — literal prompt argument substitution from upstream
+
+Adapt upstream `24519c30856965a832551206b3e9ed87e814d602` (public main after
+v0.9.4) at the existing pure prompt-template helper. One callback-based replacement
+pass preserves argument values literally, including placeholder-looking strings
+and JavaScript replacement dollar sequences. Positional, all-argument and sliced
+selection semantics remain. Two existing cases cover normal selection and literal
+arguments; no cases or model calls were added. The first formatter reported three
+literal-template warnings; Root changed only their spelling to escaped template
+strings with identical runtime values. The passing cases were not rerun for that
+style-only correction. Sol's custom prompt and system/autonomous prompt content,
+source/request/ACK/epoch/budget owners remain unchanged.
+
+The shared required check passed1046/no fixes, types/installer/browser.
+The upstream selection and adaptation note is `docs/implementation/upstream-0.9.4.md`.
+
+
+### W100 — MCPv2 schema at the existing runtime adapter
+
+Port the MCPv2 schema leaf from upstream844e85545af6858dcb3d6cfe42bbfcf2ca0be4e5.
+`McpIntegration._ensure_tools` reads the required-v2 `input_schema` field and keeps
+object schemas; missing/non-object values become an empty object. Outward
+`inputSchema`, cached tool names, locks, sessions and actual tool calls are unchanged.
+No old-attribute fallback, invocation policy, credential or registry change is added.
+The two existing fake-session cases cover actual schema/arguments/result and the
+unknown-tool path with a non-object schema. The first run failed in common setup
+because it patched removed `_agent_dir`; neither case body ran. Root corrected only
+the fixture to patch current `product_state_path` to its private auth path. The
+same two cases then passed on Python3.11.15. Required check passed first1046/no fixes,
+types/installer/browser; it was not rerun for the fixture-only correction apart
+from mandatory commit hooks. Other auth/transport cases remain unrun. No real SDK
+session, auth/network call, installation, benchmark or publication was performed.
+
+
+### W105 — Explicit API-price estimates in the benchmark report
+
+The new optional profile snapshot flows from runner invocation through existing
+session parsing, physical-request deduplication and report aggregation. Sol/Astra
+use declared STANDARD API-equivalent four-component rates, with whole-request
+long pricing strictly above272000 gross input tokens. DeepSeek uses a declared
+peak API estimate. Transport, credentials and canonical receipts are unchanged.
+Missing/ambiguous profiles and unknown nonzero-priced quantities stay unpriced.
+Stock normalized OpenAI input has an unknown ordinary/write split: the report
+shows a conditional interval. DeepSeek can have a conditional point. Seen
+subtotals and unpriced-seen counts do not measure hidden calls or bound whole-run
+charges. Profile/source groups stay separate; no complete-cost win is inferred.
+Omitted profiles retain the old catalog path; old campaigns remain untouched.
+Two existing Python3.12.3 happy/edge cases passed first, including long pricing,
+copy deduplication, missing writes, duplicate profiles and conditional reporting.
+No SDK observer, model call, credential read, new schedule or benchmark ran. The
+canonical DeepSeek catalog and native projection are separate work, not established
+by these price calculations. Owned installation/publication and W72 remain held.
+
+
+### W107 — Canonical DeepSeek V4.1 Flash and native text/tool replay
+
+The generator and committed catalog now define direct `deepseek-flash`,
+`DeepSeek-V4.1-Flash`, at `https://api.deepseek.com`, with `max_tokens` and a393216
+output ceiling. Published context is1M; the catalog uses conservative decimal
+1000000, not a claimed exact provider integer. The announcement declares native
+multimodal support; enforced media budgeting remains unknown. Declared peak rates
+are input.30/read.006/output1.20 USD per million, with no separate write price.
+Logical minimal/low map to low; medium/high/xhigh to high; max to max. Legacy
+aliases are unchanged. Existing reasoning replay and cache-hit handling are reused.
+
+The actual Completions serializer now captures a distinct direct-canonical
+DeepSeek text/tool projection. Whole eligible groups can become descriptive user
+text via `messages`, not Responses `input` or generated IDs. One converter and
+one payload callback feed the existing selector, source capture, epoch append
+ACK/adoption, measurement and send. Generic Completions retains measure-only
+behavior. Exact route/model/config checks and pending-group acceptance remain;
+changed/foreign/opaque mappings get no new permission. Only this exact contract
+admits thinking/reasoning_effort into the existing epoch representation. No new
+schema, quota, default budget profile, source writer or epoch algorithm is added.
+
+One new case in the existing compaction suite passed first on Node22.12.0: real
+offline adapter/tool/native source, forced public conversion, compaction/ACK,
+next request, low/medium wire mapping and an altered-payload refusal after ACK.
+Existing OpenAI cases were untouched and unrun. Required check passed first;
+one template-literal style info was corrected without changing the string value
+or rerunning the passing native case. The generator-only formatter attempt had
+processed no files because that file is intentionally ignored; no forced rerun.
+No live provider/key read, benchmark, installation or publication occurred.
+Benchmark API-key delivery, latest-public host and balanced scheduling remain
+separate work. This is a working offline native path, not availability, tokenizer,
+vision-budget, billing, performance or full-spec acceptance.
+
+
+### W109 — Three-model comparison setup
+
+Added an opt-in six-slot campaign: the same two task IDs across Sol, Astra and
+DeepSeek, paired arms sequentially and counterbalanced, complete window barriers,
+and all LOW work before MEDIUM. Per-model/phase outputs preserve existing attempt,
+retry, primary, failure and partial-result handling. The campaign requires all
+30 tasks, both arms, the pinned public baseline and explicit API-price profiles.
+The old single-model path remains available.
+
+Fresh public-host preparation accepts the official branded Prime Agent 0.9.4
+archives while preserving their scoped core import keys and ESM identities. It
+excludes ambient first-party modules and preserves existing native candidate,
+fresh-root and v2 manifest checks. Official assets were downloaded without
+scripts, installation or bootstrap. Source metadata shows existing ordinary
+direct dependencies fit their declared ranges; this is not runtime compatibility.
+
+Provider launch uses separate SDK entrypoints and selected-only read-only mounts.
+OpenAI keeps the existing subscription backend. DeepSeek uses a private API-key
+file and an empty stored backend plus a literal runtime override, avoiding stock
+stored-key command/environment interpretation. Stock already has Sol/Astra;
+only canonical DeepSeek is configured. Current native budgets remain explicit.
+No real DeepSeek key was read. Tool/service/judge credential isolation is unchanged.
+
+The first scheduler command failed discovery because the two new methods were
+placed in CodexAdapterTests. Neither body ran. Moving the unchanged methods to
+HarnessComparisonTests fixed the two affected cases. The separate public-layout
+and provider-command happy fixture and wrong-public-metadata edge passed first.
+The JS syntax checks passed. These checks do not execute the prepared SDKs or
+establish live availability. A clean current image, actual host preparation and
+an offline SDK working path remain before any new live campaign. No benchmark,
+owned installation, publication, complete-cost win or full-spec claim is made.
+
+
+### W113 — Shared main-prompt restraint for every model
+
+User clarification: "The Absolute Prohibition block should apply to all models
+and be a part of the main base-context prompt."
+
+The existing Absolute Prohibition block from `AGENTS.md` is now
+included unchanged by the common main system-prompt builder. It applies to every
+model without a Sol selector, external prompt file or project-context discovery.
+The default trained prefix stays intact. Custom system prompts replace the
+default body but retain this shared policy. This is a prompt instruction, not a
+new runtime validator or an auxiliary-call quota. The stock public comparison
+prompt is unchanged.
+
+Separately, the actual prepared public Prime Agent 0.9.4 and Base Context SDK/RPC
+paths passed the offline DeepSeek exercise at native source `dd7cf0944`: canonical
+model selection, requested medium mapping to wire high, `max_tokens: 32000`,
+literal command-shaped dummy key, one HTTP completion and clean EOF per arm.
+Neither dummy command executed; stderr was empty. Only HTTP was mocked; the
+real SDK, model registry, session/runtime and RPC ran. This does not establish
+live availability, billing, tools or campaign results. That exercise is frozen;
+the shared-prompt change requires a new native image before the comparison.
+
+Two existing main-prompt cases passed on Node 22.12.0: the default/custom IPython
+and Bash paths include the policy, and custom replacement still retains it.
+The required check passed. No prompt-behavior or efficiency gain is inferred
+from these string/path checks. The passing prepared-SDK exercise was not rerun.
+
+
+### W119 — Approved native auxiliary attempt caps
+
+The user approved fixed per-operation caps: compaction 4, branch summary 2,
+learning reviewer 2, and planner 2. This supersedes earlier W72 approval holds.
+These count provider-attempt admissions, not tokens, spend, or successful calls.
+A compaction invocation shares its four attempts across history and turn-prefix
+summaries. Nested captures and logical retries share the same private allowance;
+they do not inherit native output-association authority. A fresh native
+invocation starts a fresh allowance. Ordinary root MAIN, child, standalone and
+generic captures remain uncapped by this policy.
+
+Admission debits synchronously after existing prechecks and before source
+persistence. Failed attempts, admitted cancellations and persistence failures
+do not refund it. Exhaustion latches the existing completion failure before
+transport, including when the adapter returns an error message. Source/ACK,
+settlement and native-output ownership are unchanged. No request-token profile,
+settings schema, receipt store or token-budget default was added.
+
+Two focused cases passed first on Node 22.12.0 using the real Responses adapter,
+SessionManager and split-turn compaction helper with HTTP mocked: shared/nested
+caps and new-invocation reset; two admitted SDK failures followed by pre-send
+refusal, no logical-retry refund, and a fresh successful invocation. The run
+retained expected adapter error logs and a MaxListenersExceededWarning; it was
+not a live provider or runtime-cleanliness check. Branch/planner entry assignment
+and admitted cancellation/persistence-failure behavior were source-reviewed,
+not separately executed. The running W113/public-0.9.4 campaign stays frozen;
+these caps apply to the next build, not its results.
+
+The user also approved real owned installation/bootstrap and keeping the npm
+namespace `@ponythewhite/base-context*` with `BaseModelAI/base-context` GitHub
+Releases downloads. The first real owned install stopped during npm preparation:
+`EALLOWSCRIPTS`, because `--allow-scripts` is invalid for project-scoped installs.
+The owned selection was absent afterward; the failed candidate was retained.
+A minimal installer fix is pending. Actual publication still needs final approval
+after benchmark review. Whole-root/settings/package migration remains separate.
+
+
+### W120 — Correct npm project-scoped installation policy
+
+The first real owned installation failed before activation with npm 11.19
+`EALLOWSCRIPTS`. The new version directory now gets a private package.json with
+`allowScripts` entries for the captured main install operand and absolute local
+dependency tarballs. The invalid project-scoped `--allow-scripts` argument was
+removed; `--allow-remote=all` remains valid and unchanged. Normal non-strict npm
+dependency scripts, downloads and mandatory fresh Python preparation remain.
+No global npm configuration, bypass, dependency downgrade or skipped scripts
+were added. This map does not claim a complete future dependency script policy.
+
+Both affected existing owned-install cases passed first. Their shared fake npm
+boundary reads the real candidate-local policy before writing installed files;
+real activation/rollback ownership and preparation-failure retention are unchanged.
+This fixture is not a successful real installation. The original failed candidate
+remains, with no current selection observed after that failure. A corrected build
+and a new real installation attempt are next; frozen benchmark artifacts stay
+unchanged. Actual publication still requires final approval.
+
+
+### W122 — Real owned installation and launcher accepted
+
+The corrected installation of source `a7a8841b0` completed with exit 0 after
+normal npm dependency installation and mandatory fresh Python preparation.
+The owned activation was acknowledged, and current.json selected the new
+release with previous:null. The stable `~/.local/share/base-context/bin/base-context`
+launcher returned `0.1.0` through its actual installed entrypoint. No shell
+profile, Prime installation, Prime credentials or running benchmark image changed.
+
+The release-local venv uses a newly installed uv-managed Python 3.11.15 under
+the retained private installation HOME. That HOME must remain available; the
+interpreter binary is not bundled inside the selected version directory and is
+not Prime's existing environment. npm's three uncovered install-script warnings
+and node-domexception deprecation were retained. The original EALLOWSCRIPTS
+failure and its unactivated candidate were retained too; no rollback or blind
+replay occurred. This first activation has no previous release for rollback.
+
+### W123 — GitHub versioned assets with npm channel discovery
+
+Release preparation and shell download URLs now use the approved repository
+base `https://github.com/BaseModelAI/base-context` and `/releases/download/v<V>/`.
+The packager's internal dependency URLs and main manifest tarball path use this
+layout. The shell's main tarball and existing SHA256SUMS URLs match it; no checksum
+mechanism changed. Default stable/beta shell discovery uses the owned npm
+package's latest/beta tags. Positional versions and BASE_CONTEXT_VERSION retain
+their precedence and bypass discovery. The existing progress owner still captures
+the resolver output without introducing a second lookup or fallback origin.
+
+The existing installer checker now exercises two real shell-main paths: default
+stable discovery and explicit positional version. npm/curl, external tools,
+preflight, confirmation and checksum approval are fake boundaries. These are
+resolver/URL/owned-handoff cases, not online download, bootstrap or checksum
+acceptance. Beta mapping and packager URL output remain source-reviewed only.
+
+Native updater defaults and custom static-manifest identity/origin/redirect
+rules are unchanged. Do not set the application's runtime download-base override
+to the GitHub repository URL. Use the existing npm default instead. These changes
+do not publish GitHub assets or npm tags; actual publication still needs final
+approval after benchmark review. Whole-root migration is being implemented for
+supplied coherent offline exports only. No live Prime export/import or credential
+migration is authorized or claimed.
+
+
+### W125 — Offline legacy-root import with inactive packages
+
+The registered `migrate --from-prime-agent <offline-export-root>` command now has
+`--dry-run` and explicit new `--destination` paths. It returns before startup
+migrations or runtime creation. The input must be a separately produced coherent
+offline/filesystem export. Known/default Prime roots are refused; this command
+neither creates a live snapshot nor certifies arbitrary custom roots as inactive.
+No actual user-data migration, source quiescence or credential import was performed.
+
+Supported flat legacy JSONL sessions go through the existing preview/import owners
+with their known cwd. Missing cwd is refused rather than replaced by the command's
+cwd. All previews precede destination effects, and actual import checks its held
+source format again before that session's destination. Native-framed input is
+refused here because qualified epochs retain pinned source paths across staging;
+standalone retained-import/preview defaults remain unchanged. Owners close before
+final publication of a new state directory. Failed staging is retained, not replayed;
+existing targets are not merged or overwritten. Binary selection is unaffected.
+
+Selected typed preferences use the destination settings owner. Model/UI preferences
+include the real nested terminal fields. Supported noncredential npm/HTTPS package
+declarations are stored in inactivePackages OUTSIDE packages[], so even older readers
+that ignore the new field do not install them. Current resolve/update paths remain
+active-only; listing inactive declarations does not resolve installed paths. An
+explicit successful install moves the matching declaration through the existing
+settings owner while retaining its resource filters. No schema framework or new
+manifest, hash, receipt store, snapshot mechanism or epoch relocation was added.
+
+The two focused CLI cases exercise real session/settings owners, two source cwd
+values, final-root reopen AND branch-history reads, inactive package resolution,
+secret-file/settings exclusions, explicit activation after a fake successful package
+install, and invalid-source/existing-target refusal. First run: the edge passed;
+the happy case failed at its settings assertion because showImages was incorrectly
+modeled as top-level. Production projection and the fixture were corrected to
+terminal.showImages/terminal.showTerminalProgress. Only the affected happy case was
+rerun and passed. The required check passed; its useTemplate INFO was retained and
+fixed with a value-identical fixture template literal, without a native rerun.
+The invalid-source case fails during pre-preview; later apply-failure retention,
+native-format refusal and missing-cwd refusal are source-reviewed, not separately
+executed cases. No broader compatibility or live-migration claim is made.
+
+Auth/models secrets, executable/instruction paths, autonomous records, daemon state
+and kernel snapshots are excluded. History contents are retained, not secret-scrubbed.
+Attachment/artifact/external-reference remapping, paused jobs, opaque replay and
+trusted runtime resume remain unsupported. This is useful partial migration, not
+full G12/F16 closure. The benchmark image remains W113, and publication stays held.
+
+
+### W127 — Real owned update, rollback and restoration
+
+The owned installation was updated from source `a7a8841b0` to `ca5510863` using
+fresh local packages, normal npm scripts/downloads and a new release-local Python
+environment. Activation completed successfully with the original release retained
+as previous. The actual stable installer then rolled back to that original pair
+and restored the updated pair in two explicit, successful operations, each using
+the observed selection as its expectation. These were planned lifecycle actions,
+not retries or automatic rollback after an uncertain result. Old versions and the
+initial failed installation candidate were retained.
+
+The updated release is active again. Its actual installed stable launcher handles
+`help migrate`. No user data was migrated, no source writers were stopped, and
+Prime Agent and the frozen benchmark images were unchanged. Both release venvs
+need their retained private installation HOMEs, which hold their freshly installed
+uv-managed Python interpreters. Binary selection is not a schema/data rollback or
+a claim about the health of already-running owners.
+
+This demonstrates the local owned install/update/rollback path. Public npm/GitHub
+publication still requires benchmark review and final approval. Local release
+artifact preparation does not grant publication permission or establish hosted
+endpoint availability.
+
+
+### W128 — Retained goals are history, not restored active work
+
+The existing goal restore owners already exclude retained-import entries, both
+in indexed branch bootstrap and in AgentSession's indexed/resident restore paths.
+Historical thread_goal_state records can remain in imported journals; they are
+not physically absent and are not reactivated. Fresh autonomy comes from explicit
+configuration, not those journal labels. Pending actions/messages use separate
+snapshot/recovery inputs. Scheduler, daemon-recovery and runtime files are not
+copied by the root importer. No new owner guard or runtime test was added for this
+source-confirmed path. CLI coverage text and README now state the distinction.
+Retained history is not secret-scrubbed or asserted unable to influence a future
+model conversation; explicit new goals/autonomy remain available.
+
+
+## W136 — Superseded post-turn compaction checks
+
+A manual compact can begin after the public `agent_end` event while an older
+optional compaction check still awaits indexed metadata. Its stale-owner error
+could reject the event tail; the next input pump then repeatedly awaited and
+rescheduled that rejection. A private real-owner reproduction exposed the CPU
+loop. A bounded V8 profile located the pump/event-tail cycle, and a read-only
+observer captured `Compaction owner changed` from the timestamp lookup.
+
+`_checkCompaction` now skips that lookup only for `StaleCompactionOwnerError` when
+its original captured owner is actually stale. Other errors still propagate.
+The strict shared reader, input pump, event tail, ACK timing, native request/output
+ownership and provider policy are unchanged. No new epoch is adopted on error.
+
+The persisted-session/real-Responses fake-HTTP case now completes two immediate
+agent-end/manual-compact boundaries and starts the next real model request. It
+passed in 705 ms. The existing genuine source-byte-budget error case passed on
+its first execution. The original CPU hang and two test-fixture corrections are
+retained separately; the passing edge was not rerun. This isolates the local
+owner race, not the full Codex/refinement/budget benchmark stack or every timeout.
+
+The ongoing campaign keeps its W113 image, first primaries and all failures.
+The hung offline diagnostic occupied one CPU during part of that campaign; its
+effect on comparative timing is unknown. No capacity classification is changed.
+Publication remains held for completed benchmark review and final approval.
+
+
+## W138 — Captured build environment in release metadata
+
+The existing build-info.json retains source identity and now records the actual
+build Node, npm, tsgo and resolved esbuild versions, plus the build host platform
+and architecture. The source build captures this once and writes the same object
+to all four packages. The release packer reads the prepared main-package object
+before output changes and carries it unchanged as manifest.build. It does not
+substitute the later pack host or Git state for the original build facts.
+
+These are build-host facts, not a supported-target matrix or a new installer gate.
+Existing package engines, runtime/bootstrap and daemon/storage contracts remain
+with their current owners. This adds no schema, doctor, hash, compatibility layer,
+wheel claim or full reproducibility claim. The runtime is still supplied as source
+and receives a fresh environment at installation. Full G15 coverage remains open.
+The already installed 1fc87 liveness fix does not need another installation merely
+for this descriptor change. Previous private release bundles remain frozen.
+
+
+## W152 — Paused schedule import and offline listing (source integrated)
+
+The offline importer now maps supported top-level cron/user-heartbeat/recurring RLM declarations
+through the existing AgentCronJobStore into paused per-session schedule files.
+It creates no active intermediate job, pending dispatch or daemon/runtime owner.
+Subagent, ambiguous/unmatched, completed/cancelled and one-shot RLM records are skipped.
+`BASE_CONTEXT_HOME=<root> base-context schedule list --offline [--all] [--json]`
+uses the existing reader before daemon routing and projects only known metadata.
+Retained prompts stay unexecuted data, not secret-scrubbed text. Generic cron resume,
+one-shot rescheduling, subagent ownership and full artifact migration remain outside
+this increment. Existing heartbeat resume still requires an explicit runtime action
+from the newly bound session; RLM callers must use the new job IDs. Old handles and
+kernel state are not restored.
+
+Source and the two existing migration cases are integrated. Both focused cases
+passed under isolated Node22.12 after restoring the saved changes. The corrected
+source53d campaign was stopped as a precaution; its frozen inputs remain unchanged.
+Its incomplete results are diagnostic only, not a completed comparison.
+
+The linked quickstart, usage, session, background-work and provider guides use the owned
+Base Context commands, paths and environment names. They distinguish native framed
+journals from legacy JSONL, use bounded async history owners, and describe the
+limited paused import without promising kernel survival or restored execution.
+Real provider identifiers, Python import names and upstream attribution remain.
+
+
+## W168 — Bounded Codex WebSocket opening; comparison remains stopped
+
+Codex WebSocket connection setup now uses `timeoutMs`, or 30 seconds when omitted.
+The deadline covers opening only, not response generation, native preparation or
+an entire run. It closes the connecting socket and rejects through the existing
+transport path, allowing normal auto-to-SSE fallback. Open/error/close/abort clear
+the timer and listeners. Attempt admission, cache/session identities and limits
+are unchanged; failed connection setup creates no fictitious inference receipt.
+
+The new native happy case first failed because no opening deadline was scheduled.
+With the fix, that case completes through SSE and the cancellation edge aborts
+without fallback. Both passed on isolated Node22.12. The two paused-import cases
+also passed; no additional migration matrix was added.
+
+The source53d comparison was stopped as a precaution after Sol's fourth run waited
+following two compactions. All 24 prior Sol receipts were completed WebSocket
+attempts. This does not exclude a new connection wait before admission, nor prove
+that connection setup caused the stall. No concrete local dependency cycle was
+established. The actual incident cause remains unknown.
+
+Historical W168 gate state, superseded by the current release status above:
+the older pre-fix campaign is discarded. Neither incomplete campaign is release
+acceptance or a final comparison. A fresh clean package and the packaged Sol RPC
+path with actual default refinement enabled and a real 30-second opening deadline
+must pass before a fresh all-30 LOW-then-MEDIUM campaign. Publication still needs
+completed benchmark review and separate final approval.
+
+
+## W175 — Explicit local release dependency resolution
+
+A real private installation of the release archives failed before activation:
+npm fetched an unpublished GitHub dependency despite the supplied local tarballs.
+The installed selection stayed unchanged. The failed candidate and its bootstrap
+HOME were retained; publication was not used as a workaround.
+
+For explicitly supplied local dependency inputs, the installer now reads the actual
+package name with `tar -xOf ... package/package.json` before owned-root effects.
+The existing private candidate manifest declares their direct `file:` dependencies
+and matching npm `$name` overrides. Only those supplied identities replace matching
+transitive resolution. Archive bytes stay unchanged. The default path, script
+policy, one npm installation, fresh Python preparation and activation CAS remain
+with their existing owners.
+
+Historical W175 gate state, superseded by the successful installation and campaign
+start recorded in the current release status above:
+the two existing native installer cases passed. Their tar/npm boundaries are fake;
+the corrected release-archive installation is still the required working check.
+The unchanged WebSocket/RPC path already passed on f99702981 and is not rerun for
+this installer-only change. The fresh benchmark campaign remains unstarted until
+the corrected private installation succeeds.
+
+## Explicit recurring-cron resume
+
+`base-context schedule resume <new-job-id>` adds the explicit generic-cron control
+left outside W152. It activates one paused recurring top-level job only after its
+destination session and journal file are bound to the normal runtime. The store
+persists activation and uses the existing next-run rules and scheduler delivery.
+
+Import, offline listing and session opening still leave retained schedules paused.
+One-shot cron jobs require explicit rescheduling. Heartbeat controls, migration
+scope and handle/kernel-state limits are unchanged. The 32 selected native checks
+pass, including supervisor-to-worker activation with existing scheduler delivery
+and refusal without a bound runtime. These use private fixtures and fake delivery;
+no real retained job or provider call was activated. Protocol version 11 and native
+startup requirements stay unchanged; the optional command uses schema revision 46
+and the `cron_resume` capability.
+
+## Explicit child-result capsules and retained findings (source integration)
+
+Spec §19.3's concise return contract is implemented through the explicit
+`agent_message.send_result(summary, findings, ...)` path. The recipient stages the
+full public findings as a qualified non-message record in its existing session
+source before receiving a small capsule. The capsule and receipt carry an exact
+source/entry/field reference for existing bounded `prime_context` read/search.
+Full findings stay outside ordinary model context and remain in recipient-session
+retention after child runtime disposal. No cross-session grant, new archive
+backend or automatic summarization call is introduced.
+
+Ordinary `send` is unchanged. Summaries refuse above 2,000 characters; complete
+encoded reports use the existing native recovery source budget without clipping.
+Capsules identify earlier reports they revise or replace when applicable. Parents
+can skim capsules first and retrieve only the latest relevant details; older
+reports and independent unresolved findings are not automatically discarded.
+The new `send_result`/`worker_deliver_result` operation requires the optional
+`agent_results` capability at protocol11/schema47. Existing native startup
+requirements are unchanged. All 32 selected native checks pass. The working path
+uses real parent/child sessions and daemon delivery with a faux provider: three
+successive capsules stay small, earlier refs remain retained, and selected latest
+findings remain recoverable after sender disposal and recipient reopen. Oversize
+reports refuse before notification. The Python bridge and affected compatibility
+fixtures also pass. No real provider calls, jobs or imported prompts were activated.

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0] - 2026-09-15
+
+- Added awaited native tool-invocation admission before effects, with stable execution IDs shared by finalized evidence.
+- Added one-shot stream and tool execution owner bindings that survive caller callback reassignment.
+- Added a native context barrier before prompt transformation and message conversion.
+- Added ordered finalized tool exchanges with original and executed arguments, final middleware results, and explicit interrupted-effect outcomes.
+- Allowed an immutable context owner to return a detached per-request message projection without changing lifecycle or tool context.
+- Kept opaque request context on the native owned-stream path, separate from configured provider arguments and options.
+- Joined projection cleanup after terminal handling and preserved both inference and cleanup failures.
+- First public Synerise base-context 1.0.0 release of `@ponythewhite/base-context-agent`, including native invocation ownership and bounded transient-provider recovery.
+
 ## [0.8.0] - 2026-08-21
 
 - Added `AgentContinueError` with stable codes (`busy`, `nothing-to-continue`) for `Agent.continue()` precondition failures, so callers classify without matching message text.

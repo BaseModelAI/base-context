@@ -8,10 +8,9 @@ methods, so the agent writes ordinary Python:
     import linear
     issues = await linear.list_issues(team="Engineering")
 
-Credentials live in the host's ``auth.json`` (single store, survives kernel
-rebuilds). This module reads that file directly for the common case; on token
-expiry it asks the host to refresh via ``rlm.host_request("mcp.refresh", ...)``
-and re-reads. Interactive login runs host-side, never here.
+Explicit API keys live in the host's ``auth.json`` (single store, survives kernel
+rebuilds), or a configured environment variable supplies a bearer token. Stored
+OAuth is unavailable until the Base Context provider contract is validated.
 """
 
 from __future__ import annotations
@@ -19,33 +18,26 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
 from contextlib import AsyncExitStack
-from pathlib import Path
 from typing import Any
 
-from . import host_request
+from .product import product_state_path
 
 __all__ = ["McpIntegration", "McpToolError", "NotEnabled"]
-
-# Stored access tokens are treated as expired this many seconds early so a token
-# never dies mid-request. Mirrors the host's refresh buffer.
-_EXPIRY_SKEW_SECONDS = 30
-
 
 class NotEnabled(RuntimeError):
     """Raised when an integration has no usable credentials.
 
-    The integration is installed but not logged in. The message tells the agent
-    how to enable it so it can relay that to the user rather than retrying.
+    The message tells the agent how to configure a supported credential so it
+    can relay that to the user rather than retrying unavailable OAuth login.
     """
 
     def __init__(self, server: str):
         self.server = server
         super().__init__(
-            f"The '{server}' integration is not enabled: no credentials found. "
-            f"Tell the user to run `/mcp login {server}` in Prime Agent to connect it. "
-            f"Do not ask them to set environment variables."
+            f"The '{server}' integration is not enabled: no usable credentials found. "
+            "OAuth is unavailable until the Base Context provider contract is validated. "
+            "Use explicit bearer-token or API-key configuration instead."
         )
 
 
@@ -53,22 +45,11 @@ class McpToolError(RuntimeError):
     """Raised when an MCP tool call returns a result flagged as an error."""
 
 
-def _agent_dir() -> Path:
-    """Resolve the Prime Agent config dir the same way the rest of the runtime does."""
-    raw = (
-        os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
-        or os.environ.get("PI_CODING_AGENT_DIR")
-        or str(Path.home() / ".prime" / "agent")
-    )
-    # resolve() so a relative env override reads auth.json from the right place,
-    # not relative to the kernel's cwd.
-    return Path(raw).expanduser().resolve()
-
-
 def _read_auth(provider: str) -> dict[str, Any] | None:
     """Read one credential entry from auth.json. Returns None if absent/unreadable."""
+    auth_path = product_state_path("auth.json")
     try:
-        data = json.loads((_agent_dir() / "auth.json").read_text())
+        data = json.loads(auth_path.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -140,10 +121,10 @@ class McpIntegration:
         return f"mcp:{self.server}"
 
     def _token(self) -> str | None:
-        """Current usable bearer token, or None if missing/expired (needs refresh).
+        """Return an explicit bearer token or API key, never unvalidated OAuth.
 
         A static bearer-token env var wins (matches the host's `isAuthed` check);
-        otherwise read auth.json. OAuth tokens are only returned while still fresh.
+        otherwise read an API key from auth.json.
         """
         if self.bearer_token_env:
             env_token = os.environ.get(self.bearer_token_env, "").strip()
@@ -154,37 +135,13 @@ class McpIntegration:
             return None
         if cred.get("type") == "api_key":
             return _resolve_config_value(str(cred.get("key") or "")) or None
-        # OAuth credential: {access, refresh, expires(ms)}.
-        access = str(cred.get("access") or "")
-        expires = cred.get("expires")
-        fresh = isinstance(expires, (int, float)) and (
-            time.time() * 1000 < expires - _EXPIRY_SKEW_SECONDS * 1000
-        )
-        if access and fresh:
-            return access
-        return None  # signal: needs refresh
+        # No MCP OAuth provider contract is validated for Base Context.
+        return None
 
     async def _resolve_token(self) -> str:
         token = self._token()
         if token:
             return token
-        # Expired or missing-access: ask the host to refresh, then re-validate via
-        # _token() (which re-checks expiry) rather than trusting any access value.
-        if _read_auth(self._provider_id) is not None:
-            refresh_error: Exception | None = None
-            try:
-                await host_request("mcp.refresh", {"server": self.server})
-            except RuntimeError as exc:
-                refresh_error = exc
-            token = self._token()
-            if token:
-                return token
-            # A refresh that failed (vs. genuinely-absent creds) is a recoverable
-            # error; don't mislabel it as "not enabled / re-login".
-            if refresh_error is not None:
-                raise RuntimeError(
-                    f"Failed to refresh credentials for '{self.server}': {refresh_error}"
-                ) from refresh_error
         raise NotEnabled(self.server)
 
     # -- connection ---------------------------------------------------------
@@ -260,14 +217,16 @@ class McpIntegration:
             async with AsyncExitStack() as stack:
                 session = await self._open_session(stack)
                 resp = await session.list_tools()
-                self._tools = {
-                    t.name: {
+                tools = {}
+                for t in resp.tools:
+                    # mcp>=2 uses input_schema in Python; inputSchema is the wire key.
+                    schema = getattr(t, "input_schema", None)
+                    tools[t.name] = {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        "inputSchema": schema if isinstance(schema, dict) else {},
                     }
-                    for t in resp.tools
-                }
+                self._tools = tools
 
     async def call_tool(self, tool: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call ``tool`` on the server and return its parsed result.

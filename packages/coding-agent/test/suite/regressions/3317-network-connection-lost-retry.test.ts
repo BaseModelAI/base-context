@@ -1,23 +1,32 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getAssistantTexts, type Harness } from "../harness.js";
 
 describe("issue #3317 network connection lost retry", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
-	it('retries transient "Network connection lost." failures', async () => {
+	it('retries concretely classified "Network connection lost." failures', async () => {
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Network connection lost." }),
+			{
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage: "Network connection lost." }),
+				diagnostics: [
+					{
+						type: "provider_stream_failure",
+						timestamp: Date.now(),
+						details: { kind: "transport", providerErrorType: "ECONNRESET" },
+					},
+				],
+			},
 			fauxAssistantMessage("recovered after reconnect"),
 		]);
 

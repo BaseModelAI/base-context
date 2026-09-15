@@ -15,20 +15,24 @@ function createContext(tokens: number | null, compact = vi.fn()): ExtensionConte
 		abort: vi.fn(),
 		hasPendingMessages: () => false,
 		shutdown: vi.fn(),
-		getContextUsage: () => ({ tokens, contextWindow: 200_000, percent: tokens === null ? null : tokens / 2000 }),
+		getContextUsage: async () => ({
+			tokens,
+			contextWindow: 200_000,
+			percent: tokens === null ? null : tokens / 2000,
+		}),
 		compact,
 		getSystemPrompt: () => "",
 	};
 }
 
 describe("trigger-compact example extension", () => {
-	test("only auto-compacts when context usage crosses the threshold", () => {
+	test("only auto-compacts when context usage crosses the threshold", async () => {
 		let turnEndHandler:
-			| ((event: { type: "turn_end" }, ctx: ExtensionContext | ExtensionCommandContext) => void)
+			| ((event: { type: "turn_end" }, ctx: ExtensionContext | ExtensionCommandContext) => Promise<void>)
 			| undefined;
 
 		const api = {
-			on: (event: string, handler: (event: { type: "turn_end" }, ctx: ExtensionContext) => void) => {
+			on: (event: string, handler: (event: { type: "turn_end" }, ctx: ExtensionContext) => Promise<void>) => {
 				if (event === "turn_end") {
 					turnEndHandler = handler;
 				}
@@ -42,16 +46,16 @@ describe("trigger-compact example extension", () => {
 		const compact = vi.fn();
 		const event = { type: "turn_end" } as const;
 
-		turnEndHandler?.(event, createContext(110_000, compact));
+		await turnEndHandler?.(event, createContext(110_000, compact));
 		expect(compact).not.toHaveBeenCalled();
 
-		turnEndHandler?.(event, createContext(120_000, compact));
+		await turnEndHandler?.(event, createContext(120_000, compact));
 		expect(compact).not.toHaveBeenCalled();
 
-		turnEndHandler?.(event, createContext(95_000, compact));
+		await turnEndHandler?.(event, createContext(95_000, compact));
 		expect(compact).not.toHaveBeenCalled();
 
-		turnEndHandler?.(event, createContext(105_000, compact));
+		await turnEndHandler?.(event, createContext(105_000, compact));
 		expect(compact).toHaveBeenCalledTimes(1);
 	});
 });

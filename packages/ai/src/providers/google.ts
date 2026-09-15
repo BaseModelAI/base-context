@@ -20,6 +20,7 @@ import type {
 	ToolCall,
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
 	formatStreamFailureMessage,
@@ -31,9 +32,11 @@ import {
 	convertMessages,
 	convertTools,
 	getGoogleThinkingBudget,
+	instrumentGoogleAttempts,
 	isThinkingPart,
 	mapStopReason,
 	mapToolChoice,
+	observeGoogleUsage,
 	retainThoughtSignature,
 } from "./google-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -55,6 +58,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 	options?: GoogleOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -78,11 +82,13 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const client = createClient(model, apiKey, options?.headers);
+			instrumentGoogleAttempts(client, attempts);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
+			attempts.configure({ effort: params.config?.thinkingConfig?.thinkingLevel });
 			const googleStream = await client.models.generateContentStream(params);
 
 			stream.push({ type: "start", partial: output });
@@ -90,6 +96,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			for await (const chunk of googleStream) {
+				attempts.event();
+				attempts.response({ providerResponseId: chunk.responseId, responseModel: chunk.modelVersion });
 				// @google/genai documents GenerateContentResponse.responseId as an output-only field
 				// used to identify each response. Keep the first non-empty one from the stream.
 				output.responseId ||= chunk.responseId;
@@ -97,6 +105,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				if (candidate?.content?.parts) {
 					for (const part of candidate.content.parts) {
 						if (part.text !== undefined) {
+							if (part.text.length > 0) attempts.event(true);
 							const isThinking = isThinkingPart(part);
 							if (
 								!currentBlock ||
@@ -158,6 +167,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 						}
 
 						if (part.functionCall) {
+							attempts.event(true);
 							if (currentBlock) {
 								if (currentBlock.type === "text") {
 									stream.push({
@@ -206,6 +216,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				}
 
 				if (candidate?.finishReason) {
+					attempts.terminal();
 					output.stopReason = mapStopReason(candidate.finishReason);
 					if (output.content.some((b) => b.type === "toolCall")) {
 						output.stopReason = "toolUse";
@@ -216,6 +227,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				}
 
 				if (chunk.usageMetadata) {
+					observeGoogleUsage(attempts, chunk.usageMetadata, !!candidate?.finishReason);
 					output.usage = {
 						input:
 							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
@@ -262,9 +274,12 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				throw streamFailureFromStopReason(output.stopReasonRaw);
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (error instanceof Error && error.name === "ApiError" && "status" in error) {
+				attempts.providerError(error.message);
+				attempts.terminal("failed");
+			}
 			// Remove internal index property used during streaming
 			for (const block of output.content) {
 				if ("index" in block) {
@@ -274,8 +289,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 

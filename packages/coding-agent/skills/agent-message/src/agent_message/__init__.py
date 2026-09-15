@@ -66,6 +66,38 @@ async def send(
     return receipt
 
 
+async def send_result(
+    summary: str,
+    findings: str,
+    *,
+    receiver_role: ReceiverRole | str = "parent",
+    receiver_name: str | None = None,
+) -> dict[str, Any]:
+    """Archive full public findings and send only a summary plus recovery reference."""
+    if not isinstance(summary, str):
+        raise TypeError(f"summary must be str, got {type(summary).__name__}")
+    if not isinstance(findings, str):
+        raise TypeError(f"findings must be str, got {type(findings).__name__}")
+    if receiver_role not in ("parent", "sibling", "child"):
+        raise ValueError('receiver_role must be "parent", "sibling", or "child"')
+    if receiver_role == "parent":
+        if receiver_name is not None:
+            raise ValueError("receiver_name must be omitted for parent messages")
+    elif not isinstance(receiver_name, str) or not receiver_name.strip():
+        raise ValueError("receiver_name is required for sibling and child messages")
+    receipt = await host_request(
+        "agent_message.send_result",
+        {
+            "summary": summary,
+            "findings": findings,
+            "receiver_role": receiver_role,
+            "receiver_name": receiver_name,
+        },
+    )
+    _emit_sent_message(receipt, receiver_role)
+    return receipt
+
+
 def _emit_sent_message(receipt: dict[str, Any], receiver_role: str | None = None) -> None:
     try:
         from rlm import emit

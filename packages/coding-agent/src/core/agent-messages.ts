@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AgentResultReference } from "./agent-results.js";
 import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
 import { HEARTBEAT_PROMPT_CUSTOM_TYPE } from "./messages.js";
@@ -147,11 +148,13 @@ export interface AgentSessionMessageReceipt {
 	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
+	resultRef?: AgentResultReference;
 }
 
 export interface AgentSessionMessageSendInput {
 	target: string;
 	message: string;
+	findings?: string;
 	receiverRole?: AgentFamilyRelationship;
 }
 
@@ -539,6 +542,53 @@ export function createAgentMessageHostHandlers(
 		"agent_message.list_agents": async () => {
 			if (!controller.roster) throw new Error("agent family roster is not available in this session");
 			return (await controller.roster()) as unknown as Record<string, unknown>;
+		},
+		"agent_message.send_result": async (payload) => {
+			if (typeof payload.summary !== "string") {
+				throw new Error("agent_message.send_result summary must be a string");
+			}
+			if (typeof payload.findings !== "string") {
+				throw new Error("agent_message.send_result findings must be a string");
+			}
+			if (payload.target !== undefined) {
+				throw new Error("agent_message.send_result uses receiver_role and receiver_name, not positional targets");
+			}
+			const role = payload.receiver_role ?? "parent";
+			if (role !== "parent" && role !== "sibling" && role !== "child") {
+				throw new Error('agent_message.send_result receiver_role must be "parent", "sibling", or "child"');
+			}
+			const receiverName = payload.receiver_name;
+			if (role === "parent" && receiverName !== undefined && receiverName !== null) {
+				throw new Error("agent_message.send_result receiver_name must be omitted for parent messages");
+			}
+			if (role !== "parent" && (typeof receiverName !== "string" || !receiverName.trim())) {
+				throw new Error("agent_message.send_result receiver_name is required for sibling and child messages");
+			}
+			if (!controller.roster) throw new Error("agent family roster is not available in this session");
+			const selector = typeof receiverName === "string" ? receiverName.trim() : undefined;
+			const publishedId =
+				role === "child" && selector && controller.awaitPendingChildPublication
+					? await controller.awaitPendingChildPublication(selector)
+					: undefined;
+			const roster = await controller.roster();
+			const matches = roster.entries.filter(
+				(entry) =>
+					entry.relationship === role &&
+					(role === "parent" || entry.name === selector || entry.id === selector || entry.id === publishedId),
+			);
+			if (matches.length !== 1) {
+				throw new Error(
+					matches.length === 0
+						? `No ${role} matches ${role === "parent" ? "the current agent" : JSON.stringify(receiverName)}`
+						: `${role} selector ${JSON.stringify(receiverName)} is ambiguous`,
+				);
+			}
+			return (await controller.sendAgentMessage({
+				target: matches[0]!.id,
+				message: payload.summary,
+				findings: payload.findings,
+				receiverRole: role,
+			})) as unknown as Record<string, unknown>;
 		},
 		"agent_message.send": async (payload) => {
 			if (typeof payload.message !== "string") {

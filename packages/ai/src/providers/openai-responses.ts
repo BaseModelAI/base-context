@@ -16,6 +16,8 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import type { ProviderRequestProjection } from "../utils/request-token-budget.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -23,29 +25,35 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import {
+	bindResponsesPublicWindow,
+	convertResponsesMessages,
+	convertResponsesTools,
+	processResponsesStream,
+} from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
 /**
  * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
+ * Defaults to "short" and uses BASE_CONTEXT_CACHE_RETENTION for backward compatibility.
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+	if (typeof process !== "undefined" && process.env.BASE_CONTEXT_CACHE_RETENTION === "long") {
 		return "long";
 	}
 	return "short";
 }
 
-function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
+function getCompat(model: Model<"openai-responses">, requestUrl?: string): Required<OpenAIResponsesCompat> {
 	return {
 		sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
-		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
+		supportsLongCacheRetention:
+			model.compat?.supportsLongCacheRetention ?? requestUrl === "https://api.openai.com/v1/responses",
 	};
 }
 
@@ -68,6 +76,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -92,11 +101,69 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options);
+			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
+			if (
+				options?.attempts?.pendingPublicMessageGroups?.length &&
+				(!attempts.hasRequestBudget || !options.attempts.prepareRequest)
+			)
+				throw new Error("Pending tool groups require native public preparation and measurement");
+			let projection: ProviderRequestProjection | undefined;
+			let params = buildParams(
+				model,
+				context,
+				`${client.baseURL.replace(/\/$/, "")}/responses`,
+				options,
+				options?.attempts?.prepareRequest
+					? (value) => {
+							projection = value;
+						}
+					: undefined,
+			);
+			const originalInput = projection ? JSON.stringify(params.input) : undefined;
+			// The native builder is stateless. A hook cannot import external state into that permission.
+			const nativeWindow =
+				projection?.replayContract === "message-groups"
+					? JSON.stringify({ ...params, input: undefined })
+					: undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
+			}
+			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
+			if (attempts.hasRequestBudget) {
+				let pendingPublicBody: string | undefined;
+				const body = JSON.stringify(params);
+				const serialized = JSON.parse(body) as ResponseCreateParamsStreaming;
+				const requestUrl = `${client.baseURL.replace(/\/$/, "")}/responses`;
+				let requestProjection =
+					projection && JSON.stringify(serialized.input) === originalInput ? projection : undefined;
+				if (
+					requestProjection &&
+					nativeWindow !== undefined &&
+					model.provider === "openai" &&
+					requestUrl === "https://api.openai.com/v1/responses" &&
+					(options?.transport === undefined || options.transport === "sse" || options.transport === "auto") &&
+					JSON.stringify({ ...serialized, input: undefined }) === nativeWindow
+				) {
+					requestProjection = bindResponsesPublicWindow(
+						{ api: model.api, provider: model.provider, url: requestUrl, body },
+						requestProjection,
+						(encoded) => {
+							pendingPublicBody = encoded;
+						},
+					);
+				}
+				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection);
+				if (
+					options?.attempts?.pendingPublicMessageGroups?.length &&
+					(pendingPublicBody === undefined || selected !== pendingPublicBody)
+				)
+					throw new Error("Pending original tool groups were not accepted as public");
+				params = JSON.parse(selected!) as ResponseCreateParamsStreaming;
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -109,6 +176,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
+				attempts,
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
@@ -121,9 +189,12 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				throw streamFailureFromStopReason(output.stopReasonRaw, { requestId });
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && typeof OpenAI.APIError === "function" && error instanceof OpenAI.APIError) {
+				attempts.providerError(error.error);
+				if (error.error) attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
@@ -132,8 +203,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);
 			recordStreamFailure(model, output, error);
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -215,11 +285,20 @@ function createClient(
 	});
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
+function buildParams(
+	model: Model<"openai-responses">,
+	context: Context,
+	requestUrl: string,
+	options?: OpenAIResponsesOptions,
+	onProjection?: (projection: ProviderRequestProjection) => void,
+) {
+	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+		onProjection,
+		pendingPublicMessageGroups: options?.attempts?.pendingPublicMessageGroups,
+	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
-	const compat = getCompat(model);
+	const compat = getCompat(model, requestUrl);
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		input: messages,

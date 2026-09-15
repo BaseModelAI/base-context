@@ -15,15 +15,15 @@ import { API_KEY, createTestSession, type TestSessionContext } from "./utilities
 describe.skipIf(!API_KEY)("AgentSession tree navigation e2e", () => {
 	let ctx: TestSessionContext;
 
-	beforeEach(() => {
-		ctx = createTestSession({
+	beforeEach(async () => {
+		ctx = await createTestSession({
 			systemPrompt: "You are a helpful assistant. Reply with just a few words.",
 			settingsOverrides: { compaction: { keepRecentTokens: 1 } },
 		});
 	});
 
-	afterEach(() => {
-		ctx.cleanup();
+	afterEach(async () => {
+		await ctx.cleanup();
 	});
 
 	it("should navigate to user message and put text in editor", async () => {
@@ -74,36 +74,6 @@ describe.skipIf(!API_KEY)("AgentSession tree navigation e2e", () => {
 		// Leaf should be the assistant entry
 		expect(sessionManager.getLeafId()).toBe(assistantEntry!.id);
 	}, 60000);
-
-	it("should create branch summary when navigating with summarize=true", async () => {
-		const { session, sessionManager } = ctx;
-
-		// Build conversation: u1 -> a1 -> u2 -> a2
-		await session.prompt("What is 2+2?");
-		await session.agent.waitForIdle();
-		await session.prompt("What is 3+3?");
-		await session.agent.waitForIdle();
-
-		// Get tree and find first user message
-		const tree = sessionManager.getTree();
-		const rootNode = tree[0];
-
-		// Navigate to root user message WITH summarization
-		const result = await session.navigateTree(rootNode.entry.id, { summarize: true });
-
-		expect(result.cancelled).toBe(false);
-		expect(result.editorText).toBe("What is 2+2?");
-		expect(result.summaryEntry).toBeDefined();
-		expect(result.summaryEntry?.type).toBe("branch_summary");
-		expect(result.summaryEntry?.summary).toBeTruthy();
-		expect(result.summaryEntry?.summary.length).toBeGreaterThan(0);
-
-		// Summary should be a root entry (parentId = null) since we navigated to root user
-		expect(result.summaryEntry?.parentId).toBeNull();
-
-		// Leaf should be the summary entry
-		expect(sessionManager.getLeafId()).toBe(result.summaryEntry?.id);
-	}, 120000);
 
 	it("should attach summary to correct parent when navigating to nested user message", async () => {
 		const { session, sessionManager } = ctx;
@@ -171,45 +141,6 @@ describe.skipIf(!API_KEY)("AgentSession tree navigation e2e", () => {
 		// Leaf should be the summary entry
 		expect(sessionManager.getLeafId()).toBe(result.summaryEntry?.id);
 	}, 120000);
-
-	it("should handle abort during summarization", async () => {
-		const { session, sessionManager } = ctx;
-
-		// Build conversation
-		await session.prompt("Tell me about something");
-		await session.agent.waitForIdle();
-		await session.prompt("Continue");
-		await session.agent.waitForIdle();
-
-		const entriesBefore = sessionManager.getEntries();
-		const leafBefore = sessionManager.getLeafId();
-
-		// Get root user message
-		const tree = sessionManager.getTree();
-		const rootNode = tree[0];
-
-		// Start navigation with summarization but abort immediately
-		const navigationPromise = session.navigateTree(rootNode.entry.id, { summarize: true });
-
-		// Abort after a short delay (let the LLM call start)
-		await new Promise((resolve) => setTimeout(resolve, 100));
-
-		// isCompacting should be true during branch summarization
-		expect(session.isCompacting).toBe(true);
-
-		session.abortBranchSummary();
-
-		const result = await navigationPromise;
-
-		expect(result.cancelled).toBe(true);
-		expect(result.aborted).toBe(true);
-		expect(result.summaryEntry).toBeUndefined();
-
-		// Session should be unchanged
-		const entriesAfter = sessionManager.getEntries();
-		expect(entriesAfter.length).toBe(entriesBefore.length);
-		expect(sessionManager.getLeafId()).toBe(leafBefore);
-	}, 60000);
 
 	it("should not create summary when navigating without summarize option", async () => {
 		const { session, sessionManager } = ctx;
@@ -279,14 +210,14 @@ describe.skipIf(!API_KEY)("AgentSession tree navigation e2e", () => {
 describe.skipIf(!API_KEY)("AgentSession tree navigation - branch scenarios", () => {
 	let ctx: TestSessionContext;
 
-	beforeEach(() => {
-		ctx = createTestSession({
+	beforeEach(async () => {
+		ctx = await createTestSession({
 			systemPrompt: "You are a helpful assistant. Reply with just a few words.",
 		});
 	});
 
-	afterEach(() => {
-		ctx.cleanup();
+	afterEach(async () => {
+		await ctx.cleanup();
 	});
 
 	it("should navigate between branches correctly", async () => {

@@ -1,31 +1,51 @@
 import {
 	createAssistantMessageDiagnostic,
 	type ImageContent,
+	isLocalRequestPreparationError,
 	type Message,
 	type Model,
+	RequestTokenBudgetError,
 	type SimpleStreamOptions,
 	streamSimple,
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import { AgentOutputLimitError } from "./invocation-output.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
 	AgentContext,
+	AgentContextBuildResult,
+	AgentContinuationOutcome,
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentOutputPolicy,
+	AgentOwnedStreamFn,
 	AgentState,
 	AgentTool,
+	AgentTurnOutcome,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	FinalizedToolExchange,
 	GetContinuationMessagesContext,
+	GetTurnOutcomeContext,
 	ShouldStopAfterTurnContext,
 	StreamFn,
 	ToolExecutionMode,
+	ToolInvocation,
 } from "./types.js";
+
+/** Preserve actual local request preparation failures and primary cleanup chains without inventing an assistant. */
+function isRequestTokenBudgetFailure(error: unknown): error is Error {
+	return (
+		error instanceof RequestTokenBudgetError ||
+		isLocalRequestPreparationError(error) ||
+		(error instanceof AggregateError && isRequestTokenBudgetFailure(error.errors[0]))
+	);
+}
 
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(
@@ -104,9 +124,19 @@ export interface AgentOptions {
 	onResponse?: SimpleStreamOptions["onResponse"];
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+	onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
+	onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
 	shouldStopBeforeTurn?: () => boolean;
 	getContinuationMessages?: (context: GetContinuationMessagesContext, signal?: AbortSignal) => Promise<AgentMessage[]>;
+	getContinuationOutcome?: (
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContinuationOutcome>;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
 	sessionId?: string;
@@ -194,7 +224,69 @@ export class Agent {
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	public streamFn: StreamFn;
+	private initializationOwner?: () => Promise<void>;
+	private contextOwner?: () => Promise<AgentContextBuildResult>;
+	private requestPreparationRecoveryOwner?: AgentLoopConfig["recoverRequestPreparation"];
+	private providerFailureRecoveryOwner?: {
+		recover: NonNullable<AgentLoopConfig["recoverProviderFailure"]>;
+		settle?: () => void;
+	};
+	private outputOwner?: () => AgentOutputPolicy | undefined;
+	private activeOutputPolicy?: AgentOutputPolicy;
+
+	/** Native sinks join finalized message values; configuration is captured once per invocation. */
+	bindOutputOwner(owner: () => AgentOutputPolicy | undefined): void {
+		if (this.outputOwner) throw new Error("Agent output owner is already bound");
+		this.outputOwner = owner;
+	}
+
+	/** Finish native initialization before capturing context or emitting loop events. */
+	bindInitializationOwner(owner: () => Promise<void>): void {
+		if (this.initializationOwner) throw new Error("Agent initialization owner is already bound");
+		this.initializationOwner = owner;
+	}
+
+	/** Native persistence remains ahead of replaceable context callbacks. */
+	bindContextOwner(owner: () => Promise<AgentContextBuildResult>): void {
+		if (this.contextOwner) throw new Error("Agent context owner is already bound");
+		this.contextOwner = owner;
+	}
+
+	bindRequestPreparationRecoveryOwner(owner: NonNullable<AgentLoopConfig["recoverRequestPreparation"]>): void {
+		if (this.requestPreparationRecoveryOwner)
+			throw new Error("Agent request preparation recovery owner is already bound");
+		this.requestPreparationRecoveryOwner = owner;
+	}
+
+	bindProviderFailureRecoveryOwner(owner: {
+		recover: NonNullable<AgentLoopConfig["recoverProviderFailure"]>;
+		settle?: () => void;
+	}): void {
+		if (this.providerFailureRecoveryOwner) throw new Error("Agent provider failure recovery owner is already bound");
+		this.providerFailureRecoveryOwner = owner;
+	}
+
+	private configuredStreamFn!: StreamFn;
+	private effectiveStreamFn!: StreamFn;
+	private ownedStreamFn?: AgentOwnedStreamFn;
+	private streamOwner?: (streamFn: StreamFn) => AgentOwnedStreamFn;
+
+	get streamFn(): StreamFn {
+		return this.effectiveStreamFn;
+	}
+	set streamFn(streamFn: StreamFn) {
+		this.configuredStreamFn = streamFn;
+		const ownedStreamFn = this.streamOwner?.(streamFn);
+		this.ownedStreamFn = ownedStreamFn;
+		this.effectiveStreamFn = ownedStreamFn ?? streamFn;
+	}
+
+	/** A native owner remains in the path when an embedding changes its configured stream. */
+	bindStreamOwner(owner: (streamFn: StreamFn) => AgentOwnedStreamFn): void {
+		if (this.streamOwner) throw new Error("Agent stream owner is already bound");
+		this.streamOwner = owner;
+		this.streamFn = this.configuredStreamFn;
+	}
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
@@ -206,12 +298,35 @@ export class Agent {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
+	public onToolInvocationStarting?: (invocation: ToolInvocation, signal?: AbortSignal) => void | Promise<void>;
+	public onToolExchangeFinalized?: (exchange: FinalizedToolExchange, signal?: AbortSignal) => void | Promise<void>;
+	private toolExecutionOwner?: Required<Pick<AgentLoopConfig, "onToolInvocationStarting" | "onToolExchangeFinalized">>;
+
+	/** Native persistence runs before replaceable caller hooks. */
+	bindToolExecutionOwner(
+		owner: Required<Pick<AgentLoopConfig, "onToolInvocationStarting" | "onToolExchangeFinalized">>,
+	): void {
+		if (this.toolExecutionOwner) throw new Error("Agent tool execution owner is already bound");
+		this.toolExecutionOwner = {
+			onToolInvocationStarting: owner.onToolInvocationStarting,
+			onToolExchangeFinalized: owner.onToolExchangeFinalized,
+		};
+	}
+
 	public shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	public getTurnOutcome?: (
+		context: GetTurnOutcomeContext,
+		signal?: AbortSignal,
+	) => AgentTurnOutcome | Promise<AgentTurnOutcome>;
 	public shouldStopBeforeTurn?: () => boolean;
 	public getContinuationMessages?: (
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	) => Promise<AgentMessage[]>;
+	public getContinuationOutcome?: (
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	) => Promise<AgentContinuationOutcome>;
 	private activeRun?: ActiveRun;
 	public sessionId?: string;
 	public thinkingBudgets?: ThinkingBudgets;
@@ -229,9 +344,13 @@ export class Agent {
 		this.onResponse = options.onResponse;
 		this.beforeToolCall = options.beforeToolCall;
 		this.afterToolCall = options.afterToolCall;
+		this.onToolInvocationStarting = options.onToolInvocationStarting;
+		this.onToolExchangeFinalized = options.onToolExchangeFinalized;
 		this.shouldStopAfterTurn = options.shouldStopAfterTurn;
+		this.getTurnOutcome = options.getTurnOutcome;
 		this.shouldStopBeforeTurn = options.shouldStopBeforeTurn;
 		this.getContinuationMessages = options.getContinuationMessages;
+		this.getContinuationOutcome = options.getContinuationOutcome;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
 		this.sessionId = options.sessionId;
@@ -461,7 +580,10 @@ export class Agent {
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
+		const onToolInvocationStarting = this.onToolInvocationStarting;
+		const onToolExchangeFinalized = this.onToolExchangeFinalized;
 		return {
+			outputPolicy: this.activeOutputPolicy,
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel,
 			serviceTier: this._state.serviceTier,
@@ -474,8 +596,32 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
+			onToolInvocationStarting: async (invocation, signal, tool, execute, assistantMessage) => {
+				const owner = await this.toolExecutionOwner?.onToolInvocationStarting(
+					invocation,
+					signal,
+					tool,
+					execute,
+					assistantMessage,
+				);
+				await onToolInvocationStarting?.(invocation, signal);
+				return owner || undefined;
+			},
+			onToolExchangeFinalized: async (exchange, signal, owner) => {
+				if (owner) await owner.finalize(exchange, signal);
+				else await this.toolExecutionOwner?.onToolExchangeFinalized(exchange, signal);
+				await onToolExchangeFinalized?.(exchange, signal);
+			},
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,
+			getTurnOutcome: this.getTurnOutcome?.bind(this),
 			shouldStopBeforeTurn: () => this.shouldStopBeforeTurn?.() ?? false,
+			beforeContextBuild: async () => this.contextOwner?.(),
+			recoverRequestPreparation: this.requestPreparationRecoveryOwner,
+			recoverProviderFailure: this.providerFailureRecoveryOwner?.recover,
+			onContextAdopted: (messages) => {
+				this._state.messages = messages;
+			},
+			ownedStreamFn: this.ownedStreamFn,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getSystemPrompt: () => this._state.systemPrompt,
@@ -489,6 +635,7 @@ export class Agent {
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
 			getContinuationMessages: async (context, signal) => this.getContinuationMessages?.(context, signal) ?? [],
+			getContinuationOutcome: this.getContinuationOutcome?.bind(this),
 		};
 	}
 
@@ -509,11 +656,32 @@ export class Agent {
 		this._state.errorMessage = undefined;
 
 		try {
+			const outputPolicy = this.outputOwner?.();
+			this.activeOutputPolicy = outputPolicy
+				? {
+						limits: { ...outputPolicy.limits },
+						snapshot: outputPolicy.snapshot.bind(outputPolicy),
+						bindUpdates: outputPolicy.bindUpdates?.bind(outputPolicy),
+						settleUpdates: outputPolicy.settleUpdates?.bind(outputPolicy),
+					}
+				: undefined;
+			if (this.initializationOwner) {
+				await this.initializationOwner();
+				abortController.signal.throwIfAborted();
+			}
 			await executor(abortController.signal);
 		} catch (error) {
+			if (error instanceof AgentOutputLimitError || isRequestTokenBudgetFailure(error)) {
+				this._state.errorMessage = error.message;
+				throw error;
+			}
 			await this.handleRunFailure(error, abortController.signal.aborted);
 		} finally {
-			this.finishRun();
+			try {
+				this.providerFailureRecoveryOwner?.settle?.();
+			} finally {
+				this.finishRun();
+			}
 		}
 	}
 
@@ -539,6 +707,7 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this.activeOutputPolicy = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
@@ -590,6 +759,7 @@ export class Agent {
 
 			case "agent_end":
 				this._state.streamingMessage = undefined;
+				if (event.refusal) this._state.errorMessage = new AgentOutputLimitError(event.refusal).message;
 				break;
 		}
 

@@ -30,14 +30,16 @@ function writeSessionFile(path: string, cwd: string): void {
 
 describe("session cwd handling", () => {
 	const cleanupPaths: string[] = [];
+	const managers: SessionManager[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(managers.splice(0).map((manager) => manager.close()));
 		for (const path of cleanupPaths.splice(0)) {
 			rmSync(path, { recursive: true, force: true });
 		}
 	});
 
-	it("detects missing session cwd from persisted sessions", () => {
+	it("detects missing session cwd from persisted sessions", async () => {
 		const fallbackCwd = createTempDir("pi-session-cwd-fallback");
 		const missingCwd = join(fallbackCwd, "does-not-exist");
 		const sessionDir = createTempDir("pi-session-cwd-session-dir");
@@ -45,7 +47,8 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile);
+		const sessionManager = await SessionManager.open(sessionFile);
+		managers.push(sessionManager);
 		const issue = getMissingSessionCwdIssue(sessionManager, fallbackCwd);
 		expect(issue).toEqual({
 			sessionFile: sessionManager.getSessionFile(),
@@ -54,7 +57,7 @@ describe("session cwd handling", () => {
 		});
 	});
 
-	it("reads the header cwd even when the file starts with a blank line", () => {
+	it("reads the header cwd even when the file starts with a blank line", async () => {
 		// open() reads the first physical line for the header, but the full loader
 		// trims and skips leading blank lines. A leading blank line must not make
 		// getCwd() fall back to process.cwd() and disagree with the loaded header.
@@ -71,11 +74,12 @@ describe("session cwd handling", () => {
 		});
 		writeFileSync(sessionFile, `\n${header}\n`);
 
-		const sessionManager = SessionManager.open(sessionFile);
+		const sessionManager = await SessionManager.open(sessionFile);
+		managers.push(sessionManager);
 		expect(sessionManager.getCwd()).toBe(headerCwd);
 	});
 
-	it("supports overriding the effective cwd when opening a session", () => {
+	it("supports overriding the effective cwd when opening a session", async () => {
 		const fallbackCwd = createTempDir("pi-session-cwd-override");
 		const missingCwd = join(fallbackCwd, "does-not-exist");
 		const sessionDir = createTempDir("pi-session-cwd-override-session-dir");
@@ -83,7 +87,8 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile, undefined, fallbackCwd);
+		const sessionManager = await SessionManager.open(sessionFile, undefined, fallbackCwd);
+		managers.push(sessionManager);
 		expect(sessionManager.getCwd()).toBe(fallbackCwd);
 		expect(getMissingSessionCwdIssue(sessionManager, fallbackCwd)).toBeUndefined();
 	});
@@ -99,6 +104,7 @@ describe("session cwd handling", () => {
 
 		const parsed = parseArgs(["--cwd", explicitCwd, "--resume", sessionFile]);
 		const sessionManager = await createSessionManager(parsed, explicitCwd, sessionDir);
+		managers.push(sessionManager);
 
 		expect(sessionManager.getCwd()).toBe(explicitCwd);
 	});
@@ -128,7 +134,8 @@ describe("session cwd handling", () => {
 		cleanupPaths.push(fallbackCwd, sessionDir);
 		writeSessionFile(sessionFile, missingCwd);
 
-		const sessionManager = SessionManager.open(sessionFile);
+		const sessionManager = await SessionManager.open(sessionFile);
+		managers.push(sessionManager);
 		let createRuntimeCalled = false;
 		const createRuntime: CreateAgentSessionRuntimeFactory = async () => {
 			createRuntimeCalled = true;
@@ -145,7 +152,7 @@ describe("session cwd handling", () => {
 		expect(createRuntimeCalled).toBe(false);
 	});
 
-	it("preserves an explicit catalog directory for in-memory bootstrap sessions", () => {
+	it("preserves an explicit catalog directory for in-memory bootstrap sessions", async () => {
 		const manager = SessionManager.inMemory("/tmp/project", "/tmp/sessions");
 		expect(manager.getSessionDir()).toBe("/tmp/sessions");
 	});

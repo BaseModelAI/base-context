@@ -1,0 +1,24 @@
+{
+  "scope": "Frozen corrected paired MEDIUM reference; not a benchmark of release 1.0.0.",
+  "primary_cells": 180,
+  "effective_attempts": 208,
+  "current_package": "@ponythewhite/base-context",
+  "current_package_version": "0.1.0",
+  "current_sdk_commits": {
+    "astra": "84a7e6f30625247aa153ed8fdb0d40c4981c4632",
+    "deepseek": "077f463424f8eb94f07dc2c6325db0feaba363cd",
+    "sol": "84a7e6f30625247aa153ed8fdb0d40c4981c4632"
+  },
+  "vanilla_package": "prime-agent",
+  "vanilla_package_version": "0.9.4",
+  "vanilla_accounting_patch": "prime-agent-0.9.4-cost-accounting-1",
+  "judge_revision": "86429a34362e3125679812e129c9fd5d6b6001d8",
+  "node_version": "22.12.0",
+  "python_version": "3.12",
+  "logical_effort": "medium",
+  "deepseek_native_effort": "high",
+  "original_discarded_deepseek_attempts": 70,
+  "superseded_task15_27_attempts": 16,
+  "replacement_task15_27_cells": 12,
+  "replacement_task15_27_attempts": 15
+}

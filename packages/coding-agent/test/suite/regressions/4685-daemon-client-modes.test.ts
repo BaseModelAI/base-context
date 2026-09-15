@@ -2,13 +2,14 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../../src/cli/subprocess-launch.js";
 import { ENV_AGENT_DIR } from "../../../src/config.js";
 import type { AutonomousRuntimeState } from "../../../src/core/autonomous.js";
 import type { DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
 import { DaemonClient } from "../../../src/modes/daemon/daemon-client.js";
+import { DAEMON_PROTOCOL_VERSION } from "../../../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../../../src/modes/daemon/daemon-supervisor.js";
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
 import { RpcClient } from "../../../src/modes/rpc/rpc-client.js";
@@ -34,7 +35,7 @@ afterEach(async () => {
 	}
 	children.clear();
 	while (harnesses.length > 0) {
-		harnesses.pop()?.cleanup();
+		await harnesses.pop()?.cleanup();
 	}
 	for (const socketPath of daemonSockets) {
 		const client = new DaemonClient(socketPath);
@@ -73,15 +74,15 @@ async function runCli(
 			...process.env,
 			TSX_TSCONFIG_PATH: repoTsconfigPath,
 			[ENV_AGENT_DIR]: options.agentDir,
-			PI_SKIP_VERSION_CHECK: "1",
-			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: undefined,
-			PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: undefined,
-			RLM_DEPTH: undefined,
-			RLM_MAX_DEPTH: undefined,
+			BASE_CONTEXT_SKIP_VERSION_CHECK: "1",
+			BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "0",
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_TOKEN: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_SOCKET: undefined,
+			BASE_CONTEXT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL: undefined,
+			BASE_CONTEXT_RLM_DEPTH: undefined,
+			BASE_CONTEXT_RLM_MAX_DEPTH: undefined,
 			...options.environment,
 		},
 		stdio: ["pipe", "pipe", "pipe"],
@@ -112,9 +113,14 @@ async function runCli(
 
 async function runRpc(
 	commands: unknown[],
-	options: { trailingNewline?: boolean } = {},
+	options: { trailingNewline?: boolean; nativeRefineEof?: "main" | "review" } = {},
 ): Promise<{ stdout: object[]; stderr: string }> {
-	const child = spawn(process.execPath, [tsxPath, fixturePath], {
+	const nativeRoot = options.nativeRefineEof
+		? mkdtempSync(join(tmpdir(), "prime-agent-native-refine-eof-"))
+		: undefined;
+	if (nativeRoot) tempRoots.add(nativeRoot);
+	const args = [tsxPath, fixturePath, ...(nativeRoot ? [options.nativeRefineEof!, nativeRoot] : [])];
+	const child = spawn(process.execPath, args, {
 		env: { ...process.env, TSX_TSCONFIG_PATH: repoTsconfigPath },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
@@ -263,7 +269,11 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		const cases = [
 			{ name: "print", args: ["--print"], stdin: "" },
 			{ name: "json", args: ["--mode", "json"], stdin: "" },
-			{ name: "rpc", args: ["--mode", "rpc"], stdin: '{"id":"state","type":"get_state"}\n' },
+			{
+				name: "rpc",
+				args: ["--mode", "rpc", "--rpc-protocol-version", String(DAEMON_PROTOCOL_VERSION)],
+				stdin: '{"id":"state","type":"get_state"}\n',
+			},
 			{ name: "piped stdin", args: [], stdin: "   \n" },
 			{ name: "no-session", args: ["--print", "--no-session"], stdin: "" },
 		];
@@ -301,7 +311,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			],
 			{
 				agentDir,
-				environment: { PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1" },
+				environment: { BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1" },
 			},
 		);
 
@@ -319,7 +329,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		daemonSockets.add(socketPath);
 		writeFileSync(
 			extensionPath,
-			'import { appendFileSync } from "node:fs";\nexport default function() { appendFileSync(process.env.PRIME_AGENT_TEST_EXTENSION_LOAD_MARKER, "loaded\\n"); }\n',
+			'import { appendFileSync } from "node:fs";\nexport default function() { appendFileSync(process.env.BASE_CONTEXT_TEST_EXTENSION_LOAD_MARKER, "loaded\\n"); }\n',
 		);
 
 		const result = await runCli(
@@ -341,7 +351,7 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			],
 			{
 				agentDir,
-				environment: { PRIME_AGENT_TEST_EXTENSION_LOAD_MARKER: markerPath },
+				environment: { BASE_CONTEXT_TEST_EXTENSION_LOAD_MARKER: markerPath },
 			},
 		);
 
@@ -361,6 +371,11 @@ describe("ENG-4685 daemon-backed client modes", () => {
 				data: { models: [] },
 			},
 		]);
+		// Native owner: an already accepted review drains, but its approval cannot start a new plan at EOF.
+		const native = await runRpc([{ id: "state", type: "get_state" }], { nativeRefineEof: "review" });
+		expect(native.stderr).toBe("");
+		expect(native.stdout).toContainEqual({ type: "fixture_native_eof", calls: 2 });
+		expect(native.stdout.at(-1)).toEqual({ type: "fixture_native_disposed", calls: 2, acceptedAborted: false });
 	});
 
 	it("drains accepted RPC prompt work before EOF releases the connection", async () => {
@@ -371,6 +386,14 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			{ type: "agent_start" },
 			{ type: "agent_end", messages: [] },
 		]);
+		// The accepted native main request is held until the REAL EOF gate, then completes without cancellation.
+		const native = await runRpc([{ id: "native", type: "prompt", message: "finish accepted main" }], {
+			nativeRefineEof: "main",
+		});
+		expect(native.stderr).toBe("");
+		expect(native.stdout).toContainEqual(expect.objectContaining({ id: "native", type: "response", success: true }));
+		expect(native.stdout).toContainEqual(expect.objectContaining({ type: "agent_end" }));
+		expect(native.stdout.at(-1)).toEqual({ type: "fixture_native_disposed", calls: 1, acceptedAborted: false });
 	});
 
 	it("drains accepted daemon RPC prompt work before EOF", async () => {
@@ -382,6 +405,8 @@ describe("ENG-4685 daemon-backed client modes", () => {
 			[
 				"--mode",
 				"rpc",
+				"--rpc-protocol-version",
+				String(DAEMON_PROTOCOL_VERSION),
 				"--no-session",
 				"--daemon-socket",
 				socketPath,

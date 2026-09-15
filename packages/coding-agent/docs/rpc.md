@@ -2,13 +2,19 @@
 
 RPC mode enables headless operation of the coding agent via a JSON protocol over stdin/stdout. This is useful for embedding the agent in other applications, IDEs, or custom UIs.
 
-**Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@earendil-works/pi-coding-agent` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
+**Note for Node.js/TypeScript users**: If you're building a Node.js application, consider using `AgentSession` directly from `@ponythewhite/base-context` instead of spawning a subprocess. See [`src/core/agent-session.ts`](../src/core/agent-session.ts) for the API. For a subprocess-based TypeScript client, see [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts).
+
+> **Setup:** Follow [installation](installation.md) for the CLI and [SDK setup](sdk.md) for embedding. Model requests require your own configured model and credentials.
 
 ## Starting RPC Mode
 
 ```bash
-prime-agent --mode rpc [options]
+base-context --mode rpc --rpc-protocol-version 11 [options]
 ```
+
+`--rpc-protocol-version 11` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 11 and schema revision at least 45 through the existing `get_state` response before use. Hosts below the current canonical-session ownership minimum are refused; an incompatible startup uses the existing process cleanup path. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
+
+This uses the current Base Context daemon protocol marker, not the package version. Updating only the server cannot make an old client understand a new terminal event.
 
 Common options:
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
@@ -759,9 +765,9 @@ Response:
   "success": true,
   "data": {
     "commands": [
-      {"name": "session-name", "description": "Set or clear session name", "source": "extension", "path": "/home/user/.prime/agent/extensions/session.ts"},
-      {"name": "fix-tests", "description": "Fix failing tests", "source": "prompt", "location": "project", "path": "/home/user/myproject/.prime/agent/prompts/fix-tests.md"},
-      {"name": "skill:brave-search", "description": "Web search via Brave API", "source": "skill", "location": "user", "path": "/home/user/.prime/agent/skills/brave-search/SKILL.md"}
+      {"name": "session-name", "description": "Set or clear session name", "source": "extension", "path": "/home/user/.base-context/extensions/session.ts"},
+      {"name": "fix-tests", "description": "Fix failing tests", "source": "prompt", "location": "project", "path": "/home/user/myproject/.base-context/prompts/fix-tests.md"},
+      {"name": "skill:brave-search", "description": "Web search via Brave API", "source": "skill", "location": "user", "path": "/home/user/.base-context/skills/brave-search/SKILL.md"}
     ]
   }
 }
@@ -775,8 +781,8 @@ Each command has:
   - `"prompt"`: Loaded from a prompt template `.md` file
   - `"skill"`: Loaded from a skill directory (name is prefixed with `skill:`)
 - `location`: Where it was loaded from (optional, not present for extensions):
-  - `"user"`: User-level (`~/.prime/agent/`)
-  - `"project"`: Project-level (`./.prime/agent/`)
+  - `"user"`: User-level (`~/.base-context/`)
+  - `"project"`: Project-level (`./.base-context/`)
   - `"path"`: Explicit path via CLI or settings
 - `path`: Absolute file path to the command source (optional)
 
@@ -791,7 +797,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | Terminal completion: complete messages on success, or explicit output refusal |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -817,7 +823,7 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted at the terminal boundary. Successful completion contains every finalized message:
 
 ```json
 {
@@ -825,6 +831,24 @@ Emitted when the agent completes. Contains all messages generated during this ru
   "messages": [...]
 }
 ```
+
+Output refusal is terminal failure, not an empty successful run:
+
+```json
+{
+  "type": "agent_end",
+  "refusal": {
+    "kind": "output_limit",
+    "limit": "source_bytes",
+    "maxMessages": 16384,
+    "maxSourceBytes": 67108864
+  }
+}
+```
+
+`messages` is absent on refusal. The prompt response remains an acceptance ACK, not
+completion. `RpcClient.promptAndWait()` rejects refusal; `collectEvents()` preserves the
+terminal descriptor, and `waitForIdle()` only reports that execution became idle.
 
 ### turn_start / turn_end
 
@@ -1181,7 +1205,7 @@ Set the terminal window/tab title. Fire-and-forget.
   "type": "extension_ui_request",
   "id": "uuid-8",
   "method": "setTitle",
-  "title": "Prime Agent - my project"
+  "title": "Base Context - my project"
 }
 ```
 
@@ -1368,7 +1392,7 @@ import subprocess
 import json
 
 proc = subprocess.Popen(
-    ["prime-agent", "--mode", "rpc", "--no-session"],
+    ["base-context", "--mode", "rpc", "--rpc-protocol-version", "11", "--no-session"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     text=True
@@ -1393,6 +1417,8 @@ for event in read_events():
             print(delta["delta"], end="", flush=True)
     
     if event.get("type") == "agent_end":
+        if "refusal" in event:
+            raise RuntimeError(f"Invocation output refused: {event['refusal']}")
         print()
         break
 ```
@@ -1407,7 +1433,7 @@ For a complete example of handling the extension UI protocol, see [`examples/rpc
 const { spawn } = require("child_process");
 const { StringDecoder } = require("string_decoder");
 
-const agent = spawn("prime-agent", ["--mode", "rpc", "--no-session"]);
+const agent = spawn("base-context", ["--mode", "rpc", "--rpc-protocol-version", "11", "--no-session"]);
 
 function attachJsonlReader(stream, onLine) {
     const decoder = new StringDecoder("utf8");
@@ -1442,6 +1468,14 @@ attachJsonlReader(agent.stdout, (line) => {
         const { assistantMessageEvent } = event;
         if (assistantMessageEvent.type === "text_delta") {
             process.stdout.write(assistantMessageEvent.delta);
+        }
+    }
+    if (event.type === "agent_end") {
+        if ("refusal" in event) {
+            console.error("Invocation output refused:", event.refusal);
+            process.exitCode = 1;
+        } else {
+            process.stdout.write("\n");
         }
     }
 });

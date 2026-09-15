@@ -1,9 +1,21 @@
-import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@earendil-works/pi-ai";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	EventStream,
+	getModel,
+} from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { stringifyBoundedJson } from "../../coding-agent/src/core/bounded-json.js";
+import { SessionManager } from "../../coding-agent/src/core/session-manager.js";
 import {
 	Agent,
 	type AgentContext,
+	type AgentContextProjection,
+	type AgentEvent,
 	type AgentLoopConfig,
 	type AgentMessage,
 	type AgentTool,
@@ -134,6 +146,30 @@ describe("Agent", () => {
 
 	it("should await async subscribers before prompt resolves", async () => {
 		const barrier = createDeferred();
+		let notifyEnd!: (event: Extract<AgentEvent, { type: "agent_end" }>) => void;
+		const endEntered = new Promise<Extract<AgentEvent, { type: "agent_end" }>>((resolve) => {
+			notifyEnd = resolve;
+		});
+		const messageEndEntered = createDeferred();
+		const releaseMessageEnd = createDeferred();
+		const directory = mkdtempSync(join(tmpdir(), "agent-owned-output-"));
+		let manager: SessionManager | undefined;
+		let promptSettled: Promise<void> | undefined;
+		onTestFinished(async () => {
+			releaseMessageEnd.resolve();
+			barrier.resolve();
+			await promptSettled;
+			try {
+				await manager?.close();
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		});
+		const owned = await SessionManager.create(directory, directory);
+		manager = owned;
+		expect(owned.supportsCapturedHistoryReads()).toBe(true);
+		const limits = { maxMessages: 2, maxSourceBytes: 8192 };
+		const finalizedSubjects: AgentMessage[] = [];
 		const agent = new Agent({
 			streamFn: () => {
 				const stream = new MockAssistantStream();
@@ -143,10 +179,50 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
+		agent.bindOutputOwner(() => ({
+			limits,
+			snapshot(message, maxSourceBytes) {
+				try {
+					const json = stringifyBoundedJson(message, maxSourceBytes);
+					return { message: JSON.parse(json) as AgentMessage, sourceBytes: Buffer.byteLength(json) };
+				} catch (error) {
+					if (error instanceof Error && error.message === "JSON byte limit exceeded") return undefined;
+					throw error;
+				}
+			},
+		}));
+		agent.subscribe(async (event) => {
+			if (event.type !== "message_end") return;
+			if (event.message.role === "assistant") {
+				messageEndEntered.resolve();
+				await releaseMessageEnd.promise;
+				event.message.content = [{ type: "text", text: "finalized ok" }];
+			}
+			if (event.message.role !== "user" && event.message.role !== "assistant")
+				throw new Error("unexpected core fixture message");
+			await owned.appendMessage(event.message);
+			finalizedSubjects.push(event.message);
+		});
+		agent.shouldStopAfterTurn = ({ message, newMessages }) => {
+			expect(newMessages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+			expect(newMessages[1]).toEqual(message);
+			expect(newMessages[1]).not.toBe(message);
+			if (newMessages[1].role !== "assistant") throw new Error("missing finalized assistant");
+			newMessages[1].content = [{ type: "text", text: "callback copy only" }];
+			newMessages.length = 0;
+			return false;
+		};
+		agent.getContinuationMessages = async ({ newMessages }) => {
+			expect(newMessages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+			expect(newMessages[1]).toMatchObject({ content: [{ type: "text", text: "finalized ok" }] });
+			newMessages.length = 0;
+			return [];
+		};
 
 		let listenerFinished = false;
 		agent.subscribe(async (event) => {
 			if (event.type === "agent_end") {
+				notifyEnd(event);
 				await barrier.promise;
 				listenerFinished = true;
 			}
@@ -156,20 +232,45 @@ describe("Agent", () => {
 		const promptPromise = agent.prompt("hello").then(() => {
 			promptResolved = true;
 		});
-
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		promptSettled = promptPromise.then(
+			() => undefined,
+			() => undefined,
+		);
+		// The admitted policy values, not this caller's later edits, govern the open invocation.
+		limits.maxMessages = 1;
+		limits.maxSourceBytes = 2;
+		await Promise.race([messageEndEntered.promise, promptPromise]);
+		expect(promptResolved).toBe(false);
+		releaseMessageEnd.resolve();
+		const event = await Promise.race([
+			endEntered,
+			promptPromise.then(() => {
+				throw new Error("prompt settled before agent_end");
+			}),
+		]);
+		if (event.refusal) throw new Error("unexpected output refusal");
+		expect(event.messages).toEqual(finalizedSubjects);
+		expect(event.messages.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+		expect(event.messages[1]).not.toBe(finalizedSubjects[1]);
+		if (event.messages[1].role !== "assistant" || finalizedSubjects[1].role !== "assistant")
+			throw new Error("missing finalized assistant output");
+		expect(event.messages[1].content).not.toBe(finalizedSubjects[1].content);
 		expect(promptResolved).toBe(false);
 		expect(listenerFinished).toBe(false);
 		expect(agent.state.isStreaming).toBe(true);
+		const storedMessages = (await owned.readEntries()).flatMap((entry) =>
+			entry.type === "message" ? [entry.message] : [],
+		);
+		expect(storedMessages).toEqual(finalizedSubjects);
+		expect(agent.state.messages[0]).toBe(finalizedSubjects[0]);
+		expect(agent.state.messages[1]).toBe(finalizedSubjects[1]);
 
 		barrier.resolve();
 		await promptPromise;
-
 		expect(listenerFinished).toBe(true);
 		expect(promptResolved).toBe(true);
 		expect(agent.state.isStreaming).toBe(false);
 	});
-
 	it("can commit only a prefix of a prompt batch when a listener fails", async () => {
 		const agent = new Agent();
 		const first: AgentMessage = {
@@ -356,6 +457,11 @@ describe("Agent", () => {
 	});
 
 	it("should settle when aborting a tool that ignores the abort signal", async () => {
+		const initialization = createDeferred();
+		const initializationStarted = createDeferred();
+		const events: string[] = [];
+		let streamCalls = 0;
+		let toolCalls = 0;
 		let toolStarted = () => {};
 		const toolStartedPromise = new Promise<void>((resolve) => {
 			toolStarted = resolve;
@@ -366,7 +472,11 @@ describe("Agent", () => {
 			label: "hang",
 			description: "Never resolves",
 			parameters: schema,
-			execute: () => new Promise(() => {}),
+			execute: () => {
+				toolCalls++;
+				toolStarted();
+				return new Promise(() => {});
+			},
 		};
 		const agent = new Agent({
 			initialState: {
@@ -374,6 +484,7 @@ describe("Agent", () => {
 			},
 			toolExecution: "sequential",
 			streamFn: () => {
+				streamCalls++;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "toolUse", message: createToolUseMessage("hang") });
@@ -381,11 +492,35 @@ describe("Agent", () => {
 				return stream;
 			},
 		});
-		agent.subscribe((event) => {
-			if (event.type === "tool_execution_start") {
-				toolStarted();
-			}
+		agent.bindInitializationOwner(async () => {
+			initializationStarted.resolve();
+			await initialization.promise;
 		});
+		agent.subscribe((event) => {
+			events.push(event.type);
+		});
+
+		const initializingPrompt = agent.prompt("wait for initialization");
+		await initializationStarted.promise;
+		try {
+			expect(agent.state.isStreaming).toBe(true);
+			await expect(agent.prompt("busy prompt")).rejects.toThrow("already processing a prompt");
+			expect(streamCalls).toBe(0);
+			expect(toolCalls).toBe(0);
+			expect(events).toEqual([]);
+		} finally {
+			agent.abort();
+			initialization.resolve();
+			await initializingPrompt;
+		}
+		await agent.waitForIdle();
+		expect(streamCalls).toBe(0);
+		expect(toolCalls).toBe(0);
+		expect(events).toEqual(["message_start", "message_end", "agent_end"]);
+		expect(agent.state.messages).toHaveLength(1);
+		expect(agent.state.messages[0]).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		expect(agent.state.isStreaming).toBe(false);
+		expect(agent.state.pendingToolCalls.size).toBe(0);
 
 		const promptPromise = agent.prompt("hello");
 		await toolStartedPromise;
@@ -402,6 +537,9 @@ describe("Agent", () => {
 		}
 		expect(agent.state.pendingToolCalls.size).toBe(0);
 		expect(agent.state.isStreaming).toBe(false);
+		expect(streamCalls).toBe(1);
+		expect(toolCalls).toBe(1);
+		expect(events.filter((type) => type === "agent_end")).toHaveLength(2);
 	});
 
 	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
@@ -684,9 +822,40 @@ describe("Agent", () => {
 
 	it("forwards sessionId to streamFn options", async () => {
 		let receivedSessionId: string | undefined;
+		const adoptedPrompt: AgentMessage = { role: "user", content: "owned current turn", timestamp: 3 };
+		const projections: AgentContextProjection[] = [
+			{
+				messages: [{ role: "user", content: "compiled hello", timestamp: 0 }],
+				streamContext: {},
+				release: vi.fn(async () => {}),
+			},
+			{ messages: [], streamContext: {}, release: vi.fn(async () => {}) },
+			{
+				messages: [{ role: "user", content: "complete compiled summary", timestamp: 0 }, adoptedPrompt],
+				adoptMessages: true,
+				streamContext: {},
+				release: vi.fn(async () => {}),
+			},
+		];
+		let buildIndex = 0;
+		let activeProjection = projections[0];
+		const receivedMessages: AgentMessage[][] = [];
 		const agent = new Agent({
 			sessionId: "session-abc",
-			streamFn: (_model, _context, options) => {
+			transformContext: async (messages) => {
+				expect(messages).not.toBe(activeProjection.messages);
+				if (activeProjection.adoptMessages) messages.shift(); // Transform-only filtering must not prune lifecycle state.
+				return messages;
+			},
+			streamFn: (...args) => {
+				expect(args).toHaveLength(3);
+				const [_model, context, options] = args;
+				expect(options).not.toHaveProperty("beforeContextBuild");
+				expect(options).not.toHaveProperty("ownedStreamFn");
+				expect(options).not.toHaveProperty("onContextAdopted");
+				expect(options).not.toHaveProperty("adoptMessages");
+				expect(options).not.toHaveProperty("streamContext");
+				receivedMessages.push(context.messages);
 				receivedSessionId = options?.sessionId;
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -695,6 +864,21 @@ describe("Agent", () => {
 				});
 				return stream;
 			},
+		});
+		agent.bindContextOwner(async () => {
+			activeProjection = projections[buildIndex++];
+			return activeProjection;
+		});
+		agent.bindStreamOwner((configuredStream) => (...args) => {
+			expect(args).toHaveLength(4);
+			const [model, context, options, streamContext] = args;
+			expect(streamContext).toBe(activeProjection.streamContext);
+			if (activeProjection.adoptMessages) {
+				expect(agent.state.messages).toEqual(activeProjection.messages);
+				expect(agent.state.messages).not.toBe(activeProjection.messages);
+				expect(context.messages).not.toBe(agent.state.messages);
+			}
+			return configuredStream(model, context, options);
 		});
 
 		await agent.prompt("hello");
@@ -705,6 +889,27 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
+		expect(receivedMessages).toEqual([projections[0].messages, []]);
+		expect(buildIndex).toBe(2);
+		for (const projection of projections.slice(0, 2)) expect(projection.release).toHaveBeenCalledOnce();
+		expect(agent.state.messages).not.toContain(projections[0].messages[0]);
+		expect(agent.state.messages.map((message) => message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+
+		agent.shouldStopAfterTurn = ({ context, newMessages }) => {
+			expect(context.messages).toEqual(agent.state.messages);
+			expect(context.messages).not.toBe(agent.state.messages);
+			expect(context.messages).not.toBe(projections[2].messages);
+			expect(newMessages).toHaveLength(2);
+			expect(newMessages[0]).toBe(adoptedPrompt);
+			return false;
+		};
+		await agent.prompt(adoptedPrompt);
+		expect(receivedMessages[2]).toEqual([adoptedPrompt]);
+		expect(agent.state.messages.slice(0, 2)).toEqual(projections[2].messages);
+		expect(agent.state.messages).toHaveLength(3);
+		expect(agent.state.messages[2].role).toBe("assistant");
+		expect(buildIndex).toBe(3);
+		for (const projection of projections) expect(projection.release).toHaveBeenCalledOnce();
 	});
 
 	it("forwards the service tier to streamFn options", async () => {

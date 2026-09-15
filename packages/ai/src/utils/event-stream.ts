@@ -6,14 +6,18 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private done = false;
 	private finalResultPromise: Promise<R>;
 	private resolveFinalResult!: (result: R) => void;
+	private rejectFinalResult!: (error: unknown) => void;
 
 	constructor(
 		private isComplete: (event: T) => boolean,
 		private extractResult: (event: T) => R,
 	) {
-		this.finalResultPromise = new Promise((resolve) => {
+		this.finalResultPromise = new Promise((resolve, reject) => {
 			this.resolveFinalResult = resolve;
+			this.rejectFinalResult = reject;
 		});
+		// Iteration-only consumers still receive terminal events without an unhandled result rejection.
+		this.finalResultPromise.catch(() => {});
 	}
 
 	push(event: T): void {
@@ -41,6 +45,11 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			const waiter = this.waiting.shift()!;
 			waiter({ value: undefined as any, done: true });
 		}
+	}
+
+	fail(error: unknown): void {
+		this.rejectFinalResult(error);
+		this.end();
 	}
 
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {

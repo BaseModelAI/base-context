@@ -50,3 +50,12 @@ await build({
 
 chmodSync(join(outdir, "cli.js"), 0o755);
 console.log("bundled dist/cli.js -> dist/bundle/");
+
+await build({
+	entryPoints: [join(packageDir, "dist", "installer.js")],
+	outfile: join(packageDir, "dist", "installer.mjs"),
+	bundle: true,
+	format: "esm",
+	platform: "node",
+	logLevel: "warning",
+});

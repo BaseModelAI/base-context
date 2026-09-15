@@ -1,31 +1,20 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="../../assets/brand/prime-butterfly.svg">
-      <img alt="Prime Intellect butterfly mark" src="../../assets/brand/prime-butterfly-black.svg" width="88">
-    </picture>
-  </a>
-</p>
+# Synerise base-context Agent SDK
 
-<h1 align="center">Prime Agent Core</h1>
+Stateful agent runtime with native context and recovery ownership.
 
-<p align="center">
-  Stateful agent runtime.
-</p>
-
-Release docs use the Prime Agent package names. The source workspace manifests still keep inherited package names until the namespace migration is complete.
+Part of **[Synerise base-context](https://github.com/BaseModelAI/base-context)**. Forked from Prime Intellect's [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built on Mario Zechner's Pi. MIT; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Workspace Package
 
 ```bash
-npm install prime-agent-core
+npm install @ponythewhite/base-context-agent
 ```
 
 ## Quick Start
 
 ```typescript
-import { Agent } from "prime-agent-core";
-import { getModel } from "prime-agent-ai";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { getModel } from "@ponythewhite/base-context-ai";
 
 const agent = new Agent({
   initialState: {
@@ -138,6 +127,49 @@ const stream = agentLoop(prompts, context, {
 ```
 
 `shouldStopAfterTurn` runs after `turn_end` is emitted and after the assistant response and any tool executions have completed normally. If it returns `true`, the loop emits `agent_end` and exits before polling steering or follow-up queues, and before starting another LLM call. It does not abort the provider stream, does not cancel running tools, and does not alter the assistant message stop reason.
+
+### Native checkpoint control
+
+At the same completed-turn boundary, `Agent` and `AgentLoopConfig` can use
+`getTurnOutcome(context, signal)` instead of the boolean stop hook. Its
+`GetTurnOutcomeContext` includes `hasMoreToolCalls`, the loop's finalized tool-batch
+decision. An all-terminate batch sets this to `false`; the last message's role is
+not a substitute.
+
+The callback returns `AgentTurnOutcome`, synchronously or asynchronously:
+`proceed`, `finish`, `checkpoint_then_continue` or `cancelled`. Only `proceed`
+continues the ordinary queue-polling policy. The other results end this invocation.
+When the typed callback is present, the loop does not also call
+`shouldStopAfterTurn`. The boolean API remains available otherwise.
+
+The native session consumes checkpoint intent through its existing compaction
+and input-dispatch owners. `checkpoint_then_continue` is not a checkpoint ACK.
+Normal success resumption follows the canonical write and owned setup/release.
+Recoverable skip/failure retains the existing resume policy; abort does not resume.
+A known ACK plus later setup or release failure retains the checkpoint and blocks automatic
+resumption. Accepted queued input takes priority and can consume the interrupted
+boundary without leaving an extra continuation. This is transient control, not a
+new persisted restart protocol. See the [compaction guide](../coding-agent/docs/compaction.md).
+
+### Native continuation control
+
+At a natural stop, `Agent` and `AgentLoopConfig` can use the optional
+`getContinuationOutcome(context, signal)` callback. It returns a promise of the
+exported `AgentContinuationOutcome` type. The native session binds this callback. Only `continue` requests another model turn. `wait_for_owned_work`,
+`finish` and `cancelled` end the current low-level invocation. A message body or
+`turn_end` event is not a control instruction.
+
+`wait_for_owned_work` does not wait for the invocation's own idle barrier. The
+existing goal wakeup owner resumes work after descendant settlement and terminal
+notice delivery. Goal and autonomous-work priority is unchanged. This is not a
+new scheduler, cancellation policy or checkpoint transition.
+
+`getContinuationOutcome` takes precedence over the existing `getContinuationMessages`
+callback; the loop does not call both. Without a typed owner, the existing array
+callback keeps its behavior. Explicit stop hooks, steering, follow-ups and finalized
+tool results keep their existing precedence. The native owner retains the original
+session and input-pump ownership across waits; late control cannot start a turn on
+a replacement session.
 
 When you use the `Agent` class, assistant `message_end` processing is treated as a barrier before tool preflight begins. That means `beforeToolCall` sees agent state that already includes the assistant message that requested the tool call.
 
@@ -305,6 +337,24 @@ agent.thinkingBudgets = {
 };
 ```
 
+### Native bounded outputs
+
+A native owner can bind a copied output policy with `agent.bindOutputOwner(...)`.
+The coding-agent SDK enables this for owned persistent sessions. Generic Agents keep
+complete, unbounded invocation arrays unless an owner supplies a policy.
+
+Successful `newMessages`, callback values and `agent_end.messages` remain complete.
+Native values are detached after the actual `message_end` mutation/persistence job.
+Runtime subjects and tool/action identities stay unchanged. Updates accepted before
+terminal settlement are joined once; later canonical updates do not retroactively change
+returned snapshots.
+
+An output refusal emits `agent_end` with `refusal` and no `messages`. Its `kind` is
+`output_limit`; `limit` is `messages`, `source_bytes` or `value_encoding`. The descriptor
+also carries `maxMessages` and `maxSourceBytes`. `AgentOutputLimitError` rejects the raw
+loop, stream `result()` and Agent invocation. It is not a provider retry or a successful
+empty result. Already accepted parallel tools/publications settle before refusal.
+
 ### Control
 
 ```typescript
@@ -368,7 +418,7 @@ Follow-up messages are checked only when there are no more tool calls and no ste
 Extend `AgentMessage` via declaration merging:
 
 ```typescript
-declare module "prime-agent-core" {
+declare module "@ponythewhite/base-context-agent" {
   interface CustomAgentMessages {
     notification: { role: "notification"; text: string; timestamp: number };
   }
@@ -449,7 +499,7 @@ Return `terminate: true` from `execute()` or `afterToolCall` to hint that the ag
 For browser apps that proxy through a backend:
 
 ```typescript
-import { Agent, streamProxy } from "prime-agent-core";
+import { Agent, streamProxy } from "@ponythewhite/base-context-agent";
 
 const agent = new Agent({
   streamFn: (model, context, options) =>
@@ -466,7 +516,7 @@ const agent = new Agent({
 For direct control without the Agent class:
 
 ```typescript
-import { agentLoop, agentLoopContinue } from "prime-agent-core";
+import { agentLoop, agentLoopContinue } from "@ponythewhite/base-context-agent";
 
 const context: AgentContext = {
   systemPrompt: "You are helpful.",

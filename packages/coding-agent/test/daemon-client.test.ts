@@ -4,6 +4,7 @@ import {
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_REVISION,
+	type DaemonCommand,
 } from "../src/modes/daemon/daemon-protocol.js";
 
 const netMock = vi.hoisted(() => {
@@ -94,18 +95,21 @@ function emitHello(
 	socket: (typeof netMock.sockets)[number],
 	version = DAEMON_PROTOCOL_VERSION,
 	serverCapabilities: string[] = ["session_input_admission"],
-	schemaRevision?: number,
+	schemaRevision = DAEMON_SCHEMA_REVISION,
 ): void {
 	socket.emit(
 		"data",
 		`${JSON.stringify({
 			type: "daemon_hello",
 			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version },
+			protocol: { name: "base-context.daemon", version },
 			schemaRevision,
 			appVersion: "9.9.9",
 			clientId: "client-1",
-			serverCapabilities,
+			serverCapabilities:
+				version === DAEMON_PROTOCOL_VERSION
+					? [...serverCapabilities, "native_inference_ownership", "canonical_session_ownership"]
+					: serverCapabilities,
 		})}\n`,
 	);
 }
@@ -132,7 +136,7 @@ describe("DaemonClient", () => {
 		firstSocket.emit("error", new Error("initial connect failed"));
 
 		const firstError = await firstAttempt;
-		expect(firstError.message).toContain("Failed to connect to the Prime Agent daemon: initial connect failed.");
+		expect(firstError.message).toContain("Failed to connect to the Base Context daemon: initial connect failed.");
 		expect(firstError.message).toContain("Socket: /tmp/prime-agent-missing.sock.");
 		expect(firstError.message).toContain("Daemon log:");
 		expect(firstSocket.listenerCount("data")).toBe(0);
@@ -143,7 +147,7 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Base Context daemon: retry reached socket."),
 		});
 	});
 
@@ -156,7 +160,7 @@ describe("DaemonClient", () => {
 		const firstSocket = netMock.sockets[0]!;
 
 		const timeoutRejection = expect(firstAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Timed out after 5ms connecting to the Prime Agent daemon."),
+			message: expect.stringContaining("Timed out after 5ms connecting to the Base Context daemon."),
 		});
 		await vi.advanceTimersByTimeAsync(5);
 		await timeoutRejection;
@@ -170,7 +174,7 @@ describe("DaemonClient", () => {
 		netMock.sockets[1]!.emit("error", new Error("retry reached socket"));
 
 		await expect(secondAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Failed to connect to the Prime Agent daemon: retry reached socket."),
+			message: expect.stringContaining("Failed to connect to the Base Context daemon: retry reached socket."),
 		});
 	});
 
@@ -187,7 +191,7 @@ describe("DaemonClient", () => {
 		const hello = {
 			type: "daemon_hello",
 			socketPath: "/tmp/prime-agent.sock",
-			protocol: { name: "prime-agent.daemon", version: 1 },
+			protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 			appVersion: "9.9.9",
 			clientId: "client-1",
 			serverCapabilities: [],
@@ -195,7 +199,7 @@ describe("DaemonClient", () => {
 		socket.emit("data", `${JSON.stringify(hello)}\n`);
 
 		await expect(waited).resolves.toMatchObject({ appVersion: "9.9.9" });
-		expect(client.hello).toMatchObject({ protocol: { version: 1 }, appVersion: "9.9.9" });
+		expect(client.hello).toMatchObject({ protocol: { version: DAEMON_PROTOCOL_VERSION }, appVersion: "9.9.9" });
 		await expect(client.waitForHello()).resolves.toMatchObject({ appVersion: "9.9.9" });
 
 		client.close();
@@ -207,11 +211,32 @@ describe("DaemonClient", () => {
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, 3);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session_input_admission"], 46);
 
 		expect(client.supportsServerCapability("heartbeat_catalog")).toBe(false);
 		await expect(client.request({ type: "heartbeats_list" })).rejects.toThrow("does not support heartbeat_catalog");
+		expect(client.supportsServerCapability("agent_results")).toBe(false);
+		await expect(
+			client.request({
+				type: "send_result",
+				targetActiveSessionId: "parent",
+				summary: "Routing fix ready",
+				findings: "Full public routing report",
+			}),
+		).rejects.toThrow("does not support agent_results");
 		expect(socket.writes).toEqual([]);
+		const legacyMessage = client.request({
+			type: "send_message",
+			targetActiveSessionId: "parent",
+			message: "short coordination",
+		});
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		const sent = JSON.parse(socket.writes[0]!);
+		socket.emit(
+			"data",
+			`${JSON.stringify({ type: "response", id: sent.id, command: "send_message", success: true })}\n`,
+		);
+		await legacyMessage;
 		client.close();
 	});
 
@@ -236,7 +261,7 @@ describe("DaemonClient", () => {
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["delete_rlm_subagent"], DAEMON_SCHEMA_REVISION - 1);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["delete_rlm_subagent"], DAEMON_SCHEMA_REVISION);
 
 		const request = client.request({
 			type: "delete_rlm_subagent",
@@ -263,16 +288,16 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
-	it("rejects an old daemon before requesting session state", async () => {
+	it("rejects a pre-Base protocol before requesting session state", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, DAEMON_PROTOCOL_VERSION - 1);
+		emitHello(socket, 7);
 
 		await expect(client.request({ type: "get_state", activeSessionId: "active-1" })).rejects.toThrow(
-			"does not support get_state",
+			"incompatible daemon",
 		);
 		expect(socket.writes).toEqual([]);
 		client.close();
@@ -303,7 +328,7 @@ describe("DaemonClient", () => {
 
 		await expect(
 			client.request({ type: "prompt", activeSessionId: "active-1", message: "hello", admissionId: "a-1" }),
-		).rejects.toThrow("does not support prompt_admission_cancellation");
+		).rejects.toThrow("cannot provide canonical session ownership");
 		expect(socket.writes).toEqual([]);
 		client.close();
 	});
@@ -317,9 +342,9 @@ describe("DaemonClient", () => {
 		const compatibility = DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission;
 		emitHello(
 			socket,
-			compatibility.minProtocol,
+			DAEMON_PROTOCOL_VERSION,
 			["session_input_admission", "prompt_admission_cancellation"],
-			compatibility.minSchemaRevision + 1,
+			Math.max(compatibility.minSchemaRevision + 1, DAEMON_SCHEMA_REVISION),
 		);
 
 		const request = client.request({
@@ -374,7 +399,7 @@ describe("DaemonClient", () => {
 		expect(envelope).toMatchObject({
 			type: "command",
 			clientId: expect.any(String),
-			protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+			protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 			command: { type: "attach", activeSessionId: "active-1" },
 		});
 		expect(envelope.command).not.toHaveProperty("daemonSessionId");
@@ -421,7 +446,7 @@ describe("DaemonClient", () => {
 
 		await expect(request).rejects.toMatchObject({
 			message: expect.stringContaining(
-				'Cannot send daemon command "list" because the Prime Agent daemon is not connected.',
+				'Cannot send daemon command "list" because the Base Context daemon is not connected.',
 			),
 		});
 		await expect(request).rejects.toMatchObject({
@@ -663,7 +688,7 @@ describe("DaemonClient", () => {
 		socket.emit("close");
 
 		expect(closed).toHaveLength(1);
-		expect(closed[0]?.message).toContain("Connection to the Prime Agent daemon closed.");
+		expect(closed[0]?.message).toContain("Connection to the Base Context daemon closed.");
 		expect(closed[0]?.message).toContain("Socket: /tmp/prime-agent.sock.");
 		expect(closed[0]?.message).toContain("Daemon log:");
 		expect(client.isConnected).toBe(false);
@@ -793,9 +818,14 @@ describe("DaemonClient", () => {
 			`${JSON.stringify({
 				type: "daemon_hello",
 				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
-				serverCapabilities: ["session_input_admission"],
+				schemaRevision: DAEMON_SCHEMA_REVISION,
+				serverCapabilities: [
+					"session_input_admission",
+					"native_inference_ownership",
+					"canonical_session_ownership",
+				],
 			})}\n`,
 		);
 		expect(secondSocket.writes).toEqual([firstWireData]);
@@ -912,7 +942,7 @@ describe("DaemonClient", () => {
 			`${JSON.stringify({
 				type: "daemon_hello",
 				socketPath: "/tmp/prime-agent.sock",
-				protocol: { name: "prime-agent.daemon", version: DAEMON_PROTOCOL_VERSION },
+				protocol: { name: "base-context.daemon", version: DAEMON_PROTOCOL_VERSION },
 				clientId: "server-client-2",
 				serverCapabilities: [],
 			})}\n`,
@@ -929,6 +959,133 @@ describe("DaemonClient", () => {
 		await expect(response).resolves.toMatchObject({ id: firstEnvelope.id, success: true });
 		client.close();
 	});
+	it.each([8, 9, 10])(
+		"keeps passive Base%s inspection but never sends work, hydration, or graceful cleanup",
+		async (version) => {
+			const client = new DaemonClient("/tmp/base-legacy.sock");
+			const connected = client.connect();
+			const socket = netMock.sockets[0]!;
+			socket.emit("connect");
+			await connected;
+			emitHello(
+				socket,
+				version,
+				[
+					"session_input_admission",
+					"client_owned_sessions",
+					"agent_roster",
+					...(version >= 9 ? ["native_inference_ownership" as const] : []),
+					...(version === 10 ? ["canonical_session_ownership" as const] : []),
+				],
+				version === 8 ? 27 : version === 9 ? 28 : 29,
+			);
+			const refused: DaemonCommand[] = [
+				{ type: "create" },
+				{ type: "attach", activeSessionId: "active", recoveryConfig: { cwd: "/tmp" } },
+				{ type: "retry_worker", activeSessionId: "active" },
+				{ type: "import_jsonl", activeSessionId: "active", inputPath: "/tmp/import.jsonl" },
+				{ type: "export_jsonl", activeSessionId: "active" },
+				{ type: "prompt", activeSessionId: "active", message: "hello" },
+				{ type: "start_side_question", activeSessionId: "active", sideQuestionId: "s", question: "hello" },
+				{ type: "compact", activeSessionId: "active" },
+				{ type: "refine", activeSessionId: "active" },
+				{ type: "resume_queue", activeSessionId: "active" },
+				{ type: "wait_for_idle", activeSessionId: "active" },
+				{ type: "wait_for_headless_completion", activeSessionId: "active" },
+				{ type: "send_message", targetActiveSessionId: "active", message: "hello" },
+				{ type: "cron_add", activeSessionId: "active", schedule: "* * * * *", prompt: "hello" },
+				{ type: "detach", activeSessionId: "active" },
+				{ type: "kill", activeSessionId: "active" },
+				{ type: "complete_owned_session", activeSessionId: "active" },
+				{ type: "shutdown", force: true },
+				{ type: "list_saved_sessions", activeSessionId: "active", scope: "current" },
+			];
+			for (const command of refused) await expect(client.request(command)).rejects.toThrow("Command not sent");
+			await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toThrow(
+				"Command not sent",
+			);
+			expect(socket.writes).toEqual([]);
+			for (const command of [
+				{ type: "list" },
+				{ type: "get_state", activeSessionId: "active" },
+				{ type: "get_messages", activeSessionId: "active" },
+				{ type: "list_saved_sessions", cwd: "/tmp", scope: "current" },
+			] satisfies DaemonCommand[]) {
+				const response = client.request(command);
+				const envelope = JSON.parse(socket.writes.at(-1)!);
+				expect(envelope.protocol.version).toBe(version);
+				socket.emit(
+					"data",
+					`${JSON.stringify({ id: envelope.id, type: "response", command: command.type, success: true })}\n`,
+				);
+				await expect(response).resolves.toMatchObject({ success: true });
+			}
+			client.close();
+		},
+	);
+
+	it.each([8, 9])("does not replay native work after a current-protocol to Base%s downgrade", async (version) => {
+		const client = new DaemonClient("/tmp/base-reconnect.sock");
+		client.enableRequestRecovery();
+		const connected = client.connect();
+		const first = netMock.sockets[0]!;
+		first.emit("connect");
+		await connected;
+		emitHello(first);
+		const work = client.request({ type: "prompt", activeSessionId: "active", message: "hello" });
+		const rejected = expect(work).rejects.toMatchObject({
+			capability: "canonical_session_ownership",
+			afterReconnect: true,
+		});
+		const read = client.request({ type: "list" });
+		const readWire = first.writes[1]!;
+		first.emit("close");
+		const reconnected = client.connect();
+		const second = netMock.sockets[1]!;
+		second.emit("connect");
+		await reconnected;
+		emitHello(
+			second,
+			version,
+			["session_input_admission", ...(version === 9 ? ["native_inference_ownership" as const] : [])],
+			version === 8 ? 27 : 28,
+		);
+		await rejected;
+		expect(second.writes).toHaveLength(1);
+		expect(JSON.parse(second.writes[0]!)).toEqual({
+			...JSON.parse(readWire),
+			protocol: { name: "base-context.daemon", version },
+		});
+		const { id } = JSON.parse(readWire);
+		second.emit("data", `${JSON.stringify({ id, type: "response", command: "list", success: true })}\n`);
+		await read;
+		client.close();
+	});
+
+	it.each(["canonical_session_ownership", "native_inference_ownership"] as const)(
+		"rejects a current daemon missing %s before native egress",
+		async (missing) => {
+			const client = new DaemonClient("/tmp/base-owner-gate.sock");
+			const connected = client.connect();
+			const socket = netMock.sockets[0]!;
+			socket.emit("connect");
+			await connected;
+			emitHello(socket);
+			socket.emit(
+				"data",
+				`${JSON.stringify({
+					...client.hello,
+					serverCapabilities: client.hello!.serverCapabilities.filter((capability) => capability !== missing),
+				})}\n`,
+			);
+			await expect(client.request({ type: "create" })).rejects.toMatchObject({ capability: missing });
+			await expect(client.requestWorker({ type: "worker_archive_and_shutdown" })).rejects.toMatchObject({
+				capability: missing,
+			});
+			expect(socket.writes).toEqual([]);
+			client.close();
+		},
+	);
 });
 
 async function captureRejection(promise: Promise<void>): Promise<Error> {

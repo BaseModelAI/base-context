@@ -1,41 +1,51 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	Agent,
 	type AgentContext,
+	type AgentContinuationOutcome,
 	AgentContinueError,
 	type AgentEvent,
 	type AgentMessage,
+	AgentOutputLimitError,
+	type AgentOutputLimits,
 	type AgentState,
 	type AgentTool,
+	type AgentTurnOutcome,
+	type BoundToolExecution,
 	type GetContinuationMessagesContext,
+	type GetTurnOutcomeContext,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
-} from "@earendil-works/pi-agent-core";
+} from "@ponythewhite/base-context-agent";
 import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
 	Model,
+	RequestTokenBudgetOptions,
 	ServiceTier,
 	TextContent,
 	Usage,
 	UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
+	isTransientProviderFailure,
 	modelsAreEqual,
 	resetApiProviders,
 	supportsFastMode,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
-import { stripFrontmatter } from "../utils/frontmatter.js";
+import { PRODUCT } from "../product-identity.js";
+
 import { sleep } from "../utils/sleep.js";
 import {
 	AGENT_MESSAGE_CUSTOM_TYPE,
@@ -92,8 +102,22 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { stringifyBoundedJson } from "./bounded-json.js";
 import {
+	CanonicalContextCompiler,
+	canonicalRecoveryBoundary,
+	getCanonicalEpochContext,
+	getCanonicalMessageSource,
+	getCanonicalViewUnits,
+	prepareCanonicalEpoch,
+	prepareContextModeEpoch,
+	prepareRecoveryCompaction,
+	readCanonicalContextMode,
+} from "./canonical-context.js";
+import {
+	type BranchSummaryResult,
 	COMPACT_SKILL_NAME,
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
@@ -101,15 +125,34 @@ import {
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	prepareViewCompaction,
 	serializeConversation,
 	shouldCompact,
+	takeNativeBranchSummaryWrite,
 } from "./compaction/index.js";
 import {
+	appendContextEpoch,
+	assertContextRequestContract,
+	CONTEXT_EPOCH_DETAIL,
+	CONTEXT_SKILL_EPOCH_RENDERER,
+	type ContextMode,
+	type ContextReplayContract,
+	contextEpochMode,
+	contextEpochRepresentation,
+	contextRequestContract,
+	retainedContextRequestContract,
+	snapshotContextEpoch,
+} from "./context-epoch.js";
+import {
 	type ContextTreeNode,
+	ContextTreeRequest,
+	type ContextTreeRequestLimits,
 	type ContextWindowResolver,
 	computeOwnAndTotalUsage,
 	loadContextTreeChildFromDisk,
 	loadContextTreeChildrenFromDisk,
+	readContextTreeUsage,
+	readResidentContextTreeUsage,
 } from "./context-tree.js";
 import type { AgentCronJob, AgentRlmHeartbeatController, AgentRlmHeartbeatStatusUpdate } from "./cron-jobs.js";
 import { normalizeHeartbeatDeliveryMode } from "./cron-jobs.js";
@@ -160,6 +203,15 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
+import type { IpythonSentMessagesCursor } from "./history-index.js";
+import {
+	captureNativeBranchRequests,
+	captureNativeCompactionRequests,
+	captureNativePlannerRequests,
+	captureNativeReviewerRequests,
+	InferenceCoordinator,
+	type SessionRuntimeServices,
+} from "./inference-coordinator.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -204,14 +256,19 @@ import {
 	mergeRefinementHistory,
 	normalizeRefinementProposal,
 	planRefinement,
+	prepareRefinementApplication,
 	REFINE_SKILL_NAME,
 	type RefinementPlan,
 	type RefinementResult,
 	reviewAutoRefine,
 	saveHarnessState,
+	takeNativePlannerRequestWrite,
+	withRefinementBaseline,
 } from "./refinement/index.js";
+import { PublicContextBudgetError } from "./request-view-selection.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import { assertResourceCurrent, type OwnedResourceCapture } from "./resource-view.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -223,6 +280,7 @@ import {
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmChildAdmission,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -231,6 +289,26 @@ import {
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./rlm-runtime.js";
+import {
+	type CapturedSkillSelectionWriter,
+	captureSelectedSkill,
+	captureSkillDescriptor,
+	type NativeSkillSourceRef,
+	readSkillSelection,
+	type SelectedSkillCapture,
+	sameSelectedSkills,
+	selectedSkillBlock,
+	selectedSkillIdentity,
+} from "./selected-skills.js";
+import {
+	createNativeRecoveryRefusal,
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryInput,
+	type NativeRecoveryResponse,
+	parseNativeRecoveryInput,
+	recoverCapturedHistory,
+} from "./selective-recovery.js";
 import {
 	modelRequestHeaders,
 	SemanticEdgeRecorder,
@@ -255,16 +333,37 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
+import { readSessionBootstrap } from "./session-bootstrap.js";
 import {
-	CURRENT_SESSION_VERSION,
+	appendSentAgentMessageToToolResult,
+	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
+	parsePersistedIpythonSentAgentMessage,
+} from "./session-context-updates.js";
+import { ContextUsageReader } from "./session-context-usage.js";
+import {
+	bindNativeEntryWriter,
+	type CapturedNativeGoalWrite,
+	type CapturedNativeMessageWrite,
+	type NativeEntryOrigin,
+	type NativeEntryWriter,
+	type NativeSubmittedInput,
+} from "./session-entry-origin.js";
+import { readUserMessagesForForking } from "./session-fork-messages.js";
+import type { SessionHistoryReadLimits } from "./session-history-index.js";
+import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
+import {
+	applyChildUsageAttributions,
+	type BoundCompactionSink,
+	type BranchSummaryEntry,
 	getLatestCompactionEntry,
-	type SessionHeader,
+	type SessionContext,
+	type SessionEntry,
 	SessionManager,
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
+
 import {
 	parseRefineCommandOptions,
 	parseSessionSlashCommand,
@@ -280,8 +379,11 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
-import { addAssistantUsage, emptyUsage, type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
+import { type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
+
+// The native owner reads its actual provisioner, not a replaceable public reader method.
+const captureOwnedKernelState = IpythonKernelProvisioner.prototype.captureKernelState;
 
 export type { GoalState, GoalStatus } from "./goals.js";
 export type { SessionStats } from "./session-stats.js";
@@ -344,7 +446,7 @@ export type AgentSessionEvent =
 	| {
 			type: "auto_retry_start";
 			attempt: number;
-			maxAttempts: number;
+			maxAttempts?: number;
 			delayMs: number;
 			errorMessage: string;
 	  }
@@ -395,10 +497,40 @@ type UserBashEndDetails = {
 
 export class CompactionSkippedError extends Error {}
 
+interface CompactionCommit {
+	entryId: string;
+	result: CompactionResult;
+}
+
+/** The canonical compaction is already ACKed; only subsequent setup failed. */
+export class CompactionCommittedError extends Error {
+	constructor(
+		readonly entryId: string,
+		readonly result: CompactionResult,
+		cause: unknown,
+	) {
+		super(
+			`Compaction ${entryId} committed, but setup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause },
+		);
+		this.name = "CompactionCommittedError";
+	}
+}
+
+function primaryCommittedCompactionError(error: unknown): CompactionCommittedError | undefined {
+	while (error instanceof AggregateError) error = error.errors[0];
+	return error instanceof CompactionCommittedError ? error : undefined;
+}
+
 /** Thrown when a session_before_refine extension skips the refinement round. */
 export class RefineSkippedError extends Error {}
 
 export interface AgentSessionConfig {
+	/** Explicit request budget profiles; absent preserves control behavior. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: ContextMode;
+	/** Override native invocationOutput settings; complete finalized values or explicit refusal. */
+	invocationOutputLimits?: AgentOutputLimits;
 	agent: Agent;
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
@@ -448,6 +580,7 @@ export interface AgentSessionConfig {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	rlmChildAdmission?: RlmChildAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -543,7 +676,13 @@ interface SubmissionNormalizationPolicy {
 }
 
 type NormalizedSubmission =
-	| { kind: "prompt"; text: string; images?: ImageContent[] }
+	| {
+			kind: "prompt";
+			text: string;
+			images?: ImageContent[];
+			selectedSkillRef?: NativeSkillSourceRef;
+			assertSkillCurrent?: () => void;
+	  }
 	| {
 			kind: "sessionCommand";
 			text: string;
@@ -552,6 +691,20 @@ type NormalizedSubmission =
 	  }
 	| { kind: "extensionCommand"; completion: Promise<void> }
 	| { kind: "handled" };
+
+interface NativeSkillSelectionOwner {
+	manager: SessionManager;
+	sessionId: string;
+	sessionFile: string | undefined;
+	writer: CapturedSkillSelectionWriter;
+	inputEpoch?: number;
+}
+
+interface SkillCommandExpansion {
+	text: string;
+	selectedSkillRef?: NativeSkillSourceRef;
+	assertSkillCurrent: () => void;
+}
 
 type PreTurnCompactionTiming = "beforeModelSelection" | "afterModelSelection" | "skip";
 type RefineBarrierPolicy = "always" | "ifInFlight" | "skip";
@@ -600,6 +753,8 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 }
 
 interface PreparedTurnPayload extends SessionTurnPayload {
+	submitted?: NativeSubmittedInput;
+	selectedSkillRef?: NativeSkillSourceRef;
 	images?: ImageContent[];
 	content?: (TextContent | ImageContent)[];
 	customMessage?: CustomMessage;
@@ -613,6 +768,7 @@ interface PreparedTurnPayload extends SessionTurnPayload {
 }
 
 interface PreparedCommandPayload extends SessionCommandPayload {
+	submitted?: NativeSubmittedInput;
 	images?: ImageContent[];
 }
 
@@ -624,6 +780,19 @@ interface PreparedPromptPreparation {
 }
 
 class DeferredSessionInputError extends Error {}
+class StaleGoalContinuationError extends Error {}
+
+interface GoalContinuationOwner {
+	manager: SessionManager;
+	sessionId: string;
+	sessionFile: string | undefined;
+	pumpEpoch: number;
+	goal: GoalState;
+	goalRevision: number;
+	accountingStartedAt: number | undefined;
+	signal: AbortSignal | undefined;
+	checkpointOwner?: CompactionOwner;
+}
 
 function oncePreflight(
 	preflightResult: ((success: boolean, queued?: boolean) => void) | undefined,
@@ -648,6 +817,8 @@ interface RestoredPromptInput {
 }
 
 export const SESSION_ACTION_RECOVERY_FORMAT_VERSION = 1;
+/** Only snapshots carrying the new native source binding require this current-format discriminator. */
+export const SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION = 2;
 
 export interface SessionActionRecoveryRecord {
 	id: string;
@@ -659,6 +830,8 @@ export interface SessionActionRecoveryRecord {
 export type SessionActionRecoveryPayload =
 	| {
 			kind: "turn";
+			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			text: string;
 			preview?: string;
 			records: SessionActionRecoveryRecord[];
@@ -672,6 +845,7 @@ export type SessionActionRecoveryPayload =
 	  }
 	| {
 			kind: "session_command";
+			submitted?: NativeSubmittedInput;
 			text: string;
 			command: SessionSlashCommand;
 			images?: ImageContent[];
@@ -689,8 +863,20 @@ export interface SessionActionRecoveryAction {
 }
 
 export interface SessionActionRecoverySnapshot {
-	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION;
+	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION | typeof SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION;
 	actions: SessionActionRecoveryAction[];
+}
+
+type GoalOperationOrigin = Extract<NativeEntryOrigin, { kind: "goal_operation" }>;
+type GoalOriginContext = Pick<GoalOperationOrigin, "actor" | "actionId" | "submittedText"> & {
+	writer: NativeEntryWriter;
+};
+
+function captureSubmittedInput(
+	text: string,
+	input: { content?: (TextContent | ImageContent)[]; images?: ImageContent[] } = {},
+): NativeSubmittedInput {
+	return structuredClone({ text, content: input.content, images: input.images });
 }
 
 function cloneCustomMessage(message: CustomMessage): CustomMessage {
@@ -728,6 +914,12 @@ function normalizeMessageContent(content: string | (TextContent | ImageContent)[
 	return { text, ...(images.length > 0 ? { images } : {}) };
 }
 
+function isFamilyAgentMessageAction(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
+	if (action.payload.kind !== "turn") return false;
+	const message = primaryDeliveryRecord(action).message;
+	return isAgentSessionMessage(message) && message.details.fromRelationship !== undefined;
+}
+
 function queuedAgentMessagePreview(action: QueuedSessionAction): string {
 	const payload = action.payload;
 	if (payload.kind === "session_command") return payload.text;
@@ -744,67 +936,6 @@ function visibleSessionActionProjection(actions: readonly QueuedSessionAction[])
 			action.payload.queueVisible ||
 			action.payload.acceptedAgentMessage,
 	);
-}
-
-const IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY = "ipython_sent_agent_message";
-
-interface PersistedIpythonSentAgentMessage {
-	toolCallId: string;
-	message: KernelSentAgentMessage;
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parsePersistedIpythonSentAgentMessage(value: unknown): PersistedIpythonSentAgentMessage | undefined {
-	if (!isObjectRecord(value) || typeof value.toolCallId !== "string" || !isObjectRecord(value.message)) {
-		return undefined;
-	}
-	const { id, message, deliveryStatus, target } = value.message;
-	if (
-		typeof id !== "string" ||
-		typeof message !== "string" ||
-		(deliveryStatus !== "delivered" && deliveryStatus !== "queued") ||
-		!isObjectRecord(target) ||
-		typeof target.activeSessionId !== "string" ||
-		typeof target.sessionId !== "string"
-	) {
-		return undefined;
-	}
-	return {
-		toolCallId: value.toolCallId,
-		message: {
-			id,
-			message,
-			deliveryStatus,
-			target: {
-				activeSessionId: target.activeSessionId,
-				sessionId: target.sessionId,
-				...(typeof target.sessionName === "string" ? { sessionName: target.sessionName } : {}),
-			},
-		},
-	};
-}
-
-function appendSentAgentMessageToToolResult(
-	message: AgentMessage,
-	toolCallId: string,
-	sentMessage: KernelSentAgentMessage,
-): boolean {
-	if (message.role !== "toolResult" || message.toolName !== "ipython" || message.toolCallId !== toolCallId) {
-		return false;
-	}
-	const details = isObjectRecord(message.details) ? message.details : {};
-	const current = Array.isArray(details.sentAgentMessages) ? details.sentAgentMessages : [];
-	if (current.some((entry) => isObjectRecord(entry) && entry.id === sentMessage.id)) {
-		return true;
-	}
-	message.details = {
-		...details,
-		sentAgentMessages: [...current, sentMessage],
-	};
-	return true;
 }
 
 function injectedMessagePreviewLabel(message: CustomMessage): string | undefined {
@@ -839,14 +970,64 @@ function createAgentMessageDeferred(): AgentMessageDeferred {
 	return deferred;
 }
 
-/** One-shot settlement for a scheduled post-compaction continuation; a settled failure is never re-exposed to later waiters. */
+class StaleCompactionOwnerError extends Error {}
+
+interface CompactionOwner {
+	manager: SessionManager;
+	agent: Agent;
+	sessionId: string;
+	sessionFile: string | undefined;
+	pumpEpoch: number;
+	isSourceCurrent: () => boolean;
+	requests: InferenceCoordinator;
+	semanticEdges: SemanticEdgeRecorder;
+	extensions: ExtensionRunner;
+	provisioner: IpythonKernelProvisioner | undefined;
+	signal: AbortSignal | undefined;
+}
+
+interface CheckpointAction {
+	action: QueuedSessionAction;
+	ticket: ActionTicket;
+}
+
+interface CheckpointBoundary {
+	kind: "tool" | "overflow" | "request";
+	state: "pending" | "consumed";
+}
+
+interface CheckpointResume {
+	owner: CompactionOwner;
+	boundary?: CheckpointBoundary;
+	actions: CheckpointAction[];
+}
+
+interface ThresholdGoalContinuation extends CheckpointAction {
+	owner: GoalContinuationOwner;
+}
+
+interface ThresholdAutonomousOwner {
+	state: AutonomousRuntimeState;
+	snapshot: AutonomousRuntimeState;
+	cwd: string;
+	arrivalEpoch: number;
+}
+
+interface ThresholdAutonomousContinuation extends CheckpointAction {
+	owner: CompactionOwner;
+	state: AutonomousRuntimeState;
+	before: AutonomousRuntimeSnapshot;
+	after: AutonomousRuntimeState;
+}
+
+/** One-shot settlement for the same captured checkpoint directive; a settled failure is not re-exposed. */
 interface PostCompactionContinuationSettlement extends AgentMessageDeferred {
-	continueAfterSessionInput: boolean;
+	resume: CheckpointResume;
 	settled: boolean;
 }
 
-function createPostCompactionContinuationSettlement(): PostCompactionContinuationSettlement {
-	return { ...createAgentMessageDeferred(), continueAfterSessionInput: false, settled: false };
+function createPostCompactionContinuationSettlement(resume: CheckpointResume): PostCompactionContinuationSettlement {
+	return { ...createAgentMessageDeferred(), resume, settled: false };
 }
 
 export interface ModelCycleResult {
@@ -1037,21 +1218,26 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
-function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
-	const parentContextTokens =
-		parentUsage.totalTokens ||
-		parentUsage.input + parentUsage.output + parentUsage.cacheRead + parentUsage.cacheWrite;
-	// Recursive children are launched from an assistant tool call, so the parent assistant
-	// message carries their billable usage for session-level cost totals.
-	addAssistantUsage(parentUsage, childUsage);
-	// Child work affects session-level billable totals, not the parent's model-facing context size.
-	parentUsage.totalTokens = parentContextTokens;
-}
-
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
+	readonly requests: InferenceCoordinator;
+	readonly runtimeServices: SessionRuntimeServices;
+	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private readonly _contextEpochsEnabled: boolean;
+	private readonly _initialContextMode: ContextMode;
+	private _contextMode: ContextMode;
+	private _pendingContextModeChanges = 0;
+	private readonly _contextUsageReader = new ContextUsageReader();
+	private _compactionBoundaryCache?: {
+		sessionId: string;
+		sessionFile: string | undefined;
+		entryId: string;
+		revision: string;
+		timestamp: number;
+	};
+	private _contextOmissions?: { sessionId: string; sessionFile: string | undefined; ids: Set<string> };
 	private _serviceTierPreference: ServiceTier;
 
 	private _scopedModels: Array<{
@@ -1092,6 +1278,7 @@ export class AgentSession {
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
 	private _goalState: GoalState = emptyGoalState();
+	private _goalStateRevision = 0;
 	private _goalAccountingStartedAt: number | undefined = undefined;
 	private _goalContinuationAwaitsRlmWork = false;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
@@ -1099,14 +1286,21 @@ export class AgentSession {
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
 	private _autonomousContinuationSuppressedMessages = new WeakSet<AgentMessage>();
+	private readonly _invocationOutputLimits: AgentOutputLimits;
+	private _invocationSuppressedAutonomousContinuation = false;
+	private _refreshInvocationOutput?: (message: AgentMessage) => void;
+	private _invocationOutputUpdateTail?: Promise<void>;
+	private _invocationOutputRefused = false;
 
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _compactionOperation: Promise<void> | undefined = undefined;
+	private _compactionSetupFailure: CompactionCommittedError | undefined;
 	/** One recovery attempt per overflow; "reported" dedups the failure notice. */
 	private _overflowRecovery: "idle" | "attempted" | "reported" = "idle";
-	private _continueAfterThresholdCompaction = false;
-	private _pendingRequestedCompaction: { customInstructions?: string } | undefined;
+	private _invocationCompactionOwner: CompactionOwner | undefined;
+	private _pendingCheckpoint: CheckpointResume | undefined;
+	private _pendingRequestedCompaction: { customInstructions?: string; owner: CompactionOwner } | undefined;
 	private _pendingRequestedRefine: { instructions?: string; global?: boolean } | undefined;
 
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1181,6 +1375,10 @@ export class AgentSession {
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
+	private _rlmChildAdmission?: RlmChildAdmission & { cancel(reason: string): boolean };
+	private _rlmParentAdmission?: RlmChildAdmission;
+	private _rlmResidentDisposalComplete = false;
+	private _releaseRlmResidentCapacity?: () => void;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
@@ -1205,10 +1403,21 @@ export class AgentSession {
 	private _rlmChildUnsubscribes = new Map<string, () => void>();
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
+	private readonly _initialGoal: AgentSessionConfig["initialGoal"];
+	private _initialization: Promise<void> | undefined;
+	private _goalResumeOperation: Promise<void> | undefined;
+	private readonly _rlmRunTasks = new Set<Promise<void>>();
+	private readonly _childUsageWrites = new Set<Promise<void>>();
+	private readonly _assistantEntryIds = new WeakMap<
+		AssistantMessage,
+		{ sessionId: string; sessionFile: string | undefined; entryId: string }
+	>();
 
 	private _modelRegistry: ModelRegistry;
 
 	private _toolRegistry: Map<string, AgentTool> = new Map();
+	private _nativeRecoveryTools = new WeakMap<AgentTool, AgentTool["execute"]>();
+	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean; skillOwner?: NativeSkillSelectionOwner }>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -1218,18 +1427,17 @@ export class AgentSession {
 	private _assistantTurnsSinceAutoRefine = 0;
 	private _lastAutoRefineReviewAt = 0;
 	private _autoRefineInProgress = false;
+	private _autoRefineAdmissionClosed = false;
 	private readonly _autoRefineOperations = new Set<Promise<void>>();
 	private readonly _scheduledAutoRefineTimers = new Set<ReturnType<typeof setTimeout>>();
 	private _compactAutoRefinePending = false;
 	private _turnIntervalAutoRefinePending = false;
 	private _postCompactionContinuationScheduled = false;
 	private _postCompactionContinuationSettlement: PostCompactionContinuationSettlement | undefined;
-	private _postCompactionContinuationMessages: AgentMessage[] = [];
-	private _scheduledPostCompactionContinuationMessages: AgentMessage[] = [];
-	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, AgentMessage>();
-	private _queuedAutonomousContinuationSnapshots = new WeakMap<AgentMessage, AutonomousRuntimeSnapshot>();
-	private _pendingThresholdCompactionAutonomousMessages: AgentMessage[] = [];
-	private _queuedGoalThresholdContinuation: AgentMessage | undefined;
+	private _postCompactionContinuations: ThresholdAutonomousContinuation[] = [];
+	private _queuedAutonomousThresholdContinuations = new WeakMap<AssistantMessage, ThresholdAutonomousContinuation>();
+	private _pendingThresholdCompactionAutonomousContinuations: ThresholdAutonomousContinuation[] = [];
+	private _queuedGoalThresholdContinuation: ThresholdGoalContinuation | undefined;
 	private _pendingAutoRefineReview: { reason: AutoRefineReason; review: AutoRefineReview } | undefined;
 	private _autoRefineBranchVersion = 0;
 	private _autoRefineReviewAbort?: AbortController;
@@ -1246,8 +1454,467 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		this._rlmParentAdmission = config.rlmChildAdmission;
+		this._rlmParentAdmission?.bind(this);
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this._invocationOutputLimits = {
+			...(config.invocationOutputLimits ?? config.settingsManager.getInvocationOutputLimits()),
+		};
+		if (
+			this._invocationOutputLimits &&
+			(!Number.isSafeInteger(this._invocationOutputLimits.maxMessages) ||
+				this._invocationOutputLimits.maxMessages < 1 ||
+				!Number.isSafeInteger(this._invocationOutputLimits.maxSourceBytes) ||
+				this._invocationOutputLimits.maxSourceBytes < 1)
+		)
+			throw new Error("Invalid invocation output limits");
+		this.agent.bindOutputOwner(() => {
+			this._invocationOutputRefused = false;
+			if (!this.sessionManager.supportsCapturedHistoryReads()) return undefined;
+			let registeredUpdate: ((message: AgentMessage) => void) | undefined;
+			return {
+				limits: { ...this._invocationOutputLimits },
+				bindUpdates: (refresh) => {
+					const update = (message: AgentMessage) => {
+						if (!refresh(message)) this._invocationOutputRefused = true;
+					};
+					registeredUpdate = update;
+					this._invocationOutputUpdateTail = undefined;
+					this._refreshInvocationOutput = update;
+					return () => {
+						if (this._refreshInvocationOutput === update) this._refreshInvocationOutput = undefined;
+					};
+				},
+				settleUpdates: async () => {
+					// One fixed accepted boundary; do not wait for future child lifetimes or a later event tail.
+					const lateUpdate = this._invocationOutputUpdateTail;
+					this._invocationOutputUpdateTail = undefined;
+					const childWrites = [...this._childUsageWrites];
+					if (this._refreshInvocationOutput === registeredUpdate) this._refreshInvocationOutput = undefined;
+					const settled = await Promise.allSettled([...(lateUpdate ? [lateUpdate] : []), ...childWrites]);
+					const errors = settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+					if (errors.length === 1) throw errors[0];
+					if (errors.length > 1) throw new AggregateError(errors, "Accepted invocation output updates failed");
+				},
+				snapshot: (message, maxSourceBytes) => {
+					try {
+						const json = stringifyBoundedJson(message, maxSourceBytes);
+						return { message: JSON.parse(json) as AgentMessage, sourceBytes: Buffer.byteLength(json) };
+					} catch (error) {
+						if (error instanceof Error && error.message === "JSON byte limit exceeded") return undefined;
+						throw error;
+					}
+				},
+			};
+		});
+		this.agent.bindInitializationOwner(() => this.initialize());
+		this._initialContextMode = config.contextMode ?? config.settingsManager.getContextMode();
+		if (this._initialContextMode !== "on" && this._initialContextMode !== "off")
+			throw new Error("context.mode must be on or off");
+		this._contextMode = this._initialContextMode;
+		this._contextEpochsEnabled = config.requestTokenBudget !== undefined;
+		const contextEpochsEnabled = this._contextEpochsEnabled;
+		this.agent.bindContextOwner(async () => {
+			await this.initialize();
+			await this._goalResumeOperation;
+			await this._waitForAgentEventsBeforeContext();
+			await this._waitForChildUsageWrites();
+			await this.sessionManager.flushNow();
+			// In-memory sessions have no canonical archive. This is an explicit mode, not an index-error fallback.
+			if (!this.sessionManager.isPersisted()) {
+				if (!this._compactionSetupFailure) return;
+				const rebuilt = await readSessionBootstrap(
+					this.sessionManager,
+					this.settingsManager.getCanonicalContextLimits(),
+				);
+				this._compactionSetupFailure = undefined;
+				return { messages: rebuilt.context.messages, adoptMessages: true };
+			}
+			const limits = this.settingsManager.getCanonicalContextLimits();
+			const outcomes = structuredClone(this._unpersistedOutcomes);
+			if (
+				this._contextOmissions?.sessionId !== this.sessionId ||
+				this._contextOmissions?.sessionFile !== this.sessionFile
+			)
+				this._contextOmissions = undefined;
+			const controls = this._contextOmissions;
+			const omitted = new Set(controls?.ids);
+			const epochManager = this.sessionManager;
+			const resource = this._captureKernelResource();
+			const compaction = epochManager.bindCompactionSink({
+				maxEntries: limits.maxMessages,
+				maxSourceBytes: limits.maxSourceBytes,
+			});
+			const captured = this.requests.capture(compaction);
+			try {
+				const messages = await captured.readHistory(async (view) => {
+					const sameSource =
+						controls?.sessionId === view.source.sessionId && controls?.sessionFile === view.source.sessionFile;
+					const result = await this._contextCompiler.compile(
+						view,
+						limits,
+						sameSource ? omitted : undefined,
+						{},
+						resource,
+						this._initialContextMode,
+						contextEpochsEnabled,
+					);
+					if (sameSource && this._contextOmissions === controls) {
+						// Only prune this captured set. A newer control or source switch must survive this read.
+						for (const id of omitted) if (!this._contextCompiler.hasActiveEntry(id)) controls.ids.delete(id);
+					}
+					return result;
+				});
+				// Failed persistence outcomes are transient UI/request facts, never canonical history authority.
+				this._mergeUnpersistedOutcomes(messages, outcomes);
+				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
+				const epochContext = getCanonicalEpochContext(messages);
+				if (epochContext) this._contextMode = epochContext.mode;
+				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint);
+				const skillPolicy = nativeSkills ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined;
+				if (this._baseSystemPromptOptions.nativeSkillSelection !== skillPolicy) {
+					const previousBase = this._baseSystemPrompt;
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), nativeSkills);
+					this.agent.state.systemPrompt = this._refreshExtensionSystemPrompt(
+						this.agent.state.systemPrompt,
+						previousBase,
+					);
+				}
+				if (
+					epochContext?.resourceRevision !== undefined &&
+					getCanonicalViewUnits(messages)?.length !== messages.length
+				)
+					throw new Error("Current resource view requires tracked canonical context");
+				if (epochContext?.checkpoint && getCanonicalViewUnits(messages)?.length !== messages.length)
+					throw new Error("Committed context epoch cannot admit untracked transient messages");
+				if (
+					epochContext &&
+					(contextEpochsEnabled || epochContext.checkpoint) &&
+					getCanonicalViewUnits(messages)?.length === messages.length
+				) {
+					let committed = epochContext.checkpoint;
+					let committedEntry = epochContext.checkpointEntry;
+					const fixed = epochContext.mode === "off" || (committed?.policyOnly === true && !contextEpochsEnabled);
+					let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
+					const nativeTail = messages.some(
+						(message) =>
+							message.role === "toolResult" ||
+							(message.role === "assistant" &&
+								message.content.some((part) => part.type !== "text" || part.textSignature !== undefined)),
+					);
+					let accepted: string | undefined;
+					let acceptedBody: string | undefined;
+					let acceptedReplayContract: ContextReplayContract | undefined;
+					let acknowledged: CompactionCommit | undefined;
+					const commitFailure = (cause: unknown) => {
+						if (!acknowledged) return cause;
+						const error = new CompactionCommittedError(acknowledged.entryId, acknowledged.result, cause);
+						this._compactionSetupFailure = error;
+						return error;
+					};
+					captured.bindRequestViewBoundary(
+						messages,
+						async (candidate) => {
+							if (fixed) throw new Error("Context selection is disabled while context.mode is off");
+							if (
+								epochContext.toolContinuations?.length &&
+								(!candidate.publicMessages ||
+									JSON.stringify(getCanonicalEpochContext(candidate.publicMessages)?.toolContinuations) !==
+										JSON.stringify(epochContext.toolContinuations) ||
+									candidate.projection.pendingPublicMessageGroups?.length)
+							)
+								throw new Error("Tool continuation requires its exact public candidate before epoch ACK");
+							assertResourceCurrent(resource);
+							const representation = contextEpochRepresentation(
+								candidate.request,
+								candidate.assessment,
+								limits.maxSourceBytes,
+							);
+							const replayContract =
+								"replayContract" in candidate.projection &&
+								candidate.projection.replayContract === "message-groups"
+									? "message-groups"
+									: "complete-context";
+							const publicWindow =
+								"publicWindow" in candidate.projection && candidate.projection.publicWindow === true;
+							const selection = JSON.stringify([
+								representation,
+								replayContract,
+								publicWindow,
+								candidate.publicMessages !== undefined,
+								candidate.selectedUnitIds,
+							]);
+							if (accepted !== undefined) {
+								if (accepted !== selection)
+									throw new Error("Captured epoch request selection changed after acceptance");
+								return committedEntry;
+							}
+							// Stable request settings do not cover recovery added after the committed source.
+							const recoverySourceSequence = committed?.source.sourceSequence ?? -1;
+							const hasUncoveredRecovery = getCanonicalViewUnits(messages)!.some((unit, index) => {
+								const reference = epochContext.references[index];
+								return (
+									unit.kind === "recovery" && (!reference || reference.ref.sequence > recoverySourceSequence)
+								);
+							});
+							if (
+								!candidate.publicMessages &&
+								!hasUncoveredRecovery &&
+								committed?.representation === representation &&
+								committed.replayContract === replayContract &&
+								(committed.publicWindow === true) === publicWindow &&
+								committed.taskFrame?.material === epochContext.taskFrame?.material &&
+								committed.resourceRevision === epochContext.resourceRevision &&
+								sameSelectedSkills(committed.selectedSkills, epochContext.selectedSkills) &&
+								candidate.selectedUnitIds.length === messages.length
+							) {
+								accepted = selection;
+								acceptedBody = candidate.request.body;
+								return committedEntry;
+							}
+							const prepared = prepareCanonicalEpoch(
+								candidate.publicMessages ?? messages,
+								candidate.selectedUnitIds,
+								representation,
+								limits.maxSourceBytes,
+								replayContract,
+								publicWindow,
+							);
+							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
+								throw new Error("Context epoch candidate does not match its captured source");
+							const tokensBefore = candidate.originalAssessment.estimatedInputTokens;
+							const result: CompactionResult = {
+								summary: "",
+								firstKeptEntryId: prepared.checkpoint.literalTailId,
+								tokensBefore,
+							};
+							// This is the sole commit. A resolved append is already canonical even if adoption fails.
+							const entryId = await compaction[appendContextEpoch](prepared.checkpoint, tokensBefore);
+							acknowledged = { entryId, result };
+							try {
+								assertResourceCurrent(resource);
+								if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+									throw new Error("Context epoch source changed before adoption");
+								this.agent.state.messages = prepared.messages;
+								committed = prepared.checkpoint;
+								committedEntry = { sessionId: epochContext.source.sessionId, entryId };
+								accepted = selection;
+								acceptedBody = candidate.request.body;
+								return committedEntry;
+							} catch (cause) {
+								throw commitFailure(cause);
+							}
+						},
+						(request, assessment) => {
+							try {
+								assertResourceCurrent(resource);
+								if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
+									throw new Error("Selected skill versions require a committed epoch boundary");
+								if (fixed) {
+									if (
+										(requestContract ||
+											committed?.pendingRequestContract ||
+											nativeTail ||
+											acceptedBody !== undefined) &&
+										(acceptedBody === undefined || request.body !== acceptedBody)
+									)
+										throw new Error("Fixed context requires a compatible final provider projection");
+									if (requestContract) {
+										if (!acceptedReplayContract)
+											throw new Error("Fixed context has no accepted replay projection");
+										assertContextRequestContract(requestContract, request, acceptedReplayContract);
+									}
+									return;
+								}
+								if (!committed) return;
+								if (acceptedBody === undefined || request.body !== acceptedBody)
+									throw new Error("Committed context epoch requires a compatible final provider projection");
+								if (
+									contextEpochRepresentation(request, assessment, limits.maxSourceBytes) !==
+									committed.representation
+								)
+									throw new Error("Context epoch representation changed without a committed boundary");
+								if (committed.resourceRevision !== epochContext.resourceRevision)
+									throw new Error("Context epoch resource revision requires a committed boundary");
+								if (committed.taskFrame?.material !== epochContext.taskFrame?.material)
+									throw new Error("Context epoch task revision requires a committed boundary");
+							} catch (cause) {
+								throw commitFailure(cause);
+							}
+						},
+						fixed
+							? async (request, projection) => {
+									try {
+										assertResourceCurrent(resource);
+										if (!requestContract && nativeTail)
+											throw new Error("Retained native context has no accepted request contract");
+										const replayContract = projection.replayContract ?? "complete-context";
+										const skillChange = !sameSelectedSkills(
+											committed?.selectedSkills,
+											epochContext.selectedSkills,
+										);
+										if (
+											skillChange &&
+											committed?.selectedSkills?.some(
+												(skill) =>
+													!sameSelectedSkills(
+														[skill],
+														epochContext.selectedSkills?.filter((item) => item.name === skill.name),
+													),
+											)
+										)
+											throw new Error("Fixed context cannot replace a selected skill version");
+										if ((!requestContract && committed?.pendingRequestContract) || skillChange) {
+											// Existing policy-only ACK: bind first selections, without changing fixed views or mode.
+											const base =
+												committed ??
+												prepareContextModeEpoch(messages, epochContext.mode, limits.maxSourceBytes)
+													.checkpoint;
+											if (base.version !== 5)
+												throw new Error("Fixed skill selection requires its policy checkpoint");
+											const nextContract =
+												requestContract ?? contextRequestContract(request, replayContract);
+											const checkpoint = snapshotContextEpoch(
+												{
+													...base,
+													renderer: epochContext.selectedSkills?.length
+														? CONTEXT_SKILL_EPOCH_RENDERER
+														: base.renderer,
+													...(epochContext.selectedSkills?.length
+														? { selectedSkills: epochContext.selectedSkills }
+														: {}),
+													source: epochContext.source,
+													requestContract: nextContract,
+													pendingRequestContract: undefined,
+												},
+												limits.maxSourceBytes,
+											);
+											const entryId = await compaction[appendContextEpoch](checkpoint, null);
+											acknowledged = {
+												entryId,
+												result: {
+													summary: "",
+													firstKeptEntryId: checkpoint.literalTailId,
+													tokensBefore: null,
+												},
+											};
+											committed = checkpoint;
+											committedEntry = { sessionId: epochContext.source.sessionId, entryId };
+											requestContract = nextContract;
+											assertResourceCurrent(resource);
+											if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+												throw new Error("Context contract source changed before acceptance");
+										}
+										if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
+											throw new Error("Fixed context selected skill versions changed after acceptance");
+										if (requestContract)
+											assertContextRequestContract(requestContract, request, replayContract);
+										if (acceptedBody !== undefined && request.body !== acceptedBody)
+											throw new Error("Fixed context changed after acceptance");
+										acceptedBody = request.body;
+										acceptedReplayContract = replayContract;
+										return committedEntry;
+									} catch (cause) {
+										throw commitFailure(cause);
+									}
+								}
+							: undefined,
+					);
+				}
+				this._compactionSetupFailure = undefined;
+				return { messages, adoptMessages: true, streamContext: captured, release: () => captured.dispose() };
+			} catch (error) {
+				try {
+					await captured.dispose();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "Canonical context build and release failed");
+				}
+				throw error;
+			}
+		});
+		this.agent.bindRequestPreparationRecoveryOwner(async (error, signal) => {
+			if (
+				!(error instanceof PublicContextBudgetError) ||
+				!this.settingsManager.getCompactionSettings().enabled ||
+				!this._contextOptimizationAllowed()
+			)
+				return false;
+			const invocation = this._invocationCompactionOwner;
+			if (!invocation || invocation.signal !== signal) return false;
+			const owner = { ...invocation, pumpEpoch: this._sessionInputPumpEpoch };
+			if (
+				!this._isCompactionOwnerCurrent(owner) ||
+				!error.source.persistent ||
+				error.source.sessionId !== owner.sessionId ||
+				error.source.sessionFile !== owner.sessionFile ||
+				error.source.leafId !== owner.manager.getLeafId()
+			)
+				return false;
+			// The loop released its unsent inference and captured projection before this handoff.
+			// Continue in-place only after the real summary ACK and canonical owner adoption.
+			return this._runAutoCompaction("threshold", false, owner, true);
+		});
+		this.agent.bindProviderFailureRecoveryOwner({
+			recover: (message, signal) => this._handleRetryableError(message, signal),
+			settle: () => {
+				// A request-budget rejection can bypass agent_end. Always release its retry owner.
+				if (this._retryAttempt > 0) {
+					this._emit({
+						type: "auto_retry_end",
+						success: false,
+						attempt: this._retryAttempt,
+						finalError: this.agent.state.errorMessage,
+					});
+				}
+				this._retryAttempt = 0;
+				this._retryAuthFailureSources = [];
+				this._resolveRetry();
+			},
+		});
+		this.agent.bindToolExecutionOwner({
+			onToolInvocationStarting: async (invocation, _signal, tool, execute, assistantMessage) => {
+				// Capture this invocation's original source generation before either wait.
+				const manager = this.sessionManager;
+				const sessionId = manager.getSessionId();
+				const sessionFile = manager.getSessionFile();
+				const writer = manager[bindNativeEntryWriter]();
+				const selected = this._toolRegistry.get(tool.name) === tool && tool.execute === execute;
+				const qualified = selected && manager.isPersisted();
+				const skillOwner = qualified
+					? { manager, sessionId, sessionFile, writer: writer.captureSkillSelection() }
+					: undefined;
+				await this.initialize();
+				await this._agentEventQueue;
+				if (this.sessionManager !== manager)
+					throw new Error("Tool execution owner changed before intent admission");
+				const assistant = assistantMessage ? this._assistantEntryIds.get(assistantMessage) : undefined;
+				if (qualified && (!assistant || assistant.sessionId !== sessionId || assistant.sessionFile !== sessionFile))
+					throw new Error("Tool intent does not match its original native assistant source");
+				const intentWrite = writer.captureToolInvocation(qualified ? assistant : undefined);
+				const exchangeWrite = qualified ? writer.captureToolExchange(invocation.executionId) : undefined;
+				// Recovery qualification still requires the selected genuine recovery producer.
+				const recoveryWrite =
+					this._nativeRecoveryTools.get(tool) === execute
+						? writer.captureRecoveryExchange(invocation.executionId)
+						: undefined;
+				await intentWrite(invocation);
+				if (!recoveryWrite && !exchangeWrite) return;
+				const producer = { used: false, skillOwner };
+				const owner: BoundToolExecution = {
+					run: (run) => (recoveryWrite ? this._nativeRecoveryProducer.run(producer, run) : run()),
+					finalize: async (exchange) => {
+						if (producer.used && recoveryWrite) await recoveryWrite(exchange);
+						else if (exchangeWrite) await exchangeWrite(exchange);
+						else await manager.appendToolExchange(exchange);
+					},
+				};
+				return owner;
+			},
+			onToolExchangeFinalized: async (exchange) => {
+				await this.sessionManager.appendToolExchange(exchange);
+			},
+		});
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
 		this._scopedModels = config.scopedModels ?? [];
@@ -1270,12 +1937,17 @@ export class AgentSession {
 		const headerRlmDepth = this.sessionManager.getHeader()?.rlmDepth;
 		this._rlmDepth =
 			config.rlmDepth ??
-			(isNonNegativeInteger(headerRlmDepth) ? headerRlmDepth : parseDepth(process.env.RLM_DEPTH, 0, "RLM_DEPTH"));
+			(isNonNegativeInteger(headerRlmDepth)
+				? headerRlmDepth
+				: parseDepth(process.env.BASE_CONTEXT_RLM_DEPTH, 0, "BASE_CONTEXT_RLM_DEPTH"));
 		this._configuredRlmMaxDepth = config.rlmMaxDepth;
 		if (this._configuredRlmMaxDepth !== undefined && !isNonNegativeInteger(this._configuredRlmMaxDepth)) {
 			throw new Error("rlmMaxDepth must be a non-negative integer");
 		}
-		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
+		// Persistent controls are restored before constructing the runtime in initialize().
+		const resolvedRlmMaxDepth = this.sessionManager.isPersisted()
+			? { maxDepth: 2, source: "default" as const }
+			: this._resolveRlmMaxDepth(this._loadPersistedRlmMaxDepthState());
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
@@ -1293,29 +1965,41 @@ export class AgentSession {
 			parentSessionId: config.semanticParentSessionId,
 			spawnedByRequestId: config.semanticSpawnedByRequestId,
 		});
-		this.agent.streamFn = wrapStreamFnWithSemanticEdges(this.agent.streamFn, this._semanticEdges);
+		this.requests = new InferenceCoordinator(
+			() => this.sessionManager.bindRequestSink(),
+			() => ({ parentSessionId: config.semanticParentSessionId }),
+			config.requestTokenBudget,
+		);
+		this.requests.setProviderRecoveryPolicy(() => ({
+			enabled: this.settingsManager.getRetryEnabled(),
+			baseDelayMs: this.settingsManager.getRetrySettings().baseDelayMs,
+			maxRetryDelayMs: this.settingsManager.getProviderRetrySettings().maxRetryDelayMs || 60_000,
+		}));
+		this.runtimeServices = { requests: this.requests };
+		this.requests.onActivityChange(() => this._notifySessionInputCheckpointChange());
+		this.agent.bindStreamOwner((streamFn) =>
+			wrapStreamFnWithSemanticEdges(
+				this.requests.bindStream(streamFn, {
+					purpose: this._rlmDepth > 0 ? "child" : "main",
+					parentOperationId: config.semanticSpawnedByRequestId,
+				}),
+				this._semanticEdges,
+			),
+		);
 		// A resumed child may have replied before this process started; false would
 		// claim knowledge that is not present in the session transcript.
 		this._repliedToParentSinceTask =
-			this._rlmDepth > 0 && this.sessionManager.getBranch().some((entry) => entry.type === "message")
+			this._rlmDepth > 0 &&
+			(this.sessionManager.isPersisted() ||
+				this.sessionManager.getBranch().some((entry) => entry.type === "message"))
 				? undefined
 				: false;
 		this._subagentRuntimeHost = config.subagentRuntimeHost;
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
 		});
-		this._goalState = this._loadPersistedGoalState();
-		// Seed initial goal from CLI --goal flag, but only for top-level sessions
-		// and only when the branch contains only bootstrap entry types (model_change,
-		// thinking_level_change, service_tier_change) and no persisted
-		// thread_goal_state. This prevents reseeding after clear/complete/error
-		// or restart/rehydration of a session that already has messages or a goal.
-		if (this._rlmDepth === 0 && config.initialGoal && this._isBranchSeedable()) {
-			this._goalState = this._startGoal(config.initialGoal.objective, config.initialGoal.tokenBudget);
-			// Goal context is the model's only source of goal visibility; action
-			// admission is unavailable mid-construction, so ride the next turn.
-			this._pendingNextTurnMessages.push(createGoalContextMessage(this._goalState, "continuation"));
-		}
+		this._goalState = this.sessionManager.isPersisted() ? emptyGoalState() : this._loadPersistedGoalState();
+		this._initialGoal = config.initialGoal ? { ...config.initialGoal } : undefined;
 		this._restoreLateIpythonSentAgentMessages();
 		if (this._goalState.status === "active") {
 			this._goalAccountingStartedAt = Date.now();
@@ -1326,10 +2010,186 @@ export class AgentSession {
 		this._installAgentTurnHook();
 		this._installAgentContinuationHook();
 
-		this._buildRuntime({
-			activeToolNames: this._initialActiveToolNames,
-			includeAllExtensionTools: true,
+		if (!this.sessionManager.isPersisted()) {
+			this._buildRuntime({
+				activeToolNames: this._initialActiveToolNames,
+				includeAllExtensionTools: true,
+			});
+		}
+	}
+
+	private async _waitForChildUsageWrites(): Promise<void> {
+		while (this._childUsageWrites.size > 0) await Promise.all([...this._childUsageWrites]);
+	}
+
+	/** Finish native bootstrap persistence before publishing this session. */
+	initialize(): Promise<void> {
+		if (this._disposing || this._disposed)
+			return Promise.reject(new Error("Cannot initialize a disposing or disposed session."));
+		this._initialization ??= this._initialize();
+		return this._initialization;
+	}
+
+	private async _initialize(): Promise<void> {
+		this._rlmParentAdmission?.assertCurrent();
+		this._contextMode = await this._readContextMode();
+		const freshContextContract = this.sessionManager.canSeedContextModeContract();
+		let goalSeedable = false;
+		if (this.sessionManager.isPersisted()) {
+			const bootstrap = await this._readRuntimeBootstrap();
+			this._goalState = bootstrap.goalState;
+			this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
+			goalSeedable = bootstrap.goalSeedable;
+			const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
+			this._rlmMaxDepth = resolved.maxDepth;
+			this._rlmMaxDepthSource = resolved.source;
+			this._repliedToParentSinceTask = this._rlmDepth > 0 && bootstrap.hasBranchMessage ? undefined : false;
+			this._buildRuntime({
+				activeToolNames: this._initialActiveToolNames,
+				includeAllExtensionTools: true,
+			});
+			if (
+				this._goalState.status === "active" &&
+				this._includeGoals &&
+				!this.getActiveToolNames().includes("ipython")
+			) {
+				this.setActiveToolsByName([...this.getActiveToolNames(), "ipython"]);
+				this._prewarmIpythonIfNeeded();
+			}
+		} else if (this._rlmDepth === 0 && this._initialGoal) {
+			goalSeedable = this._isBranchSeedable();
+		}
+		if (this._rlmDepth === 0 && this._initialGoal && goalSeedable) {
+			const goal = await this._startGoal(this._initialGoal.objective, this._initialGoal.tokenBudget);
+			this._pendingNextTurnMessages.push(createGoalContextMessage(goal, "continuation"));
+			this._ensureGoalRuntimeActive();
+		}
+		await this.sessionManager.flushNow();
+		if (this._contextMode === "off") await this._writeContextMode("off", freshContextContract);
+	}
+
+	/** Accepted canonical policy. Settings are only the creation default. */
+	get contextMode(): ContextMode {
+		return this._contextMode;
+	}
+
+	private _contextOptimizationAllowed(): boolean {
+		return this._contextMode === "on" && this._pendingContextModeChanges === 0;
+	}
+
+	private _assertContextOptimizationAllowed(): void {
+		if (!this._contextOptimizationAllowed())
+			throw new Error("Context optimization is disabled; explicitly re-enable context.mode first");
+	}
+
+	private _retainContextOptimization<T>(operation: Promise<T>): Promise<T> {
+		const retained = operation.then(() => undefined);
+		this._autoRefineOperations.add(retained);
+		void retained.finally(() => this._autoRefineOperations.delete(retained)).catch(() => undefined);
+		return operation;
+	}
+
+	private _readContextMode(): Promise<ContextMode> {
+		if (!this.sessionManager.isPersisted()) return Promise.resolve(this._initialContextMode);
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return this.sessionManager.readBranchHistory((history) =>
+			readCanonicalContextMode(history.branchContext, maxSourceBytes, this._initialContextMode),
+		);
+	}
+
+	/** External session control; never await the current action's own pump or tool turn. */
+	async setContextMode(mode: ContextMode): Promise<void> {
+		if (mode !== "on" && mode !== "off") throw new Error("context.mode must be on or off");
+		if (this._sessionActionCommitContext.getStore() !== undefined)
+			throw new Error("Context mode changes require external session control");
+		this._pendingContextModeChanges++;
+		try {
+			await this.initialize();
+			while (true) {
+				await this._drainAcceptedRefinement();
+				await Promise.all([this._compactionOperation, this._branchSummaryOperation]);
+				await this.waitForIdle();
+				const fence = await this._acquireSessionActionCommitFence();
+				try {
+					if (
+						this.isStreaming ||
+						this.unfinishedActionCount !== 0 ||
+						this._compactionOperation ||
+						this._branchSummaryOperation ||
+						this._refineInFlight ||
+						this._refinePlanInFlight ||
+						this._serializedPlanInFlight
+					)
+						continue;
+					await this._sessionActionCommitContext.run(fence.owner, () => this._writeContextMode(mode));
+					return;
+				} finally {
+					fence.release();
+				}
+			}
+		} finally {
+			// Restore only the reversible barrier. EOF/disposal remains permanently closed.
+			this._pendingContextModeChanges--;
+		}
+	}
+
+	/** Called during unpublished initialization or while holding the existing session action fence. */
+	private async _writeContextMode(mode: ContextMode, freshContextContract = false): Promise<void> {
+		const manager = this.sessionManager;
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		const resource = this._captureKernelResource();
+		const compaction = manager.bindCompactionSink({
+			maxEntries: limits.maxMessages,
+			maxSourceBytes: limits.maxSourceBytes,
 		});
+		const captured = this.requests.capture(compaction);
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
+		let primaryCause: unknown;
+		try {
+			const messages = await captured.readHistory((view) =>
+				this._contextCompiler.compile(view, limits, undefined, {}, resource, this._initialContextMode),
+			);
+			const context = getCanonicalEpochContext(messages)!;
+			if (
+				contextEpochMode(context.checkpoint, this._initialContextMode) === mode &&
+				(context.checkpoint !== undefined || mode === "on")
+			) {
+				this._contextMode = mode;
+			} else {
+				const prepared = prepareContextModeEpoch(messages, mode, limits.maxSourceBytes, freshContextContract);
+				assertResourceCurrent(resource);
+				const entryId = await compaction[appendContextEpoch](prepared.checkpoint, null);
+				committed = {
+					entryId,
+					result: { summary: "", firstKeptEntryId: prepared.checkpoint.literalTailId, tokensBefore: null },
+				};
+				// ACK is authoritative even if later setup or release fails.
+				this._contextMode = mode;
+				if (this.sessionManager !== manager || manager.getLeafId() !== entryId)
+					throw new Error("Context mode source changed before adoption");
+				assertResourceCurrent(resource);
+				this.agent.state.messages = prepared.messages;
+			}
+		} catch (cause) {
+			primaryCause = cause;
+			failure = committed ? new CompactionCommittedError(committed.entryId, committed.result, cause) : cause;
+			if (committed) this._compactionSetupFailure = failure as CompactionCommittedError;
+		}
+		try {
+			await captured.dispose();
+		} catch (cause) {
+			if (failure !== undefined) {
+				if (cause !== primaryCause)
+					failure = new AggregateError([failure, cause], "Context mode transition and release failed", {
+						cause: failure,
+					});
+			} else {
+				failure = committed ? new CompactionCommittedError(committed.entryId, committed.result, cause) : cause;
+				if (committed) this._compactionSetupFailure = failure as CompactionCommittedError;
+			}
+		}
+		if (failure !== undefined) throw failure;
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -1533,11 +2393,13 @@ export class AgentSession {
 
 	private _installAgentContinuationHook(): void {
 		this.agent.getContinuationMessages = (context, signal) => this._getContinuationMessages(context, signal);
+		this.agent.getContinuationOutcome = (context, signal) => this._getContinuationOutcome(context, signal);
 	}
 
 	private _installAgentTurnHook(): void {
 		this.agent.shouldStopBeforeTurn = () => this._shouldStopBeforeTurn();
 		this.agent.shouldStopAfterTurn = (context) => this._shouldStopAfterTurn(context);
+		this.agent.getTurnOutcome = (context, signal) => this._getTurnOutcome(context, signal);
 	}
 
 	private _emit(event: AgentSessionEvent): void {
@@ -1560,6 +2422,8 @@ export class AgentSession {
 
 	private _restoreLateIpythonSentAgentMessages(): void {
 		this._lateIpythonSentAgentMessages.clear();
+		// Native restored outputs come from the compiler; pending outputs use captured relation reads.
+		if (this.sessionManager.supportsCapturedHistoryReads()) return;
 		for (const entry of this.sessionManager.getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
 				continue;
@@ -1595,16 +2459,64 @@ export class AgentSession {
 		}
 	}
 
+	private async _applyCanonicalIpythonSentAgentMessages(message: AgentMessage): Promise<void> {
+		if (message.role !== "toolResult" || message.toolName !== "ipython") return;
+		const toolCallId = message.toolCallId;
+		const refreshOutput = this._refreshInvocationOutput;
+		const limits = { ...this.settingsManager.getCanonicalContextLimits() };
+		const sentMessages = await this.sessionManager.readSourceHistory(async (history) => {
+			const messages: KernelSentAgentMessage[] = [];
+			let cursor: IpythonSentMessagesCursor | undefined;
+			let sourceBytes = 0;
+			do {
+				const page = await history.ipythonSentMessages(toolCallId, { cursor });
+				for (const ref of page.refs) {
+					sourceBytes += ref.locator.length;
+					if (sourceBytes > limits.maxSourceBytes || messages.length >= limits.maxMessages)
+						throw new Error("IPython sent-message history budget exceeded");
+					const hydrated = await history.hydrateEntry(ref.entryId, limits.maxSourceBytes);
+					const sent =
+						hydrated?.entry.type === "custom"
+							? parsePersistedIpythonSentAgentMessage(hydrated.entry.data)
+							: undefined;
+					if (!sent || sent.toolCallId !== toolCallId)
+						throw new Error("IPython sent-message source is unavailable");
+					messages.push(sent.message);
+				}
+				cursor = page.nextCursor ?? undefined;
+			} while (cursor);
+			return messages;
+		});
+		for (const sent of sentMessages) appendSentAgentMessageToToolResult(message, toolCallId, sent);
+		refreshOutput?.(message);
+	}
+
 	private _recordLateIpythonSentAgentMessage(toolCallId: string, message: KernelSentAgentMessage): void {
-		const record = () => {
-			if (this._disposed || !this._rememberLateIpythonSentAgentMessage(toolCallId, message)) {
+		const refreshOutput = this._refreshInvocationOutput;
+		const record = async () => {
+			if (this._disposed) return;
+			if (this.sessionManager.supportsCapturedHistoryReads()) {
+				const sessionId = this.sessionId;
+				const sessionFile = this.sessionFile;
+				const captured = structuredClone(message);
+				const result = await this.sessionManager.appendIpythonSentAgentMessage({ toolCallId, message: captured });
+				if (!result.appended || sessionId !== this.sessionId || sessionFile !== this.sessionFile) return;
+				for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+					if (appendSentAgentMessageToToolResult(this.agent.state.messages[index], toolCallId, captured)) {
+						refreshOutput?.(this.agent.state.messages[index]);
+						break;
+					}
+				}
+				this._emit({ type: "ipython_sent_agent_message", toolCallId, message: captured });
 				return;
 			}
-			this.sessionManager.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, { toolCallId, message });
+			if (!this._rememberLateIpythonSentAgentMessage(toolCallId, message)) return;
+			await this.sessionManager.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, { toolCallId, message });
 			this._emit({ type: "ipython_sent_agent_message", toolCallId, message });
 		};
 		this._agentEventQueue = this._agentEventQueue.then(record, record);
-		this._agentEventQueue.catch(() => {});
+		if (refreshOutput) this._invocationOutputUpdateTail = this._agentEventQueue;
+		void this._agentEventQueue.catch((error) => this._surfaceSessionInputError(error));
 	}
 
 	private _emitGoalUpdate(): void {
@@ -1626,11 +2538,10 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _resolveRlmMaxDepth(): {
+	private _resolveRlmMaxDepth(persisted: PersistedRlmMaxDepthState | undefined): {
 		maxDepth: number;
 		source: RlmMaxDepthSource;
 	} {
-		const persisted = this._loadPersistedRlmMaxDepthState();
 		if (persisted) {
 			return { maxDepth: persisted.maxDepth, source: "chat" };
 		}
@@ -1641,11 +2552,60 @@ export class AgentSession {
 		if (global !== undefined && isNonNegativeInteger(global)) {
 			return { maxDepth: global, source: "global" };
 		}
-		const env = process.env.RLM_MAX_DEPTH;
+		const env = process.env.BASE_CONTEXT_RLM_MAX_DEPTH;
 		if (env !== undefined && env !== "") {
-			return { maxDepth: parseDepth(env, 1, "RLM_MAX_DEPTH"), source: "env" };
+			return { maxDepth: parseDepth(env, 1, "BASE_CONTEXT_RLM_MAX_DEPTH"), source: "env" };
 		}
 		return { maxDepth: 2, source: "default" };
+	}
+
+	private async _readRuntimeBootstrap(): Promise<{
+		goalState: GoalState;
+		goalSeedable: boolean;
+		rlmMaxDepth: PersistedRlmMaxDepthState | undefined;
+		hasBranchMessage: boolean;
+	}> {
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return this.sessionManager.readBranchHistory(async (view) => {
+			const bootstrap = await view.branchBootstrap();
+			let remaining = maxSourceBytes;
+			let goalState = emptyGoalState();
+			if (bootstrap.goalState) {
+				if (bootstrap.goalState.locator.length > remaining)
+					throw new Error("Runtime bootstrap source byte budget exceeded");
+				const hydrated = await view.hydrateEntry(bootstrap.goalState.id, remaining);
+				remaining -= bootstrap.goalState.locator.length;
+				if (
+					!hydrated ||
+					hydrated.source.retention === "retained-import" ||
+					hydrated.entry.type !== "custom" ||
+					hydrated.entry.customType !== GOAL_STATE_CUSTOM_TYPE ||
+					!isPersistedGoalState(hydrated.entry.data)
+				)
+					throw new Error("Bootstrap goal source is unavailable or ineligible");
+				goalState = normalizeGoalState(hydrated.entry.data);
+			}
+			let rlmMaxDepth: PersistedRlmMaxDepthState | undefined;
+			if (bootstrap.rlmMaxDepth) {
+				if (bootstrap.rlmMaxDepth.locator.length > remaining)
+					throw new Error("Runtime bootstrap source byte budget exceeded");
+				const hydrated = await view.hydrateEntry(bootstrap.rlmMaxDepth.id, remaining);
+				if (
+					!hydrated ||
+					hydrated.entry.type !== "custom" ||
+					hydrated.entry.customType !== RLM_MAX_DEPTH_STATE_CUSTOM_TYPE ||
+					!isPersistedRlmMaxDepthState(hydrated.entry.data)
+				)
+					throw new Error("Bootstrap RLM depth source is unavailable or ineligible");
+				rlmMaxDepth = hydrated.entry.data;
+			}
+			return {
+				goalState,
+				goalSeedable: bootstrap.goalSeedable,
+				rlmMaxDepth,
+				hasBranchMessage: bootstrap.hasBranchMessage,
+			};
+		});
 	}
 
 	private _loadPersistedGoalState(): GoalState {
@@ -1655,6 +2615,7 @@ export class AgentSession {
 			if (
 				entry.type === "custom" &&
 				entry.customType === GOAL_STATE_CUSTOM_TYPE &&
+				this.sessionManager.getEntryRetention(entry.id) !== "retained-import" &&
 				isPersistedGoalState(entry.data)
 			) {
 				return normalizeGoalState(entry.data);
@@ -1691,15 +2652,16 @@ export class AgentSession {
 		return true;
 	}
 
-	private _reloadGoalStateFromBranch(): void {
-		this._goalState = this._loadPersistedGoalState();
+	private async _reloadBranchRuntimeState(): Promise<void> {
+		this._contextMode = await this._readContextMode();
+		const bootstrap = this.sessionManager.isPersisted()
+			? await this._readRuntimeBootstrap()
+			: { goalState: this._loadPersistedGoalState(), rlmMaxDepth: this._loadPersistedRlmMaxDepthState() };
+		this._goalState = bootstrap.goalState;
 		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
-	}
-
-	private _reloadRlmMaxDepthFromBranch(): void {
 		const previousMaxDepth = this._rlmMaxDepth;
-		const resolved = this._resolveRlmMaxDepth();
+		const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
 		this._rlmMaxDepth = resolved.maxDepth;
 		this._rlmMaxDepthSource = resolved.source;
 		if (resolved.maxDepth !== previousMaxDepth) {
@@ -1708,29 +2670,94 @@ export class AgentSession {
 		}
 	}
 
-	private _persistGoalState(goal: GoalState): void {
-		this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
-		// Force flush so the goal state is durable on disk immediately,
-		// even before the first assistant response. This ensures idempotent
-		// restart/rehydration can detect the persisted goal.
-		this.sessionManager.flushNow();
+	private _captureGoalContinuationOwner(signal?: AbortSignal): GoalContinuationOwner {
+		const manager = this.sessionManager;
+		return {
+			manager,
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			pumpEpoch: this._sessionInputPumpEpoch,
+			goal: this._goalState,
+			goalRevision: this._goalStateRevision,
+			accountingStartedAt: this._goalAccountingStartedAt,
+			signal,
+		};
 	}
 
-	private _setGoalState(next: GoalState, options: { persist?: boolean } = {}): void {
+	private _isGoalContinuationOwnerCurrent(owner: GoalContinuationOwner): boolean {
+		return (
+			!owner.signal?.aborted &&
+			(!owner.checkpointOwner || this._isCompactionOwnerCurrent(owner.checkpointOwner)) &&
+			!this._disposed &&
+			!this._disposing &&
+			this.sessionManager === owner.manager &&
+			owner.manager.getSessionId() === owner.sessionId &&
+			owner.manager.getSessionFile() === owner.sessionFile &&
+			this._sessionInputPumpEpoch === (owner.checkpointOwner?.pumpEpoch ?? owner.pumpEpoch) &&
+			this._goalStateRevision === owner.goalRevision &&
+			this._goalState === owner.goal &&
+			this._goalAccountingStartedAt === owner.accountingStartedAt
+		);
+	}
+
+	private _assertGoalContinuationOwner(owner: GoalContinuationOwner): void {
+		if (!this._isGoalContinuationOwnerCurrent(owner)) {
+			throw new StaleGoalContinuationError("Goal continuation owner changed");
+		}
+	}
+
+	private _stoppedContinuationOutcome(signal?: AbortSignal): AgentContinuationOutcome {
+		return { kind: signal?.aborted || this._disposed || this._disposing ? "cancelled" : "finish" };
+	}
+
+	private async _persistGoalState(
+		goal: GoalState,
+		nativeGoalWrite?: CapturedNativeGoalWrite,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<void> {
+		const manager = continuationOwner?.manager ?? this.sessionManager;
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
+		if (nativeGoalWrite) await nativeGoalWrite(goal);
+		else await manager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
+		// Accepted writes stay on their source. Do not admit a flush on a replacement after the ACK.
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
+		// Force flush so the goal state is durable before the first assistant response.
+		await manager.flushNow();
+	}
+
+	private async _setGoalState(
+		next: GoalState,
+		options: {
+			persist?: boolean;
+			nativeGoalWrite?: CapturedNativeGoalWrite;
+			continuationOwner?: GoalContinuationOwner;
+		} = {},
+	): Promise<GoalState> {
+		const owner = options.continuationOwner;
+		if (owner) this._assertGoalContinuationOwner(owner);
+		// A newer goal write invalidates a continuation before that write's awaited publication.
+		this._goalStateRevision++;
+		if (owner) owner.goalRevision = this._goalStateRevision;
 		const normalized = normalizeGoalState({
 			...next,
 			updatedAt: Date.now(),
 		});
+		if (options.persist !== false) {
+			await this._persistGoalState(normalized, options.nativeGoalWrite, owner);
+		}
+		if (owner) this._assertGoalContinuationOwner(owner);
 		this._goalState = normalized;
 		if (normalized.status === "active") {
 			this._goalAccountingStartedAt ??= Date.now();
 		} else {
 			this._goalAccountingStartedAt = undefined;
 		}
-		if (options.persist !== false) {
-			this._persistGoalState(normalized);
+		if (owner) {
+			owner.goal = normalized;
+			owner.accountingStartedAt = this._goalAccountingStartedAt;
 		}
 		this._emitGoalUpdate();
+		return normalized;
 	}
 
 	private _goalWithCurrentWallClock(now = Date.now()): GoalState {
@@ -1835,7 +2862,11 @@ export class AgentSession {
 		this._emitQueueUpdate();
 	}
 
-	private _startGoal(objectiveText: string, tokenBudget: number | undefined): GoalState {
+	private async _startGoal(
+		objectiveText: string,
+		tokenBudget: number | undefined,
+		nativeGoalWrite?: CapturedNativeGoalWrite,
+	): Promise<GoalState> {
 		const objective = validateGoalObjective(objectiveText);
 		const budget = validateGoalBudget(tokenBudget);
 		const now = Date.now();
@@ -1853,32 +2884,34 @@ export class AgentSession {
 		};
 		this._goalAccountingStartedAt = now;
 		this._goalContinuationAwaitsRlmWork = false;
-		this._setGoalState(goal);
-		return this._goalState;
+		return this._setGoalState(goal, { nativeGoalWrite });
 	}
 
-	private _clearGoal(): void {
+	private async _clearGoal(nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		this._clearQueuedGoalContexts();
-		this._setGoalState(emptyGoalState());
+		await this._setGoalState(emptyGoalState(), { nativeGoalWrite });
 	}
 
-	private _pauseGoal(reason = "Paused by user"): void {
+	private async _pauseGoal(reason = "Paused by user", nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		this._clearQueuedGoalContexts();
 		if (this._goalState.status !== "active") {
 			this._emitGoalUpdate();
 			return;
 		}
 		const goal = this._goalWithAccountedWallClock();
-		this._setGoalState({
-			...goal,
-			active: false,
-			status: "paused",
-			lastReason: reason,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "paused",
+				lastReason: reason,
+				lastError: undefined,
+			},
+			{ nativeGoalWrite },
+		);
 	}
 
-	private async _resumeGoal(): Promise<void> {
+	private async _resumeGoal(nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		if (!this._goalState.objective) {
 			this._emitGoalUpdate();
 			return;
@@ -1890,33 +2923,45 @@ export class AgentSession {
 		const exhausted =
 			this._goalState.tokenBudget !== undefined && this._goalState.tokensUsed >= this._goalState.tokenBudget;
 		const nextStatus: GoalStatus = exhausted ? "budget_limited" : "active";
-		this._setGoalState({
-			...this._goalState,
-			active: nextStatus === "active",
-			status: nextStatus,
-			lastReason: exhausted ? "Goal token budget already reached" : undefined,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...this._goalState,
+				active: nextStatus === "active",
+				status: nextStatus,
+				lastReason: exhausted ? "Goal token budget already reached" : undefined,
+				lastError: undefined,
+			},
+			{ nativeGoalWrite },
+		);
 		if (nextStatus === "active") {
 			await this._runOrQueueGoalContext("continuation");
 		}
 	}
 
-	private _finishGoalWithError(errorMessage: string): void {
+	private async _finishGoalWithError(errorMessage: string, continuationOwner?: GoalContinuationOwner): Promise<void> {
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
 		if (!this._goalState.objective || this._goalState.status !== "active") {
 			return;
 		}
 		const goal = this._goalWithAccountedWallClock();
-		this._setGoalState({
-			...goal,
-			active: false,
-			status: "error",
-			lastReason: errorMessage,
-			lastError: errorMessage,
-		});
+		if (continuationOwner) continuationOwner.accountingStartedAt = this._goalAccountingStartedAt;
+		await this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "error",
+				lastReason: errorMessage,
+				lastError: errorMessage,
+			},
+			{ continuationOwner },
+		);
 	}
 
-	private _finishGoalForTerminalAssistantMessage(message: AssistantMessage): void {
+	private async _finishGoalForTerminalAssistantMessage(
+		message: AssistantMessage,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<void> {
+		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
 		if (this._goalState.status !== "active") {
 			return;
 		}
@@ -1931,16 +2976,19 @@ export class AgentSession {
 				this._goalAbortInProgress = false;
 				return;
 			}
-			this._finishGoalWithError(message.errorMessage || "Assistant response failed");
+			await this._finishGoalWithError(message.errorMessage || "Assistant response failed", continuationOwner);
 		}
 	}
 
-	private _stopGoalContinuationForTerminalMessage(message: AssistantMessage): boolean {
+	private async _stopGoalContinuationForTerminalMessage(
+		message: AssistantMessage,
+		continuationOwner?: GoalContinuationOwner,
+	): Promise<boolean> {
 		if (message.stopReason !== "error" && message.stopReason !== "aborted") {
 			return false;
 		}
 		try {
-			this._finishGoalForTerminalAssistantMessage(message);
+			await this._finishGoalForTerminalAssistantMessage(message, continuationOwner);
 		} catch {
 			// Goal hooks must not reject; listener failures should not crash the agent loop.
 		}
@@ -2021,7 +3069,7 @@ export class AgentSession {
 		return `Autonomous mode: ${state}. Continuations: ${status.continuationsUsed}/${status.limits.maxContinuations}. Turns: ${status.turnsUsed}/${status.limits.maxTurns}. Tokens: ${status.tokensUsed}/${status.limits.maxTokens}.`;
 	}
 
-	private _emitAutonomousStatus(): void {
+	private async _emitAutonomousStatus(): Promise<void> {
 		const message = {
 			role: "custom" as const,
 			customType: "autonomous_status",
@@ -2030,13 +3078,13 @@ export class AgentSession {
 			details: this.getAutonomousStatus(),
 			timestamp: Date.now(),
 		} satisfies CustomMessage<AgentAutonomousStatus>;
-		this.agent.state.messages.push(message);
-		this.sessionManager.appendCustomMessageEntry(
+		await this.sessionManager.appendCustomMessageEntry(
 			message.customType,
 			message.content,
 			message.display,
 			message.details,
 		);
+		this.agent.state.messages.push(message);
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
 	}
@@ -2052,7 +3100,7 @@ export class AgentSession {
 			setAutonomousEnabled(this._autonomousState, false);
 			this._clearQueuedAutonomousContinuations();
 		}
-		this._emitAutonomousStatus();
+		await this._emitAutonomousStatus();
 		return true;
 	}
 
@@ -2113,7 +3161,19 @@ export class AgentSession {
 		}
 	}
 
-	private _maybeResumeGoalContinuationAfterRlmWork(): void {
+	private _scheduleGoalContinuationAfterRlmWork(): void {
+		if (this._goalResumeOperation || !this._goalContinuationAwaitsRlmWork) return;
+		const operation = this._resumeGoalContinuationAfterRlmWork();
+		this._goalResumeOperation = operation;
+		void operation
+			.finally(() => {
+				if (this._goalResumeOperation === operation) this._goalResumeOperation = undefined;
+				this._notifySessionInputCheckpointChange();
+			})
+			.catch((error) => this._surfaceSessionInputError(error));
+	}
+
+	private async _resumeGoalContinuationAfterRlmWork(): Promise<void> {
 		if (!this._goalContinuationAwaitsRlmWork) return;
 		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
@@ -2123,16 +3183,21 @@ export class AgentSession {
 		// Keep the deferral while admission is paused or the pump is suspended
 		// (post-abort); the pause release and resumeQueuedWork retry.
 		if (this._sessionInputAdmissionPauses.size > 0 || this._sessionInputPumpSuspended) return;
-		const goalBeforeResume = this._goalState;
+		const owner = this._captureGoalContinuationOwner();
+		const goalBeforeResume = owner.goal;
 		try {
 			this._ensureGoalRuntimeActive();
-			this._setGoalState({
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
-				lastReason: undefined,
-				lastError: undefined,
-			});
-			const message = createGoalContextMessage(this._goalState, "continuation");
+			await this._setGoalState(
+				{
+					...owner.goal,
+					continuationsUsed: owner.goal.continuationsUsed + 1,
+					lastReason: undefined,
+					lastError: undefined,
+				},
+				{ continuationOwner: owner },
+			);
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			const message = createGoalContextMessage(owner.goal, "continuation");
 			const normalized = normalizeMessageContent(message.content);
 			// No front: a settling child's terminal notice must be read first.
 			this._admitSessionInput(
@@ -2143,8 +3208,13 @@ export class AgentSession {
 			);
 			this._goalContinuationAwaitsRlmWork = false;
 		} catch {
-			// Admission can race a new pause; roll back so the retry re-counts.
-			this._setGoalState(goalBeforeResume);
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return;
+			// Compensate only on the unchanged owner; an accepted old write is not rolled back on a new goal.
+			try {
+				await this._setGoalState(goalBeforeResume, { continuationOwner: owner });
+			} catch (error) {
+				if (!(error instanceof StaleGoalContinuationError)) throw error;
+			}
 		}
 	}
 
@@ -2160,11 +3230,29 @@ export class AgentSession {
 		this._admitSessionInput(action, { front: true, wake: false });
 	}
 
-	private async _handleGoalSlashCommand(text: string, images: ImageContent[] | undefined): Promise<boolean> {
+	private async _handleGoalSlashCommand(
+		text: string,
+		images: ImageContent[] | undefined,
+		context?: GoalOriginContext,
+	): Promise<boolean> {
 		const command = this._parseGoalSlashCommand(text);
 		if (!command) {
 			return false;
 		}
+
+		const previousGoalId = this._goalState.goalId;
+		const replacementOperation = this._goalState.objective ? "revise" : "create";
+		const origin = (operation: GoalOperationOrigin["operation"]): CapturedNativeGoalWrite | undefined => {
+			if (!context) return undefined;
+			const { writer, ...captured } = context;
+			return writer.captureGoalOperation({
+				version: 1,
+				kind: "goal_operation",
+				...captured,
+				operation,
+				previousGoalId,
+			});
+		};
 
 		if (command.kind === "status") {
 			this._emitGoalUpdate();
@@ -2172,32 +3260,37 @@ export class AgentSession {
 		}
 
 		if (command.kind === "clear") {
-			this._clearGoal();
+			await this._clearGoal(origin("clear"));
 			return true;
 		}
 
 		if (command.kind === "pause") {
-			this._pauseGoal();
+			await this._pauseGoal(undefined, origin("pause"));
 			return true;
 		}
 
 		if (command.kind === "resume") {
-			await this._resumeGoal();
+			await this._resumeGoal(origin("resume"));
 			return true;
 		}
 
 		const previousWasActive = this._goalState.status === "active";
+		const nativeGoalWrite = origin(replacementOperation);
 		if (!this.isStreaming) {
 			await this._validateCanStartAgentRun();
 		}
 		this._ensureGoalRuntimeActive();
 		this._clearQueuedGoalContexts();
-		this._startGoal(command.objective, command.tokenBudget);
+		await this._startGoal(command.objective, command.tokenBudget, nativeGoalWrite);
 		await this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images);
 		return true;
 	}
 
-	private _accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean {
+	private async _accountGoalUsageForAssistantMessage(
+		message: AssistantMessage,
+		owner?: GoalContinuationOwner,
+	): Promise<boolean> {
+		if (owner) this._assertGoalContinuationOwner(owner);
 		if (!this._goalState.objective) {
 			return false;
 		}
@@ -2218,22 +3311,26 @@ export class AgentSession {
 		this._goalAccountedAssistantMessages.add(message);
 		const tokenDelta = goalTokenDeltaForUsage(message.usage);
 		const goal = this._goalWithAccountedWallClock();
+		if (owner) owner.accountingStartedAt = this._goalAccountingStartedAt;
 		const nextGoal: GoalState = {
 			...goal,
 			tokensUsed: goal.tokensUsed + tokenDelta,
 		};
 		const budgetReached = nextGoal.tokenBudget !== undefined && nextGoal.tokensUsed >= nextGoal.tokenBudget;
 		if (!budgetReached) {
-			this._setGoalState(nextGoal);
+			await this._setGoalState(nextGoal, { continuationOwner: owner });
 			return false;
 		}
-		this._setGoalState({
-			...nextGoal,
-			active: false,
-			status: "budget_limited",
-			lastReason: `Reached ${nextGoal.tokenBudget} token goal budget`,
-			lastError: undefined,
-		});
+		await this._setGoalState(
+			{
+				...nextGoal,
+				active: false,
+				status: "budget_limited",
+				lastReason: `Reached ${nextGoal.tokenBudget} token goal budget`,
+				lastError: undefined,
+			},
+			{ continuationOwner: owner },
+		);
 		return true;
 	}
 
@@ -2254,51 +3351,182 @@ export class AgentSession {
 		return this._steeringStopPending;
 	}
 
-	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
-			return true;
-		}
-		try {
-			if (this._accountGoalUsageForAssistantMessage(context.message)) {
-				const message = createGoalContextMessage(this._goalState, "budget_limit");
-				const normalized = normalizeMessageContent(message.content);
-				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
-					message,
-					resumeIfIdle: true,
-				});
-			}
-		} catch {
-			// Goal accounting must not interrupt the core agent loop.
-		}
-		// Serialized refine checkpoint: in print/headless mode, run refinement
-		// planning+apply synchronously here — the quiescent boundary between
-		// turns — so it never overlaps the primary model request.
-		// This MUST run BEFORE threshold compaction to prevent the
-		// compaction model call from overlapping an in-flight refine
-		// plan/apply that was started at message_end.
-		if (this._serializedRefine) {
-			// Ensure the preceding message_end processing (counter increment,
-			// background plan kickoff) has completed before the checkpoint.
-			await this._agentEventQueue;
-			await this._runSerializedRefineCheckpoint();
-		}
-		if (await this._shouldStopForThresholdCompaction(context)) {
-			return true;
-		}
-		// Steering stops continuation only after mandatory serialized checkpoints.
-		// Returning true here still prevents the agent loop from starting another turn.
-		return this._steeringStopPending;
+	private _captureCompactionOwner(signal?: AbortSignal): CompactionOwner {
+		const manager = this.sessionManager;
+		return {
+			manager,
+			agent: this.agent,
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			pumpEpoch: this._sessionInputPumpEpoch,
+			isSourceCurrent: manager.captureCompactionSourceOwner(),
+			requests: this.requests,
+			semanticEdges: this._semanticEdges,
+			extensions: this._extensionRunner,
+			provisioner: this._ipythonKernelProvisioner,
+			signal,
+		};
 	}
 
-	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		this._continueAfterThresholdCompaction = false;
-		if (this._pendingRequestedCompaction === undefined && !(await this._thresholdCompactionNeeded(context))) {
-			return false;
-		}
+	private _isCompactionSourceOwnerCurrent(owner: CompactionOwner): boolean {
+		return (
+			this.sessionManager === owner.manager &&
+			this.agent === owner.agent &&
+			owner.manager.getSessionId() === owner.sessionId &&
+			owner.manager.getSessionFile() === owner.sessionFile &&
+			owner.isSourceCurrent() &&
+			this.requests === owner.requests &&
+			this._semanticEdges === owner.semanticEdges &&
+			this._extensionRunner === owner.extensions &&
+			this._ipythonKernelProvisioner === owner.provisioner
+		);
+	}
 
-		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
-		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
-		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
+	private _isCompactionOwnerCurrent(owner: CompactionOwner): boolean {
+		return (
+			!this._disposed &&
+			!this._disposing &&
+			!owner.signal?.aborted &&
+			this._isCompactionSourceOwnerCurrent(owner) &&
+			this._sessionInputPumpEpoch === owner.pumpEpoch
+		);
+	}
+
+	private _assertCompactionSourceOwner(owner: CompactionOwner): void {
+		if (!this._isCompactionSourceOwnerCurrent(owner))
+			throw new StaleCompactionOwnerError("Compaction source owner changed");
+	}
+
+	private _assertCompactionOwner(owner: CompactionOwner): void {
+		if (!this._isCompactionOwnerCurrent(owner)) throw new StaleCompactionOwnerError("Compaction owner changed");
+	}
+
+	private _checkpointActionPending({ action }: CheckpointAction): boolean {
+		return (
+			action.payload.kind === "turn" &&
+			!primaryDeliveryRecord(action).started &&
+			(action.lifecycle.state === "queued" ||
+				action.lifecycle.state === "selected" ||
+				action.lifecycle.state === "preparing" ||
+				action.lifecycle.state === "committing")
+		);
+	}
+
+	private _captureCheckpointResume(owner: CompactionOwner, boundary?: CheckpointBoundary): CheckpointResume {
+		const actions = this._actionStore
+			.unfinishedActions()
+			.filter((action) => action.payload.kind === "turn" && !primaryDeliveryRecord(action).started)
+			.map((action) => ({ action, ticket: this._actionStore.ticketFor(action).ticket }));
+		return { owner, boundary, actions };
+	}
+
+	private _checkpointHasResume(resume: CheckpointResume): boolean {
+		return (
+			resume.boundary?.state === "pending" || resume.actions.some((action) => this._checkpointActionPending(action))
+		);
+	}
+
+	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		// The legacy direct adapter has no finalized-batch decision. The installed native hook does.
+		const last = this.agent.state.messages.at(-1);
+		return (
+			(await this._getTurnOutcome({ ...context, hasMoreToolCalls: !!last && last.role !== "assistant" })).kind !==
+			"proceed"
+		);
+	}
+
+	private async _getTurnOutcome(context: GetTurnOutcomeContext, signal?: AbortSignal): Promise<AgentTurnOutcome> {
+		const sourceOwner = signal ? this._invocationCompactionOwner : this._captureCompactionOwner();
+		if (
+			!sourceOwner ||
+			signal?.aborted ||
+			(signal && sourceOwner.signal !== signal) ||
+			!this._isCompactionSourceOwnerCurrent(sourceOwner)
+		)
+			return { kind: "cancelled" };
+		// This is a new turn-boundary admission. Its source predicate still belongs to the original invocation.
+		const owner = { ...sourceOwner, pumpEpoch: this._sessionInputPumpEpoch };
+		const requested = this._pendingRequestedCompaction;
+		const mayCheckpoint =
+			this._contextOptimizationAllowed() ||
+			(requested !== undefined && this._isCompactionOwnerCurrent(requested.owner));
+		const preparing = mayCheckpoint
+			? this._captureCheckpointResume(
+					owner,
+					context.hasMoreToolCalls ? { kind: "tool", state: "pending" } : undefined,
+				)
+			: undefined;
+		if (preparing) this._pendingCheckpoint = preparing;
+		const current = () =>
+			preparing
+				? this._isCompactionOwnerCurrent(owner)
+				: !signal?.aborted && !this._disposed && !this._disposing && this._isCompactionSourceOwnerCurrent(owner);
+		const goalOwner = { ...this._captureGoalContinuationOwner(signal), checkpointOwner: owner };
+		const autonomousOwner = this._captureThresholdAutonomousOwner();
+		try {
+			if (await this._stopGoalContinuationForTerminalMessage(context.message, goalOwner)) return { kind: "finish" };
+			if (!current()) return { kind: "cancelled" };
+			try {
+				if (await this._accountGoalUsageForAssistantMessage(context.message, goalOwner)) {
+					this._assertGoalContinuationOwner(goalOwner);
+					const message = createGoalContextMessage(goalOwner.goal, "budget_limit");
+					const normalized = normalizeMessageContent(message.content);
+					this._admitSessionInput(
+						this._createPreparedTurnAction("steer", normalized.text, normalized.images, {
+							message,
+							resumeIfIdle: true,
+						}),
+					);
+				}
+			} catch {
+				// Ordinary accounting retains its non-rejection policy; it cannot publish on a replacement.
+			}
+			if (!current()) return { kind: "cancelled" };
+			// Keep mandatory serialized refinement before threshold and steering, without self-waiting for idle.
+			if (this._serializedRefine) {
+				await this._agentEventQueue;
+				if (!current()) return { kind: "cancelled" };
+				await this._runSerializedRefineCheckpoint();
+			}
+			if (!current()) return { kind: "cancelled" };
+			try {
+				if (
+					preparing &&
+					(await this._shouldStopForThresholdCompaction(context, owner, goalOwner, autonomousOwner))
+				) {
+					const resume = this._pendingCheckpoint;
+					return { kind: resume && this._checkpointHasResume(resume) ? "checkpoint_then_continue" : "finish" };
+				}
+			} catch (error) {
+				if (!(error instanceof StaleCompactionOwnerError)) throw error;
+				return { kind: "cancelled" };
+			}
+			if (!current()) return { kind: "cancelled" };
+			return { kind: this._steeringStopPending ? "finish" : "proceed" };
+		} finally {
+			// Only an actual checkpoint decision replaces this preparing reference.
+			if (preparing && this._pendingCheckpoint === preparing) this._pendingCheckpoint = undefined;
+		}
+	}
+
+	private async _shouldStopForThresholdCompaction(
+		context: GetTurnOutcomeContext,
+		owner: CompactionOwner,
+		goalOwner: GoalContinuationOwner,
+		autonomousOwner: ThresholdAutonomousOwner,
+	): Promise<boolean> {
+		const pending = this._pendingRequestedCompaction;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) {
+			if (this._pendingRequestedCompaction === pending) this._pendingRequestedCompaction = undefined;
+		}
+		const requested = pending !== undefined && this._pendingRequestedCompaction === pending;
+		if (!requested && !(await this._thresholdCompactionNeeded(context, owner, goalOwner, autonomousOwner)))
+			return false;
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
+		this._pendingCheckpoint = this._captureCheckpointResume(
+			owner,
+			context.hasMoreToolCalls ? { kind: "tool", state: "pending" } : undefined,
+		);
 		return true;
 	}
 
@@ -2313,6 +3541,7 @@ export class AgentSession {
 	 * in-flight guards and counter resets.
 	 */
 	private async _runSerializedRefineCheckpoint(): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		if (this._disposed || this._disposing) {
 			return;
 		}
@@ -2403,6 +3632,7 @@ export class AgentSession {
 	}
 
 	private async _runSerializedRefineCheckpointAfterBackground(branchVersion: number): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		// No background result, or a refine.run arrived while the background result was
 		// in flight. Fall through so an explicit pending request is serviced at this boundary.
 
@@ -2425,7 +3655,7 @@ export class AgentSession {
 		// 3. Post-compaction auto-refine. Serialized sessions defer the
 		// compaction trigger to this boundary instead of entering the interactive
 		// path, which waits for agent idle and can never run inside a tool loop.
-		if (!this._autoRefineAllowedForSession()) {
+		if (!this._newAutoRefineAllowed()) {
 			this._compactAutoRefinePending = false;
 			return;
 		}
@@ -2469,6 +3699,7 @@ export class AgentSession {
 		reason: "compact" | "turn_interval",
 		branchVersion: number,
 	): Promise<void> {
+		if (!this._newAutoRefineAllowed()) return;
 		const reviewAbort = new AbortController();
 		this._autoRefineReviewAbort = reviewAbort;
 		this._autoRefineInProgress = true;
@@ -2477,7 +3708,12 @@ export class AgentSession {
 				{ reason, turnsSinceLastReview: this._assistantTurnsSinceAutoRefine },
 				reviewAbort.signal,
 			);
-			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
+			if (
+				!this._newAutoRefineAllowed() ||
+				this._disposed ||
+				this._disposing ||
+				branchVersion !== this._autoRefineBranchVersion
+			) {
 				return;
 			}
 			if (!review.shouldRefine) {
@@ -2601,7 +3837,7 @@ export class AgentSession {
 		}
 
 		// Interval-triggered auto-refine background planning.
-		if (!this._autoRefineAllowedForSession()) {
+		if (!this._newAutoRefineAllowed()) {
 			return;
 		}
 		const settings = this.settingsManager.getAutoRefineSettings();
@@ -2656,6 +3892,7 @@ export class AgentSession {
 				if (!review.shouldRefine) {
 					return { status: "skip" };
 				}
+				if (!this._newAutoRefineAllowed()) return { status: "skip" };
 				planOptions = {
 					instructions: autoRefineInstructions("turn_interval", review),
 				};
@@ -2779,41 +4016,91 @@ export class AgentSession {
 		}
 	}
 
-	private async _thresholdCompactionNeeded(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled) return false;
-
-		const contextWindow = this.model?.contextWindow ?? 0;
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
-		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
-			return false;
+	private async _getLatestCompactionTimestamp(owner?: CompactionOwner): Promise<number | undefined> {
+		if (owner) this._assertCompactionOwner(owner);
+		const manager = owner?.manager ?? this.sessionManager;
+		if (!manager.isPersisted()) {
+			const entry = getLatestCompactionEntry(manager.getBranch());
+			return entry ? new Date(entry.timestamp).getTime() : undefined;
 		}
-
-		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
-		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
-			return false;
-		}
-
-		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
-		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		}
-		return true;
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		return manager.readBranchHistory(async (view) => {
+			const ref = (await view.branchBootstrap()).latestCompaction;
+			if (owner) this._assertCompactionOwner(owner);
+			if (!ref) {
+				this._compactionBoundaryCache = undefined;
+				return undefined;
+			}
+			if (ref.locator.length > maxSourceBytes) throw new Error("Compaction bootstrap source byte budget exceeded");
+			const cached = this._compactionBoundaryCache;
+			if (
+				cached &&
+				cached.sessionId === view.source.sessionId &&
+				cached.sessionFile === view.source.sessionFile &&
+				cached.entryId === ref.id &&
+				cached.revision === ref.revision
+			)
+				return cached.timestamp;
+			const hydrated = await view.hydrateEntry(ref.id, maxSourceBytes);
+			if (!hydrated || hydrated.entry.type !== "compaction")
+				throw new Error("Compaction bootstrap source is unavailable");
+			const timestamp = new Date(hydrated.entry.timestamp).getTime();
+			if (owner) this._assertCompactionOwner(owner);
+			this._compactionBoundaryCache = {
+				sessionId: view.source.sessionId,
+				sessionFile: view.source.sessionFile,
+				entryId: ref.id,
+				revision: ref.revision,
+				timestamp,
+			};
+			return timestamp;
+		});
 	}
 
-	private _snapshotAutonomousRuntimeState(): AutonomousRuntimeSnapshot {
+	private async _thresholdCompactionNeeded(
+		context: ShouldStopAfterTurnContext,
+		owner = this._captureCompactionOwner(),
+		goalOwner: GoalContinuationOwner = {
+			...this._captureGoalContinuationOwner(owner.signal),
+			checkpointOwner: owner,
+		},
+		autonomousOwner = this._captureThresholdAutonomousOwner(),
+	): Promise<boolean> {
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
+		const settings = this.settingsManager.getCompactionSettings();
+		if (!settings.enabled) return false;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
+		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) return false;
+		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
+		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) return false;
+		// Keep the existing threshold-specific goal winner; do not import W74's natural wait policy here.
+		if (!this._isGoalContinuationOwnerCurrent(goalOwner)) return true;
+		if (!(await this._queueGoalContinuationForThresholdCompaction(context.message, goalOwner))) {
+			if (!this._isGoalContinuationOwnerCurrent(goalOwner))
+				return this._isCompactionOwnerCurrent(owner) && this._contextOptimizationAllowed();
+			if (!this._contextOptimizationAllowed()) return false;
+			await this._queueAutonomousContinuationForThresholdCompaction(context.message, owner, autonomousOwner);
+		}
+		return this._isCompactionOwnerCurrent(owner) && this._contextOptimizationAllowed();
+	}
+
+	private _captureThresholdAutonomousOwner(): ThresholdAutonomousOwner {
 		return {
-			continuationsUsed: this._autonomousState.continuationsUsed,
-			gateAttempts: { ...this._autonomousState.gateAttempts },
-			lastGateFailure: this._autonomousState.lastGateFailure
-				? { ...this._autonomousState.lastGateFailure }
-				: undefined,
-			lastGateFailureSnapshot: this._autonomousState.lastGateFailureSnapshot
-				? { ...this._autonomousState.lastGateFailureSnapshot }
-				: undefined,
+			state: this._autonomousState,
+			snapshot: structuredClone(this._autonomousState),
+			cwd: this._cwd,
+			arrivalEpoch: this._sessionInputArrivalEpoch,
+		};
+	}
+
+	private _snapshotAutonomousRuntimeState(state = this._autonomousState): AutonomousRuntimeSnapshot {
+		return {
+			continuationsUsed: state.continuationsUsed,
+			gateAttempts: { ...state.gateAttempts },
+			lastGateFailure: state.lastGateFailure ? { ...state.lastGateFailure } : undefined,
+			lastGateFailureSnapshot: state.lastGateFailureSnapshot ? { ...state.lastGateFailureSnapshot } : undefined,
 		};
 	}
 
@@ -2828,159 +4115,181 @@ export class AgentSession {
 
 	private async _queueAutonomousContinuationForThresholdCompaction(
 		message: AssistantMessage,
-	): Promise<AgentMessage | undefined> {
-		const queuedMessage = this._queuedAutonomousThresholdContinuations.get(message);
-		if (queuedMessage && this._postCompactionContinuationMessages.includes(queuedMessage)) {
-			return queuedMessage;
+		owner = this._captureCompactionOwner(this.agent.signal),
+		capture = this._captureThresholdAutonomousOwner(),
+	): Promise<CheckpointAction | undefined> {
+		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
+		const queued = this._queuedAutonomousThresholdContinuations.get(message);
+		if (queued && this._checkpointActionPending(queued)) return queued;
+		const { state, snapshot: original, arrivalEpoch, cwd } = capture;
+		const before = this._snapshotAutonomousRuntimeState(original);
+		const candidate = structuredClone(original);
+		const current = () =>
+			this._isCompactionOwnerCurrent(owner) && this._autonomousState === state && isDeepStrictEqual(state, original);
+		if (!current()) return undefined;
+		let messageToQueue: UserMessage | undefined;
+		try {
+			messageToQueue = await nextAutonomousContinuation(candidate, message, { cwd, signal: owner.signal });
+		} catch (error) {
+			if (current()) this._restoreAutonomousRuntimeSnapshot(candidate);
+			throw error; // Preserve the actual command/orphan owner's primary failure even after replacement.
 		}
-		const snapshot = this._snapshotAutonomousRuntimeState();
-		const arrivalEpoch = this._sessionInputArrivalEpoch;
-		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, message, {
-			cwd: this._cwd,
-			signal: this.agent.signal,
+		if (!current() || !this._contextOptimizationAllowed()) return undefined;
+		if (messageToQueue && this._sessionInputArrivalEpoch !== arrivalEpoch) return undefined;
+		this._restoreAutonomousRuntimeSnapshot(candidate);
+		if (!messageToQueue) return undefined;
+		const normalized = normalizeMessageContent(messageToQueue.content);
+		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+			message: messageToQueue,
 		});
-		if (!autonomousMessage) {
+		const admitted = this._admitSessionInput(action);
+		if (!admitted.accepted || !admitted.ticket) {
+			this._restoreAutonomousRuntimeSnapshot(before);
 			return undefined;
 		}
-		if (this._sessionInputArrivalEpoch !== arrivalEpoch) {
-			this._restoreAutonomousRuntimeSnapshot(snapshot);
-			return undefined;
-		}
-		this._queuedAutonomousThresholdContinuations.set(message, autonomousMessage);
-		this._queuedAutonomousContinuationSnapshots.set(autonomousMessage, snapshot);
-		this._postCompactionContinuationMessages.push(autonomousMessage);
-		this._pendingThresholdCompactionAutonomousMessages.push(autonomousMessage);
-		const text =
-			typeof autonomousMessage.content === "string"
-				? autonomousMessage.content
-				: autonomousMessage.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-		this._admitSessionInput(
-			this._createPreparedTurnAction("followUp", text, undefined, {
-				message: autonomousMessage,
-			}),
-		);
-		return autonomousMessage;
+		const continuation: ThresholdAutonomousContinuation = {
+			action,
+			ticket: admitted.ticket,
+			owner,
+			state,
+			before,
+			after: structuredClone(state),
+		};
+		this._queuedAutonomousThresholdContinuations.set(message, continuation);
+		this._postCompactionContinuations.push(continuation);
+		this._pendingThresholdCompactionAutonomousContinuations.push(continuation);
+		return continuation;
 	}
 
-	// The role heuristic reads an assistant-last threshold stop as "task finished" and
-	// agent.continue() cannot resume from it, so the goal continuation is queued as a session input.
-	private _queueGoalContinuationForThresholdCompaction(message: AssistantMessage): boolean {
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
-			return false;
-		}
-		if (this._goalState.status !== "active" || !this._goalState.objective) {
-			return false;
-		}
-		const alreadyQueued = this._queuedGoalThresholdContinuation;
-		if (
-			alreadyQueued !== undefined &&
-			this._actionStore.unfinishedActions().some((action) => {
-				if (action.payload.kind !== "turn" || primaryDeliveryRecord(action).message !== alreadyQueued) return false;
-				// A running continuation may already need a successor; only undelivered actions deduplicate.
-				return (
-					action.lifecycle.state === "queued" ||
-					action.lifecycle.state === "selected" ||
-					action.lifecycle.state === "preparing" ||
-					action.lifecycle.state === "committing"
-				);
-			})
-		) {
-			return true;
-		}
+	private async _queueGoalContinuationForThresholdCompaction(
+		message: AssistantMessage,
+		owner: GoalContinuationOwner = {
+			...this._captureGoalContinuationOwner(this.agent.signal),
+			checkpointOwner: this._captureCompactionOwner(this.agent.signal),
+		},
+	): Promise<CheckpointAction | undefined> {
+		if (!this._isGoalContinuationOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
+		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
+		if (owner.goal.status !== "active" || !owner.goal.objective) return undefined;
+		const queued = this._queuedGoalThresholdContinuation;
+		if (queued && this._checkpointActionPending(queued)) return queued;
+		const before = owner.goal;
+		let counted = false;
 		try {
 			this._ensureGoalRuntimeActive();
-			this._setGoalState({
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
-				lastReason: undefined,
-				lastError: undefined,
-			});
-			const goalMessage = createGoalContextMessage(this._goalState, "continuation");
-			const normalized = normalizeMessageContent(goalMessage.content);
-			this._admitSessionInput(
-				this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
-					message: goalMessage,
-				}),
+			await this._setGoalState(
+				{
+					...before,
+					continuationsUsed: before.continuationsUsed + 1,
+					lastReason: undefined,
+					lastError: undefined,
+				},
+				{ continuationOwner: owner },
 			);
-			this._queuedGoalThresholdContinuation = goalMessage;
-			return true;
+			counted = true;
+			this._assertGoalContinuationOwner(owner);
+			if (!this._contextOptimizationAllowed()) {
+				await this._setGoalState(before, { continuationOwner: owner });
+				return undefined;
+			}
+			const messageToQueue = createGoalContextMessage(owner.goal, "continuation");
+			const normalized = normalizeMessageContent(messageToQueue.content);
+			const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+				message: messageToQueue,
+			});
+			const admitted = this._admitSessionInput(action);
+			if (!admitted.accepted || !admitted.ticket) {
+				await this._setGoalState(before, { continuationOwner: owner });
+				return undefined;
+			}
+			const continuation = { action, ticket: admitted.ticket, owner };
+			this._queuedGoalThresholdContinuation = continuation;
+			return continuation;
 		} catch {
-			return false;
+			if (counted && this._isGoalContinuationOwnerCurrent(owner)) {
+				try {
+					await this._setGoalState(before, { continuationOwner: owner });
+				} catch {
+					/* Keep the existing non-rejection policy. */
+				}
+			}
+			return undefined;
 		}
 	}
 
-	// Withdraws a goal continuation queued for a threshold compaction the user cancelled,
-	// rolling back the continuationsUsed increment so the next natural stop re-queues it.
-	private _clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
-		queuedGoalContinuation: AgentMessage | undefined,
-	): void {
-		if (queuedGoalContinuation === undefined) return;
+	private async _clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
+		continuation: ThresholdGoalContinuation | undefined,
+	): Promise<void> {
+		if (
+			!continuation ||
+			!continuation.owner.checkpointOwner ||
+			!this._isCompactionSourceOwnerCurrent(continuation.owner.checkpointOwner) ||
+			!this._checkpointActionPending(continuation)
+		)
+			return;
 		const cancelled = this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && primaryDeliveryRecord(action).message === queuedGoalContinuation,
+			(action) => action === continuation.action,
 			new Error("Queued goal continuation was cleared before delivery."),
 		);
-		this._queuedGoalThresholdContinuation = undefined;
-		// A stale marker (continuation already consumed) matches no action; only an
-		// actual cancellation may roll back its queue-time continuationsUsed increment.
-		if (cancelled.length === 0) return;
-		this._setGoalState({ ...this._goalState, continuationsUsed: this._goalState.continuationsUsed - 1 });
+		if (this._queuedGoalThresholdContinuation === continuation) this._queuedGoalThresholdContinuation = undefined;
+		if (
+			!cancelled.includes(continuation.action) ||
+			primaryDeliveryRecord(continuation.action).durable ||
+			!this._isGoalContinuationOwnerCurrent(continuation.owner)
+		)
+			return;
+		const owner = continuation.owner;
+		await this._setGoalState(
+			{ ...owner.goal, continuationsUsed: owner.goal.continuationsUsed - 1 },
+			{ continuationOwner: owner },
+		);
 		this._emitQueueUpdate();
 	}
 
 	private _clearQueuedAutonomousContinuations(
-		options: { restoreAutonomousState?: boolean; messages?: AgentMessage[] } = {},
+		options: { restoreAutonomousState?: boolean; continuations?: ThresholdAutonomousContinuation[] } = {},
 	): void {
-		const requestedMessages = options.messages ?? [...this._postCompactionContinuationMessages];
-		const requestedMessageSet = new Set(requestedMessages);
-		const queuedMessages = this._postCompactionContinuationMessages.filter((message) =>
-			requestedMessageSet.has(message),
+		const continuations = options.continuations ?? [...this._postCompactionContinuations];
+		const current = continuations.filter(
+			(continuation) =>
+				this._isCompactionSourceOwnerCurrent(continuation.owner) && this._checkpointActionPending(continuation),
 		);
-		if (queuedMessages.length === 0) {
-			return;
-		}
-		const queuedMessageSet = new Set(queuedMessages);
-		this._postCompactionContinuationMessages = this._postCompactionContinuationMessages.filter(
-			(message) => !queuedMessageSet.has(message),
-		);
-		this.agent.removeQueuedMessages((message) => queuedMessageSet.has(message));
-		this._cancelSessionActions(
-			(action) => action.payload.kind === "turn" && queuedMessageSet.has(primaryDeliveryRecord(action).message),
+		const actions = new Set(current.map((continuation) => continuation.action));
+		const cancelled = this._cancelSessionActions(
+			(action) => actions.has(action),
 			new Error("Queued autonomous continuation was cleared before delivery."),
 		);
-		this._emitQueueUpdate();
 		if (options.restoreAutonomousState) {
-			for (const queuedMessage of queuedMessages) {
-				const snapshot = this._queuedAutonomousContinuationSnapshots.get(queuedMessage);
-				if (snapshot) {
-					this._restoreAutonomousRuntimeSnapshot(snapshot);
-					break;
-				}
-			}
+			const continuation = current.find(
+				(candidate) =>
+					this._isCompactionOwnerCurrent(candidate.owner) &&
+					cancelled.includes(candidate.action) &&
+					!primaryDeliveryRecord(candidate.action).durable &&
+					this._autonomousState === candidate.state &&
+					isDeepStrictEqual(candidate.state, candidate.after),
+			);
+			if (continuation) this._restoreAutonomousRuntimeSnapshot(continuation.before);
 		}
-		for (const queuedMessage of queuedMessages) {
-			this._queuedAutonomousContinuationSnapshots.delete(queuedMessage);
-		}
-		this._pendingThresholdCompactionAutonomousMessages = this._pendingThresholdCompactionAutonomousMessages.filter(
-			(message) => !queuedMessageSet.has(message),
+		this._postCompactionContinuations = this._postCompactionContinuations.filter(
+			(item) => !continuations.includes(item),
 		);
-		if (options.messages === undefined) {
-			this._continueAfterThresholdCompaction = false;
-		}
-		if (!this.agent.hasQueuedMessages() && this.unfinishedActionCount === 0) {
+		this._pendingThresholdCompactionAutonomousContinuations =
+			this._pendingThresholdCompactionAutonomousContinuations.filter((item) => !continuations.includes(item));
+		if (cancelled.length > 0) this._emitQueueUpdate();
+		if (
+			!this.agent.hasQueuedMessages() &&
+			this.unfinishedActionCount === 0 &&
+			this._postCompactionContinuationSettlement?.resume.boundary?.state !== "pending"
+		)
 			this._cancelPostCompactionContinue();
-		}
 	}
 
 	private _clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 		shouldContinueAfterThreshold: boolean,
-		queuedMessages: AgentMessage[],
+		continuations: ThresholdAutonomousContinuation[],
 	): void {
-		if (shouldContinueAfterThreshold) {
-			this._clearQueuedAutonomousContinuations({
-				restoreAutonomousState: true,
-				messages: queuedMessages,
-			});
-		}
+		if (shouldContinueAfterThreshold)
+			this._clearQueuedAutonomousContinuations({ restoreAutonomousState: true, continuations });
 	}
 
 	/**
@@ -2988,7 +4297,7 @@ export class AgentSession {
 	 * goal skill). All goal state stays host-side; the kernel only sees the
 	 * serialized snake_case response.
 	 */
-	handleGoalHostRequest(type: string, payload: Record<string, unknown> = {}): GoalHostResponse {
+	async handleGoalHostRequest(type: string, payload: Record<string, unknown> = {}): Promise<GoalHostResponse> {
 		if (!this._includeGoals) {
 			throw new Error("goals are disabled in this session");
 		}
@@ -3002,10 +4311,10 @@ export class AgentSession {
 				if (payload.token_budget !== undefined && typeof payload.token_budget !== "number") {
 					throw new Error("goal.create token_budget must be an integer when provided");
 				}
-				return goalHostResponse(this._createGoalFromHost(payload.objective, payload.token_budget), false);
+				return goalHostResponse(await this._createGoalFromHost(payload.objective, payload.token_budget), false);
 			}
 			case "goal.complete":
-				return goalHostResponse(this._completeGoalFromHost(), true);
+				return goalHostResponse(await this._completeGoalFromHost(), true);
 			default:
 				throw new Error(`unknown goal request type "${type}"`);
 		}
@@ -3016,18 +4325,23 @@ export class AgentSession {
 	 * abort the run executing the requesting cell, so compact.run only schedules
 	 * it; _checkCompaction consumes the request at the turn boundary.
 	 */
-	handleCompactHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+	async handleCompactHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
+		if (type === "compact.run") this._assertContextOptimizationAllowed();
 		if (!this._includeCompactSkill) {
 			throw new Error("the compact skill is disabled in this session");
 		}
 		switch (type) {
 			case "compact.status": {
-				const usage = this.getContextUsage();
+				const scheduled = this._pendingRequestedCompaction !== undefined;
+				const usage = await this.getContextUsage();
 				return {
 					tokens: usage?.tokens ?? null,
 					context_window: usage?.contextWindow ?? null,
 					percent: usage?.percent ?? null,
-					scheduled: this._pendingRequestedCompaction !== undefined,
+					scheduled,
 				};
 			}
 			case "compact.run": {
@@ -3041,18 +4355,46 @@ export class AgentSession {
 						reason: "no active turn; compaction can only be requested while a turn is running",
 					};
 				}
-				const preparation = prepareCompaction(
-					this.sessionManager.getBranch(),
-					this.settingsManager.getCompactionSettings(),
-				);
+				const settings = { ...this.settingsManager.getCompactionSettings() };
+				const sourceOwner = this._invocationCompactionOwner ?? this._captureCompactionOwner(this.agent.signal);
+				const owner = { ...sourceOwner, pumpEpoch: this._sessionInputPumpEpoch };
+				this._assertCompactionOwner(owner);
+				const compaction = owner.manager.bindCompactionSink();
+				const captured = owner.requests.capture(compaction);
+				let branch: SessionEntry[];
+				let preparation: CompactionPreparation | undefined;
+				try {
+					branch = await compaction.readBranch();
+					this._assertCompactionOwner(owner);
+					preparation = this.isStreaming
+						? (await this._prepareCapturedCompaction(branch, settings, captured, compaction, owner)).preparation
+						: undefined;
+				} catch (error) {
+					try {
+						await captured.dispose();
+					} catch (cleanupError) {
+						throw new AggregateError([error, cleanupError], "Compaction preparation and release failed", {
+							cause: error,
+						});
+					}
+					throw error;
+				}
+				await captured.dispose();
+				this._assertCompactionOwner(owner);
+				if (!this.isStreaming)
+					return {
+						scheduled: false,
+						reason: "no active turn; compaction can only be requested while a turn is running",
+					};
 				if (!preparation) {
-					const lastEntry = this.sessionManager.getBranch().at(-1);
+					const lastEntry = branch.at(-1);
 					return {
 						scheduled: false,
 						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
 					};
 				}
-				this._pendingRequestedCompaction = { customInstructions: instructions };
+				this._assertContextOptimizationAllowed();
+				this._pendingRequestedCompaction = { customInstructions: instructions, owner };
 				return {
 					scheduled: true,
 					note: "Compaction runs when the current turn ends; you resume automatically afterwards. Continue working normally.",
@@ -3071,6 +4413,7 @@ export class AgentSession {
 	 * if refine() awaited agent idle from within the active tool call.
 	 */
 	handleRefineHostRequest(type: string, payload: Record<string, unknown> = {}): Record<string, unknown> {
+		if (type === "refine.run") this._assertContextOptimizationAllowed();
 		switch (type) {
 			case "refine.status": {
 				return {
@@ -3117,7 +4460,7 @@ export class AgentSession {
 							});
 						}
 					} else {
-						this._maybeStartSerializedBackgroundPlan();
+						if (!this._invocationOutputRefused) this._maybeStartSerializedBackgroundPlan();
 					}
 				}
 				return {
@@ -3239,6 +4582,22 @@ export class AgentSession {
 				if (!this._agentMessageController.roster)
 					throw new Error("agent family roster is not available in this session");
 				return this._agentMessageController.roster();
+			case "agent_message.send_result": {
+				if (typeof payload.target !== "string") {
+					throw new Error("agent_message.send_result target must be a string");
+				}
+				if (typeof payload.summary !== "string") {
+					throw new Error("agent_message.send_result summary must be a string");
+				}
+				if (typeof payload.findings !== "string") {
+					throw new Error("agent_message.send_result findings must be a string");
+				}
+				return this._agentMessageController.sendAgentMessage({
+					target: assertDirectAgentMessageTarget(payload.target),
+					message: payload.summary,
+					findings: payload.findings,
+				});
+			}
 			case "agent_message.send": {
 				if (typeof payload.target !== "string") {
 					throw new Error("agent_message.send target must be a string");
@@ -3292,7 +4651,7 @@ export class AgentSession {
 		}
 	}
 
-	private _createGoalFromHost(objective: string, tokenBudget: number | undefined): GoalState {
+	private async _createGoalFromHost(objective: string, tokenBudget: number | undefined): Promise<GoalState> {
 		switch (this._goalState.status) {
 			case "active":
 				throw new Error(
@@ -3308,11 +4667,21 @@ export class AgentSession {
 				);
 			default:
 				// idle, or a terminal record (complete / error): nothing pending, start fresh.
-				return this._startGoal(objective, tokenBudget);
+				return this._startGoal(
+					objective,
+					tokenBudget,
+					this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
+						version: 1,
+						kind: "goal_operation",
+						operation: "create",
+						actor: "runtime",
+						submittedText: objective,
+					}),
+				);
 		}
 	}
 
-	private _completeGoalFromHost(): GoalState {
+	private async _completeGoalFromHost(): Promise<GoalState> {
 		if (!this._goalState.objective || this._goalState.status === "idle") {
 			throw new Error("cannot complete goal because this thread has no goal");
 		}
@@ -3321,51 +4690,82 @@ export class AgentSession {
 		// runs at message_end, before the completing ipython cell executes, so a
 		// budget-limit context may already be steered. It is stale now — drop it.
 		this._clearQueuedGoalContexts();
-		this._setGoalState({
-			...goal,
-			active: false,
-			status: "complete",
-			lastReason: "Goal achieved",
-			lastError: undefined,
-		});
-		return this._goalState;
+		return this._setGoalState(
+			{
+				...goal,
+				active: false,
+				status: "complete",
+				lastReason: "Goal achieved",
+				lastError: undefined,
+			},
+			{
+				nativeGoalWrite: this.sessionManager[bindNativeEntryWriter]().captureGoalOperation({
+					version: 1,
+					kind: "goal_operation",
+					operation: "complete",
+					actor: "runtime",
+					previousGoalId: goal.goalId,
+				}),
+			},
+		);
 	}
 
-	private async _getGoalContinuationMessages(
+	private _getGoalContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
-	): Promise<AgentMessage[]> {
-		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
-			return [];
+	): Promise<AgentMessage[]>;
+	private _getGoalContinuationMessages(
+		context: GetContinuationMessagesContext,
+		signal: AbortSignal | undefined,
+		owner: GoalContinuationOwner,
+	): Promise<AgentContinuationOutcome>;
+	private _getGoalContinuationMessages(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+		owner?: GoalContinuationOwner,
+	): Promise<AgentMessage[] | AgentContinuationOutcome> {
+		const outcome = this._getGoalContinuationOutcome(context, owner ?? this._captureGoalContinuationOwner(signal));
+		return owner ? outcome : outcome.then((value) => (value.kind === "continue" ? value.messages : []));
+	}
+
+	private async _getGoalContinuationOutcome(
+		context: GetContinuationMessagesContext,
+		owner: GoalContinuationOwner,
+	): Promise<AgentContinuationOutcome> {
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (await this._stopGoalContinuationForTerminalMessage(context.message, owner)) {
+			return this._stoppedContinuationOutcome(owner.signal);
 		}
-		if (signal?.aborted || this._goalState.status !== "active" || !this._goalState.objective) {
-			return [];
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+		if (this._goalState.status !== "active" || !this._goalState.objective) {
+			return { kind: "finish" };
 		}
-		// Delegating and ending the turn is correct behavior; hold the continuation
-		// until descendants settle instead of re-prompting a waiting parent.
+		// Delegating and ending the turn is correct behavior; retain the existing wakeup owner.
 		if (this._hasUnsettledRlmQuiescenceWork()) {
 			this._goalContinuationAwaitsRlmWork = true;
-			return [];
+			return { kind: "wait_for_owned_work" };
 		}
 		this._goalContinuationAwaitsRlmWork = false;
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
-				...this._goalState,
-				continuationsUsed: this._goalState.continuationsUsed + 1,
+				...owner.goal,
+				continuationsUsed: owner.goal.continuationsUsed + 1,
 				lastReason: undefined,
 				lastError: undefined,
 			};
-			this._setGoalState(nextGoal);
-			return [createGoalContextMessage(this._goalState, "continuation")];
+			await this._setGoalState(nextGoal, { continuationOwner: owner });
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
+			return { kind: "continue", messages: [createGoalContextMessage(owner.goal, "continuation")] };
 		} catch (error) {
+			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
 			const message = error instanceof Error ? error.message : String(error);
 			try {
-				this._finishGoalWithError(message);
+				await this._finishGoalWithError(message, owner);
 			} catch {
-				// The continuation hook must not reject; listener failures should not crash the agent loop.
+				// Preserve the goal hook's existing non-rejection policy, without finishing a replacement goal.
 			}
-			return [];
+			return this._stoppedContinuationOutcome(owner.signal);
 		}
 	}
 
@@ -3373,37 +4773,72 @@ export class AgentSession {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
-		if (this.queuedActionCount > 0) {
-			return [];
-		}
+		// Keep direct callers of the original Agent callback; the real loop uses the typed owner only.
+		const outcome = await this._getContinuationOutcome(context, signal);
+		return outcome.kind === "continue" ? outcome.messages : [];
+	}
+
+	private async _getContinuationOutcome(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<AgentContinuationOutcome> {
+		if (signal?.aborted || this._disposed || this._disposing) return this._stoppedContinuationOutcome(signal);
+		if (this.queuedActionCount > 0) return { kind: "finish" };
+		const owner = this._captureGoalContinuationOwner(signal);
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
-		const goalSnapshot = this._goalState;
-		const goalAccountingStartedAt = this._goalAccountingStartedAt;
-		const goalMessages = await this._getGoalContinuationMessages(context, signal);
-		if (goalMessages.length > 0 || signal?.aborted) {
-			if (goalMessages.length > 0 && this._sessionInputArrivalEpoch !== arrivalEpoch) {
-				this._setGoalState(goalSnapshot);
+		const goalSnapshot = owner.goal;
+		const goalAccountingStartedAt = owner.accountingStartedAt;
+		const autonomousState = this._autonomousState;
+		const autonomousSnapshot = structuredClone(autonomousState);
+		const cwd = this._cwd;
+		const autonomousOwnerIsCurrent = () =>
+			this._autonomousState === autonomousState && isDeepStrictEqual(autonomousState, autonomousSnapshot);
+		const goalOutcome = await this._getGoalContinuationMessages(context, signal, owner);
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
+		if (goalOutcome.kind === "continue") {
+			if (this._sessionInputArrivalEpoch !== arrivalEpoch) {
+				try {
+					await this._setGoalState(goalSnapshot, { continuationOwner: owner });
+				} catch (error) {
+					if (error instanceof StaleGoalContinuationError) return this._stoppedContinuationOutcome(signal);
+					throw error;
+				}
+				if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
 				this._goalAccountingStartedAt = goalAccountingStartedAt;
-				return [];
+				return { kind: "finish" };
 			}
-			return goalMessages;
+			return goalOutcome;
 		}
+		const noContinuation = (): AgentContinuationOutcome =>
+			goalOutcome.kind === "wait_for_owned_work" && this._goalContinuationAwaitsRlmWork
+				? { kind: "wait_for_owned_work" }
+				: { kind: "finish" };
 		if (
 			this._autonomousContinuationSuppressionDepth > 0 ||
-			context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message))
+			(owner.manager.supportsCapturedHistoryReads()
+				? this._invocationSuppressedAutonomousContinuation
+				: context.newMessages.some((message) => this._autonomousContinuationSuppressedMessages.has(message)))
 		) {
-			return [];
+			return noContinuation();
 		}
-		const autonomousSnapshot = this._snapshotAutonomousRuntimeState();
-		const autonomousMessage = await nextAutonomousContinuation(this._autonomousState, context.message, {
-			cwd: this._cwd,
-			signal,
-		});
-		if (autonomousMessage && this._sessionInputArrivalEpoch !== arrivalEpoch) {
-			this._restoreAutonomousRuntimeSnapshot(autonomousSnapshot);
-			return [];
+		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
+		// Gate work may await. It must not mutate a new run's counters or failure state while it waits.
+		const candidate = structuredClone(autonomousSnapshot);
+		let autonomousMessage: AgentMessage | undefined;
+		try {
+			autonomousMessage = await nextAutonomousContinuation(candidate, context.message, { cwd, signal });
+		} catch (error) {
+			if (this._isGoalContinuationOwnerCurrent(owner) && autonomousOwnerIsCurrent()) {
+				this._restoreAutonomousRuntimeSnapshot(candidate);
+			}
+			throw error;
 		}
-		return autonomousMessage ? [autonomousMessage] : [];
+		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
+		if (!autonomousOwnerIsCurrent()) return { kind: "finish" };
+		if (autonomousMessage && this._sessionInputArrivalEpoch !== arrivalEpoch) return { kind: "finish" };
+		this._restoreAutonomousRuntimeSnapshot(candidate);
+		// Preserve the current policy winner: a goal deferral does not override autonomous continuation.
+		return autonomousMessage ? { kind: "continue", messages: [autonomousMessage] } : noContinuation();
 	}
 
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
@@ -3480,8 +4915,61 @@ export class AgentSession {
 			);
 	}
 
-	private _handleAgentEvent = (event: AgentEvent): void => {
-		this._createRetryPromiseForAgentEnd(event);
+	private _captureInputOrigin(message: UserMessage | CustomMessage): CapturedNativeMessageWrite | undefined {
+		const actions = this._actionStore.actionsForMessage(message);
+		if (actions.length !== 1) return undefined;
+		const action = actions[0];
+		if (action.payload.kind !== "turn") return undefined;
+		const record = action.payload.records.find((record) => record.message === message);
+		if (!record) return undefined;
+		return this.sessionManager[bindNativeEntryWriter]().captureMessage({
+			version: 1,
+			kind: "input",
+			actionId: action.id,
+			recordId: record.id,
+			inputSource: action.payload.acceptedAgentMessage ? "internal" : action.source,
+			recordRole: record.role,
+			...(record.role === "primary" && action.payload.submitted ? { submitted: action.payload.submitted } : {}),
+			...(record.role === "primary" && action.payload.selectedSkillRef
+				? { selectedSkillRef: action.payload.selectedSkillRef }
+				: {}),
+		});
+	}
+
+	private async _waitForAgentEventsBeforeContext(): Promise<void> {
+		try {
+			await this._agentEventQueue;
+		} catch (error) {
+			if (!(error instanceof CompactionCommittedError) || error !== this._compactionSetupFailure) throw error;
+		}
+	}
+
+	private _handleAgentEvent = (event: AgentEvent): void | Promise<void> => {
+		if (event.type === "agent_end" && event.refusal) this._invocationOutputRefused = true;
+		if (event.type === "agent_start") {
+			// Native input waits for its delivery ticket. Direct/generic Agent runs have actually started here.
+			if (
+				!this._actionStore
+					.activeActions()
+					.some((action) => action.payload.kind === "turn" && action.lifecycle.state === "committing")
+			) {
+				for (const resume of [this._pendingCheckpoint, this._postCompactionContinuationSettlement?.resume]) {
+					if (resume?.boundary && this._isCompactionOwnerCurrent(resume.owner)) resume.boundary.state = "consumed";
+				}
+			}
+			this._invocationSuppressedAutonomousContinuation = false;
+			this._invocationCompactionOwner = this._captureCompactionOwner(this.agent.signal);
+		}
+		if (
+			(event.type === "message_start" || event.type === "message_end") &&
+			this._autonomousContinuationSuppressedMessages.has(event.message)
+		) {
+			this._invocationSuppressedAutonomousContinuation = true;
+		}
+		const nativeMessageWrite =
+			event.type === "message_end" && (event.message.role === "user" || event.message.role === "custom")
+				? this._captureInputOrigin(event.message)
+				: undefined;
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
 				if (
@@ -3515,58 +5003,23 @@ export class AgentSession {
 						? action.payload.records.find((candidate) => candidate.message === event.message)
 						: undefined;
 				if (record) record.started = true;
-				if (record?.role === "primary") {
-					this._actionStore.ticketFor(action).settleDelivered({ status: "delivered" });
-					this._settleAgentMessage(action.agentMessageId, "delivery");
-				}
-			}
-		} else if (event.type === "message_end" && (event.message.role === "user" || event.message.role === "custom")) {
-			for (const action of this._actionStore.actionsForMessage(event.message)) {
-				const record =
-					action.payload.kind === "turn"
-						? action.payload.records.find((candidate) => candidate.message === event.message)
-						: undefined;
-				if (record) record.durable = true;
-				if (record?.role === "primary" && action.lifecycle.state === "committing") {
-					transitionSessionAction(action, {
-						state: "running",
-						execution: "agent_turn",
-					});
-					this._notifySessionInputCheckpointChange();
-					this._emitQueueUpdate();
-				}
 			}
 		}
-		this._agentEventQueue = this._agentEventQueue.then(
-			() => this._processAgentEvent(event),
-			() => this._processAgentEvent(event),
+		const compactionOwner = event.type === "agent_end" ? this._invocationCompactionOwner : undefined;
+		const job = this._agentEventQueue.then(
+			() => this._processAgentEvent(event, nativeMessageWrite, compactionOwner),
+			() => this._processAgentEvent(event, nativeMessageWrite, compactionOwner),
 		);
-		this._agentEventQueue.catch(() => {});
+		this._agentEventQueue = job;
+		job.catch(() => {});
+		// Ordinary extension contexts already expose request-only abort, not command waitForIdle.
+		// Join THIS accepted message job, never a later mutable tail from inside that job.
+		if (
+			this.sessionManager.supportsCapturedHistoryReads() &&
+			(event.type === "message_end" || (event.type === "agent_end" && event.refusal))
+		)
+			return job;
 	};
-
-	private _createRetryPromiseForAgentEnd(event: AgentEvent): void {
-		if (event.type !== "agent_end" || this._retryPromise) {
-			return;
-		}
-
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			return;
-		}
-
-		const lastAssistant = this._findLastAssistantInMessages(event.messages);
-		const concreteAuthFailure = lastAssistant ? this._isConcreteProviderAuthFailure(lastAssistant) : false;
-		if (!lastAssistant || (!this._isRetryableError(lastAssistant) && !concreteAuthFailure)) {
-			return;
-		}
-		if (concreteAuthFailure) {
-			this._captureRetryAuthFailureSource(lastAssistant);
-		}
-
-		this._retryPromise = new Promise((resolve) => {
-			this._retryResolve = resolve;
-		});
-	}
 
 	private _findLastAssistantInMessages(messages: AgentMessage[]): AssistantMessage | undefined {
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -3582,7 +5035,7 @@ export class AgentSession {
 		const message =
 			event.type === "message_end" && event.message.role === "assistant"
 				? (event.message as AssistantMessage)
-				: event.type === "agent_end"
+				: event.type === "agent_end" && !event.refusal
 					? this._findLastAssistantInMessages(event.messages)
 					: undefined;
 		if (!message || message.stopReason !== "error" || !message.errorMessage) {
@@ -3594,10 +5047,16 @@ export class AgentSession {
 		message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
 	}
 
-	private async _processAgentEvent(event: AgentEvent): Promise<void> {
+	private async _processAgentEvent(
+		event: AgentEvent,
+		nativeMessageWrite?: CapturedNativeMessageWrite,
+		compactionOwner?: CompactionOwner,
+	): Promise<void> {
 		let clearedDispatchEnded = false;
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
-			this._applyLateIpythonSentAgentMessages(event.message);
+			if (this.sessionManager.supportsCapturedHistoryReads())
+				await this._applyCanonicalIpythonSentAgentMessages(event.message);
+			else this._applyLateIpythonSentAgentMessages(event.message);
 		}
 		if (event.type === "message_start" || event.type === "message_end") {
 			const cleared = this._capturingCancelledAction(event.message);
@@ -3632,8 +5091,47 @@ export class AgentSession {
 			}
 		}
 
+		if (event.type === "agent_end" && event.refusal) {
+			// Primary delivery ACKs remain delivered. Only this invocation's completion has failed.
+			this._lastAssistantMessage = undefined;
+			this._clearQueuedGoalContexts();
+			this._clearQueuedAutonomousContinuations();
+			if (this._retryAttempt > 0) {
+				this._emit({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this._retryAttempt,
+					finalError: new AgentOutputLimitError(event.refusal).message,
+				});
+				this._retryAttempt = 0;
+			}
+			this._retryAuthFailureSources = [];
+			this._resolveRetry();
+			await this._emitExtensionEvent(event);
+			this._emit(event);
+			return;
+		}
+
 		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
+		}
+
+		if (
+			this.sessionManager.supportsCapturedHistoryReads() &&
+			event.type === "message_end" &&
+			event.message.role === "assistant"
+		) {
+			// Preserve budget progress while a message_end transformer waits. The same subject WeakSet
+			// deduplicates the post-message and post-turn calls; goal state is published only after its ACK.
+			// Do not run serialized refinement/compaction or stop mandatory tools at this point.
+			if ((await this._accountGoalUsageForAssistantMessage(event.message)) && !this._invocationOutputRefused) {
+				const message = createGoalContextMessage(this._goalState, "budget_limit");
+				const normalized = normalizeMessageContent(message.content);
+				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+					message,
+					resumeIfIdle: true,
+				});
+			}
 		}
 
 		await this._emitExtensionEvent(event);
@@ -3648,23 +5146,55 @@ export class AgentSession {
 
 		this._addLoginGuidanceToAuthError(event);
 
-		this._emit(event);
+		if (event.type !== "message_end") this._emit(event);
 
 		if (event.type === "message_end") {
 			if (event.message.role === "custom") {
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
+				if (nativeMessageWrite) await nativeMessageWrite(event.message);
+				else
+					await this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				this.sessionManager.appendMessage(event.message);
+				const manager = this.sessionManager;
+				const sessionId = manager.getSessionId();
+				const sessionFile = manager.getSessionFile();
+				const nativeOutput =
+					!nativeMessageWrite && event.message.role === "assistant"
+						? this.requests.appendMainOutput(event.message, manager)
+						: undefined;
+				const entryId = nativeMessageWrite
+					? await nativeMessageWrite(event.message)
+					: ((nativeOutput ? await nativeOutput : undefined) ?? (await manager.appendMessage(event.message)));
+				if (event.message.role === "assistant")
+					this._assistantEntryIds.set(event.message, { sessionId, sessionFile, entryId });
 			}
+			if (event.message.role === "user" || event.message.role === "custom") {
+				for (const action of this._actionStore.actionsForMessage(event.message)) {
+					const record =
+						action.payload.kind === "turn"
+							? action.payload.records.find((candidate) => candidate.message === event.message)
+							: undefined;
+					if (record) record.durable = true;
+					if (record?.role === "primary") {
+						this._actionStore.ticketFor(action).settleDelivered({ status: "delivered" });
+						this._settleAgentMessage(action.agentMessageId, "delivery");
+						if (action.lifecycle.state === "committing") {
+							transitionSessionAction(action, { state: "running", execution: "agent_turn" });
+							this._notifySessionInputCheckpointChange();
+							this._emitQueueUpdate();
+						}
+					}
+				}
+			}
+			this._emit(event);
 
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
@@ -3691,7 +5221,11 @@ export class AgentSession {
 
 				// Reset retry counter immediately on successful assistant response
 				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
+				if (
+					assistantMsg.stopReason !== "error" &&
+					assistantMsg.stopReason !== "aborted" &&
+					this._retryAttempt > 0
+				) {
 					this._emit({
 						type: "auto_retry_end",
 						success: true,
@@ -3700,7 +5234,7 @@ export class AgentSession {
 					this._retryAttempt = 0;
 					this._retryAuthFailureSources = [];
 				}
-				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
+				if ((await this._accountGoalUsageForAssistantMessage(assistantMsg)) && !this._invocationOutputRefused) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
 					await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
@@ -3725,28 +5259,20 @@ export class AgentSession {
 				return;
 			}
 
-			const concreteAuthFailure = this._isConcreteProviderAuthFailure(msg);
-			const retryConcreteAuthFailure =
-				concreteAuthFailure && !this._isStructuredPermanentProviderRetryExhausted(msg);
-			if (this._isRetryableError(msg) || retryConcreteAuthFailure) {
-				if (retryConcreteAuthFailure) {
-					this._captureRetryAuthFailureSource(msg);
-				}
-				const didRetry = await this._handleRetryableError(msg, {
-					markAuthStaleOnFailure: retryConcreteAuthFailure,
-					authSourceTokens: retryConcreteAuthFailure ? this._retryAuthFailureSources : undefined,
+			if (this._isConcreteProviderAuthFailure(msg)) {
+				this._markProviderAuthStaleForRetryFailure(msg, {
+					markAuthStaleOnFailure: true,
+					authSourceTokens: this._retryAuthFailureSources,
 				});
-				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
-
-			const compactionWillRetry = await this._checkCompaction(msg);
+			const compactionWillRetry = await this._checkCompaction(msg, true, true, compactionOwner);
 			if (compactionWillRetry && this._retryAttempt > 0) {
 				return;
 			}
 			this._finishActiveRetryWithFailure(msg);
 			this._resolveRetry();
 			if (!compactionWillRetry) {
-				this._finishGoalForTerminalAssistantMessage(msg);
+				await this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
 				// at the shouldStopAfterTurn boundary, not here at agent_end.
 				if (!this._serializedRefine) {
@@ -3761,6 +5287,7 @@ export class AgentSession {
 
 	private _resolveRetry(): void {
 		this._semanticEdges.clearTurnRetry();
+		this.requests.clearTurnRetry();
 		if (this._retryResolve) {
 			this._retryResolve();
 			this._retryResolve = undefined;
@@ -3798,17 +5325,16 @@ export class AgentSession {
 	}
 
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
+		// Failed native initialization can emit a lifecycle error before extensions exist.
+		if (!this._extensionRunner) return;
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
-			this.sessionManager.recordGitStateIfChanged();
+			await this.sessionManager.recordGitStateIfChanged();
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
 			// Also capture at end of turn so commits made during the run (e.g. via a bash tool) land.
-			this.sessionManager.recordGitStateIfChanged();
-			await this._extensionRunner.emit({
-				type: "agent_end",
-				messages: event.messages,
-			});
+			await this.sessionManager.recordGitStateIfChanged();
+			await this._extensionRunner.emit(event);
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -3917,224 +5443,217 @@ export class AgentSession {
 	 * Remove all listeners and disconnect from agent.
 	 * Call this when completely done with the session.
 	 */
+	/** Stop new opportunistic refinement without cancelling accepted calls or explicit queued requests. */
+	closeAutoRefineAdmission(): void {
+		if (this._autoRefineAdmissionClosed) return;
+		this._autoRefineAdmissionClosed = true;
+		for (const timer of this._scheduledAutoRefineTimers) clearTimeout(timer);
+		this._scheduledAutoRefineTimers.clear();
+		this._discardPendingAutoRefine();
+	}
+
 	/**
 	 * Async teardown for graceful quit/switch: await the Python kernel's dispose
 	 * (which flushes a final namespace snapshot) before the synchronous dispose, so
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
-		if (this._disposed) {
-			return this._disposeCallbacksPromise;
-		}
-		// Concurrent callers await the same in-flight teardown so none resolves before
-		// the kernel snapshot flush finishes.
-		if (this._disposeAsyncPromise) {
-			return this._disposeAsyncPromise;
-		}
+		this._rlmChildAdmission?.cancel("Parent session disposed");
+		if (this._disposeAsyncPromise) return this._disposeAsyncPromise;
+		this.closeAutoRefineAdmission();
 		const kernelSnapshot = options?.kernelSnapshot ?? true;
 		this._disposeAsyncPromise = (async () => {
-			// Drain before marking _disposing so a refine triggered at the final
-			// agent_end completes instead of being aborted by dispose().
-			await this._drainPendingRefinementForDisposal();
-			if (this._disposed) {
-				return this._disposeCallbacksPromise;
+			const errors: unknown[] = [];
+			try {
+				if (!this._disposed) await this._drainPendingRefinementForDisposal();
+			} catch (error) {
+				errors.push(error);
 			}
 			this._disposing = true;
 			this._sessionActionCommitDisposeAbortController.abort();
-			await this._disposeAsyncOnce(kernelSnapshot);
+			try {
+				await this._disposeAsyncOnce(kernelSnapshot);
+			} catch (error) {
+				errors.push(error);
+			}
+			if (errors.length === 1) throw errors[0];
+			if (errors.length > 1) throw new AggregateError(errors, "Session disposal failed");
+			this._rlmResidentDisposalComplete = true;
+			this._releaseRlmResidentCapacity?.();
 		})();
 		return this._disposeAsyncPromise;
 	}
 
-	/**
-	 * Await any in-flight refinement (planning or application) and run a
-	 * pending auto-refine that was scheduled but not yet started. Called
-	 * from disposeAsync before _disposing is set so refinement completes
-	 * before disposal.
-	 */
+	/** Drain accepted refinement and explicit queued requests; never start an opportunistic review or plan. */
 	private async _drainPendingRefinementForDisposal(): Promise<void> {
-		for (const timer of this._scheduledAutoRefineTimers) {
-			clearTimeout(timer);
-		}
-		this._scheduledAutoRefineTimers.clear();
-		await Promise.allSettled([...this._autoRefineOperations]);
-		for (const timer of this._scheduledAutoRefineTimers) {
-			clearTimeout(timer);
-		}
-		this._scheduledAutoRefineTimers.clear();
-		// Wait for in-flight refinement (including serialized background plan) to settle.
-		while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
-			if (this._refineInFlight) {
-				await this._refineInFlight;
-			} else if (this._refinePlanInFlight) {
-				await this._refinePlanInFlight;
-			} else if (this._serializedPlanInFlight) {
-				// Await the background plan and apply a ready "plan" result before teardown.
-				await this._consumeSerializedBackgroundPlan(async (bgResult) => {
-					if (bgResult?.status === "plan" && bgResult.branchVersion === this._autoRefineBranchVersion) {
-						try {
-							await this._applySerializedPlan(bgResult);
-						} catch (error) {
-							this._emitRefineFailed(error);
+		this.closeAutoRefineAdmission();
+		await this._drainAcceptedRefinement();
+	}
+
+	private async _drainAcceptedRefinement(): Promise<void> {
+		const errors: unknown[] = [];
+		const drain = async () => {
+			for (const timer of this._scheduledAutoRefineTimers) {
+				clearTimeout(timer);
+			}
+			this._scheduledAutoRefineTimers.clear();
+			const settled = await Promise.allSettled([...this._autoRefineOperations]);
+			for (const result of settled) if (result.status === "rejected") errors.push(result.reason);
+			for (const timer of this._scheduledAutoRefineTimers) {
+				clearTimeout(timer);
+			}
+			this._scheduledAutoRefineTimers.clear();
+			// Wait for in-flight refinement (including serialized background plan) to settle.
+			while (this._refineInFlight || this._refinePlanInFlight || this._serializedPlanInFlight) {
+				if (this._refineInFlight) {
+					await this._refineInFlight;
+				} else if (this._refinePlanInFlight) {
+					await this._refinePlanInFlight;
+				} else if (this._serializedPlanInFlight) {
+					// Await the background plan and apply a ready "plan" result before teardown.
+					await this._consumeSerializedBackgroundPlan(async (bgResult) => {
+						if (bgResult?.status === "plan" && bgResult.branchVersion === this._autoRefineBranchVersion) {
+							try {
+								await this._applySerializedPlan(bgResult);
+							} catch (error) {
+								errors.push(error);
+								this._emitRefineFailed(error);
+							}
+							// Preserve completion bookkeeping for the accepted refinement.
+							this._lastAutoRefineReviewAt = Date.now();
+							this._assistantTurnsSinceAutoRefine = 0;
 						}
-						// Stamp cooldown and reset counter so the interval
-						// check below does not trigger a duplicate refine.
-						this._lastAutoRefineReviewAt = Date.now();
-						this._assistantTurnsSinceAutoRefine = 0;
-					}
-					// Preserve a consumed explicit request when its background plan failed,
-					// matching the turn-boundary recovery path. The pending drain below
-					// retries it once before disposal.
-					if (
-						bgResult?.status === "failure" &&
-						bgResult.explicit &&
-						bgResult.branchVersion === this._autoRefineBranchVersion &&
-						!this._pendingRequestedRefine
-					) {
-						this._pendingRequestedRefine = bgResult.options;
-					}
-					if (bgResult?.status === "skip" && bgResult.explicit) {
-						this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
-					}
-					// For "skip" or "failure", stamp cooldown and reset counter
-					// so the interval check below does not trigger a duplicate
-					// terminal retry.
-					if (
-						bgResult?.status === "skip" ||
-						bgResult?.status === "failure" ||
-						bgResult?.status === "invalidated"
-					) {
-						this._lastAutoRefineReviewAt = Date.now();
-						this._assistantTurnsSinceAutoRefine = 0;
-					}
-					return false;
-				});
-			} else {
-				await new Promise<void>((resolve) => setTimeout(resolve, 0));
-			}
-		}
-		// Drain an agent-callable refine.run request that was scheduled but
-		// not yet consumed. Use the direct serialized path (no waitForIdle)
-		// since the agent may still own activeRun at the final agent_end.
-		if (this._pendingRequestedRefine) {
-			const pending = this._pendingRequestedRefine;
-			this._pendingRequestedRefine = undefined;
-			try {
-				await this._runSerializedRefine(pending);
-			} catch {
-				// Best-effort drain; refinement errors must not block disposal.
-			}
-			// Stamp cooldown and reset counter so the interval check below
-			// does not trigger a duplicate refine after the explicit drain.
-			this._lastAutoRefineReviewAt = Date.now();
-			this._assistantTurnsSinceAutoRefine = 0;
-		}
-		// A serialized compaction can finish without another model turn. Drain its
-		// pending review here so disposal does not silently lose the trigger.
-		if (this._serializedRefine && this._compactAutoRefinePending && this._autoRefineAllowedForSession()) {
-			const compactSettings = this.settingsManager.getAutoRefineSettings();
-			if (!compactSettings.enabled || !compactSettings.compact) {
-				this._compactAutoRefinePending = false;
-			} else {
-				const nowMs = Date.now();
-				const underCooldown =
-					this._lastAutoRefineReviewAt > 0 && nowMs - this._lastAutoRefineReviewAt < compactSettings.cooldownMs;
-				this._compactAutoRefinePending = false;
-				if (!underCooldown) {
-					try {
-						await this._runSerializedAutoRefineReview("compact", this._autoRefineBranchVersion);
-					} catch {
-						// Best-effort drain; refinement errors must not block disposal.
-					}
-					return;
+						// A failed background plan keeps its recorded failure; disposal never recreates it for retry.
+						if (bgResult?.status === "skip" && bgResult.explicit) {
+							this._emitRefineFailed(new RefineSkippedError("Refinement skipped by extension"));
+						}
+						// Preserve completed background-round bookkeeping without retrying.
+						if (
+							bgResult?.status === "skip" ||
+							bgResult?.status === "failure" ||
+							bgResult?.status === "invalidated"
+						) {
+							this._lastAutoRefineReviewAt = Date.now();
+							this._assistantTurnsSinceAutoRefine = 0;
+						}
+						return false;
+					});
+				} else {
+					await new Promise<void>((resolve) => setTimeout(resolve, 0));
 				}
 			}
+			if (this._compactionSetupFailure) return;
+			// Drain an agent-callable refine.run request that was scheduled but
+			// not yet consumed. Use the direct serialized path (no waitForIdle)
+			// since the agent may still own activeRun at the final agent_end.
+			if (this._pendingRequestedRefine) {
+				const pending = this._pendingRequestedRefine;
+				this._pendingRequestedRefine = undefined;
+				try {
+					await this._runSerializedRefine(pending);
+				} catch (error) {
+					errors.push(error);
+				}
+				// Preserve completion bookkeeping for the accepted explicit request.
+				this._lastAutoRefineReviewAt = Date.now();
+				this._assistantTurnsSinceAutoRefine = 0;
+			}
+		};
+		try {
+			await drain();
+		} catch (error) {
+			errors.push(error);
 		}
-
-		// If auto-refine is due but has not started yet, run it now so the
-		// refinement is persisted before disposal. Use the direct serialized
-		// path in serialized mode, or _maybeAutoRefine in interactive mode
-		// (where the agent is idle at this point).
-		if (this._disposed || !this._autoRefineAllowedForSession()) {
-			return;
-		}
-		const settings = this.settingsManager.getAutoRefineSettings();
-		if (!settings.enabled) {
-			return;
-		}
-		if (this._assistantTurnsSinceAutoRefine < settings.turnInterval) {
-			return;
-		}
-		const nowMs = Date.now();
-		const underCooldown =
-			this._lastAutoRefineReviewAt > 0 && nowMs - this._lastAutoRefineReviewAt < settings.cooldownMs;
-		if (underCooldown) {
-			return;
-		}
-		if (this._serializedRefine) {
-			await this._runSerializedRefineCheckpoint();
-		} else {
-			await this._maybeAutoRefine("turn_interval");
-		}
+		const distinct = [...new Set(errors)];
+		if (distinct.length === 1) throw distinct[0];
+		if (distinct.length > 1) throw new AggregateError(distinct, "Session refinement drain failed");
 	}
 
 	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
-		// Flush kernels/traces for both still-running and retained children; the sync
-		// dispose() below only tears them down synchronously.
-		for (const run of [...this._activeRlmChildRuns.values()]) {
-			const childSession = run.session;
-			if (!childSession) continue;
-			if (run.detachedDeletion) {
-				run.suppressTerminalNotice = true;
-				if (run.deletionCleanupObserver) {
-					await run.deletionCleanupObserver.catch(() => false);
-				} else if (run.deletionCleanup) {
-					await run.deletionCleanup.catch(() => childSession.disposeAsync().catch(() => undefined));
-				} else {
-					// Cleanup already failed and was exposed for retry before disposal.
-					await childSession.disposeAsync().catch(() => undefined);
-				}
-				if (!run.settled) await this._finishRlmRunDeletion(run);
-			} else {
-				await childSession.disposeAsync().catch(() => undefined);
+		const admission = this._rlmChildAdmission;
+		const errors: unknown[] = [];
+		const drain = async (operation: () => unknown | Promise<unknown>): Promise<void> => {
+			try {
+				await operation();
+			} catch (error) {
+				errors.push(error);
 			}
-		}
-		for (const unsubscribe of this._rlmChildUnsubscribes.values()) {
-			unsubscribe();
-		}
-		this._rlmChildUnsubscribes.clear();
-		for (const { session } of this._rlmChildSessions.values()) {
-			await session.disposeAsync().catch(() => undefined);
-		}
-		this._rlmChildSessions.clear();
-		this._rlmChildCleanupFailures.clear();
-		this._deletedRlmChildIds.clear();
+		};
 		try {
-			await this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot });
-		} catch {
-			// a failed kernel startup already cleaned up after itself
+			await drain(() => this.requests.stopAdmission());
+			await drain(() => this.requestAbort());
+			for (const run of [...this._activeRlmChildRuns.values()]) {
+				await drain(() => this._cancelRlmChildRun(run, "Parent session disposed"));
+			}
+			await drain(() => this.requests.waitForIdle());
+			// Initialization reports errors through its own promise, like an active Agent run.
+			// Join it before disposing any runtime resources it may still be constructing.
+			if (this._initialization) await Promise.allSettled([this._initialization]);
+			const admittedChild = admission?.session;
+			// Includes a native child constructed but not yet published by its factory.
+			if (admittedChild) await drain(() => admittedChild.disposeAsync());
+			for (const run of [...this._activeRlmChildRuns.values()]) {
+				const childSession = run.session;
+				if (!childSession) continue;
+				run.suppressTerminalNotice = true;
+				if (run.detachedDeletion && run.deletionCleanupObserver) {
+					await drain(() => run.deletionCleanupObserver);
+				} else if (run.detachedDeletion && run.deletionCleanup) {
+					await drain(() => run.deletionCleanup);
+				} else {
+					await drain(() => childSession.disposeAsync());
+				}
+				if (run.detachedDeletion && !run.settled) await drain(() => this._finishRlmRunDeletion(run));
+			}
+			for (const unsubscribe of this._rlmChildUnsubscribes.values()) await drain(unsubscribe);
+			this._rlmChildUnsubscribes.clear();
+			for (const { session } of this._rlmChildSessions.values()) await drain(() => session.disposeAsync());
+			this._rlmChildSessions.clear();
+			this._rlmChildCleanupFailures.clear();
+			this._deletedRlmChildIds.clear();
+			// Stop kernel-backed tools before waiting for their terminal agent events.
+			await drain(() => this._ipythonKernelProvisioner?.dispose({ snapshot: kernelSnapshot }));
+			while (this._rlmRunTasks.size > 0) {
+				for (const task of [...this._rlmRunTasks]) await drain(() => task);
+			}
+			await drain(() => admission?.settlement);
+			if (admission?.session && admission.session !== admittedChild) {
+				await drain(() => admission.session?.disposeAsync());
+			}
+			await drain(() => this.agent.waitForIdle());
+			await drain(() => this._compactionOperation);
+			await drain(() => this._branchSummaryOperation);
+			await drain(() => this._agentEventQueue);
+			await drain(() => this._goalResumeOperation);
+			await drain(() => this._waitForChildUsageWrites());
+			await drain(() => this.dispose());
+		} catch (error) {
+			errors.push(error);
+		} finally {
+			await drain(() => this._startDisposeCallbacks());
+			await drain(() => this.sessionManager.close());
 		}
-		this.dispose();
-		await this._disposeCallbacksPromise;
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Session disposal failed");
 	}
 
 	private _startDisposeCallbacks(): Promise<void> {
-		if (this._disposeCallbacksPromise) {
-			return this._disposeCallbacksPromise;
-		}
+		if (this._disposeCallbacksPromise) return this._disposeCallbacksPromise;
 		const pending: Promise<void>[] = [];
 		for (const callback of this._disposeCallbacks) {
 			try {
 				const result = callback();
-				if (result) {
-					pending.push(result.catch(() => undefined));
-				}
-			} catch {
-				// Disposal remains best-effort; one owner must not block the rest.
+				if (result) pending.push(result);
+			} catch (error) {
+				pending.push(Promise.reject(error));
 			}
 		}
 		this._disposeCallbacks.clear();
-		this._disposeCallbacksPromise = Promise.all(pending).then(() => undefined);
+		this._disposeCallbacksPromise = Promise.allSettled(pending).then((results) => {
+			const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+			if (errors.length === 1) throw errors[0];
+			if (errors.length > 1) throw new AggregateError(errors, "Session disposal callbacks failed");
+		});
 		return this._disposeCallbacksPromise;
 	}
 
@@ -4142,6 +5661,7 @@ export class AgentSession {
 		if (this._disposed) {
 			return;
 		}
+		this.requests.stopAdmission();
 		this._disposed = true;
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -4181,14 +5701,15 @@ export class AgentSession {
 			}
 			this._cancelSessionActions(() => true, deliveryError);
 			this.agent.clearAllQueues();
-			this._extensionRunner.invalidate(
+			this._extensionRunner?.invalidate(
 				"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 			);
 			this._disconnectFromAgent();
 			this._eventListeners = [];
 			cleanupSessionResources(this.sessionId);
 		} finally {
-			void this._startDisposeCallbacks();
+			// The synchronous surface cannot report late errors; disposeAsync joins this same promise.
+			void this._startDisposeCallbacks().catch(() => undefined);
 		}
 	}
 
@@ -4279,21 +5800,31 @@ export class AgentSession {
 		);
 	}
 
+	/** Active working context; use captured history readers for the complete source. */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
 	}
 
-	buildSessionContext(): SessionContext {
-		const context = this.sessionManager.buildSessionContext();
-		for (const message of context.messages) {
-			this._applyLateIpythonSentAgentMessages(message);
+	async buildSessionContext(): Promise<SessionContext> {
+		if (!this.sessionManager.isPersisted()) {
+			const context = this.sessionManager.buildSessionContext();
+			for (const message of context.messages) this._applyLateIpythonSentAgentMessages(message);
+			this._mergeUnpersistedOutcomes(context.messages);
+			return context;
 		}
-		this._mergeUnpersistedOutcomes(context.messages);
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		const outcomes = structuredClone(this._unpersistedOutcomes);
+		const { context } = await readSessionBootstrap(this.sessionManager, limits);
+		this._mergeUnpersistedOutcomes(context.messages, outcomes);
+		if (context.messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 		return context;
 	}
 
-	private _mergeUnpersistedOutcomes(messages: AgentMessage[]): void {
-		for (const outcome of this._unpersistedOutcomes) {
+	private _mergeUnpersistedOutcomes(
+		messages: AgentMessage[],
+		outcomes: readonly CustomMessage[] = this._unpersistedOutcomes,
+	): void {
+		for (const outcome of outcomes) {
 			let insertAt = messages.length;
 			while (insertAt > 0 && messages[insertAt - 1]!.timestamp > outcome.timestamp) {
 				insertAt -= 1;
@@ -4404,7 +5935,10 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _rebuildSystemPrompt(
+		toolNames: string[],
+		nativeEpoch = this.sessionManager.isPersisted() && this._contextEpochsEnabled,
+	): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelines: string[] = [];
@@ -4430,6 +5964,7 @@ export class AgentSession {
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
 			skills: loadedSkills,
+			nativeSkillSelection: nativeEpoch ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
@@ -4460,13 +5995,21 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		policy: SubmissionNormalizationPolicy,
-	): NormalizedSubmission {
-		let expandedText = text;
-		if (policy.expandSkills) expandedText = this._expandSkillCommand(expandedText);
-		if (policy.expandPromptTemplates) {
-			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
-		}
-		return { kind: "prompt", text: expandedText, images };
+		skillOwner?: NativeSkillSelectionOwner,
+	): NormalizedSubmission | Promise<NormalizedSubmission> {
+		const finish = (expanded: string | SkillCommandExpansion): NormalizedSubmission => {
+			const value = typeof expanded === "string" ? { text: expanded } : expanded;
+			return {
+				...value,
+				kind: "prompt",
+				images,
+				text: policy.expandPromptTemplates
+					? expandPromptTemplate(value.text, [...this.promptTemplates])
+					: value.text,
+			};
+		};
+		const expanded = policy.expandSkills ? this._expandSkillCommand(text, skillOwner) : text;
+		return expanded instanceof Promise ? expanded.then(finish) : finish(expanded);
 	}
 
 	private _normalizeSubmission(
@@ -4488,17 +6031,18 @@ export class AgentSession {
 			}
 		}
 
+		const skillOwner = policy.expandSkills ? this._captureSkillSelectionOwner() : undefined;
 		if (policy.inputSource !== undefined && this._extensionRunner.hasHandlers("input")) {
 			return this._extensionRunner.emitInput(text, images, policy.inputSource).then((result) => {
 				if (result.action === "handled") return { kind: "handled" };
 				if (result.action === "transform") {
-					return this._finishSubmissionNormalization(result.text, result.images ?? images, policy);
+					return this._finishSubmissionNormalization(result.text, result.images ?? images, policy, skillOwner);
 				}
-				return this._finishSubmissionNormalization(text, images, policy);
+				return this._finishSubmissionNormalization(text, images, policy, skillOwner);
 			});
 		}
 
-		return this._finishSubmissionNormalization(text, images, policy);
+		return this._finishSubmissionNormalization(text, images, policy, skillOwner);
 	}
 
 	private async _runPreTurnCompaction(): Promise<void> {
@@ -4516,10 +6060,10 @@ export class AgentSession {
 		) {
 			await this._waitForRefineIdle();
 		}
-		if (policy.flushPendingBashBeforeValidation) this._flushPendingBashMessages();
+		if (policy.flushPendingBashBeforeValidation) await this._flushPendingBashMessages();
 		if (policy.validateModelAndAuth) await this._validateCanStartAgentRun();
 		steps.afterValidation?.();
-		if (!policy.flushPendingBashBeforeValidation) this._flushPendingBashMessages();
+		if (!policy.flushPendingBashBeforeValidation) await this._flushPendingBashMessages();
 
 		if (policy.preTurnCompaction === "beforeModelSelection") await this._runPreTurnCompaction();
 		if (policy.awaitPendingModelSelection) {
@@ -4895,6 +6439,10 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
+		const submitted = captureSubmittedInput(text, options);
+		const isInternalPrompt = options?.internalPrompt === true;
+		const acceptedAgentMessage = options?.skipPrePromptWork === true && options.returnAfterAccepted === true;
+		const inputSource = isInternalPrompt ? "internal" : (options?.source ?? "interactive");
 		const resumeSuspendedInput = options?.resumeIfIdle !== false;
 		if (!this.isStreaming) {
 			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
@@ -4915,13 +6463,14 @@ export class AgentSession {
 					throw new Error("Session input was invalidated before admission");
 				}
 				options?.admissionCommitted?.();
-				const isInternalPrompt = options?.internalPrompt === true;
 				const expandPromptTemplates = isInternalPrompt ? false : (options?.expandPromptTemplates ?? true);
 				const normalizationResult = this._normalizeSubmission(text, options?.images, {
 					parseSessionCommands: !isInternalPrompt && !options?.skipPrePromptWork,
 					extensionCommands: expandPromptTemplates ? "execute" : "ignore",
 					inputSource:
-						!isInternalPrompt && !options?.skipInputHandlers ? (options?.source ?? "interactive") : undefined,
+						!isInternalPrompt && !options?.skipInputHandlers && inputSource !== "internal"
+							? inputSource
+							: undefined,
 					expandSkills: expandPromptTemplates,
 					expandPromptTemplates,
 				});
@@ -4960,7 +6509,8 @@ export class AgentSession {
 						schedule,
 						{
 							agentMessageId: options?.agentMessageId,
-							source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+							source: inputSource,
+							submitted,
 						},
 					);
 					const result = this._admitSessionInput(action, {
@@ -4978,6 +6528,7 @@ export class AgentSession {
 					return;
 				}
 
+				normalized.assertSkillCurrent?.();
 				const queueForStreaming = this.isStreaming;
 				const queueForBusy = options?.queueIfBusy === true && this._isBusyForSessionInput("preflight");
 				const visibleQueued = queueForStreaming || queueForBusy;
@@ -5002,8 +6553,8 @@ export class AgentSession {
 							content: content.map((block) => ({ ...block })),
 							timestamp: Date.now(),
 						} satisfies UserMessage);
-				const acceptedAgentMessage = options?.skipPrePromptWork === true && options.returnAfterAccepted === true;
 				const action = this._createPreparedTurnAction(schedule, normalized.text, normalized.images, {
+					selectedSkillRef: normalized.selectedSkillRef,
 					agentMessageId: options?.agentMessageId,
 					queueKey: options?.followUpQueueKey,
 					content,
@@ -5014,7 +6565,8 @@ export class AgentSession {
 						!visibleQueued ||
 						options?.resumeIfIdle ||
 						(options?.queueIfBusy === true && canSelectSessionAction(this._runtimeActivity())),
-					source: isInternalPrompt ? "internal" : (options?.source ?? "interactive"),
+					source: inputSource,
+					submitted,
 					executionPolicy: visibleQueued
 						? this._turnExecutionPolicy("queued")
 						: this._turnExecutionPolicy("directPrompt", {
@@ -5119,31 +6671,49 @@ export class AgentSession {
 	/**
 	 * Expand skill commands (/skill:name args) to their full content.
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
-	 * Emits errors via extension runner if file read fails.
+	 * Emits errors via extension runner and rejects if the selected file cannot be read completely.
 	 */
-	private _expandSkillCommand(text: string): string {
+	private _expandSkillCommand(
+		text: string,
+		owner?: NativeSkillSelectionOwner,
+	): string | Promise<string | SkillCommandExpansion> {
 		if (!text.startsWith("/skill:")) return text;
-
 		const parsed = parseSlashCommand(text);
 		if (!parsed?.name.startsWith("skill:")) return text;
 		const skillName = parsed.name.slice("skill:".length);
-		const args = parsed.args;
-
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown skill, pass through
-
-		try {
-			const content = readFileSync(skill.filePath, "utf-8");
-			const body = stripFrontmatter(content).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
-		} catch (err) {
+		const skill = this.resourceLoader.getSkills().skills.find((item) => item.name === skillName);
+		if (!skill) return text;
+		const skillPath = skill.filePath;
+		const render = (capture: SelectedSkillCapture, ref?: string): string => {
+			const block = selectedSkillBlock(capture, ref);
+			return parsed.args ? `${block}\n\n${parsed.args}` : block;
+		};
+		const failure = (error: unknown): never => {
 			this._extensionRunner.emitError({
-				extensionPath: skill.filePath,
+				extensionPath: skillPath,
 				event: "skill_expansion",
-				error: err instanceof Error ? err.message : String(err),
+				error: error instanceof Error ? error.message : String(error),
 			});
-			return text; // Return original on error
+			throw error;
+		};
+		try {
+			if (owner)
+				return this._selectNativeSkill(skill, owner, false)
+					.then((selected) => {
+						const assertSkillCurrent = () => this._assertSkillSelectionOwner(owner);
+						assertSkillCurrent();
+						return selected
+							? {
+									text: render(selected.capture, selected.ref),
+									selectedSkillRef: { ...selected.source },
+									assertSkillCurrent,
+								}
+							: { text: render(captureSelectedSkill(captureSkillDescriptor(skill))), assertSkillCurrent };
+					})
+					.catch(failure);
+			return render(captureSelectedSkill(captureSkillDescriptor(skill)));
+		} catch (error) {
+			return failure(error);
 		}
 	}
 
@@ -5164,17 +6734,34 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<void> {
-		const normalized = this._normalizeSubmission(text, images, {
+		const submitted = captureSubmittedInput(text, { images });
+		const manager = this.sessionManager;
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile();
+		const inputEpoch = this._sessionInputPumpEpoch;
+		const normalization = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
 			expandSkills: true,
 			expandPromptTemplates: true,
 		});
-		if (normalized instanceof Promise || normalized.kind !== "prompt") {
+		const normalized = normalization instanceof Promise ? await normalization : normalization;
+		if (
+			normalization instanceof Promise &&
+			(this.sessionManager !== manager ||
+				sessionId !== manager.getSessionId() ||
+				sessionFile !== manager.getSessionFile() ||
+				inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Queued prompt normalization owner changed");
+		if (normalized.kind !== "prompt") {
 			throw new Error("Queued prompt normalization did not produce a prompt");
 		}
 
+		normalized.assertSkillCurrent?.();
 		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+			submitted,
+			selectedSkillRef: normalized.selectedSkillRef,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -5197,17 +6784,34 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 		} = {},
 	): Promise<boolean> {
-		const normalized = this._normalizeSubmission(text, images, {
+		const submitted = captureSubmittedInput(text, { images });
+		const manager = this.sessionManager;
+		const sessionId = manager.getSessionId();
+		const sessionFile = manager.getSessionFile();
+		const inputEpoch = this._sessionInputPumpEpoch;
+		const normalization = this._normalizeSubmission(text, images, {
 			parseSessionCommands: false,
 			extensionCommands: "reject",
 			expandSkills: true,
 			expandPromptTemplates: true,
 		});
-		if (normalized instanceof Promise || normalized.kind !== "prompt") {
+		const normalized = normalization instanceof Promise ? await normalization : normalization;
+		if (
+			normalization instanceof Promise &&
+			(this.sessionManager !== manager ||
+				sessionId !== manager.getSessionId() ||
+				sessionFile !== manager.getSessionFile() ||
+				inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Queued prompt normalization owner changed");
+		if (normalized.kind !== "prompt") {
 			throw new Error("Queued prompt normalization did not produce a prompt");
 		}
 
+		normalized.assertSkillCurrent?.();
 		return this._queuePreparedPrompt("followUp", normalized.text, normalized.images, {
+			submitted,
+			selectedSkillRef: normalized.selectedSkillRef,
 			queueKey: options.queueKey,
 			agentMessageId: options.agentMessageId,
 			resumeIfIdle: options.resumeIfIdle,
@@ -5215,7 +6819,12 @@ export class AgentSession {
 	}
 
 	async restoreSessionActions(snapshot: SessionActionRecoverySnapshot): Promise<number> {
-		if (snapshot.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION) {
+		if (
+			(snapshot.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+				snapshot.formatVersion !== SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION) ||
+			(snapshot.formatVersion === SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+				snapshot.actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef))
+		) {
 			throw new Error(`Unsupported session action recovery format version: ${snapshot.formatVersion}`);
 		}
 		const actionIds = new Set(this._actionStore.ownedActions().map((action) => action.id));
@@ -5233,6 +6842,12 @@ export class AgentSession {
 					? {
 							kind: "turn",
 							text: recovered.payload.text,
+							...(recovered.payload.selectedSkillRef
+								? { selectedSkillRef: { ...recovered.payload.selectedSkillRef } }
+								: {}),
+							...(recovered.payload.submitted
+								? { submitted: structuredClone(recovered.payload.submitted) }
+								: {}),
 							...(recovered.payload.preview ? { preview: recovered.payload.preview } : {}),
 							records: recovered.payload.records.map((record) => ({
 								id: record.id,
@@ -5274,6 +6889,9 @@ export class AgentSession {
 					: {
 							kind: "session_command",
 							text: recovered.payload.text,
+							...(recovered.payload.submitted
+								? { submitted: structuredClone(recovered.payload.submitted) }
+								: {}),
 							command: { ...recovered.payload.command },
 							...(recovered.payload.images
 								? {
@@ -5506,6 +7124,8 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -5532,6 +7152,8 @@ export class AgentSession {
 		const preview = options.previewLabel ? `${options.previewLabel}: ${text}` : undefined;
 		const payload: PreparedTurnPayload = {
 			kind: "turn",
+			submitted: options.submitted,
+			selectedSkillRef: options.selectedSkillRef ? { ...options.selectedSkillRef } : undefined,
 			text,
 			records: [
 				...prefixMessages.map((prefix) => this._createDeliveryRecord(id, "prefix", prefix)),
@@ -5571,6 +7193,7 @@ export class AgentSession {
 		schedule: SessionInputSchedule,
 		options: {
 			agentMessageId?: string;
+			submitted?: NativeSubmittedInput;
 			source?: InputSource | "internal";
 		} = {},
 	): QueuedSessionAction {
@@ -5579,7 +7202,7 @@ export class AgentSession {
 			source: options.source ?? "internal",
 			delivery: this._deliveryPolicy(schedule),
 			wake: "immediate",
-			payload: { kind: "session_command", text, command, images },
+			payload: { kind: "session_command", submitted: options.submitted, text, command, images },
 			lifecycle: { state: "queued" },
 			agentMessageId: options.agentMessageId,
 		};
@@ -5639,6 +7262,12 @@ export class AgentSession {
 				DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
 			);
 		}
+		if (
+			!options.restore &&
+			action.payload.kind === "session_command" &&
+			(action.payload.command.name === "compact" || action.payload.command.name === "refine")
+		)
+			this._assertContextOptimizationAllowed();
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
@@ -5687,6 +7316,8 @@ export class AgentSession {
 		options: {
 			agentMessageId?: string;
 			queueKey?: string;
+			submitted?: NativeSubmittedInput;
+			selectedSkillRef?: NativeSkillSourceRef;
 			content?: (TextContent | ImageContent)[];
 			message?: QueuedAgentMessage;
 			prefixMessages?: CustomMessage[];
@@ -5774,7 +7405,7 @@ export class AgentSession {
 					}
 					return;
 				}
-				if (!this._hasCancelledDispatchCapture()) await this._agentEventQueue;
+				if (!this._hasCancelledDispatchCapture()) await this._waitForAgentEventsBeforeContext();
 				if (!preselected || preselected.payload.kind === "session_command") await this._waitForRefineIdle();
 				const activity = this._runtimeActivity();
 				const canSelectPreselectedTurn =
@@ -5820,8 +7451,7 @@ export class AgentSession {
 					for (const action of actions) {
 						if (action.lifecycle.state === "committing") {
 							const primary = primaryDeliveryRecord(action);
-							if (this.agent.state.messages.includes(primary.message)) {
-								primary.durable = true;
+							if (primary.durable) {
 								transitionSessionAction(action, {
 									state: "running",
 									execution: "agent_turn",
@@ -5836,11 +7466,9 @@ export class AgentSession {
 					}
 				} catch (error) {
 					const transcript = this.agent.state.messages;
-					const delivered = new Set(transcript);
 					const undelivered: QueuedSessionAction[] = [];
 					for (const action of actions) {
 						if (action.payload.kind !== "turn" || action.lifecycle.state === "cancelled") continue;
-						for (const record of action.payload.records) record.durable ||= delivered.has(record.message);
 						action.payload.records = action.payload.records.filter((record) => {
 							if (record.role === "prefix") return !record.durable;
 							if (record.role === "next_turn") return record.durable;
@@ -5935,7 +7563,7 @@ export class AgentSession {
 				this._notifySessionInputCheckpointChange();
 				this._emitQueueUpdate();
 				try {
-					this._appendDurableSessionCommandMessage(input.text, input.command, false);
+					await this._appendDurableSessionCommandMessage(input.text, input.command, false);
 					this._actionStore.ticketFor(action).settleDelivered({ status: "not_applicable" });
 					this._settleAgentMessage(action.agentMessageId, "delivery");
 					await this._executeQueuedSessionCommand(action);
@@ -5987,6 +7615,7 @@ export class AgentSession {
 	}
 
 	private _isDeferredSessionInputError(error: unknown, epoch: number): boolean {
+		if (primaryCommittedCompactionError(error)) return false;
 		if (error instanceof DeferredSessionInputError) return true;
 		if (epoch !== this._sessionInputPumpEpoch) return true;
 		if (this._isBusyForSessionInput("pump")) {
@@ -6072,7 +7701,8 @@ export class AgentSession {
 				restoreNextTurnContext();
 				return;
 			}
-			const { prepared, turns } = preparedTurn;
+			const { prepared } = preparedTurn;
+			let { turns } = preparedTurn;
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let promptPromise: Promise<void>;
 			try {
@@ -6083,6 +7713,18 @@ export class AgentSession {
 						turns.some((action) => action.lifecycle.state !== "preparing")
 					) {
 						throw new DeferredSessionInputError("Agent became active before session input handoff");
+					}
+					// Deliver the pending family updates together, including arrivals during preparation.
+					// Keep user/control actions and delivery lanes as boundaries; retain every action's ticket.
+					if (turns.every(isFamilyAgentMessageAction)) {
+						while (true) {
+							const next = this._actionStore.queuedActions()[0];
+							if (!next || next.delivery !== turns[0].delivery || !isFamilyAgentMessageAction(next)) break;
+							this._actionStore.selectFirst();
+							transitionSessionAction(next, { state: "preparing" });
+							actions.push(next);
+						}
+						turns = activeTurns();
 					}
 					if (executionPolicy.nextTurnContextTiming === "commit") {
 						nextTurnMessages = this._takePendingNextTurnMessages();
@@ -6106,7 +7748,19 @@ export class AgentSession {
 					} else if (executionPolicy.nextTurnContextTiming !== "skip") {
 						this.agent.state.systemPrompt = this._baseSystemPrompt;
 					}
-					for (const action of turns) transitionSessionAction(action, { state: "committing" });
+					const checkpointBoundary =
+						this._postCompactionContinuationSettlement?.resume.boundary ?? this._pendingCheckpoint?.boundary;
+					for (const action of turns) {
+						transitionSessionAction(action, { state: "committing" });
+						if (checkpointBoundary?.state === "pending") {
+							void this._actionStore.ticketFor(action).ticket.delivered.then(
+								(delivery) => {
+									if (delivery.status === "delivered") checkpointBoundary.state = "consumed";
+								},
+								() => {},
+							);
+						}
+					}
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
 					return turns.some((action) => action.suppressAutonomousContinuation)
@@ -6119,17 +7773,10 @@ export class AgentSession {
 			await promptPromise;
 			if (executionPolicy.completionIncludesRetryChain) await this.waitForRetry();
 			if (!this._hasCancelledDispatchCapture()) await this._agentEventQueue;
-			if (
-				turns.some(
-					(action) =>
-						action.lifecycle.state !== "cancelled" &&
-						!primaryDeliveryRecord(action).durable &&
-						!this.agent.state.messages.includes(primaryDeliveryRecord(action).message),
-				)
-			) {
+			if (turns.some((action) => action.lifecycle.state !== "cancelled" && !primaryDeliveryRecord(action).durable)) {
 				throw new Error("Session input dispatch settled without durable delivery");
 			}
-			this._forgetConsumedPostCompactionContinuations(turns.map((action) => primaryDeliveryRecord(action).message));
+			this._forgetConsumedPostCompactionContinuations(turns);
 		} catch (error) {
 			const delivered = new Set(this.agent.state.messages);
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages.filter((message) => !delivered.has(message)));
@@ -6150,7 +7797,7 @@ export class AgentSession {
 			let displayResult = true;
 			switch (input.command.name) {
 				case "compact":
-					await this.compact(input.command.args || undefined, {
+					await this._compactAccepted(input.command.args || undefined, {
 						skipAbort: true,
 					});
 					break;
@@ -6158,7 +7805,7 @@ export class AgentSession {
 					let result: RefinementResult;
 					try {
 						const options = parseRefineCommandOptions(input.command.args);
-						result = await this.refine(options, { skipAbort: true });
+						result = await this._refineAccepted(options, { skipAbort: true });
 					} catch (error) {
 						// Only a failure of the refinement itself is a refine failure; a later
 						// result-row persist error must not report a completed refinement as failed.
@@ -6170,24 +7817,31 @@ export class AgentSession {
 					displayResult = false;
 					break;
 				}
-				case "goal":
-					await this._handleGoalSlashCommand(input.text, input.images);
+				case "goal": {
+					const goalOrigin: GoalOriginContext = {
+						writer: this.sessionManager[bindNativeEntryWriter](),
+						actor: action.source,
+						actionId: action.id,
+						submittedText: input.submitted?.text,
+					};
+					await this._handleGoalSlashCommand(input.text, input.images, goalOrigin);
 					resultText = this._goalState.objective
 						? `Goal ${this._goalState.status}: ${this._goalState.objective}`
 						: "No active goal.";
 					break;
+				}
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
 					break;
 			}
 			if (resultText) {
-				this._appendDurableSessionCommandMessage(resultText, input.command, true, false, displayResult);
+				await this._appendDurableSessionCommandMessage(resultText, input.command, true, false, displayResult);
 			}
 		} catch (error) {
 			if (error instanceof CompactionSkippedError) return;
 			const commandError = error instanceof Error ? error : new Error(String(error));
 			try {
-				this._appendDurableSessionCommandMessage(
+				await this._appendDurableSessionCommandMessage(
 					`Command failed: ${commandError.message}`,
 					input.command,
 					true,
@@ -6208,13 +7862,13 @@ export class AgentSession {
 		}
 	}
 
-	private _appendDurableSessionCommandMessage(
+	private async _appendDurableSessionCommandMessage(
 		content: string,
 		command: SessionSlashCommand,
 		isResult: boolean,
 		isError = false,
 		display = true,
-	): void {
+	): Promise<void> {
 		const message: CustomMessage = isResult
 			? createSessionSlashCommandResultMessage(
 					content,
@@ -6229,7 +7883,7 @@ export class AgentSession {
 			: createSessionSlashCommandMessage(command);
 		// Persist before touching live state so a failed write cannot leave an
 		// unsaved leaf that the next entry would silently parent onto.
-		this.sessionManager.appendCustomMessageEntryWithRollback(
+		await this.sessionManager.appendCustomMessageEntryWithRollback(
 			message.customType,
 			message.content,
 			message.display,
@@ -6313,13 +7967,13 @@ export class AgentSession {
 				admissionFence.release();
 			}
 		} else {
-			this.agent.state.messages.push(appMessage);
-			this.sessionManager.appendCustomMessageEntry(
+			await this.sessionManager.appendCustomMessageEntry(
 				message.customType,
 				message.content,
 				message.display,
 				message.details,
 			);
+			this.agent.state.messages.push(appMessage);
 			this._emit({ type: "message_start", message: appMessage });
 			this._emit({ type: "message_end", message: appMessage });
 		}
@@ -6508,6 +8162,7 @@ export class AgentSession {
 			if (mutation.images !== undefined) item.payload.images = images?.length ? images : undefined;
 		} else {
 			item.payload.text = mutation.text;
+			item.payload.selectedSkillRef = undefined;
 			const text = { type: "text" as const, text: mutation.text };
 			if (mutation.images !== undefined) {
 				item.payload.images = images?.length ? images : undefined;
@@ -6522,6 +8177,19 @@ export class AgentSession {
 					record.message.content = item.payload.content?.map((block) => ({ ...block })) ?? mutation.text;
 				}
 			}
+		}
+		if (item.payload.submitted) {
+			const previous = item.payload.submitted;
+			const content = previous.content
+				? [
+						{ type: "text" as const, text: mutation.text },
+						...(mutation.images ?? previous.content.filter((block) => block.type !== "text")),
+					]
+				: undefined;
+			item.payload.submitted = captureSubmittedInput(mutation.text, {
+				content,
+				images: mutation.images ?? previous.images,
+			});
 		}
 		const targetPolicy = queuedMessageLaneDeliveryPolicy(mutation.lane);
 		if (targetPolicy !== policy) {
@@ -6548,6 +8216,8 @@ export class AgentSession {
 
 	get isSessionActive(): boolean {
 		return (
+			this.requests.hasPending ||
+			this._goalResumeOperation !== undefined ||
 			this.isStreaming ||
 			this.isCompacting ||
 			this.isRetrying ||
@@ -6615,9 +8285,12 @@ export class AgentSession {
 	}
 
 	getSessionActionRecoverySnapshot(): SessionActionRecoverySnapshot {
+		const actions = this._actionStore.snapshotActions();
 		return {
-			formatVersion: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
-			actions: this._actionStore.snapshotActions().map((action) => ({
+			formatVersion: actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef)
+				? SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION
+				: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+			actions: actions.map((action) => ({
 				id: action.id,
 				source: action.source,
 				delivery: action.delivery,
@@ -6630,6 +8303,10 @@ export class AgentSession {
 						? {
 								kind: "turn",
 								text: action.payload.text,
+								...(action.payload.selectedSkillRef
+									? { selectedSkillRef: { ...action.payload.selectedSkillRef } }
+									: {}),
+								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
 								...(action.payload.preview ? { preview: action.payload.preview } : {}),
 								records: action.payload.records.map((record) => ({
 									id: record.id,
@@ -6669,6 +8346,7 @@ export class AgentSession {
 						: {
 								kind: "session_command",
 								text: action.payload.text,
+								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
 								command: { ...action.payload.command },
 								...(action.payload.images
 									? {
@@ -6759,7 +8437,7 @@ export class AgentSession {
 				if (signal?.aborted) throw new Error("Update restart preparation cancelled");
 				await waitForPromiseOrAbort(this._agentEventQueue, signal, "Update restart preparation cancelled");
 				if (signal?.aborted) throw new Error("Update restart preparation cancelled");
-				this.sessionManager.flushNow();
+				await this.sessionManager.flushNow();
 				return;
 			} finally {
 				commitFence.release();
@@ -6767,21 +8445,32 @@ export class AgentSession {
 		}
 	}
 
+	private _advanceCheckpointPauseEpoch(): void {
+		// A pause invalidates preparations, not already owned checkpoint work. Keep its original source predicate.
+		const owners = [
+			this._pendingRequestedCompaction?.owner,
+			this._pendingCheckpoint?.owner,
+			this._postCompactionContinuationSettlement?.resume.owner,
+		].filter((owner): owner is CompactionOwner => owner !== undefined && this._isCompactionOwnerCurrent(owner));
+		this._sessionInputPumpEpoch++;
+		for (const owner of owners) owner.pumpEpoch = this._sessionInputPumpEpoch;
+	}
+
 	acquireSessionInputPause(): { release(): void } {
 		const token = Symbol("session-input-admission-pause");
 		this._sessionInputAdmissionPauses.add(token);
 		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
+		this._advanceCheckpointPauseEpoch();
 		let released = false;
 		return {
 			release: () => {
 				if (released) return;
 				released = true;
 				this._sessionInputAdmissionPauses.delete(token);
-				this._sessionInputPumpEpoch++;
+				this._advanceCheckpointPauseEpoch();
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
-				this._maybeResumeGoalContinuationAfterRlmWork();
+				this._scheduleGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -6791,7 +8480,7 @@ export class AgentSession {
 		const token = Symbol("queued-work-pause");
 		this._queuedWorkPauses.add(token);
 		this._sessionInputPumpRequested = false;
-		this._sessionInputPumpEpoch++;
+		this._advanceCheckpointPauseEpoch();
 		let released = false;
 		return {
 			release: () => {
@@ -6898,7 +8587,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
-		this._maybeResumeGoalContinuationAfterRlmWork();
+		this._scheduleGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
 	}
@@ -6922,9 +8611,15 @@ export class AgentSession {
 	 * blocks daemon passivation).
 	 */
 	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
-		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
+		const owner = settlement?.resume.owner;
+		const current = () => !owner || this._isCompactionOwnerCurrent(owner);
+		while (current() && (settlement === undefined || this._postCompactionContinuationSettlement === settlement)) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
+				if (
+					this._sessionInputPumpSuspended ||
+					this._queuedWorkPauses.size > 0 ||
+					(settlement && this._sessionInputAdmissionPauses.size > 0)
+				) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;
@@ -6941,14 +8636,25 @@ export class AgentSession {
 			}
 			const pump = this._sessionInputPump;
 			await pump;
-			await this.agent.waitForIdle();
+			if (!current()) return;
+			await (owner?.agent ?? this.agent).waitForIdle();
+			if (!current()) return;
 			const agentEventQueue = this._agentEventQueue;
 			await agentEventQueue;
+			if (!current()) return;
+			const goalResumeOperation = this._goalResumeOperation;
+			await goalResumeOperation;
+			if (!current()) return;
+			const requestSettlement = (owner?.requests ?? this.requests).waitForIdle();
+			await (settlement ? Promise.race([requestSettlement, settlement.promise]) : requestSettlement);
+			if (!current() || (settlement && this._postCompactionContinuationSettlement !== settlement)) return;
 			if (
 				pump === this._sessionInputPump &&
 				agentEventQueue === this._agentEventQueue &&
+				this._goalResumeOperation === undefined &&
 				!this._sessionInputPumpRequested &&
 				!this.agent.state.isStreaming &&
+				!this.requests.hasPending &&
 				this.unfinishedActionCount === 0
 			) {
 				return;
@@ -7117,6 +8823,12 @@ export class AgentSession {
 	}
 
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
+		model = { ...model, cost: { ...model.cost } };
+		const sourceId = this.sessionManager.getSessionId();
+		const sourceFile = this.sessionManager.getSessionFile();
+		const previousModel = this.model;
+		const thinkingLevel = this._getThinkingLevelForModelSwitch();
+		const serviceTier = this._getServiceTierForModelSwitch();
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -7124,14 +8836,14 @@ export class AgentSession {
 			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
 		}
 
-		const previousModel = this.model;
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
-		const serviceTier = this._getServiceTierForModelSwitch();
+		if (this.sessionManager.getSessionId() !== sourceId || this.sessionManager.getSessionFile() !== sourceFile) {
+			throw new Error("Session source changed during model selection");
+		}
+		await this.sessionManager.appendModelChange(model.provider, model.id);
 		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		await this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(model, previousModel, "set");
@@ -7194,11 +8906,11 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 		const serviceTier = this._getServiceTierForModelSwitch();
 
+		await this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		await this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(next.model, currentModel, "cycle");
@@ -7233,11 +8945,11 @@ export class AgentSession {
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		const serviceTier = this._getServiceTierForModelSwitch();
+		await this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.agent.state.model = nextModel;
-		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
-		this.setThinkingLevel(thinkingLevel);
+		await this.setThinkingLevel(thinkingLevel);
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(nextModel, currentModel, "cycle");
@@ -7255,22 +8967,21 @@ export class AgentSession {
 		};
 	}
 
-	setThinkingLevel(level: ThinkingLevel): void {
+	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
 		const previousLevel = this.agent.state.thinkingLevel;
 		const isChanging = effectiveLevel !== previousLevel;
 
-		this.agent.state.thinkingLevel = effectiveLevel;
-
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			await this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			this.agent.state.thinkingLevel = effectiveLevel;
 			if (this.supportsThinking() || effectiveLevel !== "off") {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
-			void this._extensionRunner.emit({
+			await this._extensionRunner.emit({
 				type: "thinking_level_select",
 				level: effectiveLevel,
 				previousLevel,
@@ -7278,16 +8989,16 @@ export class AgentSession {
 		}
 	}
 
-	setServiceTier(serviceTier: ServiceTier): void {
+	async setServiceTier(serviceTier: ServiceTier): Promise<void> {
 		const effectiveServiceTier = this._getEffectiveServiceTier(serviceTier);
 		const preferenceChanged = effectiveServiceTier !== this._serviceTierPreference;
 		const effectiveTierChanged = effectiveServiceTier !== this.agent.state.serviceTier;
 		if (!preferenceChanged && !effectiveTierChanged) {
 			return;
 		}
-		this._serviceTierPreference = effectiveServiceTier;
 		if (preferenceChanged) {
-			this.sessionManager.appendServiceTierChange(effectiveServiceTier);
+			await this.sessionManager.appendServiceTierChange(effectiveServiceTier);
+			this._serviceTierPreference = effectiveServiceTier;
 			if (this.model && supportsFastMode(this.model)) {
 				this.settingsManager.setDefaultServiceTier(effectiveServiceTier);
 			}
@@ -7321,7 +9032,7 @@ export class AgentSession {
 		});
 	}
 
-	cycleThinkingLevel(): ThinkingLevel | undefined {
+	async cycleThinkingLevel(): Promise<ThinkingLevel | undefined> {
 		if (!this.supportsThinking()) return undefined;
 
 		const levels = this.getAvailableThinkingLevels();
@@ -7329,7 +9040,7 @@ export class AgentSession {
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];
 
-		this.setThinkingLevel(nextLevel);
+		await this.setThinkingLevel(nextLevel);
 		return nextLevel;
 	}
 
@@ -7356,10 +9067,29 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
-	private async _syncKernelStateAfterCompaction(): Promise<void> {
+	private _captureKernelResource(): OwnedResourceCapture {
 		const provisioner = this._ipythonKernelProvisioner;
+		const captured = provisioner ? captureOwnedKernelState.call(provisioner) : undefined;
+		return Object.freeze({
+			enabled: this._contextEpochsEnabled,
+			snapshot:
+				captured?.snapshot ??
+				Object.freeze({
+					source: "unobserved" as const,
+					owner: null,
+					generation: null,
+					state: "unobserved" as const,
+				}),
+			isCurrent: () => this._ipythonKernelProvisioner === provisioner && (captured?.isCurrent() ?? true),
+		});
+	}
+
+	private async _syncKernelStateAfterCompaction(owner = this._captureCompactionOwner()): Promise<void> {
+		this._assertCompactionOwner(owner);
+		const provisioner = owner.provisioner;
 		if (!provisioner?.hasRunningKernel) return;
 		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
+		this._assertCompactionOwner(owner);
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), KERNEL_STATE_LISTING_TIMEOUT_MS);
 		if (typeof timer === "object" && "unref" in timer) timer.unref();
@@ -7369,6 +9099,7 @@ export class AgentSession {
 		} finally {
 			clearTimeout(timer);
 		}
+		this._assertCompactionOwner(owner);
 		if (names === null && !provisioner.hasRunningKernel) return;
 		const detail =
 			names === null
@@ -7392,7 +9123,9 @@ export class AgentSession {
 			display: false,
 			timestamp: Date.now(),
 		} satisfies CustomMessage;
-		const messages = this.agent.state.messages;
+		await owner.manager.appendCustomMessageEntry(message.customType, message.content, message.display, undefined);
+		this._assertCompactionOwner(owner);
+		const messages = owner.agent.state.messages;
 		const last = messages[messages.length - 1];
 		const insertBeforeError = last?.role === "assistant" && (last as AssistantMessage).stopReason === "error";
 		if (insertBeforeError) {
@@ -7400,7 +9133,6 @@ export class AgentSession {
 		} else {
 			messages.push(message);
 		}
-		this.sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, undefined);
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
 	}
@@ -7444,15 +9176,78 @@ export class AgentSession {
 	}
 
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
+		this._assertContextOptimizationAllowed();
+		return this._retainContextOptimization(this._compactAccepted(customInstructions, options));
+	}
+
+	private _resolveCompactionModel(): { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined {
+		const selection = this.settingsManager.getCompactionModel();
+		if (selection === undefined) {
+			const model = this.model;
+			return model ? { model: { ...model, cost: { ...model.cost } }, thinkingLevel: this.thinkingLevel } : undefined;
+		}
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid compaction.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown compaction.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`compaction.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: structuredClone(model), thinkingLevel: selection.thinkingLevel };
+	}
+
+	private async _compactAccepted(
+		customInstructions?: string,
+		options: { skipAbort?: boolean } = {},
+	): Promise<CompactionResult> {
+		if (this._compactionSetupFailure) throw this._compactionSetupFailure;
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
-		const hadPostCompactionContinue = this._postCompactionContinuationScheduled;
-		const continueAfterSessionInput = this._postCompactionContinuationSettlement?.continueAfterSessionInput ?? false;
+		const sourceOwner = this._captureCompactionOwner();
+		const consumedRequest = this._pendingRequestedCompaction;
+		const requestedWasCurrent =
+			consumedRequest !== undefined && this._isCompactionOwnerCurrent(consumedRequest.owner);
+		const savedResume = this._postCompactionContinuationScheduled
+			? this._postCompactionContinuationSettlement?.resume
+			: undefined;
+		const carryResume = savedResume !== undefined && this._isCompactionOwnerCurrent(savedResume.owner);
 		this._disconnectFromAgent();
+		// Only this operation's own abort advances its control epoch. Do not adopt an epoch after the wait.
+		const originalOwner = carryResume ? savedResume.owner : requestedWasCurrent ? consumedRequest.owner : sourceOwner;
+		const owner = {
+			...originalOwner,
+			signal: undefined,
+			pumpEpoch: sourceOwner.pumpEpoch + (options.skipAbort ? 0 : 1),
+		};
 		if (!options.skipAbort) await this.abort();
+		if (!this._isCompactionOwnerCurrent(owner)) {
+			if (this._isCompactionSourceOwnerCurrent(owner)) this._reconnectToAgent();
+			this._assertCompactionOwner(owner);
+		}
+		const resume = carryResume ? { ...savedResume, owner } : undefined;
+		const checkpoint = resume ?? { owner, actions: [] };
+		this._pendingCheckpoint = checkpoint;
+		if (requestedWasCurrent && this._pendingRequestedCompaction === consumedRequest) {
+			consumedRequest.owner = { ...consumedRequest.owner, pumpEpoch: owner.pumpEpoch, signal: undefined };
+		}
 		let didCompact = false;
-		this._compactionAbortController = new AbortController();
+		let requests: InferenceCoordinator | undefined;
+		let compaction: BoundCompactionSink | undefined;
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
+		const abort = new AbortController();
+		this._compactionAbortController = abort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
@@ -7465,19 +9260,41 @@ export class AgentSession {
 		});
 
 		try {
-			if (!this.model) {
+			const selected = this._resolveCompactionModel();
+			if (!selected) {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
-			const { apiKey, headers } = await this._getRequiredRequestAuth(this.model);
-			const result = await this._performCompaction({
-				model: this.model,
+			const { model, thinkingLevel } = selected;
+			const settings = { ...this.settingsManager.getCompactionSettings() };
+			const semanticEdges = owner.semanticEdges;
+			compaction = owner.manager.bindCompactionSink();
+			requests = owner.requests.capture(compaction);
+			const pathEntries = await compaction.readBranch();
+			this._assertCompactionOwner(owner);
+			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+			this._assertCompactionOwner(owner);
+			committed = await this._performCompaction({
+				model,
+				thinkingLevel,
+				pathEntries,
+				settings,
+				requests,
+				compaction,
+				semanticEdges,
+				owner,
 				apiKey,
 				headers,
 				customInstructions,
-				signal: this._compactionAbortController.signal,
+				signal: abort.signal,
+				allowShortSession: true,
 			});
 
+			const result = committed.result;
+			await this._releaseCompactionCapture(requests, compaction, undefined, owner);
+			requests = undefined;
+			compaction = undefined;
+			this._assertCompactionOwner(owner);
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -7489,9 +9306,21 @@ export class AgentSession {
 			didCompact = true;
 			// A manual compaction satisfies any pending model request; on failure the
 			// request stays scheduled for the next turn boundary.
-			this._pendingRequestedCompaction = undefined;
+			if (this._pendingRequestedCompaction === consumedRequest) this._pendingRequestedCompaction = undefined;
 			return result;
 		} catch (error) {
+			const primaryCommit = primaryCommittedCompactionError(error);
+			const knownCommit = primaryCommit ?? committed;
+			failure =
+				knownCommit && !(error instanceof CompactionCommittedError)
+					? new CompactionCommittedError(knownCommit.entryId, knownCommit.result, error)
+					: error;
+			if (failure instanceof CompactionCommittedError) {
+				if (this._pendingRequestedCompaction === consumedRequest) this._pendingRequestedCompaction = undefined;
+				this._reportCommittedCompactionFailure(failure, "manual", customInstructions, owner);
+				throw failure;
+			}
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			const skipped = error instanceof CompactionSkippedError;
@@ -7507,26 +9336,88 @@ export class AgentSession {
 			});
 			throw error;
 		} finally {
-			this._compactionAbortController = undefined;
-			this._reconnectToAgent();
-			if (this._compactionOperation === compactionOperation) {
-				this._compactionOperation = undefined;
-			}
-			resolveCompactionOperation();
-			this._notifySessionInputCheckpointChange();
-			this._scheduleSessionInputPump();
-			if (didCompact) {
-				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
-				if (hadPostCompactionContinue) {
-					this._schedulePostCompactionContinue(continueAfterSessionInput);
+			try {
+				await this._releaseCompactionCapture(requests, compaction, failure, owner);
+			} finally {
+				if (this._pendingCheckpoint === checkpoint) this._pendingCheckpoint = undefined;
+				if (this._compactionAbortController === abort) this._compactionAbortController = undefined;
+				if (this._isCompactionSourceOwnerCurrent(owner)) this._reconnectToAgent();
+				if (this._compactionOperation === compactionOperation) {
+					this._compactionOperation = undefined;
 				}
-				// Queued agent or session-owned inputs resume the loop; defer refine
-				// behind them instead of interleaving it before their turns.
-				this._scheduleAutoRefineAfterCompaction(
-					hadPostCompactionContinue || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
-				);
+				resolveCompactionOperation();
+				if (this._isCompactionOwnerCurrent(owner)) {
+					this._notifySessionInputCheckpointChange();
+					this._scheduleSessionInputPump();
+				}
+				if (didCompact && this._isCompactionOwnerCurrent(owner)) {
+					this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+					if (resume) {
+						this._schedulePostCompactionContinue(resume);
+					}
+					// Queued agent or session-owned inputs resume the loop; defer refine
+					// behind them instead of interleaving it before their turns.
+					this._scheduleAutoRefineAfterCompaction(
+						resume !== undefined || this.agent.hasQueuedMessages() || this.unfinishedActionCount > 0,
+					);
+				}
 			}
 		}
+	}
+
+	/** A private compiled context keeps extension summary edits separate from retained source recipes. */
+	private async _prepareCapturedCompaction(
+		pathEntries: SessionEntry[],
+		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
+		requests: InferenceCoordinator,
+		compaction: BoundCompactionSink,
+		owner = this._captureCompactionOwner(),
+		allowShortSession = false,
+		budgetPressure = false,
+	): Promise<{
+		preparation: CompactionPreparation | undefined;
+		messages?: readonly AgentMessage[];
+		resource?: OwnedResourceCapture;
+		maxSourceBytes: number;
+	}> {
+		this._assertCompactionOwner(owner);
+		const limits = this.settingsManager.getCanonicalContextLimits();
+		const resource = this._captureKernelResource();
+		const source = await compaction.source;
+		this._assertCompactionOwner(owner);
+		if (!source.persistent)
+			return {
+				preparation: prepareCompaction(pathEntries, settings, allowShortSession),
+				maxSourceBytes: limits.maxSourceBytes,
+			};
+		return requests.readHistory(async (view) => {
+			const messages = await new CanonicalContextCompiler().compile(view, limits, undefined, {}, resource);
+			this._assertCompactionOwner(owner);
+			const context = getCanonicalEpochContext(messages)!;
+			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
+				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
+			const boundary = canonicalRecoveryBoundary(messages);
+			const preparation =
+				budgetPressure || context.checkpoint || boundary
+					? prepareViewCompaction(
+							messages,
+							context.references.map((ref) => ref?.ref.entryId),
+							pathEntries,
+							settings,
+							boundary,
+							allowShortSession,
+							budgetPressure,
+						)
+					: prepareCompaction(pathEntries, settings, allowShortSession);
+			// Refuse unsupported public data or open groups before starting the summary model call.
+			if (preparation) prepareRecoveryCompaction(messages, preparation.firstKeptEntryId, limits.maxSourceBytes);
+			return {
+				preparation,
+				messages,
+				resource: context.resourceRevision !== undefined ? resource : undefined,
+				maxSourceBytes: limits.maxSourceBytes,
+			};
+		});
 	}
 
 	/**
@@ -7540,12 +9431,45 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		customInstructions?: string;
 		signal: AbortSignal;
-	}): Promise<CompactionResult> {
-		const { model, apiKey, headers, customInstructions, signal } = options;
-		const pathEntries = this.sessionManager.getBranch();
-		const settings = this.settingsManager.getCompactionSettings();
+		thinkingLevel: ThinkingLevel;
+		requests: InferenceCoordinator;
+		compaction: BoundCompactionSink;
+		semanticEdges: SemanticEdgeRecorder;
+		owner?: CompactionOwner;
+		pathEntries: Awaited<ReturnType<SessionManager["readBranch"]>>;
+		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
+		allowShortSession?: boolean;
+		budgetPressure?: boolean;
+	}): Promise<CompactionCommit> {
+		const {
+			model,
+			apiKey,
+			headers,
+			customInstructions,
+			signal,
+			thinkingLevel,
+			requests,
+			compaction,
+			semanticEdges,
+			pathEntries,
+			settings,
+			owner = this._captureCompactionOwner(),
+			allowShortSession = false,
+			budgetPressure = false,
+		} = options;
 
-		const preparation = prepareCompaction(pathEntries, settings);
+		const prepared = await this._prepareCapturedCompaction(
+			pathEntries,
+			settings,
+			requests,
+			compaction,
+			owner,
+			allowShortSession,
+			budgetPressure,
+		);
+		this._assertCompactionOwner(owner);
+		if (prepared.resource) assertResourceCurrent(prepared.resource);
+		const preparation = prepared.preparation;
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			if (lastEntry?.type === "compaction") {
@@ -7555,20 +9479,22 @@ export class AgentSession {
 		}
 
 		let extensionCompaction: CompactionResult | undefined;
+		let nativeCompaction: CompactionResult | undefined;
 		let fromExtension = false;
 
-		const semanticCompaction = this._semanticEdges.beginCompaction();
-		let compactionRecorded = false;
+		const semanticCompaction = semanticEdges.beginCompaction();
+		let committed: CompactionCommit | undefined;
 		const uncommittedSlices: string[] = [];
 		let compactionSettled = false;
 		let summary: string;
 		let firstKeptEntryId: string;
-		let tokensBefore: number;
+		let tokensBefore: number | null;
 		let details: CompactionResult["details"];
 		let usage: CompactionResult["usage"];
+		let savedCompactionId: string;
 		try {
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const result = (await this._extensionRunner.emit({
+			if (owner.extensions.hasHandlers("session_before_compact")) {
+				const result = (await owner.extensions.emit({
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
@@ -7576,6 +9502,7 @@ export class AgentSession {
 					signal,
 				})) as SessionBeforeCompactResult | undefined;
 
+				this._assertCompactionOwner(owner);
 				if (result?.cancel) {
 					throw new Error("Compaction cancelled");
 				}
@@ -7597,7 +9524,7 @@ export class AgentSession {
 				const summaryCall = async <T>(
 					call: (callHeaders: Record<string, string> | undefined) => Promise<T>,
 				): Promise<T> => {
-					const requestId = this._semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
+					const requestId = semanticEdges.startCompactionRequest(semanticCompaction.compactionId);
 					if (requestId === undefined) {
 						return call(headers);
 					}
@@ -7606,81 +9533,183 @@ export class AgentSession {
 						// A slice resolving after a sibling's rejection already settled the
 						// compaction would push into a drained list and stay in-flight forever.
 						if (compactionSettled) {
-							this._semanticEdges.failRequest(requestId);
+							semanticEdges.failRequest(requestId);
 						} else {
 							uncommittedSlices.push(requestId);
 						}
 						return result;
 					} catch (error) {
-						this._semanticEdges.failRequest(requestId);
+						semanticEdges.failRequest(requestId);
 						throw error;
 					}
 				};
-				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
-					preparation,
-					model,
-					apiKey,
-					headers,
-					customInstructions,
-					signal,
-					this.thinkingLevel,
-					summaryCall,
-				));
+				const summaryRequests = requests[captureNativeCompactionRequests]();
+				let summaryFailure: unknown;
+				try {
+					nativeCompaction = await compact(
+						preparation,
+						model,
+						apiKey,
+						headers,
+						customInstructions,
+						signal,
+						thinkingLevel,
+						summaryCall,
+						summaryRequests,
+					);
+					({ summary, firstKeptEntryId, tokensBefore, details, usage } = nativeCompaction);
+				} catch (error) {
+					summaryFailure = error;
+					throw error;
+				} finally {
+					await this._releaseCompactionCapture(summaryRequests, undefined, summaryFailure, owner);
+				}
 			}
 
 			if (signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
 
-			// Ledger-before-effect: the compaction outcome is durable before the transcript
-			// commits it. Marked first: the ID is consumed even when the write throws, and a
-			// second finish attempt would mask the original I/O error.
-			compactionRecorded = true;
+			this._assertCompactionOwner(owner);
+			const result: CompactionResult = JSON.parse(
+				JSON.stringify({ summary, firstKeptEntryId, tokensBefore, details }),
+			);
+			const recovery = prepared.messages
+				? prepareRecoveryCompaction(prepared.messages, firstKeptEntryId, prepared.maxSourceBytes)
+				: undefined;
+			if (prepared.resource) assertResourceCurrent(prepared.resource);
+			if (recovery) {
+				if (
+					result.details !== undefined &&
+					(!result.details || typeof result.details !== "object" || Array.isArray(result.details))
+				)
+					throw new Error("Recovery compaction details require an object");
+				const recoveryDetails = { ...result.details, [CONTEXT_EPOCH_DETAIL]: recovery };
+				result.details = recoveryDetails;
+				savedCompactionId = await compaction[appendContextEpoch](
+					recovery,
+					tokensBefore,
+					{
+						summary,
+						details: recoveryDetails,
+						fromHook: fromExtension,
+						customInstructions,
+						usage,
+					},
+					nativeCompaction,
+				);
+			} else {
+				savedCompactionId = await compaction.appendCompaction(
+					summary,
+					firstKeptEntryId,
+					tokensBefore,
+					result.details,
+					fromExtension,
+					customInstructions,
+					usage,
+					nativeCompaction,
+				);
+			}
+			// Only the canonical append ACK commits summary slices and advances the semantic epoch.
+			committed = { entryId: savedCompactionId, result };
 			compactionSettled = true;
 			for (const requestId of uncommittedSlices.splice(0)) {
-				this._semanticEdges.finishRequest(requestId);
+				semanticEdges.finishRequest(requestId);
 			}
-			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
-			this.sessionManager.appendCompaction(
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
-				fromExtension,
-				customInstructions,
-				usage,
-			);
+			semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
+			if (prepared.resource) assertResourceCurrent(prepared.resource);
 		} catch (error) {
 			compactionSettled = true;
+			if (committed) throw new CompactionCommittedError(committed.entryId, committed.result, error);
 			for (const requestId of uncommittedSlices.splice(0)) {
-				this._semanticEdges.failRequest(requestId);
+				semanticEdges.failRequest(requestId);
 			}
-			if (!compactionRecorded) {
-				const cancelled =
-					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
-				this._semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
-			}
+			const cancelled =
+				error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
+			semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
 			throw error;
 		}
-		const newEntries = this.sessionManager.getEntries();
-		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
-		this._mergeUnpersistedOutcomes(this.agent.state.messages);
-		this._restoreLateIpythonSentAgentMessages();
+		try {
+			this._assertCompactionOwner(owner);
+			const bootstrap = await readSessionBootstrap(owner.manager, this.settingsManager.getCanonicalContextLimits());
+			this._assertCompactionOwner(owner);
+			owner.agent.state.messages = bootstrap.context.messages;
+			this._contextOmissions = undefined;
+			this._mergeUnpersistedOutcomes(owner.agent.state.messages);
+			this._restoreLateIpythonSentAgentMessages();
 
-		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-			| CompactionEntry
-			| undefined;
-		if (savedCompactionEntry) {
-			await this._extensionRunner.emit({
-				type: "session_compact",
-				compactionEntry: savedCompactionEntry,
-				fromExtension,
-			});
+			const savedCompactionEntry = await owner.manager.readEntry(savedCompactionId);
+			this._assertCompactionOwner(owner);
+			if (savedCompactionEntry?.type === "compaction") {
+				await owner.extensions.emit({
+					type: "session_compact",
+					compactionEntry: savedCompactionEntry,
+					fromExtension,
+				});
+			}
+			this._assertCompactionOwner(owner);
+			if (!prepared.resource) await this._syncKernelStateAfterCompaction(owner);
+			this._assertCompactionOwner(owner);
+			await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+			this._assertCompactionOwner(owner);
+		} catch (error) {
+			throw new CompactionCommittedError(committed!.entryId, committed!.result, error);
 		}
-		await this._syncKernelStateAfterCompaction();
-		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
+		return committed!;
+	}
 
-		return { summary, firstKeptEntryId, tokensBefore, details };
+	private _reportCommittedCompactionFailure(
+		error: CompactionCommittedError,
+		reason: CompactionReason,
+		customInstructions?: string,
+		owner?: CompactionOwner,
+	): void {
+		if (owner && !this._isCompactionSourceOwnerCurrent(owner)) return;
+		this._compactionSetupFailure = error;
+		this._sessionInputPumpRequested = false;
+		this._sessionInputPumpEpoch++;
+		this._sessionInputPumpSuspended = true;
+		this._settlePostCompactionContinue(error);
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._autoRefineBranchVersion++;
+		this._resolveRetry();
+		this._emit({
+			type: "compaction_end",
+			reason,
+			result: error.result,
+			aborted: false,
+			willRetry: false,
+			errorMessage: error.message,
+			errorSeverity: "error",
+			customInstructions,
+		});
+	}
+
+	private async _releaseCompactionCapture(
+		requests: InferenceCoordinator | undefined,
+		compaction: BoundCompactionSink | undefined,
+		failure: unknown,
+		owner?: CompactionOwner,
+	): Promise<void> {
+		try {
+			if (requests) await requests.dispose();
+			else await compaction?.release();
+		} catch (cleanupError) {
+			if (failure instanceof CompactionCommittedError) {
+				if (cleanupError === failure || cleanupError === failure.cause) throw failure;
+				const combined = new CompactionCommittedError(
+					failure.entryId,
+					failure.result,
+					new AggregateError([failure.cause, cleanupError], "Compaction setup and source release failed"),
+				);
+				if ((!owner || this._isCompactionSourceOwnerCurrent(owner)) && this._compactionSetupFailure === failure)
+					this._compactionSetupFailure = combined;
+				throw combined;
+			}
+			if (failure !== undefined && failure !== cleanupError)
+				throw new AggregateError([failure, cleanupError], "Compaction and source release failed");
+			throw cleanupError;
+		}
 	}
 
 	private async _reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void> {
@@ -7706,8 +9735,15 @@ export class AgentSession {
 		return this._rlmDepth === 0 && this._localHarnessStateDir() !== undefined;
 	}
 
+	private _newAutoRefineAllowed(): boolean {
+		return (
+			this._contextOptimizationAllowed() && !this._autoRefineAdmissionClosed && this._autoRefineAllowedForSession()
+		);
+	}
+
 	private _settlePostCompactionContinue(error?: Error): void {
 		if (!error && this._postCompactionContinuationScheduled) return;
+		if (error) this._postCompactionContinuationScheduled = false;
 		const settlement = this._postCompactionContinuationSettlement;
 		if (!settlement || settlement.settled) return;
 		settlement.settled = true;
@@ -7719,7 +9755,6 @@ export class AgentSession {
 
 	private _cancelPostCompactionContinue(): void {
 		this._postCompactionContinuationScheduled = false;
-		this._scheduledPostCompactionContinuationMessages = [];
 		this._settlePostCompactionContinue();
 	}
 
@@ -7777,7 +9812,8 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefineAfterAgentEnd(): void {
-		if (!this._autoRefineAllowedForSession()) {
+		if (this._compactionSetupFailure) return;
+		if (!this._newAutoRefineAllowed()) {
 			return;
 		}
 		if (this._pendingAutoRefineReview) {
@@ -7796,12 +9832,12 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void {
-		if (!this._autoRefineAllowedForSession()) {
+		if (!this._newAutoRefineAllowed()) {
 			return;
 		}
 		if (this._serializedRefine) {
 			// Serialized sessions must service compaction-triggered refinement at
-			// shouldStopAfterTurn (or disposal), never through the interactive path.
+			// shouldStopAfterTurn, never through the interactive path.
 			this._compactAutoRefinePending = true;
 			return;
 		}
@@ -7813,32 +9849,35 @@ export class AgentSession {
 		this._scheduleAutoRefine("compact");
 	}
 
-	private _schedulePostCompactionContinue(continueAfterSessionInput = false): void {
+	private _schedulePostCompactionContinue(resume: CheckpointResume): void {
+		if (!this._isCompactionOwnerCurrent(resume.owner)) return;
+		const previous = this._postCompactionContinuationSettlement;
+		if (previous && !this._isCompactionOwnerCurrent(previous.resume.owner)) this._cancelPostCompactionContinue();
 		if (!this._postCompactionContinuationSettlement || this._postCompactionContinuationSettlement.settled) {
-			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement();
+			this._postCompactionContinuationSettlement = createPostCompactionContinuationSettlement(resume);
 		}
 		const settlement = this._postCompactionContinuationSettlement;
-		settlement.continueAfterSessionInput ||= continueAfterSessionInput;
-		if (this._postCompactionContinuationScheduled) {
-			return;
-		}
+		settlement.resume = resume;
+		if (this._postCompactionContinuationScheduled) return;
 		this._postCompactionContinuationScheduled = true;
-		this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
 		void this._runScheduledPostCompactionContinue(settlement)
-			.catch(() => undefined)
+			.catch((error: unknown) => {
+				if (this._postCompactionContinuationSettlement === settlement)
+					this._settlePostCompactionContinue(this._asError(error));
+			})
 			.finally(() => {
-				if (this._postCompactionContinuationSettlement === settlement) {
-					this._settlePostCompactionContinue();
-				}
+				if (this._postCompactionContinuationSettlement === settlement) this._settlePostCompactionContinue();
 			});
 	}
 
-	private _sessionOwnsScheduledContinuations(continuationMessages: AgentMessage[]): boolean {
-		return continuationMessages.some((message) => this._postCompactionContinuationMessages.includes(message));
-	}
-
 	private async _waitForQueuedWorkResume(settlement: PostCompactionContinuationSettlement): Promise<void> {
-		while (this._queuedWorkPauses.size > 0 && this._postCompactionContinuationSettlement === settlement) {
+		const resume = settlement.resume;
+		while (
+			(this._queuedWorkPauses.size > 0 || this._sessionInputAdmissionPauses.size > 0) &&
+			this._postCompactionContinuationSettlement === settlement &&
+			settlement.resume === resume &&
+			this._isCompactionOwnerCurrent(resume.owner)
+		) {
 			let resume = () => {};
 			const resumed = new Promise<void>((resolve) => {
 				resume = resolve;
@@ -7854,105 +9893,96 @@ export class AgentSession {
 
 	private async _runScheduledPostCompactionContinue(settlement: PostCompactionContinuationSettlement): Promise<void> {
 		while (this._postCompactionContinuationScheduled && this._postCompactionContinuationSettlement === settlement) {
-			await this.agent.waitForIdle();
+			const resume = settlement.resume;
+			const owner = resume.owner;
+			const current = () =>
+				this._postCompactionContinuationSettlement === settlement &&
+				settlement.resume === resume &&
+				this._isCompactionOwnerCurrent(owner);
+			if (!current()) {
+				this._cancelPostCompactionContinue();
+				return;
+			}
+			await owner.agent.waitForIdle();
+			if (!current()) continue;
 			await this.waitForRetry();
-			await this._waitForRefineIdle();
+			if (!current()) continue;
+			const refine = this._refineInFlight;
+			if (refine) await refine;
+			if (!current()) continue;
 			await this._waitForQueuedWorkResume(settlement);
+			if (!current()) continue;
 			const compactionOperation = this._compactionOperation;
 			if (compactionOperation) {
 				await Promise.race([compactionOperation, settlement.promise]);
 				continue;
 			}
-
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let continuation: Promise<void> | undefined;
-			let continuationMessages: AgentMessage[] = [];
 			let waitForSessionInput = false;
 			try {
-				await this.agent.waitForIdle();
+				if (!current()) continue;
+				await owner.agent.waitForIdle();
+				if (!current()) continue;
 				if (
-					!this._postCompactionContinuationScheduled ||
-					this._postCompactionContinuationSettlement !== settlement
-				) {
-					return;
-				}
-
-				if (this._queuedWorkPauses.size > 0 || this._compactionOperation || this._refineInFlight) {
+					this._queuedWorkPauses.size > 0 ||
+					this._sessionInputAdmissionPauses.size > 0 ||
+					this._compactionOperation ||
+					this._refineInFlight
+				)
 					continue;
-				}
-
-				continuationMessages = [...this._scheduledPostCompactionContinuationMessages];
-				if (continuationMessages.length > 0 && !this._sessionOwnsScheduledContinuations(continuationMessages)) {
-					this._cancelPostCompactionContinue();
-					this._scheduleAutoRefineAfterAgentEnd();
-					return;
-				}
 				if (this.unfinishedActionCount > 0 || this._sessionInputPumpRequested) {
 					this._scheduleSessionInputPump();
 					waitForSessionInput = true;
 				} else {
+					// A released row is not a receipt. The retained ticket settles delivery and completion separately.
+					for (const { action, ticket } of resume.actions) {
+						if (action.lifecycle.state === "cancelled") continue;
+						if (action.lifecycle.state !== "completed" && action.lifecycle.state !== "failed") {
+							throw new Error(`Checkpoint action ${ticket.id} has not settled`);
+						}
+						await ticket.completed;
+						const delivered = await ticket.delivered;
+						if (delivered.status !== "delivered")
+							throw new Error(`Checkpoint action ${ticket.id} was not delivered`);
+						if (!current()) break;
+					}
+					if (!current()) continue;
+					if (this.hasPendingSessionWork || this._sessionInputPumpRequested) continue;
 					this._postCompactionContinuationScheduled = false;
-					continuation = this.agent.continue();
+					if (resume.boundary?.state === "pending" || owner.agent.hasQueuedMessages()) {
+						continuation = owner.agent.continue();
+					} else {
+						this._scheduleAutoRefineAfterAgentEnd();
+						return;
+					}
 				}
 			} finally {
 				commitFence.release();
 			}
-
 			if (waitForSessionInput) {
 				await this._waitForIdleOrSettlement(settlement);
-				if (this._postCompactionContinuationSettlement !== settlement) return;
-				const shouldContinue =
-					(settlement.continueAfterSessionInput && continuationMessages.length === 0) ||
-					this._sessionOwnsScheduledContinuations(continuationMessages);
-				if (shouldContinue) {
-					this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
-					continue;
-				}
-				this._postCompactionContinuationScheduled = false;
-				this._scheduledPostCompactionContinuationMessages = [];
-				this._scheduleAutoRefineAfterAgentEnd();
-				return;
+				continue; // The input dispatch, not queue removal, consumes the old boundary.
 			}
-
 			try {
 				await continuation;
-				if (this._postCompactionContinuationSettlement === settlement) {
-					this._forgetConsumedPostCompactionContinuations(continuationMessages);
-				}
 				return;
 			} catch (error) {
-				const code = error instanceof AgentContinueError ? error.code : undefined;
-				if (code === "busy") {
-					if (this._postCompactionContinuationSettlement === settlement) {
-						this._postCompactionContinuationScheduled = true;
-						this._scheduledPostCompactionContinuationMessages = [...this._postCompactionContinuationMessages];
-					}
+				if (error instanceof AgentContinueError && error.code === "busy") {
+					if (current()) this._postCompactionContinuationScheduled = true;
 					continue;
 				}
-				if (code !== "nothing-to-continue" && this._postCompactionContinuationSettlement === settlement) {
+				// A valid directive must not rely on a stale-tail/nothing-to-continue error to decide completion.
+				if (this._postCompactionContinuationSettlement === settlement)
 					this._settlePostCompactionContinue(this._asError(error));
-				}
 				return;
 			}
 		}
 	}
 
-	private _forgetConsumedPostCompactionContinuations(continuationMessages: AgentMessage[]): void {
-		if (continuationMessages.length === 0) {
-			return;
-		}
-		const continuationMessageSet = new Set(continuationMessages);
-		const stillQueued = new Set(this.agent.removeQueuedMessages((message) => continuationMessageSet.has(message)));
-		for (const message of stillQueued) {
-			this.agent.followUp(message);
-		}
-		for (const message of continuationMessages) {
-			if (!stillQueued.has(message)) {
-				this._queuedAutonomousContinuationSnapshots.delete(message);
-			}
-		}
-		this._postCompactionContinuationMessages = this._postCompactionContinuationMessages.filter(
-			(message) => !continuationMessageSet.has(message) || stillQueued.has(message),
+	private _forgetConsumedPostCompactionContinuations(actions: QueuedSessionAction[]): void {
+		this._postCompactionContinuations = this._postCompactionContinuations.filter(
+			(continuation) => !actions.includes(continuation.action) || this._checkpointActionPending(continuation),
 		);
 	}
 
@@ -7971,6 +10001,7 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefine(reason: AutoRefineReason, branchVersion = this._autoRefineBranchVersion): void {
+		if (this._compactionSetupFailure || !this._newAutoRefineAllowed()) return;
 		const timer = setTimeout(() => {
 			this._scheduledAutoRefineTimers.delete(timer);
 			if (branchVersion !== this._autoRefineBranchVersion) {
@@ -7984,11 +10015,12 @@ export class AgentSession {
 	}
 
 	private async _maybeAutoRefine(reason: AutoRefineReason): Promise<void> {
+		if (this._compactionSetupFailure) return;
 		if (this._disposed || this._disposing) {
 			this._discardPendingAutoRefine();
 			return;
 		}
-		if (!this._autoRefineAllowedForSession()) {
+		if (!this._newAutoRefineAllowed()) {
 			this._discardPendingAutoRefine();
 			return;
 		}
@@ -8053,7 +10085,12 @@ export class AgentSession {
 		let approvedReview: AutoRefineReview | undefined;
 		try {
 			const review = await this._reviewAutoRefine({ reason, turnsSinceLastReview }, reviewAbort.signal);
-			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
+			if (
+				!this._newAutoRefineAllowed() ||
+				this._disposed ||
+				this._disposing ||
+				branchVersion !== this._autoRefineBranchVersion
+			) {
 				return;
 			}
 			if (!review.shouldRefine) {
@@ -8097,6 +10134,7 @@ export class AgentSession {
 	}
 
 	private async _runApprovedRefine(reason: AutoRefineReason, review: AutoRefineReview): Promise<void> {
+		if (this._compactionSetupFailure || !this._newAutoRefineAllowed()) return;
 		this._autoRefineInProgress = true;
 		try {
 			await this.refine({ instructions: autoRefineInstructions(reason, review) }, { trigger: "auto" });
@@ -8125,26 +10163,64 @@ export class AgentSession {
 		}
 	}
 
+	private _resolveRefinementModel():
+		| { model: NonNullable<AgentSession["model"]>; thinkingLevel: ThinkingLevel; explicit: boolean }
+		| undefined {
+		const selection = this.settingsManager.getAutoRefineModel();
+		if (selection === undefined) {
+			const model = this.model;
+			return model
+				? { model: { ...model, cost: { ...model.cost } }, thinkingLevel: this.thinkingLevel, explicit: false }
+				: undefined;
+		}
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid autoRefine.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown autoRefine.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`autoRefine.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: { ...model, cost: { ...model.cost } }, thinkingLevel: selection.thinkingLevel, explicit: true };
+	}
+
 	private async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
-		if (this._autoRefineReviewer) {
-			return this._autoRefineReviewer(context, signal);
+		if (this._autoRefineReviewer) return this._autoRefineReviewer(context, signal);
+		const selected = this._resolveRefinementModel();
+		if (!selected) return { shouldRefine: false, rationale: "No model selected." };
+		const { model, thinkingLevel, explicit } = selected;
+		const messages = structuredClone(this.agent.state.messages);
+		const harnessState = this._loadMergedHarnessState();
+		const reviewContext = { ...context };
+		const requests = this.requests[captureNativeReviewerRequests]();
+		try {
+			const history = await this._loadRefinementHistory();
+			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+			return await reviewAutoRefine(
+				messages,
+				harnessState,
+				history,
+				model,
+				apiKey,
+				reviewContext,
+				headers,
+				signal,
+				thinkingLevel,
+				requests,
+				explicit,
+			);
+		} finally {
+			await requests.dispose();
 		}
-		const model = this.model;
-		if (!model) {
-			return { shouldRefine: false, rationale: "No model selected." };
-		}
-		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-		return reviewAutoRefine(
-			this.agent.state.messages,
-			this._loadMergedHarnessState(),
-			this._loadRefinementHistory(),
-			model,
-			apiKey,
-			context,
-			headers,
-			signal,
-			this.thinkingLevel,
-		);
 	}
 
 	/** Global harness state overlaid with this session's local state, when persisted. */
@@ -8156,10 +10232,30 @@ export class AgentSession {
 		);
 	}
 
-	private _loadRefinementHistory(): RefinementResult[] {
+	private async _loadRefinementHistory(): Promise<RefinementResult[]> {
+		const limits: SessionHistoryReadLimits = {
+			maxEntries: 16_384,
+			maxSourceBytes: 64 * 1024 * 1024,
+		};
+		const residentEntries = this.sessionManager.supportsCapturedHistoryReads()
+			? undefined
+			: this.sessionManager.materializeResidentHistory(limits).entries;
+		const globalHistory = loadGlobalRefinementHistory(getGlobalHarnessStateDir(), limits);
+		const sessionHistory = (async () => {
+			if (residentEntries !== undefined) return residentEntries;
+			return (await this.sessionManager.materializeSourceHistory(limits)).entries.map(({ entry }) => entry);
+		})();
+		const [globalResult, sessionResult] = await Promise.allSettled([globalHistory, sessionHistory]);
+		if (globalResult.status === "rejected") {
+			if (sessionResult.status === "rejected") {
+				throw new AggregateError([globalResult.reason, sessionResult.reason], "Refinement history reads failed");
+			}
+			throw globalResult.reason;
+		}
+		if (sessionResult.status === "rejected") throw sessionResult.reason;
 		return mergeRefinementHistory(
-			loadGlobalRefinementHistory(getGlobalHarnessStateDir()),
-			getRefinementHistory(this.sessionManager.getEntries().filter((entry) => entry.type === "custom")),
+			globalResult.value,
+			getRefinementHistory(sessionResult.value.filter((entry) => entry.type === "custom")),
 		);
 	}
 
@@ -8172,6 +10268,14 @@ export class AgentSession {
 	 * application phase (disk I/O + in-memory mutation) blocks turn entry points.
 	 */
 	async refine(
+		options: { instructions?: string; rollbackId?: string; global?: boolean } = {},
+		internal: { skipAbort?: boolean; trigger?: "manual" | "auto" } = {},
+	): Promise<RefinementResult> {
+		this._assertContextOptimizationAllowed();
+		return this._retainContextOptimization(this._refineAccepted(options, internal));
+	}
+
+	private async _refineAccepted(
 		options: {
 			instructions?: string;
 			rollbackId?: string;
@@ -8310,16 +10414,15 @@ export class AgentSession {
 			throw new Error("Cannot refine a disposed session.");
 		}
 
-		if (!this.model) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-
-		const model = this.model;
-		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		const selected = this._resolveRefinementModel();
+		if (!selected) throw new Error(formatNoModelSelectedMessage());
+		const { model, thinkingLevel, explicit } = selected;
+		const messages = structuredClone(this.agent.state.messages);
+		const requestOptions = { ...options };
 		const globalHarnessStateDir = getGlobalHarnessStateDir();
 		const localHarnessStateDir = this._localHarnessStateDir();
-		const requestedScope = options.global ? "global" : "local";
-		if (!options.rollbackId && requestedScope === "local" && !localHarnessStateDir) {
+		const requestedScope = requestOptions.global ? "global" : "local";
+		if (!requestOptions.rollbackId && requestedScope === "local" && !localHarnessStateDir) {
 			throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
 		}
 		const globalPlanningState = loadHarnessState(globalHarnessStateDir, "global");
@@ -8328,80 +10431,92 @@ export class AgentSession {
 			requestedScope === "global"
 				? globalPlanningState
 				: mergeHarnessStates(globalPlanningState, localPlanningState);
-		const history = this._loadRefinementHistory();
-		const rollbackTarget = options.rollbackId ? history.find((item) => item.id === options.rollbackId) : undefined;
-		let baselineScope = rollbackTarget
-			? (inferRefinementResultScope(rollbackTarget) ?? requestedScope)
-			: requestedScope;
-		let baselineHarnessStateDir = baselineScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
-		if (rollbackTarget?.harnessStatePath) {
-			baselineHarnessStateDir = dirname(rollbackTarget.harnessStatePath);
-			baselineScope = resolve(baselineHarnessStateDir) === resolve(globalHarnessStateDir) ? "global" : "local";
-		}
-		if (!baselineHarnessStateDir) {
-			throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
-		}
-		const baselineState = rollbackTarget
-			? loadHarnessState(baselineHarnessStateDir, baselineScope)
-			: baselineScope === "global"
-				? globalPlanningState
-				: localPlanningState!;
-		if (!options.rollbackId && this._extensionRunner.hasHandlers("session_before_refine")) {
-			const result = (await this._extensionRunner.emit({
-				type: "session_before_refine",
-				preparation: {
-					trigger,
-					instructions: options.instructions,
-					scope: requestedScope,
-					planningState,
-					history,
-					conversationText: serializeConversation(convertToLlm(this.agent.state.messages)).slice(-80_000),
-				},
+		const plannerManager = this.sessionManager;
+		const requests = this.requests[captureNativePlannerRequests](plannerManager.bindRequestSink());
+		try {
+			const history = await this._loadRefinementHistory();
+			const rollbackTarget = requestOptions.rollbackId
+				? history.find((item) => item.id === requestOptions.rollbackId)
+				: undefined;
+			let baselineScope = rollbackTarget
+				? (inferRefinementResultScope(rollbackTarget) ?? requestedScope)
+				: requestedScope;
+			let baselineHarnessStateDir = baselineScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
+			if (rollbackTarget?.harnessStatePath) {
+				baselineHarnessStateDir = dirname(rollbackTarget.harnessStatePath);
+				baselineScope = resolve(baselineHarnessStateDir) === resolve(globalHarnessStateDir) ? "global" : "local";
+			}
+			if (!baselineHarnessStateDir) {
+				throw new Error("Local harness refinement requires a persisted session; use global refinement instead.");
+			}
+			const baselineState = rollbackTarget
+				? loadHarnessState(baselineHarnessStateDir, baselineScope)
+				: baselineScope === "global"
+					? globalPlanningState
+					: localPlanningState!;
+			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+			if (!requestOptions.rollbackId && this._extensionRunner.hasHandlers("session_before_refine")) {
+				const result = (await this._extensionRunner.emit({
+					type: "session_before_refine",
+					preparation: {
+						trigger,
+						instructions: requestOptions.instructions,
+						scope: requestedScope,
+						planningState,
+						history,
+						conversationText: serializeConversation(convertToLlm(messages)).slice(-80_000),
+					},
+					signal,
+				})) as SessionBeforeRefineResult | undefined;
+				if (this._disposed || signal.aborted) {
+					throw new Error("Refinement cancelled because the session was disposed.");
+				}
+				if (result?.skip) {
+					throw new RefineSkippedError("Refinement skipped by extension");
+				}
+				if (result?.proposal !== undefined) {
+					return {
+						proposal: normalizeRefinementProposal(result.proposal),
+						id: generateRefinementId(),
+						baselineState,
+					};
+				}
+			}
+			const plan = await planRefinement(
+				messages,
+				planningState,
+				history,
+				model,
+				apiKey,
+				requestOptions,
+				headers,
 				signal,
-			})) as SessionBeforeRefineResult | undefined;
+				thinkingLevel,
+				requests,
+				explicit,
+			);
 			if (this._disposed || signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
-			if (result?.skip) {
-				throw new RefineSkippedError("Refinement skipped by extension");
-			}
-			if (result?.proposal !== undefined) {
-				return {
-					proposal: normalizeRefinementProposal(result.proposal),
-					id: generateRefinementId(),
-					baselineState,
-				};
-			}
+			return withRefinementBaseline(plan, baselineState);
+		} finally {
+			await requests.dispose();
 		}
-		const plan = await planRefinement(
-			this.agent.state.messages,
-			planningState,
-			history,
-			model,
-			apiKey,
-			options,
-			headers,
-			signal,
-			this.thinkingLevel,
-		);
-		if (this._disposed || signal.aborted) {
-			throw new Error("Refinement cancelled because the session was disposed.");
-		}
-		return { ...plan, baselineState };
 	}
 
-	private _recordRefinementOutcome(result: RefinementResult): void {
+	private async _recordRefinementOutcome(result: RefinementResult): Promise<void> {
 		const message = createRefinementOutcomeMessage(result);
 		try {
-			this.sessionManager.appendCustomMessageEntryWithRollback(
+			await this.sessionManager.appendCustomMessageEntryWithRollback(
 				message.customType,
 				message.content,
 				message.display,
 				message.details,
 			);
-		} catch {
-			// Not in the session file, so context rebuilds would drop the outcome.
+		} catch (error) {
+			// Retain the already-applied effect, but do not publish a saved outcome.
 			this._unpersistedOutcomes.push(message);
+			throw error;
 		}
 		this.agent.state.messages.push(message);
 		this._emit({ type: "message_start", message });
@@ -8423,13 +10538,14 @@ export class AgentSession {
 		}
 		// The caller has already set _refineInFlight and waited for agent idle.
 		// Disconnect only for the brief apply + save + reconnect critical section.
+		options = { ...options };
 		this._disconnectFromAgent();
 
 		try {
 			const globalHarnessStateDir = getGlobalHarnessStateDir();
 			const localHarnessStateDir = this._localHarnessStateDir();
 			const requestedScope = options.global ? "global" : "local";
-			const history = this._loadRefinementHistory();
+			const history = await this._loadRefinementHistory();
 			const rollbackTarget = options.rollbackId ? history.find((item) => item.id === options.rollbackId) : undefined;
 			let targetScope = plan.rollbackScope ?? requestedScope;
 			let targetHarnessStateDir = targetScope === "global" ? globalHarnessStateDir : localHarnessStateDir;
@@ -8452,21 +10568,7 @@ export class AgentSession {
 			// Re-read the target state immediately before applying so concurrent kernel
 			// (`rlm.harness`) writes during the LLM pass are not clobbered.
 			const state = loadHarnessState(targetHarnessStateDir, targetScope);
-			const proposal = {
-				...plan.proposal,
-				edits: plan.proposal.edits.map((edit) => {
-					const localPrefix = "local:";
-					const globalPrefix = "global:";
-					return {
-						...edit,
-						id: edit.id?.startsWith(localPrefix)
-							? edit.id.slice(localPrefix.length)
-							: edit.id?.startsWith(globalPrefix)
-								? edit.id.slice(globalPrefix.length)
-								: edit.id,
-					};
-				}),
-			};
+			const proposal = prepareRefinementApplication(plan, state, options, targetScope);
 			if (this._disposed || refineAbort.signal.aborted) {
 				throw new Error("Refinement cancelled because the session was disposed.");
 			}
@@ -8478,16 +10580,21 @@ export class AgentSession {
 			});
 			result.harnessStatePath = saveHarnessState(targetHarnessStateDir, state);
 			if (targetScope === "global") {
-				appendGlobalRefinement(globalHarnessStateDir, result);
+				await appendGlobalRefinement(globalHarnessStateDir, result);
 			}
 			let refinementAuditAppendError: { error: unknown } | undefined;
 			try {
-				this.sessionManager.appendCustomEntry("prime-agent.refinement", result);
+				const manager = this.sessionManager;
+				const write = takeNativePlannerRequestWrite(result);
+				const pending = write?.(manager);
+				if ((pending ? await pending : undefined) === undefined) {
+					await manager.appendCustomEntry("prime-agent.refinement", result);
+				}
 			} catch (error) {
 				refinementAuditAppendError = { error };
 			}
 			try {
-				this._recordRefinementOutcome(result);
+				await this._recordRefinementOutcome(result);
 			} catch (error) {
 				if (!refinementAuditAppendError) throw error;
 			}
@@ -8566,11 +10673,27 @@ export class AgentSession {
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
+		invocationOwner?: CompactionOwner,
 	): Promise<boolean> {
+		if (this._compactionSetupFailure) return false;
+		if (invocationOwner && !this._isCompactionSourceOwnerCurrent(invocationOwner)) return false;
+		const owner =
+			this._pendingCheckpoint?.owner ??
+			(invocationOwner
+				? { ...invocationOwner, pumpEpoch: this._sessionInputPumpEpoch }
+				: this._captureCompactionOwner());
+		if (!this._isCompactionSourceOwnerCurrent(owner)) return false;
+		if (assistantMessage.stopReason !== "aborted" && !this._isCompactionOwnerCurrent(owner)) return false;
+		const goalOwner = { ...this._captureGoalContinuationOwner(owner.signal), checkpointOwner: owner };
+		const autonomousOwner = this._captureThresholdAutonomousOwner();
+		const pending = this._pendingRequestedCompaction;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) this._pendingRequestedCompaction = undefined;
+		if (!this._contextOptimizationAllowed() && this._pendingRequestedCompaction === undefined) return false;
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
 			this._pendingRequestedCompaction = undefined;
+			this._pendingCheckpoint = undefined;
 			// An abort also drops any pending explicit refine.run request: the
 			// turn that would service it (non-serialized: _consumePendingRequestedRefine
 			// at agent_end; serialized: the shouldStopAfterTurn checkpoint) never
@@ -8603,8 +10726,15 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		let compactionTimestamp: number | undefined;
+		try {
+			compactionTimestamp = await this._getLatestCompactionTimestamp(owner);
+		} catch (error) {
+			// A manual checkpoint can supersede this optional check after agent_end was emitted.
+			if (error instanceof StaleCompactionOwnerError && !this._isCompactionOwnerCurrent(owner)) return false;
+			throw error;
+		}
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
 
@@ -8619,10 +10749,11 @@ export class AgentSession {
 			if (this._overflowRecovery !== "idle") {
 				if (this._overflowRecovery === "attempted") {
 					this._overflowRecovery = "reported";
-					this._endCompactionUnsuccessfully(
+					await this._endCompactionUnsuccessfully(
 						"overflow",
 						"failed",
 						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+						{ owner },
 					);
 				}
 				return false;
@@ -8633,16 +10764,18 @@ export class AgentSession {
 			// but we don't want it in context for the retry)
 			const messages = this.agent.state.messages;
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.state.messages = messages.slice(0, -1);
+				this._removeLastAssistantFromContext();
 			}
-			return await this._runAutoCompaction("overflow", true);
+			return await this._runAutoCompaction("overflow", true, owner);
 		}
 
 		if (this._pendingRequestedCompaction !== undefined) {
-			return await this._runAutoCompaction("requested", false);
+			return await this._runAutoCompaction("requested", false, owner);
 		}
 
-		if (!settings.enabled || assistantIsFromBeforeCompaction) return false;
+		if (!this._contextOptimizationAllowed() || !settings.enabled || assistantIsFromBeforeCompaction) return false;
+		// A native turn already made its typed decision. Do not synthesize a new policy winner at agent_end.
+		if (invocationOwner && !this._pendingCheckpoint) return false;
 
 		// Case 3: Threshold - context is getting large.
 		// Use the full-session estimate so messages appended after the last successful
@@ -8650,15 +10783,16 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
-				this._continueAfterThresholdCompaction = true;
-			} else if (
-				queueAutonomousContinuation &&
-				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
-			) {
-				this._continueAfterThresholdCompaction = true;
+			if (!this._pendingCheckpoint && queueAutonomousContinuation) {
+				if (
+					!(await this._queueGoalContinuationForThresholdCompaction(assistantMessage, goalOwner)) &&
+					this._isGoalContinuationOwnerCurrent(goalOwner)
+				) {
+					await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage, owner, autonomousOwner);
+				}
 			}
-			return await this._runAutoCompaction("threshold", false);
+			if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
+			return await this._runAutoCompaction("threshold", false, owner);
 		}
 		return false;
 	}
@@ -8667,7 +10801,7 @@ export class AgentSession {
 	 * Internal: Run automatic (threshold/overflow) or model-requested compaction
 	 * with events.
 	 */
-	private _endCompactionUnsuccessfully(
+	private async _endCompactionUnsuccessfully(
 		reason: CompactionOutcomeReason,
 		outcome: CompactionOutcome,
 		message: string,
@@ -8675,9 +10809,12 @@ export class AgentSession {
 			aborted?: boolean;
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
+			owner?: CompactionOwner;
 		} = {},
-	): void {
-		this._persistCompactionOutcome(reason, outcome, message);
+	): Promise<void> {
+		const owner = options.owner ?? this._captureCompactionOwner();
+		await this._persistCompactionOutcome(reason, outcome, message, owner);
+		this._assertCompactionSourceOwner(owner);
 		this._emit({
 			type: "compaction_end",
 			reason,
@@ -8691,23 +10828,26 @@ export class AgentSession {
 		});
 	}
 
-	private _persistCompactionOutcome(
+	private async _persistCompactionOutcome(
 		reason: CompactionOutcomeReason,
 		outcome: CompactionOutcome,
 		message: string,
-	): void {
+		owner = this._captureCompactionOwner(),
+	): Promise<void> {
+		this._assertCompactionSourceOwner(owner);
 		let outcomeMessage = createCompactionOutcomeMessage(message, {
 			reason,
 			outcome,
 		});
 		try {
-			this.sessionManager.appendCustomMessageEntryWithRollback(
+			await owner.manager.appendCustomMessageEntryWithRollback(
 				outcomeMessage.customType,
 				outcomeMessage.content,
 				outcomeMessage.display,
 				outcomeMessage.details,
 			);
 		} catch (error) {
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw error;
 			const persistenceError = error instanceof Error ? error.message : String(error);
 			outcomeMessage = createCompactionOutcomeMessage(
 				`${message}\n\nThis compaction outcome could not be saved to session history: ${persistenceError}`,
@@ -8716,7 +10856,8 @@ export class AgentSession {
 			// Not in the session file, so context rebuilds would drop the disclosure.
 			this._unpersistedOutcomes.push(outcomeMessage);
 		}
-		this.agent.state.messages.push(outcomeMessage);
+		this._assertCompactionSourceOwner(owner);
+		owner.agent.state.messages.push(outcomeMessage);
 		this._emit({ type: "message_start", message: outcomeMessage });
 		this._emit({ type: "message_end", message: outcomeMessage });
 	}
@@ -8724,51 +10865,74 @@ export class AgentSession {
 	private async _runAutoCompaction(
 		reason: "overflow" | "threshold" | "requested",
 		willRetry: boolean,
+		capturedOwner?: CompactionOwner,
+		resumeInPlace = false,
 	): Promise<boolean> {
-		// Any compaction consumes a pending model request and honors its instructions
-		// (overflow recovery can fire first and take the request with it).
+		const checkpoint = this._pendingCheckpoint;
 		const pending = this._pendingRequestedCompaction;
+		const owner = checkpoint?.owner ?? pending?.owner ?? capturedOwner ?? this._captureCompactionOwner();
+		if (!this._isCompactionOwnerCurrent(owner)) return false;
+		if (reason === "threshold" && !this._contextOptimizationAllowed()) return false;
+		if (checkpoint && !this._isCompactionOwnerCurrent(checkpoint.owner)) return false;
+		if (pending && !this._isCompactionOwnerCurrent(pending.owner)) return false;
 		this._pendingRequestedCompaction = undefined;
 		const customInstructions = pending?.customInstructions;
-		const shouldContinueAfterCompaction =
-			(reason === "threshold" || reason === "requested") && this._continueAfterThresholdCompaction;
+		const resume = resumeInPlace
+			? this._captureCheckpointResume(owner, { kind: "request", state: "pending" })
+			: reason === "overflow"
+				? this._captureCheckpointResume(owner, { kind: "overflow", state: "pending" })
+				: (checkpoint ?? this._captureCheckpointResume(owner));
+		this._pendingCheckpoint = resume;
+		const shouldContinueAfterCompaction = this._checkpointHasResume(resume);
 		const queuedAutonomousContinuationsForThisCompaction =
 			reason === "threshold" && shouldContinueAfterCompaction
-				? this._pendingThresholdCompactionAutonomousMessages.splice(0)
+				? this._pendingThresholdCompactionAutonomousContinuations.splice(0)
 				: [];
 		const queuedGoalContinuationForThisCompaction =
 			reason === "threshold" && shouldContinueAfterCompaction ? this._queuedGoalThresholdContinuation : undefined;
-		this._continueAfterThresholdCompaction = false;
-
-		// Requested/threshold stop the loop on purpose, so a failed or skipped compaction must not stall it.
-		// Overflow stays excluded: a failed overflow recovery must not re-issue the overflowing request.
 		const resumeAfterFailure = () => {
 			if (
+				!resumeInPlace &&
 				(reason === "requested" || reason === "threshold") &&
-				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
+				this._isCompactionOwnerCurrent(owner) &&
+				(this._checkpointHasResume(resume) || owner.agent.hasQueuedMessages() || this.hasPendingSessionWork)
 			) {
-				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
+				this._schedulePostCompactionContinue(resume);
 			}
 		};
 
 		this._emit({ type: "compaction_start", reason, customInstructions });
-		this._autoCompactionAbortController = new AbortController();
+		const abort = new AbortController();
+		this._autoCompactionAbortController = abort;
 		let resolveCompactionOperation: () => void = () => {};
 		const compactionOperation = new Promise<void>((resolve) => {
 			resolveCompactionOperation = resolve;
 		});
 		this._compactionOperation = compactionOperation;
-
+		let requests: InferenceCoordinator | undefined;
+		let compaction: BoundCompactionSink | undefined;
+		let committed: CompactionCommit | undefined;
+		let failure: unknown;
 		try {
-			const authResult = this.model ? await this._modelRegistry.getApiKeyAndHeaders(this.model) : undefined;
-			if (!this.model || !authResult || !authResult.ok || !authResult.apiKey) {
+			const selected = this._resolveCompactionModel();
+			const model = selected?.model;
+			const thinkingLevel = selected?.thinkingLevel ?? this.thinkingLevel;
+			const settings = { ...this.settingsManager.getCompactionSettings() };
+			const semanticEdges = owner.semanticEdges;
+			compaction = owner.manager.bindCompactionSink();
+			requests = owner.requests.capture(compaction);
+			const pathEntries = await compaction.readBranch();
+			this._assertCompactionOwner(owner);
+			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
+			this._assertCompactionOwner(owner);
+			if (!model || !authResult || !authResult.ok || !authResult.apiKey) {
 				const detail =
-					!this.model || !authResult
+					!model || !authResult
 						? "no model is selected"
 						: authResult.ok
 							? "no API key is available"
 							: authResult.error;
-				this._endCompactionUnsuccessfully(reason, "failed", `Compaction failed: ${detail}`);
+				await this._endCompactionUnsuccessfully(reason, "failed", `Compaction failed: ${detail}`, { owner });
 				this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 					reason === "threshold" && shouldContinueAfterCompaction,
 					queuedAutonomousContinuationsForThisCompaction,
@@ -8776,96 +10940,109 @@ export class AgentSession {
 				resumeAfterFailure();
 				return false;
 			}
-
-			const result = await this._performCompaction({
-				model: this.model,
+			committed = await this._performCompaction({
+				model,
+				thinkingLevel,
+				pathEntries,
+				settings,
+				requests,
+				compaction,
+				semanticEdges,
+				owner,
 				apiKey: authResult.apiKey,
 				headers: authResult.headers,
 				customInstructions,
-				signal: this._autoCompactionAbortController.signal,
+				signal: abort.signal,
+				// Only confirmed public-budget recovery resumes within the same invocation.
+				budgetPressure: resumeInPlace,
 			});
-
-			this._emit({
-				type: "compaction_end",
-				reason,
-				result,
-				aborted: false,
-				willRetry,
-				customInstructions,
-			});
-			// Queued work lives in both the agent queues and the session-owned queues.
-			const hasQueuedMessages = this.agent.hasQueuedMessages() || this.hasPendingSessionWork;
-			const willContinueAfterCompaction = willRetry || shouldContinueAfterCompaction || hasQueuedMessages;
-
+			const result = committed.result;
+			// Release this captured source before arming success. A later release failure still carries the ACK.
+			await this._releaseCompactionCapture(requests, compaction, undefined, owner);
+			requests = undefined;
+			compaction = undefined;
+			this._assertCompactionOwner(owner);
+			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry, customInstructions });
+			const hasQueuedWork = owner.agent.hasQueuedMessages() || this.hasPendingSessionWork;
+			const willContinue = willRetry || this._checkpointHasResume(resume) || hasQueuedWork;
 			if (willRetry) {
-				const messages = this.agent.state.messages;
-				const lastMsg = messages[messages.length - 1];
-				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
-					this.agent.state.messages = messages.slice(0, -1);
-				}
-
-				this._schedulePostCompactionContinue(true);
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
-				return true;
-			} else if (shouldContinueAfterCompaction || hasQueuedMessages) {
-				// Compaction can intentionally stop a tool loop between turns.
-				// Queued follow-up/steering/custom messages can also be waiting.
-				this._schedulePostCompactionContinue(shouldContinueAfterCompaction);
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
-			} else {
-				this._scheduleAutoRefineAfterCompaction(willContinueAfterCompaction);
+				const messages = owner.agent.state.messages;
+				const last = messages[messages.length - 1];
+				if (last?.role === "assistant" && last.stopReason === "error") this._removeLastAssistantFromContext();
 			}
-			return false;
+			if (willContinue && !resumeInPlace) this._schedulePostCompactionContinue(resume);
+			this._scheduleAutoRefineAfterCompaction(willContinue);
+			// The unsent request remains in its original invocation; do not queue a new action.
+			return resumeInPlace || willRetry; // Other callers retain the existing overflow retry contract.
 		} catch (error) {
+			const primaryCommit = primaryCommittedCompactionError(error);
+			const knownCommit = primaryCommit ?? committed;
+			failure =
+				knownCommit && !(error instanceof CompactionCommittedError)
+					? new CompactionCommittedError(knownCommit.entryId, knownCommit.result, error)
+					: error;
+			if (failure instanceof CompactionCommittedError) {
+				this._reportCommittedCompactionFailure(failure, reason, customInstructions, owner);
+				throw failure;
+			}
+			if (!this._isCompactionSourceOwnerCurrent(owner)) throw failure;
 			this._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 				reason === "threshold" && shouldContinueAfterCompaction,
 				queuedAutonomousContinuationsForThisCompaction,
 			);
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
-				errorMessage === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+				errorMessage === "Compaction cancelled" ||
+				(error instanceof Error && error.name === "AbortError") ||
+				abort.signal.aborted;
 			if (aborted) {
-				this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(queuedGoalContinuationForThisCompaction);
-				this._endCompactionUnsuccessfully(
+				await this._clearQueuedGoalContinuationAfterCancelledThresholdCompaction(
+					queuedGoalContinuationForThisCompaction,
+				);
+				await this._endCompactionUnsuccessfully(
 					reason,
 					"cancelled",
 					`${reason === "requested" ? "Requested c" : "C"}ompaction cancelled`,
-					{ aborted: true, customInstructions },
+					{ aborted: true, customInstructions, owner },
 				);
 				return false;
 			}
 			if (error instanceof CompactionSkippedError) {
-				this._endCompactionUnsuccessfully(
+				await this._endCompactionUnsuccessfully(
 					reason,
 					"skipped",
 					reason === "requested"
 						? `Requested compaction skipped: ${errorMessage}`
 						: `Auto-compaction skipped: ${errorMessage}`,
-					{ errorSeverity: "warning", customInstructions },
+					{ errorSeverity: "warning", customInstructions, owner },
 				);
-				resumeAfterFailure();
-				return false;
+			} else {
+				await this._endCompactionUnsuccessfully(
+					reason,
+					"failed",
+					reason === "overflow"
+						? `Context overflow recovery failed: ${errorMessage}`
+						: reason === "requested"
+							? `Requested compaction failed: ${errorMessage}`
+							: `Auto-compaction failed: ${errorMessage}`,
+					{ customInstructions, owner },
+				);
 			}
-			this._endCompactionUnsuccessfully(
-				reason,
-				"failed",
-				reason === "overflow"
-					? `Context overflow recovery failed: ${errorMessage}`
-					: reason === "requested"
-						? `Requested compaction failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
-				{ customInstructions },
-			);
 			resumeAfterFailure();
 			return false;
 		} finally {
-			this._autoCompactionAbortController = undefined;
-			if (this._compactionOperation === compactionOperation) {
-				this._compactionOperation = undefined;
+			try {
+				await this._releaseCompactionCapture(requests, compaction, failure, owner);
+			} finally {
+				if (this._pendingCheckpoint === resume) this._pendingCheckpoint = undefined;
+				if (this._autoCompactionAbortController === abort) this._autoCompactionAbortController = undefined;
+				if (this._compactionOperation === compactionOperation) this._compactionOperation = undefined;
+				resolveCompactionOperation();
+				if (this._isCompactionOwnerCurrent(owner)) {
+					this._notifySessionInputCheckpointChange();
+					this._scheduleSessionInputPump();
+				}
 			}
-			resolveCompactionOperation();
-			this._notifySessionInputCheckpointChange();
-			this._scheduleSessionInputPump();
 		}
 	}
 
@@ -9017,39 +11194,41 @@ export class AgentSession {
 
 		runner.bindCore(
 			{
-				sendMessage: (message, options) => {
-					this.sendCustomMessage(message, options).catch((err) => {
+				sendMessage: async (message, options) => {
+					await this.sendCustomMessage(message, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
 							error: err instanceof Error ? err.message : String(err),
 						});
+						throw err;
 					});
 				},
-				sendUserMessage: (content, options) => {
-					this.sendUserMessage(content, options).catch((err) => {
+				sendUserMessage: async (content, options) => {
+					await this.sendUserMessage(content, options).catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_user_message",
 							error: err instanceof Error ? err.message : String(err),
 						});
+						throw err;
 					});
 				},
-				appendEntry: (customType, data) => {
-					this.sessionManager.appendCustomEntry(customType, data);
+				appendEntry: async (customType, data) => {
+					await this.sessionManager.appendCustomEntry(customType, data);
 				},
 				setSessionName: async (name) => {
 					if (this._agentMessageController?.setSessionName) {
 						await this._agentMessageController.setSessionName(name);
 						return;
 					}
-					this.setSessionName(name);
+					await this.setSessionName(name);
 				},
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
 				},
-				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
+				setLabel: async (entryId, label) => {
+					await this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
@@ -9168,6 +11347,14 @@ export class AgentSession {
 			() => this._extensionRunner,
 		);
 
+		// Only these actual built-in wrappers can establish a recovery execution scope.
+		// Same-name custom tools and baseToolsOverride never enter this identity table.
+		if (!this._baseToolsOverride) {
+			for (const tool of wrappedBuiltInTools) {
+				if (tool.name === "prime_context" || tool.name === "ipython")
+					this._nativeRecoveryTools.set(tool, tool.execute);
+			}
+		}
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
@@ -9236,7 +11423,12 @@ export class AgentSession {
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 			});
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
+				prime_context: { recover: (input, signal) => this.recoverNativeHistory(input, signal) },
 				ipython: {
+					captureNativeRecoveryScope: () => {
+						const producer = this._nativeRecoveryProducer.getStore();
+						return producer ? (run) => this._nativeRecoveryProducer.run(producer, run) : undefined;
+					},
 					provisioner: this._ipythonKernelProvisioner,
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
@@ -9289,7 +11481,9 @@ export class AgentSession {
 		for (const tool of acpMcpTools) this._allowedToolNames?.add(tool.name);
 		this._acpMcpTools = acpMcpTools;
 
-		const defaultActiveToolNames = this._baseToolsOverride ? Object.keys(this._baseToolsOverride) : ["ipython"];
+		const defaultActiveToolNames = this._baseToolsOverride
+			? Object.keys(this._baseToolsOverride)
+			: ["ipython", "prime_context"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
 		if (this._goalState.status === "active" && this._includeGoals) {
 			// An active goal needs ipython so the model can reach the goal skill.
@@ -9300,18 +11494,19 @@ export class AgentSession {
 			includeAllExtensionTools: options.includeAllExtensionTools,
 		});
 
-		// Prewarm when configured, or whenever we're resuming a session that already
-		// has a kernel snapshot — so its state is revived and the model is told what
-		// came back before the first turn, rather than a turn later when the kernel
-		// would otherwise lazily start on first use.
+		this._prewarmIpythonIfNeeded();
+
+		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
+		this._ipythonRuntimeBuilt = true;
+	}
+
+	private _prewarmIpythonIfNeeded(): void {
+		// Also used when an asynchronously restored goal enables ipython after construction.
 		const hasSnapshot =
 			!!this._ipythonKernelSnapshotDir && existsSync(snapshotPathIn(this._ipythonKernelSnapshotDir));
 		if ((this._prewarmIpythonKernel || hasSnapshot) && this.getActiveToolNames().includes("ipython")) {
 			this._ipythonKernelProvisioner?.prewarm();
 		}
-
-		// Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
-		this._ipythonRuntimeBuilt = true;
 	}
 
 	/**
@@ -9341,8 +11536,163 @@ export class AgentSession {
 		return skills;
 	}
 
+	private _nativeRecoveryEnabled(): boolean {
+		const nativeDefinition = this._baseToolDefinitions.get("prime_context");
+		return (
+			!this._baseToolsOverride &&
+			nativeDefinition !== undefined &&
+			this._toolDefinitions.get("prime_context")?.definition === nativeDefinition &&
+			this.getActiveToolNames().includes("prime_context") &&
+			(!this._allowedToolNames || this._allowedToolNames.has("prime_context"))
+		);
+	}
+
+	private _captureSkillSelectionOwner(): NativeSkillSelectionOwner | undefined {
+		const manager = this.sessionManager;
+		return manager.isPersisted()
+			? {
+					manager,
+					sessionId: manager.getSessionId(),
+					sessionFile: manager.getSessionFile(),
+					writer: manager[bindNativeEntryWriter]().captureSkillSelection(),
+					inputEpoch: this._sessionInputPumpEpoch,
+				}
+			: undefined;
+	}
+
+	private _assertSkillSelectionOwner(owner: NativeSkillSelectionOwner): void {
+		owner.writer.assertCurrent();
+		if (
+			this.sessionManager !== owner.manager ||
+			owner.sessionId !== owner.manager.getSessionId() ||
+			owner.sessionFile !== owner.manager.getSessionFile() ||
+			(owner.inputEpoch !== undefined && owner.inputEpoch !== this._sessionInputPumpEpoch)
+		)
+			throw new Error("Skill selection owner changed");
+	}
+
+	private async _selectNativeSkill(
+		skill: Skill,
+		owner: NativeSkillSelectionOwner,
+		modelInvocation: boolean,
+		signal?: AbortSignal,
+	): Promise<
+		| { ref: string; capture: SelectedSkillCapture; source: NativeSkillSourceRef; assertCurrent: () => void }
+		| undefined
+	> {
+		const assertCurrent = () => {
+			signal?.throwIfAborted();
+			this._assertSkillSelectionOwner(owner);
+			if (modelInvocation && !this._nativeRecoveryEnabled())
+				throw new Error("Native skill selection is not authorized");
+		};
+		assertCurrent();
+		const descriptor = captureSkillDescriptor(skill);
+		const result = (ref: string, capture: SelectedSkillCapture) => ({
+			ref,
+			capture,
+			assertCurrent,
+			source: { sessionId: owner.sessionId, sessionFile: owner.sessionFile, entryId: ref },
+		});
+		const state = await owner.manager.readBranchHistory((history) =>
+			readSkillSelection(history.branchContext, descriptor.name, this.settingsManager.getCanonicalContextLimits()),
+		);
+		assertCurrent();
+		if (!this._contextEpochsEnabled && !state.checkpoint) return;
+		const fixed =
+			contextEpochMode(state.checkpoint, this._initialContextMode) === "off" ||
+			(state.checkpoint?.policyOnly === true && !this._contextEpochsEnabled);
+		// A new file capture is eligible only after an actual accepted epoch boundary.
+		// Off/fixed reads keep the retained version; no file read is a policy/epoch ACK.
+		const sameSource =
+			!state.capture || selectedSkillIdentity(state.capture.descriptor) === selectedSkillIdentity(descriptor);
+		if (state.reference && !sameSource && fixed)
+			throw new Error("Fixed context cannot substitute a different effective skill source");
+		if (
+			state.reference &&
+			state.capture &&
+			sameSource &&
+			(state.pending ||
+				fixed ||
+				JSON.stringify(state.reference.view.source) === JSON.stringify(state.checkpoint?.source))
+		)
+			return result(state.reference.view.ref.entryId, state.capture);
+		const capture = captureSelectedSkill(descriptor);
+		const ref = await owner.writer.append(capture, modelInvocation ? "model" : "command");
+		assertCurrent(); // A completed source append is not rolled back on cancellation or owner change.
+		return result(ref, capture);
+	}
+
+	/** Read only the server-owned branch captured for this operation (including a batch). */
+	async recoverNativeHistory(
+		input: NativeRecoveryInput,
+		signal?: AbortSignal,
+		maxBytes = DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes,
+	): Promise<NativeRecoveryResponse> {
+		signal?.throwIfAborted();
+		const request = parseNativeRecoveryInput(input);
+		const responseBytes = Math.min(maxBytes, DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes, request.maxBytes ?? Infinity);
+		if (!this._nativeRecoveryEnabled()) {
+			return createNativeRecoveryRefusal("not_authorized", "native_recovery_not_enabled", responseBytes);
+		}
+		// Only the real authorized reader can latch this private admitted execution.
+		// A replacement method/result or descriptive JSON cannot set the producer bit.
+		const producer = this._nativeRecoveryProducer.getStore();
+		if (producer) producer.used = true;
+		if (request.action === "skill") {
+			if (!producer?.skillOwner)
+				return createNativeRecoveryRefusal(
+					"not_authorized",
+					"native_skill_selection_owner_required",
+					responseBytes,
+				);
+			const skill = this._modelVisibleSkills().find(
+				(item) => item.name === request.name && !item.disableModelInvocation,
+			);
+			if (!skill) return createNativeRecoveryRefusal("not_authorized", "skill_not_model_visible", responseBytes);
+			const selected = await this._selectNativeSkill(skill, producer.skillOwner, true, signal);
+			if (!selected)
+				return createNativeRecoveryRefusal("unavailable", "native_skill_epoch_not_enabled", responseBytes);
+			selected.assertCurrent();
+			return producer.skillOwner.manager.readBranchHistory((history) =>
+				recoverCapturedHistory(
+					history.branchContext,
+					{ action: "read", ref: selected.ref, maxBytes: responseBytes },
+					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
+					signal,
+				),
+			);
+		}
+		// readBranchHistory captures synchronously and preserves ordered read/release errors.
+		// Never accept a caller's owner/path/frontier or turn a failed read into evidence of absence.
+		try {
+			const manager = producer?.skillOwner?.manager ?? this.sessionManager;
+			producer?.skillOwner?.writer.assertCurrent();
+			if (this.sessionManager !== manager) throw new Error("Native recovery source changed");
+			return await manager.readBranchHistory((history) =>
+				recoverCapturedHistory(
+					history.branchContext,
+					request,
+					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
+					signal,
+				),
+			);
+		} catch (error) {
+			signal?.throwIfAborted();
+			if (error instanceof NativeRecoveryBudgetRefusal) throw error;
+			return createNativeRecoveryRefusal("unavailable", "captured_history_unavailable", responseBytes);
+		}
+	}
+
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
+			prime_context: async (payload, context) => {
+				if (!context?.nativeRecovery) {
+					return { ...createNativeRecoveryRefusal("not_authorized", "active_cell_required") };
+				}
+				const input = parseNativeRecoveryInput(payload.request);
+				return { ...(await this.recoverNativeHistory(input, context.signal, context.nativeRecovery.maxBytes)) };
+			},
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
 				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
 			})),
@@ -9393,10 +11743,16 @@ export class AgentSession {
 						(await this.handleAgentMessageHostRequest("agent_message.list_agents")) as AgentFamilyRosterResult,
 					awaitPendingChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
 					sendAgentMessage: async (input) => {
-						const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
-							target: input.target,
-							message: input.message,
-						})) as AgentSessionMessageReceipt;
+						const receipt = (await (input.findings === undefined
+							? this.handleAgentMessageHostRequest("agent_message.send", {
+									target: input.target,
+									message: input.message,
+								})
+							: this.handleAgentMessageHostRequest("agent_message.send_result", {
+									target: input.target,
+									summary: input.message,
+									findings: input.findings,
+								}))) as AgentSessionMessageReceipt;
 						if (this._rlmDepth > 0) {
 							let addressedParent = input.receiverRole === "parent";
 							if (input.receiverRole === undefined && this._agentMessageController?.roster) {
@@ -9479,20 +11835,20 @@ export class AgentSession {
 	}
 
 	private _rlmKernelEnv(): Record<string, string> {
-		// Kernel env is provisioning-time only: RLM_MAX_DEPTH may be stale in an already-running kernel;
+		// Kernel env is provisioning-time only: BASE_CONTEXT_RLM_MAX_DEPTH may be stale in an already-running kernel;
 		// the TypeScript-side spawn check remains authoritative.
 		const env: Record<string, string> = {
-			RLM_DEPTH: String(this._rlmDepth),
-			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
-			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
+			BASE_CONTEXT_RLM_DEPTH: String(this._rlmDepth),
+			BASE_CONTEXT_RLM_MAX_DEPTH: String(this._rlmMaxDepth),
+			BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
-			env.RLM_SESSION_DIR = rlmSessionDir;
+			env.BASE_CONTEXT_KERNEL_SESSION_DIR = rlmSessionDir;
 			// Keep kernel writes and host reads (system prompt, review, /refine) on
 			// the same local harness path. Subagents prefer their own artifact dir;
 			// ephemeral sessions fall back to the RLM session dir once it exists.
-			env.RLM_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
+			env.BASE_CONTEXT_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
 		}
 		this._addWebsearchKeyEnv(env);
 		return env;
@@ -9500,7 +11856,7 @@ export class AgentSession {
 
 	private _addWebsearchKeyEnv(env: Record<string, string>): void {
 		if (this._agentDir) {
-			env.PRIME_AGENT_CODING_AGENT_DIR = this._agentDir;
+			env.BASE_CONTEXT_HOME = this._agentDir;
 		}
 
 		if (process.env[SERPER_ENV_VAR]?.trim()) {
@@ -9558,7 +11914,7 @@ export class AgentSession {
 	}
 
 	private _createEphemeralRlmSessionDir(): string {
-		this._rlmSessionDir = mkdtempSync(join(tmpdir(), "prime-agent-rlm-"));
+		this._rlmSessionDir = mkdtempSync(join(tmpdir(), `${PRODUCT.command}-rlm-`));
 		return this._rlmSessionDir;
 	}
 
@@ -9581,13 +11937,128 @@ export class AgentSession {
 		return this._currentRecap;
 	}
 
-	private _findAssistantEntryForMessage(message: AssistantMessage): SessionMessageEntry | undefined {
-		return this.sessionManager
-			.getEntries()
-			.find((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message === message);
+	private _removeLastAssistantFromContext(): void {
+		const messages = this.agent.state.messages;
+		const message = messages.at(-1);
+		if (message?.role !== "assistant") return;
+		if (this.sessionManager.isPersisted()) {
+			const acknowledged = this._assistantEntryIds.get(message);
+			if (
+				!acknowledged ||
+				acknowledged.sessionId !== this.sessionId ||
+				acknowledged.sessionFile !== this.sessionFile
+			)
+				throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
+			if (
+				this._contextOmissions?.sessionId !== this.sessionId ||
+				this._contextOmissions?.sessionFile !== this.sessionFile
+			)
+				this._contextOmissions = { sessionId: this.sessionId, sessionFile: this.sessionFile, ids: new Set() };
+			this._contextOmissions.ids.add(acknowledged.entryId);
+		}
+		this.agent.state.messages = messages.slice(0, -1);
+	}
+
+	private _findAssistantEntryIdForMessage(message: AssistantMessage): string | undefined {
+		const source = this._assistantEntryIds.get(message) ?? getCanonicalMessageSource(message);
+		if (source)
+			return source.sessionId === this.sessionId && source.sessionFile === this.sessionFile
+				? source.entryId
+				: undefined;
+		if (this.sessionManager.isPersisted()) return undefined;
+		return this.sessionManager.getEntries().find((entry) => entry.type === "message" && entry.message === message)
+			?.id;
+	}
+
+	get hasRlmParentAdmission(): boolean {
+		return this._releaseRlmResidentCapacity !== undefined;
+	}
+
+	/** Reserve before setup awaits. The concrete parent lifetime owns this one slot. */
+	reserveRlmChildAdmission(): RlmChildAdmission {
+		if (this._disposed || this._disposing || this._disposeAsyncPromise) {
+			throw new Error("Cannot spawn a subagent after its parent was disposed");
+		}
+		if (this._rlmChildAdmission) {
+			throw new Error(
+				"RLM resident child limit reached (one child per parent); dispose or passivate the existing child first",
+			);
+		}
+		const controller = new AbortController();
+		const settlement = createAgentMessageDeferred();
+		let child: AgentSession | undefined;
+		let settled = false;
+		let factoryClaimed = false;
+		let unboundCleanupComplete = true;
+		const release = () => {
+			if (!settled || (child ? !child._rlmResidentDisposalComplete : !unboundCleanupComplete)) return;
+			if (this._rlmChildAdmission === admission) this._rlmChildAdmission = undefined;
+			if (child?._releaseRlmResidentCapacity === release) child._releaseRlmResidentCapacity = undefined;
+			if (child?._rlmParentAdmission === admission) child._rlmParentAdmission = undefined;
+		};
+		const admission: RlmChildAdmission & { cancel(reason: string): boolean } = {
+			parent: this,
+			get session() {
+				return child;
+			},
+			settlement: settlement.promise,
+			get pending() {
+				return !settled;
+			},
+			assertCurrent: () => {
+				controller.signal.throwIfAborted();
+				if (
+					this._disposed ||
+					this._disposing ||
+					this._disposeAsyncPromise ||
+					this._rlmChildAdmission !== admission
+				) {
+					throw new Error("RLM child admission is no longer current");
+				}
+			},
+			bind: (session) => {
+				if (this._rlmChildAdmission !== admission) throw new Error("RLM child admission is no longer current");
+				if (
+					(child && child !== session) ||
+					(session._releaseRlmResidentCapacity && session._releaseRlmResidentCapacity !== release)
+				) {
+					throw new Error("RLM child already belongs to another resident admission");
+				}
+				child = session;
+				session._releaseRlmResidentCapacity = release;
+				release();
+			},
+			beginSetup: () => {
+				if (settled || child) throw new Error("RLM child admission already started a child");
+				unboundCleanupComplete = false;
+			},
+			claimFactory: () => {
+				if (factoryClaimed) throw new Error("RLM child admission already started a factory");
+				admission.beginSetup();
+				factoryClaimed = true;
+			},
+			confirmUnboundCleanup: () => {
+				unboundCleanupComplete = true;
+				release();
+			},
+			settle: () => {
+				settled = true;
+				settlement.resolve();
+				release();
+			},
+			cancel: (reason) => {
+				if (settled || controller.signal.aborted) return false;
+				controller.abort(new Error(reason));
+				void child?.abort();
+				return true;
+			},
+		};
+		this._rlmChildAdmission = admission;
+		return admission;
 	}
 
 	private _createRlmSubagentRuntimeOptions(options: {
+		admission: RlmChildAdmission;
 		id: string;
 		prompt: string;
 		sessionName: string;
@@ -9596,9 +12067,13 @@ export class AgentSession {
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
 		spawnedByRequestId?: string;
-	}): CreateRlmSubagentRuntimeOptions {
+	}): CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission } {
+		const requestTokenBudget = this.requests.getRequestTokenBudgetOptions();
 		return {
 			parentSession: this,
+			contextMode: this.contextMode,
+			...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
+			admission: options.admission,
 			id: options.id,
 			prompt: options.prompt,
 			sessionName: options.sessionName,
@@ -9622,7 +12097,11 @@ export class AgentSession {
 		};
 	}
 
-	private async _createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+	private async _createRlmSubagentRuntime(
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
+	): Promise<RlmSubagentRuntime> {
+		options.admission.assertCurrent();
+		options.admission.beginSetup();
 		if (this._subagentRuntimeHost) {
 			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
 		}
@@ -9630,75 +12109,95 @@ export class AgentSession {
 		return this._createInlineRlmSubagentRuntime(options);
 	}
 
-	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
-		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
-		if (options.parentSession.sessionFile) {
-			childSessionManager.newSession({
-				parentSession: options.parentSession.sessionFile,
-				rlmDepth: options.rlmDepth,
-			});
-		}
-		childSessionManager.appendModelChange(options.model.provider, options.model.id);
-		childSessionManager.appendThinkingLevelChange(options.thinkingLevel);
-		childSessionManager.appendServiceTierChange(options.serviceTier);
-
-		const childAgent = new Agent({
-			initialState: {
-				systemPrompt: "",
-				model: options.model,
-				thinkingLevel: options.thinkingLevel,
-				serviceTier: options.serviceTier,
-				tools: [],
-			},
-			convertToLlm: this.agent.convertToLlm,
-			transformContext: this.agent.transformContext,
-			streamFn: this.agent.streamFn,
-			getApiKey: this.agent.getApiKey,
-			onPayload: this.agent.onPayload,
-			onResponse: this.agent.onResponse,
-			steeringMode: this.settingsManager.getSteeringMode(),
-			followUpMode: this.settingsManager.getFollowUpMode(),
-			sessionId: childSessionManager.getSessionId(),
-			thinkingBudgets: this.settingsManager.getThinkingBudgets(),
-			transport: this.settingsManager.getTransport(),
-			maxRetryDelayMs: this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-			toolExecution: this.agent.toolExecution,
-		});
-
-		const child = new AgentSession({
-			agent: childAgent,
-			sessionManager: childSessionManager,
-			settingsManager: this.settingsManager,
-			cwd: this._cwd,
-			agentDir: this._agentDir,
-			scopedModels: options.scopedModels,
-			resourceLoader: this._resourceLoader,
-			customTools: options.customTools,
-			modelRegistry: this._modelRegistry,
-			initialActiveToolNames: options.activeToolNames,
-			allowedToolNames: options.allowedToolNames,
-			includeGoals: options.includeGoals,
-			includeCompactSkill: options.includeCompactSkill,
+	private async _createInlineRlmSubagentRuntime(
+		options: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission },
+	): Promise<RlmSubagentRuntime> {
+		options.admission.claimFactory();
+		const parentSessionFile = options.parentSession.sessionFile;
+		const parentSessionId = options.parentSession.sessionId;
+		const parentAgent = options.parentSession.sessionName ?? parentSessionId;
+		const childSessionManager = await SessionManager.create(this._cwd, options.sessionDir, {
+			parentSession: parentSessionFile,
 			rlmDepth: options.rlmDepth,
-			rlmMaxDepth: options.rlmMaxDepth,
-			rlmSessionDir: options.sessionDir,
-			rlmParentNodeId: options.rlmParentNodeId,
-			rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
-			semanticParentSessionId: options.parentSession.sessionId,
-			semanticSpawnedByRequestId: options.spawnedByRequestId,
-			sessionStartEvent: { type: "session_start", reason: "startup" },
 		});
-		if (child.sessionName !== options.sessionName) {
-			try {
-				child.setSessionName(options.sessionName);
-			} catch (error) {
-				child.dispose();
-				throw error;
-			}
-		}
-		options.onSessionPublished?.(child);
+		let child: AgentSession | undefined;
+		try {
+			options.admission.assertCurrent();
+			await childSessionManager.appendModelChange(options.model.provider, options.model.id);
+			await childSessionManager.appendThinkingLevelChange(options.thinkingLevel);
+			await childSessionManager.appendServiceTierChange(options.serviceTier);
 
-		return { session: child };
+			const childAgent = new Agent({
+				initialState: {
+					systemPrompt: "",
+					model: options.model,
+					thinkingLevel: options.thinkingLevel,
+					serviceTier: options.serviceTier,
+					tools: [],
+				},
+				convertToLlm: this.agent.convertToLlm,
+				transformContext: this.agent.transformContext,
+				streamFn: this.agent.streamFn,
+				getApiKey: this.agent.getApiKey,
+				onPayload: this.agent.onPayload,
+				onResponse: this.agent.onResponse,
+				steeringMode: this.settingsManager.getSteeringMode(),
+				followUpMode: this.settingsManager.getFollowUpMode(),
+				sessionId: childSessionManager.getSessionId(),
+				thinkingBudgets: this.settingsManager.getThinkingBudgets(),
+				transport: this.settingsManager.getTransport(),
+				maxRetryDelayMs: this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+				toolExecution: this.agent.toolExecution,
+			});
+
+			child = new AgentSession({
+				agent: childAgent,
+				requestTokenBudget: options.requestTokenBudget,
+				contextMode: options.contextMode,
+				sessionManager: childSessionManager,
+				settingsManager: this.settingsManager,
+				cwd: this._cwd,
+				agentDir: this._agentDir,
+				scopedModels: options.scopedModels,
+				resourceLoader: this._resourceLoader,
+				customTools: options.customTools,
+				modelRegistry: this._modelRegistry,
+				initialActiveToolNames: options.activeToolNames,
+				allowedToolNames: options.allowedToolNames,
+				includeGoals: options.includeGoals,
+				includeCompactSkill: options.includeCompactSkill,
+				rlmDepth: options.rlmDepth,
+				rlmMaxDepth: options.rlmMaxDepth,
+				rlmSessionDir: options.sessionDir,
+				rlmParentNodeId: options.rlmParentNodeId,
+				rlmParentAgent: parentAgent,
+				rlmChildAdmission: options.admission,
+				semanticParentSessionId: parentSessionId,
+				semanticSpawnedByRequestId: options.spawnedByRequestId,
+				sessionStartEvent: { type: "session_start", reason: "startup" },
+			});
+			await child.initialize();
+			if (child.sessionName !== options.sessionName) {
+				await child.setSessionName(options.sessionName);
+			}
+			options.onSessionPublished?.(child);
+
+			return { session: child };
+		} catch (error) {
+			try {
+				const failedChild = child ?? options.admission.session;
+				if (failedChild) await failedChild.disposeAsync();
+				else {
+					await childSessionManager.close();
+					options.admission.confirmUnboundCleanup();
+				}
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "RLM startup and cleanup failed");
+			}
+			throw error;
+		}
 	}
 
 	private _abandonRlmRunForQuiescence(run: RlmChildRun): void {
@@ -9707,10 +12206,11 @@ export class AgentSession {
 		this._abandonedRlmQuiescenceChildIds.add(run.id);
 		this._unsettledRlmChildRuns.delete(run);
 		run.settlement.resolve();
-		this._maybeResumeGoalContinuationAfterRlmWork();
+		this._scheduleGoalContinuationAfterRlmWork();
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
+		this._rlmChildAdmission?.cancel(reason);
 		for (const run of this._activeRlmChildRuns.values()) {
 			this._cancelRlmChildRun(run, reason);
 		}
@@ -10036,7 +12536,7 @@ export class AgentSession {
 		run.settlement.resolve();
 		run.deletionReservation.resolve();
 		this._unsettledRlmChildRuns.delete(run);
-		this._maybeResumeGoalContinuationAfterRlmWork();
+		this._scheduleGoalContinuationAfterRlmWork();
 	}
 
 	private _observeRlmRunDeletionCleanup(
@@ -10170,7 +12670,7 @@ export class AgentSession {
 	 * the child) when the parent is already tearing down, so the caller can drop the
 	 * matching event forwarder too.
 	 */
-	registerRlmChildSession(childId: string, session: AgentSession, unsubscribe?: () => void): boolean {
+	async registerRlmChildSession(childId: string, session: AgentSession, unsubscribe?: () => void): Promise<boolean> {
 		// A child can finish concurrently while the parent is (or has) torn down; don't
 		// resurrect the map (it would never be disposed), just drop the child now.
 		if (this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId)) {
@@ -10180,8 +12680,19 @@ export class AgentSession {
 			return false;
 		}
 		if (this._disposed || this._disposing) {
-			void session.disposeAsync().catch(() => undefined);
+			await session.disposeAsync();
 			return false;
+		}
+		if (!session._rlmResidentDisposalComplete) {
+			if (this._rlmChildAdmission) this._rlmChildAdmission.bind(session);
+			else {
+				const admission = this.reserveRlmChildAdmission();
+				try {
+					admission.bind(session);
+				} finally {
+					admission.settle();
+				}
+			}
 		}
 		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
 		if (unsubscribe) {
@@ -10313,6 +12824,7 @@ export class AgentSession {
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const session of this._rlmSubtreeSessions()) {
+			if (session._rlmChildAdmission?.pending) return true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (run.status === "running" || run.status === "queued") {
 					return true;
@@ -10334,6 +12846,7 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
+		if (this.requests.hasPending) return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
@@ -10459,6 +12972,7 @@ export class AgentSession {
 	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
 		let cancelled = false;
 		for (const session of this._rlmSubtreeSessions()) {
+			if (session._rlmChildAdmission?.cancel(reason)) cancelled = true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
 			}
@@ -10549,6 +13063,7 @@ export class AgentSession {
 
 	private async _startRlmChildRun(
 		prompt: string,
+		admission: RlmChildAdmission,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
@@ -10556,6 +13071,7 @@ export class AgentSession {
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
+		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -10567,7 +13083,7 @@ export class AgentSession {
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
-				`RLM recursion depth limit reached (RLM_DEPTH=${this._rlmDepth}, RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
+				`RLM recursion depth limit reached (BASE_CONTEXT_RLM_DEPTH=${this._rlmDepth}, BASE_CONTEXT_RLM_MAX_DEPTH=${this._rlmMaxDepth})`,
 			);
 		}
 		if (requestedSessionName) {
@@ -10583,6 +13099,7 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		admission.assertCurrent();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
 			if (!supported.includes(requestedThinkingLevel)) {
@@ -10597,10 +13114,11 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		admission.assertCurrent();
 		const startedAt = Date.now();
-		const parentAssistantForUsage = this._findLastAssistantMessage();
 		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
+		let usageSettlement: Promise<void> = Promise.resolve();
 		const run: RlmChildRun = {
 			id: childNodeId,
 			prompt,
@@ -10640,8 +13158,9 @@ export class AgentSession {
 			// blocked and run.abort was still a no-op.
 			if (run.status === "cancelled") run.abort();
 		};
-		const subagentOptions: CreateRlmSubagentRuntimeOptions = {
+		const subagentOptions: CreateRlmSubagentRuntimeOptions & { admission: RlmChildAdmission } = {
 			...this._createRlmSubagentRuntimeOptions({
+				admission,
 				id: childNodeId,
 				prompt,
 				sessionName,
@@ -10692,13 +13211,19 @@ export class AgentSession {
 		// Runtime startup and the task run are deliberately detached. The public
 		// spawn resolves at admission, while this task owns live tracking, usage,
 		// retention, cancellation, and late-startup cleanup.
-		void (async () => {
+		const task = (async () => {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
-				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				try {
+					childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+					admission.bind(childRuntime.session);
+				} finally {
+					admission.settle();
+				}
+				admission.assertCurrent();
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
-				if (child.sessionName !== sessionName) child.setSessionName(sessionName);
+				if (child.sessionName !== sessionName) await child.setSessionName(sessionName);
 				publishChildSession(child);
 				throwIfCancelled();
 				run.status = "running";
@@ -10717,10 +13242,9 @@ export class AgentSession {
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
-							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
-								const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
-								if (parentEntry) {
+								const parentEntryId = this._findAssistantEntryIdForMessage(parentAssistantForUsage);
+								if (parentEntryId) {
 									const messages = child.messages;
 									const assistantIndex = messages.lastIndexOf(assistant);
 									const precedingPrompt = messages
@@ -10733,12 +13257,33 @@ export class AgentSession {
 												? "spawn_task"
 												: "agent_message"
 											: "direct_user";
-									this.sessionManager.appendChildUsageAttribution(
-										parentEntry.id,
-										assistant.usage,
-										parentAssistantForUsage.usage,
-										origin,
+									const text = compactRlmText(readAssistantText(assistant));
+									const refreshOutput = this._refreshInvocationOutput;
+									const write = this.sessionManager
+										.appendChildUsageAttributionWithAggregate(
+											parentEntryId,
+											assistant.usage,
+											undefined,
+											origin,
+										)
+										.then(({ aggregateUsage }) => {
+											parentAssistantForUsage.usage = structuredClone(aggregateUsage);
+											refreshOutput?.(parentAssistantForUsage);
+											if (text) run.answerPreview = text;
+											emitChildUpdate();
+										});
+									this._childUsageWrites.add(write);
+									usageSettlement = Promise.all([usageSettlement, write]).then(() => undefined);
+									void usageSettlement.catch(() => undefined);
+									void write.then(
+										() => this._childUsageWrites.delete(write),
+										(error) => {
+											this._childUsageWrites.delete(write);
+											run.error = `Child usage attribution was not acknowledged: ${this._asError(error).message}`;
+											this._surfaceSessionInputError(error);
+										},
 									);
+									return;
 								}
 							}
 						}
@@ -10792,6 +13337,7 @@ export class AgentSession {
 					customMessage: spawnMessage,
 				});
 				await child.waitForRlmQuiescence();
+				await usageSettlement;
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
 				// Only successful completions return; the edge lands on the parent's next commit.
@@ -10817,7 +13363,7 @@ export class AgentSession {
 						}),
 					);
 				}
-				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
+				if (!(await this.registerRlmChildSession(run.id, child)) && !run.detachedDeletion) {
 					if (childRuntime && this._subagentRuntimeHost?.releaseRlmSubagentRuntime) {
 						await this._subagentRuntimeHost
 							.releaseRlmSubagentRuntime(childRuntime, subagentOptions, "error")
@@ -10829,6 +13375,11 @@ export class AgentSession {
 			} catch (error) {
 				const runError = error instanceof Error ? error : new Error(String(error));
 				run.publication.reject(runError);
+				// A native constructor can fail before publication, but still owns a real child.
+				if (!childSession && admission.session) {
+					childSession = admission.session;
+					run.session = childSession;
+				}
 				if (run.status !== "cancelled") {
 					run.status = "error";
 					run.error = runError.message;
@@ -10901,6 +13452,7 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				await usageSettlement.catch((error) => this._surfaceSessionInputError(error));
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
@@ -10936,10 +13488,18 @@ export class AgentSession {
 					run.settled = true;
 					run.settlement.resolve();
 					this._unsettledRlmChildRuns.delete(run);
-					this._maybeResumeGoalContinuationAfterRlmWork();
+					this._scheduleGoalContinuationAfterRlmWork();
 				}
 			}
-		})().catch(() => undefined);
+		})();
+		this._rlmRunTasks.add(task);
+		void task.then(
+			() => this._rlmRunTasks.delete(task),
+			(error) => {
+				this._rlmRunTasks.delete(task);
+				this._surfaceSessionInputError(error);
+			},
+		);
 
 		return {
 			rlm_child_id: childNodeId,
@@ -10954,36 +13514,26 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		return this._startRlmChildRun(prompt, kwargs, spawnCode);
+		const admission = this.reserveRlmChildAdmission();
+		const start = this._startRlmChildRun(prompt, admission, kwargs, spawnCode);
+		// Join pre-runtime name/model work during disposal as well as the detached task.
+		const pending = start.then(
+			() => undefined,
+			() => undefined,
+		);
+		this._rlmRunTasks.add(pending);
+		try {
+			return await start;
+		} catch (error) {
+			admission.settle();
+			throw error;
+		} finally {
+			this._rlmRunTasks.delete(pending);
+		}
 	}
 
 	private _isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
-
-		if (this._isFauxProviderQueueExhausted(message)) {
-			return false;
-		}
-
-		if (this._isAgentLifecycleFailure(message)) {
-			return false;
-		}
-
-		if (this._isStructuredPermanentProviderRetryExhausted(message)) {
-			return false;
-		}
-
-		return true;
-	}
-
-	private _isFauxProviderQueueExhausted(message: AssistantMessage): boolean {
-		return message.provider === "faux" && message.errorMessage === "No more faux responses queued";
-	}
-
-	private _isAgentLifecycleFailure(message: AssistantMessage): boolean {
-		return message.diagnostics?.some((diagnostic) => diagnostic.type === "agent_lifecycle_failure") ?? false;
+		return isTransientProviderFailure(message) && !isContextOverflow(message, this.model?.contextWindow ?? 0);
 	}
 
 	private _getProviderStreamFailureDetails(message: AssistantMessage): Record<string, unknown> | undefined {
@@ -10993,20 +13543,6 @@ export class AgentSession {
 			return undefined;
 		}
 		return details;
-	}
-
-	private _getProviderStreamFailureKind(message: AssistantMessage): string | undefined {
-		const kind = this._getProviderStreamFailureDetails(message)?.kind;
-		return typeof kind === "string" ? kind : undefined;
-	}
-
-	private _isStructuredPermanentProviderFailure(message: AssistantMessage): boolean {
-		const kind = this._getProviderStreamFailureKind(message);
-		return kind === "auth" || kind === "invalid_request" || kind === "refusal";
-	}
-
-	private _isStructuredPermanentProviderRetryExhausted(message: AssistantMessage): boolean {
-		return this._retryAttempt > 0 && this._isStructuredPermanentProviderFailure(message);
 	}
 
 	private _getProviderStreamFailureAuthStatus(message: AssistantMessage): number | undefined {
@@ -11124,91 +13660,51 @@ export class AgentSession {
 		this._retryAuthFailureSources = [];
 	}
 
-	private async _handleRetryableError(
-		message: AssistantMessage,
-		options?: {
-			markAuthStaleOnFailure?: boolean;
-			authSourceTokens?: readonly AuthSourceToken[];
-		},
-	): Promise<boolean> {
+	private async _handleRetryableError(message: AssistantMessage, signal?: AbortSignal): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._retryAuthFailureSources = [];
-			this._resolveRetry();
-			return false;
-		}
+		if (!settings.enabled || signal?.aborted || !this._isRetryableError(message)) return false;
 
+		// Join native message persistence before omitting its acknowledged assistant ID.
+		await this._waitForAgentEventsBeforeContext();
+		if (signal?.aborted) return false;
+		this._removeLastAssistantFromContext();
 		if (!this._retryPromise) {
 			this._retryPromise = new Promise((resolve) => {
 				this._retryResolve = resolve;
 			});
 		}
-
 		this._retryAttempt++;
-
-		if (this._retryAttempt > settings.maxRetries) {
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt: this._retryAttempt - 1,
-				finalError: message.errorMessage,
-			});
-			this._retryAttempt = 0;
-			this._retryAuthFailureSources = [];
-			this._resolveRetry(); // Resolve so waitForRetry() completes
-			return false;
-		}
-
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
-		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
-		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
+		const delayMs = Math.min(
+			this.settingsManager.getProviderRetrySettings().maxRetryDelayMs || 60_000,
+			settings.baseDelayMs * 2 ** Math.min(this._retryAttempt - 1, 32),
+		);
+		// Payload hooks forfeit reuse. Otherwise retain the failed operation's existing identity.
 		if (!this._extensionRunner.hasHandlers("before_provider_request")) {
 			this._semanticEdges.prepareTurnRetry();
+			this.requests.prepareTurnRetry();
 		}
-
+		const controller = new AbortController();
+		this._retryAbortController = controller;
+		const retrySignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
 		this._emit({
 			type: "auto_retry_start",
 			attempt: this._retryAttempt,
-			maxAttempts: settings.maxRetries,
 			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
+			errorMessage: message.errorMessage || "Provider request failed",
 		});
-
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
-
-		this._retryAbortController = new AbortController();
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
-		} catch {
-			const attempt = this._retryAttempt;
-			this._markProviderAuthStaleForRetryFailure(message, options);
-			this._retryAttempt = 0;
-			this._retryAbortController = undefined;
-			this._emit({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this._resolveRetry();
-			this._retryAuthFailureSources = [];
+			await sleep(delayMs, retrySignal);
+		} catch (error) {
+			if (!retrySignal.aborted) throw error;
 			return false;
+		} finally {
+			this._retryAbortController = undefined;
 		}
-		this._retryAbortController = undefined;
-
-		setTimeout(() => {
-			this.agent.continue().catch(() => {});
-		}, 0);
-
-		return true;
+		return this.settingsManager.getRetryEnabled() && !retrySignal.aborted;
 	}
 
 	abortRetry(): void {
+		if (this._retryPromise) this.agent.abort();
 		if (this._retryAbortController) {
 			this._retryAbortController.abort();
 			return;
@@ -11297,7 +13793,7 @@ export class AgentSession {
 			);
 
 			if (!options?.transient) {
-				this.recordBashResult(command, result, options);
+				await this.recordBashResult(command, result, options);
 			}
 			return result;
 		} finally {
@@ -11392,7 +13888,7 @@ export class AgentSession {
 				if (result.output) {
 					this._emit({ type: "bash_output", chunk: result.output });
 				}
-				record(result);
+				await record(result);
 				return {
 					exitCode: result.exitCode,
 					cancelled: result.cancelled,
@@ -11404,7 +13900,7 @@ export class AgentSession {
 			// An abort that arrived before the process spawned (during extension
 			// dispatch) has no abort controller to act on; honor it here instead.
 			if (this._userBashAbortRequested) {
-				record({
+				await record({
 					output: "",
 					exitCode: undefined,
 					cancelled: true,
@@ -11428,7 +13924,7 @@ export class AgentSession {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			// Persist the failure like every other outcome so replayed transcripts
 			// and the LLM context reflect that the command did not run.
-			record({
+			await record({
 				output: `bash failed: ${errorMessage}`,
 				exitCode: undefined,
 				cancelled: false,
@@ -11443,7 +13939,11 @@ export class AgentSession {
 		}
 	}
 
-	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+	async recordBashResult(
+		command: string,
+		result: BashResult,
+		options?: { excludeFromContext?: boolean },
+	): Promise<void> {
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command,
@@ -11460,9 +13960,8 @@ export class AgentSession {
 		if (this.isStreaming) {
 			this._pendingBashMessages.push(bashMessage);
 		} else {
+			await this.sessionManager.appendMessage(bashMessage);
 			this.agent.state.messages.push(bashMessage);
-
-			this.sessionManager.appendMessage(bashMessage);
 		}
 	}
 
@@ -11494,16 +13993,15 @@ export class AgentSession {
 	 * Flush pending bash messages to agent state and session.
 	 * Called after agent turn completes to maintain proper message ordering.
 	 */
-	private _flushPendingBashMessages(): void {
+	private async _flushPendingBashMessages(): Promise<void> {
 		if (this._pendingBashMessages.length === 0) return;
 
-		for (const bashMessage of this._pendingBashMessages) {
+		while (this._pendingBashMessages.length > 0) {
+			const bashMessage = this._pendingBashMessages[0]!;
+			await this.sessionManager.appendMessage(bashMessage);
+			this._pendingBashMessages.shift();
 			this.agent.state.messages.push(bashMessage);
-
-			this.sessionManager.appendMessage(bashMessage);
 		}
-
-		this._pendingBashMessages = [];
 	}
 
 	getRlmMaxDepthStatus(): RlmMaxDepthStatus {
@@ -11515,7 +14013,7 @@ export class AgentSession {
 			throw new Error("RLM max depth must be a non-negative integer.");
 		}
 
-		this.sessionManager.appendCustomEntryWithRollback(RLM_MAX_DEPTH_STATE_CUSTOM_TYPE, { maxDepth });
+		await this.sessionManager.appendCustomEntryWithRollback(RLM_MAX_DEPTH_STATE_CUSTOM_TYPE, { maxDepth });
 		this._rlmMaxDepth = maxDepth;
 		this._rlmMaxDepthSource = "chat";
 		const oldBase = this._baseSystemPrompt;
@@ -11542,8 +14040,8 @@ export class AgentSession {
 		};
 	}
 
-	setSessionName(name: string): void {
-		this.sessionManager.appendSessionInfo(name);
+	async setSessionName(name: string): Promise<void> {
+		await this.sessionManager.appendSessionInfo(name);
 		this._emit({
 			type: "session_info_changed",
 			name: this.sessionManager.getSessionName(),
@@ -11577,6 +14075,7 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
+		options = { ...options };
 		const previous = this._branchNavigationQueue;
 		let release = () => {};
 		this._branchNavigationQueue = new Promise<void>((resolve) => {
@@ -11588,6 +14087,29 @@ export class AgentSession {
 		} finally {
 			release();
 		}
+	}
+
+	private _resolveBranchSummaryModel(): { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined {
+		const selection = this.settingsManager.getBranchSummaryModel();
+		if (selection === undefined) return undefined;
+		if (
+			!selection ||
+			typeof selection !== "object" ||
+			Array.isArray(selection) ||
+			typeof selection.provider !== "string" ||
+			!selection.provider.trim() ||
+			typeof selection.modelId !== "string" ||
+			!selection.modelId.trim() ||
+			typeof selection.thinkingLevel !== "string"
+		)
+			throw new Error("Invalid branchSummary.model; expected provider, modelId, and thinkingLevel");
+		const model = this._modelRegistry.find(selection.provider, selection.modelId);
+		if (!model) throw new Error(`Unknown branchSummary.model ${selection.provider}/${selection.modelId}`);
+		if (!getSupportedThinkingLevels(model).includes(selection.thinkingLevel))
+			throw new Error(
+				`branchSummary.model thinkingLevel ${selection.thinkingLevel} is not supported by ${selection.provider}/${selection.modelId}`,
+			);
+		return { model: structuredClone(model), thinkingLevel: selection.thinkingLevel };
 	}
 
 	private async _navigateTree(
@@ -11604,24 +14126,29 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
-		if (options.summarize && !this.model) {
+		const summarySelection = options.summarize ? this._resolveBranchSummaryModel() : undefined;
+		if (options.summarize && !summarySelection && !this.model) {
 			throw new Error("No model available for summarization");
 		}
 
-		const targetEntry = this.sessionManager.getEntry(targetId);
-		if (!targetEntry) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-
+		options = { ...options };
 		const queuedWorkPause = this.acquireQueuedWorkPause();
 		let commitFence: { owner: symbol; release(): void } | undefined;
 		try {
+			const targetSource = { sessionId: this.sessionId, sessionFile: this.sessionFile };
+			const targetEntry = await this.sessionManager.readEntry(targetId);
+			if (targetSource.sessionId !== this.sessionId || targetSource.sessionFile !== this.sessionFile)
+				throw new Error("Session source changed during branch navigation");
+			if (this._disposing || this._disposed) throw new Error("Cannot navigate a disposing or disposed session.");
+			if (!targetEntry) throw new Error(`Entry ${targetId} not found`);
 			// Branch navigation and turn dispatch mutate the same transcript leaf.
 			commitFence = await this._acquireSessionActionCommitFence();
 			return await this._sessionActionCommitContext.run(commitFence.owner, async () => {
 				await this.agent.waitForIdle();
 				await this._agentEventQueue;
-				return this._navigateTreeUnderPause(targetId, targetEntry, options);
+				if (targetSource.sessionId !== this.sessionId || targetSource.sessionFile !== this.sessionFile)
+					throw new Error("Session source changed during branch navigation");
+				return this._navigateTreeUnderPause(targetId, targetEntry, options, summarySelection);
 			});
 		} finally {
 			queuedWorkPause.release();
@@ -11631,13 +14158,14 @@ export class AgentSession {
 
 	private async _navigateTreeUnderPause(
 		targetId: string,
-		targetEntry: NonNullable<ReturnType<SessionManager["getEntry"]>>,
+		targetEntry: NonNullable<Awaited<ReturnType<SessionManager["readEntry"]>>>,
 		options: {
 			summarize?: boolean;
 			customInstructions?: string;
 			replaceInstructions?: boolean;
 			label?: string;
 		},
+		summarySelection: { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined,
 	): Promise<{
 		editorText?: string;
 		cancelled: boolean;
@@ -11654,27 +14182,7 @@ export class AgentSession {
 		// Do not switch branches while /refine has detached event handling and is
 		// about to persist harness/session entries for the current branch.
 		await this._invalidatePendingAutoRefineForBranchChange();
-
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			targetId,
-		);
-
-		let customInstructions = options.customInstructions;
-		let replaceInstructions = options.replaceInstructions;
-		let label = options.label;
-
-		const preparation: TreePreparation = {
-			targetId,
-			oldLeafId,
-			commonAncestorId,
-			entriesToSummarize,
-			userWantsSummary: options.summarize ?? false,
-			customInstructions,
-			replaceInstructions,
-			label,
-		};
+		if (this._disposing || this._disposed) throw new Error("Cannot navigate a disposing or disposed session.");
 
 		this._branchSummaryAbortController = new AbortController();
 		let resolveBranchSummaryOperation: () => void = () => {};
@@ -11684,6 +14192,34 @@ export class AgentSession {
 		this._branchSummaryOperation = branchSummaryOperation;
 
 		try {
+			const initialSource = { sessionId: this.sessionId, sessionFile: this.sessionFile };
+			const captured = await this.sessionManager.readBranches([oldLeafId, targetId]);
+			const source = captured.source ?? initialSource;
+			const assertSource = () => {
+				if (source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile)
+					throw new Error("Session source changed during branch navigation");
+			};
+			assertSource();
+			if (this._branchSummaryAbortController.signal.aborted) return { cancelled: true, aborted: true };
+			const [oldPath, targetPath] = captured.branches;
+			if (!oldPath || !targetPath) throw new Error("Captured navigation paths are unavailable");
+			const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(oldPath, targetPath);
+
+			let customInstructions = options.customInstructions;
+			let replaceInstructions = options.replaceInstructions;
+			let label = options.label;
+
+			const preparation: TreePreparation = {
+				targetId,
+				oldLeafId,
+				commonAncestorId,
+				entriesToSummarize,
+				userWantsSummary: options.summarize ?? false,
+				customInstructions,
+				replaceInstructions,
+				label,
+			};
+
 			let extensionSummary: { summary: string; details?: unknown } | undefined;
 			let fromExtension = false;
 
@@ -11714,34 +14250,47 @@ export class AgentSession {
 				}
 			}
 
+			assertSource();
 			let summaryText: string | undefined;
+			let nativeBranchSummary: BranchSummaryResult | undefined;
 			let summaryDetails: unknown;
 			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
-				const result = await generateBranchSummary(entriesToSummarize, {
-					model,
-					apiKey,
-					headers,
-					signal: this._branchSummaryAbortController.signal,
-					customInstructions,
-					replaceInstructions,
-					reserveTokens: branchSummarySettings.reserveTokens,
-				});
-				if (result.aborted) {
-					return { cancelled: true, aborted: true };
+				const selectedModel = summarySelection?.model ?? this.model!;
+				const model = { ...selectedModel, cost: { ...selectedModel.cost } };
+				const branchSummarySettings = { ...this.settingsManager.getBranchSummarySettings() };
+				const summaryEntries = structuredClone(entriesToSummarize);
+				const summaryManager = this.sessionManager;
+				const requests = this.requests[captureNativeBranchRequests](summaryManager.bindRequestSink());
+				try {
+					const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+					const result = await generateBranchSummary(summaryEntries, {
+						model,
+						...(summarySelection === undefined ? {} : { thinkingLevel: summarySelection.thinkingLevel }),
+						apiKey,
+						headers,
+						signal: this._branchSummaryAbortController.signal,
+						customInstructions,
+						replaceInstructions,
+						reserveTokens: branchSummarySettings.reserveTokens,
+						requests,
+					});
+					if (result.aborted) {
+						return { cancelled: true, aborted: true };
+					}
+					if (result.error) {
+						throw new Error(result.error);
+					}
+					nativeBranchSummary = result;
+					summaryText = result.summary;
+					summaryUsage = result.usage;
+					summaryDetails = {
+						readFiles: result.readFiles || [],
+						modifiedFiles: result.modifiedFiles || [],
+					};
+				} finally {
+					await requests.dispose();
 				}
-				if (result.error) {
-					throw new Error(result.error);
-				}
-				summaryText = result.summary;
-				summaryUsage = result.usage;
-				summaryDetails = {
-					readFiles: result.readFiles || [],
-					modifiedFiles: result.modifiedFiles || [],
-				};
 			} else if (extensionSummary) {
 				summaryText = extensionSummary.summary;
 				summaryDetails = extensionSummary.details;
@@ -11766,36 +14315,41 @@ export class AgentSession {
 				newLeafId = targetId;
 			}
 
+			await this.sessionManager.flushNow();
+			assertSource();
 			let summaryEntry: BranchSummaryEntry | undefined;
 			if (summaryText) {
-				const summaryId = this.sessionManager.branchWithSummary(
-					newLeafId,
-					summaryText,
-					summaryDetails,
-					fromExtension,
-					summaryUsage,
-				);
-				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
+				const manager = this.sessionManager;
+				const write = !fromExtension ? takeNativeBranchSummaryWrite(nativeBranchSummary, summaryText) : undefined;
+				const pending = write?.(manager, newLeafId, summaryText, summaryDetails, summaryUsage);
+				const summaryId =
+					(pending ? await pending : undefined) ??
+					(await manager.branchWithSummary(newLeafId, summaryText, summaryDetails, fromExtension, summaryUsage));
+				summaryEntry = (await this.sessionManager.readEntry(summaryId)) as BranchSummaryEntry;
 
 				if (label) {
-					this.sessionManager.appendLabelChange(summaryId, label);
+					await this.sessionManager.appendLabelChange(summaryId, label);
 				}
 			} else if (newLeafId === null) {
-				this.sessionManager.resetLeaf();
+				await this.sessionManager.branchTo(null);
 			} else {
-				this.sessionManager.branch(newLeafId);
+				await this.sessionManager.branchTo(newLeafId);
 			}
 
 			if (label && !summaryText) {
-				this.sessionManager.appendLabelChange(targetId, label);
+				await this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const { context: sessionContext } = await readSessionBootstrap(
+				this.sessionManager,
+				this.settingsManager.getCanonicalContextLimits(),
+				{ allowPendingToolPublic: this._contextEpochsEnabled, initialContextMode: this._initialContextMode },
+			);
 			this.agent.state.messages = sessionContext.messages;
+			this._contextOmissions = undefined;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();
-			this._reloadGoalStateFromBranch();
-			this._reloadRlmMaxDepthFromBranch();
+			await this._reloadBranchRuntimeState();
 			this._invalidateQueuedPromptPreparation();
 
 			await this._extensionRunner.emit({
@@ -11817,21 +14371,8 @@ export class AgentSession {
 		}
 	}
 
-	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.sessionManager.getEntries();
-		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = this._extractUserMessageText(entry.message.content);
-			if (text) {
-				result.push({ entryId: entry.id, text });
-			}
-		}
-
-		return result;
+	getUserMessagesForForking(): Promise<Array<{ entryId: string; text: string }>> {
+		return readUserMessagesForForking(this.sessionManager);
 	}
 
 	private _extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
@@ -11845,7 +14386,7 @@ export class AgentSession {
 		return "";
 	}
 
-	getSessionStats(): SessionStats {
+	async getSessionStats(): Promise<SessionStats> {
 		const state = this.state;
 		const userMessages = state.messages.filter((m) => m.role === "user").length;
 		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
@@ -11886,53 +14427,25 @@ export class AgentSession {
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
-			contextUsage: this.getContextUsage(),
+			contextUsage: await this.getContextUsage(),
 		};
 	}
 
-	getContextUsage(): ContextUsage | undefined {
+	async getContextUsage(): Promise<ContextUsage | undefined> {
 		const model = this.model;
 		if (!model) return undefined;
-
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
-		// After compaction, the last assistant usage reflects pre-compaction context size.
-		// We can only trust usage from an assistant that responded after the latest compaction.
-		// If no such assistant exists, context token count is unknown until the next LLM response.
-		const branchEntries = this.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
-
-		if (latestCompaction) {
-			// Check if there's a valid assistant usage after the compaction boundary
-			const compactionIndex = branchEntries.lastIndexOf(latestCompaction);
-			let hasPostCompactionUsage = false;
-			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
-				const entry = branchEntries[i];
-				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
-						break;
-					}
-				}
-			}
-
-			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
-			}
-		}
-
+		// Capture the working-view estimate before the source read can yield.
 		const estimate = estimateContextTokens(this.messages);
-		const percent = (estimate.tokens / contextWindow) * 100;
-
+		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		if (!(await this._contextUsageReader.hasPostCompactionUsage(this.sessionManager, maxSourceBytes)))
+			return { tokens: null, contextWindow, percent: null };
 		return {
 			tokens: estimate.tokens,
 			contextWindow,
-			percent,
+			percent: (estimate.tokens / contextWindow) * 100,
 		};
 	}
 
@@ -11944,20 +14457,49 @@ export class AgentSession {
 		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
 	}
 
-	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
+	private _ownUsageMemo?: {
+		sessionId: string;
+		sessionFile: string | undefined;
+		sourceSequence: number;
+		count: number;
+		sourceBytes: number;
+		usage: SessionUsageSummary | undefined;
+	};
 
-	// Whole-file own spend, identical to the catalog scan so rows never shift at passivation.
-	getOwnUsageSummary(): SessionUsageSummary | undefined {
-		const entries = this.sessionManager.getEntries();
-		const tailId = entries.at(-1)?.id;
-		const memo = this._ownUsageMemo;
-		if (memo && memo.count === entries.length && memo.tailId === tailId) {
-			return memo.usage;
+	// Whole-source own spend, identical to the catalog reduction at passivation.
+	async getOwnUsageSummary(): Promise<SessionUsageSummary | undefined> {
+		if (!this.sessionManager.supportsCapturedHistoryReads()) {
+			const entries = await this.sessionManager.readEntries();
+			return sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 		}
-		const { ownUsage } = computeOwnAndTotalUsage(entries, entries);
-		const usage = sessionUsageSummaryFrom(ownUsage);
-		this._ownUsageMemo = { count: entries.length, tailId, usage };
-		return usage;
+		const limits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 };
+		return this.sessionManager.readSourceHistory(async (history) => {
+			const { sessionId, sessionFile, sourceSequence } = history.source;
+			const memo = this._ownUsageMemo;
+			if (
+				memo &&
+				memo.sessionId === sessionId &&
+				memo.sessionFile === sessionFile &&
+				memo.sourceSequence === sourceSequence &&
+				memo.count <= limits.maxEntries &&
+				memo.sourceBytes <= limits.maxSourceBytes
+			) {
+				return memo.usage ? { ...memo.usage } : undefined;
+			}
+			const materialized = await history.materialize(limits);
+			const entries = materialized.entries.map(({ entry }) => entry);
+			applyChildUsageAttributions(entries);
+			const usage = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
+			this._ownUsageMemo = {
+				sessionId,
+				sessionFile,
+				sourceSequence,
+				count: entries.length,
+				sourceBytes: materialized.sourceBytes,
+				usage,
+			};
+			return usage ? { ...usage } : undefined;
+		});
 	}
 
 	/**
@@ -11966,42 +14508,80 @@ export class AgentSession {
 	 * from their live sessions; completed children from their persisted session
 	 * dirs, so the tree survives child disposal and session resume.
 	 */
-	getContextTree(): ContextTreeNode {
-		const resolveContextWindow = this._contextWindowResolver();
-		const { ownUsage, totalUsage } = computeOwnAndTotalUsage(
-			this.sessionManager.getBranch(),
-			this.sessionManager.getEntries(),
-		);
+	async getContextTree(limits: Partial<ContextTreeRequestLimits> = {}): Promise<ContextTreeNode> {
+		return this._getContextTree(new ContextTreeRequest(limits));
+	}
 
-		const children: ContextTreeNode[] = [];
-		const liveIds = new Set<string>();
-		for (const run of this._activeRlmChildRuns.values()) {
-			liveIds.add(run.id);
-			const node =
-				run.session?.getContextTree() ?? loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow);
-			children.push({
-				...(node ?? {
-					ownUsage: emptyUsage(),
-					totalUsage: emptyUsage(),
-					children: [],
-				}),
-				id: run.id,
-				label: rlmChildLabel(run.prompt),
-				status: run.status,
-			});
-		}
-		children.push(...loadContextTreeChildrenFromDisk(this._rlmSessionDirForReading(), resolveContextWindow, liveIds));
-
+	private async _getContextTree(
+		request: ContextTreeRequest,
+		identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
+	): Promise<ContextTreeNode> {
+		// Live descendants enter synchronously before any queued native/disk reduction.
+		// Their parent already admitted the run identity and one node slot.
+		if (!identity) request.admitNode();
 		const model = this.model;
-		return {
-			id: "root",
-			label: this.sessionName ?? "main agent",
-			status: "active",
+		const rootNode = {
+			...(identity ?? { id: "root", label: this.sessionName ?? "main agent", status: "active" as const }),
 			model: model ? { provider: model.provider, id: model.id } : undefined,
-			ownUsage,
-			totalUsage,
-			contextUsage: this.getContextUsage(),
-			children,
+		};
+		request.retainMetadata(identity ? { model: rootNode.model } : rootNode);
+		const contextWindow = model?.contextWindow ?? 0;
+		const estimate = model && !(contextWindow <= 0) ? estimateContextTokens(this.messages) : undefined;
+		const availabilityBytes = estimate ? this.settingsManager.getCanonicalContextLimits().maxSourceBytes : undefined;
+		const resolveContextWindow = this._contextWindowResolver();
+		const rlmSessionDir = this._rlmSessionDirForReading();
+		const residentUsage = this.sessionManager.supportsCapturedHistoryReads()
+			? undefined
+			: readResidentContextTreeUsage(this.sessionManager, request.limits, availabilityBytes);
+		if (residentUsage) request.retainMetadata(residentUsage);
+		const usageRead = residentUsage
+			? Promise.resolve(residentUsage)
+			: readContextTreeUsage(this.sessionManager, request.limits, request, availabilityBytes);
+		const children: Promise<ContextTreeNode | undefined>[] = [];
+		const skipIds = new Set<string>();
+		let diskChildren: Promise<ContextTreeNode[]> = Promise.resolve([]);
+		try {
+			// Admit while iterating: do not first clone an unbounded run Map.
+			for (const run of this._activeRlmChildRuns.values()) {
+				request.admitNode();
+				const childIdentity = { id: run.id, label: rlmChildLabel(run.prompt), status: run.status };
+				request.retainMetadata(childIdentity);
+				skipIds.add(childIdentity.id);
+				const child = run.session;
+				children.push(
+					child
+						? child._getContextTree(request, childIdentity)
+						: loadContextTreeChildFromDisk(run.sessionDir, resolveContextWindow, request, childIdentity),
+				);
+			}
+			diskChildren = loadContextTreeChildrenFromDisk(rlmSessionDir, resolveContextWindow, skipIds, request);
+		} catch (error) {
+			// Admission failure does not abandon any earlier captured/accepted read.
+			children.push(Promise.reject(error));
+		}
+		const results = await Promise.allSettled([usageRead, ...children, diskChildren]);
+		const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "Context tree reads failed");
+		const usage = (results[0] as PromiseFulfilledResult<Awaited<typeof usageRead>>).value;
+		if (!usage) throw new Error("Context tree usage source is unavailable");
+		const contextUsage = estimate
+			? usage.hasPostCompactionUsage
+				? { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 }
+				: { tokens: null, contextWindow, percent: null }
+			: undefined;
+		const usageMetadata = { ownUsage: usage.ownUsage, totalUsage: usage.totalUsage, contextUsage };
+		request.retainMetadata({ contextUsage });
+		return {
+			...rootNode,
+			...usageMetadata,
+			children: [
+				...results.slice(1, children.length + 1).flatMap((result) => {
+					const node = (result as PromiseFulfilledResult<ContextTreeNode | undefined>).value;
+					return node ? [node] : [];
+				}),
+				...(results[children.length + 1] as PromiseFulfilledResult<ContextTreeNode[]>).value,
+			],
 		};
 	}
 
@@ -12012,6 +14592,16 @@ export class AgentSession {
 	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
 		const themeName = this.settingsManager.getTheme();
+		const sourceId = this.sessionManager.getSessionId();
+		const sourceFile = this.sessionManager.getSessionFile();
+		await this.initialize();
+		await this._agentEventQueue;
+		await this._goalResumeOperation;
+		await this._waitForChildUsageWrites();
+		await this.sessionManager.flushNow();
+		if (this.sessionManager.getSessionId() !== sourceId || this.sessionManager.getSessionFile() !== sourceFile) {
+			throw new Error("Session source changed during export");
+		}
 
 		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
 			getToolDefinition: (name) => this.getToolDefinition(name),
@@ -12032,34 +14622,19 @@ export class AgentSession {
 	 * @param outputPath Target file path. If omitted, generates a timestamped file in cwd.
 	 * @returns The resolved output file path.
 	 */
-	exportToJsonl(outputPath?: string): string {
+	async exportToJsonl(outputPath?: string): Promise<string> {
 		const filePath = resolve(outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
-		const dir = dirname(filePath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
+		const sourceId = this.sessionManager.getSessionId();
+		const sourceFile = this.sessionManager.getSessionFile();
+		await this.initialize();
+		await this._agentEventQueue;
+		await this._goalResumeOperation;
+		await this._waitForChildUsageWrites();
+		await this.sessionManager.flushNow();
+		if (this.sessionManager.getSessionId() !== sourceId || this.sessionManager.getSessionFile() !== sourceFile) {
+			throw new Error("Session source changed during export");
 		}
-
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionManager.getSessionId(),
-			timestamp: new Date().toISOString(),
-			cwd: this.sessionManager.getCwd(),
-		};
-
-		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
-		}
-
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
-		return filePath;
+		return exportSessionBranchToJsonl(this.sessionManager, filePath);
 	}
 
 	/**

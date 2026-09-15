@@ -8,7 +8,8 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { KeyId } from "@earendil-works/pi-tui";
+import * as nativeAi from "@ponythewhite/base-context-ai";
+import type { KeyId } from "@ponythewhite/base-context-tui";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
@@ -54,17 +55,19 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@earendil-works/pi-agent-core");
-	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@earendil-works/pi-tui");
-	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@earendil-works/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@earendil-works/pi-ai/oauth");
+	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@ponythewhite/base-context-agent");
+	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@ponythewhite/base-context-tui");
+	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@ponythewhite/base-context-ai");
+	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@ponythewhite/base-context-ai/oauth");
+	const piAiMcpEntry = resolveWorkspaceOrImport("ai/dist/mcp.js", "@ponythewhite/base-context-ai/mcp");
 
 	_aliases = {
-		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core": piAgentCoreEntry,
-		"@earendil-works/pi-tui": piTuiEntry,
-		"@earendil-works/pi-ai": piAiEntry,
-		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
+		"@ponythewhite/base-context": piCodingAgentEntry,
+		"@ponythewhite/base-context-agent": piAgentCoreEntry,
+		"@ponythewhite/base-context-tui": piTuiEntry,
+		"@ponythewhite/base-context-ai": piAiEntry,
+		"@ponythewhite/base-context-ai/oauth": piAiOauthEntry,
+		"@ponythewhite/base-context-ai/mcp": piAiMcpEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
 		"@mariozechner/pi-tui": piTuiEntry,
@@ -230,22 +233,22 @@ function createExtensionAPI(
 			return runtime.flagValues.get(name);
 		},
 
-		sendMessage(message, options): void {
+		sendMessage(message, options): Promise<void> {
 			runtime.assertActive();
-			runtime.sendMessage(message, options);
+			return runtime.sendMessage(message, options);
 		},
 
-		sendUserMessage(content, options): void {
+		sendUserMessage(content, options): Promise<void> {
 			runtime.assertActive();
-			runtime.sendUserMessage(content, options);
+			return runtime.sendUserMessage(content, options);
 		},
 
-		appendEntry(customType: string, data?: unknown): void {
+		appendEntry(customType: string, data?: unknown): Promise<void> {
 			runtime.assertActive();
-			runtime.appendEntry(customType, data);
+			return runtime.appendEntry(customType, data);
 		},
 
-		setSessionName(name: string): void | Promise<void> {
+		setSessionName(name: string): Promise<void> {
 			runtime.assertActive();
 			return runtime.setSessionName(name);
 		},
@@ -255,9 +258,9 @@ function createExtensionAPI(
 			return runtime.getSessionName();
 		},
 
-		setLabel(entryId: string, label: string | undefined): void {
+		setLabel(entryId: string, label: string | undefined): Promise<void> {
 			runtime.assertActive();
-			runtime.setLabel(entryId, label);
+			return runtime.setLabel(entryId, label);
 		},
 
 		exec(command: string, args: string[], options?: ExecOptions) {
@@ -299,9 +302,9 @@ function createExtensionAPI(
 			return runtime.getThinkingLevel();
 		},
 
-		setThinkingLevel(level) {
+		setThinkingLevel(level): Promise<void> {
 			runtime.assertActive();
-			runtime.setThinkingLevel(level);
+			return runtime.setThinkingLevel(level);
 		},
 
 		registerProvider(name: string, config: ProviderConfig) {
@@ -325,6 +328,33 @@ function createExtensionAPI(
 declare const __PI_BUNDLED__: boolean | undefined;
 const isBundledCli = typeof __PI_BUNDLED__ !== "undefined" && __PI_BUNDLED__ === true;
 
+/** Check the resolved entry's package identity without importing extension code. */
+function assertNativeExtensionPackage(extensionPath: string): void {
+	let directory = path.dirname(fs.realpathSync(extensionPath));
+	for (;;) {
+		const manifestPath = path.join(directory, "package.json");
+		if (fs.existsSync(manifestPath)) {
+			const manifest: unknown = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+			if (
+				manifest &&
+				typeof manifest === "object" &&
+				"name" in manifest &&
+				manifest.name === "prime-agent-context"
+			) {
+				throw new Error(
+					"The legacy prime-agent-context extension cannot load in native Base Context. " +
+						"Base Context already provides native context projection, learning, and continuation. " +
+						"Remove prime-agent-context from settings.json packages, and remove its extension path from extensions or -e/--extension.",
+				);
+			}
+			return; // The nearest manifest owns this entry, not an enclosing package.
+		}
+		const parent = path.dirname(directory);
+		if (parent === directory) return;
+		directory = parent;
+	}
+}
+
 async function loadExtensionModule(extensionPath: string) {
 	// jiti and the bundled virtual modules are loaded lazily so that importing
 	// the loader (which nearly every startup path does transitively) doesn't pay
@@ -337,13 +367,21 @@ async function loadExtensionModule(extensionPath: string) {
 		// virtualModules so extensions share the bundle's module instances
 		// (file-path aliases would load a second, divergent copy of each package).
 		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
+		// Node/dev must also share the native AI registry and implementation identities.
 		...(isBunBinary || isBundledCli
 			? { virtualModules: (await import("./bundled-modules.js")).VIRTUAL_MODULES, tryNative: false }
-			: { alias: getAliases() }),
+			: {
+					alias: getAliases(),
+					virtualModules: {
+						"@ponythewhite/base-context-ai": nativeAi,
+						"@mariozechner/pi-ai": nativeAi,
+					},
+				}),
 	});
 
-	const module = await jiti.import(extensionPath, { default: true });
+	const resolvedEntry = jiti.esmResolve(extensionPath);
+	assertNativeExtensionPackage(fileURLToPath(resolvedEntry));
+	const module = await jiti.import(resolvedEntry, { default: true });
 	const factory = module as ExtensionFactory;
 	return typeof factory !== "function" ? undefined : factory;
 }

@@ -1,4 +1,6 @@
+import type * as NodeFs from "node:fs";
 import {
+	appendFileSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -12,7 +14,7 @@ import { tmpdir } from "node:os";
 
 const linkFailure = vi.hoisted(() => ({ code: undefined as string | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+	const actual = await importOriginal<typeof NodeFs>();
 	return {
 		...actual,
 		linkSync: (
@@ -30,9 +32,10 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 import { dirname, join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@ponythewhite/base-context-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
+import { decodeJournalFrame, encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import * as sessionManagerModule from "../src/core/session-manager.js";
@@ -42,32 +45,70 @@ import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { DaemonCommand, DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
+	createRlmLedgerRegistrySeedSource,
 	RLM_LEDGER_MAX_BYTES,
 	RLM_LEDGER_MAX_RECORDS,
 	type RlmLedgerDeleteReason,
+	type RlmLedgerSeedSource,
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry,
 	rlmLedgerPath,
 } from "../src/modes/daemon/rlm-ledger.js";
 
-const { SessionManager } = sessionManagerModule;
+import { RLM_LEDGER_MAX_PENDING_OPERATIONS } from "../src/modes/daemon/rlm-ledger-mutations.js";
 
-function makeRoots(root: string) {
+const { SessionManager } = sessionManagerModule;
+const fixtureSessions = new Set<sessionManagerModule.SessionManager>();
+
+function trackSession(manager: sessionManagerModule.SessionManager): sessionManagerModule.SessionManager {
+	fixtureSessions.add(manager);
+	return manager;
+}
+
+async function closeFixtureSessions(): Promise<void> {
+	await Promise.all([...fixtureSessions].map((manager) => manager.close()));
+	fixtureSessions.clear();
+}
+
+function readLedgerFrames(path: string) {
+	const contents = readFileSync(path);
+	const payloads: unknown[] = [];
+	let cursor = INITIAL_JOURNAL_CURSOR;
+	let start = 0;
+	while (start < contents.length) {
+		const end = contents.indexOf(0x0a, start);
+		expect(end).toBeGreaterThanOrEqual(start);
+		const decoded = decodeJournalFrame(contents.subarray(start, end + 1), cursor);
+		payloads.push(decoded.payload);
+		cursor = decoded.next;
+		start = end + 1;
+	}
+	return { payloads, cursor };
+}
+
+function createOwnerLedger(
+	agentDir: string,
+	sessionsDir: string,
+	seedSource?: RlmLedgerSeedSource,
+	log?: (message: string) => void,
+): RlmSpawnLedger {
+	return new RlmSpawnLedger(agentDir, sessionsDir, seedSource, log, { mode: "owner", assertOwner: () => {} });
+}
+
+async function makeRoots(root: string) {
 	const sessionsDir = join(root, "sessions");
-	const parent = SessionManager.create(root, sessionsDir);
-	parent.newSession();
-	parent.appendSessionInfo("parent");
-	parent.flushNow();
+	const parent = trackSession(await SessionManager.create(root, sessionsDir));
+	await parent.appendSessionInfo("parent");
+	await parent.flushNow();
 	const parentFile = parent.getSessionFile();
 	if (!parentFile) throw new Error("Missing parent session file");
 	return { sessionsDir, parent, parentFile };
 }
 
-function makeChildSession(root: string, dir: string, parentFile: string, depth: number, name: string) {
-	const manager = SessionManager.create(root, dir);
-	manager.newSession({ parentSession: parentFile, rlmDepth: depth });
-	manager.appendSessionInfo(name);
-	manager.flushNow();
+async function makeChildSession(root: string, dir: string, parentFile: string, depth: number, name: string) {
+	const manager = trackSession(await SessionManager.create(root, dir, { parentSession: parentFile, rlmDepth: depth }));
+	await manager.appendSessionInfo(name);
+	await manager.flushNow();
 	const file = manager.getSessionFile();
 	if (!file) throw new Error("Missing child session file");
 	return { manager, file };
@@ -77,8 +118,8 @@ describe("rlm spawn ledger", () => {
 	it("replays spawn, rename, and delete records last-writer-wins", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -98,12 +139,136 @@ describe("rlm spawn ledger", () => {
 
 			const edges = await ledger.edges();
 			expect(edges).toEqual([expect.objectContaining({ childId: "sub-22222222", name: "renamed-b", depth: 1 })]);
-			const lines = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
-			expect(JSON.parse(lines[0])).toMatchObject({ v: 1, op: "meta", sessionsDir: realpathSync(sessionsDir) });
-			expect(JSON.parse(lines[4])).toMatchObject({ v: 1, op: "delete", reason: "revoked" });
+			const { payloads } = readLedgerFrames(ledger.ledgerPath);
+			expect(payloads[0]).toMatchObject({ v: 1, op: "meta", sessionsDir: realpathSync(sessionsDir) });
+			expect(payloads[4]).toMatchObject({ v: 1, op: "delete", reason: "revoked" });
 			expect(statSync(ledger.ledgerPath).mode & 0o777).toBe(0o600);
 			expect(statSync(dirname(ledger.ledgerPath)).mode & 0o777).toBe(0o700);
 		} finally {
+			await closeFixtureSessions();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("acknowledges remote mutations only after the owner writes them", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-remote-"));
+		try {
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const owner = createOwnerLedger(root, sessionsDir);
+			let acknowledge = () => {};
+			let acknowledgment = new Promise<void>((resolve) => {
+				acknowledge = resolve;
+			});
+			const remote = new RlmSpawnLedger(root, sessionsDir, undefined, undefined, {
+				mode: "remote",
+				mutate: async (mutation) => {
+					await acknowledgment;
+					await owner.mutate(mutation);
+				},
+			});
+			const child = join(root, "child.jsonl");
+			let settled = false;
+			const pending = remote
+				.mutate({ op: "spawn", childId: "sub-11111111", parent: parentFile, child, depth: 1, name: "worker" })
+				.then(() => {
+					settled = true;
+				});
+			await Promise.resolve();
+			expect(settled).toBe(false);
+			expect(existsSync(owner.ledgerPath)).toBe(false);
+			acknowledge();
+			await pending;
+			expect(settled).toBe(true);
+			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).resolves.toEqual([
+				expect.objectContaining({ childId: "sub-11111111", name: "worker" }),
+			]);
+			await remote.appendRenameByChildPath(child, "renamed");
+			await expect(owner.edges()).resolves.toEqual([expect.objectContaining({ name: "renamed" })]);
+			acknowledgment = new Promise<void>((resolve) => {
+				acknowledge = resolve;
+			});
+			const pendingDelete = remote.appendDeleteByChildPath(child, "user");
+			remote.stopAdmission();
+			await expect(remote.appendRenameByChildPath(child, "too-late")).rejects.toThrow("admission is closed");
+			let drained = false;
+			const draining = remote.flush().then(() => {
+				drained = true;
+			});
+			await Promise.resolve();
+			expect(drained).toBe(false);
+			await expect(owner.edges()).resolves.toEqual([expect.objectContaining({ name: "renamed" })]);
+			acknowledge();
+			await pendingDelete;
+			await draining;
+			expect(drained).toBe(true);
+			await expect(owner.edges()).resolves.toEqual([]);
+		} finally {
+			await closeFixtureSessions();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects queue overflow until acknowledged remote writes release capacity", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-backpressure-"));
+		try {
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const owner = createOwnerLedger(root, sessionsDir);
+			let acknowledge = () => {};
+			const acknowledgment = new Promise<void>((resolve) => {
+				acknowledge = resolve;
+			});
+			const remote = new RlmSpawnLedger(root, sessionsDir, undefined, undefined, {
+				mode: "remote",
+				mutate: async (mutation) => {
+					await acknowledgment;
+					await owner.mutate(mutation);
+				},
+			});
+			const pending = Array.from({ length: RLM_LEDGER_MAX_PENDING_OPERATIONS }, (_, index) =>
+				remote.appendSpawn({
+					childId: `sub-${String(index).padStart(8, "0")}`,
+					parent: parentFile,
+					child: join(root, `${index}.jsonl`),
+					depth: 1,
+					name: `worker-${index}`,
+				}),
+			);
+			await expect(remote.appendRenameByChildPath(join(root, "0.jsonl"), "overflow")).rejects.toThrow(/queue/i);
+			expect(existsSync(owner.ledgerPath)).toBe(false);
+			acknowledge();
+			await Promise.all(pending);
+			await remote.appendRenameByChildPath(join(root, "0.jsonl"), "renamed");
+			const edges = await owner.edges();
+			expect(edges).toHaveLength(RLM_LEDGER_MAX_PENDING_OPERATIONS);
+			expect(edges[0].name).toBe("renamed");
+		} finally {
+			await closeFixtureSessions();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("defaults to a reader without seeding, creating files, or accepting mutations", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-reader-"));
+		try {
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const readRegistryForSessionFile = vi.fn(async () => []);
+			const reader = new RlmSpawnLedger(root, sessionsDir, { readRegistryForSessionFile });
+			await expect(reader.edges()).resolves.toEqual([]);
+			await expect(reader.family()).resolves.toEqual([expect.objectContaining({ name: "parent" })]);
+			await expect(
+				reader.appendSpawn({
+					childId: "sub-11111111",
+					parent: parentFile,
+					child: join(root, "child.jsonl"),
+					depth: 1,
+					name: "worker",
+				}),
+			).rejects.toThrow(/read.only|owner/i);
+			await expect(reader.recover()).rejects.toThrow(/read.only|owner/i);
+			expect(readRegistryForSessionFile).not.toHaveBeenCalled();
+			expect(existsSync(dirname(reader.ledgerPath))).toBe(false);
+		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -111,8 +276,8 @@ describe("rlm spawn ledger", () => {
 	it("rejects a duplicate canonical child path at append", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-dup-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			const child = join(root, "child.jsonl");
 			await ledger.appendSpawn({ childId: "sub-11111111", parent: parentFile, child, depth: 1, name: "a" });
 			await expect(
@@ -125,6 +290,7 @@ describe("rlm spawn ledger", () => {
 			await ledger.appendSpawn({ childId: "sub-33333333", parent: parentFile, child, depth: 1, name: "c" });
 			expect(await ledger.edges()).toEqual([expect.objectContaining({ childId: "sub-33333333", name: "c" })]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -132,8 +298,8 @@ describe("rlm spawn ledger", () => {
 	it("fails closed on a malformed ledger line", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-malformed-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -142,7 +308,7 @@ describe("rlm spawn ledger", () => {
 				name: "a",
 			});
 			writeFileSync(ledger.ledgerPath, `${readFileSync(ledger.ledgerPath, "utf8")}not json\n`);
-			await expect(ledger.edges()).rejects.toThrow("Malformed RLM ledger line");
+			await expect(ledger.edges()).rejects.toThrow("Malformed journal frame");
 			const fresh = new RlmSpawnLedger(root, sessionsDir);
 			writeFileSync(
 				fresh.ledgerPath,
@@ -150,6 +316,7 @@ describe("rlm spawn ledger", () => {
 			);
 			await expect(fresh.edges()).rejects.toThrow("invalid spawn record");
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -157,8 +324,8 @@ describe("rlm spawn ledger", () => {
 	it("tolerates one torn final line without a trailing newline, but not mid-file", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-torn-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -171,10 +338,10 @@ describe("rlm spawn ledger", () => {
 			// in-progress data: ignored with a log, not fail-closed.
 			writeFileSync(ledger.ledgerPath, `${intact}{"v":1,"op":"spawn","at":"2026-`);
 			const logged: string[] = [];
-			const torn = new RlmSpawnLedger(root, sessionsDir, undefined, (message) => logged.push(message));
+			const torn = createOwnerLedger(root, sessionsDir, undefined, (message) => logged.push(message));
 			await expect(torn.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-11111111" })]);
 			expect(logged.some((message) => message.includes("torn final line"))).toBe(true);
-			// The next append repairs the torn tail with a newline first.
+			// The next owner append truncates the torn tail first.
 			await torn.appendSpawn({
 				childId: "sub-22222222",
 				parent: parentFile,
@@ -185,8 +352,9 @@ describe("rlm spawn ledger", () => {
 			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).resolves.toHaveLength(2);
 			// The same content mid-file (trailing newline present) stays fail-closed.
 			writeFileSync(ledger.ledgerPath, `${intact}{"v":1,"op":"spawn","at":"2026-\n`);
-			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).rejects.toThrow("Malformed RLM ledger line");
+			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).rejects.toThrow("Malformed journal frame");
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -194,8 +362,8 @@ describe("rlm spawn ledger", () => {
 	it("repairs a torn tail by byte offset, preserving preceding multi-byte UTF-8 records", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-utf8-torn-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			// Multi-byte UTF-8 in the name makes string indices diverge from
 			// byte offsets; the truncate must not cut into this record.
 			await ledger.appendSpawn({
@@ -206,7 +374,7 @@ describe("rlm spawn ledger", () => {
 				name: "wörker-💥-ümlaut",
 			});
 			writeFileSync(ledger.ledgerPath, `${readFileSync(ledger.ledgerPath, "utf8")}{"v":1,"op":"spawn","torn`);
-			const repairing = new RlmSpawnLedger(root, sessionsDir);
+			const repairing = createOwnerLedger(root, sessionsDir);
 			await repairing.appendSpawn({
 				childId: "sub-22222222",
 				parent: parentFile,
@@ -219,6 +387,7 @@ describe("rlm spawn ledger", () => {
 				expect.objectContaining({ childId: "sub-22222222", name: "second" }),
 			]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -226,8 +395,8 @@ describe("rlm spawn ledger", () => {
 	it("skips v1 records with unknown ops instead of failing the whole ledger", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-forward-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const { sessionsDir, parentFile } = await makeRoots(root);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -235,21 +404,24 @@ describe("rlm spawn ledger", () => {
 				depth: 1,
 				name: "a",
 			});
-			writeFileSync(
-				ledger.ledgerPath,
-				`${readFileSync(ledger.ledgerPath, "utf8")}${JSON.stringify({ v: 1, op: "future-op", at: "2026-01-01T00:00:00.000Z" })}\n`,
+			const unknownOp = encodeJournalFrame(
+				{ v: 1, op: "future-op", at: "2026-01-01T00:00:00.000Z" },
+				readLedgerFrames(ledger.ledgerPath).cursor,
 			);
+			appendFileSync(ledger.ledgerPath, unknownOp.line);
 			const logged: string[] = [];
 			const reader = new RlmSpawnLedger(root, sessionsDir, undefined, (message) => logged.push(message));
 			await expect(reader.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-11111111" })]);
 			expect(logged.some((message) => message.includes("unknown op"))).toBe(true);
 			// A future major version still fails loudly.
-			writeFileSync(
-				ledger.ledgerPath,
-				`${readFileSync(ledger.ledgerPath, "utf8")}${JSON.stringify({ v: 2, op: "spawn", at: "2026-01-01T00:00:00.000Z" })}\n`,
+			const futureVersion = encodeJournalFrame(
+				{ v: 2, op: "spawn", at: "2026-01-01T00:00:00.000Z" },
+				readLedgerFrames(ledger.ledgerPath).cursor,
 			);
+			appendFileSync(ledger.ledgerPath, futureVersion.line);
 			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).rejects.toThrow("missing v/at");
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -257,7 +429,7 @@ describe("rlm spawn ledger", () => {
 	it("fails closed on byte and record bounds", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-bounds-"));
 		try {
-			const { sessionsDir } = makeRoots(root);
+			const { sessionsDir } = await makeRoots(root);
 			const oversized = new RlmSpawnLedger(root, sessionsDir);
 			mkdirSync(dirname(oversized.ledgerPath), { recursive: true });
 			writeFileSync(oversized.ledgerPath, Buffer.alloc(RLM_LEDGER_MAX_BYTES + 1, "\n"));
@@ -266,13 +438,14 @@ describe("rlm spawn ledger", () => {
 			// The torn-tail repair path must hit the same bound before any
 			// file-sized allocation, not just replaySync.
 			await expect(
-				new RlmSpawnLedger(root, sessionsDir).appendRename({ childId: "sub-1", child: "/c", name: "n" }),
+				createOwnerLedger(root, sessionsDir).appendRename({ childId: "sub-1", child: "/c", name: "n" }),
 			).rejects.toThrow("bytes");
 
 			const record = `${JSON.stringify({ v: 1, op: "rename", at: "x", childId: "sub-1", child: "/c", name: "n" })}\n`;
 			writeFileSync(oversized.ledgerPath, record.repeat(RLM_LEDGER_MAX_RECORDS + 1));
 			await expect(new RlmSpawnLedger(root, sessionsDir).edges()).rejects.toThrow("records");
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -280,17 +453,16 @@ describe("rlm spawn ledger", () => {
 	it("builds families from roots plus live edges and drops dead entries", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-family-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(root);
-			const other = SessionManager.create(root, sessionsDir);
-			other.newSession();
-			other.appendSessionInfo("other-root");
-			other.flushNow();
+			const { sessionsDir, parent, parentFile } = await makeRoots(root);
+			const other = trackSession(await SessionManager.create(root, sessionsDir));
+			await other.appendSessionInfo("other-root");
+			await other.flushNow();
 			const artifactDir = parent.getSessionArtifactDir();
 			if (!artifactDir) throw new Error("Missing artifact dir");
-			const child = makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "worker");
-			const grandchild = makeChildSession(root, join(artifactDir, "sub-22222222"), child.file, 2, "nested");
+			const child = await makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const grandchild = await makeChildSession(root, join(artifactDir, "sub-22222222"), child.file, 2, "nested");
 
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -316,10 +488,9 @@ describe("rlm spawn ledger", () => {
 
 			// A sessions-dir child whose parent transcript vanished degrades to a root row: the dead
 			// edge is reconciled away for suppression exactly as for emission.
-			const orphan = SessionManager.create(root, sessionsDir);
-			orphan.newSession();
-			orphan.appendSessionInfo("orphan-root");
-			orphan.flushNow();
+			const orphan = trackSession(await SessionManager.create(root, sessionsDir));
+			await orphan.appendSessionInfo("orphan-root");
+			await orphan.flushNow();
 			const orphanFile = orphan.getSessionFile();
 			if (!orphanFile) throw new Error("Missing orphan file");
 			await ledger.appendSpawn({
@@ -347,6 +518,7 @@ describe("rlm spawn ledger", () => {
 			const rootSiblings = await ledger.siblings(parentFile);
 			expect(rootSiblings.map((row) => row.name)).toEqual(["parent", "other-root", "orphan-root"]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -354,13 +526,13 @@ describe("rlm spawn ledger", () => {
 	it("drops a depth-contradictory edge without failing the rest of the family", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-depth-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(root);
+			const { sessionsDir, parent, parentFile } = await makeRoots(root);
 			const artifactDir = parent.getSessionArtifactDir();
 			if (!artifactDir) throw new Error("Missing artifact dir");
-			const child = makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "worker");
-			const grandchild = makeChildSession(root, join(artifactDir, "sub-22222222"), child.file, 2, "nested");
+			const child = await makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const grandchild = await makeChildSession(root, join(artifactDir, "sub-22222222"), child.file, 2, "nested");
 			const logged: string[] = [];
-			const ledger = new RlmSpawnLedger(root, sessionsDir, undefined, (message) => logged.push(message));
+			const ledger = createOwnerLedger(root, sessionsDir, undefined, (message) => logged.push(message));
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -379,6 +551,7 @@ describe("rlm spawn ledger", () => {
 			expect(family.map((row) => row.name)).toEqual(["parent", "worker"]);
 			expect(logged.some((message) => message.includes("contradictory depth"))).toBe(true);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -386,21 +559,22 @@ describe("rlm spawn ledger", () => {
 	it("never passes header-claimed topology through for roots (fork headers)", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-fork-root-"));
 		try {
-			const { sessionsDir, parentFile } = makeRoots(root);
+			const { sessionsDir, parentFile } = await makeRoots(root);
 			// A fork: header carries parentSession, so readSessionInfo reports a
 			// parentSessionPath — writer-owned topology the ledger must strip.
-			const fork = SessionManager.forkFrom(parentFile, root, sessionsDir);
-			fork.appendSessionInfo("forked-root");
-			fork.flushNow();
+			const fork = trackSession(await SessionManager.forkFrom(parentFile, root, sessionsDir));
+			await fork.appendSessionInfo("forked-root");
+			await fork.flushNow();
 			const forkFile = fork.getSessionFile();
 			if (!forkFile) throw new Error("Missing fork session file");
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const ledger = createOwnerLedger(root, sessionsDir);
 			const family = await ledger.family();
 			const forkRow = family.find((row) => row.name === "forked-root");
 			expect(forkRow).toBeDefined();
 			expect(forkRow?.rlmDepth).toBe(0);
 			expect(forkRow?.parentSessionPath).toBeUndefined();
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -408,11 +582,11 @@ describe("rlm spawn ledger", () => {
 	it("returns the surviving child alone when its parent file is gone", async () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-orphan-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(root);
+			const { sessionsDir, parent, parentFile } = await makeRoots(root);
 			const artifactDir = parent.getSessionArtifactDir();
 			if (!artifactDir) throw new Error("Missing artifact dir");
-			const child = makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "survivor");
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const child = await makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 1, "survivor");
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -420,6 +594,7 @@ describe("rlm spawn ledger", () => {
 				depth: 1,
 				name: "survivor",
 			});
+			await parent.close();
 			rmSync(parentFile);
 
 			// The edge is reconciliation-dropped, but the child file exists: it
@@ -429,6 +604,7 @@ describe("rlm spawn ledger", () => {
 				expect.objectContaining({ path: canonicalSessionPath(child.file), name: "survivor", rlmDepth: 0 }),
 			]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -439,11 +615,11 @@ describe("rlm spawn ledger", () => {
 		// not be dropped against an assumed root depth of 0.
 		const root = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-nested-root-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(root);
+			const { sessionsDir, parent, parentFile } = await makeRoots(root);
 			const artifactDir = parent.getSessionArtifactDir();
 			if (!artifactDir) throw new Error("Missing artifact dir");
-			const child = makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 3, "deep-worker");
-			const ledger = new RlmSpawnLedger(root, sessionsDir);
+			const child = await makeChildSession(root, join(artifactDir, "sub-11111111"), parentFile, 3, "deep-worker");
+			const ledger = createOwnerLedger(root, sessionsDir);
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
 				parent: parentFile,
@@ -457,6 +633,7 @@ describe("rlm spawn ledger", () => {
 				["deep-worker", 3],
 			]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -493,13 +670,16 @@ function makeDaemonFixture(tempDir: string) {
 		): Promise<void>;
 		setStateSessionName(state: ActiveSessionState, name: string): Promise<void>;
 		rlmSpawnLedger(): RlmSpawnLedger;
+		rlmSpawnLedgerInstance: RlmSpawnLedger;
 	};
+	internals.rlmSpawnLedgerInstance = createOwnerLedger(tempDir, sessionsDir, createRlmLedgerRegistrySeedSource());
 	return { daemon, internals, sessionsDir };
 }
 
 function makeRuntimeSession(
 	sessionManager: Parameters<CreateAgentSessionRuntimeFactory>[0]["sessionManager"],
 ): Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"] {
+	trackSession(sessionManager);
 	return {
 		sessionManager,
 		messages: [],
@@ -516,14 +696,19 @@ function makeRuntimeSession(
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),
 		bindExtensions: vi.fn(async () => {}),
+		initialize: vi.fn(async () => {
+			await sessionManager.flushNow();
+		}),
 		setExecEnvProvider: vi.fn(),
 		getAvailableThinkingLevels: vi.fn(() => []),
 		scopedModels: [],
 		getActiveToolNames: vi.fn(() => []),
-		getContextUsage: vi.fn(() => undefined),
+		getContextUsage: vi.fn(async () => undefined),
 		setSessionName: vi.fn((name: string) => sessionManager.appendSessionInfo(name)),
 		dispose: vi.fn(),
-		disposeAsync: vi.fn(async () => {}),
+		disposeAsync: vi.fn(async () => {
+			await sessionManager.close();
+		}),
 		abort: vi.fn(async () => {}),
 	} as unknown as Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"];
 }
@@ -556,11 +741,11 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-wiring-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
 			const parentFile = parentManager.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
+			await parentManager.close();
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentFile });
 			const childDir = join(parentManager.getSessionArtifactDir()!, "sub-1234abcd");
 			const childRuntime = await internals.createRlmSubagentRuntime(
@@ -592,8 +777,8 @@ describe("rlm spawn ledger daemon wiring", () => {
 
 			await internals.recordRlmSubagentDeletion(parentState, "sub-1234abcd", "revoked");
 			await expect(ledger.edges()).resolves.toEqual([]);
-			const lines = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
-			expect(JSON.parse(lines.at(-1)!)).toMatchObject({ op: "delete", reason: "revoked" });
+			const { payloads } = readLedgerFrames(ledger.ledgerPath);
+			expect(payloads.at(-1)).toMatchObject({ op: "delete", reason: "revoked" });
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
 
 			// Self-heal: with the registry already tombstoned, a live ledger edge
@@ -608,12 +793,13 @@ describe("rlm spawn ledger daemon wiring", () => {
 			await expect(ledger.edges()).resolves.toHaveLength(1);
 			await internals.recordRlmSubagentDeletion(parentState, "sub-1234abcd", "gc");
 			await expect(ledger.edges()).resolves.toEqual([]);
-			const healed = readFileSync(ledger.ledgerPath, "utf8").trim().split("\n");
-			expect(JSON.parse(healed.at(-1)!)).toMatchObject({ op: "delete", reason: "gc" });
+			const healed = readLedgerFrames(ledger.ledgerPath).payloads;
+			expect(healed.at(-1)).toMatchObject({ op: "delete", reason: "gc" });
 			// A second retry with no live edge appends nothing further.
 			await internals.recordRlmSubagentDeletion(parentState, "sub-1234abcd", "gc");
 			expect(readFileSync(ledger.ledgerPath, "utf8").trim().split("\n")).toHaveLength(healed.length);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -622,11 +808,11 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-spawn-fail-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
 			const parentFile = parentManager.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
+			await parentManager.close();
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentFile });
 			const ledger = internals.rlmSpawnLedger();
 			const failingAppend = vi.spyOn(ledger, "appendSpawn").mockRejectedValue(new Error("ledger disk exploded"));
@@ -654,6 +840,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			);
 			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ childId: "sub-a11a11a1" })]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -662,14 +849,13 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-offline-rename-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
 			const childDir = join(parentManager.getSessionArtifactDir()!, "sub-1234abcd");
-			const child = makeChildSession(tempDir, childDir, parentFile, 1, "before-rename");
+			const child = await makeChildSession(tempDir, childDir, parentFile, 1, "before-rename");
 			const ledger = internals.rlmSpawnLedger();
 			await ledger.appendSpawn({
 				childId: "sub-1234abcd",
@@ -685,6 +871,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			await ledger.appendRenameByChildPath(join(tempDir, "unknown.jsonl"), "nobody");
 			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "after-rename" })]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -693,27 +880,24 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			// A fork root: header parentSession without rlmDepth. Ledger seeding
-			// never consults headers, so it must appear as a plain root.
-			const forkManager = SessionManager.create(tempDir, sessionsDir);
-			forkManager.newSession({ parentSession: parentFile });
-			forkManager.appendSessionInfo("forked-root");
-			forkManager.flushNow();
+			// Ledger seeding never uses fork headers as topology: this stays a plain root.
+			const forkManager = trackSession(await SessionManager.forkFrom(parentFile, tempDir, sessionsDir));
+			await forkManager.appendSessionInfo("forked-root");
+			await forkManager.flushNow();
 
 			const childDir = join(parentArtifactDir, "sub-1234abcd");
-			const child = makeChildSession(tempDir, childDir, parentFile, 1, "seed-worker");
+			const child = await makeChildSession(tempDir, childDir, parentFile, 1, "seed-worker");
 			const grandchildDir = join(childDir, "sub-deadbeef");
-			const grandchild = makeChildSession(tempDir, grandchildDir, child.file, 2, "nested-worker");
+			const grandchild = await makeChildSession(tempDir, grandchildDir, child.file, 2, "nested-worker");
 
 			const zeroDepthDir = join(parentArtifactDir, "sub-0depth00");
-			const zeroDepth = makeChildSession(tempDir, zeroDepthDir, parentFile, 1, "zero-depth-worker");
+			const zeroDepth = await makeChildSession(tempDir, zeroDepthDir, parentFile, 1, "zero-depth-worker");
 
 			// Registry entries shaped exactly like recordRlmSubagentRegistryEntry
 			// output. The seed-worker appears twice (running then completed) as
@@ -798,6 +982,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			const siblings = await internals.rlmSpawnLedger().siblings(child.file);
 			expect(siblings.map((row) => row.name).sort()).toEqual(["seed-worker", "zero-depth-worker"]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -832,6 +1017,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			expect(entries.find((item) => item.childId === "sub-11111111")?.rlmMaxDepth).toBe(4);
 			expect(entries.find((item) => item.childId === "sub-22222222")?.rlmMaxDepth).toBeUndefined();
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -840,14 +1026,19 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-crash-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				parentFile,
+				1,
+				"worker",
+			);
 			const seedEntry = {
 				childId: "sub-11111111",
 				sessionName: "worker",
@@ -856,7 +1047,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 				status: "completed" as const,
 			};
 			let calls = 0;
-			const flaky = new RlmSpawnLedger(tempDir, sessionsDir, {
+			const flaky = createOwnerLedger(tempDir, sessionsDir, {
 				readRegistryForSessionFile: async () => {
 					if (++calls === 1) throw new Error("disk exploded mid-seed");
 					return [];
@@ -866,7 +1057,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			// The interrupted seed published nothing: no ledger file, no partial state.
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(false);
 
-			const healthy = new RlmSpawnLedger(tempDir, sessionsDir, {
+			const healthy = createOwnerLedger(tempDir, sessionsDir, {
 				readRegistryForSessionFile: async (sessionFile) =>
 					canonicalSessionPath(sessionFile) === canonicalSessionPath(parentFile) ? [seedEntry] : [],
 			});
@@ -876,6 +1067,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			]);
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(true);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -884,19 +1076,18 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-race-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			const stale = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "stale");
-			const live = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "live");
+			const stale = await makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "stale");
+			const live = await makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "live");
 			// A second process's ledger over the same file: no seed source, so
 			// its append lands directly.
-			const other = new RlmSpawnLedger(tempDir, sessionsDir);
-			const seeding = new RlmSpawnLedger(tempDir, sessionsDir, {
+			const other = createOwnerLedger(tempDir, sessionsDir);
+			const seeding = createOwnerLedger(tempDir, sessionsDir, {
 				readRegistryForSessionFile: async (sessionFile) => {
 					if (canonicalSessionPath(sessionFile) !== canonicalSessionPath(parentFile)) return [];
 					// Simulate the race: the live append creates the real file
@@ -927,6 +1118,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			expect(contents).toContain("sub-22222222");
 			expect(contents).not.toContain("sub-11111111");
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -935,10 +1127,9 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-bounds-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
 			// Few-but-huge records: 40 x ~1MiB names serialize past the 32MiB
@@ -952,7 +1143,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 				status: "completed" as const,
 			}));
 			const logged: string[] = [];
-			const ledger = new RlmSpawnLedger(
+			const ledger = createOwnerLedger(
 				tempDir,
 				sessionsDir,
 				{
@@ -966,6 +1157,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 			expect(existsSync(rlmLedgerPath(tempDir, sessionsDir))).toBe(false);
 			expect(logged.some((message) => message.includes("seed exceeds read bounds"))).toBe(true);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -974,16 +1166,21 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seed-nolink-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				parentFile,
+				1,
+				"worker",
+			);
 			const logged: string[] = [];
-			const ledger = new RlmSpawnLedger(
+			const ledger = createOwnerLedger(
 				tempDir,
 				sessionsDir,
 				{
@@ -1016,6 +1213,7 @@ describe("rlm spawn ledger daemon wiring", () => {
 				logged.some((message) => message.includes("link publish unavailable (ENOTSUP); skipping seeding")),
 			).toBe(true);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1024,14 +1222,13 @@ describe("rlm spawn ledger daemon wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-seedfail-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			if (!parentFile) throw new Error("Missing parent session file");
 			const failures: string[] = [];
-			const ledger = new RlmSpawnLedger(
+			const ledger = createOwnerLedger(
 				tempDir,
 				sessionsDir,
 				{
@@ -1045,12 +1242,14 @@ describe("rlm spawn ledger daemon wiring", () => {
 			expect(family.map((row) => [row.name, row.rlmDepth])).toEqual([["parent", 0]]);
 			expect(failures.some((message) => message.includes("registry exploded"))).toBe(true);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 });
 
 interface SupervisorLedgerInternals {
+	rlmSpawnLedgerInstance: RlmSpawnLedger;
 	rlmSpawnLedger(): RlmSpawnLedger;
 	rlmLedgerSiblings(sessionPath: string): Promise<Array<{ name?: string; rlmDepth: number; path: string }>>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
@@ -1073,21 +1272,38 @@ describe("passive descendants in the saved catalog", () => {
 	it("serves passivated descendants in the saved catalog after a supervisor restart", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-catalog-supervisor-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
+			const { sessionsDir, parent, parentFile } = await makeRoots(tempDir);
 			const parentArtifactDir = parent.getSessionArtifactDir();
 			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
 			// The transcript header points at a forked-away ancestor; the ledger edge is the truth.
 			const staleParent = join(tempDir, "forked-away-parent.jsonl");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), staleParent, 2, "worker");
-			child.manager.appendMessage({ role: "user", content: "shard", timestamp: 1 });
-			child.manager.flushNow();
-			const deleted = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "gone");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				staleParent,
+				2,
+				"worker",
+			);
+			await child.manager.appendMessage({ role: "user", content: "shard", timestamp: 1 });
+			await child.manager.flushNow();
+			const deleted = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-22222222"),
+				parentFile,
+				1,
+				"gone",
+			);
 			const parentInfo = await sessionManagerModule.readSessionInfo(parentFile);
 			if (!parentInfo) throw new Error("Missing parent session info");
 			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
 				descriptorDir: join(tempDir, "workers"),
 			}) as unknown as SupervisorLedgerInternals;
+			supervisor.rlmSpawnLedgerInstance = createOwnerLedger(
+				tempDir,
+				sessionsDir,
+				createRlmLedgerRegistrySeedSource(),
+			);
 			Object.assign(supervisor.catalog, { list: vi.fn(async () => [parentInfo]) });
 			const ledger = supervisor.rlmSpawnLedger();
 			await ledger.appendSpawn({
@@ -1123,6 +1339,7 @@ describe("passive descendants in the saved catalog", () => {
 				messageCount: 1,
 			});
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1131,10 +1348,16 @@ describe("passive descendants in the saved catalog", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-catalog-daemon-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
-			const { parent, parentFile } = makeRoots(tempDir);
+			const { parent, parentFile } = await makeRoots(tempDir);
 			const parentArtifactDir = parent.getSessionArtifactDir();
 			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-33333333"), parentFile, 1, "worker");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-33333333"),
+				parentFile,
+				1,
+				"worker",
+			);
 			await internals.rlmSpawnLedger().appendSpawn({
 				childId: "sub-33333333",
 				parent: parentFile,
@@ -1144,20 +1367,19 @@ describe("passive descendants in the saved catalog", () => {
 			});
 			// A second sessions-dir family with its own ledger: listings must not cross.
 			const otherDir = join(tempDir, "other-sessions");
-			const otherParent = SessionManager.create(tempDir, otherDir);
-			otherParent.newSession();
-			otherParent.appendSessionInfo("other-parent");
-			otherParent.flushNow();
+			const otherParent = trackSession(await SessionManager.create(tempDir, otherDir));
+			await otherParent.appendSessionInfo("other-parent");
+			await otherParent.flushNow();
 			const otherParentFile = otherParent.getSessionFile();
 			if (!otherParentFile) throw new Error("Missing other parent session file");
-			const otherChild = makeChildSession(
+			const otherChild = await makeChildSession(
 				tempDir,
 				join(tempDir, "other-artifacts", "sub-44444444"),
 				otherParentFile,
 				1,
 				"other-worker",
 			);
-			await new RlmSpawnLedger(tempDir, otherDir).appendSpawn({
+			await createOwnerLedger(tempDir, otherDir).appendSpawn({
 				childId: "sub-44444444",
 				parent: otherParentFile,
 				child: otherChild.file,
@@ -1188,6 +1410,7 @@ describe("passive descendants in the saved catalog", () => {
 			mkdirSync(rlmLedgerPath(tempDir, otherDir), { recursive: true });
 			expect(await list(otherDir)).toEqual([otherParent.getSessionId()]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1197,14 +1420,25 @@ describe("rlm spawn ledger supervisor wiring", () => {
 	it("hydrates a ledger-seeded child's cwd before publishing the roster", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-cwd-"));
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
+			const { sessionsDir, parent, parentFile } = await makeRoots(tempDir);
 			const parentArtifactDir = parent.getSessionArtifactDir();
 			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				parentFile,
+				1,
+				"worker",
+			);
 			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
 				descriptorDir: join(tempDir, "workers"),
 			}) as unknown as SupervisorLedgerInternals;
+			supervisor.rlmSpawnLedgerInstance = createOwnerLedger(
+				tempDir,
+				sessionsDir,
+				createRlmLedgerRegistrySeedSource(),
+			);
 			Object.assign(supervisor.catalog, { list: vi.fn(async () => []) });
 			await supervisor.rlmSpawnLedger().appendSpawn({
 				childId: "sub-11111111",
@@ -1227,6 +1461,7 @@ describe("rlm spawn ledger supervisor wiring", () => {
 			expect(row?.summary.cwd).toBe(tempDir);
 			expect(row?.seededCwd).toBeUndefined();
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1235,17 +1470,34 @@ describe("rlm spawn ledger supervisor wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-stale-"));
 		let readSpy: ReturnType<typeof vi.spyOn> | undefined;
 		try {
-			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
+			const { sessionsDir, parent, parentFile } = await makeRoots(tempDir);
 			const parentArtifactDir = parent.getSessionArtifactDir();
 			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
-			const missing = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "missing");
-			const existing = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "existing");
+			const missing = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				parentFile,
+				1,
+				"missing",
+			);
+			const existing = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-22222222"),
+				parentFile,
+				1,
+				"existing",
+			);
 			const missingInfo = await sessionManagerModule.readSessionInfo(missing.file);
 			if (!missingInfo) throw new Error("Missing child session info");
 			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
 				descriptorDir: join(tempDir, "workers"),
 			}) as unknown as SupervisorLedgerInternals;
+			supervisor.rlmSpawnLedgerInstance = createOwnerLedger(
+				tempDir,
+				sessionsDir,
+				createRlmLedgerRegistrySeedSource(),
+			);
 			const ledger = supervisor.rlmSpawnLedger();
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
@@ -1313,6 +1565,7 @@ describe("rlm spawn ledger supervisor wiring", () => {
 			]);
 		} finally {
 			readSpy?.mockRestore();
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1321,19 +1574,29 @@ describe("rlm spawn ledger supervisor wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			const first = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "first");
-			const second = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "second");
+			const first = await makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "first");
+			const second = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-22222222"),
+				parentFile,
+				1,
+				"second",
+			);
 			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
 				descriptorDir: join(tempDir, "workers"),
 			}) as unknown as SupervisorLedgerInternals;
+			supervisor.rlmSpawnLedgerInstance = createOwnerLedger(
+				tempDir,
+				sessionsDir,
+				createRlmLedgerRegistrySeedSource(),
+			);
 			const ledger = supervisor.rlmSpawnLedger();
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
@@ -1361,6 +1624,7 @@ describe("rlm spawn ledger supervisor wiring", () => {
 				supervisor.assertSupervisorSavedSessionNameAvailable(first.file, "unclaimed"),
 			).resolves.toBeUndefined();
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -1369,18 +1633,30 @@ describe("rlm spawn ledger supervisor wiring", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-rename-"));
 		try {
 			const sessionsDir = join(tempDir, "sessions");
-			const parentManager = SessionManager.create(tempDir, sessionsDir);
-			parentManager.newSession();
-			parentManager.appendSessionInfo("parent");
-			parentManager.flushNow();
+			const parentManager = trackSession(await SessionManager.create(tempDir, sessionsDir));
+			await parentManager.appendSessionInfo("parent");
+			await parentManager.flushNow();
 			const parentFile = parentManager.getSessionFile();
 			const parentArtifactDir = parentManager.getSessionArtifactDir();
 			if (!parentFile || !parentArtifactDir) throw new Error("Missing parent session paths");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "old-name");
+			const child = await makeChildSession(
+				tempDir,
+				join(parentArtifactDir, "sub-11111111"),
+				parentFile,
+				1,
+				"old-name",
+			);
 			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
 				descriptorDir: join(tempDir, "workers"),
 			}) as unknown as SupervisorLedgerInternals;
+			const ownerLedger = createOwnerLedger(tempDir, sessionsDir, createRlmLedgerRegistrySeedSource());
+			const actor = {
+				ledgerPath: ownerLedger.ledgerPath,
+				mutate: vi.fn(ownerLedger.mutate.bind(ownerLedger)),
+			};
+			const ownership = { assertJournalCurrent: vi.fn() };
+			Object.assign(supervisor, { rlmJournalOwner: actor, ownership });
 			const rename = vi.fn(async () => {});
 			Object.assign(supervisor.catalog, { rename });
 			const ledger = supervisor.rlmSpawnLedger();
@@ -1397,8 +1673,10 @@ describe("rlm spawn ledger supervisor wiring", () => {
 				{ type: "rename_saved_session", sessionPath: child.file, name: "new-name" },
 			);
 			expect(rename).toHaveBeenCalledWith(child.file, "new-name");
+			expect(ownership.assertJournalCurrent).toHaveBeenCalledWith(ledger.ledgerPath);
 			await expect(ledger.edges()).resolves.toEqual([expect.objectContaining({ name: "new-name" })]);
 		} finally {
+			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
+import { registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.js";
+import * as providerContracts from "../src/core/provider-contracts.js";
 
 describe("AuthStorage", () => {
 	let tempDir: string;
@@ -15,6 +16,7 @@ describe("AuthStorage", () => {
 		tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		authJsonPath = join(tempDir, "auth.json");
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Provider calls are not allowed in these tests"));
 	});
 
 	afterEach(() => {
@@ -22,6 +24,8 @@ describe("AuthStorage", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		resetOAuthProviders();
 	});
 
 	function writeAuthJson(data: Record<string, unknown>) {
@@ -206,7 +210,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -264,7 +268,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -286,7 +290,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -350,7 +354,7 @@ describe("AuthStorage", () => {
 			expect(authStorage.getAuthStatus("prime-inference")).toEqual({
 				configured: false,
 				source: "prime_cli",
-				label: "Prime CLI",
+				label: "Base Context provider config",
 			});
 		});
 
@@ -472,35 +476,38 @@ describe("AuthStorage", () => {
 			expect(authStorage.getPrimeInferenceTeamSelection()).toBeNull();
 		});
 
-		test("prime inference environment team overrides legacy personal selection", () => {
-			const originalPrimeTeamId = process.env.PRIME_TEAM_ID;
-			process.env.PRIME_TEAM_ID = "env-team";
-			try {
-				const primeConfigPath = join(tempDir, "prime-config.json");
-				writeFileSync(primeConfigPath, JSON.stringify({ team_id: "cli-team" }));
-				writeAuthJson({
-					"prime-inference": {
-						type: "api_key",
-						key: "agent-key",
-						primeTeam: null,
-					},
-				});
+		test.each([true, false])(
+			"prime inference environment team overrides personal selection with config sync %s",
+			(syncConfig) => {
+				const originalPrimeTeamId = process.env.PRIME_TEAM_ID;
+				process.env.PRIME_TEAM_ID = "env-team";
+				try {
+					const primeConfigPath = join(tempDir, "prime-config.json");
+					writeFileSync(primeConfigPath, JSON.stringify({ team_id: "cli-team" }));
+					writeAuthJson({
+						"prime-inference": {
+							type: "api_key",
+							key: "agent-key",
+							primeTeam: null,
+						},
+					});
 
-				authStorage = AuthStorage.create(authJsonPath, {
-					primeCliConfigPath: primeConfigPath,
-					usePrimeCliConfig: true,
-				});
+					authStorage = AuthStorage.create(authJsonPath, {
+						primeCliConfigPath: syncConfig ? primeConfigPath : undefined,
+						usePrimeCliConfig: syncConfig,
+					});
 
-				expect(authStorage.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "env-team" });
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
-			} finally {
-				if (originalPrimeTeamId === undefined) {
-					delete process.env.PRIME_TEAM_ID;
-				} else {
-					process.env.PRIME_TEAM_ID = originalPrimeTeamId;
+					expect(authStorage.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "env-team" });
+					expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
+				} finally {
+					if (originalPrimeTeamId === undefined) {
+						delete process.env.PRIME_TEAM_ID;
+					} else {
+						process.env.PRIME_TEAM_ID = originalPrimeTeamId;
+					}
 				}
-			}
-		});
+			},
+		);
 
 		test("prime inference missing Agent team selection falls back to Prime CLI team", () => {
 			const primeConfigPath = join(tempDir, "prime-config.json");
@@ -901,9 +908,148 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	describe("OAuth distribution capability", () => {
+		test("registration does not enable login or stored-token use for unvalidated providers", async () => {
+			for (const name of [
+				"ANTHROPIC_OAUTH_TOKEN",
+				"ANTHROPIC_API_KEY",
+				"COPILOT_GITHUB_TOKEN",
+				"GH_TOKEN",
+				"GITHUB_TOKEN",
+			]) {
+				vi.stubEnv(name, "");
+			}
+			const login = vi.fn();
+			const refreshToken = vi.fn();
+			const getApiKey = vi.fn();
+			const callbacks = { onAuth: vi.fn(), onPrompt: vi.fn() };
+
+			for (const providerId of ["anthropic", "github-copilot", "openai-codex", "test-unvalidated-oauth"]) {
+				registerOAuthProvider({ id: providerId, name: providerId, login, refreshToken, getApiKey });
+				for (const expires of [Date.now() + 60_000, Date.now() - 60_000]) {
+					const credential = { type: "oauth" as const, access: "saved-access", refresh: "saved-refresh", expires };
+					authStorage = AuthStorage.inMemory({ [providerId]: credential });
+					expect(authStorage.getOAuthProviders()).toEqual([]);
+					expect(authStorage.hasAuth(providerId)).toBe(false);
+					expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: false });
+					expect(authStorage.getCurrentAuthSourceToken(providerId)).toBeUndefined();
+					expect(await authStorage.getApiKey(providerId)).toBeUndefined();
+					expect(await authStorage.getApiKeyWithSourceToken(providerId)).toEqual({});
+					await expect(authStorage.login(providerId, callbacks)).rejects.toThrow(
+						providerContracts.getProviderAuthContract(providerId).guidance,
+					);
+					expect(authStorage.getAll()).toEqual({ [providerId]: credential });
+				}
+			}
+
+			for (const fresh of [true, false]) {
+				const credential = {
+					type: "oauth",
+					access: "host-access-dummy",
+					expires: Date.now() + (fresh ? 60_000 : -60_000),
+				};
+				const current = JSON.stringify({ "openai-codex": credential });
+				const backend: AuthStorageBackend = {
+					withLock(fn) {
+						const { result, next } = fn(current);
+						expect(next).toBeUndefined();
+						return result;
+					},
+					withLockAsync: vi.fn(async () => {
+						throw new Error("Borrowed host storage must not use async callbacks");
+					}),
+				};
+				authStorage = AuthStorage.fromStorage(backend, {
+					existingOpenAICodexSubscription: true,
+					usePrimeCliConfig: false,
+				});
+				const isolated = AuthStorage.fromStorage(backend, { usePrimeCliConfig: false });
+				expect(await isolated.getApiKey("openai-codex")).toBeUndefined();
+				expect(providerContracts.getProviderAuthContract("openai-codex").oauth).toBe("unvalidated");
+				expect(authStorage.getOAuthProviders()).toEqual([]);
+				await expect(authStorage.login("openai-codex", callbacks)).rejects.toThrow(
+					"Existing OpenAI subscription storage is read-only",
+				);
+				if (fresh) {
+					expect(authStorage.hasAuth("openai-codex")).toBe(true);
+					expect(authStorage.getAuthStatus("openai-codex")).toEqual({ configured: true, source: "stored" });
+					expect(await authStorage.getApiKey("openai-codex")).toBe(credential.access);
+				} else {
+					await expect(authStorage.getApiKey("openai-codex")).rejects.toThrow(
+						"Existing OpenAI subscription credential has expired",
+					);
+				}
+				expect(() => authStorage.set("openai-codex", { type: "api_key", key: "dummy" })).toThrow("read-only");
+				expect(() => authStorage.remove("openai-codex")).toThrow("read-only");
+				expect(() => authStorage.removeVerified("openai-codex")).toThrow("read-only");
+				expect(authStorage.getAll()).toEqual({ "openai-codex": credential });
+				expect(backend.withLockAsync).not.toHaveBeenCalled();
+			}
+			expect(login).not.toHaveBeenCalled();
+			expect(refreshToken).not.toHaveBeenCalled();
+			expect(getApiKey).not.toHaveBeenCalled();
+			expect(callbacks.onAuth).not.toHaveBeenCalled();
+			expect(callbacks.onPrompt).not.toHaveBeenCalled();
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		});
+
+		test("subscription tokens cannot bypass capability checks through API-key sources", async () => {
+			vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-unavailable");
+			vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-oat01-unavailable");
+			vi.stubEnv("COPILOT_GITHUB_TOKEN", "unvalidated-copilot-token");
+			for (const providerId of ["anthropic", "github-copilot", "openai-codex"]) {
+				const token = providerId === "anthropic" ? "sk-ant-oat01-unavailable" : "unvalidated-subscription-token";
+				authStorage = AuthStorage.inMemory({ [providerId]: { type: "api_key", key: token } });
+				authStorage.setRuntimeApiKey(providerId, token);
+				authStorage.setFallbackResolver(() => token);
+				expect(authStorage.hasAuth(providerId)).toBe(false);
+				expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: false });
+				expect(await authStorage.getApiKeyWithSourceToken(providerId)).toEqual({});
+				expect(authStorage.get(providerId)).toEqual({ type: "api_key", key: token });
+			}
+
+			// Resolve command output at request time, not by running commands for status checks.
+			vi.stubEnv("ANTHROPIC_API_KEY", "ordinary-api-key");
+			const tokenPath = join(tempDir, "command-output");
+			writeFileSync(tokenPath, "sk-ant-oat01-unavailable");
+			authStorage = AuthStorage.inMemory({ anthropic: { type: "api_key", key: `!cat "${toShPath(tokenPath)}"` } });
+			expect(await authStorage.getApiKey("anthropic")).toBe("ordinary-api-key");
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		});
+
+		test("unavailable stored OAuth leaves ordinary API-key fallbacks usable", async () => {
+			vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-unavailable");
+			vi.stubEnv("ANTHROPIC_API_KEY", "environment-api-key");
+			const credential = { type: "oauth" as const, access: "saved-access", refresh: "saved-refresh", expires: 0 };
+			authStorage = AuthStorage.inMemory({ anthropic: credential });
+			expect(authStorage.hasAuth("anthropic")).toBe(true);
+			expect(authStorage.getAuthStatus("anthropic")).toEqual({
+				configured: false,
+				source: "environment",
+				label: "ANTHROPIC_API_KEY",
+			});
+			expect(await authStorage.getApiKey("anthropic")).toBe("environment-api-key");
+			authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
+			expect(await authStorage.getApiKey("anthropic")).toBe("runtime-api-key");
+			authStorage.removeRuntimeApiKey("anthropic");
+			vi.stubEnv("ANTHROPIC_API_KEY", "");
+			authStorage.setFallbackResolver(() => "fallback-api-key");
+			expect(await authStorage.getApiKey("anthropic")).toBe("fallback-api-key");
+			expect(authStorage.get("anthropic")).toEqual(credential);
+			authStorage.set("anthropic", { type: "api_key", key: "stored-api-key" });
+			expect(await authStorage.getApiKey("anthropic")).toBe("stored-api-key");
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		});
+	});
+
 	describe("oauth lock compromise handling", () => {
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			vi.spyOn(providerContracts, "getProviderAuthContract").mockReturnValue({
+				providerId,
+				oauth: "validated",
+				guidance: "Test-only validated OAuth contract",
+			});
 			registerOAuthProvider({
 				id: providerId,
 				name: "Test OAuth Provider",
@@ -1061,7 +1207,7 @@ describe("AuthStorage", () => {
 		test("does not expose stored API keys or OAuth tokens", () => {
 			authStorage = AuthStorage.inMemory({
 				anthropic: { type: "api_key", key: "secret-api-key" },
-				openai: {
+				"test-unvalidated-oauth": {
 					type: "oauth",
 					access: "secret-access-token",
 					refresh: "secret-refresh-token",
@@ -1070,10 +1216,14 @@ describe("AuthStorage", () => {
 			});
 
 			expect(authStorage.getAuthStatus("anthropic")).toEqual({ configured: true, source: "stored" });
-			expect(authStorage.getAuthStatus("openai")).toEqual({ configured: true, source: "stored" });
+			expect(authStorage.getAuthStatus("test-unvalidated-oauth")).toEqual({ configured: false });
 			expect(JSON.stringify(authStorage.getAuthStatus("anthropic"))).not.toContain("secret-api-key");
-			expect(JSON.stringify(authStorage.getAuthStatus("openai"))).not.toContain("secret-access-token");
-			expect(JSON.stringify(authStorage.getAuthStatus("openai"))).not.toContain("secret-refresh-token");
+			expect(JSON.stringify(authStorage.getAuthStatus("test-unvalidated-oauth"))).not.toContain(
+				"secret-access-token",
+			);
+			expect(JSON.stringify(authStorage.getAuthStatus("test-unvalidated-oauth"))).not.toContain(
+				"secret-refresh-token",
+			);
 		});
 	});
 

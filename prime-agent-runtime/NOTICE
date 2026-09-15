@@ -1,0 +1,12 @@
+Base Context is a source-owned fork of Prime Agent v0.9.3.
+Repository: https://github.com/BaseModelAI/base-context
+Fork ancestor: 915c78f42c248b08238dd27fcd4bcab32c60beab
+
+Upstream: https://github.com/PrimeIntellect-ai/prime-agent
+Copyright (c) 2025 Mario Zechner
+Copyright (c) 2026 Prime Intellect
+Fork modifications: Copyright (c) 2026 BaseModelAI and Jacek Dąbrowski
+
+Distributed under the MIT License. See LICENSE.
+Provider names and model identifiers identify their respective providers;
+this fork is not an official Prime Intellect release.

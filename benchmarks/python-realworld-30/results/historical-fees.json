@@ -1,0 +1,135 @@
+{
+  "scope": "Historical fees only; excluded from all 180-cell / 208-effective-attempt metrics.",
+  "superseded_task15_27": [
+    {
+      "model": "sol",
+      "harness": "current",
+      "attempts": 2,
+      "whole_cost_usd": null,
+      "known_subtotals": [
+        {
+          "profile_id": "openai-standard-sol-2026-09-11",
+          "basis": "openai-standard-api-equivalent",
+          "known_subtotal": 2.7804656000000003,
+          "observations": 66,
+          "unpriced_observations": 1
+        }
+      ]
+    },
+    {
+      "model": "sol",
+      "harness": "vanilla",
+      "attempts": 3,
+      "whole_cost_usd": 1.9424751999999998,
+      "known_subtotals": [
+        {
+          "profile_id": "openai-standard-sol-2026-09-11",
+          "basis": "openai-standard-api-equivalent",
+          "known_subtotal": 1.9424752,
+          "observations": 57,
+          "unpriced_observations": 0
+        }
+      ]
+    },
+    {
+      "model": "astra",
+      "harness": "current",
+      "attempts": 2,
+      "whole_cost_usd": 2.017484,
+      "known_subtotals": [
+        {
+          "profile_id": "openai-standard-astra-2026-09-11",
+          "basis": "openai-standard-api-equivalent",
+          "known_subtotal": 2.017484,
+          "observations": 43,
+          "unpriced_observations": 0
+        }
+      ]
+    },
+    {
+      "model": "astra",
+      "harness": "vanilla",
+      "attempts": 3,
+      "whole_cost_usd": null,
+      "known_subtotals": [
+        {
+          "profile_id": "openai-standard-astra-2026-09-11",
+          "basis": "openai-standard-api-equivalent",
+          "known_subtotal": 3.0164619999999998,
+          "observations": 50,
+          "unpriced_observations": 1
+        }
+      ]
+    },
+    {
+      "model": "deepseek",
+      "harness": "current",
+      "attempts": 3,
+      "whole_cost_usd": 0.329103972,
+      "known_subtotals": [
+        {
+          "profile_id": "deepseek-flash-peak-2026-09-11",
+          "basis": "deepseek-peak-normalized-api",
+          "known_subtotal": 0.32910397200000013,
+          "observations": 96,
+          "unpriced_observations": 0
+        }
+      ]
+    },
+    {
+      "model": "deepseek",
+      "harness": "vanilla",
+      "attempts": 3,
+      "whole_cost_usd": null,
+      "known_subtotals": [
+        {
+          "profile_id": "deepseek-flash-peak-2026-09-11",
+          "basis": "deepseek-peak-normalized-api",
+          "known_subtotal": 0.8302895040000001,
+          "observations": 227,
+          "unpriced_observations": 1
+        }
+      ]
+    }
+  ],
+  "discarded_original_deepseek": [
+    {
+      "model": "deepseek",
+      "harness": "current",
+      "primaries": 30,
+      "retries": 6,
+      "attempts": 36,
+      "whole_cost_complete_attempts": 29,
+      "whole_cost_usd": null,
+      "known_subtotals": [
+        {
+          "profile_id": "deepseek-flash-peak-2026-09-11",
+          "basis": "deepseek-peak-normalized-api",
+          "known_subtotal": 2.90553624,
+          "observations": 1154,
+          "unpriced_observations": 5,
+          "missing_subtotal_entries": 3
+        }
+      ]
+    },
+    {
+      "model": "deepseek",
+      "harness": "vanilla",
+      "primaries": 30,
+      "retries": 4,
+      "attempts": 34,
+      "whole_cost_complete_attempts": 23,
+      "whole_cost_usd": null,
+      "known_subtotals": [
+        {
+          "profile_id": "deepseek-flash-peak-2026-09-11",
+          "basis": "deepseek-peak-normalized-api",
+          "known_subtotal": 3.346489992,
+          "observations": 1326,
+          "unpriced_observations": 13,
+          "missing_subtotal_entries": 3
+        }
+      ]
+    }
+  ]
+}

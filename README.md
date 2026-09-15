@@ -1,125 +1,165 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/40c36e38-c5bd-4c5a-9cb3-f7b902cd155d">
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8">
-      <img alt="Prime Intellect" src="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8" width="312" style="max-width: 100%;">
-    </picture>
-  </a>
-</p>
+# Synerise base-context
 
-<h3 align="center">
-Prime Agent: A Self-Improving RLM Harness
-</h3>
+**Keep the work. Focus the context.**
 
-<p align="center">
-  <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
-</p>
+An open-source coding and research agent for work that outgrows a chat window.
+Base Context combines a persistent Python workspace, recursive agents, and a source-backed context engine. It keeps retained history separate from the working set sent to the model, so long tasks can carry forward selected evidence without replaying every previous output.
 
-<p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
-  </a>
-  <a href="https://arxiv.org/abs/2608.23552">
-    <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
-  </a>
-</p>
+Built by [Synerise](https://synerise.com), forked from [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), and released under MIT.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/104249?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-104249" target="_blank" rel="noopener noreferrer">
-    <img src="https://trendshift.io/api/badge/repositories/104249" alt="PrimeIntellect-ai%2Fprime-agent | Trendshift" width="250" height="55" />
-  </a>
-</p>
+[Get started](packages/coding-agent/docs/quickstart.md) · [Documentation](packages/coding-agent/docs/index.md) · [Why this fork](packages/coding-agent/docs/fork-philosophy.md) · [Benchmark report](benchmarks/python-realworld-30/REPORT.md)
 
-Prime Agent is an open-source coding and research agent for general and long-running work. It is designed around two core abstractions:
+[![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](benchmarks/python-realworld-30/REPORT.md)
 
-- The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
-- The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
+*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of release 1.0.0. “Clean” adds runtime requirements to task correctness. [Methodology and full results](benchmarks/python-realworld-30/REPORT.md).*
 
-Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
+## Why Base Context?
 
-- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
-- **Subagents are built in:** `rlm(...)` spawns real child agents for parallel or background work and returns their results programmatically.
-- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
-- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
-- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
-- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
+**A capable agent is a great start. Keeping a long job coherent is the next challenge.** A task can span dozens of files, tool outputs, decisions, and interruptions. The useful question is not just “how much can the model read?” It is “can it find the right evidence and keep working?”
 
-## Getting Started
+Base Context is built to help you:
 
-Install the latest stable release on macOS or Linux:
+- **Keep the thread of a long task.** Carry selected goals, constraints, and open work explicitly, rather than leave them buried in a transcript.
+- **Check the evidence, not just a recollection.** Recover selected original public text from retained history when a summary is not enough.
+- **Use context for the work at hand.** Bring a focused working set to the model while keeping required related messages together.
+- **Keep moving after a temporary failure.** Recover recognized transient provider errors within the same invocation, without replaying completed tools, when the remaining limits allow it.
+
+That is the bet: **less repeated detective work, more continuity, and a clearer link between what the agent says and the evidence it can recover.** The benchmark below measures one harness-level outcome; it does not prove that each mechanism independently caused the gain.
+
+## Install
+
+Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+npm install -g @ponythewhite/base-context
+cd /path/to/your/project
+base-context
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the Python runtime used by the agent.
+In the terminal UI, run `/login` to configure an authorized provider, then `/model` to choose a model. For API-key routes, you can instead set the provider's environment variable before launch. See [provider setup](packages/coding-agent/docs/providers.md).
 
-Start Prime Agent from the repository or directory you want it to work in:
+The Python workspace uses `uv`. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; the default runtime prepares Python 3.11 and the bundled `base-context-runtime` on first use. Initial setup can download dependencies. The Python import is `rlm`.
+
+### Build from source
 
 ```bash
-cd /path/to/project
-prime-agent
+git clone https://github.com/BaseModelAI/base-context.git
+cd base-context
+npm ci
+npm run build:source
+node packages/coding-agent/dist/bundle/cli.js
 ```
 
-On first launch, run `/login` to choose a subscription or API-key provider. Prime Agent works in the current directory and can run commands and modify files there. Use a disposable clone, clean worktree, or another checkpoint you can inspect and restore.
+To work in another repository, change to that directory and invoke the built CLI by its absolute path. See [installation, updates, and rollback](packages/coding-agent/docs/installation.md) for source, npm, and owned-installer routes. Prime Agent installers install Prime Agent, not Base Context.
 
-> [!WARNING]
-> Prime Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, skills, and extensions only. Run untrusted code or instructions in an external sandbox or restricted environment.
+## Start useful work
 
-Useful commands:
+Ask for a concrete outcome:
 
-```bash
-prime-agent agents                   # Browse running, idle, and saved sessions
-prime-agent attach <agent>           # Reattach to a running session
-prime-agent --resume [path|id]       # Browse sessions or resume one directly
-prime-agent status                   # Inspect background service state
-prime-agent doctor [--fix]           # Inspect or repair background services
-prime-agent update [--force]         # Update Prime Agent
-prime-agent shutdown [--force]       # Stop every agent, worker, and background service
+```text
+Find the cause of the failing parser test, make the smallest fix, and explain what changed.
 ```
 
-## Built for Long-Running Work
-Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
+For a larger task:
 
-- **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications, with recorded refinement history. It does not replace packaging and reviewing new executable skills.
-- **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
-- **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `prime-agent schedule` can re-enter a session periodically or at a specific time.
-- **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
-- **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
+```text
+Delegate the API review to a subagent. Work on the independent documentation change while it runs. Read its reply before integrating the findings.
+```
+
+Base Context gives the agent a persistent Python REPL for files, commands, analysis, skills, and delegation. `await rlm(...)` returns a **child admission handle**, not the child's answer. Children report through explicit agent messages or files. Independent work can continue while they run.
+
+Add project instructions in `AGENTS.md`. Use `/settings` for common preferences and `.base-context/settings.json` for project configuration.
+
+| Command | Use |
+| --- | --- |
+| `/model`, `/effort` | Choose a configured model and reasoning level |
+| `/usage`, `/context` | Inspect context, token usage, and reported costs |
+| `/compact`, `/refine` | Summarize context or refine durable harness state |
+| `base-context agents` | List agents; add `--all` to include saved agents |
+| `base-context attach <agent>` | Reattach to an agent |
+| `base-context --resume [path\|id]` | Browse or resume saved work |
+| `base-context status` | Inspect background services |
+| `base-context doctor [--fix]` | Inspect or repair background services |
+| `base-context shutdown [--force]` | Stop agents and background services |
+
+[Full CLI and interactive reference](packages/coding-agent/docs/usage.md) · [Goals, schedules, and background work](packages/coding-agent/docs/long-running-agents.md)
+
+## One coding-harness study: fewer retries, less cumulative attempt time
+
+In a frozen study of **30 Python tasks × 3 models × 2 agents**, Base Context completed **90/90 terminal tasks under the strict validator**, compared with **87/90** for stock Prime Agent. The study includes **180 task/model/agent cells and 208 attempts**.
+
+![Runtime-clean strict finishes for all three models: Sol 30/30 versus 18/30; Astra 30/30 versus 19/30; DeepSeek 29/30 versus 27/30. Base Context is first in each pair; all chart scales run from zero to thirty.](packages/coding-agent/docs/images/benchmarks/benchmark-models.png)
+
+| Measure | Base Context | Prime Agent |
+| --- | ---: | ---: |
+| Strict passes before the deferred retry | 89/90 | 87/90 |
+| Terminal strict passes | 90/90 | 87/90 |
+| Terminal strict passes with a clean runtime | 89/90 | 64/90 |
+| Additional task attempts | 2 | 26 |
+| Cumulative lifecycle time, all attempts | 26,263.13 s | 34,627.66 s |
+| All-attempt seconds per terminal strict pass | 291.81 s | 398.02 s |
+
+That is **24.16% less cumulative attempt time**, or **26.68% less all-attempt time per strict pass**, in this study. These are sums of attempt lifecycle durations, **not campaign wall time, user-perceived latency, or CPU time**. Runtime-clean is a separate reliability measure: it includes compaction failures and must not be read as task correctness alone.
+
+This is one SDK-level coding harness with a shared Bash tool, not a native Python/RLM workflow evaluation or a general product-performance claim. It used logical `medium` effort and a fixed single-deferred-retry policy. The historical Base Context package was `0.1.0`, using source revision `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Release `1.0.0` builds on the latter source line; it is not a newly measured artifact. There are **16 attempts with unknown cost**. Reported prices are API-equivalent estimates, not cash charges; complete fees and a whole-campaign cost advantage are unknown.
+
+See the [methodology and results](benchmarks/python-realworld-30/REPORT.md), [all 180 cells](benchmarks/python-realworld-30/results/cells.md), and [reproduction guide](benchmarks/python-realworld-30/REPRODUCE.md).
+
+## Prime Agent was already awesome. Why fork it?
+
+**Prime Agent gave us an excellent foundation:** a persistent Python workspace, recursive agents, executable skills, and the machinery for long-running work. We keep that programming model. This fork is not an attempt to claim those ideas as ours.
+
+Our different bet is **how to manage the context around that work**. A longer transcript costs space and can bury the important parts. A shorter summary saves space but can lose the detail you need next. We wanted an explicit way to retain evidence, select a useful working view, and recover earlier details on demand.
+
+Think of retained history as a **project notebook**, and the model's context as your **desk**. You do not need every notebook page on the desk at once. You do need the current task, the relevant evidence, and a way to fetch an earlier page. That is a design analogy—not a promise that all information is retained forever or that summaries are lossless.
+
+![Base Context architecture: retain source history, select and recover a task-aware working set, then send the supported model request. Stable epochs preserve accepted context choices.](packages/coding-agent/docs/images/benchmarks/context-working-set.png)
+
+### How the design delivers
+
+| The problem | Our design choice | The practical reason |
+| --- | --- | --- |
+| Important details compete with old output for context. | Separate retained history from the model's working view; add indexed retrieval. | Focus the prompt, then fetch retained public evidence when it is needed. |
+| Goals and constraints get buried in conversation. | Carry selected task state in a **TaskFrame**. | Keep the task explicit instead of relying only on a narrative recap. |
+| A tool's answer can be separated from the call that explains it. | Keep required exchanges together with dependency-aware **ViewUnits**. | Preserve the relationships needed to interpret the evidence. |
+| Context choices can shift as a long run continues. | Commit stable **context epochs**. | Keep accepted choices steady across requests and restoration. |
+| A prompt-size limit can miss the provider's full request. | Offer **opt-in model/provider-aware SDK admission**. | Check supported requests, including output allowances, under explicit profiles; refuse when the required contract cannot fit. |
+| A temporary provider error interrupts useful work. | Use bounded recovery inside the same invocation. | Retry recognized transient failures without replaying completed tools. |
+
+Task state is selected recorded evidence, not automatically current truth. Budget estimates are conservative, not exact tokenizer counts; unsupported profiles do not gain a budget guarantee. Stable epochs do not guarantee provider cache hits.
+
+These choices favor **recoverable evidence and controlled working sets**, even when that requires more structure or refusing a request that cannot meet its configured contract. They describe this fork's emphasis—not a claim that every capability is absent from every upstream version.
+
+The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Remote telemetry and trace sharing are off by default and require explicit configuration.
+
+There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](packages/coding-agent/docs/context-management.md) and [fork philosophy](packages/coding-agent/docs/fork-philosophy.md) for the contracts and limits.
 
 ## Documentation
 
-- [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
-- [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
-- [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
-- [RLM programming model](packages/coding-agent/docs/rlm.md) — the persistent Python REPL, subagents, skills, and the trust model
-- [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
-- [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
-- [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers
-- [Architecture overview](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
-- [Development](packages/coding-agent/docs/development.md) — build and run from source
+- [Quickstart](packages/coding-agent/docs/quickstart.md) and [installation](packages/coding-agent/docs/installation.md)
+- [Usage and CLI](packages/coding-agent/docs/usage.md), [settings](packages/coding-agent/docs/settings.md), and [providers](packages/coding-agent/docs/providers.md)
+- [Context management](packages/coding-agent/docs/context-management.md), [compaction](packages/coding-agent/docs/compaction.md), and [sessions](packages/coding-agent/docs/sessions.md)
+- [RLM programming](packages/coding-agent/docs/rlm.md), [skills](packages/coding-agent/docs/skills.md), and [MCP integrations](packages/coding-agent/docs/mcp-integrations.md)
+- [SDK](packages/coding-agent/docs/sdk.md), [JSON](packages/coding-agent/docs/json.md), [RPC](packages/coding-agent/docs/rpc.md), and [ACP](packages/coding-agent/docs/acp.md)
+- [Architecture](packages/coding-agent/docs/architecture.md) and [development](packages/coding-agent/docs/development.md)
+
+## Trust and data
+
+Base Context executes model-generated Python and project commands with your user permissions. Workers and kernels separate process lifecycles; **they are not a security sandbox**. Use an external sandbox for untrusted code, repositories, or instructions. Review skills and extensions before loading them.
+
+Retained sessions and artifacts can contain sensitive information. Compaction is not deletion or secret removal. Do not copy upstream credential stores. To import history, use the explicit [offline Prime export workflow](packages/coding-agent/docs/sessions.md#importing-an-offline-prime-root).
 
 ## Contributing
 
-Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues through [SECURITY.md](SECURITY.md), not in public transcripts or issues.
 
-Read the [contribution guidelines](CONTRIBUTING.md) for the full process. Report security vulnerabilities privately by following the [security policy](SECURITY.md).
+## Credits and license
 
-## Acknowledgements
+Base Context is an MIT-licensed fork of **[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent)** by **[Prime Intellect](https://www.primeintellect.ai/)**. Its lineage includes **Mario Zechner's [Pi / pi-mono](https://github.com/badlogic/pi-mono)** agent and terminal UI work. We preserve upstream credits and license notices.
 
-Our agent and TUI is built on top of [`pi`](https://github.com/earendil-works/pi). We thank the authors of `pi` for their valuable work.
+We also acknowledge Prime Intellect's **[PrimeRL](https://github.com/PrimeIntellect-ai/prime-rl)** project and its contribution to open reinforcement-learning infrastructure. PrimeRL is a separate project, not a direct dependency of this CLI.
 
-## License
-
-Prime Agent is fully open source and released under the [MIT License](LICENSE).
+See [LICENSE](LICENSE).
 
 ## Citation
 

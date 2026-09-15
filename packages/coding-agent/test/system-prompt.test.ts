@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { buildRlmPrompt } from "../src/core/prompts/index.js";
 import type { HarnessState } from "../src/core/refinement/index.js";
-import type { Skill } from "../src/core/skills.js";
+import { SKILL_CATALOG_MAX_BYTES, SKILL_CATALOG_MAX_ITEMS, type Skill } from "../src/core/skills.js";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 import { createIpythonToolDefinition } from "../src/core/tools/ipython.js";
 
@@ -207,7 +207,7 @@ describe("buildRlmPrompt", () => {
 });
 
 describe("buildSystemPrompt", () => {
-	test("adds generic MCP guidance to default and custom IPython prompts", () => {
+	test("adds shared implementation policy and generic MCP guidance to default and custom prompts", () => {
 		for (const customPrompt of [undefined, "custom body"]) {
 			const prompt = buildSystemPrompt({
 				customPrompt,
@@ -218,6 +218,30 @@ describe("buildSystemPrompt", () => {
 				genericMcpServers: ["zebra", "filesystem"],
 			});
 
+			expect(prompt.match(/## Absolute Prohibition: No Verification Theater \/ Proof Boilerplate/g)).toHaveLength(1);
+			expect(prompt).toContain(
+				"You are FORBIDDEN from inventing, adding, or expanding any of the following unless the user explicitly requests them in the current message:",
+			);
+			expect(prompt).toContain(
+				"**Build the actual thing first.**  \nYour job is to ship working, minimal, readable code that solves the stated problem.  ",
+			);
+			expect(prompt).toContain("5. When in doubt: less is more. KISS is mandatory.");
+			expect(prompt.match(/## Implementation scope/g)).toHaveLength(1);
+			expect(prompt).toContain(
+				[
+					"## Implementation scope",
+					"",
+					"Implement the full stated input domain and required outputs, not only the cases present in the supplied data. Do not invent additional input formats or compatibility branches beyond that contract.",
+					"Preserve earlier requirements unless later instructions replace them. Apply stated eligibility, priorities, and decision order literally, even when a different policy seems simpler or more sensible; reevaluate later decisions when earlier actions change their inputs.",
+					"The required commands must implement the stated workflow from its stated starting state, without development-only state or extra steps.",
+					"During tool-based inspection of large datasets, request schemas or small samples. Process full inputs in local code instead of printing entire datasets into the conversation.",
+					"Do not repeat a successful check without a concrete reason, such as changed input, an edit, or an observed failure.",
+					"Choose algorithms whose time and memory costs fit the stated input limits.",
+					"For constrained search, prune known-impossible partial states before expanding them; do not postpone all feasibility checks until completed candidates.",
+					"Choose numeric representations and arithmetic precision for the stated domain, not sample values or library defaults. Follow supplied formulas and operation order; use exact arithmetic for discrete decisions instead of rounded intermediates. Preserve each output field’s units, precision, rounding and required text format.",
+				].join("\n"),
+			);
+			if (customPrompt) expect(prompt.startsWith(`${customPrompt}\n\n## Absolute Prohibition:`)).toBe(true);
 			expect(prompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(prompt).toContain('await mcp.list_tools("filesystem")');
 			expect(prompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
@@ -232,6 +256,7 @@ describe("buildSystemPrompt", () => {
 			genericMcpServers: ["filesystem"],
 		});
 		expect(shellPrompt).not.toContain("Generic MCP Connections");
+		expect(shellPrompt).toContain("## Absolute Prohibition: No Verification Theater / Proof Boilerplate");
 	});
 
 	test("injects compact global harness context and refine guidance by default", () => {
@@ -332,7 +357,7 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("# Continual Harness State");
-		expect(prompt).toContain("Local continual harness entries belong to this Prime Agent session");
+		expect(prompt).toContain("Local continual harness entries belong to this Base Context session");
 		expect(prompt).toContain("The continual harness entries below are compact summaries, not full descriptions");
 		expect(prompt).toContain("Use global continual harness refinement only for stable cross-session lessons");
 		expect(prompt).toContain("When to call `await refine.run()`");
@@ -562,6 +587,12 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("custom body");
+		expect(prompt.match(/## Absolute Prohibition: No Verification Theater \/ Proof Boilerplate/g)).toHaveLength(1);
+		expect(prompt.indexOf("## Absolute Prohibition:")).toBeGreaterThan(prompt.indexOf("custom body"));
+		expect(prompt.indexOf("## Absolute Prohibition:")).toBeLessThan(prompt.indexOf("custom append"));
+		expect(prompt).toContain(
+			"Violation of this rule is considered a failure. Re-plan and ship the real feature instead.",
+		);
 		expect(prompt).toContain("# Continual Harness State");
 		expect(prompt).toContain("[global:custom_memory] Custom memory (custom, v1)");
 		expect(prompt).not.toContain("# IPython Kernel Guidance");
@@ -633,10 +664,16 @@ describe("buildSystemPrompt", () => {
 	});
 
 	test("markdown skills are included in rlm harness prompts without Python pre-imports", () => {
+		const selectedSkills = [
+			skill("websearch"),
+			...Array.from({ length: SKILL_CATALOG_MAX_ITEMS - 1 }, (_, index) => skill(`selected-${index}`)),
+		];
+		const oversizedDescription = "é&".repeat(SKILL_CATALOG_MAX_BYTES / 4);
+		const disabled = { ...skill("disabled"), description: oversizedDescription, disableModelInvocation: true };
 		const prompt = buildSystemPrompt({
 			selectedTools: ["ipython"],
 			contextFiles: [],
-			skills: [skill("websearch")],
+			skills: [...selectedSkills, disabled],
 			cwd: "/repo",
 		});
 
@@ -645,6 +682,26 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("<name>websearch</name>");
 		expect(prompt).toContain("<type>markdown</type>");
 		expect(prompt).toContain("<location>/skills/websearch/SKILL.md</location>");
+		expect(prompt.match(/ {2}<skill>/g)).toHaveLength(SKILL_CATALOG_MAX_ITEMS);
+		expect(prompt).not.toContain("<name>disabled</name>");
+
+		const tooMany = [...selectedSkills, skill("one-too-many")];
+		expect(() => buildSystemPrompt({ cwd: "/repo", selectedTools: ["ipython"], skills: tooMany })).toThrow(
+			"Skill catalog item limit exceeded",
+		);
+		// The raw field fits; its UTF-8 XML-escaped form does not.
+		expect(Buffer.byteLength(oversizedDescription)).toBeLessThan(SKILL_CATALOG_MAX_BYTES);
+		expect(() =>
+			buildSystemPrompt({
+				cwd: "/repo",
+				selectedTools: ["bash"],
+				customPrompt: "custom body",
+				skills: [{ ...skill("oversized"), description: oversizedDescription }],
+			}),
+		).toThrow("Skill catalog byte limit exceeded");
+		expect(buildSystemPrompt({ cwd: "/repo", selectedTools: [], skills: tooMany })).not.toContain(
+			"<available_skills>",
+		);
 	});
 
 	test("Python skills are configured for IPython and included in skill metadata", () => {

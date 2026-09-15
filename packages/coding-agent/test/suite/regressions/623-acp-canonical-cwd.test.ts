@@ -4,7 +4,7 @@ import { join } from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
-import { PRIME_AGENT_META_NAMESPACE } from "../../../src/modes/acp/acp-meta.js";
+import { BASE_CONTEXT_META_NAMESPACE } from "../../../src/modes/acp/acp-meta.js";
 import { runAcpModeWithConnection } from "../../../src/modes/acp/index.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
 import { createHarness, type Harness } from "../harness.js";
@@ -31,7 +31,7 @@ async function newAcpSession(harness: Harness, cwd: string) {
 }
 
 function cwdMeta(created: { _meta?: Record<string, unknown> | null }): unknown {
-	return (created._meta?.[PRIME_AGENT_META_NAMESPACE] as { cwd?: unknown } | undefined)?.cwd;
+	return (created._meta?.[BASE_CONTEXT_META_NAMESPACE] as { cwd?: unknown } | undefined)?.cwd;
 }
 
 function findExistingCaseVariant(path: string): string | undefined {
@@ -62,12 +62,12 @@ const caseVariantCwd = findExistingCaseVariant(process.cwd());
 const harnesses: Harness[] = [];
 const directories: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	for (const directory of directories.splice(0)) {
 		rmSync(directory, { recursive: true, force: true });
 	}
 	for (const harness of harnesses.splice(0)) {
-		harness.cleanup();
+		await harness.cleanup();
 	}
 });
 

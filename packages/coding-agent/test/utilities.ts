@@ -5,9 +5,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@earendil-works/pi-ai";
-import { getOAuthApiKey } from "@earendil-works/pi-ai/oauth";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { getModel, type OAuthCredentials, type OAuthProvider } from "@ponythewhite/base-context-ai";
+import { getOAuthApiKey } from "@ponythewhite/base-context-ai/oauth";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createEventBus } from "../src/core/event-bus.js";
@@ -115,7 +115,7 @@ export function hasAuthForProvider(provider: string): boolean {
 }
 
 /** Path to the real pi agent config directory */
-export const PI_AGENT_DIR = join(homedir(), ".pi", "agent");
+export const BASE_CONTEXT_AGENT_DIR = join(homedir(), ".pi", "agent");
 
 /**
  * Get an AuthStorage instance backed by ~/.pi/agent/auth.json
@@ -174,7 +174,7 @@ export interface TestSessionContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 export interface CreateTestExtensionsResultInput {
@@ -233,7 +233,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
  * Create an AgentSession for testing with proper setup and cleanup.
  * Use this for e2e tests that need real LLM calls.
  */
-export function createTestSession(options: TestSessionOptions = {}): TestSessionContext {
+export async function createTestSession(options: TestSessionOptions = {}): Promise<TestSessionContext> {
 	const tempDir = join(tmpdir(), `pi-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
@@ -247,7 +247,9 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		},
 	});
 
-	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir);
+	const sessionManager = options.inMemory
+		? SessionManager.inMemory()
+		: await SessionManager.create(tempDir, join(tempDir, "sessions"));
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 
 	if (options.settingsOverrides) {
@@ -266,11 +268,11 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		resourceLoader: createTestResourceLoader(),
 	});
 
-	// Must subscribe to enable session persistence
+	await session.initialize();
 	session.subscribe(() => {});
 
-	const cleanup = () => {
-		session.dispose();
+	const cleanup = async () => {
+		await session.disposeAsync();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
@@ -290,12 +292,12 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
  * u4 -> a4              (another root)
  * ```
  */
-export function buildTestTree(
+export async function buildTestTree(
 	session: SessionManager,
 	structure: {
 		messages: Array<{ role: "user" | "assistant"; text: string; branchFrom?: string }>;
 	},
-): Map<string, string> {
+): Promise<Map<string, string>> {
 	const ids = new Map<string, string>();
 
 	for (const msg of structure.messages) {
@@ -308,7 +310,9 @@ export function buildTestTree(
 		}
 
 		const id =
-			msg.role === "user" ? session.appendMessage(userMsg(msg.text)) : session.appendMessage(assistantMsg(msg.text));
+			msg.role === "user"
+				? await session.appendMessage(userMsg(msg.text))
+				: await session.appendMessage(assistantMsg(msg.text));
 
 		ids.set(msg.text, id);
 	}

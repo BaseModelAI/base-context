@@ -5,15 +5,21 @@
  * and after compaction the session is reloaded.
  */
 
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model, Usage } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { AssistantMessage, Model, Usage } from "@ponythewhite/base-context-ai";
+import {
+	completeInference,
+	InferenceCoordinator,
+	type NativeCompactionOutputBinding,
+} from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
+import type { NativeCompactionRequestOutputAssociation } from "../request-events.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
 import { addAssistantUsage, emptyUsage } from "../usage.js";
 import {
@@ -34,6 +40,38 @@ export interface CompactionDetails {
 export interface SummarySlice {
 	summary: string;
 	usage?: Usage;
+}
+
+// Identity follows the actual completion -> text slice -> built-in composition, never copied fields.
+const nativeSummarySlices = new WeakMap<SummarySlice, { summary: string; binding: NativeCompactionOutputBinding }>();
+const nativeCompactionResults = new WeakMap<object, { summary: string; bindings: NativeCompactionOutputBinding[] }>();
+
+function captureSummarySlice(
+	slice: SummarySlice,
+	requests: InferenceCoordinator | undefined,
+	completion: Promise<AssistantMessage>,
+	part: NativeCompactionRequestOutputAssociation["part"],
+): SummarySlice {
+	const binding =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takeCompactionOutput.call(requests, completion)
+			: undefined;
+	if (binding?.output.part === part) nativeSummarySlices.set(slice, { summary: slice.summary, binding });
+	return slice;
+}
+
+/** Internal append input: only this exact built-in result and original sink can contribute links. */
+export function takeCompactionRequestOutputs(
+	result: object | undefined,
+	sink: object,
+	summary: string,
+): readonly NativeCompactionRequestOutputAssociation[] | undefined {
+	const captured = result ? nativeCompactionResults.get(result) : undefined;
+	if (result) nativeCompactionResults.delete(result);
+	// Equality only checks an already privately bound projection for mutation; it never discovers a link.
+	if (!captured || captured.summary !== summary) return undefined;
+	const outputs = captured.bindings.filter((binding) => binding.sink === sink).map((binding) => binding.output);
+	return outputs.length ? outputs : undefined;
 }
 
 /**
@@ -101,7 +139,8 @@ function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | u
 export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
-	tokensBefore: number;
+	/** Prior-context estimate; null when the original context is not measurable. */
+	tokensBefore: number | null;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
 	/** What the summarization call(s) billed; persisted on the compaction entry. */
@@ -166,7 +205,7 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(messages: readonly AgentMessage[]): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
 		if (usage) return { usage, index: i };
@@ -216,10 +255,18 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 	if (contextWindow <= 0) return false;
 	return contextTokens > contextWindow - settings.reserveTokens;
 }
-/**
- * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
- */
+/** Raise suffix estimates when observed usage exceeds chars/4 for the same prefix. */
+function compactionTokenScale(messages: readonly AgentMessage[]): number {
+	const usageInfo = getLastAssistantUsageInfo(messages);
+	if (!usageInfo) return 1;
+	let estimatedTokens = 0;
+	for (let index = 0; index <= usageInfo.index; index++) {
+		estimatedTokens += estimateTokens(messages[index]);
+	}
+	return estimatedTokens > 0 ? Math.max(1, calculateContextTokens(usageInfo.usage) / estimatedTokens) : 1;
+}
+
+/** Estimate message tokens with chars/4; dense content can exceed this heuristic. */
 export function estimateTokens(message: AgentMessage): number {
 	let chars = 0;
 
@@ -377,6 +424,8 @@ export function findCutPoint(
 	startIndex: number,
 	endIndex: number,
 	keepRecentTokens: number,
+	allowShortSession = false,
+	tokenScale = 1,
 ): CutPointResult {
 	const cutPoints = findValidCutPoints(entries, startIndex, endIndex);
 
@@ -389,17 +438,22 @@ export function findCutPoint(
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
 		if (entry.type !== "message") continue;
-		const messageTokens = estimateTokens(entry.message);
+		const messageTokens = estimateTokens(entry.message) * tokenScale;
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
-			}
+			cutIndex = cutPoints.filter((candidate) => candidate <= i).at(-1) ?? cutIndex;
 			break;
 		}
+	}
+	if (allowShortSession && cutIndex === cutPoints[0]) {
+		// An explicit compact may summarize a short prefix, but must keep a real suffix.
+		const latest = cutPoints
+			.filter((index) => {
+				const entry = entries[index];
+				return entry.type !== "message" || entry.message.role !== "compactionSummary";
+			})
+			.at(-1);
+		if (latest !== undefined) cutIndex = latest;
 	}
 	while (cutIndex > startIndex) {
 		const prevEntry = entries[cutIndex - 1];
@@ -455,8 +509,8 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
-const KERNEL_PERSIST_SUMMARY_NOTE =
-	"Note: the Python kernel keeps running after this summary — every Python variable, import, and helper you defined stays available. The cells that defined them won't appear above, so record in the summary any names worth remembering so you reuse them instead of redefining them.";
+const RUNTIME_STATE_SUMMARY_NOTE =
+	"Runtime note: this summary does not establish whether a Python kernel is live or whether its variables, imports, helpers, or jobs remain available. Preserve useful names and their last observed state, including uncertainty. Use current runtime reports before relying on them; do not infer either survival or loss from compaction.";
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -499,14 +553,14 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 /**
  * Build the instruction portion of the summarization prompt: the initial or
- * update template, optional user instructions, and the kernel persistence note.
+ * update template, optional user instructions, and the runtime-state qualification.
  */
 export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
 	}
-	return `${basePrompt}\n\n${KERNEL_PERSIST_SUMMARY_NOTE}`;
+	return `${basePrompt}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
 }
 
 /**
@@ -523,6 +577,7 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
@@ -549,12 +604,20 @@ export async function generateSummary(
 			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
 			: { maxTokens, signal, apiKey, headers };
 
-	const response = await completeSimple(
+	const completion = completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		completionOptions,
+		{
+			purpose: "summary",
+			purposeDetail: "compaction",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 
+	const response = await completion;
 	if (response.stopReason === "error") {
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
@@ -564,7 +627,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return { summary: textContent, usage: response.usage };
+	return captureSummarySlice({ summary: textContent, usage: response.usage }, requests, completion, "history");
 }
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
@@ -584,9 +647,147 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+/** Prepare the actual selected epoch view. Entry IDs are only real cut anchors, never synthetic rows. */
+export function prepareViewCompaction(
+	messages: readonly AgentMessage[],
+	entryIds: readonly (string | undefined)[],
+	pathEntries: SessionEntry[],
+	settings: CompactionSettings,
+	maxCutEntryId?: string,
+	allowShortSession = false,
+	budgetPressure = false,
+): CompactionPreparation | undefined {
+	if (messages.length !== entryIds.length) throw new Error("Compaction views do not match their source anchors");
+	// firstKeptEntryId restores a chronological source suffix, not a selected-view suffix.
+	// Older pinned views cannot become cut anchors across omitted source messages.
+	const selectedIds = new Set(entryIds);
+	const suffixAnchors = new Set<string>();
+	for (let index = pathEntries.length - 1; index >= 0; index--) {
+		const entry = pathEntries[index];
+		if (!getMessageFromEntryForCompaction(entry)) continue;
+		if (!selectedIds.has(entry.id)) break;
+		suffixAnchors.add(entry.id);
+	}
+	let cuts = messages.flatMap((message, index) =>
+		entryIds[index] &&
+		suffixAnchors.has(entryIds[index]!) &&
+		message.role !== "toolResult" &&
+		message.role !== "compactionSummary"
+			? [index]
+			: [],
+	);
+	let relaxRetention = false;
+	if (budgetPressure) {
+		// Only caller-confirmed public OVER may relax retention; source/tool groups remain whole.
+		const spans: [number, number][] = [];
+		const sourceStarts = new Map<string, number>();
+		const resultEnds = new Map<string, number>();
+		// Public history renders original roles as custom text; use its captured source anchors.
+		const sourceMessages = new Map(pathEntries.map((entry) => [entry.id, getMessageFromEntry(entry)]));
+		const anchoredMessages = messages.map((message, index) => sourceMessages.get(entryIds[index] ?? "") ?? message);
+		for (const [index, message] of anchoredMessages.entries()) {
+			const entryId = entryIds[index];
+			if (entryId) {
+				const start = sourceStarts.get(entryId);
+				if (start === undefined) sourceStarts.set(entryId, index);
+				else spans.push([start, index]);
+			}
+			if (message.role === "toolResult") resultEnds.set(message.toolCallId, index);
+		}
+		let latestCompleteExchange = messages.length - 1;
+		const completedAssistants: number[] = [];
+		for (const [index, message] of anchoredMessages.entries()) {
+			if (message.role !== "assistant") continue;
+			const calls = message.content.filter((block) => block.type === "toolCall");
+			const completeExchange = calls.length > 0 && calls.every((call) => (resultEnds.get(call.id) ?? -1) > index);
+			if (completeExchange) latestCompleteExchange = index;
+			if (completeExchange || (!calls.length && message.stopReason === "stop")) completedAssistants.push(index);
+			for (const call of calls) {
+				const end = resultEnds.get(call.id);
+				if (end !== undefined && end > index) spans.push([index, end]);
+			}
+		}
+		// A lone current instruction before its first exchange is not removable history.
+		relaxRetention = completedAssistants.some((index) => index < latestCompleteExchange);
+		if (relaxRetention) {
+			cuts = cuts.filter(
+				(candidate) =>
+					candidate <= latestCompleteExchange &&
+					spans.every(([start, end]) => candidate <= start || candidate > end),
+			);
+		}
+	}
+	if (!cuts.length) return;
+	const tokenScale = compactionTokenScale(messages);
+	let cut = cuts[0];
+	let tokens = 0;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		if (!entryIds[index] || messages[index].role === "compactionSummary") continue;
+		tokens += estimateTokens(messages[index]) * tokenScale;
+		if (tokens >= settings.keepRecentTokens) {
+			// Include the message that crossed the threshold and its preceding legal group boundary.
+			cut = cuts.filter((candidate) => candidate <= index).at(-1) ?? cut;
+			break;
+		}
+	}
+	if (relaxRetention || (allowShortSession && cut === cuts[0])) cut = cuts.at(-1)!;
+	if (maxCutEntryId !== undefined) {
+		const maximum = entryIds.indexOf(maxCutEntryId);
+		const lastAllowed = cuts.filter((candidate) => candidate <= maximum).at(-1);
+		if (lastAllowed === undefined) throw new Error("Compaction recovery boundary is unavailable");
+		cut = Math.min(cut, lastAllowed);
+	}
+	let turnStart = -1;
+	if (messages[cut].role !== "user") {
+		for (let index = cut; index >= 0; index--) {
+			if (entryIds[index] && ["user", "custom", "branchSummary", "bashExecution"].includes(messages[index].role)) {
+				turnStart = index;
+				break;
+			}
+		}
+	}
+	const isSplitTurn = turnStart >= 0;
+	const historyEnd = isSplitTurn ? turnStart : cut;
+	let previousSummary: string | undefined;
+	let previousSummaryIndex = -1;
+	for (const [index, message] of messages.entries()) {
+		if (message.role !== "compactionSummary") continue;
+		previousSummary = message.summary;
+		previousSummaryIndex = pathEntries.findIndex((entry) => entry.id === entryIds[index]);
+	}
+	const historical = messages.filter(
+		(message, index) => entryIds[index] && index < historyEnd && message.role !== "compactionSummary",
+	);
+	const turnPrefixMessages = isSplitTurn
+		? messages.filter(
+				(message, index) =>
+					entryIds[index] && index >= turnStart && index < cut && message.role !== "compactionSummary",
+			)
+		: [];
+	if (!historical.length && !turnPrefixMessages.length && (budgetPressure || allowShortSession || !previousSummary))
+		return;
+	// Virtual TaskFrame displays are continuity input, never a canonical suffix boundary.
+	const messagesToSummarize = messages.filter(
+		(message, index) => message.role !== "compactionSummary" && (!entryIds[index] || index < historyEnd),
+	);
+	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, previousSummaryIndex);
+	for (const message of turnPrefixMessages) extractFileOpsFromMessage(message, fileOps);
+	return {
+		firstKeptEntryId: entryIds[cut]!,
+		messagesToSummarize: structuredClone(messagesToSummarize),
+		turnPrefixMessages: structuredClone(turnPrefixMessages),
+		isSplitTurn,
+		tokensBefore: estimateContextTokens([...messages]).tokens,
+		previousSummary,
+		fileOps,
+		settings,
+	};
+}
+
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	allowShortSession = false,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -610,9 +811,17 @@ export function prepareCompaction(
 	}
 	const boundaryEnd = pathEntries.length;
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
+	const messages = buildSessionContext(pathEntries).messages;
+	const tokensBefore = estimateContextTokens(messages).tokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	const cutPoint = findCutPoint(
+		pathEntries,
+		boundaryStart,
+		boundaryEnd,
+		settings.keepRecentTokens,
+		allowShortSession,
+		compactionTokenScale(messages),
+	);
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];
 	if (!firstKeptEntry?.id) {
 		return undefined; // Session needs migration
@@ -634,7 +843,7 @@ export function prepareCompaction(
 	}
 
 	// Avoid a compaction that would summarize no history.
-	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0 && !previousSummary) {
+	if (messagesToSummarize.length === 0 && turnPrefixMessages.length === 0 && (allowShortSession || !previousSummary)) {
 		return undefined;
 	}
 	const fileOps = extractFileOperations(messagesToSummarize, pathEntries, prevCompactionIndex);
@@ -692,6 +901,7 @@ export async function compact(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
+	requests?: InferenceCoordinator,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -721,6 +931,7 @@ export async function compact(
 							customInstructions,
 							previousSummary,
 							thinkingLevel,
+							requests,
 						),
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
@@ -733,6 +944,7 @@ export async function compact(
 					callHeaders,
 					signal,
 					thinkingLevel,
+					requests,
 				),
 			),
 		]);
@@ -750,6 +962,7 @@ export async function compact(
 				customInstructions,
 				previousSummary,
 				thinkingLevel,
+				requests,
 			),
 		);
 		slices.push(result);
@@ -768,13 +981,20 @@ export async function compact(
 		usage ??= emptyUsage();
 		addAssistantUsage(usage, slice.usage);
 	}
-	return {
+	const result: CompactionResult = {
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
 		usage,
 	};
+	const bindings = slices.flatMap((slice) => {
+		const captured = nativeSummarySlices.get(slice);
+		nativeSummarySlices.delete(slice);
+		return captured?.summary === slice.summary ? [captured.binding] : [];
+	});
+	if (bindings.length) nativeCompactionResults.set(result, { summary, bindings });
+	return result;
 }
 
 /**
@@ -788,6 +1008,7 @@ async function generateTurnPrefixSummary(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
@@ -801,23 +1022,32 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await completeSimple(
+	const completion = completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		model.reasoning && thinkingLevel && thinkingLevel !== "off"
 			? { maxTokens, signal, apiKey, headers, reasoning: thinkingLevel }
 			: { maxTokens, signal, apiKey, headers },
+		{
+			purpose: "summary",
+			purposeDetail: "compaction-turn-prefix",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 
+	const response = await completion;
 	if (response.stopReason === "error") {
 		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	return {
+	const slice: SummarySlice = {
 		summary: response.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map((c) => c.text)
 			.join("\n"),
 		usage: response.usage,
 	};
+	return captureSummarySlice(slice, requests, completion, "turn-prefix");
 }

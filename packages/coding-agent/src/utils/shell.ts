@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
-import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
+import { captureOrphanProcessJournalOwner, type OrphanProcessJournalOwner } from "../core/orphan-process-journal.js";
 
 export interface ShellConfig {
 	shell: string;
@@ -192,24 +192,30 @@ export function sanitizeBinaryOutput(str: string): string {
  * Detached child processes must be tracked so they can be killed on parent
  * shutdown signals (SIGHUP/SIGTERM).
  */
-const trackedDetachedChildPids = new Set<number>();
+const trackedDetachedChildPids = new Map<number, OrphanProcessJournalOwner>();
 
-export function trackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.add(pid);
-	recordOrphanProcessState(pid, true);
+export function trackDetachedChildPid(pid: number, owner = captureOrphanProcessJournalOwner()): Error | undefined {
+	// This process already exists. Keep ownership even if enrollment fails.
+	trackedDetachedChildPids.set(pid, owner);
+	return owner.record(pid, true);
 }
 
-export function untrackDetachedChildPid(pid: number): void {
+export function untrackDetachedChildPid(pid: number): Error | undefined {
+	const owner = trackedDetachedChildPids.get(pid);
 	trackedDetachedChildPids.delete(pid);
-	recordOrphanProcessState(pid, false);
+	return owner?.record(pid, false);
 }
 
 export function killTrackedDetachedChildren(): void {
-	for (const pid of trackedDetachedChildPids) {
+	const failures: Error[] = [];
+	for (const [pid, owner] of trackedDetachedChildPids) {
 		killProcessTree(pid);
-		recordOrphanProcessState(pid, false);
+		const failure = owner.record(pid, false);
+		if (failure) failures.push(failure);
 	}
 	trackedDetachedChildPids.clear();
+	// Signal shutdown must still drain every tracked child. Do not call uncertain tracking success.
+	if (failures.length) console.error(new AggregateError(failures, "Detached-child retirement tracking is unknown"));
 }
 
 /**

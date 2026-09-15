@@ -40,10 +40,10 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@ponythewhite/base-context";
+import { DynamicBorder, getAgentDir } from "@ponythewhite/base-context";
+import type { Api, Model } from "@ponythewhite/base-context-ai";
+import { Container, Key, type SelectItem, SelectList, Text } from "@ponythewhite/base-context-tui";
 
 // Preset configuration
 interface Preset {
@@ -404,7 +404,7 @@ export default function presetExtension(pi: ExtensionAPI) {
 		}
 
 		// Restore preset from session state
-		const entries = ctx.sessionManager.getEntries();
+		const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 		const presetEntry = entries
 			.filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "preset-state")
 			.pop() as { data?: { name: string } } | undefined;

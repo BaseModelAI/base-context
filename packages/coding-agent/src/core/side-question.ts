@@ -1,6 +1,6 @@
-import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
-import { unwrapSemanticEdgeStreamFn } from "./semantic-edges.js";
+import { Agent, type AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AssistantMessage, UserMessage } from "@ponythewhite/base-context-ai";
+import { bindAuxiliaryInferenceStream } from "./inference-coordinator.js";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 
@@ -47,10 +47,12 @@ export function startSideQuestion(
 	onEvent: (event: SideQuestionEvent) => void | Promise<void>,
 	previousTurns: SideQuestionTurn[] = [],
 ): SideQuestionRun {
-	const model = parent.state.model;
-	if (!model) {
+	const selectedModel = parent.state.model;
+	if (!selectedModel) {
 		throw new Error("Select a model before asking a side question");
 	}
+
+	const model = { ...selectedModel, cost: { ...selectedModel.cost } };
 
 	// Each turn re-clones the live main conversation, so follow-ups always see
 	// the newest main-thread context; earlier side turns are replayed after it.
@@ -79,19 +81,24 @@ export function startSideQuestion(
 		} satisfies AssistantMessage,
 	]);
 
+	const initialMessages = [...structuredClone(parent.state.messages), ...previousTurnMessages];
+	const auxiliaryStream = bindAuxiliaryInferenceStream(parent.streamFn, {
+		purpose: "other",
+		purposeDetail: "side-question",
+	});
 	const sideAgent = new Agent({
 		initialState: {
 			model,
 			systemPrompt: parent.state.systemPrompt,
-			messages: [...structuredClone(parent.state.messages), ...previousTurnMessages],
+			messages: initialMessages,
 			thinkingLevel: "off",
 			serviceTier: parent.state.serviceTier,
 			tools: [],
 		},
 		convertToLlm: parent.convertToLlm,
 		transformContext: parent.transformContext,
-		// Side questions are excluded from session history; their calls carry no provenance.
-		streamFn: unwrapSemanticEdgeStreamFn(parent.streamFn),
+		// The side transcript stays separate; inference still belongs to the subject session.
+		streamFn: auxiliaryStream,
 		getApiKey: parent.getApiKey,
 		onPayload: parent.onPayload,
 		onResponse: parent.onResponse,
@@ -103,13 +110,18 @@ export function startSideQuestion(
 		toolExecution: parent.toolExecution,
 	});
 
+	if (auxiliaryStream.recoverProviderFailure) {
+		sideAgent.bindProviderFailureRecoveryOwner({ recover: auxiliaryStream.recoverProviderFailure });
+	}
+
 	let answer = "";
 	let abortRequested = false;
 	let started = false;
 	const emit = (status: SideQuestionStatus, errorMessage?: string) =>
 		onEvent({ id, question, answer, status, ...(errorMessage ? { errorMessage } : {}) });
 
-	const unsubscribe = sideAgent.subscribe(async (event) => {
+	let eventQueue: Promise<void> = Promise.resolve();
+	const unsubscribe = sideAgent.subscribe((event) => {
 		if (event.type !== "message_update" && event.type !== "message_end") {
 			return;
 		}
@@ -118,7 +130,9 @@ export function startSideQuestion(
 			return;
 		}
 		answer = nextAnswer;
-		await emit("running");
+		const update = { id, question, answer, status: "running" as const };
+		eventQueue = eventQueue.then(() => onEvent(update));
+		void eventQueue.catch(() => undefined);
 	});
 
 	const prompt = sideQuestionPrompt(question, previousTurns.length === 0);
@@ -131,6 +145,7 @@ export function startSideQuestion(
 			}
 			started = true;
 			await sideAgent.prompt(prompt);
+			await eventQueue;
 			if (abortRequested) {
 				await emit("cancelled");
 				return;
@@ -147,7 +162,14 @@ export function startSideQuestion(
 				emit(abortRequested ? "cancelled" : "error", abortRequested ? undefined : errorMessage),
 			).catch(() => undefined);
 		})
-		.finally(unsubscribe);
+		.finally(async () => {
+			unsubscribe();
+			try {
+				await eventQueue;
+			} finally {
+				await auxiliaryStream.dispose();
+			}
+		});
 
 	return {
 		done,

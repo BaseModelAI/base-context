@@ -19,8 +19,8 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { SessionManager } from "../src/core/session-manager.js";
 import { createCompactAssistantDelta } from "../src/modes/daemon/compact-session-stream.js";
 import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
@@ -244,7 +244,7 @@ function createStreamingEvent(text: string, delta: string, sequence: number): ob
 		},
 		meta: {
 			id: `${activeSessionId}:${sequence}`,
-			protocol: { name: "prime-agent.daemon", version: 1 },
+			protocol: { name: "base-context.daemon", version: 1 },
 			activeSessionId,
 			sequence,
 			emittedAt: "2026-01-01T00:00:00.000Z",
@@ -312,7 +312,7 @@ function createAttachResponseForMessages(
 		command: "attach",
 		success: true,
 		data: {
-			protocol: { name: "prime-agent.daemon", version: 1 },
+			protocol: { name: "base-context.daemon", version: 1 },
 			activeSessionId,
 			snapshot: {
 				activeSessionId,
@@ -433,7 +433,7 @@ async function runFanoutV2(clientCount: number): Promise<BenchmarkResult> {
 				},
 				meta: {
 					id: `active-benchmark:${sequence}`,
-					protocol: { name: "prime-agent.daemon", version: 2 },
+					protocol: { name: "base-context.daemon", version: 2 },
 					activeSessionId: "active-benchmark",
 					sequence,
 					cursor: { generation: "benchmark-generation", sequence },

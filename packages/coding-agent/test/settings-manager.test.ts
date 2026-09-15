@@ -1,11 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { homedir } from "os";
+import { fauxAssistantMessage, registerFauxProvider, type Transport } from "@ponythewhite/base-context-ai";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.js";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.js";
 
 describe("SettingsManager", () => {
-	const testDir = join(process.cwd(), "test-settings-tmp");
+	const testDir = mkdtempSync(join(tmpdir(), "base-context-settings-test-"));
 	const agentDir = join(testDir, "agent");
 	const projectDir = join(testDir, "project");
 
@@ -14,13 +18,87 @@ describe("SettingsManager", () => {
 			rmSync(testDir, { recursive: true });
 		}
 		mkdirSync(agentDir, { recursive: true });
-		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(join(projectDir, ".base-context"), { recursive: true });
 	});
 
 	afterEach(() => {
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true });
 		}
+	});
+
+	describe("transport selection", () => {
+		async function captureSdkTransport(settingsManager: SettingsManager) {
+			const faux = registerFauxProvider();
+			const providerTransports: Array<Transport | undefined> = [];
+			faux.setResponses([
+				(_context, options) => {
+					providerTransports.push(options?.transport);
+					return fauxAssistantMessage("done");
+				},
+			]);
+			const authStorage = AuthStorage.inMemory();
+			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
+			let session: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
+			try {
+				const services = await createAgentSessionServices({
+					cwd: projectDir,
+					agentDir,
+					authStorage,
+					settingsManager,
+					telemetryDisabled: true,
+					resourceLoaderOptions: {
+						noContextFiles: true,
+						noExtensions: true,
+						noSkills: true,
+						noPromptTemplates: true,
+						noThemes: true,
+						bundledSkillsDir: null,
+					},
+				});
+				services.modelRegistry.registerProvider(faux.getModel().provider, {
+					baseUrl: faux.getModel().baseUrl,
+					apiKey: "faux-key",
+					api: faux.api,
+					models: faux.models,
+				});
+				({ session } = await createAgentSessionFromServices({
+					services,
+					sessionManager: SessionManager.inMemory(projectDir),
+					model: faux.getModel(),
+					tools: [],
+					includeGoals: false,
+					prewarmIpythonKernel: false,
+					telemetryDisabled: true,
+				}));
+				await session.prompt("Say done.");
+				return { agentTransport: session.agent.transport, providerTransports };
+			} finally {
+				try {
+					await session?.disposeAsync();
+				} finally {
+					faux.unregister();
+				}
+			}
+		}
+
+		it("passes default SSE through the SDK-created Agent to provider options", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(await captureSdkTransport(manager)).toEqual({
+				agentTransport: "sse",
+				providerTransports: ["sse"],
+			});
+		});
+
+		it("honors explicit project auto over global SSE in SDK provider options", async () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ transport: "sse" }));
+			writeFileSync(join(projectDir, ".base-context", "settings.json"), JSON.stringify({ transport: "auto" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(await captureSdkTransport(manager)).toEqual({
+				agentTransport: "auto",
+				providerTransports: ["auto"],
+			});
+		});
 	});
 
 	describe("preserves externally added settings", () => {
@@ -276,6 +354,73 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("canonical context resource limits", () => {
+		it("resolves detached canonical context resource limits", () => {
+			const defaults = { maxMessages: 16384, maxSourceBytes: 64 * 1024 * 1024 };
+			const cases: [Settings, Settings, typeof defaults][] = [
+				[{}, {}, defaults],
+				[{ canonicalContext: { maxMessages: 32 } }, {}, { ...defaults, maxMessages: 32 }],
+				[{ canonicalContext: { maxSourceBytes: 4096 } }, {}, { ...defaults, maxSourceBytes: 4096 }],
+				[
+					{ canonicalContext: { maxMessages: 32, maxSourceBytes: 4096 } },
+					{ canonicalContext: { maxMessages: 64 } },
+					{ maxMessages: 64, maxSourceBytes: 4096 },
+				],
+				[
+					{ canonicalContext: { maxMessages: 32, maxSourceBytes: 4096 } },
+					{ canonicalContext: { maxSourceBytes: 2048 } },
+					{ maxMessages: 32, maxSourceBytes: 2048 },
+				],
+			];
+
+			for (const [globalSettings, projectSettings, expected] of cases) {
+				writeFileSync(
+					join(agentDir, "settings.json"),
+					JSON.stringify({
+						...globalSettings,
+						invocationOutput: globalSettings.canonicalContext,
+					}),
+				);
+				writeFileSync(
+					join(projectDir, ".base-context", "settings.json"),
+					JSON.stringify({
+						...projectSettings,
+						invocationOutput: projectSettings.canonicalContext,
+					}),
+				);
+				const manager = SettingsManager.create(projectDir, agentDir);
+				for (const readLimits of [
+					() => manager.getCanonicalContextLimits(),
+					() => manager.getInvocationOutputLimits(),
+				]) {
+					const limits = readLimits();
+					expect(limits).toEqual(expected);
+					limits.maxMessages = 1;
+					limits.maxSourceBytes = 1;
+					expect(readLimits()).toEqual(expected);
+				}
+			}
+		});
+
+		it("rejects invalid explicit canonical context resource limits", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ canonicalContext: { maxMessages: 0 } }));
+			expect(() => SettingsManager.create(projectDir, agentDir).getCanonicalContextLimits()).toThrow(
+				/canonicalContext\.maxMessages.*positive safe integer/,
+			);
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ canonicalContext: { maxSourceBytes: null } }));
+			expect(() => SettingsManager.create(projectDir, agentDir).getCanonicalContextLimits()).toThrow(
+				/canonicalContext\.maxSourceBytes.*positive safe integer/,
+			);
+			for (const configured of [{ maxMessages: 0 }, { maxSourceBytes: null }]) {
+				writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ invocationOutput: configured }));
+				expect(() => SettingsManager.create(projectDir, agentDir).getInvocationOutputLimits()).toThrow(
+					/invocationOutput\.(maxMessages|maxSourceBytes).*positive safe integer/,
+				);
+			}
+		});
+	});
+
 	describe("recentModels", () => {
 		it("records most-recently-used first, dedupes, and persists", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -306,7 +451,7 @@ describe("SettingsManager", () => {
 	describe("error tracking", () => {
 		it("should collect and clear load errors via drainErrors", () => {
 			const globalSettingsPath = join(agentDir, "settings.json");
-			const projectSettingsPath = join(projectDir, ".prime", "agent", "settings.json");
+			const projectSettingsPath = join(projectDir, ".base-context", "settings.json");
 			writeFileSync(globalSettingsPath, "{ invalid global json");
 			writeFileSync(projectSettingsPath, "{ invalid project json");
 
@@ -337,7 +482,7 @@ describe("SettingsManager", () => {
 		});
 
 		it("should report a new project error when saving after the load error was drained", async () => {
-			const settingsPath = join(projectDir, ".prime", "agent", "settings.json");
+			const settingsPath = join(projectDir, ".base-context", "settings.json");
 			const invalidSettings = "{ invalid project json";
 			writeFileSync(settingsPath, invalidSettings);
 
@@ -356,7 +501,7 @@ describe("SettingsManager", () => {
 
 		it("drains only the requested scope", () => {
 			writeFileSync(join(agentDir, "settings.json"), "{ invalid global json");
-			writeFileSync(join(projectDir, ".prime", "agent", "settings.json"), "{ invalid project json");
+			writeFileSync(join(projectDir, ".base-context", "settings.json"), "{ invalid project json");
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.drainErrors("global").map((entry) => entry.scope)).toEqual(["global"]);
@@ -365,35 +510,35 @@ describe("SettingsManager", () => {
 	});
 
 	describe("project settings directory creation", () => {
-		it("should not create .pi folder when only reading project settings", () => {
+		it("should not create .base-context folder when only reading project settings", () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
 
-			rmSync(join(projectDir, ".prime", "agent"), { recursive: true });
+			rmSync(join(projectDir, ".base-context"), { recursive: true });
 
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(false);
+			expect(existsSync(join(projectDir, ".base-context"))).toBe(false);
 
 			expect(manager.getTheme()).toBe("dark");
 		});
 
-		it("should create .pi folder when writing project settings", async () => {
+		it("should create .base-context folder when writing project settings", async () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
 
-			rmSync(join(projectDir, ".prime", "agent"), { recursive: true });
+			rmSync(join(projectDir, ".base-context"), { recursive: true });
 
 			const manager = SettingsManager.create(projectDir, agentDir);
 
-			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(false);
+			expect(existsSync(join(projectDir, ".base-context"))).toBe(false);
 
 			manager.setProjectPackages([{ source: "npm:test-pkg" }]);
 			await manager.flush();
 
-			expect(existsSync(join(projectDir, ".prime", "agent"))).toBe(true);
+			expect(existsSync(join(projectDir, ".base-context"))).toBe(true);
 
-			expect(existsSync(join(projectDir, ".prime", "agent", "settings.json"))).toBe(true);
+			expect(existsSync(join(projectDir, ".base-context", "settings.json"))).toBe(true);
 		});
 	});
 
@@ -446,7 +591,7 @@ describe("SettingsManager", () => {
 		it("should return project sessionDir, overriding global", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ sessionDir: "/global/sessions" }));
 			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
+				join(projectDir, ".base-context", "settings.json"),
 				JSON.stringify({ sessionDir: "./sessions" }),
 			);
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -478,7 +623,7 @@ describe("SettingsManager", () => {
 				}),
 			);
 			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
+				join(projectDir, ".base-context", "settings.json"),
 				JSON.stringify({
 					mcpServers: {
 						shared: { type: "http", url: "https://project.shared/mcp" },
@@ -504,10 +649,7 @@ describe("SettingsManager", () => {
 
 		it("reads and writes the global daemon policy without project overrides", async () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ idleEvictionMinutes: 60 }));
-			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
-				JSON.stringify({ idleEvictionMinutes: 30 }),
-			);
+			writeFileSync(join(projectDir, ".base-context", "settings.json"), JSON.stringify({ idleEvictionMinutes: 30 }));
 			const manager = SettingsManager.create(projectDir, agentDir);
 			expect(manager.getIdleEvictionMinutes()).toBe(60);
 
@@ -518,13 +660,19 @@ describe("SettingsManager", () => {
 	});
 
 	describe("telemetry privacy controls", () => {
+		it("keeps telemetry and traces disabled until explicitly enabled", () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getTelemetryEnabled()).toBe(false);
+			expect(manager.getAgentTracesEnabled()).toBe(false);
+		});
+
 		it("does not let project settings override a global opt-out or disclosure state", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),
 				JSON.stringify({ telemetry: { enabled: false, noticeShown: false } }),
 			);
 			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
+				join(projectDir, ".base-context", "settings.json"),
 				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
 			);
 
@@ -537,7 +685,7 @@ describe("SettingsManager", () => {
 		it("allows project settings to further disable globally enabled telemetry", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: true } }));
 			writeFileSync(
-				join(projectDir, ".prime", "agent", "settings.json"),
+				join(projectDir, ".base-context", "settings.json"),
 				JSON.stringify({ telemetry: { enabled: false } }),
 			);
 

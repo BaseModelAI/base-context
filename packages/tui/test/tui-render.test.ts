@@ -1,4 +1,7 @@
 import assert from "node:assert";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { deleteKittyImage, encodeKitty } from "../src/terminal-image.js";
@@ -73,6 +76,75 @@ function getCellBg(terminal: VirtualTerminal, row: number, col: number): { mode:
 	assert.ok(cell, `Missing cell at row ${row} col ${col}`);
 	return { mode: cell.getBgColorMode(), color: cell.getBgColor() };
 }
+
+describe("TUI diagnostics", () => {
+	for (const suppliedDirectory of [true, false]) {
+		it(`writes diagnostics to ${suppliedDirectory ? "the supplied directory" : "a private temporary directory by default"}`, async () => {
+			const root = mkdtempSync(join(tmpdir(), "tui-diagnostics-test-"));
+			try {
+				await withEnv(
+					{
+						HOME: root,
+						USERPROFILE: root,
+						TMPDIR: root,
+						TMP: root,
+						TEMP: root,
+						BASE_CONTEXT_DEBUG_REDRAW: "1",
+						BASE_CONTEXT_TUI_DEBUG: "1",
+					},
+					async () => {
+						const diagnosticsDir = suppliedDirectory ? join(root, "app", "tui") : undefined;
+						const terminal = new VirtualTerminal(20, 5);
+						const tui = new TUI(terminal, undefined, diagnosticsDir);
+						const component = new TestComponent();
+						tui.addChild(component);
+						const render = () => (tui as unknown as { doRender(): void }).doRender();
+						try {
+							assert.deepStrictEqual(readdirSync(root), [], "No directory is created before logging");
+							component.lines = ["first"];
+							render();
+							component.lines = ["second"];
+							render();
+							component.lines = ["x".repeat(21)];
+							let crashPath = "";
+							assert.throws(render, (error: unknown) => {
+								assert.ok(error instanceof Error);
+								assert.match(error.message, /exceeds terminal width/);
+								const match = error.message.match(/Debug log written to: (.+)/);
+								assert.ok(match);
+								crashPath = match[1];
+								return true;
+							});
+							const actualDir = dirname(crashPath);
+							if (diagnosticsDir) {
+								assert.strictEqual(actualDir, diagnosticsDir);
+							} else {
+								assert.strictEqual(dirname(actualDir), root);
+								assert.match(readdirSync(root)[0], /^tui-/);
+							}
+							assert.match(readFileSync(crashPath, "utf8"), /Line 0 visible width: 21/);
+							assert.match(readFileSync(join(actualDir, "tui-debug.log"), "utf8"), /fullRender: first render/);
+							const files = readdirSync(actualDir);
+							assert.strictEqual(files.length, 3);
+							assert.ok(files.some((file) => /^render-.*\.log$/.test(file)));
+							if (process.platform !== "win32") {
+								assert.strictEqual(statSync(actualDir).mode & 0o777, 0o700);
+								for (const file of files) {
+									assert.strictEqual(statSync(join(actualDir, file)).mode & 0o777, 0o600);
+								}
+							}
+							assert.ok(!existsSync(join(root, ".prime")));
+						} finally {
+							tui.stop();
+						}
+					},
+				);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+});
 
 describe("TUI Kitty image cleanup", () => {
 	it("deletes changed image ids before drawing moved placements", async () => {

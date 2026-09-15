@@ -3,12 +3,13 @@ import { realpathSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { Readable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { ImageContent } from "@ponythewhite/base-context-ai";
 import { VERSION } from "../../config.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import { takeOverStdout, writeRawStdout } from "../../core/output-guard.js";
+import { PRODUCT } from "../../product-identity.js";
 import { InProcessAgentConnection } from "../agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnection,
@@ -19,7 +20,7 @@ import type {
 import { latestAutonomousGateAttempt } from "../headless-completion.js";
 import { type AcpEventMappingState, acpUpdatesForSessionEvent } from "./acp-events.js";
 import { resolveAcpMcpServers } from "./acp-mcp.js";
-import { PRIME_AGENT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
+import { BASE_CONTEXT_META_NAMESPACE, type PrimeAgentAutonomousMeta, primeAgentMeta } from "./acp-meta.js";
 import { type AcpStopReason, acpStopReason } from "./acp-stop-reason.js";
 
 /**
@@ -267,14 +268,14 @@ class AcpUpdateProducer {
 			unknown
 		>;
 		const priorPrimeMeta =
-			priorMeta[PRIME_AGENT_META_NAMESPACE] && typeof priorMeta[PRIME_AGENT_META_NAMESPACE] === "object"
-				? (priorMeta[PRIME_AGENT_META_NAMESPACE] as Record<string, unknown>)
+			priorMeta[BASE_CONTEXT_META_NAMESPACE] && typeof priorMeta[BASE_CONTEXT_META_NAMESPACE] === "object"
+				? (priorMeta[BASE_CONTEXT_META_NAMESPACE] as Record<string, unknown>)
 				: {};
 		const correlatedUpdate = {
 			...update,
 			_meta: {
 				...priorMeta,
-				[PRIME_AGENT_META_NAMESPACE]: {
+				[BASE_CONTEXT_META_NAMESPACE]: {
 					...priorPrimeMeta,
 					promptTurnId: turnId,
 					eventSequence,
@@ -677,7 +678,7 @@ export async function runAcpModeWithConnection(
 	};
 
 	const handle = acp
-		.agent({ name: "prime-agent" })
+		.agent({ name: PRODUCT.command })
 		.onRequest("initialize", async () => ({
 			protocolVersion: acp.PROTOCOL_VERSION,
 			agentCapabilities: {
@@ -688,7 +689,7 @@ export async function runAcpModeWithConnection(
 				// the single-session slot) instead of dropping the connection.
 				sessionCapabilities: { close: {} },
 			},
-			agentInfo: { name: "prime-agent", title: "Prime Agent", version: VERSION },
+			agentInfo: { name: PRODUCT.command, title: PRODUCT.name, version: VERSION },
 			// Advertise prime-agent extras under a namespaced key: ACP reserves
 			// every object root for future protocol fields.
 			_meta: primeAgentMeta({}),
@@ -699,8 +700,8 @@ export async function runAcpModeWithConnection(
 			// snapshot reads are in flight, then overwrite each other's session.
 			if (session || sessionNewInFlight || sessionCloseInFlight) {
 				throw new Error(
-					"prime-agent ACP mode hosts one session per connection; " +
-						"start another prime-agent process for a second session",
+					`${PRODUCT.name} ACP mode hosts one session per connection; ` +
+						`start another ${PRODUCT.command} process for a second session`,
 				);
 			}
 			sessionNewInFlight = true;
@@ -946,11 +947,11 @@ export async function runAcpModeWithConnection(
 						throw new Error(`ACP lifecycle reconciliation failed: ${pending.failure}`);
 					}
 					if (pending.turnFailure) {
-						throw new Error(`prime-agent turn failed: ${pending.turnFailure}`);
+						throw new Error(`${PRODUCT.name} turn failed: ${pending.turnFailure}`);
 					}
 					terminalStatus = pending.status ?? status;
 				}
-				if (failure) throw new Error(`prime-agent turn failed: ${failure}`);
+				if (failure) throw new Error(`${PRODUCT.name} turn failed: ${failure}`);
 				return {
 					stopReason: acpStopReason({
 						cancelled: terminalSettlementCancelled,

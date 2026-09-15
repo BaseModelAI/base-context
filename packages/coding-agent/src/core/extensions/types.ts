@@ -9,12 +9,13 @@
  */
 
 import type {
+	AgentEvent,
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ThinkingLevel,
 	ToolExecutionMode,
-} from "@earendil-works/pi-agent-core";
+} from "@ponythewhite/base-context-agent";
 import type {
 	Api,
 	AssistantMessageEvent,
@@ -27,7 +28,7 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -38,7 +39,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	TUI,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { BashResult } from "../bash-executor.js";
@@ -160,7 +161,8 @@ export interface ExtensionUIContext {
 	 *
 	 * The factory receives a FooterDataProvider for data not otherwise accessible:
 	 * git branch and extension statuses from setStatus(). Token stats, model info,
-	 * etc. are available via ctx.sessionManager and ctx.model.
+	 * etc. can be loaded through ctx.sessionManager and ctx.model in async event handlers.
+	 * Keep only small display state in the component; render() must not read history.
 	 */
 	setFooter(
 		factory:
@@ -215,12 +217,12 @@ export interface ExtensionUIContext {
 	 * - `keybindings`: KeybindingsManager for app-level keybindings
 	 *
 	 * For full app keybinding support (escape, ctrl+d, model switching, etc.),
-	 * extend `CustomEditor` from `@earendil-works/pi-coding-agent` and call
+	 * extend `CustomEditor` from `@ponythewhite/base-context` and call
 	 * `super.handleInput(data)` for keys you don't handle.
 	 *
 	 * @example
 	 * ```ts
-	 * import { CustomEditor } from "@earendil-works/pi-coding-agent";
+	 * import { CustomEditor } from "@ponythewhite/base-context";
 	 *
 	 * class VimEditor extends CustomEditor {
 	 *   private mode: "normal" | "insert" = "insert";
@@ -286,7 +288,14 @@ export interface ExtensionContext {
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
-	/** Session manager (read-only) */
+	/**
+	 * Read-only session scalars and captured asynchronous history reads.
+	 * Use readEntry/readLabel for exact source lookup, readEntries for the whole source,
+	 * and readBranch for a complete, capped parent path. Reads return detached results
+	 * and refuse over-budget history; raw captured branch scopes may also include
+	 * attached request evidence, which is not part of the parent path.
+	 * Synchronous history-body getters belong only to explicitly resident views.
+	 */
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
@@ -303,7 +312,7 @@ export interface ExtensionContext {
 	/** Gracefully shutdown pi and exit. Available in all contexts. */
 	shutdown(): void;
 	/** Get current context usage for the active model. */
-	getContextUsage(): ContextUsage | undefined;
+	getContextUsage(): Promise<ContextUsage | undefined>;
 	/** Trigger compaction without awaiting completion. */
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
@@ -642,10 +651,7 @@ export interface AgentStartEvent {
 }
 
 /** Fired when an agent loop ends */
-export interface AgentEndEvent {
-	type: "agent_end";
-	messages: AgentMessage[];
-}
+export type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 
 /** Fired when a continual-harness refinement completes (auto-refine or explicit /refine). */
 export interface RefineCompleteEvent {
@@ -1067,7 +1073,7 @@ export interface ExtensionAPI {
 	sendMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-	): void;
+	): Promise<void>;
 
 	/**
 	 * Send a user message to the agent. Always triggers a turn.
@@ -1076,18 +1082,18 @@ export interface ExtensionAPI {
 	sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
-	): void;
+	): Promise<void>;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
-	appendEntry<T = unknown>(customType: string, data?: T): void;
+	appendEntry<T = unknown>(customType: string, data?: T): Promise<void>;
 	/** Set the session display name (shown in session selector). */
-	setSessionName(name: string): void | Promise<void>;
+	setSessionName(name: string): Promise<void>;
 
 	/** Get the current session name, if set. */
 	getSessionName(): string | undefined;
 
 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
-	setLabel(entryId: string, label: string | undefined): void;
+	setLabel(entryId: string, label: string | undefined): Promise<void>;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1110,7 +1116,7 @@ export interface ExtensionAPI {
 	getThinkingLevel(): ThinkingLevel;
 
 	/** Set thinking level (clamped to model capabilities). */
-	setThinkingLevel(level: ThinkingLevel): void;
+	setThinkingLevel(level: ThinkingLevel): Promise<void>;
 	/**
 	 * Register or override a model provider.
 	 *
@@ -1271,16 +1277,16 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 export type SendMessageHandler = <T = unknown>(
 	message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
-) => void;
+) => Promise<void>;
 
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
 	options?: { deliverAs?: "steer" | "followUp" },
-) => void;
+) => Promise<void>;
 
-export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => Promise<void>;
 
-export type SetSessionNameHandler = (name: string) => void | Promise<void>;
+export type SetSessionNameHandler = (name: string) => Promise<void>;
 
 export type GetSessionNameHandler = () => string | undefined;
 
@@ -1303,9 +1309,9 @@ export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 
-export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+export type SetThinkingLevelHandler = (level: ThinkingLevel) => Promise<void>;
 
-export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
+export type SetLabelHandler = (entryId: string, label: string | undefined) => Promise<void>;
 
 /**
  * Shared state created by loader, used during registration and runtime.
@@ -1369,7 +1375,7 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
-	getContextUsage: () => ContextUsage | undefined;
+	getContextUsage: () => Promise<ContextUsage | undefined>;
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 }

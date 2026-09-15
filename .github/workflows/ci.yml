@@ -58,7 +58,7 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build
+        run: npm run build:source
 
       - name: Check
         run: npm run check
@@ -131,7 +131,7 @@ jobs:
         run: npm ci
 
       - name: Build
-        run: npm run build
+        run: npm run build:source
 
       - name: Install uv
         if: matrix.install_uv

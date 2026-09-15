@@ -1,12 +1,13 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@ponythewhite/base-context-agent";
+import { fauxAssistantMessage, fauxToolCall, type Model } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
+import { loadSkillsFromDir, SKILL_FILE_MAX_BYTES } from "../../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.js";
@@ -35,9 +36,9 @@ describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 		while (tempDirs.length > 0) {
 			const tempDir = tempDirs.pop();
@@ -302,37 +303,29 @@ describe("AgentSession prompt characterization", () => {
 
 	it("expands skill commands before sending the prompt", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(tempDir, { recursive: true });
+		const skillDir = join(tempDir, "test");
+		mkdirSync(skillDir, { recursive: true });
 		tempDirs.push(tempDir);
-		const skillPath = join(tempDir, "test-skill.md");
-		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
-
+		const skillPath = join(skillDir, "SKILL.md");
+		const frontmatter = "---\r\nname: test\rdescription: Test skill\r\n---";
+		// The existing parser accepts a closing --- prefix without a following newline.
+		const body = "# Test Skill\r\n\r\nUse the skill body. [Reference](./reference.md)";
+		writeFileSync(skillPath, frontmatter + body);
+		const discovered = loadSkillsFromDir({ dir: skillDir, source: "test" });
+		expect(discovered.skills).toHaveLength(1);
+		expect(discovered.diagnostics).toEqual([]);
 		const resourceLoader = {
 			...createTestResourceLoader(),
-			getSkills: () => ({
-				skills: [
-					{
-						name: "test",
-						description: "Test skill",
-						filePath: skillPath,
-						disableModelInvocation: false,
-						kind: "markdown" as const,
-						baseDir: tempDir,
-						sourceInfo: createSyntheticSourceInfo(skillPath, {
-							source: "local",
-							scope: "project",
-							origin: "top-level",
-							baseDir: tempDir,
-						}),
-					},
-				],
-				diagnostics: [],
-			}),
+			getSkills: () => discovered,
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
+		const expansionErrors: string[] = [];
+		await harness.session.bindExtensions({ onError: (error) => expansionErrors.push(error.error) });
 		let expandedPrompt = "";
-
+		const unsubscribe = harness.session.agent.subscribe((event) => {
+			if (event.type === "agent_start") writeFileSync(skillPath, `${frontmatter}Changed after capture.`);
+		});
 		harness.setResponses([
 			(context) => {
 				const user = context.messages.find((message) => message.role === "user");
@@ -342,10 +335,40 @@ describe("AgentSession prompt characterization", () => {
 		]);
 
 		await harness.session.prompt("/skill:test explain this");
+		unsubscribe();
+		const expected = `<skill name="test" location="${skillPath}">\nReferences are relative to ${skillDir}.\n\n${body.replace(/\r\n/g, "\n")}\n</skill>\n\nexplain this`;
+		expect(expandedPrompt).toBe(expected);
+		const userEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toMatchObject({
+			message: { role: "user" },
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "/skill:test explain this" },
+			},
+		});
 
-		expect(expandedPrompt).toContain('<skill name="test" location="');
-		expect(expandedPrompt).toContain("Use the skill body.");
-		expect(expandedPrompt).toContain("explain this");
+		expect(getMessageText(userEntry?.type === "message" ? userEntry.message : undefined)).toBe(expected);
+
+		// Discovery keeps only bounded metadata even when the unselected body is too large.
+		const oversized = frontmatter + "é".repeat(SKILL_FILE_MAX_BYTES / 2);
+		expect(oversized.length).toBeLessThan(SKILL_FILE_MAX_BYTES);
+		expect(Buffer.byteLength(oversized)).toBeGreaterThan(SKILL_FILE_MAX_BYTES);
+		writeFileSync(skillPath, oversized);
+		const rediscovered = loadSkillsFromDir({ dir: skillDir, source: "test" });
+		expect(rediscovered.skills).toMatchObject([{ name: "test", description: "Test skill", filePath: skillPath }]);
+		expect(rediscovered.diagnostics).toEqual([]);
+		harness.setResponses([fauxAssistantMessage("must not be consumed")]);
+		await expect(harness.session.prompt("/skill:test oversized")).rejects.toThrow("Skill file byte limit exceeded");
+		expect(expansionErrors).toEqual(["Skill file byte limit exceeded"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(getUserTexts(harness)).toEqual([expected]);
 	});
 
 	it("expands prompt templates before sending the prompt", async () => {
@@ -379,6 +402,20 @@ describe("AgentSession prompt characterization", () => {
 		await harness.session.prompt("/review src/index.ts");
 
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+		const userEntry = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntry).toMatchObject({
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "/review src/index.ts" },
+			},
+		});
 	});
 
 	it("dispatches extension commands without consuming a provider response", async () => {
@@ -1092,7 +1129,7 @@ stale post-hook extension instructions`,
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
-			recordBashResult(command: string, result: BashResult): void;
+			recordBashResult(command: string, result: BashResult): Promise<void>;
 			_flushPendingBashMessages(): void;
 		};
 		const contextRoles: string[][] = [];
@@ -1107,7 +1144,7 @@ stale post-hook extension instructions`,
 		]);
 
 		const busyPrompt = harness.session.agent.prompt("busy");
-		sessionInternals.recordBashResult("echo hi", {
+		await sessionInternals.recordBashResult("echo hi", {
 			output: "hi",
 			exitCode: 0,
 			cancelled: false,
@@ -1168,29 +1205,33 @@ stale post-hook extension instructions`,
 		const accepted = harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false });
 		const acceptedRejection = expect(accepted).rejects.toThrow("cleared before delivery");
 		const deliveryRejection = expect(delivery).rejects.toThrow("cleared before delivery");
-		await admitted;
-
-		expect(harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId))).toEqual({
-			steering: [],
-			followUp: [agentPrompt],
-		});
-		releaseAdmission();
-		await Promise.all([acceptedRejection, deliveryRejection]);
-		await harness.session.agent.waitForIdle();
-
 		let sawRestoredNextTurn = false;
-		harness.setResponses([
-			(context) => {
-				sawRestoredNextTurn = context.messages.some(
-					(message) => message.role === "user" && getMessageText(message) === "carry this",
-				);
-				return fauxAssistantMessage("newer response");
-			},
-		]);
-		holdAgentStart = false;
-		await harness.session.prompt("newer prompt");
-		releaseEventQueue();
-		await harness.session.waitForIdle();
+		let newerPrompt: Promise<void> | undefined;
+		try {
+			await admitted;
+			expect(harness.session.clearQueuedUserMessagesMatching((text) => text.includes(agentMessageId))).toEqual({
+				steering: [],
+				followUp: [agentPrompt],
+			});
+			releaseAdmission();
+			await harness.session.agent.waitForIdle();
+
+			harness.setResponses([
+				(context) => {
+					sawRestoredNextTurn = context.messages.some(
+						(message) => message.role === "user" && getMessageText(message) === "carry this",
+					);
+					return fauxAssistantMessage("newer response");
+				},
+			]);
+			holdAgentStart = false;
+			newerPrompt = harness.session.prompt("newer prompt");
+		} finally {
+			releaseAdmission();
+			releaseEventQueue();
+			await Promise.all([acceptedRejection, deliveryRejection, newerPrompt]);
+			await harness.session.waitForIdle();
+		}
 
 		expect(sawRestoredNextTurn).toBe(true);
 		expect(getUserTexts(harness)).toEqual(["newer prompt"]);
@@ -1314,7 +1355,7 @@ stale post-hook extension instructions`,
 
 		await expect(
 			harness.session.acceptAgentMessagePrompt(agentPrompt, { expandPromptTemplates: false }),
-		).resolves.toBeUndefined();
+		).rejects.toThrow("Session input dispatch settled without durable delivery");
 		unsubscribe();
 		await harness.session.waitForIdle();
 
@@ -1367,16 +1408,42 @@ stale post-hook extension instructions`,
 				settled = true;
 			});
 		await vi.waitFor(() => expect(harness.session.getFollowUpMessages()).toEqual(["second"]));
+		expect(
+			harness.session.mutateQueuedMessage("followUp", 0, "second", {
+				type: "replace",
+				text: "replacement second",
+				lane: "followUp",
+			}),
+		).toBe("applied");
 		expect(settled).toBe(false);
 
 		releaseFirst?.();
-		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["first", "second"]));
+		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["first", "replacement second"]));
 		expect(settled).toBe(false);
 
 		releaseSecond?.();
 		await Promise.all([first, queued]);
 		expect(settled).toBe(true);
 		expect(getAssistantTexts(harness)).toEqual(["first done", "second done"]);
+		const replacementEntry = harness.sessionManager
+			.getEntries()
+			.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					getMessageText(entry.message) === "replacement second",
+			);
+		expect(replacementEntry).toMatchObject({
+			nativeOrigin: {
+				version: 1,
+				kind: "input",
+				actionId: expect.stringMatching(/\S/),
+				recordId: expect.stringMatching(/\S/),
+				inputSource: "interactive",
+				recordRole: "primary",
+				submitted: { text: "replacement second" },
+			},
+		});
 	});
 
 	it("drops generated prompt-wait outcome entries after completion", async () => {
@@ -1473,6 +1540,7 @@ stale post-hook extension instructions`,
 		};
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
+			persistSession: true,
 			resourceLoader,
 			extensionFactories: [
 				(pi) => {
@@ -1493,6 +1561,20 @@ stale post-hook extension instructions`,
 		expect(harness.session.getFollowUpMessages()).toEqual(["/review keep literal", "/testcmd keep literal"]);
 		expect(commandRuns).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(0);
+
+		harness.setResponses([fauxAssistantMessage("review delivered"), fauxAssistantMessage("command delivered")]);
+		harness.session.resumeQueuedWork();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["/review keep literal", "/testcmd keep literal"]);
+		const primaryEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(primaryEntries).toHaveLength(2);
+		for (const entry of primaryEntries) {
+			expect(entry).toMatchObject({
+				nativeOrigin: { kind: "input", recordRole: "primary", inputSource: "internal" },
+			});
+		}
 	});
 
 	it("keeps an ordinary direct prompt fenced until its primary message starts", async () => {
@@ -1888,14 +1970,17 @@ stale post-hook extension instructions`,
 		const checkpoint = harness.session.waitForSessionInputCheckpoint(controller.signal);
 		controller.abort();
 
-		await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
-		expect(queueDrained).toBe(false);
-		expect(flushNow).not.toHaveBeenCalled();
-		extensionGate.resolve();
-		await prompt;
-		await eventQueue;
+		try {
+			await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
+			expect(queueDrained).toBe(false);
+			expect(flushNow).not.toHaveBeenCalled();
+		} finally {
+			extensionGate.resolve();
+			await prompt;
+			await eventQueue;
+		}
 		expect(queueDrained).toBe(true);
-		expect(flushNow).not.toHaveBeenCalled();
+		expect(flushNow).toHaveBeenCalledTimes(1);
 	});
 
 	it("propagates a snapshotted event queue rejection without flushing", async () => {
@@ -1908,6 +1993,8 @@ stale post-hook extension instructions`,
 
 		await expect(harness.session.waitForSessionInputCheckpoint()).rejects.toThrow("event queue failed");
 		expect(flushNow).not.toHaveBeenCalled();
+		await expect(harness.cleanup()).rejects.toThrow("event queue failed");
+		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
 	it("releases the injected action checkpoint when dispatch fails", async () => {
@@ -1964,7 +2051,7 @@ stale post-hook extension instructions`,
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
 		const surfacedErrors: string[] = [];
-		harness.session.bindExtensions({ onError: (error) => surfacedErrors.push(error.error) });
+		await harness.session.bindExtensions({ onError: (error) => surfacedErrors.push(error.error) });
 
 		await expect(harness.session.prompt("hi")).rejects.toThrow(
 			`No API key found for ${harness.getModel().provider}.`,

@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, ServiceTier, Transport } from "@earendil-works/pi-ai";
+import { type AgentMessage, AgentOutputLimitError, type ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { ImageContent, ServiceTier, Transport } from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -17,8 +17,10 @@ import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
+import { readUserMessagesForForking } from "../../core/session-fork-messages.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { readSessionTree } from "../../core/session-tree.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import {
@@ -98,10 +100,12 @@ export class InProcessAgentConnection implements AgentConnection {
 			if (this.headlessExtensionOptions) {
 				await this.bindCurrentSessionExtensions();
 			}
+			const state = createAgentConnectionState(this.runtimeHost);
+			const messages = [...this.runtimeHost.session.messages];
 			await this.emit({
 				type: "session_replaced",
-				state: createAgentConnectionState(this.runtimeHost),
-				messages: this.runtimeHost.session.messages,
+				state: await state,
+				messages,
 			});
 		});
 	}
@@ -186,10 +190,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {
-		return {
-			tree: this.session.sessionManager.getTree(),
-			leafId: this.session.sessionManager.getLeafId(),
-		};
+		return readSessionTree(this.session.sessionManager);
 	}
 
 	async listSavedSessions(
@@ -309,7 +310,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getUserMessagesForForking(): Promise<AgentConnectionUserMessage[]> {
-		return this.session.getUserMessagesForForking();
+		return readUserMessagesForForking(this.session.sessionManager);
 	}
 
 	async getLastAssistantText(): Promise<string | undefined> {
@@ -325,7 +326,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void> {
-		this.session.sessionManager.appendLabelChange(entryId, label);
+		await this.session.sessionManager.appendLabelChange(entryId, label);
 	}
 
 	async respondToExtensionUiRequest(_requestId: string, _response: AgentConnectionExtensionUiResponse): Promise<void> {
@@ -361,10 +362,24 @@ export class InProcessAgentConnection implements AgentConnection {
 					}
 				},
 			});
-			void prompt.then(() => {
-				if (accepted) resolveOnce();
-				else rejectOnce(new Error("Prompt was not accepted by the session."));
-			}, rejectOnce);
+			void prompt.then(
+				() => {
+					if (accepted) resolveOnce();
+					else rejectOnce(new Error("Prompt was not accepted by the session."));
+				},
+				(error: unknown) => {
+					if (!accepted) rejectOnce(error);
+					// Output-limit refusals already have their own refusal-only agent_end.
+					else if (!(error instanceof AgentOutputLimitError)) {
+						void this.emit({
+							type: "extension_error",
+							extensionPath: "<session-input>",
+							event: "prompt_completion",
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				},
+			);
 		});
 	}
 
@@ -468,11 +483,11 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setThinkingLevel(level: ThinkingLevel): Promise<void> {
-		this.session.setThinkingLevel(level);
+		await this.session.setThinkingLevel(level);
 	}
 
 	async setServiceTier(serviceTier: ServiceTier): Promise<void> {
-		this.session.setServiceTier(serviceTier);
+		await this.session.setServiceTier(serviceTier);
 	}
 
 	async cycleThinkingLevel(): Promise<ThinkingLevel | undefined> {
@@ -568,7 +583,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		if (!trimmedName) {
 			throw new Error("Session name cannot be empty");
 		}
-		this.session.setSessionName(trimmedName);
+		await this.session.setSessionName(trimmedName);
 	}
 
 	async getRlmMaxDepthStatus() {
@@ -586,10 +601,15 @@ export class InProcessAgentConnection implements AgentConnection {
 		}
 		const currentSessionFile = this.session.sessionFile;
 		if (currentSessionFile && resolve(currentSessionFile) === resolve(sessionPath)) {
-			this.session.setSessionName(trimmedName);
+			await this.session.setSessionName(trimmedName);
 			return;
 		}
-		SessionManager.open(sessionPath).appendSessionInfo(trimmedName);
+		const manager = await SessionManager.open(sessionPath);
+		try {
+			await manager.appendSessionInfo(trimmedName);
+		} finally {
+			await manager.close();
+		}
 	}
 
 	async deleteSavedSession(sessionPath: string): Promise<DeleteSessionFileResult> {

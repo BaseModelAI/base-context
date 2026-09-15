@@ -1,4 +1,4 @@
-import { registerApiProvider, unregisterApiProviders } from "../api-registry.js";
+import { matchesApiProvider, registerApiProvider, unregisterApiProviders } from "../api-registry.js";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
@@ -24,6 +24,20 @@ const DEFAULT_MODEL_NAME = "Faux Model";
 const DEFAULT_BASE_URL = "http://localhost:0";
 const DEFAULT_MIN_TOKEN_SIZE = 3;
 const DEFAULT_MAX_TOKEN_SIZE = 5;
+
+const localImplementations = new Map<string, { stream: object; streamSimple: object }>();
+const localStreams = new WeakSet<object>();
+
+/** Read-only identity check for this module's registered local simulation. */
+export function isLocalFauxProvider(api: string): boolean {
+	const implementation = localImplementations.get(api);
+	return !!implementation && matchesApiProvider(api, implementation.stream, implementation.streamSimple);
+}
+
+/** Marks actual local dispatch output, not a name/classification selected before an await. */
+export function isLocalFauxStream(stream: object): boolean {
+	return localStreams.has(stream);
+}
 
 const DEFAULT_USAGE: Usage = {
 	input: 0,
@@ -429,7 +443,10 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	})) as [Model<string>, ...Model<string>[]];
 
 	const stream: StreamFunction<string, StreamOptions> = (requestModel, context, streamOptions) => {
+		// Simulation callbacks never receive authority to create physical provider receipts.
+		streamOptions = streamOptions ? { ...streamOptions, attempts: undefined } : undefined;
 		const outer = createAssistantMessageEventStream();
+		localStreams.add(outer);
 		const step = pendingResponses.shift();
 		state.callCount++;
 
@@ -467,6 +484,8 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	const streamSimple: StreamFunction<string, SimpleStreamOptions> = (streamModel, context, streamOptions) =>
 		stream(streamModel, context, streamOptions);
 
+	const implementation = { stream, streamSimple };
+	localImplementations.set(api, implementation);
 	registerApiProvider({ api, stream, streamSimple }, sourceId);
 
 	function getModel(): Model<string>;
@@ -494,6 +513,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		},
 		unregister() {
 			unregisterApiProviders(sourceId);
+			if (localImplementations.get(api) === implementation) localImplementations.delete(api);
 		},
 	};
 }

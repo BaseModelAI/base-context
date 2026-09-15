@@ -10,7 +10,7 @@
  */
 
 /** Reverse-domain namespace for every prime-agent `_meta` payload. */
-export const PRIME_AGENT_META_NAMESPACE = "ai.primeintellect.prime-agent";
+export const BASE_CONTEXT_META_NAMESPACE = "ai.primeintellect.prime-agent";
 
 export interface PrimeAgentSubagentMeta {
 	id: string;
@@ -118,7 +118,7 @@ export interface PrimeAgentSessionMeta {
 	sessionId?: string;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
-	compaction?: { tokensBefore?: number; summary?: string };
+	compaction?: { tokensBefore?: number | null; summary?: string };
 	subagents?: PrimeAgentSubagentMeta[];
 	autonomous?: PrimeAgentAutonomousMeta;
 	/** Observed subagent and autonomous-continuation counts at completion. */
@@ -128,5 +128,5 @@ export interface PrimeAgentSessionMeta {
 
 /** Wrap a prime-agent payload in its reverse-domain `_meta` envelope. */
 export function primeAgentMeta(payload: PrimeAgentSessionMeta): Record<string, unknown> {
-	return { [PRIME_AGENT_META_NAMESPACE]: payload };
+	return { [BASE_CONTEXT_META_NAMESPACE]: payload };
 }

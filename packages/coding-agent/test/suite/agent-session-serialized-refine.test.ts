@@ -1,5 +1,5 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@ponythewhite/base-context-agent";
+import { fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
@@ -110,10 +110,13 @@ function mockSerializedRefine(harness: Harness) {
 describe("Serialized auto-refine checkpoint", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -211,16 +214,13 @@ describe("Serialized auto-refine checkpoint", () => {
 		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
 	});
 
-	it("final agent_end pending refine completes before dispose", async () => {
+	it("does not start due auto-refine during disposal", async () => {
+		const reviewer = vi.fn(async () => ({ shouldRefine: true, rationale: "test", instructions: "test" }));
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
 			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
-			autoRefineReviewer: vi.fn(async () => ({
-				shouldRefine: true,
-				rationale: "test",
-				instructions: "test",
-			})),
+			autoRefineReviewer: reviewer,
 		});
 		harnesses.push(harness);
 		const { applyRefine } = mockSerializedRefine(harness);
@@ -230,8 +230,9 @@ describe("Serialized auto-refine checkpoint", () => {
 
 		await harness.session.disposeAsync();
 
-		// The drain path ran the serialized checkpoint which called _applyRefine.
-		expect(applyRefine).toHaveBeenCalled();
+		// An interval being due is not accepted planning work. Disposal does not turn it into inference.
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(applyRefine).not.toHaveBeenCalled();
 		expect(internals._disposed).toBe(true);
 	});
 
@@ -299,10 +300,13 @@ describe("Serialized auto-refine checkpoint", () => {
 describe("Serialized agent-callable refine", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -411,6 +415,8 @@ describe("Serialized agent-callable refine", () => {
 		// by background planning, NOT left for fire-and-forget at agent_end.
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 		expect(internals._serializedPlanInFlight).toBeDefined();
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
 	it("pending agent-callable refine drained before disposal", async () => {
@@ -438,10 +444,13 @@ describe("Serialized agent-callable refine", () => {
 describe("Serialized autonomous continuation", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -489,10 +498,13 @@ describe("Serialized autonomous continuation", () => {
 describe("Serialized background planning during tools", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -655,10 +667,13 @@ describe("Serialized background planning during tools", () => {
 describe("PR #503 model persistence regression", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -709,10 +724,13 @@ describe("PR #503 model persistence regression", () => {
 describe("Serialized refine review-fix regressions", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1416,7 +1434,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("defers serialized compaction refinement even when no continuation was scheduled", async () => {
+	it("does not promote deferred compaction refinement during disposal", async () => {
 		const reviewer = vi.fn(async () => ({
 			shouldRefine: true,
 			rationale: "terminal compaction lesson",
@@ -1438,8 +1456,8 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(interactiveSpy).not.toHaveBeenCalled();
 		await internals._drainPendingRefinementForDisposal();
 
-		expect(reviewer).toHaveBeenCalledWith(expect.objectContaining({ reason: "compact" }), expect.any(AbortSignal));
-		expect(applyRefine).toHaveBeenCalledTimes(1);
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(applyRefine).not.toHaveBeenCalled();
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
@@ -1503,7 +1521,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("continues to the interval drain after a compact trigger hits cooldown", async () => {
+	it("does not start interval refinement from a compact cooldown during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1523,7 +1541,7 @@ describe("Serialized refine review-fix regressions", () => {
 		await internals._drainPendingRefinementForDisposal();
 
 		expect(internals._compactAutoRefinePending).toBe(false);
-		expect(checkpoint).toHaveBeenCalledOnce();
+		expect(checkpoint).not.toHaveBeenCalled();
 	});
 
 	it("falls back to an interval review when compact-triggered refinement is disabled", async () => {
@@ -1575,7 +1593,7 @@ describe("Serialized refine review-fix regressions", () => {
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("does not let a compact review failure block disposal", async () => {
+	it("does not start a compact review during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1589,10 +1607,11 @@ describe("Serialized refine review-fix regressions", () => {
 		);
 
 		await expect(internals._drainPendingRefinementForDisposal()).resolves.toBeUndefined();
+		expect(internals._runSerializedAutoRefineReview).not.toHaveBeenCalled();
 		expect(internals._compactAutoRefinePending).toBe(false);
 	});
 
-	it("retries a failed explicit background plan during disposal", async () => {
+	it("does not retry a failed explicit background plan during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			serializedRefine: true,
@@ -1611,8 +1630,7 @@ describe("Serialized refine review-fix regressions", () => {
 
 		await internals._drainPendingRefinementForDisposal();
 
-		expect(runSpy).toHaveBeenCalledTimes(1);
-		expect(runSpy).toHaveBeenCalledWith(options);
+		expect(runSpy).not.toHaveBeenCalled();
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 	});
 });
@@ -1620,10 +1638,13 @@ describe("Serialized refine review-fix regressions", () => {
 describe("Serialized refine event-ordering integration", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1687,10 +1708,13 @@ describe("Serialized refine event-ordering integration", () => {
 describe("P0 concurrency regressions", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		vi.restoreAllMocks();
-		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		try {
+			while (harnesses.length > 0) {
+				await harnesses.pop()?.cleanup();
+			}
+		} finally {
+			vi.restoreAllMocks();
 		}
 	});
 
@@ -1866,7 +1890,19 @@ describe("P0 concurrency regressions", () => {
 				],
 			},
 		};
-		vi.spyOn(internals, "_planRefine").mockResolvedValue(fauxPlan as never);
+		let releasePlan!: () => void;
+		const planGate = new Promise<void>((resolve) => {
+			releasePlan = resolve;
+		});
+		let enteredPlan!: () => void;
+		const planEntered = new Promise<void>((resolve) => {
+			enteredPlan = resolve;
+		});
+		const planSpy = vi.spyOn(internals, "_planRefine").mockImplementation(async () => {
+			enteredPlan();
+			await planGate;
+			return fauxPlan as never;
+		});
 
 		// Spy on _rebuildSystemPrompt (call-through) to assert it was invoked.
 		const rebuildSpy = vi.spyOn(
@@ -1884,7 +1920,12 @@ describe("P0 concurrency regressions", () => {
 		});
 
 		// Run the serialized refine (real _applyRefine runs).
-		await internals._runSerializedRefine({ instructions: "add a memory" });
+		const refinement = internals._runSerializedRefine({ instructions: "add a memory" });
+		await planEntered;
+		const modeChange = harness.session.setContextMode("off");
+		releasePlan();
+		await refinement;
+		await modeChange;
 
 		// _rebuildSystemPrompt was called by _applyRefine.
 		expect(rebuildSpy).toHaveBeenCalledTimes(1);
@@ -1905,6 +1946,22 @@ describe("P0 concurrency regressions", () => {
 		// refine_complete reports only successfully applied edits to extensions.
 		expect(refineCompleteEmitted).toBe(true);
 		expect(extensionEmit).toHaveBeenCalledWith(expect.objectContaining({ type: "refine_complete", appliedEdits: 1 }));
+
+		expect(harness.session.contextMode).toBe("off");
+		const acceptedPrompt = harness.session.agent.state.systemPrompt;
+		harness.setResponses([fauxAssistantMessage("ordinary off-mode response")]);
+		await harness.session.prompt("Continue without optimization.");
+		expect(reviewer).not.toHaveBeenCalled();
+		expect(planSpy).toHaveBeenCalledTimes(1);
+		expect(rebuildSpy).toHaveBeenCalledTimes(1);
+		expect(harness.session.agent.state.systemPrompt).toBe(acceptedPrompt);
+		await expect(harness.session.refine()).rejects.toThrow("explicitly re-enable context.mode");
+		await expect(harness.session.compact()).rejects.toThrow("explicitly re-enable context.mode");
+		expect(() => harness.session.handleRefineHostRequest("refine.run")).toThrow("explicitly re-enable context.mode");
+		await expect(harness.session.handleCompactHostRequest("compact.run")).rejects.toThrow(
+			"explicitly re-enable context.mode",
+		);
+		expect(planSpy).toHaveBeenCalledTimes(1);
 	});
 	it("explicit refine.run planning failure: stamps cooldown, no apply, no retry", async () => {
 		const harness = await createHarness({
@@ -2508,7 +2565,7 @@ describe("P0 concurrency regressions", () => {
 		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
 	});
 
-	it("drains a due interactive auto-refine without waiting for agent idle", async () => {
+	it("does not start a due interactive auto-refine during disposal", async () => {
 		const harness = await createHarness({
 			persistSession: true,
 			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
@@ -2522,7 +2579,7 @@ describe("P0 concurrency regressions", () => {
 		await internals._drainPendingRefinementForDisposal();
 
 		expect(waitForIdle).not.toHaveBeenCalled();
-		expect(maybeAutoRefine).toHaveBeenCalledWith("turn_interval");
+		expect(maybeAutoRefine).not.toHaveBeenCalled();
 	});
 
 	it("waits for an interactive auto-refine operation before disposal drain continues", async () => {

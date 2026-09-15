@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Model, RequestTokenBudgetOptions, ServiceTier } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
@@ -14,7 +14,7 @@ import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
-import type { SubagentRuntimeHost } from "./rlm-runtime.js";
+import type { RlmChildAdmission, SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
@@ -45,6 +45,9 @@ export interface CreateAgentSessionServicesOptions {
 }
 
 export interface AgentSessionCreationOptions {
+	/** Explicit native request-budget rollout; also forwarded by the services/runtime factory. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: "on" | "off";
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
@@ -63,6 +66,8 @@ export interface AgentSessionCreationOptions {
 	rlmSessionDir?: string;
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
+	/** Live parent-owned setup admission; never restored from session metadata. */
+	rlmChildAdmission?: RlmChildAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -189,7 +194,7 @@ export async function createAgentSessionServices(
 		diagnostics.push({
 			type: "info",
 			message:
-				"Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
+				"Base Context analytics are opt-in. Remote export requires BASE_CONTEXT_TELEMETRY_ENDPOINT and a dedicated BASE_CONTEXT_TELEMETRY_API_KEY; inference credentials are never used. Disable with telemetry.enabled=false, BASE_CONTEXT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
 		});
 		settingsManager.setTelemetryNoticeShown(true);
 	}
@@ -241,6 +246,8 @@ export async function createAgentSessionFromServices(
 		mcpManager: options.services.mcpManager,
 		sessionManager: options.sessionManager,
 		model: options.model,
+		requestTokenBudget: options.requestTokenBudget,
+		contextMode: options.contextMode,
 		thinkingLevel: options.thinkingLevel,
 		serviceTier: options.serviceTier,
 		scopedModels: options.scopedModels,
@@ -258,6 +265,7 @@ export async function createAgentSessionFromServices(
 		rlmSessionDir: options.rlmSessionDir,
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
+		rlmChildAdmission: options.rlmChildAdmission,
 		semanticParentSessionId: options.semanticParentSessionId,
 		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 		subagentRuntimeHost: options.subagentRuntimeHost,

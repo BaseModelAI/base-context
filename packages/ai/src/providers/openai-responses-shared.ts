@@ -30,6 +30,12 @@ import type {
 import type { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { shortHash } from "../utils/hash.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import type { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import {
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	withRequestBody,
+} from "../utils/request-token-budget.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
@@ -60,7 +66,51 @@ function parseTextSignature(
 	return { id: signature };
 }
 
+/** Use the existing text-signature contract only when the full rendered item keeps its legal identity. */
+export function matchesResponsesTextSignature(signature: string | undefined, item: unknown): boolean {
+	if (
+		!item ||
+		typeof item !== "object" ||
+		!("type" in item) ||
+		item.type !== "message" ||
+		!("role" in item) ||
+		item.role !== "assistant" ||
+		!("status" in item) ||
+		item.status !== "completed" ||
+		!("id" in item) ||
+		typeof item.id !== "string" ||
+		!item.id ||
+		item.id.length > 64
+	)
+		return false;
+	const phase = "phase" in item ? item.phase : undefined;
+	if (signature === undefined) return phase === undefined;
+	if (signature.startsWith("{")) {
+		let encoded: unknown;
+		try {
+			encoded = JSON.parse(signature);
+		} catch {
+			return false;
+		}
+		if (
+			!encoded ||
+			typeof encoded !== "object" ||
+			Array.isArray(encoded) ||
+			!("v" in encoded) ||
+			encoded.v !== 1 ||
+			!("id" in encoded) ||
+			typeof encoded.id !== "string" ||
+			Object.keys(encoded).some((key) => key !== "v" && key !== "id" && key !== "phase") ||
+			("phase" in encoded && encoded.phase !== "commentary" && encoded.phase !== "final_answer")
+		)
+			return false;
+	}
+	const parsed = parseTextSignature(signature);
+	return parsed !== undefined && parsed.id === item.id && parsed.phase === phase;
+}
+
 export interface OpenAIResponsesStreamOptions {
+	attempts?: ProviderAttemptTracker;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -74,10 +124,228 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
+	/** Internal native projection capture during this conversion, never a second conversion. */
+	onProjection?: (projection: ProviderRequestProjection) => void;
+	pendingPublicMessageGroups?: readonly (readonly number[])[];
 }
 
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
+}
+
+function captureResponsesProjection<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	transformed: Context["messages"],
+	input: ResponseInput,
+	messageIndices: readonly (number | null)[],
+	pendingPublicMessageGroups: readonly (readonly number[])[],
+): ProviderRequestProjection | undefined {
+	if (
+		!(
+			(model.provider === "openai" && model.api === "openai-responses") ||
+			(model.provider === "openai-codex" && model.api === "openai-codex-responses")
+		)
+	)
+		return;
+	// No speculative conversion: these are the messages and items from the one normal converter pass.
+	if (
+		transformed.length !== context.messages.length ||
+		transformed.some((message, index) => JSON.stringify(message) !== JSON.stringify(context.messages[index]))
+	)
+		return;
+	const items = context.messages.map((): ResponseInput => []);
+	for (const [index, sourceIndex] of messageIndices.entries()) {
+		if (sourceIndex !== null) items[sourceIndex].push(input[index]);
+	}
+	const required = pendingPublicMessageGroups.map((indices) => ({
+		indices,
+		calls: new Map<string, { wireId: string; seen: boolean }>(),
+	}));
+	const requiredAt = new Map<number, (typeof required)[number]>();
+	for (const group of required) {
+		if (!group.indices.length || context.messages[group.indices[0]]?.role !== "assistant") return;
+		let previous = -1;
+		for (const index of group.indices) {
+			if (
+				!Number.isSafeInteger(index) ||
+				index <= previous ||
+				index >= context.messages.length ||
+				requiredAt.has(index)
+			)
+				return;
+			requiredAt.set(index, group);
+			previous = index;
+		}
+	}
+	let replayContract: "complete-context" | "message-groups" = "message-groups";
+	const optionalMessageIndices: number[] = [];
+	const generatedMessageIndices: number[] = [];
+	const pending = new Map<string, { wireId: string; seen: boolean }>();
+	const publicMessageGroups: number[][] = [];
+	let publicGroup: number[] | undefined;
+	const closeCalls = () => {
+		const complete = [...pending.values()].every((call) => call.seen);
+		if (complete && publicGroup) publicMessageGroups.push(publicGroup);
+		publicGroup = undefined;
+		pending.clear();
+		return complete;
+	};
+	for (const [index, message] of context.messages.entries()) {
+		const rendered = items[index];
+		if (!rendered.length) return;
+		const requiredGroup = requiredAt.get(index);
+		const calls = requiredGroup?.calls ?? pending;
+		if (
+			requiredGroup &&
+			(index === requiredGroup.indices[0] ? message.role !== "assistant" : message.role !== "toolResult")
+		)
+			return;
+		if (message.role === "assistant" || message.role === "user") {
+			if (!closeCalls()) return;
+		}
+		if (message.role === "assistant") {
+			publicGroup =
+				!requiredGroup && (message.stopReason === "stop" || message.stopReason === "toolUse") ? [index] : undefined;
+			if (requiredGroup && message.stopReason !== "toolUse" && message.stopReason !== "stop") return;
+			if (
+				message.api !== model.api ||
+				message.provider !== model.provider ||
+				message.model !== model.id ||
+				rendered.length !== message.content.length
+			)
+				return;
+			for (const [blockIndex, block] of message.content.entries()) {
+				const item = rendered[blockIndex];
+				if (block.type === "text") {
+					if (!matchesResponsesTextSignature(block.textSignature, item)) return;
+					if (block.textSignature === undefined && !generatedMessageIndices.includes(index))
+						generatedMessageIndices.push(index);
+				} else if (block.type === "thinking") {
+					if (!block.thinkingSignature || item.type !== "reasoning") return;
+					// Existing whole-message groups suffice only when the reasoning's following item stays in this unit.
+					if (
+						!message.content
+							.slice(blockIndex + 1)
+							.some((next) => next.type === "text" || next.type === "toolCall")
+					)
+						replayContract = "complete-context";
+				} else if (block.type === "toolCall") {
+					const [callId, itemId] = block.id.split("|");
+					if (
+						item.type !== "function_call" ||
+						item.call_id !== callId ||
+						item.id !== itemId ||
+						calls.has(block.id) ||
+						[...calls.values()].some((call) => call.wireId === callId)
+					)
+						return;
+					calls.set(block.id, { wireId: callId, seen: false });
+					if (block.thoughtSignature !== undefined) replayContract = "complete-context";
+				}
+			}
+			if (message.stopReason === "stop" && message.content.length === 1 && message.content[0].type === "text")
+				optionalMessageIndices.push(index);
+		} else if (message.role === "toolResult") {
+			const call = calls.get(message.toolCallId);
+			const item = rendered[0];
+			if (!call || rendered.length !== 1 || item.type !== "function_call_output" || item.call_id !== call.wireId)
+				return;
+			if (call.seen || message.content.some((part) => part.type !== "text")) {
+				if (requiredGroup) return;
+				publicGroup = undefined;
+			}
+			if (!requiredGroup) publicGroup?.push(index);
+			call.seen = true;
+		} else if (rendered.length !== 1) return;
+	}
+	if (!closeCalls()) return;
+	for (const group of required) {
+		if (!group.calls.size) return;
+		publicMessageGroups.push([...group.indices]);
+	}
+	// These IDs depend on the whole preceding layout, not just tool-message dependencies.
+	if (generatedMessageIndices.length) replayContract = "complete-context";
+	return {
+		kind: "openai-responses-replay-v1",
+		replayContract,
+		messageIndices,
+		optionalMessageIndices,
+		generatedMessageIndices,
+		publicMessageGroups,
+		...(required.length ? { pendingPublicMessageGroups: required.map((group) => [...group.indices]) } : {}),
+	};
+}
+
+/** Called only at the actual official-route native public-window gate. */
+export function bindResponsesPublicWindow(
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+	onPendingPublicEncoded?: (body: string) => void,
+): ProviderRequestProjection {
+	return {
+		...projection,
+		publicWindow: true,
+		encodePublicWindow(replacements) {
+			if (
+				!request.body ||
+				!replacements.length ||
+				replacements.length > projection.messageIndices.length ||
+				!projection.publicMessageGroups
+			)
+				return;
+			const texts = new Map<number, string>();
+			for (const replacement of replacements) {
+				if (
+					!Number.isSafeInteger(replacement.messageIndex) ||
+					typeof replacement.text !== "string" ||
+					texts.has(replacement.messageIndex)
+				)
+					return;
+				texts.set(replacement.messageIndex, replacement.text);
+			}
+			const covered = new Set<number>();
+			for (const group of projection.publicMessageGroups) {
+				if (!group.some((index) => texts.has(index))) continue;
+				if (!group.every((index) => texts.has(index))) return;
+				for (const index of group) covered.add(index);
+			}
+			if (
+				covered.size !== texts.size ||
+				projection.pendingPublicMessageGroups?.some((group) => group.some((index) => !texts.has(index)))
+			)
+				return;
+			const body = JSON.parse(request.body) as { input: ResponseInput };
+			if (body.input.length !== projection.messageIndices.length) return;
+			const input: ResponseInput = [];
+			const messageIndices: Array<number | null> = [];
+			const emitted = new Set<number>();
+			for (const [itemIndex, messageIndex] of projection.messageIndices.entries()) {
+				if (messageIndex !== null && texts.has(messageIndex)) {
+					if (emitted.has(messageIndex)) continue;
+					emitted.add(messageIndex);
+					input.push({
+						role: "user",
+						content: [{ type: "input_text", text: sanitizeSurrogates(texts.get(messageIndex)!) }],
+					});
+				} else input.push(body.input[itemIndex]);
+				messageIndices.push(messageIndex);
+			}
+			const encoded = withRequestBody(request, JSON.stringify({ ...body, input }));
+			if (projection.pendingPublicMessageGroups?.length) onPendingPublicEncoded?.(encoded.body!);
+			return {
+				request: encoded,
+				projection: {
+					kind: projection.kind,
+					replayContract: projection.replayContract,
+					publicWindow: true,
+					messageIndices,
+					optionalMessageIndices: projection.optionalMessageIndices,
+					generatedMessageIndices: projection.generatedMessageIndices,
+				},
+			};
+		},
+	};
 }
 
 export function convertResponsesMessages<TApi extends Api>(
@@ -113,7 +381,13 @@ export function convertResponsesMessages<TApi extends Api>(
 		return `${normalizedCallId}|${normalizedItemId}`;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const pendingPublicMessageGroups = options?.onProjection ? (options.pendingPublicMessageGroups ?? []) : [];
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		normalizeToolCallId,
+		pendingPublicMessageGroups,
+	);
 
 	const includeSystemPrompt = options?.includeSystemPrompt ?? true;
 	if (includeSystemPrompt && context.systemPrompt) {
@@ -124,8 +398,12 @@ export function convertResponsesMessages<TApi extends Api>(
 		});
 	}
 
+	const messageIndices: Array<number | null> | undefined = options?.onProjection
+		? messages.map(() => null)
+		: undefined;
 	let msgIndex = 0;
-	for (const msg of transformedMessages) {
+	for (const [sourceIndex, msg] of transformedMessages.entries()) {
+		const firstItem = messages.length;
 		if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				messages.push({
@@ -248,9 +526,22 @@ export function convertResponsesMessages<TApi extends Api>(
 				output,
 			});
 		}
+		if (messageIndices) {
+			for (let index = firstItem; index < messages.length; index++) messageIndices.push(sourceIndex);
+		}
 		msgIndex++;
 	}
-
+	if (messageIndices) {
+		const projection = captureResponsesProjection(
+			model,
+			context,
+			transformedMessages,
+			messages,
+			messageIndices,
+			pendingPublicMessageGroups,
+		);
+		if (projection) options!.onProjection!(projection);
+	}
 	return messages;
 }
 
@@ -263,6 +554,59 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 		parameters: tool.parameters as any, // TypeBox already generates JSON Schema
 		strict,
 	}));
+}
+
+/** Observe one decoded provider event, including failures transformed by transport-specific adapters. */
+export function observeResponsesEvent(event: ResponseStreamEvent, attempts?: ProviderAttemptTracker): void {
+	attempts?.event(
+		("delta" in event && typeof event.delta === "string" && event.delta.length > 0) ||
+			(event.type === "response.output_item.added" && event.item.type === "function_call"),
+	);
+	if ("response" in event) {
+		const response = event.response;
+		if (response.error) attempts?.providerError(response.error);
+		attempts?.response({
+			providerResponseId: response.id,
+			responseModel: response.model,
+			effectiveEffort: response.reasoning?.effort ?? undefined,
+			effectiveServiceTier: response.service_tier,
+		});
+		const terminal =
+			event.type === "response.completed" ||
+			event.type === "response.failed" ||
+			event.type === "response.incomplete";
+		if (response.usage) {
+			const usage = response.usage;
+			const details: { cached_tokens?: number; cache_write_tokens?: number } | undefined =
+				usage.input_tokens_details;
+			const cached = details?.cached_tokens;
+			const written = details?.cache_write_tokens;
+			attempts?.usage(
+				response.usage,
+				{
+					// Remove reported cache writes from ordinary input. Unreported writes remain unknown.
+					input:
+						cached !== undefined && usage.input_tokens !== undefined
+							? usage.input_tokens - cached - (written ?? 0)
+							: undefined,
+					inputTotal: usage.input_tokens,
+					output: usage.output_tokens,
+					cacheRead: cached,
+					cacheWrite: written,
+					totalTokens: usage.total_tokens,
+				},
+				terminal ? "complete" : "partial",
+			);
+		}
+		if (terminal) {
+			attempts?.terminal(
+				response.status === "failed" ? "failed" : response.status === "cancelled" ? "cancelled" : "completed",
+			);
+		}
+	} else if (event.type === "error") {
+		attempts?.providerError(event);
+		attempts?.terminal("failed");
+	}
 }
 
 export async function processResponsesStream<TApi extends Api>(
@@ -278,6 +622,7 @@ export async function processResponsesStream<TApi extends Api>(
 	const blockIndex = () => blocks.length - 1;
 
 	for await (const event of openaiStream) {
+		observeResponsesEvent(event, options?.attempts);
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {
@@ -475,13 +820,16 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			if (response?.usage) {
-				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+				const details: { cached_tokens?: number; cache_write_tokens?: number } | undefined =
+					response.usage.input_tokens_details;
+				const cachedTokens = details?.cached_tokens || 0;
+				const cacheWriteTokens = details?.cache_write_tokens || 0;
 				output.usage = {
-					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input
-					input: (response.usage.input_tokens || 0) - cachedTokens,
+					// OpenAI includes cache reads and writes in input_tokens; price each bucket once.
+					input: (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens,
 					output: response.usage.output_tokens || 0,
 					cacheRead: cachedTokens,
-					cacheWrite: 0,
+					cacheWrite: cacheWriteTokens,
 					totalTokens: response.usage.total_tokens || 0,
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};

@@ -2,8 +2,8 @@
  * Snake game extension - play snake with /snake command
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
+import { matchesKey, visibleWidth } from "@ponythewhite/base-context-tui";
 
 const GAME_WIDTH = 40;
 const GAME_HEIGHT = 15;
@@ -317,7 +317,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Load saved state from session
-			const entries = ctx.sessionManager.getEntries();
+			const entries = await ctx.sessionManager.readEntries({ maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 });
 			let savedState: GameState | undefined;
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const entry = entries[i];

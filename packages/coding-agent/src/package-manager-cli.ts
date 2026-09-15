@@ -1,4 +1,4 @@
-import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent, UserMessage } from "@ponythewhite/base-context-ai";
 import chalk from "chalk";
 import { spawn } from "child_process";
 import { readFileSync, rmSync, statSync } from "fs";
@@ -19,6 +19,7 @@ import {
 	DAEMON_UPDATE_RESTART_COORDINATOR_FLAG,
 	DAEMON_UPDATE_RESTART_ORIGIN_FLAG,
 	DAEMON_UPDATE_RESTART_STATUS_FLAG,
+	DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG,
 	DaemonUpdateRestartCoordinatorAlreadyRunningError,
 	type DaemonUpdateRestartCounts,
 	type DaemonUpdateRestartFailure,
@@ -34,6 +35,7 @@ import {
 	getAgentDir,
 	getDaemonUpdateRestartManifestPath,
 	getLegacyDaemonUpdateRestartManifestPath,
+	getPhysicalPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
 	PACKAGE_NAME,
@@ -43,7 +45,10 @@ import {
 	VERSION,
 } from "./config.js";
 import type { SessionActionRecoverySnapshot } from "./core/agent-session.js";
-import { SESSION_ACTION_RECOVERY_FORMAT_VERSION } from "./core/agent-session.js";
+import {
+	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+	SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION,
+} from "./core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.js";
 import { type CustomMessage, isSessionSlashCommand } from "./core/messages.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
@@ -67,6 +72,8 @@ import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
+import { captureOwnedUpdate, installOwnedRelease, OwnedInstallActivatedError } from "./owned-install.js";
+import { getOwnedInstallation, type OwnedInstallation } from "./owned-install-layout.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
 
@@ -91,6 +98,7 @@ interface PackageCommandOptions {
 	restartCoordinator: boolean;
 	restartStatusPath?: string;
 	restartOriginActiveSessionId?: string;
+	restartSuccessorSocketPath?: string;
 	invalidOption?: string;
 	invalidArgument?: string;
 	missingOptionValue?: string;
@@ -212,6 +220,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 	let restartCoordinator = false;
 	let restartStatusPath: string | undefined;
 	let restartOriginActiveSessionId: string | undefined;
+	let restartSuccessorSocketPath: string | undefined;
 
 	for (let index = 0; index < rest.length; index++) {
 		const arg = rest[index];
@@ -283,7 +292,11 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			continue;
 		}
 
-		if (arg === DAEMON_UPDATE_RESTART_STATUS_FLAG || arg === DAEMON_UPDATE_RESTART_ORIGIN_FLAG) {
+		if (
+			arg === DAEMON_UPDATE_RESTART_STATUS_FLAG ||
+			arg === DAEMON_UPDATE_RESTART_ORIGIN_FLAG ||
+			arg === DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG
+		) {
 			if (command !== "update") {
 				invalidOption = invalidOption ?? arg;
 				continue;
@@ -295,6 +308,8 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			}
 			if (arg === DAEMON_UPDATE_RESTART_STATUS_FLAG) {
 				restartStatusPath = value;
+			} else if (arg === DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG) {
+				restartSuccessorSocketPath = value;
 			} else {
 				restartOriginActiveSessionId = value;
 			}
@@ -376,6 +391,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		restartCoordinator,
 		restartStatusPath,
 		restartOriginActiveSessionId,
+		restartSuccessorSocketPath,
 		invalidOption,
 		invalidArgument,
 		missingOptionValue,
@@ -439,21 +455,15 @@ function setSelfUpdateNoChangeExitCode(): void {
 }
 
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
-	try {
-		const latestRelease = await getLatestPiRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		const installSpec = latestRelease?.installSpec ?? packageName;
-		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		if (
-			force ||
-			!latestRelease ||
-			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
-		) {
-			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
-		}
-	} catch {
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
+	const latestRelease = await getLatestPiRelease(VERSION);
+	if (!latestRelease) {
+		throw new Error(`${APP_NAME} release lookup is unavailable; self-update was not attempted.`);
+	}
+	const packageName = latestRelease.packageName ?? PACKAGE_NAME;
+	const installSpec = latestRelease.installSpec ?? packageName;
+	const packageRenameRequiresUpdate = !latestRelease.installSpec && packageName !== PACKAGE_NAME;
+	if (force || packageRenameRequiresUpdate || isNewerPackageVersion(latestRelease.version, VERSION)) {
+		return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease.version };
 	}
 
 	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
@@ -461,6 +471,7 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 }
 
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
+	console.log(chalk.dim("External package-manager install: Base-Context paired rollback does not apply."));
 	console.log(chalk.dim(`Updating ${APP_NAME} with ${command.display}...`));
 	for (const step of command.steps ?? [command]) {
 		await new Promise<void>((resolve, reject) => {
@@ -486,15 +497,15 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 }
 
 const UPDATE_RESTART_CONTINUATION_PROMPT =
-	"Prime Agent restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
+	"Base Context restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
 
 const UPDATE_SESSION_LOSS_COPY: DaemonSessionLossCopy = {
 	busyDetail(count) {
 		const { noun, pronoun } = pluralizeSessions(count);
-		return `Prime Agent has ${count} busy ${noun}. After the update installs, it will stop ${pronoun}, restart its background service, and resume interrupted work.`;
+		return `Base Context has ${count} busy ${noun}. After the update installs, it will stop ${pronoun}, restart its background service, and resume interrupted work.`;
 	},
 	unlistableDetail:
-		"Running agents could not be listed. After the update installs, Prime Agent will stop resident agents, restart its background service, and resume interrupted work where possible.",
+		"Running agents could not be listed. After the update installs, Base Context will stop resident agents, restart its background service, and resume interrupted work where possible.",
 	question: "Continue?",
 	nonTtyHint: "Re-run with --force to proceed.",
 };
@@ -622,6 +633,16 @@ function isSessionActionRecoveryAction(value: unknown): value is SessionActionRe
 	) {
 		return false;
 	}
+	const selectedSkillRef = value.payload.selectedSkillRef;
+	if (
+		selectedSkillRef !== undefined &&
+		(value.payload.kind !== "turn" ||
+			!isRecord(selectedSkillRef) ||
+			typeof selectedSkillRef.sessionId !== "string" ||
+			typeof selectedSkillRef.entryId !== "string" ||
+			(selectedSkillRef.sessionFile !== undefined && typeof selectedSkillRef.sessionFile !== "string"))
+	)
+		return false;
 	if (value.payload.kind === "session_command") return isSessionSlashCommand(value.payload.command);
 	return (
 		value.payload.kind === "turn" &&
@@ -662,14 +683,24 @@ function isSessionActionRecoveryAction(value: unknown): value is SessionActionRe
 
 function parseSessionActionRecoverySnapshot(value: unknown): SessionActionRecoverySnapshot {
 	if (!isRecord(value)) throw new Error("Daemon update restart response contains invalid session actions");
-	if (value.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION) {
+	if (
+		value.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+		value.formatVersion !== SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION
+	) {
 		throw new Error(`Unsupported session action recovery format version: ${String(value.formatVersion)}`);
 	}
-	if (!Array.isArray(value.actions) || !value.actions.every(isSessionActionRecoveryAction)) {
+	if (
+		!Array.isArray(value.actions) ||
+		!value.actions.every(isSessionActionRecoveryAction) ||
+		(value.formatVersion === SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
+			value.actions.some(
+				(action) => action.payload.kind === "turn" && action.payload.selectedSkillRef !== undefined,
+			))
+	) {
 		throw new Error("Daemon update restart response is missing session actions");
 	}
 	return {
-		formatVersion: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+		formatVersion: value.formatVersion,
 		actions: value.actions,
 	};
 }
@@ -1013,7 +1044,7 @@ async function restoreDaemonUpdateRestartSession(
 					activeSessionId,
 					message: {
 						customType: "prime-agent.update_complete",
-						content: `Prime Agent updated to v${VERSION}. This daemon session was restored after the update.`,
+						content: `Base Context updated to v${VERSION}. This daemon session was restored after the update.`,
 						display: true,
 						details: { version: VERSION },
 					},
@@ -1223,6 +1254,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 	agentDir: string;
 	statusPath: string;
 	originActiveSessionId?: string;
+	successorSocketPath?: string;
 }): Promise<DaemonUpdateRestartStatus> {
 	const statusWriter = new DaemonUpdateRestartStatusWriter(
 		options.statusPath,
@@ -1333,13 +1365,14 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		await shutdownAdmission.assertOrRenew();
 		await shutdownAdmission.release();
 		shutdownAdmission = undefined;
-		await ensureInteractiveDaemonRunning(options.socketPath);
-		const successorClient = new DaemonClient(options.socketPath);
+		const successorSocketPath = options.successorSocketPath ?? options.socketPath;
+		await ensureInteractiveDaemonRunning(successorSocketPath);
+		const successorClient = new DaemonClient(successorSocketPath);
 		let successor: DaemonUpdateRestartProcessIdentity;
 		try {
 			await successorClient.connect(1000);
 			const successorHello = await successorClient.waitForHello(60000);
-			successor = validateReplacementDaemon(options.socketPath, successorHello, predecessor);
+			successor = validateReplacementDaemon(successorSocketPath, successorHello, predecessor);
 		} finally {
 			successorClient.close();
 		}
@@ -1349,7 +1382,7 @@ export async function runDaemonUpdateRestartCoordinator(options: {
 		let failures: DaemonUpdateRestartFailure[] = [];
 		if (manifest) {
 			const restoreResult = await restoreDaemonUpdateRestart(
-				options.socketPath,
+				successorSocketPath,
 				manifest,
 				options.originActiveSessionId,
 				reportRestoreProgress,
@@ -1464,6 +1497,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 			agentDir,
 			statusPath,
 			originActiveSessionId: options.restartOriginActiveSessionId,
+			successorSocketPath: options.restartSuccessorSocketPath,
 		});
 		if (status.phase === "failed") {
 			process.exitCode = 1;
@@ -1471,7 +1505,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		return true;
 	}
 
-	if (options.restartStatusPath || options.restartOriginActiveSessionId) {
+	if (options.restartStatusPath || options.restartOriginActiveSessionId || options.restartSuccessorSocketPath) {
 		console.error(chalk.red("Invalid daemon update restart coordinator invocation."));
 		process.exitCode = 1;
 		return true;
@@ -1499,6 +1533,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		}
 	});
 
+	let activatedInstallation: OwnedInstallation | undefined;
 	try {
 		switch (options.command) {
 			case "install":
@@ -1528,7 +1563,11 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 				}
 
 				const formatPackage = (pkg: (typeof configuredPackages)[number]) => {
-					const display = pkg.filtered ? `${pkg.source} (filtered)` : pkg.source;
+					const display = pkg.inactive
+						? `${pkg.source} (inactive; explicit install required)`
+						: pkg.filtered
+							? `${pkg.source} (filtered)`
+							: pkg.source;
 					console.log(`  ${display}`);
 					if (pkg.installedPath) {
 						console.log(chalk.dim(`    ${pkg.installedPath}`));
@@ -1555,6 +1594,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 
 			case "update": {
 				const target = options.updateTarget ?? { type: "all" };
+				const ownedInstallation = updateTargetIncludesSelf(target)
+					? getOwnedInstallation(getPhysicalPackageDir())
+					: undefined;
+				const originalSelection = ownedInstallation ? captureOwnedUpdate(ownedInstallation) : null;
 				if (updateTargetIncludesExtensions(target)) {
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
@@ -1570,13 +1613,15 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						setSelfUpdateNoChangeExitCode();
 						return true;
 					}
-					const selfUpdateCommand = getSelfUpdateCommand(
-						PACKAGE_NAME,
-						selfUpdateNpmCommand,
-						selfUpdatePlan.installSpec,
-						selfUpdatePlan.packageName,
-					);
-					if (!selfUpdateCommand) {
+					const selfUpdateCommand = ownedInstallation
+						? undefined
+						: getSelfUpdateCommand(
+								PACKAGE_NAME,
+								selfUpdateNpmCommand,
+								selfUpdatePlan.installSpec,
+								selfUpdatePlan.packageName,
+							);
+					if (!ownedInstallation && !selfUpdateCommand) {
 						printSelfUpdateUnavailable(
 							selfUpdateNpmCommand,
 							selfUpdatePlan.installSpec,
@@ -1596,13 +1641,35 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						return true;
 					}
 					try {
-						await runSelfUpdate(selfUpdateCommand);
+						if (ownedInstallation) {
+							if (!selfUpdatePlan.targetVersion)
+								throw new Error("The Base-Context update has no target version.");
+							const activated = await installOwnedRelease({
+								root: ownedInstallation.root,
+								expected: originalSelection,
+								installSpec: selfUpdatePlan.installSpec,
+								version: selfUpdatePlan.targetVersion,
+							});
+							activatedInstallation = activated.installation;
+						} else if (selfUpdateCommand) {
+							await runSelfUpdate(selfUpdateCommand);
+						}
 					} catch (error: unknown) {
 						const message = error instanceof Error ? error.message : "Unknown package command error";
 						console.error(chalk.red(`Error: ${message}`));
-						printSelfUpdateFallback(selfUpdateCommand);
-						process.exitCode = 1;
-						return true;
+						if (error instanceof OwnedInstallActivatedError) {
+							activatedInstallation = error.activation.installation;
+							process.exitCode = 1;
+							console.error(
+								chalk.yellow(
+									`Base-Context activation was accepted for ${error.activation.installation.packageDir}; no rollback was attempted.`,
+								),
+							);
+						} else {
+							if (selfUpdateCommand && !ownedInstallation) printSelfUpdateFallback(selfUpdateCommand);
+							process.exitCode = 1;
+							return true;
+						}
 					}
 					const versionChange = selfUpdatePlan.targetVersion
 						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
@@ -1617,6 +1684,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 							agentDir,
 							cwd,
 							originActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
+							installation: activatedInstallation,
+							keepSocket: options.daemonSocketPath !== undefined,
 						});
 						reportDaemonUpdateRestartStatus(status);
 					} catch (error: unknown) {
@@ -1632,6 +1701,12 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		}
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : "Unknown package command error";
+		if (activatedInstallation)
+			console.error(
+				chalk.yellow(
+					`Base-Context activation was accepted for ${activatedInstallation.packageDir}; no rollback was attempted.`,
+				),
+			);
 		console.error(chalk.red(`Error: ${message}`));
 		process.exitCode = 1;
 		return true;

@@ -54,13 +54,15 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["schedule"],
-		usage: "schedule <list|add|cancel>",
+		usage: "schedule <list|add|resume|cancel>",
 		summary: "Manage prompts that run later or on a recurring schedule",
 	},
 	{
 		path: ["schedule", "list"],
-		usage: "schedule list [--all] [agent] [--json]",
+		usage: "schedule list [--all] [agent] [--json] | schedule list --offline [--all] [--json]",
 		summary: "List scheduled prompts",
+		description:
+			"--offline reads per-session schedule files under BASE_CONTEXT_HOME without a daemon. It lists metadata only; retained instructions and expressions stay in the files. Imported schedules remain paused until explicitly resumed. Use schedule resume <job-id> with the exact new job ID after opening its imported session; this activates future generic recurring cron scheduling only. One-shot jobs require separate explicit rescheduling. Matched top-level recurring RLM heartbeats are retained paused; subagent owners and one-shot RLM schedules are not imported.",
 	},
 	{
 		path: ["schedule", "add"],
@@ -68,6 +70,13 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "Schedule a prompt",
 		description: "The schedule may be a cron expression or a supported one-time schedule.",
 		examples: [`schedule add worker "0 9 * * 1-5" -- "Check open work"`],
+	},
+	{
+		path: ["schedule", "resume"],
+		usage: "schedule resume <job-id>",
+		summary: "Resume a paused generic recurring cron job",
+		description:
+			"Requires the exact job ID and its top-level session to be open and bound to a runtime. For imported jobs, use the new job ID, not the old ID or an agent selector. Activates future scheduling only; import, list and opening a session do not resume jobs. Heartbeats keep their existing explicit resume actions; one-shot jobs require separate explicit rescheduling.",
 	},
 	{
 		path: ["schedule", "cancel"],
@@ -82,7 +91,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["doctor"],
 		usage: "doctor [--fix] [--json]",
-		summary: "Inspect and safely clean up background services",
+		summary: "Show product, source, paths, auth contracts and background services",
 		options: ["--fix   Remove stale sockets and stop idle orphaned services", "--json  Print JSON"],
 	},
 	{
@@ -149,7 +158,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["update"],
 		usage: "update [--force]",
-		summary: "Update Prime Agent",
+		summary: "Update Base Context",
 	},
 	{
 		path: ["model"],
@@ -162,9 +171,23 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "List available models",
 	},
 	{
+		path: ["migrate"],
+		usage: "migrate --from-prime-agent <offline-export-root> [--dry-run] [--destination <new-root>]",
+		summary: "Import a supplied coherent offline Prime export into a new state root",
+		description:
+			"Requires an externally produced coherent offline/filesystem export, not a live Prime root. Apply requires a new destination; --dry-run writes nothing. Imports supported legacy JSONL and safe preferences; package declarations stay inactive. Matched top-level schedules are retained PAUSED in per-session files, without dispatches; top-level recurring RLM heartbeats use new job IDs and require explicit resume from the newly bound session. Subagent owners, one-shot RLM schedules and ambiguous targets are unsupported. Credentials, executable paths, daemon/runtime files, other artifacts and native-framed journals are excluded. Use schedule list --offline under the new BASE_CONTEXT_HOME. After opening the imported session, use schedule resume <new-job-id> to explicitly activate future generic recurring cron scheduling; one-shot jobs require separate explicit rescheduling. Historical goals remain retained, not reactivated. This command does not produce snapshots or complete all migration/replay coverage.",
+	},
+	{
 		path: ["session"],
-		usage: "session export <file> [output]",
+		usage: "session <command>",
 		summary: "Manage saved sessions",
+	},
+	{
+		path: ["session", "import"],
+		usage: "session import [--preview] <file>",
+		summary: "Import one session file into a new owned session",
+		description:
+			"Imports supported legacy or native session data as retained history. Records must end with LF. Prints the new session path; the source is not changed. --preview reports source preparation without creating a destination or assessing epoch activation/reference coverage; it does not guarantee a later import.",
 	},
 	{
 		path: ["session", "export"],
@@ -192,6 +215,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 		options: [
 			["-p, --print", "Print a response and exit"],
 			["--mode <text|json|rpc|acp|daemon>", "Select the output mode (default: text)"],
+			["--rpc-protocol-version <number>", "Required RPC client event-protocol attestation"],
 			["--cwd <dir>", "Use a specific working directory"],
 			["--offline", "Disable startup network operations"],
 			["--verbose", "Force verbose startup"],

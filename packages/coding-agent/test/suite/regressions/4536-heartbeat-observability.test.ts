@@ -6,8 +6,8 @@ import { createHarness, type Harness } from "../harness.js";
 describe("ENG-4536 heartbeat observability", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
 	it("keeps user and agent heartbeat ownership separate while allowing user management", async () => {

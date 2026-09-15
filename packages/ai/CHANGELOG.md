@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.0] - 2026-09-15
+
+- Changed builds to use the checked-in model catalog; model discovery remains an explicit operation.
+- First public Synerise base-context 1.0.0 release of `@ponythewhite/base-context-ai`, with the checked-in provider catalog and preserved MIT upstream credits.
+- Added optional physical-attempt admission and settlement callbacks to built-in inference transports, including SDK retries and Codex WebSocket fallback/continuation.
+- Preserved observed usage and timing without fabricating missing token counts or coupling provider outcomes to output commitment. Custom and proxy adapters require their own physical hooks; an outer stream wrapper does not establish complete accounting.
+- Retained exact provider capacity confirmation through hidden SDK retries without inferring it from HTTP status or storing error bodies.
+- Added a required-attempts dispatch constraint that checks known built-in handler identity, including the supplied Bedrock module, while keeping generic SDK registration extensible.
+- Added native local-simulation support for source-owned faux providers without treating synthetic usage as physical billing.
+
 ## [0.9.3] - 2026-09-06
 
 - Added GPT-6 Astra to the Codex/ChatGPT OAuth catalog with its mandatory-reasoning effort levels, and bumped the Codex discovery client version to 0.153.4 so account discovery lists it (reported by endcycles and api-moose in discussion #2062).

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@ponythewhite/base-context-ai";
 import type { AgentSession } from "../../core/agent-session.js";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.js";
 import type {
@@ -19,13 +19,13 @@ function persistedRecap(sessionManager: {
 	return sessionManager.getLatestAgentStatus?.()?.summary;
 }
 
-export function createAgentConnectionState(
+export async function createAgentConnectionState(
 	runtime: AgentSessionRuntime,
 	activeSessionId?: string,
-): AgentConnectionState {
+): Promise<AgentConnectionState> {
 	const session = runtime.session;
 	const sessionManager = session.sessionManager;
-	return {
+	const state: AgentConnectionState = {
 		activeSessionId,
 		cwd: sessionManager.getCwd(),
 		model: toConnectionModel(session.model),
@@ -46,35 +46,46 @@ export function createAgentConnectionState(
 		autoCompactionEnabled: session.autoCompactionEnabled,
 		messageCount: session.messages.length,
 		sessionActions: session.getSessionActionSnapshot(),
-		compactionCount: sessionManager.getEntries().filter((entry) => entry.type === "compaction").length,
+		compactionCount: sessionManager.getCompactionCount(),
 		goal: session.goalState,
 		scopedModels: session.scopedModels.map((scoped) => ({
 			model: toConnectionModel(scoped.model),
 			thinkingLevel: scoped.thinkingLevel,
 		})),
 		activeToolNames: session.getActiveToolNames(),
-		contextUsage: session.getContextUsage(),
+		contextUsage: undefined,
 		// Baseline recap; the daemon overlays the live summary when attaching.
 		recap: persistedRecap(sessionManager),
 	};
+	state.contextUsage = await session.getContextUsage();
+	return state;
 }
 
-export function createAgentConnectionSnapshot(
+export async function createAgentConnectionSnapshot(
 	runtime: AgentSessionRuntime,
 	activeSessionId?: string,
-): AgentConnectionSnapshot {
+): Promise<AgentConnectionSnapshot> {
 	const session = runtime.session;
-	const sessionManager = session.sessionManager;
+	const children = session.getRlmChildSnapshots();
+	const stateRead = createAgentConnectionState(runtime, activeSessionId);
+	const messages = [...session.messages];
+	const streamingMessage = session.state?.streamingMessage;
+	const [state, context] = await Promise.allSettled([stateRead, session.buildSessionContext()]);
+	// Both reads were accepted before awaiting; drain both even if either fails.
+	if (state.status === "rejected") {
+		if (context.status === "rejected" && context.reason !== state.reason)
+			throw new AggregateError([state.reason, context.reason], "Connection snapshot reads failed", {
+				cause: state.reason,
+			});
+		throw state.reason;
+	}
+	if (context.status === "rejected") throw context.reason;
 	return {
-		state: createAgentConnectionState(runtime, activeSessionId),
-		messages: [...session.messages],
-		...(session.state?.streamingMessage ? { streamingMessage: session.state.streamingMessage } : {}),
-		sessionContext: session.buildSessionContext(),
-		sessionTree: {
-			tree: sessionManager.getTree(),
-			leafId: sessionManager.getLeafId(),
-		},
-		children: session.getRlmChildSnapshots(),
+		state: state.value,
+		messages,
+		...(streamingMessage ? { streamingMessage } : {}),
+		sessionContext: context.value,
+		children,
 	};
 }
 

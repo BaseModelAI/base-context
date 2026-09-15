@@ -1,4 +1,4 @@
-import { fuzzyMatch } from "@earendil-works/pi-tui";
+import { fuzzyMatch } from "@ponythewhite/base-context-tui";
 export interface ParsedSearchQuery {
 	mode: "tokens" | "regex";
 	tokens: { kind: "fuzzy" | "phrase"; value: string }[];

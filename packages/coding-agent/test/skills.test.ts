@@ -2,12 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
+import { getBundledSkillsDir } from "../src/config.js";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
 import {
 	formatSkillsForPrompt,
 	getPythonSkillRuntimeInfo,
 	loadSkills,
 	loadSkillsFromDir,
+	readSkillFile,
+	SKILL_METADATA_MAX_BYTES,
 	type Skill,
 	type SkillPythonMetadata,
 } from "../src/core/skills.js";
@@ -82,6 +85,22 @@ describe("skills", () => {
 			expect(skills[0].description).toBe("A valid skill for testing purposes.");
 			expect(skills[0].sourceInfo.source).toBe("test");
 			expect(diagnostics).toHaveLength(0);
+
+			const builtIn = loadSkillsFromDir({ dir: join(getBundledSkillsDir(), "skill-creator"), source: "builtin" });
+			expect(builtIn.diagnostics).toHaveLength(0);
+			expect(builtIn.skills).toHaveLength(1);
+			const creator = builtIn.skills[0];
+			expect(creator.description).toContain("install Base Context skills");
+			const instructions = readSkillFile(creator.filePath);
+			expect(instructions).toContain("`.base-context/skills/<name>/`");
+			expect(instructions).toContain("`$BASE_CONTEXT_HOME/skills/<name>/`");
+			expect(instructions).not.toContain(".prime/agent");
+			const pythonGuide = readSkillFile(join(creator.baseDir, "references", "python-skills.md"));
+			expect(pythonGuide).toContain("`BASE_CONTEXT_KERNEL_VENV`");
+			expect(pythonGuide).toContain("`BASE_CONTEXT_KERNEL_PYTHON`");
+			expect(pythonGuide).toContain("`base-context-runtime`");
+			expect(pythonGuide).toContain('word_count = "rlm.skill:cli"');
+			expect(pythonGuide).not.toMatch(/PRIME_AGENT_|\.prime\/agent|`prime-agent-runtime`/);
 		});
 
 		it("should warn when name doesn't match parent directory", () => {
@@ -179,6 +198,25 @@ describe("skills", () => {
 
 			expect(skills).toHaveLength(0);
 			expect(diagnostics.some((d: ResourceDiagnostic) => d.message.includes("at line"))).toBe(true);
+
+			const tempDir = mkdtempSync(join(tmpdir(), "skill-frontmatter-limit-"));
+			try {
+				writeFileSync(
+					join(tempDir, "SKILL.md"),
+					`---\nname: oversized\ndescription: ${"é".repeat(SKILL_METADATA_MAX_BYTES / 2)}\n---\nBody.`,
+				);
+				const oversized = loadSkillsFromDir({ dir: tempDir, source: "test" });
+				expect(oversized.skills).toEqual([]);
+				expect(oversized.diagnostics).toEqual([
+					{
+						type: "warning",
+						message: "Skill frontmatter byte limit exceeded",
+						path: join(tempDir, "SKILL.md"),
+					},
+				]);
+			} finally {
+				rmSync(tempDir, { recursive: true, force: true });
+			}
 		});
 
 		it("should preserve multiline descriptions from YAML", () => {

@@ -5,8 +5,8 @@
  * and provides a transformer to convert them to LLM-compatible messages.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { ImageContent, Message, TextContent } from "@ponythewhite/base-context-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
 import type { AppliedRefinementEdit, HarnessScope, RefinementResult } from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
@@ -193,7 +193,8 @@ export interface BranchSummaryMessage {
 export interface CompactionSummaryMessage {
 	role: "compactionSummary";
 	summary: string;
-	tokensBefore: number;
+	/** Prior-context estimate; null when it is unavailable. */
+	tokensBefore: number | null;
 	/** Number of retained messages that precede this summary in transcript presentation. */
 	retainedMessageCount?: number;
 	/** User instructions that guided the summary (from `/compact <instructions>`) */
@@ -201,7 +202,7 @@ export interface CompactionSummaryMessage {
 	timestamp: number;
 }
 
-declare module "@earendil-works/pi-agent-core" {
+declare module "@ponythewhite/base-context-agent" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
 		custom: CustomMessage;
@@ -259,7 +260,7 @@ export function createBranchSummaryMessage(summary: string, fromId: string, time
 
 export function createCompactionSummaryMessage(
 	summary: string,
-	tokensBefore: number,
+	tokensBefore: number | null,
 	timestamp: string,
 	customInstructions?: string,
 	retainedMessageCount?: number,

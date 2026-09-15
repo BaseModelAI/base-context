@@ -5,7 +5,7 @@
  * Uses fake model streams only — no real model/sandbox.
  */
 
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../src/core/agent-session-config.js";
 import type { AgentRlmHeartbeatController } from "../../src/core/cron-jobs.js";
@@ -27,10 +27,10 @@ type SerializedInternals = {
 describe("Serialized refine config integration (unit)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -133,10 +133,10 @@ describe("Serialized refine config integration (unit)", () => {
 describe("Serialized refine controller availability (unit)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -228,10 +228,10 @@ describe("Serialized refine controller availability (unit)", () => {
 describe("PR #503 model preservation (unit)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

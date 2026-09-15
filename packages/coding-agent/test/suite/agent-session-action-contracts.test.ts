@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./harness.js";
 import { withStreaming } from "./scheduling.js";
@@ -6,8 +6,8 @@ import { withStreaming } from "./scheduling.js";
 describe("AgentSession action contracts", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
 	it("parses session commands only through prompt provenance", async () => {

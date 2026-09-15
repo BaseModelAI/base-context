@@ -1,6 +1,6 @@
 # RLM Programming Model
 
-Prime Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
+Base Context is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
 
 ## RLM Loop
 
@@ -30,9 +30,9 @@ The parent keeps its own context focused while Python holds working state and ch
 
 ### 1. Execution is programmatic
 
-The default RLM runtime exposes one built-in model tool: `ipython`. Reading and editing files, running project commands, transforming results, invoking skills, and delegating work all begin from that persistent kernel instead of separate built-in tool calls.
+The RLM execution tool is `ipython`. Native Base Context sessions also expose `prime_context` for bounded public-history recovery. Reading and editing files, running project commands, transforming results, invoking skills, and delegating work all begin from that persistent kernel instead of separate built-in tool calls.
 
-Python state survives across tool calls and compaction. Variables, imports, functions, parsed results, and task handles remain available on later turns:
+Python state persists across tool calls. Compaction does not itself clear the live namespace, and kernel snapshots support best-effort restoration after restart. Not every object is serializable or retained. Variables, parsed results, and task handles can remain available on later turns:
 
 ```python
 from pathlib import Path
@@ -48,7 +48,7 @@ result = await bash("npm run check")
 print(result.output)
 ```
 
-Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Base Context extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls
 
@@ -69,7 +69,21 @@ test_review = await rlm("Review the test coverage", name="test-reviewer")
 integration_audit = await rlm("Run the slow integration audit", name="integration-audit")
 ```
 
-Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. For substantial findings, send a short capsule and retain the detailed report:
+
+```python
+receipt = await agent_message.send_result(
+    summary="Found the cause; one configuration question remains.",
+    findings=report_path.read_text(),
+    receiver_role="parent",
+)
+```
+
+The recipient stores the full public report in its own session before receiving the capsule. The report is not added to the recipient's model context. The capsule and `receipt["resultRef"]` identify the retained source, entry and findings field. The recipient can use the existing `prime_context` read/search operations (or `rlm.prime_context` in an active kernel call) to request selected lines or search for a relevant section. The report remains available after the child runtime stops, within normal recipient-session retention and branch scope.
+
+Capsules are child-authored conclusions, not verified facts. Include material caveats, unresolved decisions and observed artifact changes. Identify earlier report refs that the capsule revises or replaces. A parent should read the capsules first and retrieve only the latest relevant report sections; a newer message does not automatically replace independent findings or unresolved blockers. Older reports remain readable.
+
+Summaries must fit 2,000 characters. The complete encoded report uses the existing native source size limit; oversize reports refuse instead of being clipped. This operation adds no summarization-model call. Ordinary short questions and progress messages stay inline:
 
 ```python
 await agent_message.send(message, receiver_role="parent")
@@ -103,16 +117,16 @@ Successfully completed daemon-backed children remain addressable while their par
 await rlm.delete_subagent(children[0])
 ```
 
-The default recursion depth allows a root agent to create children. Raising the configured depth allows descendants to recurse further.
+The default maximum recursion depth is `2`, with the root at depth `0`. The host enforces the accepted session limit. See [recursive-agent settings](settings.md#recursive-agents) for the global creation default.
 
 ### 3. Skills add programmatic capability
 
-Prime Agent supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Prime Agent installs into the kernel environment and exposes by import name.
+Base Context supports the Agent Skills markdown format and extends it with Python-backed skills. Both use `SKILL.md` for discovery, routing, and instructions. A Python-backed skill also contains a Python package that Base Context installs into the kernel environment and exposes by import name.
 
-For a skill named `release-audit`, the model can call:
+For example, if a skill named `release-audit` documents an async `audit` function in its `release_audit` module, the model can call:
 
 ```python
-report = await release_audit(repository=".", target_version="0.4.0")
+report = await release_audit.audit(repository=".", target_version="1.0.0")
 ```
 
 This makes Python-backed skills a superset of instruction-only skills: they can provide guidance, scripts, references, dependencies, typed callables, and optional shell commands. They may also call `rlm(...)` themselves when a capability needs recursive delegation.

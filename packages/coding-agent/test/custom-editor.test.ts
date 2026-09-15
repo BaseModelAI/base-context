@@ -1,5 +1,5 @@
-import type { AutocompleteProvider, EditorTheme, OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import type { AutocompleteProvider, EditorTheme, OverlayHandle, TUI } from "@ponythewhite/base-context-tui";
+import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@ponythewhite/base-context-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";

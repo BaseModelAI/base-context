@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
+import { discoverAndLoadExtensions, loadExtensions } from "../src/core/extensions/loader.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -251,23 +252,46 @@ describe("extensions discovery", () => {
 	});
 
 	it("loads extensions and registers commands", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode);
+		const faux = registerFauxProvider({ models: [{ id: "discovery" }] });
+		try {
+			const extensionPath = path.join(extensionsDir, "with-command.ts");
+			const registryCheck = `
+				import { getApiProvider } from "@ponythewhite/base-context-ai";
+				if (!getApiProvider(${JSON.stringify(faux.api)})) throw new Error("Native AI registry is not shared");
+			`;
+			fs.writeFileSync(extensionPath, registryCheck + extensionCode);
 
-		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].commands.has("test")).toBe(true);
+			expect(result.errors).toHaveLength(0);
+			expect(result.extensions).toHaveLength(1);
+			expect(result.extensions[0].commands.has("test")).toBe(true);
+
+			fs.writeFileSync(extensionPath, registryCheck + extensionCode.replace('"test"', '"reloaded"'));
+			const reloaded = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(reloaded.errors).toHaveLength(0);
+			expect(reloaded.extensions).toHaveLength(1);
+			expect(reloaded.extensions[0].commands.has("reloaded")).toBe(true);
+			expect(reloaded.extensions[0].commands.has("test")).toBe(false);
+		} finally {
+			faux.unregister();
+		}
 	});
 
 	it("loads extensions and registers tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), extensionCodeWithTool("my-tool"));
+		const guide = fs.readFileSync(path.join(__dirname, "../docs/extensions.md"), "utf8");
+		const quickStart = guide.match(/## Quick Start[\s\S]*?```typescript\n([\s\S]*?)\n```/)?.[1];
+		if (!quickStart) throw new Error("Extension guide Quick Start is missing");
+		expect(quickStart).toContain('from "@ponythewhite/base-context"');
+		expect(guide).toContain("`~/.base-context/extensions/my-extension.ts`");
+		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), quickStart);
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
+		expect(result.extensions[0].tools.has("greet")).toBe(true);
+		expect(result.extensions[0].commands.has("hello")).toBe(true);
 	});
 
 	it("reports errors for invalid extension code", async () => {
@@ -278,6 +302,23 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].path).toContain("invalid.ts");
 		expect(result.extensions).toHaveLength(0);
+
+		const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, "../package.json"), "utf8"));
+		expect(manifest.exports["."]).toBeDefined();
+		expect(manifest.exports["./hooks"]).toBeUndefined();
+		const hooksPath = path.join(tempDir, "obsolete-hooks.ts");
+		fs.writeFileSync(
+			hooksPath,
+			`
+			import * as hooks from "@ponythewhite/base-context/hooks";
+			export default function() { void hooks; }
+		`,
+		);
+		const unavailable = await loadExtensions([hooksPath], tempDir);
+		expect(unavailable.extensions).toHaveLength(0);
+		expect(unavailable.errors).toHaveLength(1);
+		expect(unavailable.errors[0].path).toBe(hooksPath);
+		expect(unavailable.errors[0].error).toContain("hooks");
 	});
 
 	it("handles explicitly configured paths", async () => {
@@ -333,6 +374,34 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(1);
 		expect(result.errors[0].error).toContain("Initialization failed!");
 		expect(result.extensions).toHaveLength(0);
+
+		const legacyDir = path.join(tempDir, "legacy-package");
+		const legacyEntry = path.join(legacyDir, "dist", "index.js");
+		const importedMarker = path.join(tempDir, "legacy-imported");
+		fs.mkdirSync(path.dirname(legacyEntry), { recursive: true });
+		fs.writeFileSync(
+			path.join(legacyDir, "package.json"),
+			JSON.stringify({ name: "prime-agent-context", type: "module", pi: { extensions: ["./dist/index.js"] } }),
+		);
+		fs.writeFileSync(
+			legacyEntry,
+			`
+			import { writeFileSync } from "node:fs";
+			writeFileSync(${JSON.stringify(importedMarker)}, "imported");
+			export default function(pi) {
+				pi.registerCommand("legacy-context", { handler: async () => {} });
+			}
+			`,
+		);
+		// Package resolution hands this same entry path to the central loader.
+		const blocked = await loadExtensions([legacyEntry], tempDir);
+		expect(blocked.extensions).toHaveLength(0);
+		expect(blocked.errors).toHaveLength(1);
+		expect(blocked.errors[0].path).toBe(legacyEntry);
+		expect(blocked.errors[0].error).toContain("legacy prime-agent-context");
+		expect(blocked.errors[0].error).toContain("native Base Context");
+		expect(blocked.errors[0].error).toContain("Remove prime-agent-context");
+		expect(fs.existsSync(importedMarker)).toBe(false);
 	});
 
 	it("reports error when extension has no default export", async () => {
@@ -371,7 +440,10 @@ describe("extensions discovery", () => {
 
 	it("loads extension with event handlers", async () => {
 		const extCode = `
-			export default function(pi) {
+			import { VERSION } from "@ponythewhite/base-context";
+			import type { ExtensionAPI } from "@ponythewhite/base-context";
+			export default function(pi: ExtensionAPI) {
+				if (typeof VERSION !== "string") throw new Error("Supported root import is unavailable");
 				pi.on("agent_start", async () => {});
 				pi.on("tool_call", async (event) => undefined);
 				pi.on("agent_end", async () => {});
@@ -381,7 +453,7 @@ describe("extensions discovery", () => {
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
+		expect(result.errors, JSON.stringify(result.errors)).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].handlers.has("agent_start")).toBe(true);
 		expect(result.extensions[0].handlers.has("tool_call")).toBe(true);

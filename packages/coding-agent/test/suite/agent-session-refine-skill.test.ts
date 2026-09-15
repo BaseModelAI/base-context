@@ -19,10 +19,10 @@ function setStreaming(harness: Harness, streaming: boolean) {
 describe("AgentSession refine skill host requests", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -40,6 +40,9 @@ describe("AgentSession refine skill host requests", () => {
 
 		const status = harness.session.handleRefineHostRequest("refine.status");
 		expect(status.pending).toBe(true);
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("stores global flag from refine.run", async () => {
@@ -54,6 +57,9 @@ describe("AgentSession refine skill host requests", () => {
 
 		const internals = harness.session as unknown as SessionInternals;
 		expect(internals._pendingRequestedRefine?.global).toBe(true);
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("defaults to local scope when global is not provided", async () => {
@@ -69,6 +75,9 @@ describe("AgentSession refine skill host requests", () => {
 		const internals = harness.session as unknown as SessionInternals;
 		expect(internals._pendingRequestedRefine?.global).toBeUndefined();
 		expect(internals._pendingRequestedRefine?.instructions).toBeUndefined();
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("updates pending request when called again", async () => {
@@ -85,6 +94,9 @@ describe("AgentSession refine skill host requests", () => {
 		const internals = harness.session as unknown as SessionInternals;
 		expect(internals._pendingRequestedRefine?.instructions).toBe("second");
 		expect(internals._pendingRequestedRefine?.global).toBe(true);
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("replaces an in-flight serialized plan instead of applying both requests", async () => {
@@ -92,7 +104,10 @@ describe("AgentSession refine skill host requests", () => {
 		harnesses.push(harness);
 		const internals = harness.session as unknown as SessionInternals;
 		const abort = new AbortController();
-		internals._serializedPlanInFlight = new Promise(() => {});
+		let resolvePlan!: () => void;
+		internals._serializedPlanInFlight = new Promise<void>((resolve) => {
+			resolvePlan = resolve;
+		});
 		internals._serializedExplicitRefineOptions = { instructions: "first", global: true };
 		internals._refineAbortController = abort;
 
@@ -101,7 +116,11 @@ describe("AgentSession refine skill host requests", () => {
 		setStreaming(harness, false);
 
 		expect(abort.signal.aborted).toBe(true);
+		resolvePlan();
 		expect(internals._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("discards a settled serialized plan when a replacement request arrives", async () => {
@@ -120,6 +139,9 @@ describe("AgentSession refine skill host requests", () => {
 			branchVersion: expect.any(Number),
 		});
 		expect(internals._pendingRequestedRefine).toEqual({ instructions: "replacement", global: true });
+
+		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		harnesses.pop();
 	});
 
 	it("rejects refine.run while no turn is active", async () => {

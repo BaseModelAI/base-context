@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Api, Model, RequestTokenBudgetOptions, ServiceTier } from "@ponythewhite/base-context-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -211,12 +211,31 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 	};
 }
 
+/** One live parent's pending setup or resident child. Not a tree-wide reservation. */
+export interface RlmChildAdmission {
+	readonly parent: AgentSession;
+	readonly session: AgentSession | undefined;
+	readonly settlement: Promise<void>;
+	readonly pending: boolean;
+	assertCurrent(): void;
+	bind(session: AgentSession): void;
+	beginSetup(): void;
+	claimFactory(): void;
+	confirmUnboundCleanup(): void;
+	settle(): void;
+}
+
 export interface RlmSubagentRuntime {
 	session: AgentSession;
 }
 
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
+	/** Defined trusted creation options override the inherited explicit parent policy. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
+	contextMode?: "on" | "off";
+	/** The same live parent owns this setup. Native factories reserve it when omitted. */
+	admission?: RlmChildAdmission;
 	id: string;
 	prompt: string;
 	sessionName: string;

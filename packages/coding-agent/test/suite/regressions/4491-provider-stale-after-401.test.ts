@@ -1,5 +1,5 @@
-import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentEvent } from "@ponythewhite/base-context-agent";
+import { type AssistantMessage, fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "../harness.js";
 
@@ -45,9 +45,9 @@ function provider500Message(): AssistantMessage {
 describe("issue #4491 provider stale after repeated 401", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

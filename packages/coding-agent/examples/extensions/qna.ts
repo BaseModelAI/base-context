@@ -7,9 +7,9 @@
  * 3. Loads the result into the editor for user to fill in answers
  */
 
-import { complete, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
+import { BorderedLoader } from "@ponythewhite/base-context";
+import { complete, type UserMessage } from "@ponythewhite/base-context-ai";
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
 
@@ -42,7 +42,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Find the last assistant message on the current branch
-			const branch = ctx.sessionManager.getBranch();
+			const branch = await ctx.sessionManager.readBranch(undefined, {
+				maxEntries: 16_384,
+				maxSourceBytes: 64 * 1024 * 1024,
+			});
 			let lastAssistantText: string | undefined;
 
 			for (let i = branch.length - 1; i >= 0; i--) {

@@ -5,14 +5,15 @@ import { createHarness, type Harness } from "../harness.js";
 describe("issue #3688 tree cancellation compaction state", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
 	it("clears branch summary state when session_before_tree cancels navigation", async () => {
 		const harness = await createHarness({
+			persistSession: true,
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_tree", () => ({ cancel: true }));
@@ -21,9 +22,9 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		});
 		harnesses.push(harness);
 
-		const targetId = harness.sessionManager.appendMessage(userMsg("first"));
-		harness.sessionManager.appendMessage(assistantMsg("reply"));
-		const currentLeafId = harness.sessionManager.appendMessage(userMsg("second"));
+		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
+		await harness.sessionManager.appendMessage(assistantMsg("reply"));
+		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
 
 		expect(harness.sessionManager.getLeafId()).toBe(currentLeafId);
 

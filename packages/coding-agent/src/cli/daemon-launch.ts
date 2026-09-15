@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { appendRotatingLog, expandTildePath, getClientErrorLogPath, getDaemonLogPath, VERSION } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
-import { DaemonClient, type DaemonHello } from "../modes/daemon/daemon-client.js";
+import { DaemonClient, type DaemonHello, DaemonProtocolMismatchError } from "../modes/daemon/daemon-client.js";
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { getDaemonRuntimeIdentity } from "../modes/daemon/daemon-runtime-identity.js";
 import { isSessionSummaryBusy, type SessionSummary } from "../modes/daemon/daemon-session-list.js";
@@ -105,7 +105,8 @@ export async function probeDaemonVersion(socketPath: string, helloTimeoutMs = 20
 			return { status: "current", hello };
 		}
 		return { status: "stale", hello };
-	} catch {
+	} catch (error) {
+		if (error instanceof DaemonProtocolMismatchError) throw error;
 		// The supervisor accepts connections before startup and worker adoption finish.
 		logDaemonLaunch(`running daemon on ${socketPath} sent no recognizable hello; waiting for startup`);
 		return { status: "unresponsive" };
@@ -165,7 +166,7 @@ export class StaleDaemonError extends Error {
 			: `Daemon: unknown build on ${socketPath}`;
 		const client = getDaemonRuntimeIdentity();
 		super(
-			`An incompatible Prime Agent daemon is running.\n\n${daemonIdentity}\n` +
+			`An incompatible Base Context daemon is running.\n\n${daemonIdentity}\n` +
 				`Client: v${VERSION}, protocol ${DAEMON_PROTOCOL_VERSION}, schema ${DAEMON_SCHEMA_ID}, build ${client.buildId}, ` +
 				`executable ${client.launcherPath ?? client.entrypointPath ?? client.executablePath}\n\nRun:\n` +
 				`${formatCurrentCliCommand(["shutdown", "--force"])}\n\nThen retry the original command.`,
@@ -263,10 +264,14 @@ export async function shutdownDaemonAndWait(socketPath: string, timeoutMs = 5000
 	const client = new DaemonClient(socketPath);
 	try {
 		await client.connect(1000);
-		const hello = await client.waitForHello(2000).catch(() => undefined);
+		const hello = await client.waitForHello(2000).catch((error: unknown) => {
+			if (error instanceof DaemonProtocolMismatchError) throw error;
+			return undefined;
+		});
 		return shutdownConnectedDaemonAndWait(client, socketPath, timeoutMs, hello);
-	} catch {
+	} catch (error) {
 		client.close();
+		if (error instanceof DaemonProtocolMismatchError) throw error;
 		return waitForDaemonGone(socketPath, timeoutMs);
 	}
 }
@@ -298,7 +303,8 @@ export async function probeRunningDaemonSessions(socketPath: string): Promise<Ru
 				? { busyClientOwnedSessionCount: result.busyClientOwnedSessionCount }
 				: {}),
 		};
-	} catch {
+	} catch (error) {
+		if (error instanceof DaemonProtocolMismatchError) throw error;
 		return { reachable: true };
 	} finally {
 		client.close();
@@ -325,7 +331,11 @@ async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<StaleDa
 		loadedSessionCount = result.sessions.length;
 		hasBusySessions =
 			result.busyClientOwnedSessionCount !== 0 || result.sessions.some((summary) => isSessionBusy(summary));
-	} catch {
+	} catch (error) {
+		if (error instanceof DaemonProtocolMismatchError) {
+			client.close();
+			throw error;
+		}
 		// An unresponsive daemon is not safe to replace.
 	}
 
@@ -358,7 +368,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	}
 	if (probe.status === "unresponsive") {
 		throw new Error(
-			`Prime Agent daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
+			`Base Context daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
 				`It was left running to avoid interrupting active work.
 
 Run:
@@ -425,11 +435,11 @@ Then retry the original command.`,
 		}
 		const logTail = readDaemonLogTail(socketPath, logOffset);
 		if (childFailure.type === "error") {
-			throw new Error(`Failed to spawn Prime Agent daemon: ${childFailure.error.message}.${logTail}`);
+			throw new Error(`Failed to spawn Base Context daemon: ${childFailure.error.message}.${logTail}`);
 		}
 		const signal = childFailure.signal ? `, signal ${childFailure.signal}` : "";
 		throw new Error(
-			`Prime Agent daemon exited during startup (code ${childFailure.code ?? "unknown"}${signal}).${logTail}`,
+			`Base Context daemon exited during startup (code ${childFailure.code ?? "unknown"}${signal}).${logTail}`,
 		);
 	};
 
@@ -589,7 +599,7 @@ export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark
 }
 
 export function maybeStartDaemonEarly(args: readonly string[]): void {
-	const benchmarkFlag = (process.env.PI_STARTUP_BENCHMARK ?? "").toLowerCase();
+	const benchmarkFlag = (process.env.BASE_CONTEXT_STARTUP_BENCHMARK ?? "").toLowerCase();
 	const startupBenchmark = benchmarkFlag === "1" || benchmarkFlag === "true" || benchmarkFlag === "yes";
 	if (!shouldStartDaemonEarly(args, startupBenchmark)) {
 		return;

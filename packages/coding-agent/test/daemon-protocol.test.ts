@@ -1,9 +1,7 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { isDaemonSessionSummary } from "../src/cli/daemon-launch.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
 	createDaemonEventMeta,
@@ -16,12 +14,15 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
+	DAEMON_SESSION_EVENT_FIELD_COMPATIBILITY,
 	type DaemonCommand,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	meetsDaemonCommandCompatibility,
+	NATIVE_WORK_COMPATIBILITIES,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
@@ -79,44 +80,66 @@ describe("daemon protocol helpers", () => {
 		expect(JSON.stringify(durable)).not.toContain("secret-");
 	});
 
-	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
-		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
-		const commandSource = source.slice(
-			source.indexOf("export type DaemonCommand ="),
-			source.indexOf("type DaemonCommandName"),
+	it("advertises optional agent results without raising startup requirements", () => {
+		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
+		expect(DAEMON_SCHEMA_REVISION).toBe(47);
+		expect(DAEMON_SCHEMA_ID).toBe(
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-agent-results`,
 		);
-		const savedSessionSource = source.slice(
-			source.indexOf("export interface DaemonSavedSessionInfo"),
-			source.indexOf("export type DaemonDeleteSavedSessionResult"),
-		);
-		const outboundSource = source.slice(
-			source.indexOf("export type DaemonOutbound ="),
-			source.indexOf("export const DAEMON_OUTBOUND_COMPATIBILITY"),
-		);
-		const digest = createHash("sha256")
-			.update(`${commandSource}\n${savedSessionSource}\n${outboundSource}`)
-			.digest("hex")
-			.slice(0, 12);
-		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-${digest}`);
+		const command: DaemonCommand = {
+			type: "send_result",
+			targetActiveSessionId: "parent",
+			summary: "Routing fix ready",
+			findings: "Full public routing report",
+		};
+		const compatibility = { minProtocol: 11, minSchemaRevision: 47, capability: "agent_results" } as const;
+		expect(DAEMON_COMMAND_COMPATIBILITY.send_result).toEqual(compatibility);
+		expect(getDaemonCommandCompatibilities(command)).toEqual([...NATIVE_WORK_COMPATIBILITIES, compatibility]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("agent_results");
+		const currentHello = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+		};
+		expect(meetsDaemonCommandCompatibility(currentHello, compatibility)).toBe(true);
+		expect(meetsDaemonCommandCompatibility({ ...currentHello, schemaRevision: 46 }, compatibility)).toBe(false);
+		expect(meetsDaemonCommandCompatibility({ ...currentHello, serverCapabilities: [] }, compatibility)).toBe(false);
+		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
+		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
+		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(45);
 	});
 
-	it("requires compatibility metadata for the heartbeat protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(7);
+	it("requires compatibility metadata for the scheduled-job protocol surface", () => {
+		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
+		const resume: DaemonCommand = { type: "cron_resume", jobId: "imported-job" };
+		const compatibility = { minProtocol: 11, minSchemaRevision: 46, capability: "cron_resume" } as const;
+		expect(DAEMON_COMMAND_COMPATIBILITY.cron_resume).toEqual(compatibility);
+		expect(getDaemonCommandCompatibilities(resume)).toEqual([...NATIVE_WORK_COMPATIBILITIES, compatibility]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("cron_resume");
+		const currentHello = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+		};
+		// New clients must not send resume to a daemon from before its schema or capability.
+		expect(meetsDaemonCommandCompatibility({ ...currentHello, schemaRevision: 45 }, compatibility)).toBe(false);
+		expect(meetsDaemonCommandCompatibility({ ...currentHello, serverCapabilities: [] }, compatibility)).toBe(false);
+		expect(meetsDaemonCommandCompatibility(currentHello, compatibility)).toBe(true);
 		expect(DAEMON_SCHEMA_ID).toContain(`protocol-${DAEMON_PROTOCOL_VERSION}`);
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeats_list).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			capability: "heartbeat_catalog",
 		});
 		expect(DAEMON_COMMAND_COMPATIBILITY.heartbeat_manage).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			capability: "heartbeat_management",
 		});
 		expect(DAEMON_COMMAND_COMPATIBILITY.complete_owned_session).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			capability: "client_owned_sessions",
 		});
 		expect(DAEMON_OUTBOUND_COMPATIBILITY.heartbeats_changed).toEqual({
-			minProtocol: 7,
+			minProtocol: 8,
 			capability: "heartbeat_catalog",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
@@ -126,7 +149,7 @@ describe("daemon protocol helpers", () => {
 
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			capability: "delete_rlm_subagent",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
@@ -134,7 +157,7 @@ describe("daemon protocol helpers", () => {
 
 	it("capability- and schema-gates ACP MCP server replacement", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.replace_acp_mcp_servers).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 22,
 			capability: "acp_mcp_servers",
 		});
@@ -143,7 +166,7 @@ describe("daemon protocol helpers", () => {
 
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			capability: "model_catalog",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("model_catalog");
@@ -151,7 +174,7 @@ describe("daemon protocol helpers", () => {
 
 	it("capability- and schema-gates queued message mutation at its introducing revision", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.mutate_queued_message).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 15,
 			capability: "queue_message_mutation",
 		});
@@ -159,36 +182,28 @@ describe("daemon protocol helpers", () => {
 	});
 
 	it("schema-gates the RLM max depth commands at their introducing revision", () => {
-		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_max_depth_status).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
-		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 7, minSchemaRevision: 11 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_max_depth_status).toEqual({ minProtocol: 10, minSchemaRevision: 11 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 10, minSchemaRevision: 11 });
 	});
 
-	it("schema-gates session commands that carry the telemetry policy", () => {
-		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual([
-			{ minProtocol: 7 },
-		]);
-		expect(
-			getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
-		expect(getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1" })).toEqual([
-			{ minProtocol: 7 },
-		]);
-		expect(
-			getDaemonCommandCompatibilities({ type: "attach", activeSessionId: "active-1", telemetryDisabled: true }),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
-		expect(
-			getDaemonCommandCompatibilities({
-				type: "reattach",
-				activeSessionId: "active-1",
-				targetActiveSessionId: "active-2",
-				telemetryDisabled: true,
-			}),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
+	it("requires native ownership independently of telemetry fields", () => {
+		const native = NATIVE_WORK_COMPATIBILITIES;
+		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual(native);
+		for (const command of [
+			{ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } },
+			{ type: "attach", activeSessionId: "active-1", telemetryDisabled: true },
+			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2", telemetryDisabled: true },
+		] satisfies DaemonCommand[]) {
+			expect(getDaemonCommandCompatibilities(command)).toEqual([
+				...native,
+				{ minProtocol: 8, minSchemaRevision: 14 },
+			]);
+		}
 	});
 
 	it("capability-gates authoritative rosters and transient owned-session recovery context", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_children).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 17,
 			capability: "authoritative_child_roster",
 		});
@@ -199,8 +214,8 @@ describe("daemon protocol helpers", () => {
 				recoveryConfig: { cwd: "/tmp/fresh-owner" },
 			}),
 		).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_session_recovery_context" },
-			{ minProtocol: 7 },
+			...NATIVE_WORK_COMPATIBILITIES,
+			{ minProtocol: 8, minSchemaRevision: 17, capability: "owned_session_recovery_context" },
 		]);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
 			expect.arrayContaining([
@@ -218,18 +233,21 @@ describe("daemon protocol helpers", () => {
 				activeSessionId: "active-1",
 				waitForRlmQuiescence: true,
 			}),
-		).toEqual([{ minProtocol: 7, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" }, { minProtocol: 7 }]);
+		).toEqual([
+			...NATIVE_WORK_COMPATIBILITIES,
+			{ minProtocol: 8, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" },
+		]);
 		expect(
 			getDaemonCommandCompatibilities({
 				type: "wait_for_headless_completion",
 				activeSessionId: "active-1",
 			}),
-		).toEqual([{ minProtocol: 7 }]);
+		).toEqual(NATIVE_WORK_COMPATIBILITIES);
 	});
 
 	it("capability- and schema-gates session input pause leases", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 19,
 			capability: "session_input_pause",
 		});
@@ -241,7 +259,7 @@ describe("daemon protocol helpers", () => {
 
 	it("version- and capability-gates prompt admission cancellation", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 8,
 			capability: "prompt_admission_cancellation",
 		});
@@ -250,9 +268,13 @@ describe("daemon protocol helpers", () => {
 
 	it("capability-gates cancellation after prompt ownership", () => {
 		const legacy = { type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" } as const;
-		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission]);
+		expect(getDaemonCommandCompatibilities(legacy)).toEqual([
+			...NATIVE_WORK_COMPATIBILITIES,
+			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
+		]);
 		expect(getDaemonCommandCompatibilities({ ...legacy, cancelOwned: true })).toEqual([
-			{ minProtocol: 7, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
+			...NATIVE_WORK_COMPATIBILITIES,
+			{ minProtocol: 8, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
 			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
 		]);
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");
@@ -266,7 +288,7 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(16);
 	});
 
-	it("keeps refine failure events backward-compatible on the existing session event channel", () => {
+	it("keeps refine failure events on the versioned session event channel", () => {
 		const event: DaemonOutbound = {
 			type: "session_event",
 			activeSessionId: "active-1",
@@ -275,11 +297,11 @@ describe("daemon protocol helpers", () => {
 
 		// Refine events remain on the original session-event channel across later schema revisions.
 		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(6);
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(event).toMatchObject({ event: { type: "refine_failed", error: "disk full" } });
 	});
 
-	it("accepts legacy side-question and bash shapes in new daemons and clients", () => {
+	it("keeps legacy observation shapes without admitting their old execution runtime", () => {
 		const oldClientSideQuestion: DaemonCommand = {
 			type: "start_side_question",
 			activeSessionId: "active-1",
@@ -302,9 +324,9 @@ describe("daemon protocol helpers", () => {
 			event: { type: "bash_end", exitCode: 0, cancelled: false, truncated: false },
 		};
 
-		expect(DAEMON_COMMAND_COMPATIBILITY.start_side_question).toEqual({ minProtocol: 7 });
-		expect(DAEMON_COMMAND_COMPATIBILITY.execute_bash).toEqual({ minProtocol: 7 });
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual({ minProtocol: 7 });
+		expect(DAEMON_COMMAND_COMPATIBILITY.start_side_question).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
+		expect(DAEMON_COMMAND_COMPATIBILITY.execute_bash).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.session_event).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(oldClientSideQuestion).not.toHaveProperty("previousTurns");
 		expect(oldClientBash).not.toHaveProperty("transient");
 		expect(oldClientBash).not.toHaveProperty("runId");
@@ -351,8 +373,8 @@ describe("daemon protocol helpers", () => {
 	it("rejects command envelopes from pre-session-action protocols", () => {
 		const command = { id: "cmd-1", type: "attach", activeSessionId: "active-1" } as const;
 
-		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 7))).toBe(true);
-		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 6))).toBe(false);
+		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 8))).toBe(true);
+		expect(isDaemonCommandEnvelope(createDaemonCommandEnvelope(command, "cmd-1", "client-1", 7))).toBe(false);
 	});
 
 	it("keeps attachment routing out of the durable mutation journal", () => {
@@ -363,14 +385,15 @@ describe("daemon protocol helpers", () => {
 		expect(isDaemonMutatingCommand({ type: "roster_unsubscribe" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(true);
 		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
+		expect(isDaemonMutatingCommand({ type: "cron_resume" })).toBe(true);
 	});
 
 	it("keeps the roster push additive for pre-roster clients", () => {
 		// Subscription commands and the push are capability-gated; a client that
 		// never sends roster_subscribe is never written a roster_update.
-		expect(DAEMON_COMMAND_COMPATIBILITY.roster_subscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
-		expect(DAEMON_COMMAND_COMPATIBILITY.roster_unsubscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
-		expect(DAEMON_OUTBOUND_COMPATIBILITY.roster_update).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_subscribe).toEqual({ minProtocol: 8, capability: "agent_roster" });
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_unsubscribe).toEqual({ minProtocol: 8, capability: "agent_roster" });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.roster_update).toEqual({ minProtocol: 8, capability: "agent_roster" });
 		// list responses now carry rosterStatus/statusLabel/lastHeardFromAt; the
 		// summary validator pre-roster clients shipped stays open to additive fields.
 		expect(
@@ -386,7 +409,7 @@ describe("daemon protocol helpers", () => {
 
 	it("capability-gates direct worker transport discovery as a supervisor-only surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_direct_worker_transport).toEqual({
-			minProtocol: 7,
+			minProtocol: 10,
 			minSchemaRevision: 25,
 			capability: "direct_peer_transport",
 		});
@@ -398,6 +421,8 @@ describe("daemon protocol helpers", () => {
 	it("classifies every command plane and never defaults unknown commands to the session plane", () => {
 		// A worker "list" means only that worker's sessions; the supervisor list is authoritative.
 		expect(DAEMON_COMMAND_PLANE.list).toBe("control");
+		expect(DAEMON_COMMAND_PLANE.cron_resume).toBe("control");
+		expect(DAEMON_COMMAND_PLANE.send_result).toBe("control");
 		expect(DAEMON_COMMAND_PLANE.prompt).toBe("session");
 		expect(isSessionPlaneDaemonCommand("no_such_command")).toBe(false);
 	});
@@ -456,5 +481,40 @@ describe("daemon protocol helpers", () => {
 		expect(salvageDaemonCommandId(JSON.stringify({ type: "command", id: 7 }))).toBeUndefined();
 		expect(salvageDaemonCommandId(JSON.stringify("command"))).toBeUndefined();
 		expect(salvageDaemonCommandId("{ not json")).toBeUndefined();
+	});
+	it("keeps evidence fields optional and capability-gated for new readers", () => {
+		const oldEvent: DaemonOutbound = {
+			type: "session_event",
+			activeSessionId: "active",
+			event: { type: "tool_execution_end", toolCallId: "call", toolName: "tool", result: {}, isError: false },
+		};
+		expect(oldEvent.event).not.toHaveProperty("exchange");
+		const field = DAEMON_SESSION_EVENT_FIELD_COMPATIBILITY.tool_execution_end.exchange;
+		expect(
+			meetsDaemonCommandCompatibility(
+				{ protocol: { ...DAEMON_PROTOCOL_INFO, version: 8 }, schemaRevision: 27 },
+				field,
+			),
+		).toBe(false);
+		expect(
+			meetsDaemonCommandCompatibility(
+				{
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
+					serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+				},
+				field,
+			),
+		).toBe(true);
+	});
+
+	it("reserves worker-authenticated ledger mutation only on the control plane", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.rlm_ledger_mutate).toEqual({
+			minProtocol: 10,
+			minSchemaRevision: 28,
+			capability: "rlm_ledger_mutation",
+		});
+		expect(DAEMON_COMMAND_PLANE.rlm_ledger_mutate).toBe("control");
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("rlm_ledger_mutation");
 	});
 });

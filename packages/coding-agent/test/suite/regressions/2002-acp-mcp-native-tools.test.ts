@@ -90,7 +90,7 @@ describe("PR 2002 ACP MCP native tools", () => {
 			);
 			expect(manager.getAcpServers()).toEqual([]);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -129,7 +129,7 @@ describe("PR 2002 ACP MCP native tools", () => {
 			);
 			expect(manager.getAcpServers()).toEqual([]);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 });

@@ -1,4 +1,4 @@
-import { Box } from "@earendil-works/pi-tui";
+import { Box } from "@ponythewhite/base-context-tui";
 import { theme } from "../theme/theme.js";
 
 /**

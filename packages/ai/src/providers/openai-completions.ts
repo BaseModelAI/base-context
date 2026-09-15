@@ -34,7 +34,19 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
+import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
+import {
+	type ProviderRequestProjection,
+	type ProviderRequestRepresentation,
+	withRequestBody,
+} from "../utils/request-token-budget.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import {
+	classifyStreamFailure,
+	formatStreamFailureMessage,
+	recordStreamFailure,
+	StreamFailureError,
+} from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
@@ -130,7 +142,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
+	if (typeof process !== "undefined" && process.env.BASE_CONTEXT_CACHE_RETENTION === "long") {
 		return "long";
 	}
 	return "short";
@@ -142,6 +154,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const attempts = new ProviderAttemptTracker(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -172,11 +185,68 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					? getAnthropicCacheWriteCost(model.cost.input, cacheControl.ttl === "1h" ? "1h" : "5m")
 					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
-			let params = buildParams(model, context, options, compat, cacheRetention, cacheControl);
+			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			if (attempts.enabled) {
+				client = client.withOptions({});
+				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
+			}
+			const requestUrl = `${client.baseURL.replace(/\/$/, "")}/chat/completions`;
+			const nativeDeepSeek =
+				supportsNativeDeepSeek(model, compat) && requestUrl === "https://api.deepseek.com/chat/completions";
+			if (
+				options?.attempts?.pendingPublicMessageGroups?.length &&
+				(!nativeDeepSeek || !attempts.hasRequestBudget || !options.attempts.prepareRequest)
+			)
+				throw new Error("Pending tool groups require native DeepSeek public preparation and measurement");
+			let projection: ProviderRequestProjection | undefined;
+			let params = buildParams(
+				model,
+				context,
+				options,
+				compat,
+				cacheRetention,
+				cacheControl,
+				nativeDeepSeek && options?.attempts?.prepareRequest
+					? (value) => {
+							projection = value;
+						}
+					: undefined,
+			);
+			const originalBody = projection ? JSON.stringify(params) : undefined;
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+			}
+			const wireEffort =
+				params.reasoning_effort ??
+				(params as typeof params & { reasoning?: { effort?: string } }).reasoning?.effort;
+			attempts.configure({
+				effort: typeof wireEffort === "string" ? wireEffort : undefined,
+				serviceTier: params.service_tier,
+			});
+			if (attempts.hasRequestBudget) {
+				let pendingPublicBody: string | undefined;
+				const body = JSON.stringify(params);
+				const requestProjection =
+					projection && body === originalBody && supportsNativeDeepSeek(model, compat)
+						? bindDeepSeekPublicWindow(
+								{ api: model.api, provider: model.provider, url: requestUrl, body },
+								projection,
+								(encoded) => {
+									pendingPublicBody = encoded;
+								},
+							)
+						: undefined;
+				let selected = body;
+				if (nativeDeepSeek)
+					selected = (await attempts.prepareRequest({ url: requestUrl, body }, requestProjection))!;
+				else await attempts.measureRequest({ url: requestUrl, body });
+				if (
+					options?.attempts?.pendingPublicMessageGroups?.length &&
+					(pendingPublicBody === undefined || selected !== pendingPublicBody)
+				)
+					throw new Error("Pending original tool groups were not accepted as DeepSeek public messages");
+				params = JSON.parse(selected!) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
@@ -296,8 +366,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				return block;
 			};
 
+			let rawFinishReason: string | undefined;
 			for await (const chunk of openaiStream) {
 				if (!chunk || typeof chunk !== "object") continue;
+				attempts.event();
+				attempts.response({
+					providerResponseId: chunk.id,
+					responseModel: chunk.model,
+					effectiveServiceTier: chunk.service_tier,
+				});
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -306,7 +383,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					output.responseModel ||= chunk.model;
 				}
 				if (chunk.usage) {
-					output.usage = parseChunkUsage(chunk.usage, model, cacheWriteCost);
+					output.usage = parseChunkUsage(
+						chunk.usage,
+						model,
+						cacheWriteCost,
+						attempts,
+						chunk.choices?.length === 0 || chunk.choices?.some((choice) => !!choice.finish_reason),
+					);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -315,10 +398,18 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
-					output.usage = parseChunkUsage((choice as any).usage, model, cacheWriteCost);
+					output.usage = parseChunkUsage(
+						(choice as any).usage,
+						model,
+						cacheWriteCost,
+						attempts,
+						!!choice.finish_reason,
+					);
 				}
 
 				if (choice.finish_reason) {
+					rawFinishReason = String(choice.finish_reason);
+					attempts.terminal(rawFinishReason === "network_error" ? "failed" : "completed");
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
@@ -332,6 +423,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						choice.delta.content !== undefined &&
 						choice.delta.content.length > 0
 					) {
+						attempts.event(true);
 						const block = ensureTextBlock();
 						block.text += choice.delta.content;
 						stream.push({
@@ -360,6 +452,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (foundReasoningField) {
 						const delta = deltaFields[foundReasoningField];
 						if (typeof delta === "string" && delta.length > 0) {
+							attempts.event(true);
 							const block = ensureThinkingBlock(foundReasoningField);
 							block.thinking += delta;
 							stream.push({
@@ -373,6 +466,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls) {
+							attempts.event(true);
 							const block = ensureToolCallBlock(toolCall);
 							if (!block.id && toolCall.id) {
 								block.id = toolCall.id;
@@ -459,12 +553,18 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				throw new Error("Request was aborted");
 			}
 			if (output.stopReason === "error") {
-				throw new Error(output.errorMessage || "Provider returned an error stop reason");
+				throw new StreamFailureError(output.errorMessage || "Provider returned an error stop reason", {
+					kind: rawFinishReason === "network_error" ? "transport" : classifyStreamFailure(rawFinishReason),
+					providerErrorType: rawFinishReason,
+				});
 			}
 
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			await attempts.finish(stream, output);
 		} catch (error) {
+			if (attempts.enabled && typeof OpenAI.APIError === "function" && error instanceof OpenAI.APIError) {
+				attempts.providerError(error.error);
+				if (error.error) attempts.terminal("failed");
+			}
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// Streaming scratch buffers are only used during parsing; never persist them.
@@ -472,12 +572,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
-			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
-			stream.push({ type: "error", reason: output.stopReason, error: output });
-			stream.end();
+			const failure =
+				output.stopReason !== "aborted" && error instanceof OpenAI.APIConnectionTimeoutError
+					? new StreamFailureError(error.message, {
+							kind: "transport",
+							providerErrorType: "APIConnectionTimeoutError",
+						})
+					: error;
+			output.errorMessage = formatStreamFailureMessage(failure);
+			recordStreamFailure(model, output, failure);
+			await attempts.finish(stream, output);
 		}
 	})();
 
@@ -568,6 +672,219 @@ function createClient(
 	});
 }
 
+/** The direct canonical DeepSeek route has a text/tool Chat-Completions contract, not Responses replay. */
+function supportsNativeDeepSeek(model: Model<"openai-completions">, compat: ResolvedOpenAICompletionsCompat): boolean {
+	return (
+		model.api === "openai-completions" &&
+		model.provider === "deepseek" &&
+		model.id === "deepseek-flash" &&
+		model.baseUrl.replace(/\/$/, "") === "https://api.deepseek.com" &&
+		model.reasoning &&
+		compat.thinkingFormat === "deepseek" &&
+		compat.maxTokensField === "max_tokens" &&
+		!compat.supportsDeveloperRole &&
+		compat.requiresReasoningContentOnAssistantMessages &&
+		!compat.requiresThinkingAsText &&
+		!compat.requiresAssistantAfterToolResult
+	);
+}
+
+/** Captured from the one normal converter pass; changed, foreign, opaque or unclosed replay is unsupported. */
+function captureDeepSeekProjection(
+	model: Model<"openai-completions">,
+	context: Context,
+	transformed: Message[],
+	messages: ChatCompletionMessageParam[],
+	messageIndices: readonly (number | null)[],
+	pendingPublicMessageGroups: readonly (readonly number[])[],
+): ProviderRequestProjection | undefined {
+	if (
+		transformed.length !== context.messages.length ||
+		transformed.some((message, index) => JSON.stringify(message) !== JSON.stringify(context.messages[index])) ||
+		messages.length !== messageIndices.length
+	)
+		return;
+	const items = context.messages.map((): ChatCompletionMessageParam[] => []);
+	for (const [index, sourceIndex] of messageIndices.entries()) {
+		if (sourceIndex !== null) items[sourceIndex].push(messages[index]);
+	}
+	const required = pendingPublicMessageGroups.map((indices) => ({
+		indices,
+		calls: new Map<string, boolean>(),
+	}));
+	const requiredAt = new Map<number, (typeof required)[number]>();
+	for (const group of required) {
+		if (!group.indices.length || context.messages[group.indices[0]]?.role !== "assistant") return;
+		let previous = -1;
+		for (const index of group.indices) {
+			if (
+				!Number.isSafeInteger(index) ||
+				index <= previous ||
+				index >= context.messages.length ||
+				requiredAt.has(index)
+			)
+				return;
+			requiredAt.set(index, group);
+			previous = index;
+		}
+	}
+	const pending = new Map<string, boolean>();
+	const publicMessageGroups: number[][] = [];
+	const optionalMessageIndices: number[] = [];
+	let publicGroup: number[] | undefined;
+	const closeCalls = () => {
+		const complete = [...pending.values()].every(Boolean);
+		if (complete && publicGroup) publicMessageGroups.push(publicGroup);
+		publicGroup = undefined;
+		pending.clear();
+		return complete;
+	};
+	for (const [index, message] of context.messages.entries()) {
+		if (items[index].length !== 1) return;
+		const item = items[index][0];
+		const requiredGroup = requiredAt.get(index);
+		if (
+			requiredGroup &&
+			(index === requiredGroup.indices[0] ? message.role !== "assistant" : message.role !== "toolResult")
+		)
+			return;
+		if ((message.role === "assistant" || message.role === "user") && !closeCalls()) return;
+		const calls = requiredGroup?.calls ?? pending;
+		if (message.role === "assistant") {
+			if (
+				message.api !== model.api ||
+				message.provider !== model.provider ||
+				message.model !== model.id ||
+				(message.stopReason !== "stop" && message.stopReason !== "toolUse") ||
+				item.role !== "assistant" ||
+				(item.content !== null && typeof item.content !== "string") ||
+				typeof (item as { reasoning_content?: unknown }).reasoning_content !== "string" ||
+				"reasoning_details" in item
+			)
+				return;
+			const toolCalls = message.content.filter(isToolCallBlock);
+			if ((item.tool_calls?.length ?? 0) !== toolCalls.length) return;
+			for (const [callIndex, call] of toolCalls.entries()) {
+				const wire = item.tool_calls![callIndex];
+				if (
+					!call.id ||
+					calls.has(call.id) ||
+					call.thoughtSignature !== undefined ||
+					wire.type !== "function" ||
+					wire.id !== call.id ||
+					wire.function.name !== call.name
+				)
+					return;
+				calls.set(call.id, false);
+			}
+			if (
+				message.content.some((block) =>
+					block.type === "thinking"
+						? block.redacted ||
+							(block.thinkingSignature !== undefined && block.thinkingSignature !== "reasoning_content")
+						: block.type === "text" && block.textSignature !== undefined,
+				)
+			)
+				return;
+			if (!requiredGroup) publicGroup = [index];
+			if (message.stopReason === "stop" && message.content.length === 1 && message.content[0].type === "text")
+				optionalMessageIndices.push(index);
+		} else if (message.role === "toolResult") {
+			if (
+				!calls.has(message.toolCallId) ||
+				calls.get(message.toolCallId) ||
+				item.role !== "tool" ||
+				item.tool_call_id !== message.toolCallId ||
+				message.content.some((part) => part.type !== "text")
+			)
+				return;
+			calls.set(message.toolCallId, true);
+			if (!requiredGroup) publicGroup?.push(index);
+		} else if (
+			item.role !== "user" ||
+			(typeof message.content !== "string" && message.content.some((part) => part.type !== "text"))
+		)
+			return;
+	}
+	if (!closeCalls()) return;
+	for (const group of required) {
+		if (!group.calls.size) return;
+		publicMessageGroups.push([...group.indices]);
+	}
+	return {
+		kind: "deepseek-completions-text-tools-v1",
+		replayContract: "message-groups",
+		messageIndices,
+		optionalMessageIndices,
+		// Chat Completions does not generate Responses layout-dependent item IDs.
+		generatedMessageIndices: [],
+		publicMessageGroups,
+		...(required.length ? { pendingPublicMessageGroups: required.map((group) => [...group.indices]) } : {}),
+	};
+}
+
+/** Bound only after the direct DeepSeek request still matches the native serializer after onPayload. */
+function bindDeepSeekPublicWindow(
+	request: ProviderRequestRepresentation,
+	projection: ProviderRequestProjection,
+	onPendingPublicEncoded: (body: string) => void,
+): ProviderRequestProjection {
+	return {
+		...projection,
+		publicWindow: true,
+		encodePublicWindow(replacements) {
+			if (!request.body || !replacements.length || !projection.publicMessageGroups) return;
+			const texts = new Map<number, string>();
+			for (const replacement of replacements) {
+				if (
+					!Number.isSafeInteger(replacement.messageIndex) ||
+					typeof replacement.text !== "string" ||
+					texts.has(replacement.messageIndex)
+				)
+					return;
+				texts.set(replacement.messageIndex, replacement.text);
+			}
+			const covered = new Set<number>();
+			for (const group of projection.publicMessageGroups) {
+				if (!group.some((index) => texts.has(index))) continue;
+				if (!group.every((index) => texts.has(index))) return;
+				for (const index of group) covered.add(index);
+			}
+			if (
+				covered.size !== texts.size ||
+				projection.pendingPublicMessageGroups?.some((group) => group.some((index) => !texts.has(index)))
+			)
+				return;
+			const body = JSON.parse(request.body) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
+			if (body.messages.length !== projection.messageIndices.length) return;
+			const messages: ChatCompletionMessageParam[] = [];
+			const messageIndices: Array<number | null> = [];
+			const emitted = new Set<number>();
+			for (const [itemIndex, messageIndex] of projection.messageIndices.entries()) {
+				if (messageIndex !== null && texts.has(messageIndex)) {
+					if (emitted.has(messageIndex)) continue;
+					emitted.add(messageIndex);
+					messages.push({ role: "user", content: sanitizeSurrogates(texts.get(messageIndex)!) });
+				} else messages.push(body.messages[itemIndex]);
+				messageIndices.push(messageIndex);
+			}
+			const encoded = withRequestBody(request, JSON.stringify({ ...body, messages }));
+			if (projection.pendingPublicMessageGroups?.length) onPendingPublicEncoded(encoded.body!);
+			return {
+				request: encoded,
+				projection: {
+					kind: projection.kind,
+					replayContract: "message-groups",
+					publicWindow: true,
+					messageIndices,
+					optionalMessageIndices: projection.optionalMessageIndices,
+					generatedMessageIndices: [],
+				},
+			};
+		},
+	};
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -575,8 +892,15 @@ function buildParams(
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolveCacheRetention(options?.cacheRetention),
 	cacheControl: OpenAICompatCacheControl | undefined = getCompatCacheControl(compat, cacheRetention),
+	onProjection?: (projection: ProviderRequestProjection) => void,
 ) {
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(
+		model,
+		context,
+		compat,
+		onProjection,
+		options?.attempts?.pendingPublicMessageGroups,
+	);
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
@@ -804,6 +1128,8 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
+	onProjection?: (projection: ProviderRequestProjection) => void,
+	pendingPublicMessageGroups: readonly (readonly number[])[] = [],
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -822,7 +1148,9 @@ export function convertMessages(
 		return id;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+	const capture = onProjection && supportsNativeDeepSeek(model, compat) ? onProjection : undefined;
+	const pending = capture ? pendingPublicMessageGroups : [];
+	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id), pending);
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -830,6 +1158,10 @@ export function convertMessages(
 		params.push({ role: role, content: sanitizeSurrogates(context.systemPrompt) });
 	}
 
+	const messageIndices: Array<number | null> | undefined = capture ? params.map(() => null) : undefined;
+	const recordMessage = (index: number) => {
+		if (messageIndices) while (messageIndices.length < params.length) messageIndices.push(index);
+	};
 	let lastRole: string | null = null;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -1017,6 +1349,7 @@ export function convertMessages(
 					(toolResultMsg as any).name = toolMsg.toolName;
 				}
 				params.push(toolResultMsg);
+				recordMessage(j);
 
 				if (hasImages && model.input.includes("image")) {
 					for (const block of toolMsg.content) {
@@ -1056,12 +1389,25 @@ export function convertMessages(
 			} else {
 				lastRole = "toolResult";
 			}
+			recordMessage(i);
 			continue;
 		}
 
+		recordMessage(i);
 		lastRole = msg.role;
 	}
 
+	if (capture && messageIndices) {
+		const projection = captureDeepSeekProjection(
+			model,
+			context,
+			transformedMessages,
+			params,
+			messageIndices,
+			pending,
+		);
+		if (projection) capture(projection);
+	}
 	return params;
 }
 
@@ -1090,6 +1436,8 @@ function parseChunkUsage(
 	},
 	model: Model<"openai-completions">,
 	cacheWriteCost?: number,
+	attempts?: ProviderAttemptTracker,
+	complete = false,
 ): AssistantMessage["usage"] {
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const reportedCachedTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
@@ -1115,6 +1463,31 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage, cacheWriteCost === undefined ? undefined : { cacheWrite: cacheWriteCost });
+	const observedCached = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens;
+	attempts?.usage(
+		rawUsage,
+		{
+			// OpenAI-compatible cached_tokens may include writes. Preserve direct derivations, without the legacy UI clamps.
+			input:
+				rawUsage.prompt_tokens !== undefined && observedCached !== undefined
+					? rawUsage.prompt_tokens - observedCached
+					: undefined,
+			inputTotal: rawUsage.prompt_tokens,
+			output: rawUsage.completion_tokens,
+			cacheRead:
+				observedCached !== undefined
+					? rawUsage.prompt_tokens_details?.cache_write_tokens !== undefined
+						? observedCached - rawUsage.prompt_tokens_details.cache_write_tokens
+						: observedCached
+					: undefined,
+			cacheWrite: rawUsage.prompt_tokens_details?.cache_write_tokens,
+			totalTokens:
+				rawUsage.prompt_tokens !== undefined && rawUsage.completion_tokens !== undefined
+					? rawUsage.prompt_tokens + rawUsage.completion_tokens
+					: undefined,
+		},
+		complete ? "complete" : "partial",
+	);
 	return usage;
 }
 

@@ -8,7 +8,7 @@ import {
 	Text,
 	TruncatedText,
 	truncateToWidth,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import type { AgentConnectionSessionTreeNode } from "../../agent-connection/index.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
@@ -762,8 +762,11 @@ class TreeList implements Component {
 				break;
 			}
 			case "compaction": {
-				const tokens = Math.round(entry.tokensBefore / 1000);
-				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
+				const tokens =
+					entry.tokensBefore === null
+						? "prior token estimate unknown"
+						: `${Math.round(entry.tokensBefore / 1000)}k tokens`;
+				result = theme.fg("borderAccent", `[compaction: ${tokens}]`);
 				break;
 			}
 			case "branch_summary":

@@ -5,7 +5,7 @@
  * When forking, offers to restore code to that point in history.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
 
 export default function (pi: ExtensionAPI) {
 	const checkpoints = new Map<string, string>();
@@ -13,8 +13,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Track the current entry ID when user messages are saved
 	pi.on("tool_result", async (_event, ctx) => {
-		const leaf = ctx.sessionManager.getLeafEntry();
-		if (leaf) currentEntryId = leaf.id;
+		const leafId = ctx.sessionManager.getLeafId();
+		if (leafId) currentEntryId = leafId;
 	});
 
 	pi.on("turn_start", async () => {

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.js";
 import {
@@ -93,7 +93,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
 		});
 
 		const rebindSession = async (): Promise<void> => {
@@ -174,7 +174,7 @@ describe("regression #2860: replaced session callbacks", () => {
 									staleCtxThrows = true;
 								}
 								try {
-									oldPi?.sendUserMessage("stale message");
+									await oldPi?.sendUserMessage("stale message");
 								} catch {
 									stalePiThrows = true;
 								}

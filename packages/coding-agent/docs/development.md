@@ -1,83 +1,83 @@
 # Development
 
-See the repository [AGENTS.md](../../../AGENTS.md) for the current contribution rules and required validation.
+See [CONTRIBUTING.md](../../../CONTRIBUTING.md) and the repository [AGENTS.md](../../../AGENTS.md) for contribution rules.
 
 ## Setup
 
-Prime Agent requires Node.js 22.8.0 or newer.
+Use Node.js `^22.12.0 || >=23.3.0` and a compatible npm version:
 
 ```bash
-git clone https://github.com/PrimeIntellect-ai/prime-agent
-cd prime-agent
+git clone https://github.com/BaseModelAI/base-context.git
+cd base-context
 npm ci
+npm run build:source
+node packages/coding-agent/dist/bundle/cli.js
 ```
 
-Run from source:
+To use a checkout in another project, change to that project and run the built CLI by its absolute path:
 
 ```bash
-/path/to/prime-agent/prime-agent.sh
+cd /path/to/project
+node /absolute/path/to/base-context/packages/coding-agent/dist/bundle/cli.js
 ```
 
-The script can be called from any directory and preserves the caller's working directory. Use that behavior to run a source checkout against a separate test project.
+See [installation](installation.md) for Python bootstrap and manual runtime options.
 
-## Product and Source Names
+## Product and package names
 
-Prime Agent is the product, public CLI, release artifact, and repository name. The monorepo still retains inherited `@earendil-works/pi-*` npm workspace names, a source-package `pi` bin entry, the `pi` package manifest key, and some `PI_*` compatibility environment variables. These names are source and compatibility details, not a signal that contributors should install or develop against pi-mono.
+The public CLI package is `@ponythewhite/base-context`; the binary is `base-context`. The other public packages are `@ponythewhite/base-context-ai`, `@ponythewhite/base-context-agent`, and `@ponythewhite/base-context-tui`. The bundled Python distribution is `base-context-runtime`; its import remains `rlm`.
 
-Public releases are currently versioned tarball artifacts installed by the stable and beta installer scripts. `scripts/pack-prime-agent-release.mjs` rewrites the coding-agent package name, executable, config metadata, and internal dependency URLs for that distribution. Do not document the inherited npm workspace package as the public Prime Agent install path.
+Some extension interfaces and package manifests retain the `pi` API/key. Provider identifiers such as `prime-inference` and `PRIME_API_KEY` keep their real provider meaning. Do not rename these just because the product is a fork.
 
-## Local Configuration
+## Local configuration
 
-User configuration lives under `~/.prime/agent/`. Project-local settings, prompts, themes, extensions, skills, and system-prompt files live under `.prime/agent/` in the project root. Override the user config directory with `PRIME_AGENT_CODING_AGENT_DIR` and the session directory with `PRIME_AGENT_SESSION_DIR`.
+Global configuration lives under `~/.base-context`. Project settings and resources use `.base-context/`. `BASE_CONTEXT_HOME` selects a separate absolute global root; `BASE_CONTEXT_SESSION_DIR` controls session storage independently.
 
-Use an isolated config directory when manually exercising daemon behavior so development sessions do not collide with normal sessions:
+Use an isolated root for development sessions:
 
 ```bash
-PRIME_AGENT_CODING_AGENT_DIR=/tmp/prime-agent-dev /path/to/prime-agent/prime-agent.sh
+BASE_CONTEXT_HOME=/absolute/path/to/dev-state \
+  node /absolute/path/to/base-context/packages/coding-agent/dist/bundle/cli.js
 ```
 
-## Daemon Protocol Changes
+This separates product state. It is not a security or network sandbox.
 
-Classify every daemon command, event, or response-shape change as backward-compatible, capability-gated, or incompatible. Optional behavior must be negotiated and degrade locally. Follow the protocol-version, schema-revision, compatibility-map, and cross-version test requirements in the root `AGENTS.md` before changing the wire contract.
+## Daemon protocol changes
 
-## Package Asset Resolution
+Classify daemon command, event, and response-shape changes by their compatibility impact. Follow the protocol and schema requirements in the repository instructions before changing the wire contract.
 
-Prime Agent runs from source, Node.js package output, and standalone release artifacts. Always use `src/config.ts` helpers for package assets:
+## Package assets
+
+Use `src/config.ts` helpers for packaged assets rather than resolving them directly from `__dirname`:
 
 ```typescript
 import { getPackageDir, getThemeDir } from "./config.js";
 ```
 
-Do not resolve packaged assets directly from `__dirname`.
-
 ## Debugging
 
-The hidden `/debug` command writes `~/.prime/agent/prime-agent-debug.log` with rendered TUI lines, their visible widths, and the current agent messages. Daemon, worker, client, and provider diagnostic logs live under `~/.prime/agent/logs/`.
-
-Useful service commands:
+Daemon, worker, client, and provider diagnostic logs are under `~/.base-context/logs/`. Logs and session exports can contain private work; inspect them before sharing.
 
 ```bash
-prime-agent status
-prime-agent doctor
-prime-agent doctor --fix
-prime-agent shutdown
+base-context status
+base-context doctor
+base-context doctor --fix
+base-context shutdown
 ```
 
-## Validation
+## Local checks
 
-After code changes, run the repository check from the root:
+The repository check formats files, lints, checks types, and runs installer/browser smoke checks. It does not run the test suite:
 
 ```bash
 npm run check
 ```
 
-This performs formatting, linting, type checking, installer rendering checks, and the browser smoke check. It does not run the test suite.
-
-Run focused tests from the package root. For example:
+Run only the focused tests relevant to a change. From the coding-agent package:
 
 ```bash
 cd packages/coding-agent
 npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts
 ```
 
-If you create or modify a test file, run that file and iterate until it passes. Coding-agent suite regressions belong under `test/suite/regressions/` and use the suite harness and faux provider rather than live provider credentials.
+Use the repository's test harness and faux providers rather than live provider credentials. Benchmark reproduction is documented separately in the [benchmark guide](../../../benchmarks/python-realworld-30/REPRODUCE.md); ordinary source setup does not require a benchmark run.

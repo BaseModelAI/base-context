@@ -5,8 +5,8 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model } from "@earendil-works/pi-ai";
+import type { AgentEvent, AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { ImageContent, Model } from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type { CompactionResult } from "../../core/compaction/index.js";
@@ -136,6 +136,10 @@ export interface RpcSlashCommand {
 // ============================================================================
 
 export interface RpcSessionState {
+	/** Missing on older unversioned RPC servers; the client must refuse them before work. */
+	protocolVersion?: number;
+	/** Missing on older servers that do not qualify native task admission. */
+	schemaRevision?: number;
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
@@ -296,6 +300,14 @@ export type RpcResponse =
 // ============================================================================
 // Extension UI Events (stdout)
 // ============================================================================
+
+/** A late accepted-prompt failure, not a provider message or a successful agent_end. */
+export type RpcPromptCompletionError = {
+	type: "extension_error";
+	extensionPath: "<session-input>";
+	event: "prompt_completion";
+	error: string;
+};
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =

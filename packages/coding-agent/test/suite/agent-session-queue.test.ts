@@ -1,8 +1,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { AgentContinueError, type AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
+import { AgentContinueError, type AgentTool } from "@ponythewhite/base-context-agent";
+import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -85,6 +85,17 @@ function agentPromptText(id: string, body: string): string {
 	return `Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: ${id}\n\n${body}`;
 }
 
+function childMessage(id: string, message: string) {
+	return createAgentSessionMessage({
+		id,
+		source: AGENT_MESSAGE_SOURCE,
+		message,
+		from: { activeSessionId: "child-active", sessionId: "child-session", runtimeKind: "subagent" },
+		fromRelationship: "child",
+		target: { activeSessionId: "parent-active", sessionId: "parent-session" },
+	});
+}
+
 function heartbeatJob(): AgentCronJob {
 	return {
 		id: "heartbeat-test",
@@ -108,9 +119,9 @@ const skipReviewer = vi.fn(async () => ({ shouldRefine: true, rationale: "durabl
 describe("AgentSession queue characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -693,6 +704,7 @@ describe("AgentSession queue characterization", () => {
 		const treeEventReached = createDeferred();
 		const treeEventGate = createDeferred();
 		const harness = await createHarness({
+			persistSession: true,
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_tree", async () => {
@@ -705,7 +717,7 @@ describe("AgentSession queue characterization", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
 		await harness.session.prompt("one");
-		const target = harness.sessionManager.getEntries().find((entry) => entry.type === "message");
+		const target = (await harness.sessionManager.readEntries()).find((entry) => entry.type === "message");
 		expect(target).toBeDefined();
 		await harness.session.prompt("two");
 
@@ -925,8 +937,8 @@ describe("AgentSession queue characterization", () => {
 		}) => {
 			const harness = await createAutoRefineHarness();
 			harnesses.push(harness);
-			const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-			process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+			const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+			process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 			try {
 				const globalDir = getGlobalHarnessStateDir();
 				const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
@@ -971,9 +983,9 @@ describe("AgentSession queue characterization", () => {
 				}
 			} finally {
 				if (previousAgentDir === undefined) {
-					delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+					delete process.env.BASE_CONTEXT_HOME;
 				} else {
-					process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+					process.env.BASE_CONTEXT_HOME = previousAgentDir;
 				}
 			}
 		},
@@ -983,8 +995,8 @@ describe("AgentSession queue characterization", () => {
 		const original = await createAutoRefineHarness();
 		const branched = await createAutoRefineHarness();
 		harnesses.push(original, branched);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${original.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${original.tempDir}/agent`;
 		try {
 			const originalLocalDir = getLocalHarnessStateDir(original.sessionManager.getSessionArtifactDir())!;
 			const branchedLocalDir = getLocalHarnessStateDir(branched.sessionManager.getSessionArtifactDir())!;
@@ -1023,7 +1035,7 @@ describe("AgentSession queue characterization", () => {
 			]);
 
 			const originalRefinement = await original.session.refine({ instructions: "remember this locally" });
-			branched.sessionManager.appendCustomEntry("prime-agent.refinement", originalRefinement);
+			await branched.sessionManager.appendCustomEntry("prime-agent.refinement", originalRefinement);
 			expect(loadHarnessState(originalLocalDir, "local").entries.memory.remember_me.content).toBe(
 				"Original content should be rolled back.",
 			);
@@ -1036,9 +1048,9 @@ describe("AgentSession queue characterization", () => {
 			);
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1046,8 +1058,8 @@ describe("AgentSession queue characterization", () => {
 	it("records a durable refinement outcome while preserving a concurrent prompt result", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			const planGate = createDeferred();
 			const planStartedPromise = createDeferred();
@@ -1112,9 +1124,9 @@ describe("AgentSession queue characterization", () => {
 			expect(persistedAssistants).toHaveLength(1);
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1122,8 +1134,8 @@ describe("AgentSession queue characterization", () => {
 	it("keeps an unpersisted refinement outcome when the refinement audit append fails", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
 			const auditAppendError = new Error("audit write failed");
@@ -1138,14 +1150,14 @@ describe("AgentSession queue characterization", () => {
 				auditAppendError,
 			);
 
-			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
 			// The outcome survives context rebuilds even when neither session entry could persist.
-			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect((await harness.session.buildSessionContext()).messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1153,17 +1165,20 @@ describe("AgentSession queue characterization", () => {
 	it("keeps an unpersisted refinement outcome across context rebuilds", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
 			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(() => {
 				throw new Error("disk full");
 			});
 
-			await harness.session.refine({ instructions: "outcome persistence failure" });
+			await expect(harness.session.refine({ instructions: "outcome persistence failure" })).rejects.toThrow(
+				"disk full",
+			);
 
-			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(false);
+			const outcome = (await harness.session.buildSessionContext()).messages.find(isRefinementOutcomeMessage);
 			expect(outcome?.details.summary).toBe("no-op");
 			expect(
 				harness.sessionManager
@@ -1171,12 +1186,12 @@ describe("AgentSession queue characterization", () => {
 					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
 			).toBe(false);
 			// The memory-only outcome survives context rebuilds despite the failed write.
-			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+			expect((await harness.session.buildSessionContext()).messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1184,8 +1199,8 @@ describe("AgentSession queue characterization", () => {
 	it("preserves a same-entry harness write made during background planning", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
 			const initialState = loadHarnessState(localDir, "local");
@@ -1255,9 +1270,9 @@ describe("AgentSession queue characterization", () => {
 			expect(loadHarnessState(localDir, "local").entries.memory.shared.content).toBe("concurrent kernel content");
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1265,8 +1280,8 @@ describe("AgentSession queue characterization", () => {
 	it("rolls back a local refinement in a non-persisted session via the recorded state path", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			const recordedDir = join(harness.tempDir, "recorded-local", "harness");
 			const recordedState = loadHarnessState(recordedDir, "local");
@@ -1289,7 +1304,7 @@ describe("AgentSession queue characterization", () => {
 				{ id: "refine_recorded", scope: "local" },
 			);
 			seeded.harnessStatePath = saveHarnessState(recordedDir, recordedState);
-			harness.sessionManager.appendCustomEntry("prime-agent.refinement", seeded);
+			await harness.sessionManager.appendCustomEntry("prime-agent.refinement", seeded);
 
 			const result = await harness.session.refine({ rollbackId: "refine_recorded" });
 
@@ -1297,9 +1312,9 @@ describe("AgentSession queue characterization", () => {
 			expect(loadHarnessState(recordedDir, "local").entries.memory.remember_me).toBeUndefined();
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1307,8 +1322,8 @@ describe("AgentSession queue characterization", () => {
 	it("keeps a legacy scope-less rollback in the global store with global scope", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			const globalDir = getGlobalHarnessStateDir();
 			const timestamp = new Date().toISOString();
@@ -1360,7 +1375,7 @@ describe("AgentSession queue characterization", () => {
 				],
 				harnessStatePath: getHarnessStatePath(globalDir),
 			};
-			harness.sessionManager.appendCustomEntry("prime-agent.refinement", legacyRefinement);
+			await harness.sessionManager.appendCustomEntry("prime-agent.refinement", legacyRefinement);
 
 			const result = await harness.session.refine({ rollbackId: "refine_legacy" });
 
@@ -1368,16 +1383,16 @@ describe("AgentSession queue characterization", () => {
 			const stored = JSON.parse(readFileSync(getHarnessStatePath(globalDir), "utf8"));
 			expect(stored.entries.memory.legacy_target).toBeUndefined();
 			expect(stored.entries.memory.keep_me.scope).toBe("global");
-			const rollbackRecord = loadGlobalRefinementHistory(globalDir).find(
+			const rollbackRecord = (await loadGlobalRefinementHistory(globalDir)).find(
 				(item) => item.rollbackOf === "refine_legacy",
 			);
 			expect(rollbackRecord).toBeDefined();
 			expect(rollbackRecord?.scope).toBe("global");
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -1402,7 +1417,7 @@ describe("AgentSession queue characterization", () => {
 		});
 		harnesses.push(harness);
 		const extensionErrors: string[] = [];
-		harness.session.bindExtensions({ onError: (error) => extensionErrors.push(error.error) });
+		await harness.session.bindExtensions({ onError: (error) => extensionErrors.push(error.error) });
 
 		await expect(harness.session.promptUntilAccepted("/testcmd")).resolves.toBeUndefined();
 		let completed = false;
@@ -1762,6 +1777,70 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["handed off"]);
 		expect(getAssistantTexts(harness)).toEqual(["delivered"]);
+	});
+
+	it("delivers queued child progress and completion in the first model call", async () => {
+		const hook = gatedHook();
+		const harness = await createHarness({ extensionFactories: [hook.factory] });
+		harnesses.push(harness);
+		harness.session.setSteeringMode("one-at-a-time");
+		const progress = childMessage("agentmsg_progress", "Progress: implementation is in progress.");
+		const completion = childMessage("agentmsg_completion", "Complete: implementation and checks are done.");
+		const modelInputs: string[][] = [];
+		harness.setResponses([
+			(context) => {
+				modelInputs.push(context.messages.filter((message) => message.role === "user").map(getMessageText));
+				return fauxAssistantMessage("handled complete batch");
+			},
+		]);
+		const deliveries = [progress, completion].map((message) =>
+			harness.session.waitForAgentMessagePromptDelivery(message.details.id),
+		);
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.queueAgentMessagePrompt(progress.content, "steer", progress);
+		pause.release();
+		await hook.reached;
+		// The daemon admission path can add a completion while the first action prepares.
+		await harness.session.acceptAgentMessagePrompt(completion.content, {
+			customMessage: completion,
+			streamingBehavior: "steer",
+			queueIfBusy: true,
+		});
+		expect(modelInputs).toEqual([]);
+		hook.release();
+		await harness.session.waitForIdle();
+		await Promise.all(deliveries);
+
+		expect(modelInputs).toEqual([[progress.content, completion.content]]);
+		expect(getAssistantTexts(harness)).toEqual(["handled complete batch"]);
+		expect(harness.eventsOfType("tool_execution_start")).toEqual([]);
+		expect(harness.session.unfinishedActionCount).toBe(0);
+	});
+
+	it("keeps ordinary users one-at-a-time and in order between child updates", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.setSteeringMode("one-at-a-time");
+		const progress = childMessage("agentmsg_order_progress", "Progress update");
+		const completion = childMessage("agentmsg_order_completion", "Completion update");
+		const inputs = [progress.content, "first user", "second user", completion.content];
+		const modelInputs: string[][] = [];
+		const respond: FauxResponseStep = (context) => {
+			modelInputs.push(context.messages.filter((message) => message.role === "user").map(getMessageText));
+			return fauxAssistantMessage("handled input");
+		};
+		harness.setResponses(inputs.map(() => respond));
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.queueAgentMessagePrompt(progress.content, "steer", progress);
+		await harness.session.steer("first user");
+		await harness.session.steer("second user");
+		await harness.session.queueAgentMessagePrompt(completion.content, "steer", completion);
+		pause.release();
+		await harness.session.waitForIdle();
+
+		expect(modelInputs).toEqual(inputs.map((_, index) => inputs.slice(0, index + 1)));
+		expect(getUserTexts(harness)).toEqual(["first user", "second user"]);
+		expect(harness.session.unfinishedActionCount).toBe(0);
 	});
 
 	it("does not cancel one action from a handed-off batch", async () => {
@@ -2142,15 +2221,14 @@ describe("AgentSession queue characterization", () => {
 
 	it("resolves pre-registered queued and direct agent-message delivery waiters once prompts start", async () => {
 		const blocked = createDeferred();
-		const harness = await createHarness({
-			extensionFactories: [
-				(pi) => {
-					pi.on("turn_start", async () => blocked.promise);
-				},
-			],
-		});
+		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("done")]);
+		harness.setResponses([
+			async () => {
+				await blocked.promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
 		withStreaming(harness, true);
 		const queuedDelivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_sync");
 		await harness.session.followUp("agent message", undefined, {
@@ -2159,10 +2237,13 @@ describe("AgentSession queue characterization", () => {
 		});
 		withStreaming(harness, false);
 
-		// Queued delivery resolves on message_start, before the gated turn completes.
-		await expect(queuedDelivery).resolves.toBeUndefined();
-		blocked.resolve();
-		await harness.session.waitForIdle();
+		// Queued delivery waits for the message ACK, not the gated response.
+		try {
+			await expect(queuedDelivery).resolves.toBeUndefined();
+		} finally {
+			blocked.resolve();
+			await harness.session.waitForIdle();
+		}
 
 		harness.setResponses([fauxAssistantMessage("direct reply")]);
 		const delivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_direct");
@@ -2254,7 +2335,11 @@ describe("AgentSession queue characterization", () => {
 				.getBranch()
 				.some((entry) => entry.type === "custom" && entry.customType === "session_slash_command"),
 		).toBe(false);
-		const followUpEntryId = harness.sessionManager.appendCustomMessageEntry("post-failure", "still writable", false);
+		const followUpEntryId = await harness.sessionManager.appendCustomMessageEntry(
+			"post-failure",
+			"still writable",
+			false,
+		);
 		expect(harness.sessionManager.getBranch().at(-1)?.id).toBe(followUpEntryId);
 	});
 
@@ -2697,8 +2782,8 @@ describe("AgentSession queue characterization", () => {
 	it("does not emit refine_failed when only the result-row persist fails after a successful refine", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage(refinePlanJson("no-op"))]);
 			await harness.session.prompt("one");
@@ -2718,9 +2803,9 @@ describe("AgentSession queue characterization", () => {
 			expect(harness.session.messages.find(isRefinementOutcomeMessage)?.details.summary).toBe("no-op");
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});
@@ -3065,9 +3150,9 @@ describe("AgentSession queue characterization", () => {
 describe("AgentSession scheduler scenarios", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -3137,7 +3222,7 @@ describe("AgentSession scheduler scenarios", () => {
 			{ deliverAs: "steer" },
 		);
 		expect(extensionApi).toBeDefined();
-		extensionApi?.sendUserMessage("extension steer", { deliverAs: "steer" });
+		await extensionApi?.sendUserMessage("extension steer", { deliverAs: "steer" });
 		await harness.session.followUp("f1");
 		await harness.session.prompt("/autonomous status", { streamingBehavior: "followUp" });
 		await harness.session.followUp("f2");
@@ -3548,8 +3633,8 @@ describe("AgentSession scheduler scenarios", () => {
 			autoRefineReviewer: reviewer,
 		});
 		harnesses.push(harness);
-		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
-		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		const previousAgentDir = process.env.BASE_CONTEXT_HOME;
+		process.env.BASE_CONTEXT_HOME = `${harness.tempDir}/agent`;
 		try {
 			const localDir = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
 			const memoryIds = () => {
@@ -3616,9 +3701,9 @@ describe("AgentSession scheduler scenarios", () => {
 			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			if (previousAgentDir === undefined) {
-				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+				delete process.env.BASE_CONTEXT_HOME;
 			} else {
-				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+				process.env.BASE_CONTEXT_HOME = previousAgentDir;
 			}
 		}
 	});

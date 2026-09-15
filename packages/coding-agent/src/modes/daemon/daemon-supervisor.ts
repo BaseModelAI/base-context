@@ -13,7 +13,7 @@ import {
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
-import { getLogger } from "@earendil-works/pi-ai";
+import { getLogger } from "@ponythewhite/base-context-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	appendRotatingLog,
@@ -52,6 +52,7 @@ import {
 	shouldReapOrphanProcess,
 } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
+import { RlmJournalOwner } from "../../core/rlm-journal-owner.js";
 import {
 	canEvictWorker,
 	type IdleEvictionMinutes,
@@ -61,6 +62,7 @@ import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } fr
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
+import { PRODUCT } from "../../product-identity.js";
 import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
@@ -76,11 +78,16 @@ import {
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "./agent-roster.js";
-import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
+import {
+	type CommandJournalBeginResult,
+	CommandRecoveryJournal,
+	createCommandIdempotencyKey,
+} from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
 import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
 import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	collectDaemonClientEnv,
 	createDaemonEventMeta,
 	DAEMON_COMMAND_COMPATIBILITY,
@@ -103,6 +110,7 @@ import {
 	failure,
 	isDaemonCommandEnvelope,
 	isDaemonMutatingCommand,
+	isLegacyDaemonInspection,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -136,6 +144,7 @@ import {
 import {
 	DaemonWorkerAuthenticationError,
 	DaemonWorkerClient,
+	DaemonWorkerCompatibilityError,
 	DaemonWorkerProbeTimeoutError,
 } from "./daemon-worker-client.js";
 import {
@@ -165,10 +174,10 @@ import {
 	createRlmLedgerRegistrySeedSource,
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
+	rlmLedgerPath,
 	tombstoneSavedSessionDelete,
-	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
-import { serializeSavedSessionInfo } from "./saved-session-info.js";
+import { captureSavedSessionPageQuery } from "./saved-session-page.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
 
@@ -183,6 +192,7 @@ const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	"agent_roster",
 	"direct_peer_transport",
+	"rlm_ledger_mutation",
 ];
 const PEER_TRANSPORT_GRANT_TTL_MS = 10_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -220,6 +230,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
 	"list",
 	"list_agent_peers",
+	"rlm_ledger_mutate",
 	"get_direct_worker_transport",
 	"roster_subscribe",
 	"roster_unsubscribe",
@@ -242,6 +253,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"append_custom_message",
 	"resume_queue",
 	"send_message",
+	"send_result",
 	"agent_messages_status",
 	"agent_messages_pause",
 	"agent_messages_resume",
@@ -279,6 +291,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"heartbeat_manage",
 	"cron_add",
 	"cron_cancel",
+	"cron_resume",
 	"heartbeat_get",
 	"heartbeat_set",
 	"heartbeat_update",
@@ -329,6 +342,7 @@ interface ResidentWorker {
 	descriptor: DaemonWorkerDescriptor;
 	descriptorPath: string;
 	client?: DaemonWorkerClient;
+	compatibilityError?: DaemonWorkerCompatibilityError;
 	heartbeatSnapshot?: AgentConnectionHeartbeat[];
 	heartbeatSnapshotStale?: boolean;
 	summaries: Map<string, SessionSummary>;
@@ -650,7 +664,7 @@ export function idleEvictionSweepIntervalMs(idleEvictionMinutes: IdleEvictionMin
 function workerSocketPath(supervisorSocketPath: string, workerId: string): string {
 	const key = descriptorKey(supervisorSocketPath);
 	if (process.platform === "win32") {
-		return `\\\\.\\pipe\\prime-agent-worker-${key}-${workerId.slice(0, 12)}`;
+		return `\\\\.\\pipe\\${PRODUCT.command}-worker-${key}-${workerId.slice(0, 12)}`;
 	}
 	return join(defaultDaemonSocketDir(), `worker-${key}-${workerId.slice(0, 12)}.sock`);
 }
@@ -728,6 +742,8 @@ export class DaemonSupervisor {
 	private rosterPushScheduled = false;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
+	private rlmJournalOwner?: RlmJournalOwner;
+	private rlmJournalClose?: Promise<void>;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
@@ -771,13 +787,17 @@ export class DaemonSupervisor {
 			this.assertSocketLeaseHeld();
 			await waitForDaemonStartupFence(this.socketPath);
 			this.assertSocketLeaseHeld();
+			const journalScope = this.rlmJournalScope();
 			this.ownership = await acquireDaemonSupervisorOwnership({
 				socketPath: this.socketPath,
 				descriptorDir: this.descriptorDir,
 				agentDir,
+				journalPath: journalScope.journalPath,
 				generation: this.generation,
 				appVersion: VERSION,
 			});
+			this.assertSocketLeaseHeld();
+			this.rlmJournalOwner = await RlmJournalOwner.open(journalScope);
 			this.assertSocketLeaseHeld();
 			await prepareDaemonSocketPath(this.socketPath, this.socketLease);
 
@@ -844,7 +864,7 @@ export class DaemonSupervisor {
 			await this.ownership.updatePhase("owner");
 			this.assertSocketLeaseHeld();
 			this.startupComplete = true;
-			this.log(`Prime Agent daemon supervisor ${this.generation} listening on ${this.socketPath}`);
+			this.log(`${PRODUCT.name} daemon supervisor ${this.generation} listening on ${this.socketPath}`);
 			this.markReady();
 		} catch (error) {
 			const startupError = error instanceof Error ? error : new Error(String(error));
@@ -1269,15 +1289,21 @@ export class DaemonSupervisor {
 					`socket: ${this.socketPath}; restart the daemon to recover — sessions are preserved`,
 			);
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
+			this.fenceRlmJournalOwner();
 			throw error;
 		}
-		await ownership.assertCurrent();
+		try {
+			await ownership.assertCurrent();
+		} catch (error) {
+			this.fenceRlmJournalOwner();
+			throw error;
+		}
 	}
 
-	private async assertServingCurrentOwnership(): Promise<void> {
-		this.assertSupervisorServing();
+	private async assertServingCurrentOwnership(allowWorkerLedger = false): Promise<void> {
+		this.assertSupervisorServing(allowWorkerLedger);
 		await this.assertCurrentOwnership();
-		this.assertSupervisorServing();
+		this.assertSupervisorServing(allowWorkerLedger);
 	}
 
 	private async assertRecoveryAllowed(): Promise<void> {
@@ -1601,6 +1627,7 @@ export class DaemonSupervisor {
 		const ownerClientId = worker.descriptor.ownerClientId;
 		if (
 			!ownerClientId ||
+			worker.compatibilityError !== undefined ||
 			worker.ownerCleanupTimer ||
 			[...this.clients].some((client) => this.protocolClientId(client) === ownerClientId)
 		) {
@@ -1609,6 +1636,7 @@ export class DaemonSupervisor {
 		worker.ownerCleanupTimer = setTimeout(() => {
 			worker.ownerCleanupTimer = undefined;
 			if (
+				worker.compatibilityError !== undefined ||
 				worker.descriptor.ownerClientId !== ownerClientId ||
 				[...this.clients].some((client) => this.protocolClientId(client) === ownerClientId) ||
 				this.workers.get(worker.descriptor.workerId) !== worker
@@ -1699,6 +1727,14 @@ export class DaemonSupervisor {
 			throw new Error(`Daemon commands require protocol ${DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION} or newer`);
 		}
 		const command = { ...envelope.command, id: envelope.id } as DaemonCommand;
+		if (
+			envelope.protocol.version < CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol &&
+			!isLegacyDaemonInspection(command)
+		) {
+			throw new Error(
+				`Native daemon commands require protocol ${CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol} canonical session ownership and bounded invocation output; only passive inspection is available`,
+			);
+		}
 		let admission: SupervisorPromptAdmission | undefined;
 		if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 			if (typeof command.activeSessionId !== "string" || typeof command.admissionId !== "string") {
@@ -1728,9 +1764,18 @@ export class DaemonSupervisor {
 		};
 	}
 
+	private isWorkerLedgerEnvelope(line: string): boolean {
+		try {
+			const parsed: unknown = JSON.parse(line);
+			return isDaemonCommandEnvelope(parsed) && parsed.command.type === "rlm_ledger_mutate";
+		} catch {
+			return false;
+		}
+	}
+
 	private async handleLine(client: DaemonSocketClient, line: string): Promise<void> {
 		try {
-			this.assertSupervisorServing();
+			this.assertSupervisorServing(this.shuttingDown && this.isWorkerLedgerEnvelope(line));
 		} catch (error) {
 			this.write(client, failure(salvageDaemonCommandId(line), "dispatch", error, serializeDaemonError(error)));
 			return;
@@ -1789,7 +1834,10 @@ export class DaemonSupervisor {
 		}
 
 		try {
-			await waitForPromptAdmission(this.assertServingCurrentOwnership(), parsedAdmission?.controller.signal);
+			await waitForPromptAdmission(
+				this.assertServingCurrentOwnership(command.type === "rlm_ledger_mutate"),
+				parsedAdmission?.controller.signal,
+			);
 		} catch (error) {
 			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 			this.write(client, failure(command.id, command.type, error));
@@ -1824,7 +1872,7 @@ export class DaemonSupervisor {
 			phase === "draining"
 				? !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)
 				: phase !== undefined && !(phase === "prepared" && command.type === "shutdown");
-		if (restartRejected && mutation) {
+		if (restartRejected && mutation && command.type !== "rlm_ledger_mutate") {
 			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;
@@ -1834,7 +1882,7 @@ export class DaemonSupervisor {
 			if (idleEvictionFence) {
 				await idleEvictionFence;
 				try {
-					await this.assertServingCurrentOwnership();
+					await this.assertServingCurrentOwnership(command.type === "rlm_ledger_mutate");
 				} catch (error) {
 					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
@@ -1843,7 +1891,14 @@ export class DaemonSupervisor {
 			}
 		}
 		if (journalIdentity) {
-			const admitted = this.commandJournal.begin(journalIdentity.clientId, journalIdentity.commandId, command.type);
+			let admitted: CommandJournalBeginResult;
+			try {
+				admitted = this.commandJournal.begin(journalIdentity.clientId, journalIdentity.commandId, command.type);
+			} catch (error) {
+				if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+				this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+				return;
+			}
 			if (admitted.status === "complete") {
 				if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 				this.write(client, admitted.response);
@@ -1866,8 +1921,10 @@ export class DaemonSupervisor {
 		// the race, attach fails cleanly with "Session worker is not connected" and
 		// the client retries through the saved-session path instead of mutating state.
 		if (mutation) this.mutationDrain.begin();
+		let commandCompleted = false;
 		try {
 			const response = await this.handleCommand(client, command, cancellationAdmission);
+			commandCompleted = true;
 			if (response) {
 				if (journalIdentity) {
 					await this.assertCurrentOwnership();
@@ -1878,12 +1935,20 @@ export class DaemonSupervisor {
 		} catch (error) {
 			this.log(`Supervisor command ${command.type} failed: ${error instanceof Error ? error.stack : String(error)}`);
 			let response = failure(command.id, command.type, error, serializeDaemonError(error));
-			if (journalIdentity && !isSupervisorGenerationStale(error)) {
+			// A completed command must not get a conflicting failure result after uncertain result persistence.
+			if (journalIdentity && !commandCompleted && !isSupervisorGenerationStale(error)) {
 				try {
 					await this.assertCurrentOwnership();
 					this.commandJournal.recordResult(journalIdentity.clientId, journalIdentity.commandId, response);
-				} catch (ownershipError) {
-					response = failure(command.id, command.type, ownershipError, serializeDaemonError(ownershipError));
+				} catch (persistenceError) {
+					const failureError =
+						persistenceError === error
+							? error
+							: new AggregateError(
+									[error, persistenceError],
+									"Supervisor command and result persistence failed",
+								);
+					response = failure(command.id, command.type, failureError, serializeDaemonError(failureError));
 				}
 			}
 			this.write(client, response);
@@ -1958,6 +2023,27 @@ export class DaemonSupervisor {
 						return root ? [this.agentPeerSummary(sessionSummaryFromRosterEntry(root))] : [];
 					});
 				return success(command.id, command.type, { peers });
+			}
+			case "rlm_ledger_mutate": {
+				const worker = [...this.workers.values()].find(
+					(candidate) => candidate.descriptor.authenticationToken === command.workerToken,
+				);
+				if (
+					!worker ||
+					!command.workerInstanceId ||
+					worker.descriptor.workerInstanceId !== command.workerInstanceId ||
+					worker.compatibilityError ||
+					this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) !== "current"
+				) {
+					throw new Error("Worker authentication failed for RLM ledger mutation");
+				}
+				const owner = this.assertRlmJournalAdmission();
+				const scope = this.rlmJournalScope(worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir);
+				if (canonicalSessionPath(scope.journalPath) !== owner.ledgerPath) {
+					throw new Error("Worker RLM ledger family is not owned by this supervisor");
+				}
+				await this.rlmSpawnLedger().mutate(command.mutation);
+				return success(command.id, command.type);
 			}
 			case "get_direct_worker_transport": {
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
@@ -2440,6 +2526,41 @@ export class DaemonSupervisor {
 				}
 				throw new Error(`No cron job found: ${command.jobId}`);
 			}
+			case "cron_resume": {
+				if (command.activeSessionId !== undefined) {
+					const entry = this.roster().byActiveSessionId(command.activeSessionId);
+					const worker = entry?.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
+					if (!worker || entry?.queuedChild) {
+						throw new Error("Cron resume requires an already bound destination runtime");
+					}
+					this.assertWorkerAccessibleToClient(client, worker, command.activeSessionId);
+					return this.forwardToWorker(worker, command);
+				}
+				const listed = await Promise.all(
+					[...this.workers.values()]
+						.filter(
+							(worker) => this.isLiveWorker(worker) && worker.client && worker.descriptor.lifecycle === "ready",
+						)
+						.map(async (worker) => ({
+							worker,
+							response: await this.forwardToWorker(
+								worker,
+								{ type: "cron_list", includeInactive: true },
+								5000,
+							).catch(() => undefined),
+						})),
+				);
+				for (const candidate of listed) {
+					const job = candidate.response?.success
+						? cronJobsFromResponse(candidate.response).find((job) => job.id === command.jobId)
+						: undefined;
+					if (job) {
+						this.assertWorkerAccessibleToClient(client, candidate.worker, job.activeSessionId);
+						return this.forwardToWorker(candidate.worker, command);
+					}
+				}
+				throw new Error(`Cron resume requires an already bound destination runtime for job: ${command.jobId}`);
+			}
 			case "heartbeat_get": {
 				const match = await this.findWorkerForClient(client, command.activeSessionId);
 				return this.forwardToWorker(match.worker, command);
@@ -2461,16 +2582,11 @@ export class DaemonSupervisor {
 				return await this.withSessionNameReservation(target, async () => {
 					await this.assertSupervisorSavedSessionNameAvailable(command.sessionPath, target.name);
 					if (!command.activeSessionId) {
+						this.assertRlmJournalAdmission();
 						await this.catalog.rename(command.sessionPath, command.name);
 						// Third rename write point: an offline saved-session rename
 						// changes the name the ledger carries for that child.
-						await this.rlmSpawnLedger()
-							.appendRenameByChildPath(command.sessionPath, target.name)
-							.catch((error) => {
-								this.log(
-									`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
-								);
-							});
+						await this.rlmSpawnLedger().appendRenameByChildPath(command.sessionPath, target.name);
 						const entry = this.roster().bySessionFile(canonicalSessionPath(command.sessionPath));
 						if (entry) {
 							this.writeRosterEntry({ ...entry, summary: { ...entry.summary, sessionName: target.name } });
@@ -2504,6 +2620,7 @@ export class DaemonSupervisor {
 							);
 						}
 					}
+					this.assertRlmJournalAdmission();
 					await tombstoneSavedSessionDelete(this.rlmSpawnLedger(), command.sessionPath, entry?.summary);
 					const result = await this.catalog.delete(command.sessionPath);
 					if (result.ok && entry && this.roster().get(entry.agentId) === entry) {
@@ -2514,7 +2631,7 @@ export class DaemonSupervisor {
 				break;
 		}
 
-		if (command.type === "send_message") {
+		if (command.type === "send_message" || command.type === "send_result") {
 			// agentOrigin without fromActiveSessionId is trusted only at the direct socket-client boundary.
 			const source = command.fromActiveSessionId
 				? await this.findWorkerForClient(client, command.fromActiveSessionId)
@@ -2571,9 +2688,10 @@ export class DaemonSupervisor {
 				const targetClient = this.requireAvailableWorkerClient(target.worker);
 				const response = await targetClient.requestWorker(
 					{
-						type: "worker_deliver_message",
+						...(command.type === "send_result"
+							? { type: "worker_deliver_result" as const, summary: command.summary, findings: command.findings }
+							: { type: "worker_deliver_message" as const, message: command.message }),
 						targetActiveSessionId,
-						message: command.message,
 						sender: {
 							activeSessionId: source.summary.activeSessionId ?? source.summary.id,
 							sessionId: source.summary.sessionId,
@@ -2798,46 +2916,21 @@ export class DaemonSupervisor {
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list_saved_sessions" }>,
 	): Promise<DaemonResponse> {
+		const pageQuery = captureSavedSessionPageQuery(command.page ?? {});
+		const scope = command.scope;
 		let cwd: string;
 		let sessionDir: string | undefined;
-		let activeSessionId: string | undefined;
 		if ("activeSessionId" in command) {
 			const match = await this.findWorkerForClient(client, command.activeSessionId);
 			cwd = match.summary.cwd;
 			sessionDir = this.defaultSessionConfig.sessionDir;
-			activeSessionId = match.summary.activeSessionId ?? match.summary.id;
 		} else {
 			cwd = resolve(command.cwd);
 			sessionDir = command.sessionDir;
 		}
-		const callbacks = command.id
-			? {
-					onProgress: (loaded: number, total: number) =>
-						this.write(client, {
-							id: command.id,
-							type: "session_list_progress",
-							command: "list_saved_sessions",
-							...(activeSessionId ? { activeSessionId } : {}),
-							loaded,
-							total,
-						}),
-					onSession: (session: SessionInfo) =>
-						this.write(client, {
-							id: command.id,
-							type: "session_list_item",
-							command: "list_saved_sessions",
-							...(activeSessionId ? { activeSessionId } : {}),
-							session: serializeSavedSessionInfo(session),
-						}),
-				}
-			: undefined;
-		const saved = await this.catalog.list(command.scope === "current" ? cwd : undefined, sessionDir, callbacks);
-		const sessions = await withPassiveRlmDescendantInfos(saved, this.rlmSpawnLedgerFor(sessionDir), {
-			...(command.scope === "current" ? { cwd } : {}),
-			...(callbacks ? { onSession: callbacks.onSession } : {}),
-			log: (message) => this.log(message),
-		});
-		return success(command.id, "list_saved_sessions", { sessions: sessions.map(serializeSavedSessionInfo) });
+		const { agentDir, sessionsDir: ledgerSessionDir } = this.rlmJournalScope(sessionDir);
+		const page = await this.catalog.list(cwd, sessionDir, { page: pageQuery, scope, agentDir, ledgerSessionDir });
+		return success(command.id, "list_saved_sessions", page);
 	}
 
 	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
@@ -3005,7 +3098,7 @@ export class DaemonSupervisor {
 			}
 			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
 			if (identity === "current") {
-				if (!freshCreate || !worker.descriptor.processStartId) return false;
+				if (worker.compatibilityError || !freshCreate || !worker.descriptor.processStartId) return false;
 				await this.stopWorker(worker, true, true);
 				return true;
 			}
@@ -3125,7 +3218,7 @@ export class DaemonSupervisor {
 			[SESSION_LEASES_ENABLED_ENV]: "1",
 			[SESSION_LEASE_OWNER_ID_ENV]: rootActiveSessionId,
 		});
-		delete workerEnvironment.RLM_DEPTH;
+		delete workerEnvironment.BASE_CONTEXT_RLM_DEPTH;
 		await this.assertRecoveryAllowed();
 		const child: ChildProcess = spawn(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
@@ -3286,6 +3379,10 @@ export class DaemonSupervisor {
 			if (isSupervisorGenerationStale(error)) {
 				throw error;
 			}
+			if (error instanceof DaemonWorkerCompatibilityError) {
+				this.parkIncompatibleWorker(worker, error);
+				throw error;
+			}
 			if (isSupervisorShutdownAdmissionCancelled(error)) {
 				let rolledBack = false;
 				try {
@@ -3376,6 +3473,8 @@ export class DaemonSupervisor {
 					worker.lastFrameAt = Date.now();
 					worker.client?.close();
 					worker.client = client;
+					worker.compatibilityError = undefined;
+					worker.descriptor.lastError = undefined;
 					return client;
 				} finally {
 					if (worker.pendingClient === client) worker.pendingClient = undefined;
@@ -3386,7 +3485,8 @@ export class DaemonSupervisor {
 				if (
 					isSupervisorRecoveryCancelled(error) ||
 					error instanceof PreRosterWorkerError ||
-					error instanceof DaemonWorkerAuthenticationError
+					error instanceof DaemonWorkerAuthenticationError ||
+					error instanceof DaemonWorkerCompatibilityError
 				) {
 					throw error;
 				}
@@ -3394,6 +3494,23 @@ export class DaemonSupervisor {
 			}
 		}
 		throw new DaemonWorkerProbeTimeoutError(`Timed out connecting to daemon session worker: ${String(lastError)}`);
+	}
+
+	private parkIncompatibleWorker(worker: ResidentWorker, error: DaemonWorkerCompatibilityError): void {
+		// Compatibility refusal is not evidence that this process or its ownership is dead.
+		worker.compatibilityError = error;
+		worker.descriptor.lifecycle = "recovering";
+		worker.descriptor.lastError = error.message;
+		const client = worker.client;
+		worker.client = undefined;
+		client?.close();
+		if (worker.ownerCleanupTimer) {
+			clearTimeout(worker.ownerCleanupTimer);
+			worker.ownerCleanupTimer = undefined;
+		}
+		this.persistWorker(worker);
+		this.markWorkerRosterEntries(worker, "recovering");
+		this.log(`Kept incompatible worker ${worker.descriptor.workerId}: ${error.message}`);
 	}
 
 	private async subscribeWorker(worker: ResidentWorker, activeSessionId: string): Promise<void> {
@@ -3470,6 +3587,10 @@ export class DaemonSupervisor {
 			this.broadcastHeartbeatsChanged();
 		} catch (error) {
 			if (isSupervisorRecoveryCancelled(error)) {
+				return;
+			}
+			if (error instanceof DaemonWorkerCompatibilityError) {
+				this.parkIncompatibleWorker(worker, error);
 				return;
 			}
 			this.log(`Could not adopt worker ${worker.descriptor.workerId}: ${String(error)}`);
@@ -3606,7 +3727,7 @@ export class DaemonSupervisor {
 	}
 
 	private deferWorkerRecovery(worker: ResidentWorker, disconnectError: Error): void {
-		if (worker.deferredRecovery) {
+		if (worker.compatibilityError || worker.deferredRecovery) {
 			return;
 		}
 		// A live-but-silent worker must not probe forever: park it failed (user-visible through the
@@ -3630,7 +3751,7 @@ export class DaemonSupervisor {
 	private async resumeDeferredWorkerRecovery(worker: ResidentWorker, disconnectError: Error): Promise<void> {
 		while (true) {
 			await unrefDelay(DEFERRED_RECOVERY_RECHECK_MS);
-			if (!this.isWorkerRecoveryCandidate(worker)) {
+			if (worker.compatibilityError || !this.isWorkerRecoveryCandidate(worker)) {
 				return;
 			}
 			if (!this.isWorkerRecoveryEligible(worker)) {
@@ -3644,7 +3765,7 @@ export class DaemonSupervisor {
 				}
 				continue;
 			}
-			if (!this.isWorkerRecoveryCandidate(worker)) {
+			if (worker.compatibilityError || !this.isWorkerRecoveryCandidate(worker)) {
 				return;
 			}
 			if (!this.isWorkerRecoveryEligible(worker)) {
@@ -3888,7 +4009,7 @@ export class DaemonSupervisor {
 							this.broadcastHeartbeatsChanged();
 							return;
 						} catch (error) {
-							if (isSupervisorRecoveryCancelled(error)) {
+							if (isSupervisorRecoveryCancelled(error) || error instanceof DaemonWorkerCompatibilityError) {
 								throw error;
 							}
 							await this.assertRecoveryAllowed();
@@ -3928,6 +4049,10 @@ export class DaemonSupervisor {
 					try {
 						await this.assertRecoveryAllowed();
 					} catch {
+						return;
+					}
+					if (error instanceof DaemonWorkerCompatibilityError) {
+						this.parkIncompatibleWorker(worker, error);
 						return;
 					}
 					worker.client?.close();
@@ -4540,38 +4665,61 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/**
-	 * Supervisor-side view of the spawn ledger for this supervisor's sessions
-	 * dir. Workers hold their own instances over the same file; every read
-	 * re-reads the file, so cross-process freshness is per-operation.
-	 */
-	private rlmSpawnLedger(): RlmSpawnLedger {
+	private rlmJournalScope(sessionDir?: string): { agentDir: string; sessionsDir: string; journalPath: string } {
 		const agentDir = this.defaultSessionConfig.agentDir;
-		if (!agentDir) {
-			throw new Error("Daemon supervisor config is missing agentDir");
-		}
-		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
-			agentDir,
-			this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir),
-			createRlmLedgerRegistrySeedSource(),
-			(message) => this.log(message),
-		);
-		return this.rlmSpawnLedgerInstance;
+		if (!agentDir) throw new Error("Daemon supervisor config is missing agentDir");
+		const sessionsDir = sessionDir ?? this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir);
+		return { agentDir, sessionsDir, journalPath: rlmLedgerPath(agentDir, sessionsDir) };
 	}
 
-	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
-	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
-		const agentDir = this.defaultSessionConfig.agentDir;
-		const defaultDir = this.defaultSessionConfig.sessionDir ?? (agentDir ? getSessionsDir(agentDir) : undefined);
-		if (sessionDir === undefined || (defaultDir !== undefined && resolve(sessionDir) === resolve(defaultDir))) {
-			return this.rlmSpawnLedger();
+	private assertRlmJournalAdmission(): RlmJournalOwner {
+		const owner = this.rlmJournalOwner;
+		if (!owner || this.rlmJournalClose) throw new Error("RLM journal mutation admission is closed");
+		try {
+			if (!this.ownership) throw new Error("RLM journal supervisor ownership is unavailable");
+			this.ownership.assertJournalCurrent(owner.ledgerPath);
+		} catch (error) {
+			this.fenceRlmJournalOwner();
+			throw error;
 		}
-		if (!agentDir) {
-			throw new Error("Daemon supervisor config is missing agentDir");
-		}
-		return new RlmSpawnLedger(agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
-			this.log(message),
+		return owner;
+	}
+
+	private fenceRlmJournalOwner(): void {
+		void this.closeRlmJournalOwner().catch((error: unknown) => this.reportCleanupFailure("RLM journal owner", error));
+	}
+
+	private closeRlmJournalOwner(): Promise<void> {
+		this.rlmSpawnLedgerInstance?.stopAdmission();
+		if (this.rlmJournalClose) return this.rlmJournalClose;
+		const owner = this.rlmJournalOwner;
+		if (!owner) return Promise.resolve();
+		this.rlmJournalClose = (async () => {
+			await this.rlmSpawnLedgerInstance?.flush();
+			await owner.close();
+			this.rlmJournalOwner = undefined;
+		})();
+		return this.rlmJournalClose;
+	}
+
+	/** Reads are local; every mutation is acknowledged by the external lifetime owner. */
+	private rlmSpawnLedger(): RlmSpawnLedger {
+		const { agentDir, sessionsDir } = this.rlmJournalScope();
+		this.rlmSpawnLedgerInstance ??= new RlmSpawnLedger(
+			agentDir,
+			sessionsDir,
+			createRlmLedgerRegistrySeedSource(),
+			(message) => this.log(message),
+			{
+				mode: "remote",
+				mutate: (mutation) => {
+					const owner = this.rlmJournalOwner;
+					if (!owner) throw new Error("RLM journal owner is unavailable");
+					return owner.mutate(mutation);
+				},
+			},
 		);
+		return this.rlmSpawnLedgerInstance;
 	}
 
 	/**
@@ -6273,6 +6421,7 @@ export class DaemonSupervisor {
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
 	): Promise<void> {
+		if (worker.compatibilityError) throw worker.compatibilityError;
 		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
 			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
@@ -6304,6 +6453,7 @@ export class DaemonSupervisor {
 		const entryPid = worker.descriptor.pid;
 		const entryStartId = worker.descriptor.processStartId;
 		const assertStopStillApplies = () => {
+			if (worker.compatibilityError) throw worker.compatibilityError;
 			if (directChild) {
 				return;
 			}
@@ -6358,6 +6508,7 @@ export class DaemonSupervisor {
 			} else {
 				await worker.client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
 			}
+			assertStopStillApplies();
 			worker.client.close();
 			worker.client = undefined;
 		} else if (directChild) {
@@ -6391,6 +6542,7 @@ export class DaemonSupervisor {
 		}
 		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
+			assertStopStillApplies();
 			if (directChild) {
 				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
@@ -6652,6 +6804,7 @@ export class DaemonSupervisor {
 	}
 
 	private persistWorkerStopTombstone(worker: ResidentWorker, archiveSession = false): void {
+		if (worker.compatibilityError) throw worker.compatibilityError;
 		worker.intentionalStop = true;
 		worker.descriptor.stopRequestedAt ??= new Date().toISOString();
 		worker.descriptor.archiveOnStop ||= archiveSession;
@@ -6700,9 +6853,9 @@ export class DaemonSupervisor {
 		if (compromise) throw new Error(`Daemon socket lease was compromised: ${compromise.message}`);
 	}
 
-	private assertSupervisorServing(): void {
+	private assertSupervisorServing(allowWorkerLedger = false): void {
 		this.assertSocketLeaseHeld();
-		if (this.shuttingDown) {
+		if (this.shuttingDown && (!allowWorkerLedger || this.rlmJournalClose !== undefined)) {
 			const error = new Error(`Daemon supervisor generation ${this.generation} is shutting down; retry the command`);
 			Object.assign(error, { code: "supervisor_generation_stale" as const });
 			throw error;
@@ -6725,6 +6878,7 @@ export class DaemonSupervisor {
 		if (this.socketLeaseCompromise) return;
 		this.socketLeaseCompromise = error;
 		this.shuttingDown = true;
+		this.fenceRlmJournalOwner();
 		this.fenceSupervisorSocket();
 		const message = `Daemon socket lease was compromised; relinquishing supervisor ownership: ${error.message}`;
 		try {
@@ -6823,6 +6977,7 @@ export class DaemonSupervisor {
 		await this.runCleanupStep("supervisor cache", () => {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });
 		});
+		await this.closeRlmJournalOwner();
 		const lease = this.socketLease;
 		this.socketLease = undefined;
 		await this.runCleanupStep("daemon socket lock", async () => lease?.release());
@@ -6877,6 +7032,10 @@ export class DaemonSupervisor {
 					try {
 						await this.stopWorker(worker, true, forceWorkers, true);
 					} catch (error) {
+						if (error instanceof DaemonWorkerCompatibilityError) {
+							this.log(`Keeping live incompatible worker ${worker.descriptor.workerId}: ${error.message}`);
+							return;
+						}
 						if (!(error instanceof WorkerStopTimeoutError)) {
 							throw error;
 						}
@@ -6891,6 +7050,7 @@ export class DaemonSupervisor {
 			}
 		} else {
 			for (const worker of this.workers.values()) {
+				if (worker.compatibilityError) continue;
 				worker.intentionalStop = true;
 				worker.client?.close();
 				worker.client = undefined;
@@ -6906,6 +7066,7 @@ export class DaemonSupervisor {
 		await this.runCleanupStep("supervisor cache", () => {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });
 		});
+		await this.closeRlmJournalOwner();
 		const lease = this.socketLease;
 		this.socketLease = undefined;
 		await this.runCleanupStep("daemon socket lock", async () => lease?.release());

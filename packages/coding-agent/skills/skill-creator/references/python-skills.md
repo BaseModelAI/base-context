@@ -1,6 +1,6 @@
 # Python-Backed Skills
 
-A Python-backed skill is a regular markdown skill that also ships a Python package. Prime Agent installs the package editable into the kernel venv (`~/.prime/agent/kernel-venv` by default, `PRIME_AGENT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
+A Python-backed skill is a regular markdown skill that also ships a Python package. Base Context installs the package editable into the kernel venv (the selected release-local `runtime` for an owned installation; otherwise `~/.base-context/runtime`, under `BASE_CONTEXT_HOME` when configured; `BASE_CONTEXT_KERNEL_VENV` to override) and exposes it in the persistent Python kernel, so the agent can call it directly instead of shelling out.
 
 ## Detection Contract
 
@@ -98,7 +98,7 @@ The `[project.scripts]` entry pointing at `rlm.skill:cli` gives the skill a shel
 
 - The script name must **exactly** match the Python import name, underscores included (`word_count`, not `word-count`).
 - `rlm.skill:cli` imports `<script_name>.run` and parses argv against its signature with `tyro`, awaits async results, and prints non-`None` return values.
-- `rlm` and `tyro` are already present in the kernel venv. Do **not** declare `prime-agent-runtime` as a dependency: it is bundled with Prime Agent, not published on PyPI, so declaring it breaks installs outside the kernel venv. The CLI entry point only works where the runtime is installed, i.e. inside the kernel venv.
+- `rlm` and `tyro` are already present in the kernel venv. Do **not** declare `base-context-runtime` as a dependency: it is bundled with Base Context and is not currently published on PyPI. Keep the Python import and CLI target as `rlm` and `rlm.skill:cli`. The CLI entry point only works where the runtime is installed, i.e. inside the kernel venv.
 
 The agent can then use either form:
 
@@ -114,10 +114,10 @@ Omit `[project.scripts]` when a CLI is not needed.
 
 ## Dependencies and the Kernel Venv
 
-- Declare every third-party package `run()` imports in `dependencies` — `pyproject.toml` is the source of truth. The one exception is `prime-agent-runtime` (see above).
+- Declare every third-party package `run()` imports in `dependencies` — `pyproject.toml` is the source of truth. The one exception is the bundled `base-context-runtime` (see above).
 - These are already in the kernel venv, so depending on them is free: `requests`, `httpx`, `pyyaml`, `tomli`, `python-dotenv`, `pandas`, `numpy`, `scipy`, `beautifulsoup4`, `lxml`, `pydantic`, `tyro`.
 - The install is editable and keyed on a hash of `pyproject.toml`: editing Python source takes effect on the next kernel start with no reinstall; editing `pyproject.toml` triggers a reinstall automatically.
-- If the user sets `PRIME_AGENT_KERNEL_PYTHON`, Prime Agent installs nothing — skills whose imports are missing there are disabled with a warning.
+- If the user sets `BASE_CONTEXT_KERNEL_PYTHON`, Base Context installs nothing into that environment. It must already contain the current `base-context-runtime` and default runtime packages. Skills whose imports are missing there are disabled with a warning. This override is outside the owned installation’s default CLI/Python pairing.
 
 A Python skill runs inside the agent's kernel, so it can itself spawn recursive sub-agents with `import rlm` and `await rlm.run("subtask")` — useful for skills that delegate open-ended work.
 

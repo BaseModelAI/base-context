@@ -1,4 +1,4 @@
-import { setKeybindings, type TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { setKeybindings, type TUI, visibleWidth } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -67,10 +67,10 @@ describe("ConfigurationMenuComponent", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		initTheme("dark");
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

@@ -1,4 +1,4 @@
-import { type AutocompleteProvider, setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, setKeybindings, type TUI } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
@@ -46,9 +46,9 @@ describe("ENG-4575 model authentication", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

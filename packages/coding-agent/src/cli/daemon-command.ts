@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { clearLine, createInterface, cursorTo, type Interface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import chalk from "chalk";
 import { spawn } from "child_process";
 import { expandTildePath } from "../config.js";
@@ -14,6 +14,7 @@ import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-prot
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
+import { PRODUCT } from "../product-identity.js";
 import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
@@ -819,7 +820,7 @@ async function runRename(client: DaemonClient, args: string[], json: boolean): P
 	const activeSessionId = requireActiveSessionId(args);
 	const name = args.slice(1).join(" ").trim();
 	if (!name) {
-		throw new Error("Usage: prime-agent rename <agent> <name>");
+		throw new Error(`Usage: ${PRODUCT.command} rename <agent> <name>`);
 	}
 	const response = await client.request({ type: "rename", activeSessionId, name });
 	const data = requireSuccess(response);
@@ -963,11 +964,11 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 	}
 
 	if (explicitMessage !== undefined && messageParts.length > 0) {
-		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
+		throw new Error(`Usage: ${PRODUCT.command} send [--from <agent>] <agent> [--message <message>|<message>]`);
 	}
 	const message = (explicitMessage ?? messageParts.join(" ")).trim();
 	if (!targetActiveSessionId || !message) {
-		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
+		throw new Error(`Usage: ${PRODUCT.command} send [--from <agent>] <agent> [--message <message>|<message>]`);
 	}
 	return {
 		targetActiveSessionId,
@@ -1021,11 +1022,11 @@ async function runCron(client: DaemonClient, args: string[], json: boolean): Pro
 	if (subcommand === "add" || subcommand === "schedule") {
 		const separator = args.indexOf("--");
 		if (separator < 0) {
-			throw new Error("Usage: prime-agent schedule add <agent> <schedule> -- <message>");
+			throw new Error(`Usage: ${PRODUCT.command} schedule add <agent> <schedule> -- <message>`);
 		}
 		const activeSessionId = args[1];
 		if (!activeSessionId) {
-			throw new Error("Usage: prime-agent schedule add <agent> <schedule> -- <message>");
+			throw new Error(`Usage: ${PRODUCT.command} schedule add <agent> <schedule> -- <message>`);
 		}
 		const schedule = args.slice(2, separator).join(" ").trim();
 		const message = args
@@ -1033,7 +1034,7 @@ async function runCron(client: DaemonClient, args: string[], json: boolean): Pro
 			.join(" ")
 			.trim();
 		if (!schedule || !message) {
-			throw new Error("Usage: prime-agent schedule add <agent> <schedule> -- <message>");
+			throw new Error(`Usage: ${PRODUCT.command} schedule add <agent> <schedule> -- <message>`);
 		}
 		const response = await client.request({ type: "cron_add", activeSessionId, schedule, prompt: message });
 		const data = requireSuccess(response);
@@ -1046,10 +1047,26 @@ async function runCron(client: DaemonClient, args: string[], json: boolean): Pro
 		return;
 	}
 
+	if (subcommand === "resume") {
+		const jobId = args[1];
+		if (!jobId || jobId.startsWith("-") || args.length !== 2) {
+			throw new Error(`Usage: ${PRODUCT.command} schedule resume <job-id>`);
+		}
+		const response = await client.request({ type: "cron_resume", jobId });
+		const data = requireSuccess(response);
+		if (json) {
+			printJson(data);
+			return;
+		}
+		const job = getCronJob(data);
+		console.log(job ? `Resumed ${job.id} next=${job.nextRunAt ?? "-"}` : "Resumed cron job.");
+		return;
+	}
+
 	if (subcommand === "cancel" || subcommand === "delete" || subcommand === "remove") {
 		const jobId = args[1];
 		if (!jobId) {
-			throw new Error("Usage: prime-agent schedule cancel <job-id>");
+			throw new Error(`Usage: ${PRODUCT.command} schedule cancel <job-id>`);
 		}
 		const response = await client.request({ type: "cron_cancel", jobId });
 		const data = requireSuccess(response);
@@ -1250,7 +1267,7 @@ const printJsonLine: DaemonClientMessageListener = (value) => {
 class DaemonAttachTerminal {
 	private rl?: Interface;
 	private isStreaming = false;
-	private readonly prompt = chalk.green("prime-agent> ");
+	private readonly prompt = chalk.green(`${PRODUCT.command}> `);
 
 	constructor(
 		private readonly client: DaemonClient,
@@ -1458,7 +1475,11 @@ class DaemonAttachTerminal {
 				this.writeLine(chalk.dim(`Compaction ${event.aborted ? "aborted" : "finished"}: ${event.reason}`));
 				return;
 			case "auto_retry_start":
-				this.writeLine(chalk.dim(`Retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`));
+				this.writeLine(
+					chalk.dim(
+						`Retry ${event.attempt}${event.maxAttempts === undefined ? "" : `/${event.maxAttempts}`}: ${event.errorMessage}`,
+					),
+				);
 				return;
 			case "auto_retry_end":
 				this.writeLine(chalk.dim(event.success ? "Retry succeeded." : `Retry failed: ${event.finalError ?? ""}`));

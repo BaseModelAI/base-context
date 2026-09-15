@@ -5,6 +5,7 @@ const daemonClientMock = vi.hoisted(() => {
 	type CloseListener = (error: Error) => void;
 	type Command = {
 		type: string;
+		jobId?: string;
 		name?: string;
 		activeSessionId?: string;
 		targetActiveSessionId?: string;
@@ -52,6 +53,14 @@ const daemonClientMock = vi.hoisted(() => {
 			this.requests.push(command);
 			if (command.type === "list") {
 				return { type: "response", command: command.type, success: true, data: { sessions: behavior.sessions } };
+			}
+			if (command.type === "cron_resume") {
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: { job: { id: command.jobId, nextRunAt: "2026-01-01T00:05:00.000Z" } },
+				};
 			}
 			if (command.type === "attach" && behavior.emitStaleAgentEndOnAttach) {
 				this.emitMessage({ type: "session_event", activeSessionId: "active-1", event: { type: "agent_end" } });
@@ -400,6 +409,16 @@ describe("daemon command", () => {
 			schedule: "in 5m",
 			prompt: "check status",
 		});
+	});
+
+	it("resumes the exact cron job and prints its next run", async () => {
+		await expect(
+			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "cron", "resume", "new-job-id"]),
+		).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests).toEqual([{ type: "cron_resume", jobId: "new-job-id" }]);
+		expect(console.log).toHaveBeenCalledWith("Resumed new-job-id next=2026-01-01T00:05:00.000Z");
+		expect(process.exitCode).toBeUndefined();
 	});
 
 	it("resolves agent names before filtering scheduled prompts", async () => {

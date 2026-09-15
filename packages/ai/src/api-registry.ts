@@ -35,6 +35,10 @@ interface ApiProviderInternal {
 type RegisteredApiProvider = {
 	provider: ApiProviderInternal;
 	sourceId?: string;
+	originalStream: object;
+	originalStreamSimple: object;
+	registeredStream: ApiStreamFunction;
+	registeredStreamSimple: ApiStreamSimpleFunction;
 };
 
 const apiProviderRegistry = new Map<string, RegisteredApiProvider>();
@@ -67,18 +71,32 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 	provider: ApiProvider<TApi, TOptions>,
 	sourceId?: string,
 ): void {
+	const stream = wrapStream(provider.api, provider.stream);
+	const streamSimple = wrapStreamSimple(provider.api, provider.streamSimple);
 	apiProviderRegistry.set(provider.api, {
-		provider: {
-			api: provider.api,
-			stream: wrapStream(provider.api, provider.stream),
-			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
-		},
+		provider: { api: provider.api, stream, streamSimple },
 		sourceId,
+		originalStream: provider.stream,
+		originalStreamSimple: provider.streamSimple,
+		registeredStream: stream,
+		registeredStreamSimple: streamSimple,
 	});
 }
 
 export function getApiProvider(api: Api): ApiProviderInternal | undefined {
 	return apiProviderRegistry.get(api)?.provider;
+}
+
+/** Compares implementation identity, not caller-supplied registration metadata. */
+export function matchesApiProvider(api: Api, stream: object, streamSimple: object): boolean {
+	const entry = apiProviderRegistry.get(api);
+	return (
+		!!entry &&
+		entry.originalStream === stream &&
+		entry.originalStreamSimple === streamSimple &&
+		entry.provider.stream === entry.registeredStream &&
+		entry.provider.streamSimple === entry.registeredStreamSimple
+	);
 }
 
 export function getApiProviders(): ApiProviderInternal[] {

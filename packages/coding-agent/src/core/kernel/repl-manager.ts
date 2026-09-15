@@ -1,16 +1,31 @@
 // Kernel client for the REPL runtime: the kernel is a JSON-lines subprocess
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
+
 import { type ChildProcess, spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
-import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
+import { PRODUCT } from "../../product-identity.js";
+import {
+	captureOrphanProcessJournalOwner,
+	ORPHAN_PROCESS_JOURNAL_ENV,
+	type OrphanProcessJournalOwner,
+	reapKernelOrphanProcesses,
+} from "../orphan-process-journal.js";
+import {
+	createNativeRecoveryRefusal,
+	DEFAULT_NATIVE_RECOVERY_LIMITS,
+	NativeRecoveryBudgetRefusal,
+	type NativeRecoveryResponse,
+	stringifyNativeRecoveryResponse,
+} from "../selective-recovery.js";
 import { ensureKernelPython } from "./bootstrap.js";
 import {
 	AGENT_MESSAGE_DISPLAY_MIME,
 	ATTACHMENT_DISPLAY_MIME,
+	type CapturedKernelLifecycle,
 	createDeferred,
 	createKernelStartupAbortError,
 	DEFAULT_MAX_OUTPUT_CHARS,
@@ -49,7 +64,7 @@ import {
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
-const REPL_PROTOCOL_VERSION = 3;
+const REPL_PROTOCOL_VERSION = 4;
 const READY_TIMEOUT_MS = 30_000;
 const REPAIR_STEP_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
@@ -90,6 +105,11 @@ interface ActiveExecution {
 	diffs: KernelDiffDisplay[];
 	attachments: KernelAttachment[];
 	sentAgentMessages: KernelSentAgentMessage[];
+	// Ephemeral, per-cell output attachment; only the finalized tool result persists it.
+	nativeRecoveries: NativeRecoveryResponse[];
+	nativeRecoveryBytes: number;
+	nativeRecoveryRequests: number;
+	nativeRecoveryAbort: AbortController;
 	/** Stream text without this execution's id: user threads, other cells' leftovers, raw fd writes. */
 	backgroundOutput: string;
 	backgroundOutputTruncated: boolean;
@@ -162,6 +182,7 @@ export class ReplKernelManager {
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
+	private childOrphanOwner?: OrphanProcessJournalOwner;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private kernelStderr = "";
 	/** Serializes execute() calls — the runtime runs one request at a time. */
@@ -179,6 +200,8 @@ export class ReplKernelManager {
 	private pendingBackgroundOutput = "";
 	private pendingBackgroundOutputTruncated = false;
 	private readonly inFlightHostRequests = new Set<Promise<void>>();
+	/** A newly constructed manager is a different owner even when its counter restarts at zero. */
+	private readonly lifecycleOwner = uuid();
 	private state: "idle" | "starting" | "running" | "shutdown" = "idle";
 	/** Bumped by every teardown so a stale in-flight doStart can never touch a newer kernel. */
 	private startGeneration = 0;
@@ -221,6 +244,15 @@ export class ReplKernelManager {
 
 	get ownerSessionId(): string | undefined {
 		return this.options.sessionId;
+	}
+
+	captureLifecycleState(): CapturedKernelLifecycle {
+		const generation = this.startGeneration;
+		const state = this.state;
+		return Object.freeze({
+			snapshot: Object.freeze({ source: "repl-manager" as const, owner: this.lifecycleOwner, generation, state }),
+			isCurrent: () => this.startGeneration === generation && this.state === state,
+		});
 	}
 
 	private appendKernelDiagnostic(message: string): void {
@@ -277,6 +309,7 @@ export class ReplKernelManager {
 
 	private async doStart(startOptions: KernelStartOptions): Promise<void> {
 		if (this.state !== "idle") return;
+		const orphanOwner = captureOrphanProcessJournalOwner();
 		const generation = ++this.startGeneration;
 		this.state = "starting";
 		installSignalHandlersOnce();
@@ -312,17 +345,20 @@ export class ReplKernelManager {
 			env: {
 				...process.env,
 				...this.options.env,
-				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+				[ORPHAN_PROCESS_JOURNAL_ENV]: orphanOwner.path,
+				BASE_CONTEXT_KERNEL_OWNER_PID: String(orphanOwner.ownerPid),
 			},
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.child = child;
-		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
+		this.childOrphanOwner = orphanOwner;
 		this.readyDeferred = createDeferred<number>();
 		this.startupProtocolError = undefined;
 		this.wireChild(child);
 
 		try {
+			const registrationError = child.pid !== undefined ? orphanOwner.record(child.pid, true) : undefined;
+			if (registrationError) throw registrationError;
 			const protocol = await this.waitForReady(child);
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			// Ready and a corrupt frame can share one stdout chunk: ready resolved the
@@ -332,7 +368,7 @@ export class ReplKernelManager {
 			if (protocol !== REPL_PROTOCOL_VERSION) {
 				throw new Error(
 					`Kernel runtime speaks protocol ${protocol}, expected ${REPL_PROTOCOL_VERSION}. ` +
-						"Update prime-agent-runtime in the kernel Python (PRIME_AGENT_KERNEL_PYTHON) to match this prime-agent.",
+						`Update ${PRODUCT.runtimeDistribution} in the kernel Python (BASE_CONTEXT_KERNEL_PYTHON) to match this ${PRODUCT.name}.`,
 				);
 			}
 		} catch (e) {
@@ -340,7 +376,14 @@ export class ReplKernelManager {
 			const canRetryStartup = (this.state as string) !== "shutdown";
 			// Only the call that performed the cleanup may resurrect to idle; a
 			// concurrent kill()/teardown owns the state otherwise.
-			if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
+			try {
+				if ((await this.shutdown()) && canRetryStartup) this.state = "idle";
+			} catch (cleanupError) {
+				throw new AggregateError(
+					[e, cleanupError],
+					`Kernel startup failed: ${errorMessage(e)}; cleanup failed: ${errorMessage(cleanupError)}`,
+				);
+			}
 			throw e;
 		}
 
@@ -740,7 +783,7 @@ export class ReplKernelManager {
 			return;
 		}
 		if (type === "host_request") {
-			if (typeof event.id === "string") this.startHostRequest(event.id, event.data);
+			if (typeof event.id === "string") this.startHostRequest(event.id, event.data, event.cellId);
 			return;
 		}
 
@@ -942,6 +985,10 @@ export class ReplKernelManager {
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
+			nativeRecoveries: [],
+			nativeRecoveryBytes: 2, // JSON array brackets; reserve one delimiter per admitted response.
+			nativeRecoveryRequests: 0,
+			nativeRecoveryAbort: new AbortController(),
 			backgroundOutput: this.pendingBackgroundOutput,
 			backgroundOutputTruncated: this.pendingBackgroundOutputTruncated,
 			status: "ok",
@@ -968,6 +1015,7 @@ export class ReplKernelManager {
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
+			execution.nativeRecoveryAbort.abort();
 			void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
@@ -1002,6 +1050,7 @@ export class ReplKernelManager {
 		} finally {
 			clearAbortTimer();
 			opts.signal?.removeEventListener("abort", onAbort);
+			execution.nativeRecoveryAbort.abort();
 		}
 	}
 
@@ -1045,6 +1094,7 @@ export class ReplKernelManager {
 		}
 		if (!execution.settled) {
 			execution.settled = true;
+			execution.nativeRecoveryAbort.abort();
 			if (execution.opts.onLateSentAgentMessage) {
 				this.registerLateSentAgentMessageHandler(execution.requestId, execution.opts.onLateSentAgentMessage);
 			}
@@ -1073,12 +1123,14 @@ export class ReplKernelManager {
 				diffs: execution.diffs.length > 0 ? execution.diffs : undefined,
 				attachments: execution.attachments.length > 0 ? execution.attachments : undefined,
 				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
+				nativeRecoveries: execution.nativeRecoveries.length > 0 ? execution.nativeRecoveries : undefined,
 				backgroundOutput: backgroundOutput.length > 0 ? backgroundOutput : undefined,
 				error: execution.error,
 				status,
 				durationMs: Date.now() - execution.started,
 				doneFields: execution.doneFields,
 			});
+			execution.nativeRecoveries = [];
 		}
 		if (didClearActive) {
 			this.notifyActiveExecutionIdle();
@@ -1120,6 +1172,8 @@ export class ReplKernelManager {
 			return;
 		}
 		this.activeExecution = undefined;
+		execution.nativeRecoveryAbort.abort();
+		execution.nativeRecoveries = [];
 		execution.reject(error);
 		this.notifyActiveExecutionIdle();
 	}
@@ -1182,7 +1236,7 @@ export class ReplKernelManager {
 		}
 	}
 
-	private startHostRequest(requestId: string, data: unknown): void {
+	private startHostRequest(requestId: string, data: unknown, cellId: unknown): void {
 		if (this.handledHostRequestIds.has(requestId)) {
 			return;
 		}
@@ -1195,7 +1249,7 @@ export class ReplKernelManager {
 
 		const task = (async () => {
 			try {
-				const result = await this.handleHostRequest(data);
+				const result = await this.handleHostRequest(data, cellId);
 				try {
 					await this.writeLine({ type: "host_reply", id: requestId, data: { status: "ok", result } });
 				} catch (replyError) {
@@ -1224,7 +1278,7 @@ export class ReplKernelManager {
 		});
 	}
 
-	private async handleHostRequest(data: unknown): Promise<Record<string, unknown>> {
+	private async handleHostRequest(data: unknown, cellId: unknown): Promise<Record<string, unknown>> {
 		if (!isRecord(data)) {
 			throw new Error("host request payload must be an object");
 		}
@@ -1235,6 +1289,51 @@ export class ReplKernelManager {
 		const handler = this.options.hostHandlers?.[data.type];
 		if (!handler) {
 			throw new Error(`host request type "${data.type}" is not available in this session`);
+		}
+		if (data.type === "prime_context") {
+			const execution = this.activeExecution;
+			// Only the transport's current cell may own an attachment. No last-cell fallback.
+			if (
+				!execution ||
+				execution.settled ||
+				execution.opts.internal ||
+				!execution.opts.nativeRecovery ||
+				cellId !== execution.requestId ||
+				execution.nativeRecoveryAbort.signal.aborted
+			) {
+				return { ...createNativeRecoveryRefusal("not_authorized", "active_cell_required") };
+			}
+			const maxBytes = DEFAULT_NATIVE_RECOVERY_LIMITS.maxBytes - execution.nativeRecoveryBytes - 1;
+			if (execution.nativeRecoveryRequests >= DEFAULT_NATIVE_RECOVERY_LIMITS.maxRequests || maxBytes <= 0) {
+				throw new NativeRecoveryBudgetRefusal();
+			}
+			// Reserve before invoking the handler: concurrent requests cannot grow past the cell cap.
+			execution.nativeRecoveryRequests++;
+			execution.nativeRecoveryBytes += maxBytes + 1;
+			let reserved = maxBytes + 1;
+			try {
+				const read = async () =>
+					handler(data, {
+						signal: execution.nativeRecoveryAbort.signal,
+						nativeRecovery: { maxBytes },
+					});
+				const response = (await (execution.opts.runNativeRecovery
+					? execution.opts.runNativeRecovery(read)
+					: read())) as unknown as NativeRecoveryResponse;
+				execution.nativeRecoveryAbort.signal.throwIfAborted();
+				if (this.activeExecution !== execution || execution.settled) {
+					throw new Error("Native recovery cell has finalized");
+				}
+				const encoded = stringifyNativeRecoveryResponse(response, maxBytes);
+				const admittedBytes = Buffer.byteLength(encoded) + 1;
+				execution.nativeRecoveryBytes -= reserved - admittedBytes;
+				reserved = 0;
+				const admitted = JSON.parse(encoded) as NativeRecoveryResponse;
+				execution.nativeRecoveries.push(admitted);
+				return { ...admitted };
+			} finally {
+				execution.nativeRecoveryBytes -= reserved;
+			}
 		}
 		// Tag the request with the cell that triggered it. A blocking call is still
 		// the in-flight execution; detached spawns (asyncio.create_task) fire after
@@ -1249,7 +1348,8 @@ export class ReplKernelManager {
 		await this.writeLine({ type: "interrupt", id: requestId });
 	}
 
-	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
+	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): Error | undefined {
+		const failures: unknown[] = [];
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
 		this.lateSentAgentMessageHandlers.clear();
@@ -1259,7 +1359,9 @@ export class ReplKernelManager {
 		this.pendingBackgroundOutputTruncated = false;
 		this.rejectActiveExecution(new Error("Kernel has been shut down"));
 		const child = this.child;
+		const orphanOwner = this.childOrphanOwner;
 		this.child = undefined;
+		this.childOrphanOwner = undefined;
 		this.readyDeferred = undefined;
 		if (child) {
 			child.stdin?.destroy();
@@ -1275,16 +1377,31 @@ export class ReplKernelManager {
 			let signaled = false;
 			try {
 				signaled = child.kill(killSignal);
-			} catch {
-				// The kernel has already exited.
+			} catch (error) {
+				failures.push(error);
 			}
 			// Inactive only when the signal proved the pid still named our un-reaped child.
-			if (pid !== undefined && signaled) recordOrphanProcessState(pid, false);
+			if (pid !== undefined && signaled) {
+				const failure = orphanOwner?.record(pid, false);
+				if (failure) failures.push(failure);
+			}
 			// A killed/crashed kernel cannot run its own shutdown hook, so the host
 			// reaps the bash() process groups it journaled under this kernel pid.
-			if (pid !== undefined) reapKernelOrphanProcesses(pid);
+			if (pid !== undefined && orphanOwner) {
+				const failure = reapKernelOrphanProcesses(pid, orphanOwner);
+				if (failure) failures.push(failure);
+			}
 		}
 		this.startPromise = undefined;
+		if (failures.length) {
+			const failure = new AggregateError(
+				failures,
+				`Kernel cleanup tracking is unknown: ${failures.map(errorMessage).join("; ")}`,
+			);
+			this.appendKernelDiagnostic(failure.message);
+			return failure;
+		}
+		return undefined;
 	}
 
 	private async waitForKernelExit(): Promise<void> {
@@ -1338,7 +1455,8 @@ export class ReplKernelManager {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
-			this.cleanupResources();
+			const failure = this.cleanupResources();
+			if (failure) throw failure;
 			return true;
 		}
 		// Captured before any await: teardowns and newer starts bump the counter.
@@ -1356,6 +1474,8 @@ export class ReplKernelManager {
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		let doneWaiterId: string | undefined;
 		let performedCleanup = false;
+		let gracefulFailure: unknown;
+		let cleanupFailure: Error | undefined;
 		try {
 			if (opts.drainHostRequests) {
 				const inFlightHostRequests = [...this.inFlightHostRequests];
@@ -1390,6 +1510,7 @@ export class ReplKernelManager {
 				await Promise.race([kernelExit, shutdownDeadline]);
 			}
 		} catch (error) {
+			gracefulFailure = error;
 			this.appendKernelDiagnostic(
 				`graceful shutdown failed (killing instead): ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -1398,11 +1519,15 @@ export class ReplKernelManager {
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
 			if (!this.startStale(generation)) {
-				this.cleanupResources();
+				cleanupFailure = this.cleanupResources();
 				performedCleanup = true;
 			}
 		}
 
+		if (cleanupFailure)
+			throw gracefulFailure
+				? new AggregateError([gracefulFailure, cleanupFailure], "Kernel graceful shutdown and cleanup failed")
+				: cleanupFailure;
 		return performedCleanup;
 	}
 

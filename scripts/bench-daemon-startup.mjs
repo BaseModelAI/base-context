@@ -35,7 +35,7 @@ async function measureOnce(i) {
 	const start = performance.now();
 	const child = spawn(process.execPath, [entrypoint, "--mode", "daemon", "--daemon-socket", socketPath], {
 		stdio: "ignore",
-		env: { ...process.env, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1" },
+		env: { ...process.env, BASE_CONTEXT_OFFLINE: "1", BASE_CONTEXT_SKIP_VERSION_CHECK: "1" },
 	});
 	let ready;
 	const deadline = performance.now() + 30000;

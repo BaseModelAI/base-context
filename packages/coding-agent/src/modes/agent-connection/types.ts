@@ -1,5 +1,13 @@
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
+import type { AgentEvent, AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type {
+	Api,
+	ImageContent,
+	Model,
+	ServiceTier,
+	TextContent,
+	Transport,
+	Usage,
+} from "@ponythewhite/base-context-ai";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AuthSourceToken } from "../../core/auth-storage.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -177,7 +185,7 @@ export interface AgentConnectionCompactionEntry extends AgentConnectionSessionEn
 	type: "compaction";
 	summary: string;
 	firstKeptEntryId: string;
-	tokensBefore: number;
+	tokensBefore: number | null;
 	details?: unknown;
 	fromHook?: boolean;
 }
@@ -592,7 +600,7 @@ export type AgentConnectionSessionEvent =
 			errorSeverity?: "warning" | "error";
 			customInstructions?: string;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
+	| { type: "auto_retry_start"; attempt: number; maxAttempts?: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "auth_stale"; provider: string; sourceTokens?: readonly AuthSourceToken[] }
 	| { type: "rlm_child_update"; child: AgentConnectionRlmChildAgentSnapshot }

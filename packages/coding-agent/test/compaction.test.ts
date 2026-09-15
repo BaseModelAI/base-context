@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
-import { getModel } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
+import { getModel } from "@ponythewhite/base-context-ai";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	prepareViewCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
 import {
@@ -180,8 +181,9 @@ describe("buildSummarizationPrompt", () => {
 		const prompt = buildSummarizationPrompt();
 		expect(prompt).not.toContain("<user-instructions>");
 		expect(prompt).toContain("## Goal");
-		// The kernel keeps running across compaction — the note must not claim a wipe.
-		expect(prompt).toContain("Python kernel keeps running");
+		expect(prompt).toContain("does not establish whether a Python kernel is live");
+		expect(prompt).toContain("do not infer either survival or loss from compaction");
+		expect(prompt).not.toContain("Python kernel keeps running");
 		expect(prompt).not.toMatch(/wiped|restarted/);
 	});
 
@@ -199,6 +201,10 @@ describe("buildSummarizationPrompt", () => {
 		expect(initial).not.toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("existing summary provided in <previous-summary> tags");
 		expect(update).toContain("<user-instructions>");
+		expect(update).toContain("Preserve useful names and their last observed state, including uncertainty");
+		expect(update).toContain("Use current runtime reports before relying on them");
+		expect(update).not.toContain("every Python variable");
+		expect(update.slice(update.indexOf("Runtime note:"))).toBe(initial.slice(initial.indexOf("Runtime note:")));
 	});
 });
 
@@ -433,6 +439,174 @@ describe("buildSessionContext", () => {
 		// model_change is later overwritten by assistant message's model info
 		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
 		expect(loaded.thinkingLevel).toBe("high");
+	});
+});
+
+describe("compaction token calibration", () => {
+	it("retains the same 20k-token suffix in view and ordinary paths when chars/4 underestimates", () => {
+		const entries = [
+			createMessageEntry(createUserMessage("u".repeat(20000))),
+			createMessageEntry(createAssistantMessage("a".repeat(20000))),
+			createMessageEntry(createUserMessage("v".repeat(20000))),
+			createMessageEntry(createAssistantMessage("b".repeat(20000), createMockUsage(38000, 2000))),
+		];
+		const messages = entries.map((entry) => entry.message);
+		const ids = entries.map((entry) => entry.id);
+		// 20k heuristic tokens, 40k observed: the last user/assistant pair is the retained 20k.
+		const preparations = [
+			prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS),
+			prepareViewCompaction(messages, ids, entries, DEFAULT_COMPACTION_SETTINGS),
+		];
+		for (const preparation of preparations) {
+			expect(preparation?.firstKeptEntryId).toBe(entries[2].id);
+			expect(preparation?.messagesToSummarize).toEqual(messages.slice(0, 2));
+			expect(preparation?.tokensBefore).toBe(40000);
+		}
+	});
+
+	it("retains the whole tool group when its result crosses 20k before a later legal cut", () => {
+		const entries = [
+			createMessageEntry(createUserMessage("Previous task")),
+			createMessageEntry(createAssistantMessage("Finished", createMockUsage(0, 0))),
+			createMessageEntry(createUserMessage("Read the fixture")),
+			createMessageEntry({
+				...createAssistantMessage("", createMockUsage(0, 0)),
+				content: [{ type: "toolCall", id: "read_fixture", name: "read_fixture", arguments: {} }],
+				stopReason: "toolUse",
+			}),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "read_fixture",
+				toolName: "read_fixture",
+				content: [{ type: "text", text: "r".repeat(80_000) }],
+				isError: false,
+				timestamp: Date.now(),
+			}),
+			createMessageEntry(createUserMessage("Continue")),
+		];
+		const messages = entries.map((entry) => entry.message);
+		const preparations = [
+			prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS),
+			prepareViewCompaction(
+				messages,
+				entries.map((entry) => entry.id),
+				entries,
+				DEFAULT_COMPACTION_SETTINGS,
+			),
+		];
+		for (const preparation of preparations) {
+			expect(preparation?.firstKeptEntryId).toBe(entries[3].id);
+			expect(preparation?.messagesToSummarize).toEqual(messages.slice(0, 2));
+			expect(preparation?.turnPrefixMessages).toEqual([messages[2]]);
+		}
+	});
+
+	it("keeps ordinary suffix estimates when usage is unavailable or the heuristic is already higher", () => {
+		for (const stopReason of ["error", "stop"] as const) {
+			const entries = Array.from({ length: 3 }, () => [
+				createMessageEntry(createUserMessage("u".repeat(20000))),
+				createMessageEntry({
+					...createAssistantMessage("a".repeat(20000), createMockUsage(14000, 1000)),
+					stopReason,
+				}),
+			]).flat();
+			// Error usage is ignored; otherwise observed 15k is below the 30k heuristic.
+			const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+			expect(preparation?.firstKeptEntryId).toBe(entries[2].id);
+		}
+	});
+});
+
+describe("prepareViewCompaction under confirmed public budget pressure", () => {
+	it("summarizes older whole tool groups while retaining the latest complete exchange below 20k", () => {
+		const entries = [
+			createMessageEntry(createUserMessage("Previous task")),
+			createMessageEntry(createAssistantMessage("Finished", createMockUsage(0, 0))),
+			createMessageEntry(createUserMessage("Read the fixtures")),
+		];
+		for (const group of ["older", "latest"]) {
+			entries.push(
+				createMessageEntry({
+					...createAssistantMessage("", createMockUsage(0, 0)),
+					content: ["a", "b"].map((part) => ({
+						type: "toolCall" as const,
+						id: `${group}_${part}`,
+						name: "read",
+						arguments: { path: `${group}_${part}.txt` },
+					})),
+					stopReason: "toolUse",
+				}),
+			);
+			for (const part of ["a", "b"]) {
+				entries.push(
+					createMessageEntry({
+						role: "toolResult",
+						toolCallId: `${group}_${part}`,
+						toolName: "read",
+						content: [{ type: "text", text: group === "older" ? "r".repeat(40_000) : `${group}_${part}` }],
+						isError: false,
+						timestamp: Date.now(),
+					}),
+				);
+			}
+		}
+		entries.push(
+			createMessageEntry(createAssistantMessage("Read complete", createMockUsage(0, 0))),
+			createMessageEntry(createUserMessage("Continue")),
+		);
+		const original = structuredClone(entries);
+		const messages = entries.map((entry) => entry.message);
+		const ids = entries.map((entry) => entry.id);
+		const ordinary = prepareViewCompaction(messages, ids, entries, DEFAULT_COMPACTION_SETTINGS);
+		const pressure = prepareViewCompaction(
+			messages,
+			ids,
+			entries,
+			DEFAULT_COMPACTION_SETTINGS,
+			undefined,
+			false,
+			true,
+		);
+
+		expect(ordinary?.firstKeptEntryId).toBe(entries[3].id);
+		expect(pressure?.firstKeptEntryId).toBe(entries[6].id);
+		expect(pressure?.messagesToSummarize).toEqual(messages.slice(0, 2));
+		expect(pressure?.turnPrefixMessages).toEqual(messages.slice(2, 6));
+		expect(pressure?.settings.keepRecentTokens).toBe(20_000);
+		expect(entries).toEqual(original);
+	});
+
+	it("keeps a lone current instruction and its first complete exchange under pressure", () => {
+		const entries = [
+			createMessageEntry(createUserMessage("u".repeat(90_000))),
+			createMessageEntry({
+				...createAssistantMessage("", createMockUsage(0, 0)),
+				content: [{ type: "toolCall", id: "large_read", name: "read", arguments: { path: "large.txt" } }],
+				stopReason: "toolUse",
+			}),
+			createMessageEntry({
+				role: "toolResult",
+				toolCallId: "large_read",
+				toolName: "read",
+				content: [{ type: "text", text: "r".repeat(70_000) }],
+				isError: false,
+				timestamp: Date.now(),
+			}),
+			createMessageEntry(createUserMessage("Continue")),
+		];
+		const original = structuredClone(entries);
+		const preparation = prepareViewCompaction(
+			entries.map((entry) => entry.message),
+			entries.map((entry) => entry.id),
+			entries,
+			DEFAULT_COMPACTION_SETTINGS,
+			undefined,
+			false,
+			true,
+		);
+
+		expect(preparation).toBeUndefined();
+		expect(entries).toEqual(original);
 	});
 });
 

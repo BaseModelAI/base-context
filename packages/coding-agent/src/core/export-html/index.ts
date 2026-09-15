@@ -1,11 +1,13 @@
-import type { AgentState } from "@earendil-works/pi-agent-core";
+import { access } from "node:fs/promises";
+import type { AgentState } from "@ponythewhite/base-context-agent";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.js";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.js";
+import { stringifyBoundedJson } from "../bounded-json.js";
 import type { ToolDefinition } from "../extensions/types.js";
-import type { SessionEntry } from "../session-manager.js";
-import { SessionManager } from "../session-manager.js";
+import type { SessionEntry, SessionManager } from "../session-manager.js";
+import { applyExportUsage, exportHistoryLimits, readExportHistory } from "./history.js";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -32,6 +34,14 @@ interface RenderedToolHtml {
 }
 
 export interface ExportOptions {
+	/** Complete history entry cap. Defaults to 16,384; exceeding it refuses the export. */
+	maxEntries?: number;
+	/**
+	 * History byte cap (64 MiB by default): canonical entry frames for a live
+	 * source, serialized header/entries for a resident view, or standalone file
+	 * bytes. Header metadata is also independently bounded for a live source.
+	 */
+	maxSourceBytes?: number;
 	outputPath?: string;
 	themeName?: string;
 	/** Optional tool renderer for custom tools */
@@ -126,7 +136,7 @@ function generateThemeVars(themeName?: string): string {
 
 interface SessionData {
 	header: ReturnType<SessionManager["getHeader"]>;
-	entries: ReturnType<SessionManager["getEntries"]>;
+	entries: SessionEntry[];
 	leafId: string | null;
 	systemPrompt?: string;
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
@@ -236,7 +246,24 @@ export async function exportSessionToHtml(
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
-	const entries = sm.getEntries();
+	const limits = exportHistoryLimits(opts);
+	const systemPrompt = state?.systemPrompt;
+	const tools = state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
+	let captured: Pick<SessionData, "header" | "entries" | "leafId">;
+	if (sm.supportsCapturedHistoryReads()) {
+		const header: SessionData["header"] = JSON.parse(stringifyBoundedJson(sm.getHeader(), limits.maxSourceBytes));
+		const history = await sm.materializeSourceHistory(limits);
+		if (!header || header.id !== history.source.sessionId)
+			throw new Error("HTML export session changed during capture");
+		const entries = history.entries.map(({ entry }) => entry);
+		applyExportUsage(entries);
+		captured = { header, entries, leafId: history.source.leafId };
+	} else {
+		// A supplied readonly Manager owns a captured resident view. Do not
+		// replace that view with whatever its file contains now.
+		captured = sm.materializeResidentHistory(limits);
+	}
+	const { header, entries, leafId } = captured;
 	let renderedTools: Record<string, RenderedToolHtml> | undefined;
 	if (opts.toolRenderer) {
 		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
@@ -246,11 +273,11 @@ export async function exportSessionToHtml(
 	}
 
 	const sessionData: SessionData = {
-		header: sm.getHeader(),
+		header,
 		entries,
-		leafId: sm.getLeafId(),
-		systemPrompt: state?.systemPrompt,
-		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
+		leafId,
+		systemPrompt,
+		tools,
 		renderedTools,
 	};
 
@@ -262,7 +289,14 @@ export async function exportSessionToHtml(
 		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	try {
+		writeFileSync(outputPath, html, { encoding: "utf-8", flag: "wx" });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+			throw new Error(`Export file already exists: ${outputPath}. Choose a new filename.`, { cause: error });
+		}
+		throw error;
+	}
 	return outputPath;
 }
 
@@ -271,18 +305,18 @@ export async function exportSessionToHtml(
  * Used by CLI for exporting arbitrary session files.
  */
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
-	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
+	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : { ...options };
 
-	if (!existsSync(inputPath)) {
+	try {
+		await access(inputPath);
+	} catch {
 		throw new Error(`File not found: ${inputPath}`);
 	}
 
-	const sm = SessionManager.open(inputPath);
+	const history = await readExportHistory(inputPath, exportHistoryLimits(opts));
 
 	const sessionData: SessionData = {
-		header: sm.getHeader(),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
+		...history,
 		systemPrompt: undefined,
 		tools: undefined,
 	};
@@ -295,6 +329,13 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
 	}
 
-	writeFileSync(outputPath, html, "utf8");
+	try {
+		writeFileSync(outputPath, html, { encoding: "utf-8", flag: "wx" });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+			throw new Error(`Export file already exists: ${outputPath}. Choose a new filename.`, { cause: error });
+		}
+		throw error;
+	}
 	return outputPath;
 }

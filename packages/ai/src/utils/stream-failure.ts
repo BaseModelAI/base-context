@@ -14,6 +14,7 @@ export type StreamFailureKind =
 	| "overloaded"
 	| "rate_limit"
 	| "server_error"
+	| "transport"
 	| "auth"
 	| "invalid_request"
 	| "malformed_response"
@@ -32,8 +33,8 @@ export interface StreamFailureInfo {
 export class StreamFailureError extends Error {
 	readonly info: StreamFailureInfo;
 
-	constructor(message: string, info: StreamFailureInfo) {
-		super(message);
+	constructor(message: string, info: StreamFailureInfo, options?: ErrorOptions) {
+		super(message, options);
 		this.name = "StreamFailureError";
 		this.info = info;
 	}
@@ -45,6 +46,7 @@ const KIND_MESSAGES: Record<StreamFailureKind, string> = {
 	overloaded: "Provider overloaded",
 	rate_limit: "Provider rate limit exceeded",
 	server_error: "Provider server error",
+	transport: "Provider transport interrupted",
 	auth: "Provider authentication failed",
 	invalid_request: "Provider rejected the request",
 	malformed_response: "Provider returned a malformed response",
@@ -69,17 +71,24 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (/sensitive|safety|prohibited_content|blocklist|spii|recitation|content.?filter|guardrail|flagged/.test(type)) {
 		return "safety";
 	}
-	if (type.includes("overloaded") || status === 529) return "overloaded";
-	if (type.includes("rate_limit") || type.includes("throttl") || status === 429) return "rate_limit";
 	if (/authentication|permission|unauthorized/.test(type) || status === 401 || status === 403) return "auth";
-	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
+	if (
+		type.includes("invalid_request") ||
+		type.includes("not_found_error") ||
+		type === "insufficient_quota" ||
+		type === "usage_not_included" ||
+		(status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429)
+	) {
 		return "invalid_request";
 	}
+	if (type.includes("overloaded") || status === 529) return "overloaded";
+	if (type.includes("rate_limit") || type.includes("throttl") || status === 429) return "rate_limit";
 	if (type.includes("malformed")) return "malformed_response";
 	if (
 		type.includes("api_error") ||
 		type.includes("server_error") ||
 		type.includes("unavailable") ||
+		status === 408 ||
 		(status !== undefined && status >= 500)
 	) {
 		return "server_error";
@@ -114,6 +123,31 @@ export function truncateRawPayload(raw: string): string {
 	return raw.length > MAX_RAW_LENGTH ? `${raw.slice(0, MAX_RAW_LENGTH)}…` : raw;
 }
 
+const TRANSPORT_ERROR_CODES = new Set([
+	"ECONNRESET",
+	"ECONNREFUSED",
+	"EPIPE",
+	"ETIMEDOUT",
+	"EAI_AGAIN",
+	"UND_ERR_SOCKET",
+	"UND_ERR_CONNECT_TIMEOUT",
+	"UND_ERR_HEADERS_TIMEOUT",
+	"UND_ERR_BODY_TIMEOUT",
+]);
+
+function transportErrorCode(error: Error): string | undefined {
+	const seen = new Set<Error>();
+	let current: unknown = error;
+	while (current instanceof Error && !seen.has(current)) {
+		if (current.name === "AbortError") return undefined;
+		seen.add(current);
+		const code = (current as Error & { code?: unknown }).code;
+		if (typeof code === "string" && TRANSPORT_ERROR_CODES.has(code)) return code;
+		current = current.cause;
+	}
+	return undefined;
+}
+
 function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; detail?: string } {
 	if (error instanceof StreamFailureError) return { info: error.info };
 	if (!(error instanceof Error)) return { info: { kind: "unknown" } };
@@ -140,7 +174,7 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	}
 	const bodyType = body && typeof body === "object" ? (body.type ?? body.code) : undefined;
 	const bodyMessage = body && typeof body === "object" ? body.message : undefined;
-	const providerErrorType =
+	let providerErrorType =
 		typeof bodyType === "string"
 			? bodyType
 			: typeof err.code === "string"
@@ -160,9 +194,17 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	const rawRequestId = err.requestID ?? err.request_id ?? err.$metadata?.requestId ?? headerRequestId;
 	const requestId = typeof rawRequestId === "string" ? rawRequestId : undefined;
 
+	let kind = classifyStreamFailure(providerErrorType, status);
+	if (kind === "unknown" && status === undefined) {
+		const code = transportErrorCode(error);
+		if (code) {
+			kind = "transport";
+			providerErrorType = code;
+		}
+	}
 	return {
 		info: {
-			kind: classifyStreamFailure(providerErrorType ?? error.message, status),
+			kind,
 			providerErrorType,
 			status,
 			requestId,
@@ -178,6 +220,14 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
  */
 export function extractStreamFailureInfo(error: unknown): StreamFailureInfo {
 	return extractStreamFailureParts(error).info;
+}
+
+/** Only concrete provider failures may keep an accepted operation in recovery. */
+export function isTransientProviderFailure(message: AssistantMessage): boolean {
+	if (message.stopReason !== "error") return false;
+	if (message.diagnostics?.some((diagnostic) => diagnostic.type === "agent_lifecycle_failure")) return false;
+	const kind = message.diagnostics?.find((diagnostic) => diagnostic.type === "provider_stream_failure")?.details?.kind;
+	return kind === "transport" || kind === "overloaded" || kind === "rate_limit" || kind === "server_error";
 }
 
 /**

@@ -6,7 +6,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import { theme } from "../theme/theme.js";
 
 interface MenuPanelOptions {

@@ -1,26 +1,24 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@earendil-works/pi-agent-core";
-import {
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
-	getModel,
-	type Model,
-} from "@earendil-works/pi-ai";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { fauxAssistantMessage, getModel, type Model, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
+import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
+	onOutput: undefined as ((line: string) => void) | undefined,
 	lineHandler: undefined as ((line: string) => void) | undefined,
 }));
 
@@ -28,6 +26,7 @@ vi.mock("../src/core/output-guard.js", () => ({
 	takeOverStdout: vi.fn(),
 	writeRawStdout: (line: string) => {
 		rpcIo.outputLines.push(line);
+		rpcIo.onOutput?.(line);
 	},
 }));
 
@@ -40,39 +39,6 @@ vi.mock("../src/modes/rpc/jsonl.js", () => ({
 	}),
 	serializeJsonLine: (value: unknown) => `${JSON.stringify(value)}\n`,
 }));
-
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
-
-function createAssistantMessage(text: string): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "claude-sonnet-4-5",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
-}
 
 type ParsedOutputLine = Record<string, unknown>;
 
@@ -101,10 +67,16 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
-	const model = options.model ?? getModel("anthropic", "claude-sonnet-4-5");
-	if (!model) {
-		throw new Error("Test model not found");
-	}
+	const faux = options.model
+		? undefined
+		: registerFauxProvider({ api: "faux-rpc-prompt", provider: "faux-rpc-prompt" });
+	faux?.setResponses([
+		async () => {
+			await sleep(options.responseDelayMs);
+			return fauxAssistantMessage("done");
+		},
+	]);
+	const model = options.model ?? faux!.getModel();
 
 	const agent = new Agent({
 		getApiKey: () => "test-key",
@@ -113,16 +85,6 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 			systemPrompt: "Test",
 			tools: [],
 		},
-		streamFn: (_model, _context, _options) => {
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				stream.push({ type: "start", partial: createAssistantMessage("") });
-				setTimeout(() => {
-					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("done") });
-				}, options.responseDelayMs);
-			});
-			return stream;
-		},
 	});
 
 	const sessionManager = SessionManager.inMemory();
@@ -130,7 +92,7 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 	if (options.withAuth) {
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
 	}
 
 	const session = new AgentSession({
@@ -162,7 +124,8 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 			} catch {
 				// ignore test cleanup failures
 			}
-			session.dispose();
+			await session.disposeAsync();
+			faux?.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true });
 			}
@@ -179,7 +142,7 @@ async function startRpcMode(options: { withAuth: boolean; responseDelayMs: numbe
 	rpcIo.lineHandler = undefined;
 
 	const { runtimeHost, session, cleanup } = createRuntimeHost(options);
-	void runRpcMode(runtimeHost);
+	void runRpcMode(runtimeHost, DAEMON_PROTOCOL_VERSION);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
 	return { lineHandler: rpcIo.lineHandler!, session, cleanup };
@@ -189,6 +152,7 @@ describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+		rpcIo.onOutput = undefined;
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {
@@ -252,6 +216,118 @@ describe("RPC prompt response semantics", () => {
 			expect(session.isStreaming).toBe(true);
 		} finally {
 			await cleanup();
+		}
+	});
+
+	it("reports a late native request-budget failure after ACK while stdin stays open", async () => {
+		const tempDir = join(tmpdir(), `rpc-native-refusal-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		const manager = await SessionManager.create(tempDir, tempDir);
+		const model: Model<"openai-responses"> = {
+			...getModel("openai", "gpt-4.1"),
+			api: "openai-responses",
+			baseUrl: "https://example.invalid/v1",
+			contextWindow: 128,
+			maxTokens: 16,
+		};
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected diagnostic network send"));
+		let session: AgentSession | undefined;
+		try {
+			({ session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: manager,
+				model,
+				authStorage: AuthStorage.inMemory({ openai: { type: "api_key", key: "offline-test" } }),
+				settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+				resourceLoader: createTestResourceLoader(),
+				tools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				prewarmIpythonKernel: false,
+				requestTokenBudget: {
+					mode: "enforce",
+					profiles: [
+						{
+							id: "offline-rpc-refusal",
+							revision: "1",
+							api: model.api,
+							provider: model.provider,
+							url: "https://example.invalid/v1/responses",
+							model: model.id,
+							authMode: "fixture-api-key",
+							templateRevision: "responses-text-v1",
+							replayFamily: "responses-text-v1",
+							contextTokens: 128,
+							outputCeilingTokens: 16,
+							estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 16 },
+						},
+					],
+				},
+			}));
+			const runtimeHost = { session, setRebindSession: vi.fn() } as unknown as AgentSessionRuntime;
+			rpcIo.outputLines = [];
+			rpcIo.lineHandler = undefined;
+			void runRpcMode(runtimeHost, DAEMON_PROTOCOL_VERSION);
+			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+
+			const client = new RpcClient();
+			rpcIo.onOutput = (line) => client["handleLine"](line);
+			const failure = "Request token budget over-budget: configured context limit exceeded";
+			const collected = expect(client.collectEvents()).rejects.toThrow(failure);
+			const idle = expect(client.waitForIdle()).rejects.toThrow(failure);
+			// Unrelated extension errors must not terminate either completion waiter.
+			rpcIo.onOutput(
+				JSON.stringify({
+					type: "extension_error",
+					extensionPath: "test-extension",
+					event: "prompt_completion",
+					error: "nonterminal",
+				}),
+			);
+			rpcIo.onOutput(
+				JSON.stringify({
+					type: "extension_error",
+					extensionPath: "<session-input>",
+					event: "session_input",
+					error: "nonterminal",
+				}),
+			);
+			rpcIo.lineHandler!(JSON.stringify({ id: "late", type: "prompt", message: "Diagnostic request" }));
+			await Promise.all([collected, idle]);
+
+			const output = parseOutputLines(rpcIo.outputLines);
+			expect(getPromptResponses(rpcIo.outputLines, "late")).toEqual([
+				{ id: "late", type: "response", command: "prompt", success: true },
+			]);
+			const failures = output.filter((event) => event.type === "extension_error");
+			expect(failures).toEqual([
+				{
+					type: "extension_error",
+					extensionPath: "<session-input>",
+					event: "prompt_completion",
+					error: failure,
+				},
+			]);
+			expect(output.findIndex((event) => event.type === "response")).toBeLessThan(
+				output.findIndex((event) => event.type === "turn_start"),
+			);
+			expect(output.findIndex((event) => event.type === "turn_start")).toBeLessThan(output.indexOf(failures[0]));
+			expect(
+				output.some(
+					(event) =>
+						event.type === "agent_end" ||
+						(event.type === "message_end" && (event.message as { role?: string }).role === "assistant"),
+				),
+			).toBe(false);
+			expect(fetch).not.toHaveBeenCalled();
+			expect(session.messages.some((message) => message.role === "assistant")).toBe(false);
+		} finally {
+			rpcIo.onOutput = undefined;
+			fetch.mockRestore();
+			if (session) await session.disposeAsync();
+			else await manager.close();
+			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 

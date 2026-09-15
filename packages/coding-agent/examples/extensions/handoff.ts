@@ -12,10 +12,10 @@
  * The generated prompt appears as a draft in the editor for review/editing.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { complete, type Message } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionEntry } from "@ponythewhite/base-context";
+import { BorderedLoader, convertToLlm, serializeConversation } from "@ponythewhite/base-context";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { complete, type Message } from "@ponythewhite/base-context-ai";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -99,7 +99,9 @@ export default function (pi: ExtensionAPI) {
 
 			// Gather conversation context from current branch. If the branch was compacted,
 			// include the compaction summary plus entries from firstKeptEntryId onward.
-			const messages = getHandoffMessages(ctx.sessionManager.getBranch());
+			const messages = getHandoffMessages(
+				await ctx.sessionManager.readBranch(undefined, { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 }),
+			);
 
 			if (messages.length === 0) {
 				ctx.ui.notify("No conversation to hand off", "error");

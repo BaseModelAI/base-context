@@ -1,4 +1,4 @@
-import type { AssistantMessage, AssistantMessageEvent, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, UserMessage } from "@ponythewhite/base-context-ai";
 import { describe, expect, test } from "vitest";
 import { AgentActivityTracker, formatTokenCount } from "../src/modes/interactive/agent-activity.js";
 

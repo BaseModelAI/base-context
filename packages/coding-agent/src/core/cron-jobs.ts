@@ -220,6 +220,46 @@ export class AgentCronJobStore {
 		return this.readJobs().sort((a, b) => compareOptionalIso(a.nextRunAt, b.nextRunAt));
 	}
 
+	/** Import supported declarations directly as paused data; never import dispatch ownership. */
+	importPaused(
+		jobs: readonly AgentCronJob[],
+		target: { sessionId: string; sessionFile: string; cwd: string },
+	): AgentCronJob[] {
+		const now = new Date().toISOString();
+		const imported = jobs.map((job): AgentCronJob => {
+			if (
+				!isAgentCronJob(job) ||
+				(job.status !== "active" && job.status !== "paused") ||
+				(job.source === "rlm_heartbeat" && job.schedule.kind === "once") ||
+				job.runtimeKind === "subagent"
+			)
+				throw new Error("Unsupported paused schedule owner");
+			return {
+				id: randomUUID(),
+				status: "paused",
+				source: job.source ?? "cron",
+				runtimeKind: "top-level",
+				activeSessionId: target.sessionId,
+				sessionId: target.sessionId,
+				sessionFile: target.sessionFile,
+				cwd: target.cwd,
+				prompt: job.prompt,
+				schedule: {
+					kind: job.schedule.kind,
+					expression: job.schedule.expression,
+					...(job.schedule.kind === "interval" ? { intervalMs: job.schedule.intervalMs } : {}),
+				},
+				...(job.label === undefined ? {} : { label: job.label }),
+				...(job.deliveryMode === undefined ? {} : { deliveryMode: job.deliveryMode }),
+				createdAt: now,
+				updatedAt: now,
+				runCount: 0,
+			};
+		});
+		if (imported.length > 0) this.writeJobs([...this.readJobs(), ...imported]);
+		return imported;
+	}
+
 	create(input: CreateAgentCronJobInput): AgentCronJob {
 		const now = input.now ?? new Date();
 		const prompt = input.prompt.trim();
@@ -617,6 +657,40 @@ export class AgentCronJobStore {
 			this.writeJobs(jobs);
 		}
 		return updated;
+	}
+
+	resumeCronJob(
+		id: string,
+		owner: { activeSessionId: string; sessionId: string; sessionFile: string },
+		now = new Date(),
+	): AgentCronJob | undefined {
+		const jobs = this.readJobs();
+		const current = jobs.find((job) => job.id === id);
+		if (!current) {
+			return undefined;
+		}
+		if (
+			current.activeSessionId !== owner.activeSessionId ||
+			current.sessionId !== owner.sessionId ||
+			resolve(current.sessionFile) !== resolve(owner.sessionFile)
+		) {
+			throw new Error("Cron job does not belong to the bound session");
+		}
+		if (current.status !== "paused" || current.source !== "cron" || current.runtimeKind !== "top-level") {
+			throw new Error("Only paused top-level cron jobs can be resumed");
+		}
+		const nextRunAt = nextRunAtForSchedule(current.schedule, now);
+		if (!nextRunAt) {
+			throw new Error("Cron resume requires a recurring schedule; reschedule one-shot jobs explicitly");
+		}
+		const resumed: AgentCronJob = {
+			...current,
+			status: "active",
+			nextRunAt: nextRunAt.toISOString(),
+			updatedAt: now.toISOString(),
+		};
+		this.writeJobs(jobs.map((job) => (job.id === id ? resumed : job)));
+		return resumed;
 	}
 
 	cancel(id: string, now = new Date()): AgentCronJob | undefined {
@@ -1691,7 +1765,7 @@ function withoutNextRunAt(job: AgentCronJob): AgentCronJob {
 	return rest;
 }
 
-function isAgentCronJob(value: unknown): value is AgentCronJob {
+export function isAgentCronJob(value: unknown): value is AgentCronJob {
 	if (!value || typeof value !== "object") {
 		return false;
 	}

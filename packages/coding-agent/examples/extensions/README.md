@@ -198,11 +198,20 @@ return {
 
 // Reconstruct on session events
 pi.on("session_start", async (_event, ctx) => {
-  for (const entry of ctx.sessionManager.getBranch()) {
-    if (entry.type === "message" && entry.message.toolName === "my_tool") {
+  const entries = await ctx.sessionManager.readBranch(undefined, {
+    maxEntries: 16_384,
+    maxSourceBytes: 64 * 1024 * 1024,
+  });
+  for (const entry of entries) {
+    if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "my_tool") {
       const details = entry.message.details;
       // Reconstruct state from details
     }
   }
 });
 ```
+
+History reads are asynchronous. Use complete, capped parent-path reads for branch restores
+and explicit source reads for state shared across branches. A cap failure is not an empty history.
+Synchronous history getters are only available on explicitly resident session views.
+Custom footer renders must use small cached display state, refreshed by async event handlers.

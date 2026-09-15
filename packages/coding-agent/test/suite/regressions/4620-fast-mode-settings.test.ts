@@ -11,23 +11,23 @@ describe("ENG-4620 fast mode settings", () => {
 	let harness: Harness | undefined;
 	const sessions: AgentSession[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const session of sessions.splice(0)) {
-			session.dispose();
+			await session.disposeAsync();
 		}
-		harness?.cleanup();
+		await harness?.cleanup();
 		harness = undefined;
 	});
 
 	it("uses the saved fast mode preference for new sessions", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }],
 		});
 		const currentHarness = harness;
 
-		currentHarness.session.setServiceTier("priority");
+		await currentHarness.session.setServiceTier("priority");
 		expect(currentHarness.settingsManager.getDefaultServiceTier()).toBe("priority");
 
 		const createSession = () =>
@@ -44,7 +44,7 @@ describe("ENG-4620 fast mode settings", () => {
 		sessions.push(session);
 		expect(session.serviceTier).toBe("priority");
 
-		session.setServiceTier("default");
+		await session.setServiceTier("default");
 		const { session: nextSession } = await createSession();
 		sessions.push(nextSession);
 		expect(nextSession.serviceTier).toBe("default");
@@ -64,18 +64,18 @@ describe("ENG-4620 fast mode settings", () => {
 
 	it("restores the saved preference after leaving an unsupported model", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
 		});
 
-		harness.session.setServiceTier("priority");
-		await harness.session.setModel(harness.getModel("gpt-5.3")!);
+		await harness.session.setServiceTier("priority");
+		await harness.session.setModel(harness.getModel("gpt-4-turbo")!);
 
 		expect(harness.session.serviceTier).toBe("default");
 		expect(harness.settingsManager.getDefaultServiceTier()).toBe("priority");
 
-		await harness.session.setModel(harness.getModel("gpt-5.4")!);
+		await harness.session.setModel(harness.getModel("gpt-5.5")!);
 		expect(harness.session.serviceTier).toBe("priority");
 	});
 
@@ -86,7 +86,7 @@ describe("ENG-4620 fast mode settings", () => {
 			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
 		});
 
-		harness.session.setServiceTier("priority");
+		await harness.session.setServiceTier("priority");
 		expect(harness.session.serviceTier).toBe("priority");
 
 		await harness.session.setModel(harness.getModel("gpt-4-turbo")!);
@@ -95,32 +95,32 @@ describe("ENG-4620 fast mode settings", () => {
 
 	it("returns the effective service tier when cycling models", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
 		});
 
-		harness.session.setServiceTier("priority");
+		await harness.session.setServiceTier("priority");
 		const unsupportedResult = await harness.session.cycleModel();
-		expect(unsupportedResult?.model.id).toBe("gpt-5.3");
+		expect(unsupportedResult?.model.id).toBe("gpt-4-turbo");
 		expect(unsupportedResult?.serviceTier).toBe("default");
 
 		const supportedResult = await harness.session.cycleModel();
-		expect(supportedResult?.model.id).toBe("gpt-5.4");
+		expect(supportedResult?.model.id).toBe("gpt-5.5");
 		expect(supportedResult?.serviceTier).toBe("priority");
 	});
 
 	it("preserves fast mode while navigating session history", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }],
 		});
 
-		const targetId = harness.sessionManager.appendMessage(userMsg("first"));
-		harness.sessionManager.appendMessage(assistantMsg("reply"));
-		harness.session.setServiceTier("priority");
-		harness.sessionManager.appendMessage(userMsg("second"));
+		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
+		await harness.sessionManager.appendMessage(assistantMsg("reply"));
+		await harness.session.setServiceTier("priority");
+		await harness.sessionManager.appendMessage(userMsg("second"));
 
 		await harness.session.navigateTree(targetId, { summarize: false });
 
@@ -129,43 +129,43 @@ describe("ENG-4620 fast mode settings", () => {
 
 	it("does not persist a temporary clamp from an unsupported model", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
 			persistSession: true,
 		});
 		const currentHarness = harness;
 
-		currentHarness.sessionManager.appendMessage(userMsg("hello"));
-		currentHarness.session.setServiceTier("priority");
-		await currentHarness.session.setModel(currentHarness.getModel("gpt-5.3")!);
+		await currentHarness.sessionManager.appendMessage(userMsg("hello"));
+		await currentHarness.session.setServiceTier("priority");
+		await currentHarness.session.setModel(currentHarness.getModel("gpt-4-turbo")!);
 		expect(currentHarness.session.serviceTier).toBe("default");
 		expect(currentHarness.sessionManager.buildSessionContext().serviceTier).toBe("priority");
-		currentHarness.session.dispose();
+		await currentHarness.session.disposeAsync();
 
-		const createSession = (modelId: string) =>
+		const createSession = async (modelId: string) =>
 			createAgentSession({
 				cwd: currentHarness.tempDir,
 				authStorage: currentHarness.authStorage,
 				model: currentHarness.getModel(modelId),
 				resourceLoader: createTestResourceLoader(),
-				sessionManager: currentHarness.sessionManager,
+				sessionManager: await SessionManager.open(currentHarness.sessionManager.getSessionFile()!),
 				settingsManager: currentHarness.settingsManager,
 			});
 
-		const { session: supportedSession } = await createSession("gpt-5.4");
+		const { session: supportedSession } = await createSession("gpt-5.5");
 		sessions.push(supportedSession);
 		expect(supportedSession.serviceTier).toBe("priority");
 	});
 
 	it("stores the preference when a new session starts on an unsupported model", async () => {
 		harness = await createHarness({
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			models: [{ id: "gpt-5.4" }, { id: "gpt-5.3" }],
+			api: "openai-responses",
+			provider: "openai",
+			models: [{ id: "gpt-5.5" }, { id: "gpt-4-turbo" }],
 		});
 		const currentHarness = harness;
-		const sessionManager = SessionManager.inMemory(currentHarness.tempDir);
+		let sessionManager = SessionManager.inMemory(currentHarness.tempDir);
 		currentHarness.settingsManager.setDefaultServiceTier("priority");
 
 		const createSession = (modelId: string) =>
@@ -178,13 +178,15 @@ describe("ENG-4620 fast mode settings", () => {
 				settingsManager: currentHarness.settingsManager,
 			});
 
-		const { session: unsupportedSession } = await createSession("gpt-5.3");
+		const { session: unsupportedSession } = await createSession("gpt-4-turbo");
 		sessions.push(unsupportedSession);
 		expect(unsupportedSession.serviceTier).toBe("default");
 		expect(sessionManager.buildSessionContext().serviceTier).toBe("priority");
-		unsupportedSession.dispose();
+		const nextManager = await sessionManager.forkBranch(sessionManager.getLeafId(), { persist: false });
+		await unsupportedSession.disposeAsync();
+		sessionManager = nextManager;
 
-		const { session: supportedSession } = await createSession("gpt-5.4");
+		const { session: supportedSession } = await createSession("gpt-5.5");
 		sessions.push(supportedSession);
 		expect(supportedSession.serviceTier).toBe("priority");
 	});

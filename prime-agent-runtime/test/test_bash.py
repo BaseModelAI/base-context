@@ -55,6 +55,21 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
 
+        # More than a lifetime total of 32 commands, with real owner/reader settlement.
+        for _ in range(33):
+            completed = bash("printf recycled")
+            self.assertEqual((await completed).output, "recycled")
+            deadline = time.monotonic() + 5
+            while True:
+                with bash_module._live_lock:
+                    retired = completed not in bash_module._live_handles
+                if retired:
+                    break
+                self.assertLess(time.monotonic(), deadline, "healthy admission did not retire")
+                await asyncio.sleep(0.01)
+        self.assertEqual(handle.poll(), awaited)
+        self.assertIn("hi", result.output)
+
     async def test_status_pipe_survives_high_fds_and_strict_posix_shell(self):
         # Regression: dash rejects multi-digit fds in redirections at parse
         # time, so the script must never reference the raw status-pipe fd.
@@ -352,7 +367,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(proc.returncode, 127)
             self.assertFalse(os.path.exists(marker))
 
-    def test_status_socket_closed_when_wake_pipe_fails(self):
+    async def test_status_socket_closed_when_wake_pipe_fails(self):
         if not bash_module._IS_POSIX:
             self.skipTest("POSIX-only fds")
         acquired: list[int] = []
@@ -377,6 +392,48 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acquired), 2)
         for fd in acquired:
             self.assertIn(fd, closed)
+
+        # The failed setup above must not consume a slot. Hold actual pump exits,
+        # not results or fabricated set entries, to fill the live owner boundary.
+        release_readers = threading.Event()
+        original_pump = bash_module.BashHandle._pump
+        handles = []
+
+        def held_pump(handle_self):
+            original_pump(handle_self)
+            release_readers.wait()
+
+        try:
+            with mock.patch.object(bash_module.BashHandle, "_pump", held_pump):
+                for _ in range(32):
+                    handles.append(bash("printf retained"))
+                results = await asyncio.wait_for(asyncio.gather(*handles), timeout=10)
+                self.assertTrue(all(result.exit_code == 0 for result in results))
+                self.assertTrue(all(result.output == "retained" for result in results))
+                with (
+                    mock.patch.object(bash_module, "_install_shutdown_hook") as hook,
+                    mock.patch.object(bash_module.socket, "socketpair") as pair,
+                    mock.patch.object(bash_module.os, "pipe") as pipe,
+                    mock.patch.object(bash_module.subprocess, "Popen") as spawn,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, r"live handle limit exceeded \(32\)"):
+                        bash("echo excess")
+                    hook.assert_not_called()
+                    pair.assert_not_called()
+                    pipe.assert_not_called()
+                    spawn.assert_not_called()
+        finally:
+            release_readers.set()
+            deadline = time.monotonic() + 5
+            while True:
+                with bash_module._live_lock:
+                    retired = all(handle not in bash_module._live_handles for handle in handles)
+                if retired:
+                    break
+                self.assertLess(time.monotonic(), deadline, "reader ownership did not settle")
+                await asyncio.sleep(0.01)
+        recovered = bash("printf after-settlement")
+        self.assertEqual((await recovered).output, "after-settlement")
 
     def test_windows_process_start_id(self):
         completed = mock.Mock(stdout="638000000000000000\n")
@@ -486,6 +543,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         try:
+            with handle._callback_lock:
+                self.assertEqual(handle._callbacks, [])
             os.killpg(handle._pid, 0)  # still alive
         finally:
             handle.kill(signal.SIGKILL)
@@ -499,6 +558,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handle._released)
         again = await handle
         self.assertEqual(again, result)
+        with handle._callback_lock:
+            self.assertEqual(handle._callbacks, [])
 
     async def test_second_cancel_during_cleanup_still_confirms_group_death(self):
         # Python 3.11: an await inside an except-CancelledError block of a
@@ -1198,23 +1259,62 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                         bash("sleep 30")
 
     async def test_journal_short_write_rejects_when_configured(self):
-        # A partial os.write would leave a truncated JSON line the host
-        # discards; enrollment must treat it as failure.
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
+            marker = os.path.join(tmp, "executed")
+            pids: list[int] = []
+            journal_fds: set[int] = set()
+            real_popen, real_open, real_write = subprocess.Popen, os.open, os.write
+            write_error = OSError("injected orphan append failure after a short write")
+            wrote_prefix = False
+
+            def capturing_popen(*args, **kwargs):
+                proc = real_popen(*args, **kwargs)
+                pids.append(proc.pid)
+                return proc
+
+            def capturing_open(path, *args, **kwargs):
+                fd = real_open(path, *args, **kwargs)
+                if os.path.realpath(path) == os.path.realpath(journal):
+                    journal_fds.add(fd)
+                return fd
 
             def short_write(fd, data):
-                return 0  # no progress
+                nonlocal wrote_prefix
+                if fd not in journal_fds:
+                    return real_write(fd, data)
+                if not wrote_prefix:
+                    wrote_prefix = True
+                    return real_write(fd, bytes(data)[:2])
+                raise write_error
 
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
-                },
-            ):
-                with mock.patch.object(bash_module.os, "write", short_write):
-                    self.assertFalse(bash_module._record_journal(os.getpid(), active=False))
+            with mock.patch.dict(os.environ, {
+                "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
+            }):
+                with mock.patch.object(bash_module.subprocess, "Popen", capturing_popen), \
+                     mock.patch.object(bash_module.os, "open", capturing_open), \
+                     mock.patch.object(bash_module.os, "write", short_write):
+                    with self.assertRaises(RuntimeError) as caught:
+                        bash(f"touch {marker}")
+                self.assertIn("command gate was not released", str(caught.exception))
+                cause = caught.exception.__cause__
+                self.assertIsInstance(cause, ExceptionGroup)
+                self.assertIs(cause.exceptions[0], write_error)
+                self.assertIn("Incomplete orphan process journal tail", str(cause.exceptions[1]))
+                with open(journal, "rb") as stream:
+                    prefix = stream.read()
+                self.assertEqual(prefix, b'{"')
+                # The next owner cannot append past this failed record, even after the old owner closed.
+                later_failures: list[Exception] = []
+                self.assertFalse(bash_module._record_journal(os.getpid(), active=False, failures=later_failures))
+                self.assertIn("Incomplete orphan process journal tail", str(later_failures[0]))
+                with open(journal, "rb") as stream:
+                    self.assertEqual(stream.read(), prefix)
+            await _poll_group_dead(pids[0])
+            self.assertFalse(os.path.exists(marker))
+            with bash_module._live_lock:
+                self.assertFalse(bash_module._live_handles)
 
     async def test_journal_partial_writes_complete_the_record(self):
         with tempfile.TemporaryDirectory() as tmp:

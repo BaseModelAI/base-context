@@ -1,14 +1,18 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { AgentTool, AgentToolResult } from "@ponythewhite/base-context-agent";
+import type { ImageContent, TextContent } from "@ponythewhite/base-context-ai";
 import { type Static, Type } from "typebox";
+import { v4 as uuid } from "uuid";
+import { PRODUCT } from "../../product-identity.js";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
 import { resolveKernelBashShell } from "../../utils/shell.js";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.js";
 import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
+	type CapturedKernelLifecycle,
+	type ExecuteOptions,
 	type ExecuteResult,
 	type HostRequestHandlers,
 	type KernelAttachment,
@@ -19,8 +23,13 @@ import {
 	ReplKernelManager,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import { nativeRecoveryMetadata, stringifyNativeRecoveryResponse } from "../selective-recovery.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
+import { admitNativeRecoveryToolResult, nativeRecoveryToolResult } from "./prime-context.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+
+// Bound before tool/extension callbacks; replacement reader methods cannot publish lifecycle facts.
+const captureOwnedReplState = ReplKernelManager.prototype.captureLifecycleState;
 
 const RLM_BOOTSTRAP_HEADER_CODE = `
 import asyncio
@@ -41,9 +50,9 @@ except Exception as _prime_agent_rlm_error:
     class _PrimeAgentMissingRlm:
         def _raise_missing(self):
             raise RuntimeError(
-                "prime-agent-runtime is not installed in this kernel. "
-                "Remove ~/.prime/agent/kernel-venv so prime-agent can rebuild it, or set "
-                "PRIME_AGENT_KERNEL_PYTHON to a kernel environment with prime-agent-runtime installed. "
+                "${PRODUCT.runtimeDistribution} is not installed in this kernel. "
+                "Rebuild the ${PRODUCT.name} kernel environment, or set "
+                "BASE_CONTEXT_KERNEL_PYTHON to a kernel environment with ${PRODUCT.runtimeDistribution} installed. "
                 f"Import error: {_PRIME_AGENT_RLM_IMPORT_ERROR}"
             )
 
@@ -248,6 +257,8 @@ function setWorkingMessage(ctx: ExtensionContext | undefined, message?: string):
 export type IpythonToolInput = Static<typeof ipythonSchema>;
 
 export interface IpythonToolDetails {
+	/** Descriptive selectors only; the exact selected body is in this tool result's content. */
+	nativeRecoveries?: ReturnType<typeof nativeRecoveryMetadata>[];
 	durationMs?: number;
 	status?: "ok" | "error" | "aborted" | "starting";
 	errorEname?: string;
@@ -272,7 +283,9 @@ export interface IpythonToolDetails {
 }
 
 export interface IpythonToolOptions {
-	/** Python override. Must have prime-agent-runtime installed. */
+	/** @internal Captured inside an actual owned tool invocation, not inferred from cell output. */
+	captureNativeRecoveryScope?: () => ExecuteOptions["runNativeRecovery"];
+	/** Python override. Must have base-context-runtime installed. */
 	python?: string;
 	env?: Record<string, string>;
 	/** Command prefix prepended to every bash() command. */
@@ -306,6 +319,7 @@ export interface IpythonToolOptions {
  * attach mid-flight (a tool call racing a background prewarm()).
  */
 export class IpythonKernelProvisioner {
+	private readonly lifecycleOwner = uuid();
 	private managerPromise?: Promise<KernelClient>;
 	private startedManager?: KernelClient;
 	private readonly startupListeners = new Set<KernelBootstrapProgressHandler>();
@@ -323,6 +337,29 @@ export class IpythonKernelProvisioner {
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
 		return this.startedManager;
+	}
+
+	captureKernelState(): CapturedKernelLifecycle {
+		const manager = this.startedManager;
+		const pending = this.managerPromise;
+		const disposed = this.disposeController.signal.aborted;
+		const captured = manager instanceof ReplKernelManager ? captureOwnedReplState.call(manager) : undefined;
+		const state = disposed ? "disposed" : pending && !manager ? "provisioning" : "unobserved";
+		return Object.freeze({
+			snapshot:
+				captured?.snapshot ??
+				Object.freeze({
+					source: "ipython-provisioner" as const,
+					owner: this.lifecycleOwner,
+					generation: null,
+					state,
+				}),
+			isCurrent: () =>
+				this.startedManager === manager &&
+				this.managerPromise === pending &&
+				this.disposeController.signal.aborted === disposed &&
+				(captured?.isCurrent() ?? true),
+		});
 	}
 
 	/** Result of reviving a prior session's namespace on the last kernel start, if any. */
@@ -465,8 +502,8 @@ export class IpythonKernelProvisioner {
 				// bash() reads these to pick its shell and command prefix.
 				env: {
 					...this.options?.env,
-					...(shellPath ? { PRIME_AGENT_BASH_SHELL: shellPath } : {}),
-					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
+					...(shellPath ? { BASE_CONTEXT_BASH_SHELL: shellPath } : {}),
+					...(commandPrefix ? { BASE_CONTEXT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
@@ -563,6 +600,7 @@ async function executeWithBusyKernelChoice(
 	onStream: (chunk: string, name: "stdout" | "stderr") => void,
 	onWorkingMessage: (message?: string) => void,
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
+	runNativeRecovery: ExecuteOptions["runNativeRecovery"],
 	ctx: ExtensionContext | undefined,
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
@@ -572,6 +610,8 @@ async function executeWithBusyKernelChoice(
 			return {
 				result: await m.execute(code, {
 					signal,
+					nativeRecovery: true,
+					runNativeRecovery,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -651,6 +691,7 @@ export function createIpythonToolDefinition(
 					},
 					setToolWorkingMessage,
 					options?.onLateSentAgentMessage,
+					options?.captureNativeRecoveryScope?.(),
 					ctx,
 				);
 
@@ -669,8 +710,12 @@ export function createIpythonToolDefinition(
 
 				const imageBlocks = imageBlocksFromAttachments(r.attachments);
 				const content: (TextContent | ImageContent)[] = [{ type: "text", text: text || "" }, ...imageBlocks];
+				// Bypass stdout/trailing-expression truncation. This is the sole selected-body persistence path.
+				for (const recovery of r.nativeRecoveries ?? []) {
+					content.push({ type: "text", text: stringifyNativeRecoveryResponse(recovery) });
+				}
 
-				return {
+				const result: AgentToolResult<IpythonToolDetails> & { isError: boolean } = {
 					content,
 					details: {
 						durationMs: r.durationMs,
@@ -683,11 +728,24 @@ export function createIpythonToolDefinition(
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
+						nativeRecoveries: r.nativeRecoveries?.map(nativeRecoveryMetadata),
 						kernelRestarted,
 						error: r.error,
 					},
 					isError: r.status === "error" || r.status === "aborted",
 				};
+				return r.nativeRecoveries?.length
+					? admitNativeRecoveryToolResult(result, (refusal) => ({
+							content: nativeRecoveryToolResult(refusal).content,
+							details: {
+								status: r.status,
+								durationMs: r.durationMs,
+								kernelRestarted,
+								nativeRecoveries: [nativeRecoveryMetadata(refusal)],
+							},
+							isError: true,
+						}))
+					: result;
 			} finally {
 				if (hasWorkingMessage) {
 					setToolWorkingMessage();

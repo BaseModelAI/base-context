@@ -1,14 +1,27 @@
 import { appendFileSync } from "node:fs";
-import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
+import {
+	AgentContinueError,
+	type AgentMessage,
+	type ShouldStopAfterTurnContext,
+} from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	fauxAssistantMessage,
+	getModel,
 	type Model,
 	type ToolResultMessage,
 	type Usage,
-} from "@earendil-works/pi-ai";
+} from "@ponythewhite/base-context-ai";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.js";
+import { CompactionCommittedError } from "../../src/core/agent-session.js";
+import { CanonicalContextCompiler, getCanonicalViewUnits } from "../../src/core/canonical-context.js";
+import { readContextEpoch } from "../../src/core/context-epoch.js";
+import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
+import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
+import { readSessionJournal } from "../../src/core/session-journal-reader.js";
+import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -20,11 +33,25 @@ type SessionWithCompactionInternals = {
 	) => Promise<void>;
 	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
+	_thresholdCompactionNeeded: (context: ShouldStopAfterTurnContext) => Promise<boolean>;
 	_persistCompactionOutcome: (
 		reason: "overflow" | "threshold" | "requested",
 		outcome: "skipped" | "cancelled" | "failed",
 		message: string,
-	) => void;
+	) => Promise<void>;
+};
+
+const compactionModel: Model<"openai-responses"> = {
+	api: "openai-responses",
+	provider: "compaction-model-fixture",
+	id: "summary-model",
+	name: "Summary model",
+	baseUrl: "https://compaction.invalid/v1",
+	input: ["text"],
+	reasoning: true,
+	contextWindow: 128000,
+	maxTokens: 32768,
+	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 };
 
 function createUsage(totalTokens: number) {
@@ -72,12 +99,198 @@ describe("AgentSession compaction characterization", () => {
 		vi.useRealTimers();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
+	});
+
+	it("starts accepted next prompts after short manual compaction at the real agent-end boundary", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [],
+			settings: { autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "owner-reproduction-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "owner-reproduction-key");
+		await harness.session.setModel(compactionModel);
+		await harness.session.setThinkingLevel("low");
+		const bodies: unknown[] = [];
+		// Only transport is fake. MAIN and summary use the real adapter and persistent owners.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const text = `Owner scheduling fixture reply ${bodies.length}.`;
+			const item = {
+				type: "message",
+				id: `msg_owner_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text, annotations: [] }],
+			};
+			const events = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_owner_${bodies.length}`,
+						model: compactionModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 100,
+							output_tokens: 16,
+							total_tokens: 116,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			];
+			return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const control = harness.session as unknown as {
+			_sessionInputPumpEpoch: number;
+			_sessionInputPumpRequested: boolean;
+			_sessionInputPumpSuspended: boolean;
+			_queuedWorkPauses: Set<unknown>;
+			_sessionInputAdmissionPauses: Set<unknown>;
+			_refineInFlight?: Promise<void>;
+			_pendingCheckpoint?: unknown;
+		};
+		const bounded = <T>(work: Promise<T>, phase: string): Promise<T> =>
+			new Promise((resolve, reject) => {
+				const timer = setTimeout(
+					() =>
+						reject(
+							new Error(
+								`Owner reproduction stalled at ${phase}: ${JSON.stringify({
+									epoch: control._sessionInputPumpEpoch,
+									pumpRequested: control._sessionInputPumpRequested,
+									pumpSuspended: control._sessionInputPumpSuspended,
+									queuedWorkPauses: control._queuedWorkPauses.size,
+									admissionPauses: control._sessionInputAdmissionPauses.size,
+									refineInFlight: control._refineInFlight !== undefined,
+									pendingCheckpoint: control._pendingCheckpoint !== undefined,
+									streaming: harness.session.isStreaming,
+									compacting: harness.session.isCompacting,
+									unfinishedActions: harness.session.unfinishedActionCount,
+									starts: harness.eventsOfType("agent_start").length,
+									ends: harness.eventsOfType("agent_end").length,
+									providerRequests: bodies.length,
+								})}`,
+							),
+						),
+					10_000,
+				);
+				work.then(
+					(value) => {
+						clearTimeout(timer);
+						resolve(value);
+					},
+					(error) => {
+						clearTimeout(timer);
+						reject(error);
+					},
+				);
+			});
+		const completedRuns: Array<Promise<{ error?: unknown }>> = [];
+		const runToTerminalBoundary = async (text: string) => {
+			const accepted = createDeferred<void>();
+			const terminal = createDeferred<void>();
+			const observed = Promise.all([accepted.promise, terminal.promise]);
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "agent_end") terminal.resolve();
+			});
+			const run = harness.session.prompt(text, {
+				source: "rpc",
+				preflightResult: (success) => {
+					if (success) accepted.resolve();
+					else accepted.reject(new Error(`Prompt was not accepted: ${text}`));
+				},
+			});
+			completedRuns.push(
+				run.then(
+					() => ({}),
+					(error) => {
+						accepted.reject(error);
+						terminal.reject(error);
+						return { error };
+					},
+				),
+			);
+			try {
+				// Match the observed event boundary; do NOT drain the previous prompt/pump here.
+				await bounded(observed, text);
+			} finally {
+				unsubscribe();
+			}
+		};
+		await bounded(harness.session.prompt("seed enough history for a real manual summary"), "seed");
+		await runToTerminalBoundary("owner-stage-initial");
+		expect(harness.settingsManager.getCompactionKeepRecentTokens()).toBe(20000);
+		const firstTailId = harness.sessionManager.getLeafId();
+		const first = await bounded(harness.session.compact(), "first manual compact");
+		expect(first.firstKeptEntryId).toBe(firstTailId);
+		expect(first.summary).not.toBe("");
+		await runToTerminalBoundary("owner-stage-recovered");
+		// Ordinary prompt-to-prompt delivery waits for the lower agent, not the session pump.
+		// Both manual compactions still start at agent_end without draining their prompt.
+		await harness.session.agent.waitForIdle();
+		await runToTerminalBoundary("owner-stage-clock-offsets");
+		const second = await bounded(harness.session.compact(), "second manual compact");
+		expect(second.summary).not.toBe("");
+		const afterCompactionRequests = bodies.length;
+		await runToTerminalBoundary("owner-stage-stream-monitor");
+		const outcomes = await bounded(Promise.all(completedRuns), "prior prompt settlements");
+		for (const outcome of outcomes) if ("error" in outcome) throw outcome.error;
+		expect(harness.eventsOfType("agent_start")).toHaveLength(5);
+		expect(harness.eventsOfType("agent_end")).toHaveLength(5);
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.result && !event.aborted)).toHaveLength(2);
+		expect(bodies.length).toBeGreaterThan(afterCompactionRequests);
+		expect(JSON.stringify(bodies.slice(afterCompactionRequests))).toContain("owner-stage-stream-monitor");
+		expect(
+			harness
+				.eventsOfType("message_end")
+				.some(
+					(event) =>
+						event.message.role === "user" && getMessageText(event.message) === "owner-stage-stream-monitor",
+				),
+		).toBe(true);
+	}, 60_000);
+
+	it("refuses short manual compaction without a removable source prefix", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [],
+			settings: { autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("This summary must not be requested.")]);
+		await harness.sessionManager.appendMessage({ role: "user", content: "Only input", timestamp: 1 });
+
+		await expect(harness.session.compact()).rejects.toThrow("Session is too short to compact");
+
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "manual",
+			result: undefined,
+			errorSeverity: "warning",
+		});
 	});
 
 	it("manually compacts using an extension-provided summary", async () => {
@@ -135,25 +348,613 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
 	});
 
-	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
+	async function createRecoveryCompactionFixture() {
+		const model = getModel("deepseek", "deepseek-flash");
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
 			persistSession: true,
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			// Keep the built-in prime_context identity; an override would not produce native recovery.
+			extensionFactories: [
+				(pi) => {
+					pi.registerTool({
+						name: "ordinary_tail",
+						label: "Ordinary tail",
+						description: "Return an ordinary tool result after recovery.",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "ORDINARY_TAIL_RESULT" }], details: {} }),
+					});
+				},
+			],
+			requestTokenBudget: {
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-recovery-compaction",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://api.deepseek.com/chat/completions",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "deepseek-text-tools-fixture-v1",
+						replayFamily: "deepseek-completions",
+						contextTokens: 120000,
+						outputCeilingTokens: 393216,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+					},
+				],
+			},
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			baseUrl: model.baseUrl,
+			apiKey: "offline-deepseek-key",
+			models: [model],
+		});
+		harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		harness.session.setActiveToolsByName(["prime_context", "ordinary_tail"]);
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
+		});
+		const main: Array<{ epoch: CompactionEntry; request: RequestJournalEntry["request"] }> = [];
+		const summaries: unknown[] = [];
+		// Only HTTP is local. Recovery, request selection, append ACK and compaction use their native owners.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+			const body = JSON.parse(String(init?.body));
+			const entries = await harness.sessionManager.readEntries();
+			const admitted = entries
+				.flatMap((entry) =>
+					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+				)
+				.at(-1)!;
+			const summarizing = admitted.purpose === "summary";
+			if (summarizing) summaries.push(body);
+			else {
+				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+				expect(readContextEpoch(epoch.details, 2 * 1024 * 1024)?.replayContract).toBe("message-groups");
+				expect(admitted.contextEpoch).toEqual({
+					sessionId: harness.sessionManager.getSessionId(),
+					entryId: epoch.id,
+				});
+				main.push({ epoch, request: admitted });
+			}
+			const call = summarizing
+				? undefined
+				: main.length === 1
+					? {
+							id: "recovery_call",
+							name: "prime_context",
+							arguments: '{"action":"search","query":"RECOVERY_EVIDENCE"}',
+						}
+					: main.length === 2
+						? { id: "ordinary_call", name: "ordinary_tail", arguments: "{}" }
+						: undefined;
+			const delta = call
+				? {
+						role: "assistant",
+						reasoning_content: "Use the requested tool.",
+						tool_calls: [
+							{
+								index: 0,
+								id: call.id,
+								type: "function",
+								function: { name: call.name, arguments: call.arguments },
+							},
+						],
+					}
+				: {
+						role: "assistant",
+						reasoning_content: "Keep the recovered result.",
+						content: summarizing ? "Recovery compacted summary." : "Recovery and ordinary tail complete.",
+					};
+			const chunk = {
+				id: `recovery_reply_${main.length}_${summaries.length}`,
+				object: "chat.completion.chunk",
+				model: model.id,
+				choices: [{ index: 0, delta, finish_reason: call ? "tool_calls" : "stop" }],
+				usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const readRecovery = async () => {
+			const entries = await harness.sessionManager.readEntries();
+			const result = entries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "recovery_call",
+			)!;
+			expect(result).toMatchObject({ message: { toolName: "prime_context", isError: false } });
+			const source = await harness.sessionManager.readBranchHistory((history) => history.get(result.id));
+			expect(source).toMatchObject({ qualification: "native-recovery" });
+			return { result, source: source! };
+		};
+		return { harness, main, summaries, readRecovery };
+	}
+
+	it("accepts refinement_outcome after an existing DeepSeek epoch without sending the UI message", async () => {
+		const { harness, main } = await createRecoveryCompactionFixture();
+		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
+		expect(main).toHaveLength(3);
+		const existingEpoch = main.at(-1)!.epoch.id;
+		const outcomeId = await harness.sessionManager.appendCustomMessageEntry(
+			"refinement_outcome",
+			"UI_ONLY_REFINEMENT_OUTCOME",
+			true,
+			{},
+		);
+
+		await harness.session.prompt("Apply the SLA update.");
+		expect(main).toHaveLength(4);
+		expect(main.at(-1)!.request.contextEpoch?.entryId).toBe(main.at(-1)!.epoch.id);
+		expect((await harness.sessionManager.readEntries()).some((entry) => entry.id === existingEpoch)).toBe(true);
+		expect((await harness.sessionManager.readEntries()).find((entry) => entry.id === outcomeId)).toMatchObject({
+			type: "custom_message",
+			customType: "refinement_outcome",
+			display: true,
+		});
+		expect(harness.session.messages).toEqual(
+			expect.arrayContaining([expect.objectContaining({ role: "custom", customType: "refinement_outcome" })]),
+		);
+		const body = String(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.body);
+		expect(body).not.toContain("UI_ONLY_REFINEMENT_OUTCOME");
+		expect(body).toContain("Apply the SLA update.");
+	});
+
+	it("renews recovery coverage at accepted ACK, reuses an ordinary tail, and manually compacts", async () => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
+		expect(main).toHaveLength(3);
+		const { result, source } = await readRecovery();
+		const initial = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
+		const accepted = readContextEpoch(main[1].epoch.details, 2 * 1024 * 1024)!;
+		expect(source.sequence).toBeGreaterThan(initial.source.sourceSequence);
+		expect(main[1].epoch.id).not.toBe(main[0].epoch.id);
+		expect(accepted.source).toEqual(main[1].request.source);
+		expect(accepted.source.leafId).toBe(result.id);
+		expect(accepted.source.sourceSequence).toBe(source.sequence);
+		expect(accepted.literalTailId).toBe(result.id);
+		// No unrelated policy/resource/task change can explain the new ACK.
+		expect(accepted.representation).toBe(initial.representation);
+		expect(accepted.resourceRevision).toBe(initial.resourceRevision);
+		expect(accepted.taskFrame?.material).toBe(initial.taskFrame?.material);
+		expect(main[2].request.source.sourceSequence).toBeGreaterThan(source.sequence);
+		expect(main[2].epoch.id).toBe(main[1].epoch.id);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toHaveLength(
+			2,
+		);
+
+		const before = await harness.sessionManager.readBranchHistory((history) =>
+			new CanonicalContextCompiler().compile(
+				history.branchContext,
+				harness.settingsManager.getCanonicalContextLimits(),
+			),
+		);
+		const beforeUnits = getCanonicalViewUnits(before)!;
+		const recoveryUnit = beforeUnits.find((unit) => unit.exactSources.includes(result.id))!;
+		const callerIndex = before.findIndex(
+			(message) =>
+				message.role === "assistant" &&
+				message.content.some((part) => part.type === "toolCall" && part.id === "recovery_call"),
+		);
+		expect(callerIndex).toBeGreaterThanOrEqual(0);
+		expect(recoveryUnit.requiredVisibleDependencies).toContain(beforeUnits[callerIndex].id);
+		const callerSource = beforeUnits[callerIndex].exactSources[0];
+		const compacted = await harness.session.compact();
+		expect(compacted.summary).toContain("Recovery compacted summary.");
+		expect(summaries.length).toBeGreaterThan(0);
+		const rebuilt = await harness.sessionManager.readBranchHistory((history) =>
+			new CanonicalContextCompiler().compile(
+				history.branchContext,
+				harness.settingsManager.getCanonicalContextLimits(),
+			),
+		);
+		const retained = getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources);
+		expect(retained).toEqual(expect.arrayContaining([result.id, callerSource]));
+	});
+
+	it("refuses manual compaction of native recovery before any containing candidate is accepted", async () => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+		const priorOutcome = harness.session.agent.getTurnOutcome;
+		harness.session.agent.getTurnOutcome = (context, signal) =>
+			context.toolResults.some((result) => result.toolCallId === "recovery_call")
+				? { kind: "finish" }
+				: (priorOutcome?.(context, signal) ?? { kind: "proceed" });
+		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
+		expect(main).toHaveLength(1); // The result exists, but no request containing it has reached acceptance.
+		const { source } = await readRecovery();
+		const checkpoint = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
+		expect(source.sequence).toBeGreaterThan(checkpoint.source.sourceSequence);
+		await expect(harness.session.compact()).rejects.toThrow(
+			"Recovery compaction requires an accepted replay contract for its selected results",
+		);
+		expect(summaries).toHaveLength(0);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([
+			main[0].epoch,
+		]);
+	});
+
+	it("continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload", async () => {
+		const model = getModel("deepseek", "deepseek-flash");
+		const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
+		let executions = 0;
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			tools: [
+				{
+					name: "deepseek_probe",
+					label: "DeepSeek probe",
+					description: "Return the fixture result.",
+					parameters: Type.Object({}),
+					execute: async () => {
+						executions++;
+						return { content: [{ type: "text", text: "TOOL_RESULT_PRESERVED" }], details: {} };
+					},
+				},
+			],
+			requestTokenBudget: {
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-deepseek-native",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://api.deepseek.com/chat/completions",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "deepseek-text-tools-fixture-v1",
+						replayFamily: "deepseek-completions",
+						contextTokens: 120000,
+						outputCeilingTokens: 393216,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+					},
+				],
+			},
+		});
+		harnesses.push(harness);
+		harness.session.modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			baseUrl: model.baseUrl,
+			apiKey: "offline-deepseek-key",
+			models: [model],
+		});
+		harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		harness.session.setActiveToolsByName(["deepseek_probe"]);
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
+		});
+		type Body = {
+			model: string;
+			messages: Array<Record<string, unknown>>;
+			max_tokens: number;
+			reasoning_effort?: string;
+			tools?: unknown[];
+		};
+		const mainBodies: Body[] = [];
+		const summaryBodies: Body[] = [];
+		const epochsAtSend: string[] = [];
+		const rawBodies: string[] = [];
+		let altered = false;
+		harness.session.agent.onPayload = (payload) => {
+			rawBodies.push(JSON.stringify(payload));
+			if (altered) {
+				const body = payload as Body;
+				return { ...body, messages: [...body.messages, { role: "user", content: "UNOWNED_PAYLOAD_CHANGE" }] };
+			}
+		};
+		// Only HTTP is offline. The real adapter, selected tool, journal and epoch owner run normally.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+			const body = JSON.parse(String(init?.body)) as Body;
+			expect(body.model).toBe(model.id);
+			expect(body.max_tokens).toBeGreaterThan(0);
+			expect(body).not.toHaveProperty("max_completion_tokens");
+			expect(body).not.toHaveProperty("input");
+			const entries = await harness.sessionManager.readEntries();
+			const admitted = entries
+				.flatMap((entry) =>
+					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+				)
+				.at(-1)!;
+			const summarizing = admitted.purpose === "summary";
+			if (summarizing) summaryBodies.push(body);
+			else {
+				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+				const checkpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024)!;
+				expect(checkpoint.replayContract).toBe("message-groups");
+				expect(admitted.contextEpoch).toEqual({
+					sessionId: harness.sessionManager.getSessionId(),
+					entryId: epoch.id,
+				});
+				// Admission and HTTP follow the existing canonical append ACK, not a predicted epoch ID.
+				epochsAtSend.push(epoch.id);
+				mainBodies.push(body);
+			}
+			const toolCall = !summarizing && mainBodies.length === 1;
+			const delta = toolCall
+				? {
+						role: "assistant",
+						reasoning_content: privateThinking,
+						tool_calls: [
+							{
+								index: 0,
+								id: "deepseek_call",
+								type: "function",
+								function: { name: "deepseek_probe", arguments: "{}" },
+							},
+						],
+					}
+				: {
+						role: "assistant",
+						reasoning_content: "Retain the result.",
+						content: summarizing ? "DeepSeek compacted summary." : "DeepSeek continuation complete.",
+					};
+			const chunk = {
+				id: `deepseek_reply_${mainBodies.length}_${summaryBodies.length}`,
+				object: "chat.completion.chunk",
+				model: model.id,
+				choices: [{ index: 0, delta, finish_reason: toolCall ? "tool_calls" : "stop" }],
+				usage: {
+					prompt_tokens: 10,
+					completion_tokens: 10,
+					total_tokens: 20,
+					prompt_cache_hit_tokens: 2,
+					prompt_cache_miss_tokens: 8,
+				},
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+
+		await harness.session.prompt("Run deepseek_probe and retain its result.");
+		expect(executions).toBe(1);
+		expect(mainBodies).toHaveLength(2);
+		expect(rawBodies).toHaveLength(2); // The public candidate does not convert or call onPayload again.
+		expect(rawBodies[1]).toContain(privateThinking);
+		expect(rawBodies[1]).toContain('"reasoning_content"');
+		expect(rawBodies[1]).toContain('"tool_calls"');
+		expect(JSON.stringify(mainBodies[1])).not.toContain("PRIVATE_DEEPSEEK_REASONING");
+		expect(JSON.stringify(mainBodies[1])).not.toContain('"tool_calls"');
+		expect(mainBodies[1].messages.some((message) => message.role === "tool")).toBe(false);
+		expect(JSON.stringify(mainBodies[1])).toContain("TOOL_RESULT_PRESERVED");
+		expect(mainBodies[1].tools).toEqual(mainBodies[0].tools);
+		expect(mainBodies.map((body) => body.reasoning_effort)).toEqual(["low", "low"]);
+		expect(epochsAtSend[1]).not.toBe(epochsAtSend[0]);
+		const qualifiedTool = await harness.sessionManager.readBranchHistory(async (history) => {
+			for await (const item of history.iterateEntries({ maxEntries: 128, maxSourceBytes: 2 * 1024 * 1024 }))
+				if (item.source.qualification === "native-tool-execution") return true;
+			return false;
+		});
+		expect(qualifiedTool).toBe(true);
+		const beforeCompaction = await harness.sessionManager.readEntries();
+		const toolAssistant = beforeCompaction.find(
+			(entry) =>
+				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "toolUse",
+		);
+		expect(toolAssistant).toMatchObject({
+			requestOutput: {
+				attemptIds: [expect.any(String)],
+				source: { sessionId: harness.sessionManager.getSessionId() },
+			},
+		});
+
+		const compacted = await harness.session.compact();
+		expect(compacted.summary).toContain("DeepSeek compacted summary.");
+		expect(summaryBodies.length).toBeGreaterThan(0);
+		const saved = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction").at(-1)!;
+		expect(saved.requestOutputs?.length).toBe(summaryBodies.length);
+		expect(readContextEpoch(saved.details, 2 * 1024 * 1024)).toBeDefined();
+		await harness.session.setThinkingLevel("medium");
+		await harness.session.prompt("Continue after the committed summary.");
+		expect(mainBodies).toHaveLength(3);
+		expect(mainBodies[2].reasoning_effort).toBe("high");
+		expect(JSON.stringify(mainBodies[2])).toContain("DeepSeek compacted summary.");
+		expect(rawBodies).toHaveLength(3);
+		expect(executions).toBe(1);
+
+		const sent = offlineFetch.mock.calls.length;
+		const accepted = epochsAtSend.at(-1)!;
+		altered = true;
+		await expect(harness.session.prompt("Do not accept a changed projection.")).rejects.toThrow(
+			"compatible final provider projection",
+		);
+		expect(rawBodies).toHaveLength(4);
+		expect(offlineFetch).toHaveBeenCalledTimes(sent);
+		expect((await harness.sessionManager.readEntries()).some((entry) => entry.id === accepted)).toBe(true);
+	});
+
+	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
+		let postAckSummary = false;
+		let extensionRequestOutputs: CompactionEntry["requestOutputs"];
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						if (!postAckSummary) return;
+						return {
+							compaction: {
+								summary: "acknowledged refresh probe",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								requestOutputs: extensionRequestOutputs,
+							},
+						};
+					});
+				},
+			],
 		});
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("one response"),
 			fauxAssistantMessage("two response"),
-			fauxAssistantMessage("model-generated summary"),
-			fauxAssistantMessage("model-generated turn summary"),
 			fauxAssistantMessage("still usable"),
 		]);
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "summary-fixture-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "summary-fixture-key");
+		const selection = {
+			provider: compactionModel.provider,
+			modelId: compactionModel.id,
+			thinkingLevel: "high" as const,
+		};
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		const detached = harness.settingsManager.getCompactionModel()!;
+		detached.modelId = "changed-getter-copy";
+		expect(harness.settingsManager.getCompactionModel()).toEqual(selection);
+		const mainModel = structuredClone(harness.session.model);
+		const mainEffort = harness.session.thinkingLevel;
+		const bodies: Array<{ model: string; reasoning: { effort: string } }> = [];
+		// Only HTTP is offline; the real adapter owns serialization, admission and receipts.
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)));
+			const text = bodies.length === 1 ? "model-generated summary" : "model-generated turn summary";
+			const item = {
+				type: "message",
+				id: `msg_summary_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text, annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_summary_${bodies.length}`,
+						model: compactionModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 10,
+							output_tokens: 1,
+							total_tokens: 11,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
-		const usageBeforeCompaction = harness.session.getOwnUsageSummary();
+		const readOwnUsage = async () => {
+			const eager = vi.spyOn(harness.sessionManager, "getEntries").mockImplementation(() => {
+				throw new Error("Own usage must read captured source history");
+			});
+			try {
+				return await harness.session.getOwnUsageSummary();
+			} finally {
+				eager.mockRestore();
+			}
+		};
+		const usageBeforeCompaction = await readOwnUsage();
+		const repeatedUsage = await readOwnUsage();
+		expect(repeatedUsage).toEqual(usageBeforeCompaction);
+		if (repeatedUsage) repeatedUsage.cost = -1;
+		expect(await readOwnUsage()).toEqual(usageBeforeCompaction);
+		const sourceError = new Error("Own usage source callback failed");
+		const originalSourceRead = harness.sessionManager.readSourceHistory.bind(harness.sessionManager);
+		const sourceRead = vi.spyOn(harness.sessionManager, "readSourceHistory").mockImplementationOnce(() =>
+			originalSourceRead(async () => {
+				throw sourceError;
+			}),
+		);
+		try {
+			await expect(readOwnUsage()).rejects.toBe(sourceError);
+		} finally {
+			sourceRead.mockRestore();
+		}
 
+		const sourceSessionId = harness.sessionManager.getSessionId();
+		const sourceLeafId = harness.sessionManager.getLeafId();
+		const originalBind = harness.sessionManager.bindCompactionSink.bind(harness.sessionManager);
+		let branchReads = 0;
+		const bound = vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((limits) => {
+			const sink = originalBind(limits);
+			const read = sink.readBranch.bind(sink);
+			vi.spyOn(sink, "readBranch").mockImplementation(() => {
+				branchReads++;
+				if (branchReads === 1) {
+					harness.settingsManager.applyOverrides({
+						compaction: { model: { ...selection, modelId: "changed-after-capture", thinkingLevel: "low" } },
+					});
+				}
+				return read();
+			});
+			return sink;
+		});
+		const captures = vi.spyOn(InferenceCoordinator.prototype, "capture");
 		const result = await harness.session.compact();
-		const entry = harness.sessionManager.getEntries().find((candidate) => candidate.type === "compaction");
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
+		expect(offlineFetch).toHaveBeenCalledTimes(2);
+		expect(bodies).toEqual([
+			expect.objectContaining({ model: compactionModel.id, reasoning: expect.objectContaining({ effort: "high" }) }),
+			expect.objectContaining({ model: compactionModel.id, reasoning: expect.objectContaining({ effort: "high" }) }),
+		]);
+		const receipts: RequestJournalEntry[] = [];
+		for await (const { entry: record } of readSessionJournal(harness.sessionManager.getSessionFile()!)) {
+			const entry = record as RequestJournalEntry;
+			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+		}
+		expect(receipts).toHaveLength(2);
+		for (const { request } of receipts) {
+			expect(request).toMatchObject({
+				purpose: "summary",
+				owner: { sessionId: sourceSessionId },
+				source: { sessionId: sourceSessionId, leafId: sourceLeafId },
+				modelContract: { provider: compactionModel.provider, model: compactionModel.id },
+				receipt: { api: compactionModel.api, model: compactionModel.id, effort: "high", outcome: "completed" },
+			});
+		}
+		expect(bound).toHaveBeenCalledOnce();
+		expect(branchReads).toBe(1);
+		expect(captures).toHaveBeenCalledWith(bound.mock.results[0].value);
+		const entry = (await harness.sessionManager.readEntries()).find((candidate) => candidate.type === "compaction");
+		if (!entry || entry.type !== "compaction" || !entry.requestOutputs)
+			throw new Error("Expected native compaction request links");
+		expect(entry.requestOutputs.map((output) => output.part).sort()).toEqual(["history", "turn-prefix"]);
+		for (const output of entry.requestOutputs) {
+			const purposeDetail = output.part === "history" ? "compaction" : "compaction-turn-prefix";
+			const request = receipts.find(({ request }) => request.purposeDetail === purposeDetail)?.request;
+			if (!request) throw new Error("Expected the recorded summary request");
+			// This fixture admits one attempt per actual history/prefix request, without retries.
+			expect(output).toEqual({
+				part: output.part,
+				operationId: request.operationId,
+				attemptIds: [request.attemptId],
+				source: request.source,
+			});
+		}
+		const originalRequestOutputs = structuredClone(entry.requestOutputs);
+		extensionRequestOutputs = structuredClone(originalRequestOutputs);
+		expect(JSON.stringify(bodies)).not.toContain("requestOutputs");
 
 		expect(result.summary).toContain("model-generated summary");
 		expect(result.tokensBefore).toBeGreaterThan(0);
@@ -169,16 +970,21 @@ describe("AgentSession compaction characterization", () => {
 		expect(compactionUsage.input).toBeGreaterThan(0);
 		expect(compactionUsage.output).toBeGreaterThan(0);
 		// Own spend grows by exactly what the compaction entry recorded.
-		const ownUsage = harness.session.getOwnUsageSummary();
+		const ownUsage = await readOwnUsage();
 		expect((ownUsage?.inputTokens ?? 0) - (usageBeforeCompaction?.inputTokens ?? 0)).toBe(
 			compactionUsage.input + compactionUsage.cacheRead + compactionUsage.cacheWrite,
 		);
 		expect((ownUsage?.outputTokens ?? 0) - (usageBeforeCompaction?.outputTokens ?? 0)).toBe(compactionUsage.output);
 		expect((ownUsage?.cost ?? 0) - (usageBeforeCompaction?.cost ?? 0)).toBeCloseTo(compactionUsage.cost.total);
-		expect(harness.session.messages[0]).toMatchObject({
+		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: TASK_FRAME_CUSTOM_TYPE });
+		const literalMessages = harness.session.messages.filter(
+			(message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE,
+		);
+		expect(literalMessages[0]).toMatchObject({
 			role: "compactionSummary",
 			summary: expect.stringContaining("model-generated summary"),
 		});
+		expect(literalMessages[0]).not.toHaveProperty("requestOutputs");
 		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "manual" })]);
 		expect(harness.eventsOfType("compaction_end")).toEqual([
 			expect.objectContaining({
@@ -190,10 +996,125 @@ describe("AgentSession compaction characterization", () => {
 		]);
 
 		await harness.session.prompt("after compaction");
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
+		expect(offlineFetch).toHaveBeenCalledTimes(2);
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "text", text: "still usable" }],
 		});
+
+		// A real canonical append ACK followed by a failed bootstrap is not a failed append or usable projection.
+		const countBeforeSetupFailure = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "compaction",
+		).length;
+		const startsBeforeSetupFailure = harness.eventsOfType("compaction_start").length;
+		const refreshError = new Error("post-ACK compaction refresh failed");
+		const append = harness.sessionManager.appendCompaction.bind(harness.sessionManager);
+		let committedEntryId: string | undefined;
+		let restoreRefresh: (() => void) | undefined;
+		const appendProbe = vi
+			.spyOn(harness.sessionManager, "appendCompaction")
+			.mockImplementationOnce(async (...args) => {
+				const id = await append(...args);
+				committedEntryId = id;
+				const refresh = vi.spyOn(harness.sessionManager, "readBranchHistory").mockRejectedValueOnce(refreshError);
+				restoreRefresh = () => refresh.mockRestore();
+				return id;
+			});
+		const finish = vi.spyOn(harness.session.semanticEdges, "finishCompaction");
+		const continueAgent = vi.spyOn(harness.session.agent, "continue");
+		postAckSummary = true;
+		try {
+			const error = await harness.session.compact().then(
+				() => undefined,
+				(failure: unknown) => failure,
+			);
+			expect(error).toBeInstanceOf(CompactionCommittedError);
+			const committed = error as CompactionCommittedError;
+			expect(committed.entryId).toBe(committedEntryId);
+			expect(committed.result.summary).toBe("acknowledged refresh probe");
+			expect(committed.cause).toBe(refreshError);
+			await expect(harness.session.compact()).rejects.toBe(committed);
+			expect(appendProbe).toHaveBeenCalledOnce();
+			const extensionEntry = await harness.sessionManager.readEntry(committed.entryId);
+			expect(extensionEntry).toMatchObject({
+				id: committed.entryId,
+				type: "compaction",
+				summary: committed.result.summary,
+			});
+			expect(extensionEntry).not.toHaveProperty("requestOutputs");
+			expect(await harness.sessionManager.readEntry(entry.id)).toMatchObject({
+				requestOutputs: originalRequestOutputs,
+			});
+			expect(
+				(await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction"),
+			).toHaveLength(countBeforeSetupFailure + 1);
+			expect(finish.mock.calls.map(([, status]) => status)).toEqual(["completed"]);
+			expect(harness.eventsOfType("compaction_start")).toHaveLength(startsBeforeSetupFailure + 1);
+			expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+				result: committed.result,
+				errorMessage: committed.message,
+				errorSeverity: "error",
+				willRetry: false,
+			});
+			expect(continueAgent).not.toHaveBeenCalled();
+		} finally {
+			postAckSummary = false;
+			restoreRefresh?.();
+			appendProbe.mockRestore();
+			finish.mockRestore();
+			continueAgent.mockRestore();
+		}
+
+		// These are storage arguments, not a physical provider usage receipt.
+		const branchBeforeAdmission = await harness.sessionManager.readBranch();
+		const firstKept = branchBeforeAdmission.find((candidate) => candidate.type === "message");
+		if (!firstKept) throw new Error("Expected a real message for bound append admission");
+		const details = { readFiles: ["Before.ts"], nested: { text: "before source wait" } };
+		const usage: Usage = {
+			input: 7,
+			output: 3,
+			cacheRead: 2,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0.7, output: 0.3, cacheRead: 0.2, cacheWrite: 0, total: 1.2 },
+		};
+		const originalDetails = structuredClone(details);
+		const originalUsage = structuredClone(usage);
+		const admitted = harness.sessionManager.bindCompactionSink();
+		admitted.retain();
+		try {
+			const reading = admitted.readBranch();
+			const appending = admitted.appendCompaction(
+				"bound argument snapshot",
+				firstKept.id,
+				64,
+				details,
+				false,
+				undefined,
+				usage,
+			);
+			details.readFiles[0] = "After.ts";
+			details.nested.text = "mutated before the first await";
+			usage.input = 700;
+			usage.cost.input = 70;
+			const releasing = admitted.release();
+			const [entryId, readBranch] = await Promise.all([appending, reading, releasing]);
+			expect(readBranch).toEqual(branchBeforeAdmission);
+			const genericEntry = await harness.sessionManager.readEntry(entryId);
+			expect(genericEntry).toMatchObject({
+				type: "compaction",
+				summary: "bound argument snapshot",
+				firstKeptEntryId: firstKept.id,
+				details: originalDetails,
+				usage: originalUsage,
+			});
+			expect(genericEntry).not.toHaveProperty("requestOutputs");
+		} finally {
+			await admitted.release();
+		}
 	});
 
 	it("renders an executing /compact as activity instead of queued work", async () => {
@@ -333,13 +1254,22 @@ describe("AgentSession compaction characterization", () => {
 	it("waits for active auto-compaction before continuing", async () => {
 		const compactionStarted = createDeferred();
 		const compactionRelease = createDeferred();
+		let staleCompactionStarted: (() => void) | undefined;
+		let staleCompactionRelease: Promise<void> | undefined;
+		let staleBranchIds: string[] = [];
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			persistSession: true,
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => {
 						compactionStarted.resolve();
 						await compactionRelease.promise;
+						if (staleCompactionStarted) {
+							staleBranchIds = event.branchEntries.map((entry) => entry.id);
+							staleCompactionStarted();
+							await staleCompactionRelease;
+						}
 						return {
 							compaction: {
 								summary: "summary from extension",
@@ -373,6 +1303,95 @@ describe("AgentSession compaction characterization", () => {
 		await compaction;
 		await harness.session.waitForHeadlessIdle();
 		expect(continueAgent).toHaveBeenCalledTimes(1);
+
+		// Extend the existing held-hook case without another provider/summary response.
+		const before = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction");
+		await harness.sessionManager.appendMessage({ role: "user", content: "Prepare stale summary", timestamp: 3 });
+		const keptId = await harness.sessionManager.appendMessage({
+			role: "user",
+			content: "Keep exact input",
+			timestamp: 4,
+		});
+		const staleStarted = createDeferred();
+		const staleRelease = createDeferred();
+		staleCompactionStarted = () => staleStarted.resolve();
+		staleCompactionRelease = staleRelease.promise;
+		const stale = internals._runAutoCompaction("threshold", false);
+		let lateId: string;
+		try {
+			await staleStarted.promise;
+			lateId = await harness.sessionManager.appendMessage({
+				role: "user",
+				content: "Later source input",
+				timestamp: 5,
+			});
+			expect(staleBranchIds).toContain(keptId);
+			expect(staleBranchIds).not.toContain(lateId);
+		} finally {
+			staleRelease.resolve();
+			await stale;
+			staleCompactionStarted = undefined;
+			staleCompactionRelease = undefined;
+		}
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+			before,
+		);
+		expect(await harness.sessionManager.readEntry(lateId!)).toMatchObject({
+			type: "message",
+			message: { role: "user", content: "Later source input" },
+		});
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			result: undefined,
+			errorMessage: expect.stringContaining("Compaction source or branch changed"),
+		});
+		// Established auto-failure outcome records may still follow that input; do not claim a frozen leaf.
+
+		// Public selection away/back invalidates this in-memory candidate even when the leaf is restored.
+		const aba = harness.sessionManager.bindCompactionSink();
+		aba.retain();
+		try {
+			const source = await aba.source;
+			const branch = await aba.readBranch();
+			const away = branch.find((entry) => entry.id !== source.leafId);
+			const firstKept = branch.find((entry) => entry.type === "message");
+			if (!source.leafId || !away || !firstKept) throw new Error("Expected real source selections for ABA");
+			await harness.sessionManager.branchTo(away.id);
+			await harness.sessionManager.branchTo(source.leafId);
+			expect(harness.sessionManager.getLeafId()).toBe(source.leafId);
+			await expect(aba.appendCompaction("stale ABA summary", firstKept.id, 1)).rejects.toThrow(
+				"Compaction source or branch changed",
+			);
+			expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+				before,
+			);
+		} finally {
+			await aba.release();
+		}
+
+		const captured = harness.sessionManager.bindCompactionSink();
+		captured.retain();
+		try {
+			const source = await captured.source;
+			const branch = await captured.readBranch();
+			const firstKept = branch.find((entry) => entry.type === "message");
+			if (!firstKept) throw new Error("Expected a real captured source message");
+			await harness.sessionManager.newSession();
+			expect(harness.sessionManager.getSessionId()).not.toBe(source.sessionId);
+			expect(await captured.readBranch()).toEqual(branch);
+			await expect(captured.appendCompaction("stale source summary", firstKept.id, 1)).rejects.toThrow(
+				"Compaction source or branch changed",
+			);
+			expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual(
+				[],
+			);
+		} finally {
+			await captured.release();
+		}
+		await expect(captured.readBranch()).rejects.toThrow("Captured request sink is not retained");
+		await expect(captured.appendCompaction("released source summary", keptId, 1)).rejects.toThrow(
+			"Captured request sink is not retained",
+		);
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([]);
 	});
 
 	it("treats session-owned queued inputs as queued work after compaction", async () => {
@@ -515,16 +1534,65 @@ describe("AgentSession compaction characterization", () => {
 	it("throws when compacting without a model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
-		harness.session.agent.state.model = undefined as unknown as Model<any>;
+		harness.session.agent.state.model = undefined as unknown as Model<string>;
 
 		await expect(harness.session.compact()).rejects.toThrow("No model selected");
 	});
 
 	it("throws when compacting without configured auth", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
+		const harness = await createHarness({
+			withConfiguredAuth: false,
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+			requestTokenBudget: { mode: "enforce", profiles: [] },
+		});
 		harnesses.push(harness);
 
 		await expect(harness.session.compact()).rejects.toThrow(`No API key found for ${harness.getModel().provider}.`);
+
+		const mainModel = structuredClone(harness.session.model);
+		const mainEffort = harness.session.thinkingLevel;
+		harness.session.modelRegistry.registerProvider(compactionModel.provider, {
+			api: compactionModel.api,
+			baseUrl: compactionModel.baseUrl,
+			apiKey: "summary-fixture-key",
+			models: [compactionModel],
+		});
+		harness.authStorage.setRuntimeApiKey(compactionModel.provider, "summary-fixture-key");
+		const selection = {
+			provider: compactionModel.provider,
+			modelId: compactionModel.id,
+			thinkingLevel: "high" as const,
+		};
+		harness.settingsManager.applyOverrides({
+			compaction: { model: { ...selection, modelId: "missing-summary-model" } },
+		});
+		const auth = vi.spyOn(harness.session.modelRegistry, "getApiKeyAndHeaders");
+		const bind = vi.spyOn(harness.sessionManager, "bindCompactionSink");
+		await expect(harness.session.compact()).rejects.toThrow(
+			`Unknown compaction.model ${compactionModel.provider}/missing-summary-model`,
+		);
+		expect(auth).not.toHaveBeenCalled();
+		expect(bind).not.toHaveBeenCalled();
+		auth.mockRestore();
+		bind.mockRestore();
+
+		// A known explicit model still requires its own covered route profile.
+		harness.settingsManager.applyOverrides({ compaction: { model: selection } });
+		await harness.sessionManager.appendMessage({ role: "user", content: "Summarize this input", timestamp: 1 });
+		await harness.sessionManager.appendMessage({ role: "user", content: "Keep this input", timestamp: 2 });
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unprofiled request sent"));
+		await (harness.session as unknown as SessionWithCompactionInternals)._runAutoCompaction("requested", false);
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "requested",
+			result: undefined,
+			errorMessage: expect.stringContaining(
+				"Request token budget unknown: exact explicit route/model profile unavailable or ambiguous",
+			),
+		});
+		expect(offlineFetch).not.toHaveBeenCalled();
+		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([]);
+		expect(harness.session.model).toEqual(mainModel);
+		expect(harness.session.thinkingLevel).toBe(mainEffort);
 	});
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {
@@ -750,7 +1818,7 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("ignores stale pre-compaction assistant usage on pre-prompt checks", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ persistSession: true, settings: { compaction: { enabled: true } } });
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const staleTimestamp = Date.now() - 10_000;
@@ -760,21 +1828,20 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: staleTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		const firstKeptEntryId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: staleTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(staleAssistant);
-		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendMessage(staleAssistant);
+		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			staleAssistant.usage.totalTokens,
 			undefined,
 			false,
 		);
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "after compaction" }],
 			timestamp: Date.now(),
@@ -784,6 +1851,16 @@ describe("AgentSession compaction characterization", () => {
 
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
+		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		const originalLimits = harness.settingsManager.getCanonicalContextLimits();
+		harness.settingsManager.applyOverrides({ canonicalContext: { ...originalLimits, maxSourceBytes: 1 } });
+		try {
+			await expect(sessionInternals._checkCompaction(staleAssistant, false)).rejects.toThrow(
+				"Compaction bootstrap source byte budget exceeded",
+			);
+		} finally {
+			harness.settingsManager.applyOverrides({ canonicalContext: originalLimits });
+		}
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
 
@@ -940,7 +2017,7 @@ describe("AgentSession compaction characterization", () => {
 		const oldMessages: AgentMessage[] = [oldUser, oldAssistant];
 		const messages: AgentMessage[] = [currentUser, successfulAssistant, toolResult];
 		for (const message of [oldUser, oldAssistant, currentUser, successfulAssistant]) {
-			harness.sessionManager.appendMessage(message);
+			await harness.sessionManager.appendMessage(message);
 		}
 		harness.session.agent.state.messages = [...oldMessages, ...messages];
 
@@ -1236,7 +2313,7 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now() - 1000,
 		} satisfies Parameters<typeof harness.sessionManager.appendMessage>[0];
 		for (const message of [oldUser, oldAssistant, currentUser, successfulAssistant]) {
-			harness.sessionManager.appendMessage(message);
+			await harness.sessionManager.appendMessage(message);
 		}
 		harness.session.agent.state.messages = [oldUser, oldAssistant, currentUser, successfulAssistant, toolResult];
 
@@ -1404,7 +2481,7 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("does not trigger threshold compaction when only kept pre-compaction usage exists", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ persistSession: true, settings: { compaction: { enabled: true } } });
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const preCompactionTimestamp = Date.now() - 10_000;
@@ -1414,14 +2491,13 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: preCompactionTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		const firstKeptEntryId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: preCompactionTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(keptAssistant);
-		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendMessage(keptAssistant);
+		const compactionId = await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			keptAssistant.usage.totalTokens,
@@ -1429,21 +2505,34 @@ describe("AgentSession compaction characterization", () => {
 			false,
 		);
 
+		const compactionTimestamp = new Date(harness.sessionManager.getEntry(compactionId)!.timestamp).getTime();
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
 			errorMessage: "529 overloaded",
-			timestamp: Date.now(),
+			timestamp: compactionTimestamp + 2,
 		});
 		harness.session.agent.state.messages = [
 			{ role: "user", content: [{ type: "text", text: "kept user" }], timestamp: preCompactionTimestamp - 1000 },
 			keptAssistant,
-			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
+			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: compactionTimestamp + 1 },
 			errorAssistant,
 		];
 
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
 
 		await sessionInternals._checkCompaction(errorAssistant);
+		expect(
+			await sessionInternals._thresholdCompactionNeeded({
+				message: errorAssistant,
+				toolResults: [],
+				context: {
+					systemPrompt: harness.session.systemPrompt,
+					messages: harness.session.agent.state.messages,
+					tools: [],
+				},
+				newMessages: [errorAssistant],
+			}),
+		).toBe(false);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
 	});
@@ -1473,7 +2562,7 @@ describe("AgentSession compaction characterization", () => {
 		expect(disabledSpy).not.toHaveBeenCalled();
 	});
 
-	it("rolls back failed outcome persistence without breaking the persisted branch", async () => {
+	it("keeps failed outcome persistence out of the branch until explicit recovery", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("persisted response")]);
@@ -1483,14 +2572,14 @@ describe("AgentSession compaction characterization", () => {
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		const persistedLeafId = harness.sessionManager.getLeafId();
 		const persistedEntries = harness.sessionManager.getEntries();
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
+		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockImplementationOnce(async () => {
 			appendFileSync(sessionFile, '{"type":"custom_message"');
-			throw new Error("disk full");
+			throw new Error("injected append acknowledgement failure");
 		});
 
-		expect(() =>
+		await expect(
 			internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed"),
-		).not.toThrow();
+		).resolves.toBeUndefined();
 		// The live outcome message discloses that it was not saved.
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "custom",
@@ -1498,13 +2587,16 @@ describe("AgentSession compaction characterization", () => {
 			content: expect.stringContaining("could not be saved to session history"),
 			details: { reason: "requested", outcome: "failed" },
 		});
-		// In-memory state is fully rolled back: no outcome entry, same leaf and entries.
+		// No unacknowledged outcome is published: same leaf and entries.
 		expect(harness.sessionManager.getLeafId()).toBe(persistedLeafId);
 		expect(harness.sessionManager.getEntries()).toEqual(persistedEntries);
 
-		// The next append attaches to the persisted leaf and rewrites a coherent file.
-		const nextId = harness.sessionManager.appendCustomEntry("after_failed_outcome");
-		const reloaded = SessionManager.open(sessionFile);
+		await expect(harness.sessionManager.appendCustomEntry("blocked_before_recovery")).rejects.toThrow(
+			"outcome may be unknown",
+		);
+		await harness.sessionManager.recover();
+		const nextId = await harness.sessionManager.appendCustomEntry("after_failed_outcome");
+		const reloaded = await SessionManager.openReadOnly(sessionFile);
 		expect(reloaded.getEntry(nextId)?.parentId).toBe(persistedLeafId);
 		expect(reloaded.getBranch().map((entry) => entry.id)).toEqual(
 			harness.sessionManager.getBranch().map((entry) => entry.id),
@@ -1513,7 +2605,7 @@ describe("AgentSession compaction characterization", () => {
 			expect.objectContaining({ type: "custom_message", customType: "compaction_outcome" }),
 		);
 		// The unpersisted disclosure survives context rebuilds (e.g. thinking toggle).
-		const rebuilt = harness.session.buildSessionContext();
+		const rebuilt = await harness.session.buildSessionContext();
 		expect(rebuilt.messages.at(-1)).toMatchObject({
 			role: "custom",
 			customType: "compaction_outcome",
@@ -1524,7 +2616,7 @@ describe("AgentSession compaction characterization", () => {
 		await new Promise((resolve) => setTimeout(resolve, 5));
 		harness.setResponses([fauxAssistantMessage("later response")]);
 		await harness.session.prompt("later turn");
-		const reordered = harness.session.buildSessionContext().messages;
+		const reordered = (await harness.session.buildSessionContext()).messages;
 		const outcomeIndex = reordered.findIndex(
 			(message) => message.role === "custom" && message.customType === "compaction_outcome",
 		);
@@ -1558,10 +2650,11 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("two");
 
 		const internals = harness.session as unknown as SessionWithCompactionInternals;
-		vi.spyOn(harness.sessionManager, "_persist").mockImplementationOnce(() => {
-			throw new Error("disk full");
-		});
-		internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockRejectedValueOnce(
+			new Error("injected append acknowledgement failure"),
+		);
+		await internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed");
+		await harness.sessionManager.recover();
 
 		// Compaction reloads agent.state.messages from the session file; the
 		// memory-only disclosure must survive.

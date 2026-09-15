@@ -1,7 +1,7 @@
 import { lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -100,6 +100,11 @@ afterEach(() => {
 });
 
 describe("telemetry identity and transport", () => {
+	beforeEach(() => {
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY_ENDPOINT", "https://analytics.example.test/events");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY_API_KEY", "analytics-only-key");
+	});
+
 	it("creates a private stable installation ID", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-telemetry-"));
 		const randomId = uuidGenerator();
@@ -146,7 +151,7 @@ describe("telemetry identity and transport", () => {
 		expect(lstatSync(telemetryPath).isSymbolicLink()).toBe(true);
 	});
 
-	it("batches events through the configured Prime endpoint", async () => {
+	it("batches events only through the explicit analytics endpoint and credential", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-telemetry-"));
 		const requests: Array<{ url: string; init: RequestInit }> = [];
 		const fetchMock: typeof fetch = async (input, init) => {
@@ -156,6 +161,7 @@ describe("telemetry identity and transport", () => {
 		const client = new TelemetryClient({
 			agentDir,
 			endpoint: "https://api.example.test/api/v1/agent-analytics/events",
+			apiKey: "dedicated-export-key",
 			fetch: fetchMock,
 			randomId: uuidGenerator(),
 			now: () => Date.UTC(2026, 6, 23),
@@ -169,6 +175,8 @@ describe("telemetry identity and transport", () => {
 
 		expect(requests).toHaveLength(1);
 		expect(requests[0].url).toBe("https://api.example.test/api/v1/agent-analytics/events");
+		expect(new Headers(requests[0].init.headers).get("authorization")).toBe("Bearer dedicated-export-key");
+		expect(requests[0].init.redirect).toBe("error");
 		const body = JSON.parse(String(requests[0].init.body)) as {
 			installation_id: string;
 			events: TelemetryEvent[];
@@ -233,6 +241,25 @@ describe("telemetry identity and transport", () => {
 });
 
 describe("telemetry controls", () => {
+	it("defaults off and cannot export with provider credentials or an endpoint alone", async () => {
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY_ENDPOINT", "");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY_API_KEY", "");
+		vi.stubEnv("PRIME_API_KEY", "provider-only-key");
+		expect(isTelemetryEnabled(SettingsManager.inMemory())).toBe(false);
+		const fetchMock = vi.fn<typeof fetch>();
+		for (const endpoint of [undefined, "https://analytics.example.test/events"]) {
+			const client = new TelemetryClient({
+				agentDir: mkdtempSync(join(tmpdir(), "base-context-telemetry-")),
+				endpoint,
+				fetch: fetchMock,
+			});
+			client.capture("agent started", {});
+			await client.flush();
+		}
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
 	it("honors settings and environment opt-outs", () => {
 		const settings = SettingsManager.inMemory({ telemetry: { enabled: true } });
 
@@ -243,11 +270,11 @@ describe("telemetry controls", () => {
 		expect(isTelemetryEnabled(settings)).toBe(false);
 
 		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "0");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "0");
 		expect(isTelemetryEnabled(settings)).toBe(false);
 
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
-		vi.stubEnv("PI_OFFLINE", "true");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_OFFLINE", "true");
 		expect(isTelemetryEnabled(settings)).toBe(false);
 	});
 
@@ -273,7 +300,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("captures only allowlisted built-in command names", async () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
 
 		await captureAgentCommandUsed({
@@ -300,7 +327,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("captures onboarding completion with categorized auth and provider data", async () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
 
 		await captureOnboardingCompleted({
@@ -329,7 +356,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("emits aggregate metrics without message or tool content", () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		let timestamp = 1_000;
 		const now = () => timestamp;
 		const randomId = uuidGenerator();
@@ -422,7 +449,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("waits for post-run compaction before finalizing run metrics", () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
 		const fakeSession = new FakeAgentSession();
 
@@ -455,7 +482,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("keeps automatic retries in one completed run", () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
 		const fakeSession = new FakeAgentSession();
 
@@ -492,7 +519,7 @@ describe("agent telemetry aggregation", () => {
 	});
 
 	it("awaits the final telemetry flush during async session disposal", async () => {
-		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
+		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
 		const sink = new FakeTelemetrySink();
 		const fakeSession = new FakeAgentSession();
 		let releaseFlush: () => void = () => {};

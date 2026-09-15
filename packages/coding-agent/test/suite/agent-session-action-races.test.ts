@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../src/core/messages.js";
 import type { ActionStore, SessionAction } from "../../src/core/session-action-store.js";
@@ -50,8 +50,8 @@ function createContextMessage(content: string): CustomMessage {
 describe("AgentSession action commit-fence races", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
-		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	afterEach(async () => {
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
 	it.each([

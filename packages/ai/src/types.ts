@@ -1,5 +1,10 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
+import type {
+	ProviderRequestProjection,
+	ProviderRequestRepresentation,
+	RequestTokenAssessment,
+} from "./utils/request-token-budget.js";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.js";
 
@@ -75,6 +80,88 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+export type ProviderAttemptKind = "initial" | "retry" | "transport-fallback" | "transport-continuation";
+export type ProviderAttemptOutcome = "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
+/** Partial includes incomplete or inconsistent token reports. Complete does not imply known pricing or every cache breakdown. */
+export type ProviderUsageCompleteness = "none" | "partial" | "complete";
+
+/** Provider-facing facts only. The embedding runtime owns operation, source and owner identities. */
+export interface ProviderAttemptInfo {
+	readonly api: Api;
+	readonly provider: Provider;
+	readonly model: string;
+	readonly transport: "http" | "websocket";
+	/** Physical ordinal within this adapter stream, not a policy retry or capacity counter. */
+	readonly ordinal: number;
+	readonly kind: ProviderAttemptKind;
+	readonly previousResponseId?: string;
+	readonly effort?: string;
+	readonly serviceTier?: string | null;
+	/** Request-local budget facts, never provider prompt content. */
+	readonly requestBudget?: RequestTokenAssessment;
+}
+
+/** Only observed or derivable token fields are present. Missing fields are not zero. */
+export interface ProviderAttemptUsage {
+	/** Non-cached input tokens. Omitted when the provider exposes only an unsplit input total. */
+	input?: number;
+	/** Total input tokens, including cache reads/writes when the provider reports them as input. */
+	inputTotal?: number;
+	/** Output tokens, including reasoning tokens when the provider counts those separately. */
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+	totalTokens?: number;
+}
+
+/** Unix timestamps in milliseconds. Absent clocks were not observed. */
+export interface ProviderAttemptTiming {
+	readonly queuedAt: number;
+	readonly admittedAt: number;
+	/** Transport invocation time, not confirmation that the provider received it. */
+	readonly sentAt?: number;
+	readonly firstEventAt?: number;
+	readonly firstContentAt?: number;
+	readonly lastEventAt?: number;
+	readonly settledAt: number;
+}
+
+/** A physical outcome, independent from whether its output is committed by the caller. */
+export interface ProviderAttemptReceipt extends ProviderAttemptInfo {
+	readonly attemptId: string;
+	readonly outcome: ProviderAttemptOutcome;
+	/** Exact provider confirmation: "Selected model is at capacity." Never inferred from HTTP status. */
+	readonly capacityConfirmed?: true;
+	readonly status?: number;
+	readonly providerRequestId?: string;
+	readonly providerResponseId?: string;
+	readonly responseModel?: string;
+	/** Snapshots of explicitly observed vendor usage objects, never full response payloads. */
+	readonly rawUsage: readonly unknown[];
+	readonly usage: Readonly<ProviderAttemptUsage>;
+	readonly usageCompleteness: ProviderUsageCompleteness;
+	readonly timing: ProviderAttemptTiming;
+	readonly effectiveEffort?: string;
+	readonly effectiveServiceTier?: string | null;
+}
+
+/** Optional for SDK embeddings. Built-in adapters await both callbacks in their producer lifecycle. */
+export interface ProviderAttemptObserver {
+	/** Owned source plan only. These original groups require actual public conversion before admission. */
+	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
+	/** Optional native pre-send budget gate. It does not admit a physical attempt. */
+	measureRequest?(request: ProviderRequestRepresentation): RequestTokenAssessment | undefined;
+	/** Optional native epoch-boundary selection; resolution means the owner accepted the candidate. */
+	prepareRequest?(
+		request: ProviderRequestRepresentation,
+		projection: ProviderRequestProjection,
+	): Promise<string | undefined>;
+	/** Persist admission and return its local ID before the physical transport sends. */
+	admit(info: ProviderAttemptInfo): Promise<string>;
+	/** Persist settlement even when the assistant stream has no remaining listener. */
+	settle(receipt: ProviderAttemptReceipt): Promise<void>;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
@@ -107,6 +194,10 @@ export interface StreamOptions {
 	 * its body stream is consumed.
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+	/** Physical-attempt admission and settlement. Custom adapters must implement this capability to report coverage. */
+	attempts?: ProviderAttemptObserver;
+	/** Native owners require a known instrumented implementation; this is a constraint, not a trust claim. */
+	requireProviderAttempts?: boolean;
 	/**
 	 * Optional custom HTTP headers to include in API requests.
 	 * Merged with provider defaults; can override default headers.
@@ -331,7 +422,7 @@ export interface OpenAICompletionsCompat {
 export interface OpenAIResponsesCompat {
 	/** Whether to send the OpenAI `session_id` cache-affinity header from `options.sessionId` when caching is enabled. Default: true. */
 	sendSessionIdHeader?: boolean;
-	/** Whether the provider supports `prompt_cache_retention: "24h"`. Default: true. */
+	/** Whether the provider supports `prompt_cache_retention: "24h"`. Defaults on for the resolved official OpenAI Responses endpoint, off for other routes. Explicit values override this default. */
 	supportsLongCacheRetention?: boolean;
 }
 

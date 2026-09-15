@@ -2,15 +2,15 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { arch, platform } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
 import { detectInstallMethod, VERSION } from "../config.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.js";
 import type { AgentExecutionMode } from "./agent-session-config.js";
 import type { AuthCredential, AuthStatus } from "./auth-storage.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { isBuiltinSlashCommandName, resolveBuiltinSlashCommandName } from "./slash-commands.js";
 
-const DEFAULT_TELEMETRY_ENDPOINT = "https://api.primeintellect.ai/api/v1/agent-analytics/events";
 const TELEMETRY_STATE_FILE = "telemetry.json";
 const TELEMETRY_STATE_VERSION = 1;
 const DEFAULT_BATCH_SIZE = 10;
@@ -66,6 +66,8 @@ interface TelemetryState {
 interface TelemetryClientOptions {
 	agentDir: string;
 	endpoint?: string;
+	/** Dedicated analytics credential; provider inference keys are never reused. */
+	apiKey?: string;
 	fetch?: typeof fetch;
 	now?: () => number;
 	randomId?: () => string;
@@ -202,13 +204,13 @@ function parseBooleanOverride(value: string | undefined): boolean | undefined {
 }
 
 export function isTelemetryEnabled(settingsManager: SettingsManager): boolean {
-	if (parseBooleanOverride(process.env.PI_OFFLINE) === true) {
+	if (parseBooleanOverride(process.env.BASE_CONTEXT_OFFLINE) === true) {
 		return false;
 	}
 	if (parseBooleanOverride(process.env.DO_NOT_TRACK) === true) {
 		return false;
 	}
-	const override = parseBooleanOverride(process.env.PRIME_AGENT_TELEMETRY);
+	const override = parseBooleanOverride(process.env.BASE_CONTEXT_TELEMETRY);
 	if (override !== undefined) {
 		return override;
 	}
@@ -252,7 +254,7 @@ function writeTelemetryStateAtomically(path: string, state: TelemetryState): voi
 }
 
 export function getOrCreateTelemetryInstallationId(agentDir: string, randomId: () => string = randomUUID): string {
-	const path = join(agentDir, TELEMETRY_STATE_FILE);
+	const path = assertProductStatePath(join(agentDir, TELEMETRY_STATE_FILE));
 	let replaceInvalidState = false;
 	try {
 		const stats = lstatSync(path);
@@ -307,7 +309,8 @@ export function getOrCreateTelemetryInstallationId(agentDir: string, randomId: (
 }
 
 export class TelemetryClient implements TelemetrySink {
-	private readonly endpoint: string;
+	private readonly endpoint: string | undefined;
+	private readonly apiKey: string | undefined;
 	private readonly fetchImpl: typeof fetch;
 	private readonly now: () => number;
 	private readonly randomId: () => string;
@@ -321,7 +324,9 @@ export class TelemetryClient implements TelemetrySink {
 	private disabled = false;
 
 	constructor(private readonly options: TelemetryClientOptions) {
-		this.endpoint = options.endpoint ?? process.env.PRIME_AGENT_TELEMETRY_ENDPOINT ?? DEFAULT_TELEMETRY_ENDPOINT;
+		this.endpoint = (options.endpoint ?? process.env.BASE_CONTEXT_TELEMETRY_ENDPOINT)?.trim() || undefined;
+		this.apiKey = (options.apiKey ?? process.env.BASE_CONTEXT_TELEMETRY_API_KEY)?.trim() || undefined;
+		this.disabled = !this.endpoint || !this.apiKey;
 		this.fetchImpl = options.fetch ?? fetch;
 		this.now = options.now ?? Date.now;
 		this.randomId = options.randomId ?? randomUUID;
@@ -407,13 +412,16 @@ export class TelemetryClient implements TelemetrySink {
 	}
 
 	private async send(batch: TelemetryBatch): Promise<void> {
+		if (!this.endpoint || !this.apiKey) return;
 		try {
 			await this.fetchImpl(this.endpoint, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					"user-agent": `prime-agent/${VERSION}`,
+					"user-agent": `base-context/${VERSION}`,
+					authorization: `Bearer ${this.apiKey}`,
 				},
+				redirect: "error",
 				body: JSON.stringify(batch),
 				signal: AbortSignal.timeout(this.requestTimeoutMs),
 			});

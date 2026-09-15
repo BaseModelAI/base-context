@@ -5,6 +5,8 @@ import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS,
+	DAEMON_PROTOCOL_NAME,
 	DAEMON_PROTOCOL_VERSION,
 	type DaemonClosingReason,
 	type DaemonCommand,
@@ -19,6 +21,7 @@ import {
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
 	meetsDaemonCommandCompatibility,
+	NATIVE_WORK_COMPATIBILITIES,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
 
@@ -71,22 +74,33 @@ export class DaemonSocketClosedError extends Error {
 		const reasonDetails = daemonClosingReason ? ` Reason: ${daemonClosingReason}.` : "";
 		const causeDetails = cause ? ` Cause: ${cause}.` : "";
 		super(
-			`Connection to the Prime Agent daemon closed.${reasonDetails}${causeDetails} ${daemonEndpointDetails(socketPath)}`,
+			`Connection to the Base Context daemon closed.${reasonDetails}${causeDetails} ${daemonEndpointDetails(socketPath)}`,
 		);
 		this.name = "DaemonSocketClosedError";
 	}
 }
 
+export class DaemonProtocolMismatchError extends Error {
+	constructor(name: string, version: number) {
+		super(
+			`Base Context refuses incompatible daemon ${name} protocol ${version}; expected ${DAEMON_PROTOCOL_NAME} protocol ${DAEMON_PROTOCOL_VERSION}. Use this installation's Base Context socket. The other daemon was not changed.`,
+		);
+		this.name = "DaemonProtocolMismatchError";
+	}
+}
+
 export class DaemonCapabilityUnavailableError extends Error {
 	constructor(
-		readonly command: DaemonCommand["type"],
+		readonly command: DaemonCommand["type"] | DaemonWorkerCommand["type"],
 		readonly capability: DaemonServerCapability | undefined,
 		readonly afterReconnect = false,
 	) {
 		super(
-			capability
-				? `The running Prime Agent daemon does not support ${capability}.`
-				: `The running Prime Agent daemon does not support ${command}.`,
+			capability === "native_inference_ownership" || capability === "canonical_session_ownership"
+				? `The running Base Context daemon cannot provide ${capability === "canonical_session_ownership" ? "canonical session ownership" : "native inference ownership"} for ${command}. Command not sent. Start an updated Base Context daemon; use the old runtime's own controls for legacy cleanup. Only passive inspection is available on this connection.`
+				: capability
+					? `The running Base Context daemon does not support ${capability}.`
+					: `The running Base Context daemon does not support ${command}.`,
 		);
 		this.name = "DaemonCapabilityUnavailableError";
 	}
@@ -145,6 +159,7 @@ export class DaemonClient {
 	private autoReconnectPromise?: Promise<void>;
 	private closed = false;
 	private helloMessage?: DaemonHello;
+	private handshakeError?: Error;
 	private daemonClosingReason?: DaemonClosingReason;
 	private reconnectPromise?: Promise<void>;
 	private readonly helloWaiters = new Set<{
@@ -169,12 +184,13 @@ export class DaemonClient {
 
 	/** Wait for the daemon_hello greeting sent on connect. */
 	async waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
+		if (this.handshakeError) throw this.handshakeError;
 		if (this.helloMessage) {
 			return this.helloMessage;
 		}
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot wait for the Prime Agent daemon handshake because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot wait for the Base Context daemon handshake because the daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 		return new Promise<DaemonHello>((resolve, reject) => {
@@ -185,7 +201,7 @@ export class DaemonClient {
 					this.helloWaiters.delete(waiter);
 					reject(
 						new Error(
-							`Timed out after ${timeoutMs}ms waiting for the Prime Agent daemon handshake. ${daemonEndpointDetails(this.socketPath)}`,
+							`Timed out after ${timeoutMs}ms waiting for the Base Context daemon handshake. ${daemonEndpointDetails(this.socketPath)}`,
 						),
 					);
 				}, timeoutMs),
@@ -196,9 +212,10 @@ export class DaemonClient {
 
 	async connect(timeoutMs = 3000): Promise<void> {
 		if (this.socket) {
-			throw new Error(`Prime Agent daemon client is already connected. ${daemonEndpointDetails(this.socketPath)}`);
+			throw new Error(`Base Context daemon client is already connected. ${daemonEndpointDetails(this.socketPath)}`);
 		}
 		this.helloMessage = undefined;
+		this.handshakeError = undefined;
 		this.daemonClosingReason = undefined;
 		const socket = createConnection(this.socketPath);
 		this.socket = socket;
@@ -211,7 +228,7 @@ export class DaemonClient {
 				socket.destroy();
 				reject(
 					new Error(
-						`Timed out after ${timeoutMs}ms connecting to the Prime Agent daemon. ${daemonEndpointDetails(this.socketPath)}`,
+						`Timed out after ${timeoutMs}ms connecting to the Base Context daemon. ${daemonEndpointDetails(this.socketPath)}`,
 					),
 				);
 			}, timeoutMs);
@@ -229,7 +246,7 @@ export class DaemonClient {
 				this.clearSocketReference(socket);
 				reject(
 					new Error(
-						`Failed to connect to the Prime Agent daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
+						`Failed to connect to the Base Context daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
 					),
 				);
 			};
@@ -323,9 +340,10 @@ export class DaemonClient {
 		timeoutMs = 30000,
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
+		if (this.handshakeError) throw this.handshakeError;
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot send daemon command "${command.type}" because the Base Context daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello());
@@ -348,14 +366,19 @@ export class DaemonClient {
 
 	async authenticateWorker(token: string, timeoutMs = 3000): Promise<void> {
 		const legacyAuthentication = { type: "worker_auth", token } as DaemonWorkerCommandBody;
-		const response = await this.requestWire(legacyAuthentication, timeoutMs);
+		const response = await this.requestWorker(legacyAuthentication, timeoutMs);
 		if (!response.success) {
 			throw new Error(response.error);
 		}
 	}
 
 	async requestWorker(command: DaemonWorkerCommandBody, timeoutMs = 30000): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs);
+		const hello = await this.waitForHello();
+		const missing = NATIVE_WORK_COMPATIBILITIES.find(
+			(requirement) => !meetsDaemonCommandCompatibility(hello, requirement),
+		);
+		if (missing) throw new DaemonCapabilityUnavailableError(command.type, missing.capability);
+		return this.requestWire(command, timeoutMs, {}, undefined, NATIVE_WORK_COMPATIBILITIES);
 	}
 
 	private async requestWire(
@@ -367,7 +390,7 @@ export class DaemonClient {
 	): Promise<DaemonResponse> {
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
-				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
+				`Cannot send daemon command "${command.type}" because the Base Context daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 
@@ -409,7 +432,7 @@ export class DaemonClient {
 			this.pendingRequests.delete(id);
 			pending.reject(
 				new Error(
-					`Timed out after ${pending.timeoutMs}ms waiting for the Prime Agent daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
+					`Timed out after ${pending.timeoutMs}ms waiting for the Base Context daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
 				),
 			);
 		}, pending.timeoutMs);
@@ -422,7 +445,7 @@ export class DaemonClient {
 		this.detachReader = undefined;
 		this.rejectAll(
 			new Error(
-				`Prime Agent daemon client closed before the operation completed. ${daemonEndpointDetails(this.socketPath)}`,
+				`Base Context daemon client closed before the operation completed. ${daemonEndpointDetails(this.socketPath)}`,
 			),
 		);
 		this.socket?.end();
@@ -448,6 +471,18 @@ export class DaemonClient {
 		}
 
 		if (isDaemonHello(message)) {
+			if (
+				message.protocol.name !== DAEMON_PROTOCOL_NAME ||
+				(message.protocol.version !== DAEMON_PROTOCOL_VERSION &&
+					!DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS.includes(message.protocol.version))
+			) {
+				const error = new DaemonProtocolMismatchError(message.protocol.name, message.protocol.version);
+				this.handshakeError = error;
+				this.helloMessage = undefined;
+				this.rejectAll(error);
+				this.close();
+				return;
+			}
 			this.helloMessage = message;
 			for (const waiter of [...this.helloWaiters]) {
 				clearTimeout(waiter.timeout);
@@ -473,6 +508,12 @@ export class DaemonClient {
 							),
 						);
 						continue;
+					}
+					// Only passive reads survive a downgrade to Base8/Base9/Base10; retain identity and negotiate the envelope.
+					const wire = JSON.parse(pending.wireData) as DaemonCommandEnvelope;
+					if (wire.type === "command" && wire.protocol.version !== message.protocol.version) {
+						wire.protocol.version = message.protocol.version;
+						pending.wireData = serializeJsonLine(wire);
 					}
 					this.armPendingRequestTimeout(id, pending);
 					this.socket.write(pending.wireData);

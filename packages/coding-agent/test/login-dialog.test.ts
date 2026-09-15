@@ -4,7 +4,7 @@ import {
 	setKeybindings,
 	type TUI,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";

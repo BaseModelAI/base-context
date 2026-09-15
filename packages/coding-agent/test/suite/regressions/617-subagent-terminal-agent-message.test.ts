@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../../src/core/messages.js";
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";
@@ -20,9 +20,9 @@ describe("#617 subagent terminal agent messages", () => {
 	let parent: Harness | undefined;
 	let child: Harness | undefined;
 
-	afterEach(() => {
-		child?.cleanup();
-		parent?.cleanup();
+	afterEach(async () => {
+		await child?.cleanup();
+		await parent?.cleanup();
 		child = undefined;
 		parent = undefined;
 	});

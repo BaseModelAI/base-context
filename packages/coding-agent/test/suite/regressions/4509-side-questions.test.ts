@@ -1,5 +1,5 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { Container } from "@earendil-works/pi-tui";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
+import { Container } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type SideQuestionEvent, startSideQuestion } from "../../../src/core/side-question.js";
@@ -67,7 +67,7 @@ describe("ENG-4509 side questions", () => {
 			expect(harness.session.messages).toEqual(messagesBefore);
 			expect(harness.sessionManager.getEntries()).toEqual(entriesBefore);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -109,7 +109,7 @@ describe("ENG-4509 side questions", () => {
 
 			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "second side answer" });
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -154,7 +154,7 @@ describe("ENG-4509 side questions", () => {
 		} finally {
 			releaseMain.resolve();
 			await harness.session.agent.waitForIdle();
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -182,7 +182,7 @@ describe("ENG-4509 side questions", () => {
 			expect(events.at(-1)).toMatchObject({ status: "cancelled" });
 			expect(harness.session.isStreaming).toBe(false);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
@@ -203,11 +203,11 @@ describe("ENG-4509 side questions", () => {
 
 			expect(events).toEqual([expect.objectContaining({ status: "error", errorMessage: "event delivery failed" })]);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 
-	it("aborts daemon side questions when the session runtime is replaced", () => {
+	it("aborts daemon side questions when the session runtime is replaced", async () => {
 		const clients = [{ id: "client-1" }, { id: "client-2" }];
 		const sessionState = {
 			activeSessionId: "session-1",
@@ -227,11 +227,11 @@ describe("ENG-4509 side questions", () => {
 		});
 		const refreshReplacedSessionState = (
 			AgentDaemon.prototype as unknown as {
-				refreshReplacedSessionState(this: typeof fakeThis, state: typeof sessionState): void;
+				refreshReplacedSessionState(this: typeof fakeThis, state: typeof sessionState): Promise<void>;
 			}
 		).refreshReplacedSessionState;
 
-		refreshReplacedSessionState.call(fakeThis, sessionState);
+		await refreshReplacedSessionState.call(fakeThis, sessionState);
 
 		expect(abortSideQuestionsFor).toHaveBeenCalledTimes(2);
 		expect(abortSideQuestionsFor).toHaveBeenNthCalledWith(1, clients[0], "session-1");
@@ -856,7 +856,7 @@ describe("ENG-4509 side questions", () => {
 			expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(true);
 			expect(chatContainer.children.some((child) => child instanceof BashExecutionComponent)).toBe(true);
 		} finally {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

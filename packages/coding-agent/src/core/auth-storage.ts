@@ -10,15 +10,17 @@ import { createHash } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
+	getPrimeTeamId,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
-} from "@earendil-works/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+} from "@ponythewhite/base-context-ai";
+import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 import {
 	clearPrimeCliCredentials,
 	getPrimeCliConfigPath,
@@ -29,6 +31,7 @@ import {
 	savePrimeCliApiKey,
 	savePrimeCliTeamSelection,
 } from "./prime-inference-auth.js";
+import { getProviderAuthContract, isProviderApiKeyAllowed } from "./provider-contracts.js";
 import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
 
 export type PrimeTeamCredential = {
@@ -68,7 +71,9 @@ export type AuthStatus = {
 };
 
 export type AuthStorageOptions = {
+	/** Optional explicit provider config; the default is Base Context prime-inference.json. */
 	primeCliConfigPath?: string;
+	/** Enable the isolated Prime Inference provider config. */
 	usePrimeCliConfig?: boolean;
 };
 
@@ -109,6 +114,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	constructor(private authPath: string = join(getAgentDir(), "auth.json")) {}
 
 	private ensureParentDir(): void {
+		assertProductStatePath(this.authPath);
 		const dir = dirname(this.authPath);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -264,6 +270,7 @@ export class AuthStorage {
 	private constructor(
 		private storage: AuthStorageBackend,
 		private options: AuthStorageOptions = {},
+		private readonly existingOpenAICodexSubscription = false,
 	) {
 		this.reload();
 	}
@@ -273,8 +280,38 @@ export class AuthStorage {
 		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")), authOptions);
 	}
 
-	static fromStorage(storage: AuthStorageBackend, options?: AuthStorageOptions): AuthStorage {
-		return new AuthStorage(storage, options);
+	/** Reuse an existing host login only through an explicitly read-only backend.
+	 * This does not authorize this distribution's OAuth login or refresh client.
+	 */
+	static fromStorage(
+		storage: AuthStorageBackend,
+		options?: AuthStorageOptions & { existingOpenAICodexSubscription?: boolean },
+	): AuthStorage {
+		const existing = options?.existingOpenAICodexSubscription === true;
+		if (!existing) return new AuthStorage(storage, options);
+		if (storage instanceof FileAuthStorageBackend)
+			throw new Error("Existing OpenAI subscription requires a read-only auth backend");
+		const readOnly: AuthStorageBackend = {
+			withLock: (read) =>
+				storage.withLock((current) => {
+					const { result, next } = read(current);
+					if (next !== undefined) throw new Error("Existing OpenAI subscription storage is read-only");
+					return { result };
+				}),
+			// Refresh happens inside this callback, so never invoke it in this mode.
+			withLockAsync: async () => {
+				throw new Error("Existing OpenAI subscription refresh is disabled");
+			},
+		};
+		return new AuthStorage(readOnly, { ...options, usePrimeCliConfig: false }, true);
+	}
+
+	isExistingOpenAICodexSubscription(provider: string): boolean {
+		return this.existingOpenAICodexSubscription && provider === "openai-codex";
+	}
+
+	private assertWritableStorage(): void {
+		if (this.existingOpenAICodexSubscription) throw new Error("Existing OpenAI subscription storage is read-only");
 	}
 
 	static inMemory(data: AuthStorageData = {}, options?: AuthStorageOptions): AuthStorage {
@@ -357,11 +394,22 @@ export class AuthStorage {
 
 	private getStoredCredentialValueMaterial(providerId: string, credential: AuthCredential): string | undefined {
 		if (credential.type === "api_key") {
-			if (credential.key.startsWith("!")) {
-				const resolvedKey = resolveConfigValueUncached(credential.key);
+			const isCommand = credential.key.startsWith("!");
+			const resolvedKey = isCommand
+				? resolveConfigValueUncached(credential.key)
+				: resolveConfigValue(credential.key);
+			if (resolvedKey !== undefined && !isProviderApiKeyAllowed(providerId, resolvedKey)) {
+				return undefined;
+			}
+			if (isCommand) {
 				return resolvedKey === undefined ? undefined : `api_key:command:${credential.key}\0${resolvedKey}`;
 			}
-			return `api_key:${credential.key}\0${resolveConfigValue(credential.key) ?? ""}`;
+			return `api_key:${credential.key}\0${resolvedKey ?? ""}`;
+		}
+		if (this.isExistingOpenAICodexSubscription(providerId))
+			return `oauth:${credential.access}\0${credential.expires}`;
+		if (getProviderAuthContract(providerId).oauth !== "validated") {
+			return undefined;
 		}
 		const provider = getOAuthProvider(providerId);
 		const apiKey = provider?.getApiKey(credential) ?? credential.access;
@@ -370,7 +418,7 @@ export class AuthStorage {
 
 	private getRuntimeAuthCandidate(provider: string): AuthSourceCandidate | undefined {
 		const apiKey = this.runtimeOverrides.get(provider);
-		if (!apiKey) {
+		if (!apiKey || !isProviderApiKeyAllowed(provider, apiKey)) {
 			return undefined;
 		}
 		return {
@@ -390,7 +438,7 @@ export class AuthStorage {
 			return undefined;
 		}
 		return {
-			label: "Prime CLI",
+			label: "Base Context provider config",
 			...this.createAuthSourceCandidate({
 				configured: false,
 				source: "prime_cli",
@@ -405,10 +453,22 @@ export class AuthStorage {
 		options?: { resolveCommandValue?: boolean; resolvedCommandValue?: string },
 	): AuthSourceCandidate | undefined {
 		const credential = this.data[provider];
-		if (!credential) {
+		if (
+			!credential ||
+			(credential.type === "oauth" &&
+				getProviderAuthContract(provider).oauth !== "validated" &&
+				!this.isExistingOpenAICodexSubscription(provider))
+		) {
 			return undefined;
 		}
 		const isCommandApiKey = credential.type === "api_key" && credential.key.startsWith("!");
+		if (credential.type === "api_key") {
+			const apiKey =
+				options?.resolvedCommandValue ?? (isCommandApiKey ? credential.key : resolveConfigValue(credential.key));
+			if (apiKey !== undefined && !isProviderApiKeyAllowed(provider, apiKey)) {
+				return undefined;
+			}
+		}
 		const identityMaterial = isCommandApiKey ? `api_key:command:${credential.key}` : `${provider}:${credential.type}`;
 		const commandValueMaterial =
 			isCommandApiKey && options?.resolvedCommandValue !== undefined
@@ -429,10 +489,16 @@ export class AuthStorage {
 		});
 	}
 
+	private getEnvironmentApiKey(provider: string): string | undefined {
+		// The generic resolver prefers ANTHROPIC_OAUTH_TOKEN, an unavailable subscription route.
+		const apiKey = provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : getEnvApiKey(provider);
+		return apiKey && isProviderApiKeyAllowed(provider, apiKey) ? apiKey : undefined;
+	}
+
 	private getEnvironmentAuthCandidate(provider: string): AuthSourceCandidate | undefined {
-		const envKeys = findEnvKeys(provider);
+		const envKeys = findEnvKeys(provider)?.filter((key) => key !== "ANTHROPIC_OAUTH_TOKEN");
 		const envKey = envKeys?.[0];
-		const apiKey = getEnvApiKey(provider);
+		const apiKey = this.getEnvironmentApiKey(provider);
 		if (!apiKey) {
 			return undefined;
 		}
@@ -477,7 +543,7 @@ export class AuthStorage {
 
 	private getFallbackAuthCandidate(provider: string): AuthSourceCandidate | undefined {
 		const apiKey = this.fallbackResolver?.(provider);
-		if (!apiKey) {
+		if (!apiKey || !isProviderApiKeyAllowed(provider, apiKey)) {
 			return undefined;
 		}
 		return this.createAuthSourceCandidate({
@@ -681,6 +747,7 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		this.assertWritableStorage();
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
@@ -690,6 +757,7 @@ export class AuthStorage {
 	 * Remove credential for a provider.
 	 */
 	remove(provider: string): void {
+		this.assertWritableStorage();
 		this.clearStaleAuthSource(provider, "stored");
 		delete this.data[provider];
 		this.persistProviderChange(provider, undefined);
@@ -702,6 +770,7 @@ export class AuthStorage {
 	 * and idempotent — in-memory state is only updated after the write succeeds.
 	 */
 	removeVerified(provider: string): void {
+		this.assertWritableStorage();
 		this.storage.withLock((current) => {
 			const currentData = this.parseStorageData(current);
 			if (!(provider in currentData)) return { result: undefined };
@@ -760,6 +829,11 @@ export class AuthStorage {
 	 * Login to an OAuth provider.
 	 */
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
+		this.assertWritableStorage();
+		const contract = getProviderAuthContract(providerId);
+		if (contract.oauth !== "validated") {
+			throw new Error(contract.guidance);
+		}
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
@@ -792,6 +866,9 @@ export class AuthStorage {
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
+		if (getProviderAuthContract(providerId).oauth !== "validated") {
+			return null;
+		}
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
 			return null;
@@ -803,7 +880,7 @@ export class AuthStorage {
 			this.loadError = null;
 
 			const cred = currentData[providerId];
-			if (cred?.type !== "oauth") {
+			if (cred?.type !== "oauth" || getProviderAuthContract(providerId).oauth !== "validated") {
 				return { result: null };
 			}
 
@@ -839,7 +916,7 @@ export class AuthStorage {
 	 * Get API key for a provider.
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)
-	 * 2. Prime Inference: environment variable, Prime CLI config, auth.json
+	 * 2. Prime Inference: environment variable, Base Context provider config, auth.json
 	 * 3. Other providers: auth.json, environment variable
 	 * 4. Fallback resolver (models.json custom providers)
 	 */
@@ -847,6 +924,28 @@ export class AuthStorage {
 		providerId: string,
 		options?: { includeFallback?: boolean },
 	): Promise<AuthApiKeyResult> {
+		if (this.isExistingOpenAICodexSubscription(providerId)) {
+			if (this.runtimeOverrides.has(providerId))
+				throw new Error("Existing OpenAI subscription does not accept API-key overrides");
+			const credential = this.data[providerId];
+			if (
+				!credential ||
+				credential.type !== "oauth" ||
+				typeof credential.access !== "string" ||
+				!credential.access ||
+				!Number.isFinite(credential.expires)
+			)
+				throw new Error("Existing OpenAI subscription credential is unavailable");
+			if (Date.now() >= credential.expires) throw new Error("Existing OpenAI subscription credential has expired");
+			const candidate = this.getStoredAuthCandidate(providerId);
+			if (!candidate || this.isAuthSourceStale(providerId, candidate))
+				throw new Error("Existing OpenAI subscription credential is unavailable");
+			return {
+				apiKey: credential.access,
+				sourceToken: this.getAuthSourceTokenForCandidate(providerId, candidate),
+			};
+		}
+
 		// Runtime overrides take precedence over stored credentials and environment keys.
 		const runtimeCandidate = this.getRuntimeAuthCandidate(providerId);
 		const runtimeKey = this.runtimeOverrides.get(providerId);
@@ -858,7 +957,7 @@ export class AuthStorage {
 		}
 
 		const envCandidate = this.getEnvironmentAuthCandidate(providerId);
-		const envKey = getEnvApiKey(providerId);
+		const envKey = this.getEnvironmentApiKey(providerId);
 		if (
 			providerId === PRIME_INFERENCE_PROVIDER_ID &&
 			envKey &&
@@ -892,21 +991,23 @@ export class AuthStorage {
 					cred.key.startsWith("!") && hasStaleRecord
 						? resolveConfigValueUncached(cred.key)
 						: resolveConfigValue(cred.key);
-				const sourceToken =
-					apiKey === undefined
-						? undefined
-						: this.getAuthSourceTokenForCandidate(
-								providerId,
-								cred.key.startsWith("!")
-									? (this.getStoredAuthCandidate(providerId, { resolvedCommandValue: apiKey }) ??
-											storedCandidate)
-									: storedCandidate,
-							);
-				return { apiKey, sourceToken };
+				if (apiKey === undefined || isProviderApiKeyAllowed(providerId, apiKey)) {
+					const sourceToken =
+						apiKey === undefined
+							? undefined
+							: this.getAuthSourceTokenForCandidate(
+									providerId,
+									cred.key.startsWith("!")
+										? (this.getStoredAuthCandidate(providerId, { resolvedCommandValue: apiKey }) ??
+												storedCandidate)
+										: storedCandidate,
+								);
+					return { apiKey, sourceToken };
+				}
 			}
 		}
 
-		if (cred?.type === "oauth") {
+		if (cred?.type === "oauth" && getProviderAuthContract(providerId).oauth === "validated") {
 			const storedCandidate = this.getStoredAuthCandidate(providerId);
 			if (storedCandidate && !this.isAuthSourceStale(providerId, storedCandidate)) {
 				const provider = getOAuthProvider(providerId);
@@ -934,7 +1035,11 @@ export class AuthStorage {
 						this.reload();
 						const updatedCred = this.data[providerId];
 
-						if (updatedCred?.type === "oauth" && Date.now() < updatedCred.expires) {
+						if (
+							updatedCred?.type === "oauth" &&
+							getProviderAuthContract(providerId).oauth === "validated" &&
+							Date.now() < updatedCred.expires
+						) {
 							const updatedCandidate = this.getStoredAuthCandidate(providerId);
 							return {
 								apiKey: provider.getApiKey(updatedCred),
@@ -970,10 +1075,13 @@ export class AuthStorage {
 		if (options?.includeFallback !== false) {
 			const fallbackCandidate = this.getFallbackAuthCandidate(providerId);
 			if (fallbackCandidate && !this.isAuthSourceStale(providerId, fallbackCandidate)) {
-				return {
-					apiKey: this.fallbackResolver?.(providerId) ?? undefined,
-					sourceToken: this.getAuthSourceTokenForCandidate(providerId, fallbackCandidate),
-				};
+				const apiKey = this.fallbackResolver?.(providerId) ?? undefined;
+				if (apiKey === undefined || isProviderApiKeyAllowed(providerId, apiKey)) {
+					return {
+						apiKey,
+						sourceToken: this.getAuthSourceTokenForCandidate(providerId, fallbackCandidate),
+					};
+				}
 			}
 		}
 
@@ -986,10 +1094,10 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Get all registered OAuth providers
+	 * Get registered OAuth providers validated for this distribution.
 	 */
 	getOAuthProviders() {
-		return getOAuthProviders();
+		return getOAuthProviders().filter((provider) => getProviderAuthContract(provider.id).oauth === "validated");
 	}
 
 	setPrimeInferenceTeamSelection(team: PrimeTeam | null): void {
@@ -1046,6 +1154,9 @@ export class AuthStorage {
 	}
 
 	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {
+		if (getPrimeTeamId()) {
+			return undefined;
+		}
 		let config: PrimeCliConfig | undefined;
 		if (this.isPrimeCliConfigEnabled()) {
 			config = this.getPrimeCliConfig(PRIME_INFERENCE_PROVIDER_ID);
@@ -1066,7 +1177,7 @@ export class AuthStorage {
 			if (config?.teamId) {
 				return this.toPrimeTeamCredential({
 					teamId: config.teamId,
-					name: config.teamName ?? "Prime CLI team",
+					name: config.teamName ?? "Prime Inference team",
 					...(config.teamRole ? { role: config.teamRole } : {}),
 				});
 			}
@@ -1081,7 +1192,7 @@ export class AuthStorage {
 		if (!config?.apiKey && config?.teamId) {
 			return this.toPrimeTeamCredential({
 				teamId: config.teamId,
-				name: config.teamName ?? "Prime CLI team",
+				name: config.teamName ?? "Prime Inference team",
 				...(config.teamRole ? { role: config.teamRole } : {}),
 			});
 		}
@@ -1093,9 +1204,9 @@ export class AuthStorage {
 			return undefined;
 		}
 
-		const primeCliConfig = this.getPrimeCliConfig(providerId);
-		if (primeCliConfig?.teamIdFromEnv) {
-			return primeCliConfig.teamId ? { "X-Prime-Team-ID": primeCliConfig.teamId } : undefined;
+		const environmentTeamId = getPrimeTeamId();
+		if (environmentTeamId) {
+			return { "X-Prime-Team-ID": environmentTeamId };
 		}
 
 		const teamId = this.getPrimeInferenceTeamSelection()?.teamId;
@@ -1143,7 +1254,7 @@ export class AuthStorage {
 	private getEnabledPrimeCliConfigPath(): string {
 		const configPath = this.getPrimeCliConfigPath();
 		if (!configPath) {
-			throw new Error("Prime CLI config is not enabled");
+			throw new Error("Base Context Prime Inference config is not enabled");
 		}
 		return configPath;
 	}

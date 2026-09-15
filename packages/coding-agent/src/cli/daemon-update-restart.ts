@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import lockfile from "proper-lockfile";
-import { ENV_AGENT_DIR, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
+import { ENV_AGENT_DIR, getPhysicalPackageDir, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../core/orphan-process-journal.js";
 import { getProcessStartId, SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
@@ -14,11 +14,20 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
+import {
+	getOwnedInstallation,
+	installedCli,
+	type OwnedInstallation,
+	ownedVersion,
+	readInstallSelection,
+} from "../owned-install-layout.js";
+import { PRODUCT_ENV } from "../product-identity.js";
 import { createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
 export const DAEMON_UPDATE_RESTART_COORDINATOR_FLAG = "--internal-update-restart-coordinator";
 export const DAEMON_UPDATE_RESTART_STATUS_FLAG = "--internal-update-restart-status";
 export const DAEMON_UPDATE_RESTART_ORIGIN_FLAG = "--internal-update-restart-origin";
+export const DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG = "--internal-update-restart-successor-socket";
 
 export type DaemonUpdateRestartPhase =
 	| "starting"
@@ -85,6 +94,8 @@ export interface LaunchDaemonUpdateRestartCoordinatorOptions {
 	cwd?: string;
 	originActiveSessionId?: string;
 	timeoutMs?: number;
+	installation?: OwnedInstallation;
+	keepSocket?: boolean;
 }
 
 export interface AcquireDaemonUpdateRestartCoordinatorOptions {
@@ -315,7 +326,8 @@ export class DaemonUpdateRestartStatusWriter {
 }
 
 function defaultCoordinatorRegistryDir(): string {
-	return resolve(defaultDaemonSocketDir(), "update-restart-coordinators");
+	const owned = getOwnedInstallation(getPhysicalPackageDir());
+	return resolve(defaultDaemonSocketDir(owned?.root), "update-restart-coordinators");
 }
 
 function coordinatorRecordPath(registryDir: string, socketPath: string): string {
@@ -538,6 +550,14 @@ function coordinatorEnvironment(agentDir: string): NodeJS.ProcessEnv {
 	return environment;
 }
 
+export function selectedUpdateInstallation(): OwnedInstallation | undefined {
+	const owned = getOwnedInstallation(getPhysicalPackageDir());
+	if (!owned) return undefined;
+	const selected = readInstallSelection(owned.root);
+	if (!selected) throw new Error("Base-Context has no selected installation to relaunch.");
+	return ownedVersion(owned.root, selected.active);
+}
+
 export async function launchDaemonUpdateRestartCoordinator(
 	options: LaunchDaemonUpdateRestartCoordinatorOptions,
 ): Promise<DaemonUpdateRestartStatus> {
@@ -547,19 +567,32 @@ export async function launchDaemonUpdateRestartCoordinator(
 	const statusPath = createStatusPath(agentDir, socketPath, requestId);
 	const inheritedOrigin = process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV];
 	const originActiveSessionId = options.originActiveSessionId ?? inheritedOrigin;
-	const launch = createCliSubprocessLaunchSpec([
-		"update",
-		DAEMON_UPDATE_RESTART_COORDINATOR_FLAG,
-		"--daemon-socket",
-		socketPath,
-		DAEMON_UPDATE_RESTART_STATUS_FLAG,
-		statusPath,
-		...(originActiveSessionId ? [DAEMON_UPDATE_RESTART_ORIGIN_FLAG, originActiveSessionId] : []),
-	]);
+	const installation = options.installation;
+	const successorSocketPath =
+		installation && !options.keepSocket && socketPath === defaultDaemonSocketPath()
+			? defaultDaemonSocketPath(installation.packageDir)
+			: socketPath;
+	const launch = createCliSubprocessLaunchSpec(
+		[
+			"update",
+			DAEMON_UPDATE_RESTART_COORDINATOR_FLAG,
+			"--daemon-socket",
+			socketPath,
+			DAEMON_UPDATE_RESTART_STATUS_FLAG,
+			statusPath,
+			...(originActiveSessionId ? [DAEMON_UPDATE_RESTART_ORIGIN_FLAG, originActiveSessionId] : []),
+			...(successorSocketPath !== socketPath ? [DAEMON_UPDATE_RESTART_SUCCESSOR_FLAG, successorSocketPath] : []),
+		],
+		process.execPath,
+		process.execArgv,
+		installation ? installedCli(installation) : process.argv[1],
+	);
+	const environment = coordinatorEnvironment(agentDir);
+	if (installation) environment[PRODUCT_ENV.packageDirectory] = installation.packageDir;
 	const child = spawn(launch.command, launch.args, {
 		cwd: options.cwd ?? process.cwd(),
 		detached: true,
-		env: coordinatorEnvironment(agentDir),
+		env: environment,
 		stdio: "ignore",
 	});
 	let launchError: Error | undefined;

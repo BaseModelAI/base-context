@@ -1,7 +1,7 @@
 {
-	"name": "@earendil-works/pi-tui",
-	"version": "0.9.3",
-	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
+	"name": "@ponythewhite/base-context-tui",
+	"version": "1.0.0",
+	"description": "Synerise base-context terminal UI components",
 	"type": "module",
 	"main": "dist/index.js",
 	"scripts": {
@@ -9,11 +9,13 @@
 		"build": "tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "node --test --import tsx test/*.test.ts",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm --prefix ../.. run build:source"
 	},
 	"files": [
 		"dist/**/*",
-		"README.md"
+		"README.md",
+		"LICENSE",
+		"NOTICE"
 	],
 	"keywords": [
 		"tui",
@@ -24,15 +26,15 @@
 		"typescript",
 		"cli"
 	],
-	"author": "Mario Zechner",
+	"author": "Jacek Dąbrowski <jack.dabrowski@synerise.com>",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/PrimeIntellect-ai/prime-agent.git",
+		"url": "git+https://github.com/BaseModelAI/base-context.git",
 		"directory": "packages/tui"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": "^22.12.0 || >=23.3.0"
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
@@ -48,5 +50,14 @@
 	"devDependencies": {
 		"@xterm/headless": "^6.0.0",
 		"@xterm/xterm": "^6.0.0"
+	},
+	"contributors": [
+		"Mario Zechner",
+		"Prime Intellect",
+		"BaseModelAI"
+	],
+	"homepage": "https://github.com/BaseModelAI/base-context#readme",
+	"publishConfig": {
+		"access": "public"
 	}
 }

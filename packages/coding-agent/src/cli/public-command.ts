@@ -1,7 +1,9 @@
+import { resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV } from "../config.js";
 import { AuthStorage } from "../core/auth-storage.js";
 import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
+import { SessionManager } from "../core/session-manager.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
@@ -18,6 +20,8 @@ import {
 import { handleDaemonCommand } from "./daemon-command.js";
 import { runPs, runReap, runShutdownAll } from "./daemon-ps.js";
 import { DAEMON_UPDATE_RESTART_COORDINATOR_FLAG } from "./daemon-update-restart.js";
+import { getProductDiagnostics } from "./product-doctor.js";
+import { runOfflineScheduleList, runProductMigration } from "./product-migrate.js";
 
 export interface PublicCommandResult {
 	handled: boolean;
@@ -103,6 +107,10 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "send":
 			return runInternalAgentCommand("send", args.slice(1));
 		case "schedule":
+			if (args.includes("--offline")) {
+				runOfflineScheduleList(args.slice(1));
+				return HANDLED;
+			}
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));
@@ -110,6 +118,9 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runDoctor(args.slice(1));
 		case "shutdown":
 			return runShutdown(args.slice(1));
+		case "migrate":
+			await runProductMigration(args.slice(1));
+			return HANDLED;
 		case "package":
 			return runPackage(args.slice(1));
 		case "mcp":
@@ -123,7 +134,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			);
 			if (hasLegacySelfTarget && hasLegacyPackageTarget) {
 				return fail(
-					"Prime Agent and package updates are now separate.",
+					"Base Context and package updates are now separate.",
 					`Run "${APP_NAME} update [--force]" and "${APP_NAME} package update [source]" separately.`,
 				);
 			}
@@ -141,6 +152,7 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 		case "model":
 			return rewriteNestedCommand("model", "list", "--list-models", args.slice(1));
 		case "session":
+			if (args[1] === "import") return runSessionImport(args.slice(2));
 			return rewriteNestedCommand("session", "export", "--export", args.slice(1));
 		case "config":
 			if (!requireArgumentCount(args.slice(1), 0, "config")) return HANDLED;
@@ -204,15 +216,15 @@ function rejectRemovedCommand(args: string[]): PublicCommandResult {
 	const [command, subcommand] = args;
 	let replacement: string | undefined;
 	if (command === "daemon") {
-		replacement = 'Run "prime-agent help" to see the agent commands.';
+		replacement = 'Run "base-context help" to see the agent commands.';
 	} else if (command === "app" && subcommand === "update") {
-		replacement = 'Use "prime-agent update".';
+		replacement = 'Use "base-context update".';
 	} else if (command === "install") {
-		replacement = 'Use "prime-agent package install".';
+		replacement = 'Use "base-context package install".';
 	} else if (command === "remove" || command === "uninstall") {
-		replacement = 'Use "prime-agent package remove".';
+		replacement = 'Use "base-context package remove".';
 	} else if (command === "manage") {
-		replacement = 'Use "prime-agent agents".';
+		replacement = 'Use "base-context agents".';
 	}
 	return fail(`Unknown command: ${args.slice(0, 2).join(" ")}`, replacement);
 }
@@ -255,10 +267,11 @@ async function runStatus(args: string[]): Promise<PublicCommandResult> {
 async function runDoctor(args: string[]): Promise<PublicCommandResult> {
 	const options = parseBooleanOptions(args, new Set(["--fix", "--json"]), "doctor");
 	if (!options) return HANDLED;
+	const report = getProductDiagnostics();
 	if (options.has("--fix")) {
-		await runReap(options.has("--json"), false);
+		await runReap(options.has("--json"), false, report);
 	} else {
-		await runPs(options.has("--json"));
+		await runPs(options.has("--json"), report);
 	}
 	return HANDLED;
 }
@@ -299,14 +312,14 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 			rest.some((arg) => arg === "--self" || arg === "--extensions" || arg === "--extension" || arg === "--force")
 		) {
 			return fail(
-				'Package updates accept only an optional source. Use "prime-agent update --force" to update Prime Agent.',
+				'Package updates accept only an optional source. Use "base-context update --force" to update Base Context.',
 			);
 		}
 		if (rest.length > 1) {
 			return fail(`Usage: ${APP_NAME} package update [source]`);
 		}
 		if (rest[0] && isSelfUpdateSource(rest[0])) {
-			return fail('Use "prime-agent update" to update Prime Agent.');
+			return fail('Use "base-context update" to update Base Context.');
 		}
 		await handlePackageCommand(["update", ...(rest.length === 0 ? ["--extensions"] : rest)]);
 		return HANDLED;
@@ -315,10 +328,80 @@ async function runPackage(args: string[]): Promise<PublicCommandResult> {
 	return HANDLED;
 }
 
+function describeSessionImportError(error: unknown): string {
+	if (error instanceof AggregateError)
+		return `${error.message}: ${[...new Set(error.errors)].map(describeSessionImportError).join("; ")}`;
+	return error instanceof Error ? error.message : String(error);
+}
+
+async function runSessionImport(args: string[]): Promise<PublicCommandResult> {
+	const preview = args.includes("--preview");
+	const files = args.filter((arg) => arg !== "--preview");
+	if (files.length !== 1 || !files[0] || files[0].startsWith("-") || args.length !== (preview ? 2 : 1))
+		return fail(`Usage: ${APP_NAME} ${getCommandSpec(["session", "import"])!.usage}`);
+	const destinationCwd = process.cwd();
+	const sourcePath = resolve(destinationCwd, files[0]);
+	if (preview) {
+		try {
+			const report = await SessionManager.previewRetainedImport(sourcePath, destinationCwd);
+			console.log(JSON.stringify(report, null, 2));
+			console.log(
+				"Captured-source preparation completed. No session destination was created. " +
+					"Destination creation/indexing, canonical epoch activation and reference/replay coverage were not assessed. " +
+					"A later import rereads the source and can still fail. " +
+					"The existing V6 tool-continuation refusal remains part of real epoch activation, not this preview.",
+			);
+		} catch (error) {
+			return fail(
+				`Session import preview did not complete: ${describeSessionImportError(error)}. No session destination was created.`,
+			);
+		}
+		return HANDLED;
+	}
+	let manager: SessionManager;
+	try {
+		manager = await SessionManager.importRetainedFrom(sourcePath, destinationCwd);
+	} catch (error) {
+		return fail(
+			`Session import did not complete: ${describeSessionImportError(error)}. A destination may already exist.`,
+		);
+	}
+
+	// Import has completed. Reporting/close errors must not turn this into an alleged rollback.
+	let destinationPath: string | undefined;
+	let reportFailure: { error: unknown } | undefined;
+	const failures: string[] = [];
+	try {
+		destinationPath = manager.getSessionFile();
+		if (!destinationPath) throw new Error("The imported session has no destination path");
+		console.log(destinationPath);
+	} catch (error) {
+		reportFailure = { error };
+		failures.push(`destination reporting failed: ${describeSessionImportError(error)}`);
+	}
+	try {
+		await manager.close();
+	} catch (error) {
+		if (!reportFailure || error !== reportFailure.error)
+			failures.push(`destination close failed: ${describeSessionImportError(error)}`);
+		else failures.push("destination close also failed with the reporting error");
+	}
+	if (failures.length > 0)
+		return fail(
+			`Session imported${destinationPath ? ` to ${destinationPath}` : " (destination path unavailable)"}; ${failures.join("; ")}`,
+		);
+	return HANDLED;
+}
+
 function rewriteNestedCommand(parent: string, subcommand: string, flag: string, args: string[]): PublicCommandResult {
 	if (args[0] !== subcommand) {
 		const candidate = args[0];
-		const suggestion = candidate ? findCommandSuggestion(candidate, [subcommand]) : undefined;
+		const suggestion = candidate
+			? findCommandSuggestion(
+					candidate,
+					getChildCommandSpecs([parent]).map((spec) => spec.path.at(-1)!),
+				)
+			: undefined;
 		return fail(
 			candidate ? `Unknown ${parent} command: ${candidate}` : `Missing ${parent} command.`,
 			suggestion
@@ -426,12 +509,12 @@ function validateScheduleArgs(args: string[]): boolean {
 		}
 		return true;
 	}
-	if (subcommand === "cancel") {
+	if (subcommand === "cancel" || subcommand === "resume") {
 		const operands = args.slice(1).filter((arg) => arg !== "--json");
 		if (operands.length === 1 && !operands[0]!.startsWith("-")) {
 			return true;
 		}
-		fail(`Usage: ${APP_NAME} ${getCommandSpec(["schedule", "cancel"])!.usage}`);
+		fail(`Usage: ${APP_NAME} ${getCommandSpec(["schedule", subcommand])!.usage}`);
 		return false;
 	}
 	return true;

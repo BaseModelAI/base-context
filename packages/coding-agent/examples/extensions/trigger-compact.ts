@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@ponythewhite/base-context";
 
 const COMPACT_THRESHOLD_TOKENS = 100_000;
 
@@ -24,8 +24,8 @@ export default function (pi: ExtensionAPI) {
 		});
 	};
 
-	pi.on("turn_end", (_event, ctx) => {
-		const usage = ctx.getContextUsage();
+	pi.on("turn_end", async (_event, ctx) => {
+		const usage = await ctx.getContextUsage();
 		const currentTokens = usage?.tokens ?? null;
 		if (currentTokens === null) {
 			return;

@@ -1,4 +1,4 @@
-import { type Component, type OverlayHandle, setKeybindings, type TUI } from "@earendil-works/pi-tui";
+import { type Component, type OverlayHandle, setKeybindings, type TUI } from "@ponythewhite/base-context-tui";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import type { ModelRegistry } from "../../../src/core/model-registry.js";
@@ -64,9 +64,9 @@ describe("ENG-4658 onboarding transitions", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { AgentCronJobStore, type AgentCronScheduler } from "../../../src/core/cron-jobs.js";
@@ -17,9 +17,9 @@ type AgentDaemonCronInternals = {
 describe("ENG-4657 update heartbeat recovery", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

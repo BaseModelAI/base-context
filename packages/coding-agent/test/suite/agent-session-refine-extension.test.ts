@@ -1,15 +1,43 @@
-import { afterEach, describe, expect, it } from "vitest";
+import {
+	type FauxResponseFactory,
+	fauxAssistantMessage,
+	type Model,
+	type SimpleStreamOptions,
+} from "@ponythewhite/base-context-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
-import { loadHarnessState, type RefinementProposal } from "../../src/core/refinement/index.js";
+import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
+import {
+	type AutoRefineReview,
+	loadHarnessState,
+	REFINEMENT_CUSTOM_TYPE,
+	type RefinementProposal,
+} from "../../src/core/refinement/index.js";
+import { readSessionJournal } from "../../src/core/session-journal-reader.js";
+import type { CustomEntry, RequestJournalEntry, SessionEntry } from "../../src/core/session-manager.js";
 import { createHarness, type Harness } from "./harness.js";
+
+const learningModel: Model<"openai-responses"> = {
+	api: "openai-responses",
+	provider: "refinement-planner-fixture",
+	id: "learning",
+	name: "Learning fixture",
+	baseUrl: "https://refinement-planner.invalid/v1",
+	input: ["text"],
+	reasoning: true,
+	contextWindow: 128000,
+	maxTokens: 32768,
+	cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+};
 
 describe("AgentSession session_before_refine extension hook", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
+		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -58,6 +86,12 @@ describe("AgentSession session_before_refine extension hook", () => {
 		const state = loadHarnessState(result.harnessStatePath.replace(/\/[^/]+$/, ""), "local");
 		const memories = Object.values(state.entries.memory);
 		expect(memories.some((entry) => entry.title === "Extension memory")).toBe(true);
+		const records = (await harness.session.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "custom" && entry.customType === REFINEMENT_CUSTOM_TYPE,
+		);
+		expect(records).toHaveLength(1);
+		expect(records[0]).not.toHaveProperty("plannerRequest");
+		expect(result).not.toHaveProperty("plannerRequest");
 	});
 
 	it("rejects invalid extension edits at apply time", async () => {
@@ -147,6 +181,10 @@ describe("AgentSession session_before_refine extension hook", () => {
 		let handlerCalls = 0;
 		const harness = await createHarness({
 			persistSession: true,
+			models: [
+				{ id: "main", reasoning: true },
+				{ id: "learning", reasoning: true },
+			],
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_refine", async () => {
@@ -162,6 +200,10 @@ describe("AgentSession session_before_refine extension hook", () => {
 
 		const internals = harness.session as unknown as {
 			_planRefine(options: unknown, signal: AbortSignal): Promise<unknown>;
+			_reviewAutoRefine(context: {
+				reason: "turn_interval";
+				turnsSinceLastReview: number;
+			}): Promise<AutoRefineReview>;
 		};
 		// The handler runs but does not short-circuit: planning proceeds to the
 		// built-in planner LLM call, which fails here (no faux response queued)
@@ -171,6 +213,214 @@ describe("AgentSession session_before_refine extension hook", () => {
 			RefineSkippedError,
 		);
 		expect(handlerCalls).toBe(1);
+
+		// Actual built-in requests, not an injected reviewer or planner implementation.
+		const observed: Array<{ modelId: string; reasoning: SimpleStreamOptions["reasoning"] }> = [];
+		const response =
+			(value: unknown): FauxResponseFactory =>
+			(_context, options, _state, model) => {
+				observed.push({ modelId: model.id, reasoning: (options as SimpleStreamOptions | undefined)?.reasoning });
+				return fauxAssistantMessage(JSON.stringify(value));
+			};
+		const queueReviewAndPlan = () =>
+			harness.appendResponses([
+				response({ shouldRefine: true, rationale: "fixture lesson", instructions: "capture it", global: false }),
+				response({
+					summary: "built-in fixture plan",
+					rationale: "fixture",
+					expectedOutcome: "no edit needed",
+					edits: [],
+				}),
+			]);
+		await harness.session.setThinkingLevel("high");
+		queueReviewAndPlan();
+		expect(
+			(await internals._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 25 })).shouldRefine,
+		).toBe(true);
+		expect((await harness.session.refine()).summary).toBe("built-in fixture plan");
+		// Legacy main MODEL inheritance does not imply main effort on either request.
+		expect(observed).toEqual([
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "main", reasoning: undefined },
+		]);
+
+		const { sessionManager, modelRegistry } = harness.session;
+		modelRegistry.registerProvider(learningModel.provider, {
+			api: learningModel.api,
+			baseUrl: learningModel.baseUrl,
+			apiKey: "refinement-planner-fixture-key",
+			models: [learningModel],
+		});
+		harness.settingsManager.applyOverrides({
+			autoRefine: {
+				model: {
+					provider: learningModel.provider,
+					modelId: "learning",
+					thinkingLevel: "off",
+				},
+			},
+		});
+		// Replace the two existing learning responses, not the native planner/reviewer or their completion promises.
+		const completions = vi.spyOn(InferenceCoordinator.prototype, "complete");
+		const reviewerInstructions = "--global capture the user's reusable lesson";
+		const values: unknown[] = [
+			{ shouldRefine: true, rationale: "fixture lesson", instructions: reviewerInstructions },
+			{
+				summary: "built-in fixture plan",
+				rationale: "fixture",
+				expectedOutcome: "One proposed lesson may be useful",
+				edits: [
+					{ action: "create", kind: "memory", title: "Native planner memory", content: "A proposed lesson" },
+					{ action: "update", kind: "memory", title: "Missing target", content: "Skipped without an id" },
+				],
+			},
+		];
+		const bodies: Record<string, unknown>[] = [];
+		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			const value = values.shift();
+			if (value === undefined) throw new Error("Unexpected extra learning request");
+			const item = {
+				type: "message",
+				id: `msg_learning_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: JSON.stringify(value), annotations: [] }],
+			};
+			const events = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_learning_${bodies.length}`,
+						model: learningModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 20,
+							output_tokens: 10,
+							total_tokens: 30,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			];
+			const sse = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		const nativeReview = await internals._reviewAutoRefine({ reason: "turn_interval", turnsSinceLastReview: 25 });
+		expect(nativeReview.shouldRefine).toBe(true);
+		expect(nativeReview.instructions?.startsWith(`${reviewerInstructions}\n\n`)).toBe(true);
+		const automaticPolicy = nativeReview.instructions!.slice(reviewerInstructions.length + 2);
+		expect(automaticPolicy).toContain("concrete reusable improvement");
+		expect(automaticPolicy).toContain("local reusable lessons are eligible");
+		expect(automaticPolicy).toContain("not already supplied in the task or current harness context");
+		expect(automaticPolicy).toContain("Do not refine solely to copy current progress");
+		expect(completions.mock.calls[0]?.[1].systemPrompt).toContain(automaticPolicy);
+		const sourceLeafId = sessionManager.getLeafId();
+		const nativeResult = await harness.session.refine({ instructions: nativeReview.instructions });
+		expect(nativeResult.summary).toBe("built-in fixture plan");
+		expect(completions.mock.calls[1]?.[1].messages[0]?.content).toEqual([
+			{ type: "text", text: expect.stringContaining(nativeReview.instructions!) },
+		]);
+		expect([
+			...observed,
+			...completions.mock.calls.map(([model, , options]) => ({
+				modelId: model.id,
+				reasoning: options?.reasoning,
+			})),
+		]).toEqual([
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "main", reasoning: undefined },
+			{ modelId: "learning", reasoning: "off" },
+			{ modelId: "learning", reasoning: "off" },
+		]);
+		expect(harness.session.model?.id).toBe("main");
+		expect(harness.session.thinkingLevel).toBe("high");
+		expect(handlerCalls).toBe(3);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(offlineFetch).toHaveBeenCalledTimes(2);
+		expect(nativeResult.appliedEdits.map((edit) => edit.applied)).toEqual([true, false]);
+		const state = loadHarnessState(nativeResult.harnessStatePath.replace(/\/[^/]+$/, ""), "local");
+		expect(Object.values(state.entries.memory).some((entry) => entry.title === "Native planner memory")).toBe(true);
+		const receipts: RequestJournalEntry[] = [];
+		let recorded: CustomEntry | undefined;
+		for await (const { entry: raw, retention, qualification } of readSessionJournal(
+			sessionManager.getSessionFile()!,
+		)) {
+			const entry = raw as SessionEntry;
+			if (entry.type === "request" && entry.request.type === "attempt_settled") receipts.push(entry);
+			if (
+				entry.type === "custom" &&
+				entry.customType === REFINEMENT_CUSTOM_TYPE &&
+				entry.data &&
+				typeof entry.data === "object" &&
+				"id" in entry.data &&
+				entry.data.id === nativeResult.id
+			) {
+				recorded = entry;
+				expect(retention).toBeUndefined();
+				expect(qualification).toBeUndefined();
+			}
+		}
+		expect(receipts).toHaveLength(2);
+		const planner = receipts.map((entry) => entry.request).find((request) => request.purposeDetail === "plan");
+		if (planner?.type !== "attempt_settled") throw new Error("Missing settled planner request");
+		expect(planner).toMatchObject({
+			purpose: "refine",
+			purposeDetail: "plan",
+			source: { sessionId: sessionManager.getSessionId(), leafId: sourceLeafId },
+			receipt: { outcome: "completed" },
+		});
+		expect(receipts.some((entry) => entry.request.purposeDetail === "auto-refine-review")).toBe(true);
+		expect(recorded?.data).toEqual(nativeResult);
+		expect(recorded?.plannerRequest).toEqual({
+			operationId: planner.operationId,
+			attemptIds: [planner.attemptId],
+			source: planner.source,
+		});
+		expect(recorded?.plannerRequest?.operationId).not.toBe(nativeResult.id);
+		expect(JSON.stringify(nativeResult)).not.toContain('"plannerRequest"');
+		expect(JSON.stringify(state)).not.toContain('"plannerRequest"');
+		expect(JSON.stringify(bodies)).not.toContain('"plannerRequest"');
+		expect(JSON.stringify(harness.session.messages)).not.toContain('"plannerRequest"');
+	});
+
+	it("declines automatic task snapshots without adding planner instructions", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(JSON.stringify({ shouldRefine: false, rationale: "Only mutable task progress" })),
+		]);
+		const internals = harness.session as unknown as {
+			_maybeAutoRefine(reason: "turn_interval"): Promise<void>;
+			_reviewAutoRefine(context: {
+				reason: "turn_interval";
+				turnsSinceLastReview: number;
+			}): Promise<AutoRefineReview>;
+			_assistantTurnsSinceAutoRefine: number;
+		};
+		const review = vi.spyOn(internals, "_reviewAutoRefine");
+		const planner = vi.spyOn(harness.session, "refine");
+		internals._assistantTurnsSinceAutoRefine = 1;
+
+		await internals._maybeAutoRefine("turn_interval");
+
+		expect(review).toHaveBeenCalledTimes(1);
+		await expect(review.mock.results[0]?.value).resolves.toEqual({
+			shouldRefine: false,
+			rationale: "Only mutable task progress",
+			instructions: undefined,
+		});
+		expect(planner).not.toHaveBeenCalled();
+		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
 	it("consumes a non-serialized auto-refine round when an extension skips it", async () => {

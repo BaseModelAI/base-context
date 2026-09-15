@@ -10,13 +10,13 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
-import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
+import { assertProductStatePath, readAbsolutePathEnv, resolveRuntimePaths } from "../../runtime-paths.js";
+import { normalizeSocketPath } from "./daemon-socket.js";
 
-const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 
 const OWNER_VERSION = 1;
 const REGISTRY_LOCK_STALE_MS = 5000;
@@ -44,6 +44,7 @@ interface DaemonSupervisorOwnerRecord extends ProcessIdentity {
 	socketPath: string;
 	descriptorDir: string;
 	agentDir: string;
+	journalPath?: string;
 	appVersion: string;
 	phase: DaemonSupervisorOwnerPhase;
 	createdAt: string;
@@ -65,6 +66,8 @@ interface DaemonSupervisorOwnerScope {
 	generation: string;
 	socketPath: string;
 	descriptorDir: string;
+	agentDir?: string;
+	journalPath?: string;
 }
 
 interface DaemonStartupFenceRecord extends ProcessIdentity {
@@ -88,6 +91,7 @@ interface AcquireDaemonSupervisorOwnershipOptions {
 	socketPath: string;
 	descriptorDir: string;
 	agentDir: string;
+	journalPath?: string;
 	generation: string;
 	appVersion: string;
 	registryDir?: string;
@@ -194,6 +198,17 @@ class DaemonSupervisorOwnership {
 	) {}
 
 	async assertCurrent(): Promise<void> {
+		this.assertCurrentSync();
+	}
+
+	assertJournalCurrent(journalPath: string): void {
+		if (this.record.journalPath !== canonicalizeFilesystemPath(assertProductStatePath(journalPath))) {
+			throw this.ownershipLostError();
+		}
+		this.assertCurrentSync();
+	}
+
+	private assertCurrentSync(): void {
 		if (this.released) {
 			throw this.ownershipLostError();
 		}
@@ -310,26 +325,10 @@ class DaemonShutdownAdmission {
 	}
 }
 
-/**
- * The registry is durable authority state and must be global per user so
- * ownerConflicts sees every daemon on the box; it deliberately lives outside
- * $TMPDIR (whose files macOS dirhelper deletes after 3 days) and outside the
- * per-invocation agent dir.
- */
+/** Durable supervisor authority is scoped to one product home, never an upstream registry. */
 function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
-}
-
-/** Read-only legacy registry location, disabled when the registry is overridden. */
-/**
- * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
- * from before the ~/.prime move may still be running; gated off whenever the
- * registry is overridden. Remove after one release.
- */
-function legacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]
-		? undefined
-		: resolve(defaultDaemonSocketDir(), "supervisor-owners");
+	const override = readAbsolutePathEnv(DAEMON_SUPERVISOR_REGISTRY_DIR_ENV, environment);
+	return assertProductStatePath(override ?? resolveRuntimePaths(environment).daemonRegistry);
 }
 
 /**
@@ -356,6 +355,7 @@ function readLegacyOwnersForSocket(
 }
 
 async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
+	assertProductStatePath(registryDir);
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 	const guardPath = resolve(registryDir, ".guard");
 	let compromisedError: Error | undefined;
@@ -462,6 +462,9 @@ export async function acquireDaemonSupervisorOwnership(
 		socketPath: normalizeSocketPath(options.socketPath),
 		descriptorDir: canonicalizeFilesystemPath(options.descriptorDir),
 		agentDir: canonicalizeFilesystemPath(options.agentDir),
+		...(options.journalPath
+			? { journalPath: canonicalizeFilesystemPath(assertProductStatePath(options.journalPath)) }
+			: {}),
 		appVersion: options.appVersion,
 		phase: "starting",
 		createdAt: now,
@@ -515,7 +518,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 	},
 	validatedFingerprint?: string,
 	registryDir?: string,
-	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+	legacyRegistryDir: string | undefined = undefined,
 ): Promise<string> {
 	registryDir ??= defaultDaemonSupervisorRegistryDir();
 	const current =
@@ -574,7 +577,7 @@ export async function persistDaemonStartupFenceFromOwner(
 	socketPath: string,
 	hello: DaemonSupervisorHelloIdentity,
 	registryDir?: string,
-	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
+	legacyRegistryDir: string | undefined = undefined,
 ): Promise<void> {
 	registryDir ??= defaultDaemonSupervisorRegistryDir();
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
@@ -726,7 +729,13 @@ function canonicalizeFilesystemPath(path: string): string {
 }
 
 function ownerConflicts(left: DaemonSupervisorOwnerScope, right: DaemonSupervisorOwnerScope): boolean {
-	return left.socketPath === right.socketPath || left.descriptorDir === right.descriptorDir;
+	if (left.socketPath === right.socketPath || left.descriptorDir === right.descriptorDir) return true;
+	if (left.journalPath && right.journalPath) return left.journalPath === right.journalPath;
+	// Older records do not identify their family journal. An unknown footprint cannot grant a writer.
+	return Boolean(
+		(left.journalPath || right.journalPath) &&
+			(!left.agentDir || !right.agentDir || left.agentDir === right.agentDir),
+	);
 }
 
 function sameOwnerRecord(left: DaemonSupervisorOwnerRecord, right: DaemonSupervisorOwnerRecord): boolean {
@@ -735,7 +744,10 @@ function sameOwnerRecord(left: DaemonSupervisorOwnerRecord, right: DaemonSupervi
 		left.generation === right.generation &&
 		left.pid === right.pid &&
 		left.processStartId === right.processStartId &&
-		left.socketPath === right.socketPath
+		left.socketPath === right.socketPath &&
+		left.descriptorDir === right.descriptorDir &&
+		left.agentDir === right.agentDir &&
+		left.journalPath === right.journalPath
 	);
 }
 
@@ -811,6 +823,7 @@ function isDaemonSupervisorOwnerRecord(value: unknown): value is DaemonSuperviso
 		typeof record.socketPath === "string" &&
 		typeof record.descriptorDir === "string" &&
 		typeof record.agentDir === "string" &&
+		(record.journalPath === undefined || typeof record.journalPath === "string") &&
 		typeof record.appVersion === "string" &&
 		(record.phase === "starting" || record.phase === "owner" || record.phase === "stopping") &&
 		typeof record.createdAt === "string" &&
@@ -841,7 +854,9 @@ function isDaemonSupervisorOwnerScope(value: unknown): value is DaemonSupervisor
 		typeof scope.token === "string" &&
 		typeof scope.generation === "string" &&
 		typeof scope.socketPath === "string" &&
-		typeof scope.descriptorDir === "string"
+		typeof scope.descriptorDir === "string" &&
+		(scope.agentDir === undefined || typeof scope.agentDir === "string") &&
+		(scope.journalPath === undefined || typeof scope.journalPath === "string")
 	);
 }
 
@@ -853,6 +868,8 @@ function writeOwnerScope(directory: string, owner: DaemonSupervisorOwnerRecord):
 		generation: owner.generation,
 		socketPath: owner.socketPath,
 		descriptorDir: owner.descriptorDir,
+		agentDir: owner.agentDir,
+		...(owner.journalPath ? { journalPath: owner.journalPath } : {}),
 	};
 	writeJsonAtomically(resolve(directory, "scope.json"), scope);
 }

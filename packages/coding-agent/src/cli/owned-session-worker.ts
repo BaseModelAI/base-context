@@ -14,12 +14,13 @@ import {
 } from "../core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
+import { PRODUCT } from "../product-identity.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
-const OWNED_WORKER_ENV = "PRIME_AGENT_INTERNAL_OWNED_WORKER";
-const OWNED_RECOVERY_DESCRIPTOR_ENV = "PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR";
-const OWNED_PROFILE_ENV = "PRIME_AGENT_INTERNAL_OWNED_PROFILE";
+const OWNED_WORKER_ENV = "BASE_CONTEXT_INTERNAL_OWNED_WORKER";
+const OWNED_RECOVERY_DESCRIPTOR_ENV = "BASE_CONTEXT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR";
+const OWNED_PROFILE_ENV = "BASE_CONTEXT_INTERNAL_OWNED_PROFILE";
 
 let closeOwnerWatch: (() => void) | undefined;
 
@@ -59,7 +60,7 @@ function hasNonSessionOperation(args: readonly string[]): boolean {
 }
 
 function isStartupBenchmark(environment: NodeJS.ProcessEnv): boolean {
-	const value = environment.PI_STARTUP_BENCHMARK?.toLowerCase();
+	const value = environment.BASE_CONTEXT_STARTUP_BENCHMARK?.toLowerCase();
 	return value === "1" || value === "true" || value === "yes";
 }
 
@@ -202,8 +203,12 @@ export async function runOwnedSessionWorkerFrontend(
 	profile: OwnedSessionWorkerProfile,
 ): Promise<number> {
 	const interactive = profile === "interactive-ephemeral";
-	const recoveryDescriptorPath = join(tmpdir(), `prime-agent-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`);
+	const recoveryDescriptorPath = join(
+		tmpdir(),
+		`${PRODUCT.command}-owned-${process.pid}-${randomUUID().slice(0, 12)}.json`,
+	);
 	const orphanProcessJournalPath = `${recoveryDescriptorPath}.orphans.jsonl`;
+	let retainOrphanTracking = false;
 	let currentChild: ChildProcess | undefined;
 	let terminating = false;
 	let terminationSignal: NodeJS.Signals | undefined;
@@ -297,7 +302,14 @@ export async function runOwnedSessionWorkerFrontend(
 				// The worker process group may already be fully reaped.
 			}
 		}
-		for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, workerPid)) {
+		let orphans: ReturnType<typeof readActiveOrphanProcesses>;
+		try {
+			orphans = readActiveOrphanProcesses(orphanProcessJournalPath, workerPid);
+		} catch (error) {
+			retainOrphanTracking = true;
+			throw error;
+		}
+		for (const orphan of orphans) {
 			if (!shouldReapOrphanProcess(orphan)) {
 				continue;
 			}
@@ -429,7 +441,12 @@ export async function runOwnedSessionWorkerFrontend(
 			if (child.connected) {
 				child.disconnect();
 			}
-			reapWorkerResources(workerPid);
+			const cleanupErrors: unknown[] = [];
+			try {
+				reapWorkerResources(workerPid);
+			} catch (error) {
+				cleanupErrors.push(error);
+			}
 			const rpcCrashed =
 				profile === "rpc" &&
 				!terminating &&
@@ -438,9 +455,14 @@ export async function runOwnedSessionWorkerFrontend(
 			if (Date.now() - workerStartedAt >= 60_000) {
 				recoveryAttempt = 0;
 			}
-			if (rpcCrashed) {
-				failPendingRpcCommands();
+			try {
+				if (rpcCrashed) failPendingRpcCommands();
+			} catch (error) {
+				if (!cleanupErrors.includes(error)) cleanupErrors.push(error);
 			}
+			if (cleanupErrors.length > 1)
+				throw new AggregateError(cleanupErrors, "Worker resource cleanup and RPC uncertainty reporting failed");
+			if (cleanupErrors.length > 0) throw cleanupErrors[0];
 			const shouldRecover = rpcCrashed && !stdinEnded && recoveryAttempt < 3;
 			if (!shouldRecover) {
 				return terminationSignal ? exitCodeForSignal(terminationSignal) : workerExitCode;
@@ -463,8 +485,10 @@ export async function runOwnedSessionWorkerFrontend(
 		}
 		detachRpcInput?.();
 		detachRpcOutput?.();
-		rmSync(recoveryDescriptorPath, { force: true });
-		clearOrphanProcessJournal(orphanProcessJournalPath);
+		if (!retainOrphanTracking) {
+			rmSync(recoveryDescriptorPath, { force: true });
+			clearOrphanProcessJournal(orphanProcessJournalPath);
+		}
 	}
 }
 
@@ -472,7 +496,7 @@ export async function maybeRunOwnedSessionWorkerFrontend(
 	args: readonly string[],
 	forceLegacyFrontend = false,
 ): Promise<boolean> {
-	if (!forceLegacyFrontend && process.env.PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
+	if (!forceLegacyFrontend && process.env.BASE_CONTEXT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND !== "1") {
 		return false;
 	}
 	const profile = classifyOwnedSessionWorkerInvocation(args, process.stdin.isTTY);

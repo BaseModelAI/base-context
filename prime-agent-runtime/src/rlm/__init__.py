@@ -1,4 +1,4 @@
-"""Tiny rlm-compatible kernel shim for Prime Agent."""
+"""Tiny rlm-compatible kernel shim for Base Context."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _parse_host_reply(request_type: str, reply: dict[str, Any]) -> dict[str, Any
 
 
 async def host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Send a typed request to the Prime Agent host and await its reply.
+    """Send a typed request to the Base Context host and await its reply.
 
     This is the kernel side of the generic host bridge: Python skills call
     ``await host_request("<type>", {...})`` and the TypeScript host dispatches
@@ -82,6 +82,17 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
     return _parse_host_reply(request_type, reply)
 
 
+async def prime_context(request: object) -> dict[str, object]:
+    """Recover bounded public history through the owned host reader.
+
+    The host validates the shared native schema. Selected public data is also
+    attached intact to this active cell's finalized ipython tool result. The
+    returned value alone is not a model-context update. Freshness is unknown.
+    Detached requests and sessions without the native tool are not authorized.
+    """
+    return await host_request("prime_context", {"request": request})
+
+
 def emit(data: dict[str, Any]) -> None:
     """Ship one display event (dict of MIME type -> JSON payload) to the host."""
     from . import repl
@@ -90,7 +101,7 @@ def emit(data: dict[str, Any]) -> None:
 
 
 async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
-    """Spawn a recursive Prime Agent child and return once its task is admitted.
+    """Spawn a recursive Base Context child and return once its task is admitted.
 
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
@@ -185,12 +196,11 @@ class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
     Session env vars may be applied after import, so a state bound at import
-    time could freeze an env-less resolution. Resolution must never raise (a
-    failure inside the kernel namespace would take down the kernel). When the
-    local store is genuinely unconfigured (no session env, e.g. --no-session)
-    reads see an empty view but local writes raise instructively instead of
-    vanishing on kernel exit; any other resolution failure degrades to a shared
-    in-memory store until local resolution starts succeeding.
+    time could freeze an env-less resolution. Invalid product paths raise as
+    configuration errors. When the local store is genuinely unconfigured (no
+    session env, e.g. --no-session), reads see an empty view but local writes
+    raise instead of vanishing on kernel exit. Other resolution failures degrade
+    to a shared in-memory store until local resolution starts succeeding.
     """
 
     _fallback: HarnessState | None = None
@@ -199,6 +209,9 @@ class _HarnessProxy:
     def _resolve(self) -> HarnessState:
         try:
             return get_harness_state()
+        except ValueError:
+            # Invalid product paths are configuration errors, not volatile stores.
+            raise
         except RuntimeError as exc:
             if "Local harness state requires" in str(exc):
                 if _HarnessProxy._unpersisted is None:
@@ -233,6 +246,7 @@ _harness_state = _HarnessProxy()
 class _RLMCallable:
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
+    prime_context = staticmethod(prime_context)
 
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
@@ -282,6 +296,7 @@ __all__ = [
     "harness",
     "host_request",
     "list_subagents",
+    "prime_context",
     "rlm",
     "run",
 ]

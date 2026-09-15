@@ -17,9 +17,9 @@
  * separate variables. Only the agent cursor is ever exposed to the agent.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@ponythewhite/base-context";
+import { StringEnum } from "@ponythewhite/base-context-ai";
+import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@ponythewhite/base-context-tui";
 import { Type } from "typebox";
 
 // Thrown from the tool on illegal actions. The agent runtime surfaces thrown
@@ -624,11 +624,15 @@ let gameState: GameState = createInitialState();
 let component: TicTacToeComponent | null = null;
 let gameActive = false;
 
-function reconstructState(ctx: ExtensionContext): void {
+async function reconstructState(ctx: ExtensionContext): Promise<void> {
+	const branch = await ctx.sessionManager.readBranch(undefined, {
+		maxEntries: 16_384,
+		maxSourceBytes: 64 * 1024 * 1024,
+	});
 	gameState = createInitialState();
 	gameActive = false;
 
-	for (const entry of ctx.sessionManager.getBranch()) {
+	for (const entry of branch) {
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
 		if (msg.role !== "toolResult") continue;
@@ -784,7 +788,7 @@ Decide the target cell first, then dump every action for the turn in one go.
 				return;
 			}
 
-			reconstructState(ctx);
+			await reconstructState(ctx);
 			if (gameState.status !== "playing") {
 				gameState = createInitialState();
 			}

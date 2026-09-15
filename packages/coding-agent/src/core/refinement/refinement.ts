@@ -1,21 +1,29 @@
 import { randomUUID } from "node:crypto";
 import {
-	appendFileSync,
+	closeSync,
 	existsSync,
+	fstatSync,
 	mkdirSync,
-	readFileSync,
+	openSync,
+	readSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import { isDeepStrictEqual } from "node:util";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Model } from "@ponythewhite/base-context-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
+import { readSessionHistoryImage } from "../export-html/history.js";
+import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
 import { convertToLlm } from "../messages.js";
+import type { NativePlannerRequestOutputWriter } from "../request-events.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
+import type { SessionHistoryReadLimits } from "../session-history-index.js";
 import type { CustomEntry } from "../session-manager.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
@@ -23,6 +31,16 @@ export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
 export const REFINE_SKILL_NAME = "refine";
 const HARNESS_STATE_DIR_NAME = "harness";
 const REFINEMENT_HISTORY_FILE_NAME = "refinements.jsonl";
+const GLOBAL_REFINEMENT_HISTORY_LIMITS: SessionHistoryReadLimits = {
+	maxEntries: 16_384,
+	maxSourceBytes: 64 * 1024 * 1024,
+};
+const MAX_GLOBAL_REFINEMENT_APPENDS = 32;
+const MAX_GLOBAL_REFINEMENT_PENDING_BYTES = 64 * 1024 * 1024;
+let globalRefinementAppendTail: Promise<void> = Promise.resolve();
+let pendingGlobalRefinementAppends = 0;
+let pendingGlobalRefinementBytes = 0;
+
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
 const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
@@ -120,13 +138,13 @@ export interface AutoRefineReview {
 	instructions?: string;
 }
 
-const REFINEMENT_SYSTEM_PROMPT = `You are Prime Agent's /refine continual harness subsystem.
+const REFINEMENT_SYSTEM_PROMPT = `You are Base Context's /refine continual harness subsystem.
 
 Your job is to improve the editable continual harness state from the current trajectory.
 This is similar in spirit to context compaction, but instead of summarizing the
 conversation you emit precise Create, Update, or Delete edits to reusable state.
 The continual harness is the persistent, editable set of prompt notes, memories,
-skills, and subagent specs that lets Prime Agent improve reusable behavior
+skills, and subagent specs that lets Base Context improve reusable behavior
 outside the token history.
 Use "continual harness" for that persistent artifact layer; keep "RLM" for the
 runtime, Python REPL kernel, and native call interface that executes those artifacts.
@@ -138,7 +156,7 @@ Continual harness components:
 - subagent: reusable delegation specs, including purpose, instructions, and when to invoke. Include the RLM-native call form: compose a concise task prompt and spawn with \`handle = await rlm("sub-task")\`; admission returns immediately with \`rlm_child_id\`, \`name\`, \`session_dir\`, and \`model\`, never the child's answer. Results arrive only through explicit \`agent_message\` replies or files; children reply with \`await agent_message.send(message, receiver_role="parent")\`. Use \`await rlm.list_subagents()\` to recover direct child handles and \`await agent_message.send(..., receiver_role="child", receiver_name=handle.name)\` for follow-ups. Do not invent wrappers like \`run_subagent(...)\`.
 
 Scope and persistence policy:
-- The default editable continual harness store is local to the current Prime Agent session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
+- The default editable continual harness store is local to the current Base Context session. Use it for session-specific progress, active task state, current-run coordination notes, temporary blockers, and project facts that should not affect other sessions.
 - A caller may explicitly request global refinement. Global edits must be stable cross-session lessons, durable user preferences, reusable skills/subagents, or tool/environment facts that should affect future sessions.
 - Entry ids in the harness overview may carry a display-only \`local:\` or \`global:\` prefix. Always use the bare id (no prefix) in edits.
 - All edits in one refinement apply only to the requested scope's store. During a local refinement, global entries are read-only context: never propose update or delete edits for them; create a local entry instead when a session-specific override is genuinely needed.
@@ -172,9 +190,12 @@ JSON only with this exact shape:
   ]
 }`;
 
-const AUTO_REFINE_REVIEW_SYSTEM_PROMPT = `You are Prime Agent's automatic /refine review gate.
+const AUTOMATIC_REFINEMENT_UTILITY_POLICY = `Automatic refinement requires a concrete reusable improvement supported by the trajectory and not already supplied in the task or current harness context. Eligible improvements include stable facts/preferences, reusable failure lessons, and repeatable procedures; local reusable lessons are eligible. Do not refine solely to copy current progress, completion claims, output counts, next-step checklists, or temporary blockers; keep those in task context. If no supported reusable improvement remains, return shouldRefine=false when reviewing, or an empty edits array when planning.`;
 
-Decide whether this checkpoint should run /refine. Auto /refine writes local continual harness state by default, so approve when the trajectory contains evidence useful to this session's future turns.
+const AUTO_REFINE_REVIEW_SYSTEM_PROMPT = `You are Base Context's automatic /refine review gate.
+
+Decide whether this checkpoint should run /refine. Auto /refine writes local continual harness state by default.
+${AUTOMATIC_REFINEMENT_UTILITY_POLICY}
 Reject one-off noise, unsupported hypotheses, and transient tool outputs. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified lessons likely to be reused in future sessions.
 
 Return JSON only:
@@ -278,17 +299,81 @@ export function getHarnessStatePath(harnessStateDir: string = getGlobalHarnessSt
 	return join(harnessStateDir, "harness_state.json");
 }
 
+const HARNESS_STATE_LIMITS: SessionHistoryReadLimits = {
+	maxEntries: 16_384,
+	maxSourceBytes: 64 * 1024 * 1024,
+};
+
+class HarnessStateLimitError extends Error {}
+
+function harnessStateLimits(limits: SessionHistoryReadLimits): SessionHistoryReadLimits {
+	const { maxEntries, maxSourceBytes } = limits;
+	if (
+		!Number.isSafeInteger(maxEntries) ||
+		maxEntries <= 0 ||
+		!Number.isSafeInteger(maxSourceBytes) ||
+		maxSourceBytes <= 0
+	) {
+		throw new Error("Invalid harness state limits");
+	}
+	return { maxEntries, maxSourceBytes };
+}
+
+/** Count only owned kind records and refinement events, not arbitrary nested memory. */
+function assertHarnessStateItemLimit(state: Partial<HarnessState>, maxEntries: number): void {
+	let count = Array.isArray(state.refinements) ? state.refinements.length : 0;
+	if (count > maxEntries) throw new HarnessStateLimitError("Harness state item limit exceeded");
+	for (const kind of ["prompt", "memory", "skill", "subagent"] as const) {
+		const records = state.entries?.[kind];
+		if (!records || typeof records !== "object") continue;
+		for (const id in records) {
+			if (!Object.hasOwn(records, id) || !objectRecord(records[id])) continue;
+			if (++count > maxEntries) throw new HarnessStateLimitError("Harness state item limit exceeded");
+		}
+	}
+}
+
+function readHarnessStateImage(statePath: string, maxSourceBytes: number): Buffer {
+	const fd = openSync(statePath, "r");
+	let captured: Buffer;
+	try {
+		const size = fstatSync(fd, { bigint: true }).size;
+		if (size > BigInt(maxSourceBytes)) throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+		captured = Buffer.alloc(Number(size));
+		let offset = 0;
+		while (offset < captured.length) {
+			const count = readSync(fd, captured, offset, Math.min(64 * 1024, captured.length - offset), offset);
+			if (count === 0) throw new Error("Harness state source changed during read");
+			offset += count;
+		}
+		const after = fstatSync(fd, { bigint: true }).size;
+		if (after > BigInt(maxSourceBytes)) throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+		if (after !== size) throw new Error("Harness state source changed during read");
+	} catch (error) {
+		try {
+			closeSync(fd);
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "Harness state read and close failed", { cause: error });
+		}
+		throw error;
+	}
+	closeSync(fd);
+	return captured;
+}
+
 export function loadHarnessState(
 	harnessStateDir: string = getGlobalHarnessStateDir(),
 	scope: HarnessScope = "global",
+	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
 ): HarnessState {
+	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
 	const statePath = getHarnessStatePath(harnessStateDir);
 	if (!existsSync(statePath)) {
 		return emptyHarnessState();
 	}
 	let parsed: Partial<HarnessState>;
 	try {
-		const raw = JSON.parse(readFileSync(statePath, "utf8"));
+		const raw = JSON.parse(readHarnessStateImage(statePath, maxSourceBytes).toString("utf8"));
 		// loadHarnessState runs on every system-prompt build and before each /refine, so
 		// a corrupt or unreadable (or non-object) state file must degrade to empty rather
 		// than throw and break the session. The next saveHarnessState rewrites it cleanly.
@@ -296,16 +381,24 @@ export function loadHarnessState(
 			return emptyHarnessState();
 		}
 		parsed = raw as Partial<HarnessState>;
-	} catch {
+	} catch (error) {
+		// An oversized valid store must never become an empty snapshot that a later save can overwrite.
+		if (
+			error instanceof HarnessStateLimitError ||
+			(error instanceof AggregateError && error.cause instanceof HarnessStateLimitError)
+		)
+			throw error;
 		return emptyHarnessState();
 	}
+	assertHarnessStateItemLimit(parsed, maxEntries);
 	const state = emptyHarnessState();
 	state.schema = typeof parsed.schema === "number" ? parsed.schema : 1;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
 		const records = parsed.entries?.[kind];
 		if (records && typeof records === "object") {
-			for (const [id, rawEntry] of Object.entries(records)) {
-				const entry = objectRecord(rawEntry);
+			for (const id in records) {
+				if (!Object.hasOwn(records, id)) continue;
+				const entry = objectRecord(records[id]);
 				if (!entry) continue;
 				state.entries[kind][id] = {
 					...(entry as unknown as HarnessEntry),
@@ -342,13 +435,23 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 	return merged;
 }
 
-export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
+export function saveHarnessState(
+	harnessStateDir: string,
+	state: HarnessState,
+	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
+): string {
+	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
+	assertHarnessStateItemLimit(state, maxEntries);
+	const serialized = `${JSON.stringify(state, null, 2)}\n`;
+	if (Buffer.byteLength(serialized) > maxSourceBytes) {
+		throw new HarnessStateLimitError("Harness state source byte limit exceeded");
+	}
 	const statePath = getHarnessStatePath(harnessStateDir);
 	const tempPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
 	mkdirSync(harnessStateDir, { recursive: true });
 	try {
 		const mode = existsSync(statePath) ? statSync(statePath).mode & 0o777 : 0o600;
-		writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode });
+		writeFileSync(tempPath, serialized, { encoding: "utf8", mode });
 		renameSync(tempPath, statePath);
 	} finally {
 		if (existsSync(tempPath)) {
@@ -371,29 +474,78 @@ function isRefinementResult(data: unknown): data is RefinementResult {
  * rolled back from any session. Local-scope refinements are recorded only in the
  * session JSONL and roll back via their recorded harnessStatePath.
  */
-export function appendGlobalRefinement(harnessStateDir: string, result: RefinementResult): string {
+export async function appendGlobalRefinement(
+	harnessStateDir: string,
+	result: RefinementResult,
+	maxRecordBytes = GLOBAL_REFINEMENT_HISTORY_LIMITS.maxSourceBytes,
+): Promise<string> {
+	if (!Number.isSafeInteger(maxRecordBytes) || maxRecordBytes <= 0) {
+		throw new Error("Invalid global refinement record byte limit");
+	}
+	if (pendingGlobalRefinementAppends >= MAX_GLOBAL_REFINEMENT_APPENDS) {
+		throw new Error("Global refinement append queue limit exceeded");
+	}
 	const historyPath = getRefinementHistoryPath(harnessStateDir);
-	mkdirSync(harnessStateDir, { recursive: true });
-	appendFileSync(historyPath, `${JSON.stringify(result)}\n`, "utf8");
-	return historyPath;
+	// Preserve JSON.stringify semantics and freeze the caller's value before I/O yields.
+	const serialized = `${JSON.stringify(result)}\n`;
+	const bytes = Buffer.byteLength(serialized);
+	if (bytes > maxRecordBytes || pendingGlobalRefinementBytes + bytes > MAX_GLOBAL_REFINEMENT_PENDING_BYTES) {
+		throw new Error("Global refinement append byte limit exceeded");
+	}
+	pendingGlobalRefinementAppends++;
+	pendingGlobalRefinementBytes += bytes;
+	const write = globalRefinementAppendTail.then(async () => {
+		await mkdir(harnessStateDir, { recursive: true });
+		await appendFile(historyPath, serialized, "utf8");
+		return historyPath;
+	});
+	// Failed appends reject their caller, but do not poison later accepted work.
+	globalRefinementAppendTail = write.then(
+		() => undefined,
+		() => undefined,
+	);
+	try {
+		return await write;
+	} finally {
+		pendingGlobalRefinementAppends--;
+		pendingGlobalRefinementBytes -= bytes;
+	}
 }
 
-export function loadGlobalRefinementHistory(harnessStateDir: string = getGlobalHarnessStateDir()): RefinementResult[] {
-	const historyPath = getRefinementHistoryPath(harnessStateDir);
-	if (!existsSync(historyPath)) {
-		return [];
+export async function loadGlobalRefinementHistory(
+	harnessStateDir: string = getGlobalHarnessStateDir(),
+	limits: SessionHistoryReadLimits = GLOBAL_REFINEMENT_HISTORY_LIMITS,
+): Promise<RefinementResult[]> {
+	const { maxEntries, maxSourceBytes } = limits;
+	if (
+		!Number.isSafeInteger(maxEntries) ||
+		maxEntries <= 0 ||
+		!Number.isSafeInteger(maxSourceBytes) ||
+		maxSourceBytes <= 0
+	) {
+		throw new Error("Invalid global refinement history limits");
 	}
+	const historyPath = getRefinementHistoryPath(harnessStateDir);
+	const priorAppends = globalRefinementAppendTail;
+	await priorAppends;
+	if (!existsSync(historyPath)) return [];
+	const captured = await readSessionHistoryImage(historyPath, maxSourceBytes, "Global refinement history");
+	const text = captured.toString("utf8");
 	const results: RefinementResult[] = [];
-	for (const line of readFileSync(historyPath, "utf8").split("\n")) {
-		const trimmed = line.trim();
+	let start = 0;
+	let records = 0;
+	while (start < text.length) {
+		const newline = text.indexOf("\n", start);
+		const end = newline === -1 ? text.length : newline;
+		const trimmed = text.slice(start, end).trim();
+		start = end + 1;
 		if (!trimmed) continue;
+		if (++records > maxEntries) throw new Error("Global refinement history entry limit exceeded");
 		try {
 			const parsed = JSON.parse(trimmed);
-			if (isRefinementResult(parsed)) {
-				results.push(withDefaultRefinementScope(parsed, "global"));
-			}
+			if (isRefinementResult(parsed)) results.push(withDefaultRefinementScope(parsed, "global"));
 		} catch {
-			// Skip malformed lines so a single bad append cannot break rollback.
+			// Preserve malformed-line skipping, including scope-inference failures.
 		}
 	}
 	return results;
@@ -445,7 +597,7 @@ export function formatHarnessStateForPrompt(
 	const lines = [
 		"# Continual Harness State",
 		"",
-		"Local continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.",
+		"Local continual harness entries belong to this Base Context session. Global continual harness entries persist across Base Context sessions.",
 		"The continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.",
 		"Default to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
 		"Use these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.",
@@ -718,6 +870,8 @@ export function applyRefinementProposal(
 	proposal: RefinementProposal,
 	options: { id: string; rollbackOf?: string; scope?: HarnessScope; baselineState?: HarnessState },
 ): RefinementResult {
+	const application = nativePlannerApplications.get(proposal);
+	nativePlannerApplications.delete(proposal);
 	const appliedEdits: AppliedRefinementEdit[] = [];
 	const proposalModifiedKeys = new Set<string>();
 	for (const edit of proposal.edits) {
@@ -798,7 +952,7 @@ export function applyRefinementProposal(
 		created_at: now(),
 	});
 
-	return {
+	const result = {
 		id: options.id,
 		summary: proposal.summary,
 		rationale: proposal.rationale,
@@ -808,6 +962,21 @@ export function applyRefinementProposal(
 		rollbackOf: options.rollbackOf,
 		scope: options.scope,
 	};
+	if (
+		application &&
+		state === application.state &&
+		options.id === application.native.id &&
+		options.scope === application.scope &&
+		options.rollbackOf === undefined &&
+		options.baselineState === application.native.baselineState &&
+		matchesNativePlannerPlan(application.plan, application.native) &&
+		matchesPlannerOptions(application.options, application.native.options) &&
+		isDeepStrictEqual(proposal, application.projection)
+	) {
+		// Baseline/state references are the existing host inputs, not deep-immutability or conflict-correctness claims.
+		nativePlannerResults.set(result, { native: application.native, scope: application.scope, edits: appliedEdits });
+	}
+	return result;
 }
 
 function rollbackProposal(target: RefinementResult): RefinementProposal {
@@ -862,6 +1031,125 @@ export interface RefinementPlan {
 	baselineState?: HarnessState;
 }
 
+interface NativePlannerPlan {
+	readonly proposal: RefinementProposal;
+	readonly projection: RefinementProposal;
+	readonly id: string;
+	readonly options: RefineOptions;
+	readonly baselineState?: HarnessState;
+	readonly write: NativePlannerRequestOutputWriter;
+}
+interface NativePlannerApplication {
+	readonly plan: RefinementPlan;
+	readonly native: NativePlannerPlan;
+	readonly state: HarnessState;
+	readonly options: RefineOptions;
+	readonly scope: HarnessScope;
+	readonly projection: RefinementProposal;
+}
+const nativePlannerPlans = new WeakMap<RefinementPlan, NativePlannerPlan>();
+const nativePlannerApplications = new WeakMap<RefinementProposal, NativePlannerApplication>();
+const nativePlannerResults = new WeakMap<
+	RefinementResult,
+	{ native: NativePlannerPlan; scope: HarnessScope; edits: AppliedRefinementEdit[] }
+>();
+
+function matchesNativePlannerPlan(plan: RefinementPlan, native: NativePlannerPlan): boolean {
+	return (
+		plan.proposal === native.proposal &&
+		plan.id === native.id &&
+		plan.rollbackOf === undefined &&
+		plan.rollbackScope === undefined &&
+		plan.baselineState === native.baselineState &&
+		isDeepStrictEqual(plan.proposal, native.projection)
+	);
+}
+
+function matchesPlannerOptions(options: RefineOptions, captured: RefineOptions): boolean {
+	return (
+		options.instructions === captured.instructions &&
+		options.global === captured.global &&
+		options.rollbackId === captured.rollbackId
+	);
+}
+
+/** Preserve the actual AS baseline composition, not a copied or replacement plan's labels. */
+export function withRefinementBaseline(plan: RefinementPlan, baselineState: HarnessState): RefinementPlan {
+	const composed = { ...plan, baselineState };
+	const native = nativePlannerPlans.get(plan);
+	nativePlannerPlans.delete(plan);
+	if (native && native.baselineState === undefined && matchesNativePlannerPlan(plan, native)) {
+		nativePlannerPlans.set(composed, { ...native, baselineState });
+	}
+	return composed;
+}
+
+function lowerRefinementProposal(proposal: RefinementProposal): RefinementProposal {
+	return {
+		...proposal,
+		edits: proposal.edits.map((edit) => {
+			const localPrefix = "local:";
+			const globalPrefix = "global:";
+			return {
+				...edit,
+				id: edit.id?.startsWith(localPrefix)
+					? edit.id.slice(localPrefix.length)
+					: edit.id?.startsWith(globalPrefix)
+						? edit.id.slice(globalPrefix.length)
+						: edit.id,
+			};
+		}),
+	};
+}
+
+/** The existing application projection; metadata alone also retains its actual state/control identities. */
+export function prepareRefinementApplication(
+	plan: RefinementPlan,
+	state: HarnessState,
+	options: RefineOptions,
+	scope: HarnessScope,
+): RefinementProposal {
+	const proposal = lowerRefinementProposal(plan.proposal);
+	const native = nativePlannerPlans.get(plan);
+	nativePlannerPlans.delete(plan);
+	if (
+		native?.baselineState &&
+		matchesNativePlannerPlan(plan, native) &&
+		matchesPlannerOptions(options, native.options) &&
+		scope === (native.options.global ? "global" : "local")
+	) {
+		nativePlannerApplications.set(proposal, {
+			plan,
+			native,
+			state,
+			options,
+			scope,
+			projection: lowerRefinementProposal(native.projection),
+		});
+	}
+	return proposal;
+}
+
+/** Only the actual computed result can reach the existing session result append. */
+export function takeNativePlannerRequestWrite(
+	result: RefinementResult,
+): ((manager: object) => Promise<string | undefined> | undefined) | undefined {
+	const captured = nativePlannerResults.get(result);
+	nativePlannerResults.delete(result);
+	if (
+		!captured ||
+		result.id !== captured.native.id ||
+		result.scope !== captured.scope ||
+		result.rollbackOf !== undefined ||
+		result.summary !== captured.native.projection.summary ||
+		result.rationale !== captured.native.projection.rationale ||
+		result.expectedOutcome !== captured.native.projection.expectedOutcome ||
+		result.appliedEdits !== captured.edits
+	)
+		return undefined;
+	return (manager) => captured.native.write(manager, result);
+}
+
 /**
  * Produce a refinement proposal (the LLM pass, or a rollback proposal) without
  * mutating any harness state. Separated from {@link applyRefinementProposal} so
@@ -887,6 +1175,8 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
+	useConfiguredThinkingLevel = false,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -905,8 +1195,8 @@ export async function planRefinement(
 
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-80_000);
 	const scopeInstruction = options.global
-		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Prime Agent sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
-		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Prime Agent sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
+		? "Requested refinement scope: global. Only propose stable cross-session continual harness edits, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts that should affect future Base Context sessions. Do not persist session-only progress, temporary blockers, or current-run coordination globally."
+		: "Requested refinement scope: local. Prefer local continual harness edits for current task progress, temporary blockers, current-run coordination, and project facts that are not clearly reusable across Base Context sessions. Global entries in the overview are read-only context: do not propose update or delete edits for them; create a local entry instead if an override is needed.";
 	const userPrompt = [
 		`<current_harness_state>\n${overviewForPrompt(state)}\n</current_harness_state>`,
 		`<refinement_history>\n${historyForPrompt(history)}\n</refinement_history>`,
@@ -918,20 +1208,35 @@ export async function planRefinement(
 		.filter(Boolean)
 		.join("\n\n");
 
-	// /refine requires a parseable JSON object in the final text. Some reasoning-capable
-	// OpenAI-compatible models can spend the response on visible thinking and return no
-	// final text, which makes otherwise successful daemon /refine calls fail parsing.
-	// Keep the refinement request non-reasoning regardless of the interactive session
-	// thinking level so the model uses its output budget for the JSON object.
-	void thinkingLevel;
-	const response = await completeSimple(
+	// Preserve legacy omitted effort for JSON requests. Only an explicit learning-model
+	// contract opts into a captured effort; omission does not certify provider behavior.
+	const plannerOptions = {
+		instructions: options.instructions,
+		global: options.global,
+		rollbackId: options.rollbackId,
+	};
+	const completion = completeInference(
+		requests,
 		model,
 		{
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			maxTokens: refinementMaxOutputTokens(model),
+			signal,
+			apiKey,
+			headers,
+			...(useConfiguredThinkingLevel ? { reasoning: thinkingLevel } : {}),
+		},
+		{
+			purpose: "refine",
+			purposeDetail: "plan",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
+	const response = await completion;
 
 	if (response.stopReason === "error") {
 		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
@@ -944,7 +1249,21 @@ export async function planRefinement(
 		.filter((content): content is { type: "text"; text: string } => content.type === "text")
 		.map((content) => content.text)
 		.join("\n");
-	return { proposal: parseProposal(text), id };
+	const plan = { proposal: parseProposal(text), id };
+	const write =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takePlannerOutput.call(requests, completion)
+			: undefined;
+	if (write) {
+		nativePlannerPlans.set(plan, {
+			proposal: plan.proposal,
+			projection: structuredClone(plan.proposal),
+			id,
+			options: plannerOptions,
+			write,
+		});
+	}
+	return plan;
 }
 
 function parseAutoRefineReview(text: string): AutoRefineReview {
@@ -970,6 +1289,8 @@ export async function reviewAutoRefine(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
+	useConfiguredThinkingLevel = false,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -985,18 +1306,29 @@ ${historyForPrompt(history)}
 		`<conversation>
 ${conversationText}
 </conversation>`,
-		"Return shouldRefine=true when the trajectory contains evidence useful to this session's future turns. Prefer local harness edits for current task progress, temporary blockers, and current-run coordination. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
+		"Apply the automatic refinement utility policy. Ask for global refinement only for durable cross-session lessons or explicitly project-qualified facts likely to be reused in future sessions.",
 	].join("\n\n");
-	// Auto-refine review requires parseable JSON. Keep it non-reasoning so
-	// reasoning-capable models use final text budget for the JSON object.
-	void thinkingLevel;
-	const response = await completeSimple(
+	// Match planning: legacy requests omit effort; an explicit contract carries its exact level.
+	const response = await completeInference(
+		requests,
 		model,
 		{
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+		{
+			maxTokens: autoRefineReviewMaxOutputTokens(model),
+			signal,
+			apiKey,
+			headers,
+			...(useConfiguredThinkingLevel ? { reasoning: thinkingLevel } : {}),
+		},
+		{
+			purpose: "refine",
+			purposeDetail: "auto-refine-review",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
@@ -1008,7 +1340,11 @@ ${conversationText}
 		.filter((content): content is { type: "text"; text: string } => content.type === "text")
 		.map((content) => content.text)
 		.join("\n");
-	return parseAutoRefineReview(text);
+	const review = parseAutoRefineReview(text);
+	if (review.shouldRefine) {
+		review.instructions = [review.instructions, AUTOMATIC_REFINEMENT_UTILITY_POLICY].filter(Boolean).join("\n\n");
+	}
+	return review;
 }
 
 export async function refineHarness(
@@ -1021,8 +1357,20 @@ export async function refineHarness(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	requests?: InferenceCoordinator,
 ): Promise<RefinementResult> {
-	const plan = await planRefinement(messages, state, history, model, apiKey, options, headers, signal, thinkingLevel);
+	const plan = await planRefinement(
+		messages,
+		state,
+		history,
+		model,
+		apiKey,
+		options,
+		headers,
+		signal,
+		thinkingLevel,
+		requests,
+	);
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

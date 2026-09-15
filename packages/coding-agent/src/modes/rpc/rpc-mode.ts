@@ -11,6 +11,7 @@ import type {
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionSessionWatcher,
 } from "../agent-connection/types.js";
+import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { createRpcExtensionUiBridge } from "./rpc-extension-ui-context.js";
 import type {
@@ -32,20 +33,30 @@ export type {
 } from "./rpc-types.js";
 
 interface RpcModeConnectionOptions {
+	/** Native runtime ownership only; generic connections keep their existing lifecycle contract. */
+	closeAutoRefineAdmission?: () => void;
 	bindHeadlessExtensions?: (options: {
 		uiContext: ReturnType<typeof createRpcExtensionUiBridge>["uiContext"];
 		shutdownHandler: () => void;
 	}) => Promise<void>;
 }
 
-export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<never> {
+export async function runRpcMode(runtimeHost: AgentSessionRuntime, clientProtocolVersion: number): Promise<never> {
+	if (clientProtocolVersion !== DAEMON_PROTOCOL_VERSION)
+		throw new Error(`RPC client must support protocol ${DAEMON_PROTOCOL_VERSION}, including refusal-only agent_end`);
 	const connection = new InProcessAgentConnection(runtimeHost);
 	return runRpcModeWithConnectionInternal(connection, {
+		closeAutoRefineAdmission: () => runtimeHost.closeAutoRefineAdmission(),
 		bindHeadlessExtensions: (options) => connection.bindHeadlessExtensions(options),
 	});
 }
 
-export async function runRpcModeWithConnection(connection: AgentConnection): Promise<never> {
+export async function runRpcModeWithConnection(
+	connection: AgentConnection,
+	clientProtocolVersion: number,
+): Promise<never> {
+	if (clientProtocolVersion !== DAEMON_PROTOCOL_VERSION)
+		throw new Error(`RPC client must support protocol ${DAEMON_PROTOCOL_VERSION}, including refusal-only agent_end`);
 	return runRpcModeWithConnectionInternal(connection);
 }
 
@@ -187,6 +198,7 @@ async function runRpcModeWithConnectionInternal(
 			process.exit(exitCode);
 		}
 		shuttingDown = true;
+		options.closeAutoRefineAdmission?.();
 		await cancelPendingExtensionUi();
 		for (const cleanup of signalCleanupHandlers) cleanup();
 		unsubscribe();
@@ -245,6 +257,8 @@ async function runRpcModeWithConnectionInternal(
 			case "get_state": {
 				const state = await connection.getState();
 				const rpcState: RpcSessionState = {
+					protocolVersion: DAEMON_PROTOCOL_VERSION,
+					schemaRevision: DAEMON_SCHEMA_REVISION,
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
 					isStreaming: state.isStreaming,
@@ -317,7 +331,7 @@ async function runRpcModeWithConnectionInternal(
 				return success(id, command.type, { text: result.selectedText, cancelled: result.cancelled });
 			}
 			case "clone": {
-				const { leafId } = await connection.getSessionTree();
+				const { leafId } = await connection.getState();
 				if (!leafId) return error(id, command.type, "Cannot clone session: no current entry selected");
 				const result = await connection.fork(leafId, { position: "at" });
 				return success(id, command.type, { cancelled: result.cancelled });
@@ -528,6 +542,7 @@ async function runRpcModeWithConnectionInternal(
 	};
 	const onInputEnd = () => {
 		inputEnded = true;
+		options.closeAutoRefineAdmission?.();
 		detachInput();
 		process.stdin.pause();
 		queueMicrotask(() => {

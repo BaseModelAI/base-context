@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -17,78 +17,78 @@ if (mainCallIndex === -1) {
 
 const harnessSource = `${installerSource.slice(0, mainCallIndex)}
 
-prime_agent_test_cols=80
-prime_agent_test_rows=24
+base_context_test_cols=80
+base_context_test_rows=24
 
-prime_agent_read_terminal_size() {
-	prime_agent_screen_cols="$prime_agent_test_cols"
-	prime_agent_screen_rows="$prime_agent_test_rows"
+base_context_read_terminal_size() {
+	base_context_screen_cols="$base_context_test_cols"
+	base_context_screen_rows="$base_context_test_rows"
 }
 
 print_render_meta() {
 	label="$1"
-	if prime_agent_show_logo; then
+	if base_context_show_logo; then
 		visible=1
 	else
 		visible=0
 	fi
-	content_height=$(prime_agent_content_height)
+	content_height=$(base_context_content_height)
 	printf '__META__ %s cols=%s rows=%s layout_show_logo=%s lab_width=%s render_lab_width=%s compact=%s visible=%s content_height=%s\\n' \\
-		"$label" "$prime_agent_screen_cols" "$prime_agent_screen_rows" "$prime_agent_screen_layout_show_logo" \\
-		"$prime_agent_screen_layout_lab_width" "$prime_agent_screen_render_lab_width" "$prime_agent_screen_compact" "$visible" "$content_height"
+		"$label" "$base_context_screen_cols" "$base_context_screen_rows" "$base_context_screen_layout_show_logo" \\
+		"$base_context_screen_layout_lab_width" "$base_context_screen_render_lab_width" "$base_context_screen_compact" "$visible" "$content_height"
 }
 
 render_case() {
-	prime_agent_screen_title="Installing Prime Agent"
-	prime_agent_screen_detail="Fetching the verified package."
-	prime_agent_screen_question=
-	prime_agent_screen_frame=1
-	prime_agent_screen_cols="$1"
-	prime_agent_screen_rows="$2"
-	prime_agent_screen_layout_ready=0
-	prime_agent_screen_layout_show_logo=0
-	prime_agent_screen_layout_lab_width=0
-	prime_agent_screen_render_lab_width=0
-	prime_agent_screen_compact=0
-	prime_agent_init_screen_layout
-	prime_agent_refresh_screen_layout_mode
+	base_context_screen_title="Installing Base-Context"
+	base_context_screen_detail="Fetching the verified package."
+	base_context_screen_question=
+	base_context_screen_frame=1
+	base_context_screen_cols="$1"
+	base_context_screen_rows="$2"
+	base_context_screen_layout_ready=0
+	base_context_screen_layout_show_logo=0
+	base_context_screen_layout_lab_width=0
+	base_context_screen_render_lab_width=0
+	base_context_screen_compact=0
+	base_context_init_screen_layout
+	base_context_refresh_screen_layout_mode
 	print_render_meta first
 	printf '__RENDER_START__ first\\n'
-	prime_agent_render_screen
+	base_context_render_screen
 	printf '__RENDER_END__ first\\n'
 
-	prime_agent_screen_frame=2
-	prime_agent_screen_cols="$3"
-	prime_agent_screen_rows="$4"
-	prime_agent_refresh_screen_layout_mode
+	base_context_screen_frame=2
+	base_context_screen_cols="$3"
+	base_context_screen_rows="$4"
+	base_context_refresh_screen_layout_mode
 	print_render_meta second
 	printf '__RENDER_START__ second\\n'
-	prime_agent_render_screen
+	base_context_render_screen
 	printf '__RENDER_END__ second\\n'
 }
 
 screen_case() {
-	prime_agent_screen_enabled=1
-	prime_agent_screen_drawn=0
-	prime_agent_screen_last_cols=0
-	prime_agent_screen_last_rows=0
-	prime_agent_screen_layout_ready=0
-	prime_agent_screen_layout_show_logo=0
-	prime_agent_screen_layout_lab_width=0
-	prime_agent_screen_render_lab_width=0
-	prime_agent_screen_compact=0
-	prime_agent_screen_frame=0
+	base_context_screen_enabled=1
+	base_context_screen_drawn=0
+	base_context_screen_last_cols=0
+	base_context_screen_last_rows=0
+	base_context_screen_layout_ready=0
+	base_context_screen_layout_show_logo=0
+	base_context_screen_layout_lab_width=0
+	base_context_screen_render_lab_width=0
+	base_context_screen_compact=0
+	base_context_screen_frame=0
 
-	prime_agent_test_cols="$1"
-	prime_agent_test_rows="$2"
+	base_context_test_cols="$1"
+	base_context_test_rows="$2"
 	printf '__SCREEN_START__ first\\n' >&2
-	prime_agent_screen "Installing Prime Agent" "Installing Prime Agent" "Fetching the verified package." ""
+	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ first\\n' >&2
 
-	prime_agent_test_cols="$3"
-	prime_agent_test_rows="$4"
+	base_context_test_cols="$3"
+	base_context_test_rows="$4"
 	printf '__SCREEN_START__ second\\n' >&2
-	prime_agent_screen "Installing Prime Agent" "Installing Prime Agent" "Fetching the verified package." ""
+	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ second\\n' >&2
 }
 
@@ -97,8 +97,8 @@ progress_case() {
 Linking command binaries.
 Finalizing npm install."
 	for progress_frame in 1 24 25 48 49 200; do
-		prime_agent_animation_frame="$progress_frame"
-		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(prime_agent_animation_status "Installing Prime Agent" "$progress_details" static)" "$(prime_agent_animation_detail "$progress_details")"
+		base_context_animation_frame="$progress_frame"
+		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(base_context_animation_status "Installing Base-Context" "$progress_details" static)" "$(base_context_animation_detail "$progress_details")"
 	done
 }
 
@@ -107,7 +107,7 @@ screen_case "$@"
 progress_case
 `;
 
-const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-installer-render-"));
+const tempDir = mkdtempSync(join(tmpdir(), "base-context-installer-render-"));
 const harnessPath = join(tempDir, "harness.sh");
 
 try {
@@ -116,6 +116,10 @@ try {
 	const stableVisible = runCase("stable visible logo", 100, 30, 90, 30);
 	check(stableVisible.meta.first.visible === "1", "expected the initial large render to show the logo");
 	check(stableVisible.meta.second.visible === "1", "expected a safe resize to keep showing the logo");
+	check(
+		stableVisible.renders.first.some((line) => line.includes("| Base-Context |")),
+		"expected the visible installer wordmark to say Base-Context",
+	);
 	check(
 		stableVisible.meta.first.lab_width === stableVisible.meta.second.lab_width,
 		"expected logo lab width to stay stable across a safe resize",
@@ -153,7 +157,7 @@ try {
 	check(compactRows.meta.second.compact === "1", "expected shrink below frozen splash height to use compact mode");
 	check(compactRows.meta.second.visible === "0", "expected compact row mode to hide the logo");
 
-	checkNpmInstallPolicies();
+	checkOwnedInstallerRoute();
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
 }
@@ -165,63 +169,79 @@ if (failures.length > 0) {
 
 console.log("Installer check passed.");
 
-function checkNpmInstallPolicies() {
+function checkOwnedInstallerRoute() {
 	const binDir = join(tempDir, "bin");
 	const installHarnessPath = join(tempDir, "install-harness.sh");
-	const npmPath = join(binDir, "npm");
-	const tarballPath = join(tempDir, "verified release package.tgz");
+	const downloadDir = join(tempDir, "download scope");
+	const tarballPath = join(downloadDir, "base-context-1.2.3.tgz");
+	const checksumsPath = join(downloadDir, "SHA256SUMS");
+	const root = join(tempDir, "owned install");
+	const original = JSON.stringify({ generation: "original", active: "old", previous: null });
+	// Run the real main/resolver/URL owners; prerequisites and external effects stay offline boundaries.
 	const installHarnessSource = `${installerSource.slice(0, mainCallIndex)}
-
-prime_agent_npm_install "$1"
+base_context_install_traps() { :; }
+base_context_init_screen() { base_context_screen_enabled=0; }
+start_preflight_checks() { :; }
+finish_preflight_checks() { return 0; }
+confirm_install() { :; }
+verify_base_context_package_checksum() { :; }
+create_temp_dir() {
+  mkdir -p "$FIXTURE_DOWNLOAD_DIR"
+  printf '%s\n' "$FIXTURE_DOWNLOAD_DIR"
+}
+main "$@"
 `;
-	const npmSource = `#!/bin/sh
-set -eu
-
-if [ "\${1:-}" = "--version" ]; then
-	printf '%s\\n' "$FAKE_NPM_VERSION"
-	exit 0
-fi
-[ "\${1:-}" = install ] || exit 1
-
-remote_policy=
-script_policy=
-target=
-for arg in "$@"; do
-	case "$arg" in
-		--allow-remote=*) remote_policy=\${arg#*=} ;;
-		--allow-scripts=*) script_policy=\${arg#*=} ;;
-		"$FAKE_NPM_TARBALL") target="$arg" ;;
-	esac
-done
-[ "$target" = "$FAKE_NPM_TARBALL" ] || exit 1
-
-npm_major=\${FAKE_NPM_VERSION%%.*}
-if [ "$npm_major" -ge 12 ]; then
-	[ "$remote_policy" = all ] && [ "$script_policy" = "$FAKE_NPM_TARBALL" ] || exit 1
-else
-	[ -z "$remote_policy" ] && [ -z "$script_policy" ] || exit 1
-fi
-`;
-
 	mkdirSync(binDir);
-	writeFileSync(installHarnessPath, installHarnessSource, "utf-8");
-	writeFileSync(npmPath, npmSource, "utf-8");
-	writeFileSync(tarballPath, "verified fixture", "utf-8");
-	chmodSync(npmPath, 0o755);
-
-	for (const npmVersion of ["10.9.8", "11.12.1", "12.0.2"]) {
-		const result = spawnSync("sh", [installHarnessPath, tarballPath], {
-			encoding: "utf-8",
-			env: {
-				...process.env,
-				FAKE_NPM_TARBALL: tarballPath,
-				FAKE_NPM_VERSION: npmVersion,
-				PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-			},
+	mkdirSync(root);
+	writeFileSync(join(root, "current.json"), original, "utf8");
+	writeFileSync(installHarnessPath, installHarnessSource, "utf8");
+	writeFileSync(join(binDir, "npm"), `#!/bin/sh
+[ "$EXPECT_NPM_VIEW" = 1 ] || exit 1
+[ "$1" = view ] && [ "$2" = --registry=https://registry.npmjs.org ] &&
+[ "$3" = @ponythewhite/base-context@latest ] && [ "$4" = version ] || exit 1
+: > "$NPM_VIEW_MARKER"
+printf '1.2.3\n'
+`, { mode: 0o755 });
+	writeFileSync(join(binDir, "curl"), `#!/bin/sh
+[ "$1" = -fsSL ] && [ "$3" = -o ] || exit 1
+case "$2" in
+  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/SHA256SUMS)
+    [ "$4" = "$EXPECTED_CHECKSUMS" ] || exit 1 ;;
+  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/base-context-1.2.3.tgz)
+    [ "$4" = "$EXPECTED_TARBALL" ] || exit 1 ;;
+  *) exit 1 ;;
+esac
+printf 'offline fixture' > "$4"
+`, { mode: 0o755 });
+	writeFileSync(join(binDir, "tar"), `#!/bin/sh
+[ "$1" = -xzf ] && [ "$2" = "$EXPECTED_TARBALL" ] && [ "$3" = -C ] || exit 1
+[ -f "$EXPECTED_CHECKSUMS" ] && [ -f "$EXPECTED_TARBALL" ] || exit 1
+mkdir -p "$4/package/dist"
+: > "$4/package/dist/installer.mjs"
+`, { mode: 0o755 });
+	writeFileSync(join(binDir, "node"), `#!/bin/sh
+if [ "$EXPECT_NPM_VIEW" = 1 ]; then
+  [ -f "$NPM_VIEW_MARKER" ] || exit 1
+fi
+[ "$1" = "$EXPECTED_ENTRY" ] && [ "$2" = install ] && [ "$3" = "$EXPECTED_ROOT" ] &&
+[ "$4" = "$EXPECTED_SELECTION" ] && [ "$5" = "$EXPECTED_TARBALL" ] && [ "$6" = 1.2.3 ]
+`, { mode: 0o755 });
+	for (const [name, args, expectNpmView] of [
+		["default stable", [], "1"],
+		["explicit version", ["v1.2.3"], "0"],
+	]) {
+		const result = spawnSync("sh", [installHarnessPath, ...args], {
+			encoding: "utf8",
+			env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+				BASE_CONTEXT_DOWNLOAD_BASE_URL: "https://github.com/BaseModelAI/base-context",
+				BASE_CONTEXT_INSTALL_ROOT: root, BASE_CONTEXT_PACKAGE: "@ponythewhite/base-context",
+				BASE_CONTEXT_RELEASE_CHANNEL: "stable", BASE_CONTEXT_VERSION: "",
+				FIXTURE_DOWNLOAD_DIR: downloadDir, EXPECT_NPM_VIEW: expectNpmView,
+				NPM_VIEW_MARKER: join(tempDir, "npm-view"), EXPECTED_CHECKSUMS: checksumsPath,
+				EXPECTED_ENTRY: join(downloadDir, "bootstrap", "package", "dist", "installer.mjs"),
+				EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
 		});
-		if (result.status !== 0) {
-			failures.push(`npm ${npmVersion}: install policy check failed\n${result.stderr}${result.stdout}`);
-		}
+		check(result.status === 0, `${name} owned Base-Context installer route failed\n${result.stderr}${result.stdout}`);
 	}
 }
 
@@ -316,7 +336,7 @@ function assertInstallerProgress(progress) {
 			`expected progress sample ${index + 1} to show "${expectedDetail}", got "${progress[index].detail}"`,
 		);
 		check(
-			progress[index].status === "Installing Prime Agent...",
+			progress[index].status === "Installing Base-Context...",
 			`expected progress sample ${index + 1} to use indeterminate status`,
 		);
 		check(!progress[index].status.includes("%"), `expected progress sample ${index + 1} not to include a percent`);

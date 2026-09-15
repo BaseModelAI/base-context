@@ -5,16 +5,18 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Model, Usage } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { Model, Usage } from "@ponythewhite/base-context-ai";
+import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.js";
-import type { ReadonlySessionManager, SessionEntry } from "../session-manager.js";
+import type { NativeBranchRequestOutputWriter } from "../request-events.js";
+import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
+import type { SessionEntry } from "../session-manager.js";
 import { estimateTokens } from "./compaction.js";
 import {
 	computeFileLists,
@@ -32,6 +34,22 @@ export interface BranchSummaryResult {
 	aborted?: boolean;
 	error?: string;
 	usage?: Usage;
+}
+
+// A result must come from this native completion and retain its actual composed text projection.
+const nativeBranchResults = new WeakMap<
+	BranchSummaryResult,
+	{ summary: string; write: NativeBranchRequestOutputWriter }
+>();
+
+export function takeNativeBranchSummaryWrite(
+	result: BranchSummaryResult | undefined,
+	summary: string,
+): NativeBranchRequestOutputWriter | undefined {
+	const captured = result ? nativeBranchResults.get(result) : undefined;
+	if (result) nativeBranchResults.delete(result);
+	// Check only an already privately bound projection; never discover a request by matching text.
+	return captured?.summary === summary ? captured.write : undefined;
 }
 
 /** Details stored in BranchSummaryEntry.details for file tracking */
@@ -61,10 +79,13 @@ export interface CollectEntriesResult {
 export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model<any>;
+	/** Explicit effort only; absent preserves the provider's existing omitted-effort behavior. */
+	thinkingLevel?: ThinkingLevel;
 	/** API key for the model */
 	apiKey: string;
 	/** Request headers for the model */
 	headers?: Record<string, string>;
+	requests?: InferenceCoordinator;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -74,47 +95,21 @@ export interface GenerateBranchSummaryOptions {
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
 }
-/**
- * Collect entries that should be summarized when navigating from one position to another.
- *
- * Walks from oldLeafId back to the common ancestor with targetId, collecting entries
- * along the way. Does NOT stop at compaction boundaries - those are included and their
- * summaries become context.
- *
- * @param session - Session manager (read-only access)
- * @param oldLeafId - Current position (where we're navigating from)
- * @param targetId - Target position (where we're navigating to)
- * @returns Entries to summarize and the common ancestor
- */
+/** Collect the abandoned suffix from two complete, captured chronological paths. */
 export function collectEntriesForBranchSummary(
-	session: ReadonlySessionManager,
-	oldLeafId: string | null,
-	targetId: string,
+	oldPath: readonly SessionEntry[],
+	targetPath: readonly SessionEntry[],
 ): CollectEntriesResult {
-	if (!oldLeafId) {
-		return { entries: [], commonAncestorId: null };
-	}
-	const oldPath = new Set(session.getBranch(oldLeafId).map((e) => e.id));
-	const targetPath = session.getBranch(targetId);
+	const oldIds = new Set(oldPath.map((entry) => entry.id));
 	let commonAncestorId: string | null = null;
-	for (let i = targetPath.length - 1; i >= 0; i--) {
-		if (oldPath.has(targetPath[i].id)) {
-			commonAncestorId = targetPath[i].id;
+	for (let index = targetPath.length - 1; index >= 0; index--) {
+		if (oldIds.has(targetPath[index].id)) {
+			commonAncestorId = targetPath[index].id;
 			break;
 		}
 	}
-	const entries: SessionEntry[] = [];
-	let current: string | null = oldLeafId;
-
-	while (current && current !== commonAncestorId) {
-		const entry = session.getEntry(current);
-		if (!entry) break;
-		entries.push(entry);
-		current = entry.parentId;
-	}
-	entries.reverse();
-
-	return { entries, commonAncestorId };
+	const first = commonAncestorId === null ? 0 : oldPath.findIndex((entry) => entry.id === commonAncestorId) + 1;
+	return { entries: oldPath.slice(first), commonAncestorId };
 }
 /**
  * Extract AgentMessage from a session entry.
@@ -250,7 +245,17 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, headers, signal, customInstructions, replaceInstructions, reserveTokens = 16384 } = options;
+	const {
+		model,
+		thinkingLevel,
+		apiKey,
+		headers,
+		requests,
+		signal,
+		customInstructions,
+		replaceInstructions,
+		reserveTokens = 16384,
+	} = options;
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
 
@@ -280,11 +285,25 @@ export async function generateBranchSummary(
 			timestamp: Date.now(),
 		},
 	];
-	const response = await completeSimple(
+	const completion = completeInference(
+		requests,
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens: 2048 },
+		{
+			apiKey,
+			headers,
+			signal,
+			maxTokens: 2048,
+			...(thinkingLevel === undefined ? {} : { reasoning: thinkingLevel }),
+		},
+		{
+			purpose: "summary",
+			purposeDetail: "branch",
+			operationId: headers?.[MODEL_REQUEST_ID_HEADER],
+			semanticEdgeId: headers?.[MODEL_REQUEST_ID_HEADER],
+		},
 	);
+	const response = await completion;
 	if (response.stopReason === "aborted") {
 		return { aborted: true };
 	}
@@ -300,10 +319,16 @@ export async function generateBranchSummary(
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
 
-	return {
+	const result = {
 		summary: summary || "No summary generated",
 		readFiles,
 		modifiedFiles,
 		usage: response.usage,
 	};
+	const write =
+		requests instanceof InferenceCoordinator
+			? InferenceCoordinator.prototype.takeBranchOutput.call(requests, completion)
+			: undefined;
+	if (write) nativeBranchResults.set(result, { summary: result.summary, write });
+	return result;
 }

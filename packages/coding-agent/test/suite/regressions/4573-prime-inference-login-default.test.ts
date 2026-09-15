@@ -30,9 +30,9 @@ const prepareForModelSelectionAfterLogin = (InteractiveMode.prototype as unknown
 describe("ENG-4573 Prime Inference login default", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const harness of harnesses.splice(0)) {
-			harness.cleanup();
+			await harness.cleanup();
 		}
 	});
 

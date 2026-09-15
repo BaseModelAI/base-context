@@ -18,7 +18,16 @@ import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { type Component, Container, Input, matchesKey, ProcessTerminal, SelectList, TUI } from "@earendil-works/pi-tui";
+import { DAEMON_PROTOCOL_VERSION } from "@ponythewhite/base-context";
+import {
+	type Component,
+	Container,
+	Input,
+	matchesKey,
+	ProcessTerminal,
+	SelectList,
+	TUI,
+} from "@ponythewhite/base-context-tui";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -249,7 +258,17 @@ async function main() {
 
 	const agent = spawn(
 		"node",
-		[cliPath, "--mode", "rpc", "--no-session", "--no-extension", "--extension", extensionPath],
+		[
+			cliPath,
+			"--mode",
+			"rpc",
+			"--rpc-protocol-version",
+			String(DAEMON_PROTOCOL_VERSION),
+			"--no-session",
+			"--no-extension",
+			"--extension",
+			extensionPath,
+		],
 		{ stdio: ["pipe", "pipe", "pipe"] },
 	);
 
@@ -570,6 +589,9 @@ async function main() {
 		if (data.type === "agent_end") {
 			isStreaming = false;
 			hideLoading();
+			if (data.refusal !== undefined) {
+				outputLog.append(`${RED}[refused]${RESET} Invocation output refused; no complete result is available.`);
+			}
 			outputLog.append("");
 			tui.requestRender();
 			return;

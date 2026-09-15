@@ -68,8 +68,8 @@ describe("resolveDaemonSessionPath", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			createSavedSession(cwd, sessionDir, "abc111");
-			createSavedSession(cwd, sessionDir, "abc222");
+			await createSavedSession(cwd, sessionDir, "abc111");
+			await createSavedSession(cwd, sessionDir, "abc222");
 
 			await expect(resolveDaemonSessionPath("abc", cwd, sessionDir)).rejects.toThrow(
 				/Ambiguous saved session "abc"/,
@@ -85,7 +85,7 @@ describe("resolveDaemonSessionPath", () => {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
 			const sessionId = "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa";
-			const sessionPath = createSavedSession(cwd, sessionDir, sessionId);
+			const sessionPath = await createSavedSession(cwd, sessionDir, sessionId);
 
 			await expect(resolveDaemonSessionPath("AAAAAA-AAAAAA", cwd, sessionDir)).resolves.toBe(sessionPath);
 		} finally {
@@ -98,8 +98,8 @@ describe("resolveDaemonSessionPath", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			createSavedSession(cwd, sessionDir, "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
-			createSavedSession(cwd, sessionDir, "029e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
+			await createSavedSession(cwd, sessionDir, "019e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
+			await createSavedSession(cwd, sessionDir, "029e71ec-e08a-75a9-b573-aaaaaaaaaaaa");
 
 			await expect(resolveDaemonSessionPath("aaaaaaaaaaaa", cwd, sessionDir)).rejects.toThrow(
 				/Ambiguous saved session "aaaaaaaaaaaa"/,
@@ -114,9 +114,9 @@ describe("resolveDaemonSessionPath", () => {
 		try {
 			const cwd = join(tempDir, "project");
 			const sessionDir = join(tempDir, "sessions");
-			const exactPath = createSavedSession(cwd, sessionDir, "abcd");
-			createSavedSession(cwd, sessionDir, "abcd1");
-			createSavedSession(cwd, sessionDir, "1abcd");
+			const exactPath = await createSavedSession(cwd, sessionDir, "abcd");
+			await createSavedSession(cwd, sessionDir, "abcd1");
+			await createSavedSession(cwd, sessionDir, "1abcd");
 
 			await expect(resolveDaemonSessionPath("AB-CD", cwd, sessionDir)).resolves.toBe(exactPath);
 		} finally {
@@ -142,9 +142,12 @@ function makeState(activeSessionId: string, sessionId: string): ActiveSessionSta
 	} as unknown as ActiveSessionState;
 }
 
-function createSavedSession(cwd: string, sessionDir: string, sessionId: string): string {
-	const session = SessionManager.create(cwd, sessionDir);
-	session.newSession({ id: sessionId });
-	session.appendSessionState({ status: "archived" });
-	return session.getSessionFile()!;
+async function createSavedSession(cwd: string, sessionDir: string, sessionId: string): Promise<string> {
+	const session = await SessionManager.create(cwd, sessionDir, { id: sessionId });
+	try {
+		await session.appendSessionState({ status: "archived" });
+		return session.getSessionFile()!;
+	} finally {
+		await session.close();
+	}
 }

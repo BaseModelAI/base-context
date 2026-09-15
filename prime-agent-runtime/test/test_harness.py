@@ -10,7 +10,7 @@ from pathlib import Path
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
-from rlm.harness import HarnessState, get_harness_state
+from rlm.harness import HarnessState, HarnessStateLimitError, get_harness_state
 
 PYTHON_REFERENCE = {
     "type": "python",
@@ -133,6 +133,33 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
+
+            image = state.file_path.read_bytes()
+            bounded = HarnessState(state.file_path, max_entries=5, max_source_bytes=len(image))
+            bounded.save()
+            self.assertEqual(state.file_path.read_bytes(), image)
+            for limits in ({"max_entries": 4}, {"max_source_bytes": len(image) - 1}):
+                with self.assertRaises(HarnessStateLimitError):
+                    HarnessState(state.file_path, **limits)
+                self.assertEqual(state.file_path.read_bytes(), image)
+
+            # Refused owned mutations must not leave an oversized cached candidate.
+            current = bounded.get("memory", memory.id)
+            old_content, old_version = current.content, current.version
+            with self.assertRaisesRegex(HarnessStateLimitError, "max_source_bytes"):
+                bounded.update_memory(memory.id, current.title, "x" * len(image))
+            self.assertIs(bounded.get("memory", memory.id), current)
+            self.assertEqual((current.content, current.version), (old_content, old_version))
+            with self.assertRaisesRegex(HarnessStateLimitError, "max_entries"):
+                bounded.create_memory("Extra", "Refused", id="extra")
+            self.assertIsNone(bounded.get("memory", "extra"))
+            with self.assertRaisesRegex(HarnessStateLimitError, "max_entries"):
+                bounded.record_refinement("extra", [])
+            self.assertEqual([item.id for item in bounded.refinements], [event.id])
+            self.assertEqual(state.file_path.read_bytes(), image)
+            self.assertTrue(bounded.delete("subagent", subagent.id))
+            accepted = bounded.record_refinement("next", [])
+            self.assertEqual(accepted.id, "refine_0002")
 
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

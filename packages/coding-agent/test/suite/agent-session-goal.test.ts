@@ -1,13 +1,14 @@
 import { existsSync } from "node:fs";
-import type { AgentContext, AgentTool } from "@earendil-works/pi-agent-core";
-import { Agent } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type Usage } from "@earendil-works/pi-ai";
+import { join } from "node:path";
+import type { AgentContext, AgentTool } from "@ponythewhite/base-context-agent";
+import { Agent } from "@ponythewhite/base-context-agent";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type Usage } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { ExtensionFactory } from "../../src/core/extensions/types.js";
-import type { GoalHostResponse } from "../../src/core/goals.js";
+import { GOAL_STATE_CUSTOM_TYPE, type GoalHostResponse } from "../../src/core/goals.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
@@ -83,7 +84,7 @@ function createFauxIpythonTool(sessionRef: { current?: AgentSession }): AgentToo
 				const spaceIndex = code.indexOf(" ");
 				const type = spaceIndex < 0 ? code : code.slice(0, spaceIndex);
 				const payload = spaceIndex < 0 ? {} : JSON.parse(code.slice(spaceIndex + 1));
-				text = JSON.stringify(session.handleGoalHostRequest(type, payload));
+				text = JSON.stringify(await session.handleGoalHostRequest(type, payload));
 			}
 			return {
 				content: [{ type: "text", text }],
@@ -147,22 +148,27 @@ function createWaitingTool(): {
 describe("AgentSession goals", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
-	async function createGoalHarness(extraTools: AgentTool[] = []): Promise<Harness> {
+	async function createGoalHarness(extraTools: AgentTool[] = [], persistSession = false): Promise<Harness> {
 		const sessionRef: { current?: AgentSession } = {};
-		const harness = await createHarness({ tools: [createFauxIpythonTool(sessionRef), ...extraTools] });
+		const harness = await createHarness({
+			persistSession,
+			tools: [createFauxIpythonTool(sessionRef), ...extraTools],
+		});
 		sessionRef.current = harness.session;
 		harnesses.push(harness);
 		return harness;
 	}
 
 	it("keeps continuing until the model completes the goal through ipython", async () => {
-		const harness = await createGoalHarness();
+		const harness = await createGoalHarness([], true);
+		const typedContinuation = vi.spyOn(harness.session.agent, "getContinuationOutcome");
+		const legacyContinuation = vi.spyOn(harness.session.agent, "getContinuationMessages");
 		harness.setResponses([
 			fauxAssistantMessage("I need another step."),
 			fauxAssistantMessage("The work is complete."),
@@ -172,6 +178,12 @@ describe("AgentSession goals", () => {
 
 		await harness.session.prompt("/goal finish the task");
 
+		expect(legacyContinuation).not.toHaveBeenCalled();
+		expect(await Promise.all(typedContinuation.mock.results.map((result) => result.value))).toMatchObject([
+			{ kind: "continue" },
+			{ kind: "continue" },
+			{ kind: "finish" },
+		]);
 		expect(visibleAssistantTexts(harness)).toEqual([
 			"I need another step.",
 			"The work is complete.",
@@ -186,6 +198,55 @@ describe("AgentSession goals", () => {
 			lastReason: "Goal achieved",
 		});
 		expect(harness.getPendingResponseCount()).toBe(0);
+		const goalEntries = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE,
+		);
+		const operations = goalEntries
+			.map((entry) => entry.nativeOrigin)
+			.filter((origin) => origin?.kind === "goal_operation");
+		expect(operations.map((origin) => origin.operation)).toEqual(["create", "complete"]);
+		expect(operations[0]).toMatchObject({
+			version: 1,
+			kind: "goal_operation",
+			operation: "create",
+			actor: "interactive",
+			actionId: expect.any(String),
+			submittedText: "/goal finish the task",
+		});
+		expect(operations[1]).toMatchObject({
+			version: 1,
+			kind: "goal_operation",
+			operation: "complete",
+			actor: "runtime",
+			previousGoalId: harness.session.goalState.goalId,
+		});
+		expect(goalEntries.some((entry) => entry.nativeOrigin === undefined)).toBe(true);
+
+		const evidence = await harness.sessionManager.taskEvidence({ limit: 64 });
+		expect(evidence.nextAfter).toBeNull();
+		const projected = evidence.entries.flatMap((item) => (item.truncated ? [] : [item.projection]));
+		expect(projected.find((item) => item.goalState?.operation === "create")).toMatchObject({
+			kind: "user_goal_revision",
+			authority: "user",
+			attribution: "source-backed",
+			source: { qualification: "native-admission" },
+			goalState: { goalId: harness.session.goalState.goalId, operation: "create" },
+		});
+		expect(projected.find((item) => item.goalState?.operation === "complete")).toMatchObject({
+			authority: "tool-data",
+			source: { qualification: "native-admission" },
+			goalState: { operation: "complete", previousGoalId: harness.session.goalState.goalId },
+		});
+		const task = await harness.sessionManager.readTaskState();
+		expect(task.items.find((item) => item.event.kind === "user_goal_revision")).toMatchObject({
+			state: "completed",
+			unresolved: false,
+		});
+		expect(task.items.find((item) => item.event.goalState?.operation === "complete")).toMatchObject({
+			state: "descriptive",
+			unresolved: false,
+			event: { authority: "tool-data", attribution: "descriptive" },
+		});
 	});
 
 	it("counts tokens from the goal completion turn", async () => {
@@ -239,13 +300,13 @@ describe("AgentSession goals", () => {
 	it("returns the goal snapshot and completion report over the host bridge", async () => {
 		const harness = await createGoalHarness();
 
-		expect(harness.session.handleGoalHostRequest("goal.get")).toEqual({
+		expect(await harness.session.handleGoalHostRequest("goal.get")).toEqual({
 			goal: null,
 			remaining_tokens: null,
 			completion_budget_report: null,
 		});
 
-		const created = harness.session.handleGoalHostRequest("goal.create", {
+		const created = await harness.session.handleGoalHostRequest("goal.create", {
 			objective: "write a benchmark note",
 			token_budget: 50,
 		});
@@ -257,7 +318,7 @@ describe("AgentSession goals", () => {
 		});
 		expect(created.remaining_tokens).toBe(50);
 
-		const completed = harness.session.handleGoalHostRequest("goal.complete");
+		const completed = await harness.session.handleGoalHostRequest("goal.complete");
 		expect(completed.goal).toMatchObject({ status: "complete" });
 		expect(completed.completion_budget_report).toContain("tokens used: 0 of 50");
 	});
@@ -265,18 +326,18 @@ describe("AgentSession goals", () => {
 	it("rejects malformed and unknown goal host requests", async () => {
 		const harness = await createGoalHarness();
 
-		expect(() => harness.session.handleGoalHostRequest("goal.create", {})).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.create", {})).rejects.toThrow(
 			"goal.create objective must be a string",
 		);
-		expect(() => harness.session.handleGoalHostRequest("goal.nonsense")).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.nonsense")).rejects.toThrow(
 			'unknown goal request type "goal.nonsense"',
 		);
-		expect(() => harness.session.handleGoalHostRequest("goal.complete")).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.complete")).rejects.toThrow(
 			"cannot complete goal because this thread has no goal",
 		);
 
-		harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
-		expect(() => harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" })).toThrow(
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
+		await expect(harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" })).rejects.toThrow(
 			"already has an active goal",
 		);
 	});
@@ -284,10 +345,10 @@ describe("AgentSession goals", () => {
 	it("lets the model create a fresh goal after the previous one completed", async () => {
 		const harness = await createGoalHarness();
 
-		const first = harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
-		harness.session.handleGoalHostRequest("goal.complete");
+		const first = await harness.session.handleGoalHostRequest("goal.create", { objective: "first goal" });
+		await harness.session.handleGoalHostRequest("goal.complete");
 
-		const second = harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" });
+		const second = await harness.session.handleGoalHostRequest("goal.create", { objective: "second goal" });
 		expect(second.goal).toMatchObject({ objective: "second goal", status: "active", tokens_used: 0 });
 		expect(second.goal?.goal_id).not.toBe(first.goal?.goal_id);
 		expect(harness.session.goalState).toMatchObject({
@@ -311,7 +372,7 @@ describe("AgentSession goals", () => {
 		await promptPromise;
 
 		expect(harness.session.goalState.status).toBe("paused");
-		expect(() => harness.session.handleGoalHostRequest("goal.create", { objective: "replacement" })).toThrow(
+		await expect(harness.session.handleGoalHostRequest("goal.create", { objective: "replacement" })).rejects.toThrow(
 			"a paused goal exists; ask the user to resume it with /goal resume or clear it with /goal clear",
 		);
 	});
@@ -335,7 +396,7 @@ describe("AgentSession goals", () => {
 
 	it("adds ipython to the live continuation context when inactive at run start", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		harness.session.setActiveToolsByName([]);
 		harness.setResponses([
 			fauxAssistantMessage("Still working."),
@@ -365,7 +426,7 @@ describe("AgentSession goals", () => {
 
 	it("keeps ipython active on active-goal runtime rebuild", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 
 		await harness.session.reload();
 
@@ -374,7 +435,7 @@ describe("AgentSession goals", () => {
 
 	it("does not reject continuation when goal error update listeners throw", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		harness.session.subscribe((event) => {
 			if (event.type === "goal_update") {
 				throw new Error("listener failed");
@@ -431,6 +492,15 @@ describe("AgentSession goals", () => {
 			objective: "write a benchmark note",
 			continuationsUsed: 1,
 		});
+		const operations = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE)
+			.map((entry) => entry.nativeOrigin)
+			.filter((origin) => origin?.kind === "goal_operation");
+		expect(operations.map((origin) => origin.operation)).toEqual(["create", "complete"]);
+		expect(operations.every((origin) => origin.actor === "runtime")).toBe(true);
+		expect(operations[0]?.submittedText).toBe("write a benchmark note");
+		expect(operations[1]?.previousGoalId).toBe(harness.session.goalState.goalId);
 	});
 
 	it("reloads goal state after tree navigation", async () => {
@@ -626,7 +696,7 @@ describe("AgentSession goals", () => {
 			vi.setSystemTime(new Date("2026-01-01T00:00:05Z"));
 
 			expect(harness.session.goalState.timeUsedSeconds).toBe(5);
-			const response: GoalHostResponse = harness.session.handleGoalHostRequest("goal.get");
+			const response: GoalHostResponse = await harness.session.handleGoalHostRequest("goal.get");
 			expect(response.goal?.time_used_seconds).toBe(5);
 
 			await harness.session.prompt("/goal pause");
@@ -652,7 +722,7 @@ describe("AgentSession goals", () => {
 	});
 
 	it("does not persist a goal when start preflight fails", async () => {
-		const harness = await createHarness({ withConfiguredAuth: false });
+		const harness = await createHarness({ withConfiguredAuth: false, persistSession: true });
 		harnesses.push(harness);
 
 		await harness.session.prompt("/goal do task");
@@ -665,6 +735,62 @@ describe("AgentSession goals", () => {
 			role: "custom",
 			customType: "session_slash_command_result",
 			details: { success: false },
+		});
+
+		expect(
+			(await harness.sessionManager.readEntries()).some(
+				(entry) => entry.type === "custom" && entry.customType === GOAL_STATE_CUSTOM_TYPE,
+			),
+		).toBe(false);
+		// Deliberately unqualified raw SDK claims. These IDs are data, not native admissions.
+		const rawInput = {
+			version: 1 as const,
+			kind: "input" as const,
+			actionId: "raw-sdk-claim",
+			recordId: "raw-sdk-record",
+			inputSource: "interactive" as const,
+			recordRole: "primary" as const,
+			submitted: { text: "Keep ExactCase.txt" },
+		};
+		const inputId = await harness.sessionManager.appendMessage(
+			{ role: "user", content: "a different expanded body", timestamp: 1 },
+			rawInput,
+		);
+		const goalOrigin = {
+			version: 1 as const,
+			kind: "goal_operation" as const,
+			operation: "revise" as const,
+			actor: "rpc" as const,
+			actionId: "raw-sdk-claim",
+			submittedText: "/goal imported claim",
+			previousGoalId: "ExactPreviousGoal",
+		};
+		const goalId = await harness.sessionManager.appendCustomEntry(
+			GOAL_STATE_CUSTOM_TYPE,
+			{
+				...harness.session.goalState,
+				active: true,
+				status: "active",
+				goalId: "RawGoal",
+				objective: "imported claim",
+			},
+			goalOrigin,
+		);
+		expect((await harness.sessionManager.readEntry(inputId))?.nativeOrigin).toEqual(rawInput);
+		expect((await harness.sessionManager.readEntry(goalId))?.nativeOrigin).toEqual(goalOrigin);
+		const evidence = await harness.sessionManager.taskEvidence({ limit: 64 });
+		expect(evidence.nextAfter).toBeNull();
+		const claims = evidence.entries
+			.flatMap((item) => (item.truncated ? [] : [item.projection]))
+			.filter((item) => item.source.entryId === inputId || item.source.entryId === goalId);
+		expect(claims).toHaveLength(2);
+		expect(claims.every((item) => item.authority === "unrecorded" && item.attribution === "proposal")).toBe(true);
+		expect(claims.every((item) => item.source.qualification === undefined)).toBe(true);
+		expect(claims.find((item) => item.source.entryId === inputId)).toMatchObject({ text: "Keep ExactCase.txt" });
+		expect(claims.find((item) => item.source.entryId === goalId)).toMatchObject({
+			itemId: "RawGoal",
+			relations: [{ kind: "supersedes", itemId: "ExactPreviousGoal" }],
+			goalState: { previousGoalId: "ExactPreviousGoal" },
 		});
 	});
 
@@ -729,8 +855,13 @@ describe("AgentSession goals", () => {
 				}
 			});
 		};
-		const harness = await createHarness({ extensionFactories: [extension] });
+		const harness = await createHarness({
+			persistSession: true,
+			invocationOutputLimits: { maxMessages: 64, maxSourceBytes: 2 * 1024 * 1024 },
+			extensionFactories: [extension],
+		});
 		harnesses.push(harness);
+		expect(harness.sessionManager.supportsCapturedHistoryReads()).toBe(true);
 		harness.setResponses([
 			assistantWithUsage("Spent the budget.", { input: 6, output: 5, totalTokens: 11 }),
 			fauxAssistantMessage("Wrapping up."),
@@ -739,7 +870,8 @@ describe("AgentSession goals", () => {
 
 		const promptPromise = harness.session.prompt("/goal --budget 10 do work");
 		try {
-			await waitForCondition(() => harness.session.goalState.status === "budget_limited");
+			await waitForCondition(() => didBlock && harness.session.goalState.status === "budget_limited");
+			expect(harness.session.agent.state.isStreaming).toBe(true);
 		} finally {
 			releaseMessageEnd?.();
 		}
@@ -749,6 +881,16 @@ describe("AgentSession goals", () => {
 
 		expect(visibleAssistantTexts(harness)).toEqual(["Spent the budget.", "Wrapping up."]);
 		expect(harness.getPendingResponseCount()).toBe(1);
+		const completedOutputs = harness.eventsOfType("agent_end").flatMap((event) => {
+			if (event.refusal) throw new Error("goal budget handling refused its native output");
+			return event.messages;
+		});
+		expect(
+			completedOutputs
+				.filter((message) => message.role === "assistant")
+				.map(getMessageText)
+				.filter(Boolean),
+		).toEqual(["Spent the budget.", "Wrapping up."]);
 		expect(harness.session.goalState).toMatchObject({
 			active: false,
 			status: "budget_limited",
@@ -796,7 +938,7 @@ describe("AgentSession goals", () => {
 
 	it("does not continue when a terminal error reaches the continuation hook", async () => {
 		const harness = await createGoalHarness();
-		harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the active goal" });
 		const errorMessage = fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid_api_key" });
 
 		const continuationMessages = await harness.session.agent.getContinuationMessages?.({
@@ -876,10 +1018,12 @@ describe("AgentSession goals", () => {
 
 describe("initial goal seeding from config", () => {
 	const harnesses: Harness[] = [];
+	const restartedSessions: AgentSession[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
+		await Promise.all(restartedSessions.splice(0).map((session) => session.disposeAsync()));
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -898,7 +1042,6 @@ describe("initial goal seeding from config", () => {
 		});
 
 		// Goal is persisted before first prompt
-		const { GOAL_STATE_CUSTOM_TYPE } = await import("../../src/core/goals.js");
 		const branch = harness.sessionManager.getBranch();
 		const goalEntry = branch.find((e) => e.type === "custom" && e.customType === GOAL_STATE_CUSTOM_TYPE);
 		expect(goalEntry).toBeDefined();
@@ -943,10 +1086,17 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.active).toBe(false);
 	});
 
-	function createRestartSession(harness: Harness): AgentSession {
+	async function createRestartSession(harness: Harness, retainedImport = false): Promise<AgentSession> {
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		expect(existsSync(sessionFile)).toBe(true);
-		const newSessionManager = SessionManager.open(sessionFile);
+		await harness.session.disposeAsync();
+		const newSessionManager = retainedImport
+			? await SessionManager.importRetainedFrom(
+					sessionFile,
+					harness.tempDir,
+					join(harness.tempDir, "retained-sessions"),
+				)
+			: await SessionManager.open(sessionFile);
 
 		// Assert the reopened branch contains a thread_goal_state custom entry
 		// before constructing the new AgentSession. This proves the goal was
@@ -972,7 +1122,7 @@ describe("initial goal seeding from config", () => {
 			},
 		});
 
-		return new AgentSession({
+		const restarted = new AgentSession({
 			agent: newAgent,
 			sessionManager: newSessionManager,
 			settingsManager: newSettings,
@@ -981,7 +1131,12 @@ describe("initial goal seeding from config", () => {
 			resourceLoader: createTestResourceLoader(),
 			rlmDepth: 0,
 			initialGoal: { objective: "Should not reseed" },
+			initialActiveToolNames: [],
+			prewarmIpythonKernel: false,
 		});
+		restartedSessions.push(restarted);
+		await restarted.initialize();
+		return restarted;
 	}
 
 	it("does not reseed after goal is cleared (idempotent restart)", async () => {
@@ -999,12 +1154,12 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.status).toBe("idle");
 
 		// Simulate restart: reopen the same session file
-		const newSession = createRestartSession(harness);
+		const newSession = await createRestartSession(harness);
 
 		// Goal should remain idle (cleared), not reseeded
 		expect(newSession.goalState.status).toBe("idle");
 		expect(newSession.goalState.objective).toBeUndefined();
-		newSession.dispose();
+		await newSession.disposeAsync();
 	});
 
 	it("does not reseed after goal is completed (idempotent restart)", async () => {
@@ -1017,16 +1172,21 @@ describe("initial goal seeding from config", () => {
 		expect(harness.session.goalState.status).toBe("active");
 
 		// Complete the goal via host request
-		harness.session.handleGoalHostRequest("goal.complete");
+		await harness.session.handleGoalHostRequest("goal.complete");
 		expect(harness.session.goalState.status).toBe("complete");
+		expect(await harness.sessionManager.readBranchHistory((history) => history.branchBootstrap())).toMatchObject({
+			hasContextMessages: false,
+			goalSeedable: false,
+		});
 
 		// Simulate restart on the same session file
-		const newSession = createRestartSession(harness);
+		const newSession = await createRestartSession(harness);
 
 		// Goal should remain complete, not reseeded
 		expect(newSession.goalState.status).toBe("complete");
 		expect(newSession.goalState.objective).toBe("Complete me");
-		newSession.dispose();
+		expect(newSession.getActiveToolNames()).not.toContain("ipython");
+		await newSession.disposeAsync();
 	});
 
 	it("does not reseed when branch has messages (idempotent restart after use)", async () => {
@@ -1040,12 +1200,12 @@ describe("initial goal seeding from config", () => {
 
 		// Append user and assistant messages directly via sessionManager
 		// to avoid triggering autonomous goal continuation loop.
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "do something" }],
 			timestamp: Date.now(),
 		});
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "done" }],
 			api: "openai-completions",
@@ -1063,12 +1223,36 @@ describe("initial goal seeding from config", () => {
 			timestamp: Date.now(),
 		});
 
-		// Simulate restart on the same session file
-		const newSession = createRestartSession(harness);
+		// Older native goal snapshots do not require operation-level nativeOrigin.
+		const goalEntryId = await harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, {
+			...harness.session.goalState,
+			tokensUsed: 7,
+		});
 
-		// Goal should be the persisted active goal, not the new initialGoal
+		// A newer malformed goal must not replace the latest eligible native snapshot.
+		await harness.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, { active: false });
+
+		// Simulate restart on the same session file
+		const newSession = await createRestartSession(harness);
+		const reopenedGoalEntry = newSession.sessionManager.getEntry(goalEntryId);
+		expect(reopenedGoalEntry).toMatchObject({ data: { tokensUsed: 7 } });
+		expect(reopenedGoalEntry).not.toHaveProperty("nativeOrigin");
+		expect(newSession.sessionManager.getEntryRetention(goalEntryId)).toBeUndefined();
+
+		// Restore the latest native goal snapshot, not the original seed or new initialGoal.
 		expect(newSession.goalState.status).toBe("active");
 		expect(newSession.goalState.objective).toBe("Initial goal");
-		newSession.dispose();
+		expect(newSession.goalState.tokensUsed).toBe(7);
+		expect(newSession.getActiveToolNames()).toContain("ipython");
+		expect(newSession.agent.state.tools.some((tool) => tool.name === "ipython")).toBe(true);
+		await newSession.disposeAsync();
+
+		// The same real source imported as retained history must not activate that goal or reseed.
+		const retainedSession = await createRestartSession(harness, true);
+		expect(retainedSession.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		expect(retainedSession.goalState).toMatchObject({ active: false, status: "idle" });
+		expect(retainedSession.goalState.objective).toBeUndefined();
+		expect(retainedSession.getActiveToolNames()).not.toContain("ipython");
+		await retainedSession.disposeAsync();
 	});
 });

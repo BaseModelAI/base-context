@@ -1,5 +1,3 @@
-import { Buffer } from "node:buffer";
-import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import {
 	chmodSync,
 	closeSync,
@@ -11,22 +9,22 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { OAuthAuthInfo } from "@earendil-works/pi-ai";
+import type { OAuthAuthInfo } from "@ponythewhite/base-context-ai";
+import { getAgentDir } from "../config.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 
 export const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
 export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";
-export const PRIME_AGENT_TRACES_PROVIDER_ID = "prime-agent-traces";
-export const PRIME_AGENT_TRACES_PROVIDER_NAME = "Prime Agent Traces";
+export const BASE_CONTEXT_TRACES_PROVIDER_ID = "base-context-traces";
+export const BASE_CONTEXT_TRACES_PROVIDER_NAME = "Base Context Traces";
 
 const DEFAULT_PRIME_API_BASE_URL = "https://api.primeintellect.ai";
 const DEFAULT_PRIME_FRONTEND_URL = "https://app.primeintellect.ai";
 const DEFAULT_PRIME_INFERENCE_URL = "https://api.pinference.ai/api/v1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
-export type PrimeInferenceAuthSource = "prime-cli" | "browser";
+export type PrimeInferenceAuthSource = "api-key";
 
 export type PrimeInferenceLoginResult = {
 	apiKey: string;
@@ -52,20 +50,10 @@ export type PrimeInferenceLoginCallbacks = {
 };
 
 export type PrimeInferenceLoginOptions = {
+	apiKey?: string;
 	configPath?: string;
 	fetchFn?: typeof fetch;
-	pollIntervalMs?: number;
 	requestTimeoutMs?: number;
-};
-
-type PrimeChallengeConfig = {
-	baseUrl: string;
-	frontendUrl: string;
-};
-
-type PrimeChallengeResponse = {
-	challenge: string;
-	statusAuthToken: string;
 };
 
 export type PrimeInferenceAccessResult =
@@ -87,7 +75,7 @@ export type PrimeTeam = {
 };
 
 function defaultPrimeCliConfigPath(): string {
-	return join(homedir(), ".prime", "config.json");
+	return assertProductStatePath(join(getAgentDir(), "prime-inference.json"));
 }
 
 export function getPrimeCliConfigPath(configPath?: string): string {
@@ -137,6 +125,7 @@ function readPrimeCliConfigData(configPath: string): Record<string, unknown> {
 }
 
 function writePrimeCliConfigData(configPath: string, data: Record<string, unknown>): void {
+	configPath = assertProductStatePath(configPath);
 	const dir = dirname(configPath);
 	if (!existsSync(dir)) {
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -237,41 +226,15 @@ export function savePrimeCliTeamSelection(
 	return loadPrimeCliConfig(configPath);
 }
 
-export function resolvePrimeAgentTracesBaseUrl(baseUrl?: string): string {
-	return normalizeBaseUrl(baseUrl ?? stringEnv("PRIME_AGENT_TRACES_BASE_URL"));
-}
-
-function resolvePrimeAgentTracesChallengeConfig(config: PrimeCliConfig): PrimeChallengeConfig {
-	return {
-		baseUrl: resolvePrimeAgentTracesBaseUrl(),
-		frontendUrl: stringEnv("PRIME_AGENT_TRACES_BASE_URL") ? config.frontendUrl : DEFAULT_PRIME_FRONTEND_URL,
-	};
+export function resolvePrimeAgentTracesBaseUrl(baseUrl?: string): string | undefined {
+	const configuredBaseUrl = baseUrl?.trim() || stringEnv("BASE_CONTEXT_TRACES_BASE_URL");
+	return configuredBaseUrl ? normalizeBaseUrl(configuredBaseUrl) : undefined;
 }
 
 function throwIfCancelled(signal?: AbortSignal): void {
 	if (signal?.aborted) {
 		throw new Error("Login cancelled");
 	}
-}
-
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(new Error("Login cancelled"));
-			return;
-		}
-
-		let timeout: NodeJS.Timeout;
-		const onAbort = () => {
-			clearTimeout(timeout);
-			reject(new Error("Login cancelled"));
-		};
-		timeout = setTimeout(() => {
-			signal?.removeEventListener("abort", onAbort);
-			resolve();
-		}, ms);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
 }
 
 async function fetchWithTimeout(
@@ -431,128 +394,6 @@ export async function fetchPrimeTeams(
 	return teams;
 }
 
-function createPrimeChallengeKeypair(): { privateKey: string; publicKey: string } {
-	const { privateKey, publicKey } = generateKeyPairSync("rsa", {
-		modulusLength: 2048,
-		publicExponent: 0x10001,
-		publicKeyEncoding: {
-			type: "spki",
-			format: "pem",
-		},
-		privateKeyEncoding: {
-			type: "pkcs8",
-			format: "pem",
-		},
-	});
-	return { privateKey, publicKey };
-}
-
-function decryptPrimeChallengeResult(privateKey: string, encryptedResult: string): string {
-	const decrypted = privateDecrypt(
-		{
-			key: privateKey,
-			padding: constants.RSA_PKCS1_OAEP_PADDING,
-			oaepHash: "sha256",
-		},
-		Buffer.from(encryptedResult, "base64"),
-	);
-	return decrypted.toString("utf-8");
-}
-
-async function generatePrimeChallenge(
-	config: PrimeChallengeConfig,
-	publicKey: string,
-	fetchFn: typeof fetch,
-	timeoutMs: number,
-	signal?: AbortSignal,
-): Promise<PrimeChallengeResponse> {
-	const response = await fetchWithTimeout(
-		fetchFn,
-		`${config.baseUrl}/api/v1/auth_challenge/generate`,
-		{
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ encryptionPublicKey: publicKey }),
-		},
-		timeoutMs,
-		signal,
-	);
-
-	if (!response.ok) {
-		throw new Error(`Failed to generate Prime login challenge: ${await readResponseMessage(response)}`);
-	}
-
-	const data = await readJsonObject(response, "Prime login challenge");
-	const challenge = stringField(data, "challenge");
-	const statusAuthToken = stringField(data, "status_auth_token");
-	if (!challenge || !statusAuthToken) {
-		throw new Error("Prime login challenge response missing required fields");
-	}
-
-	return { challenge, statusAuthToken };
-}
-
-async function pollPrimeChallengeResult(
-	config: PrimeChallengeConfig,
-	challenge: PrimeChallengeResponse,
-	privateKey: string,
-	fetchFn: typeof fetch,
-	timeoutMs: number,
-	pollIntervalMs: number,
-	signal?: AbortSignal,
-): Promise<string> {
-	while (true) {
-		throwIfCancelled(signal);
-
-		const statusUrl = new URL(`${config.baseUrl}/api/v1/auth_challenge/status`);
-		statusUrl.searchParams.set("challenge", challenge.challenge);
-		const response = await fetchWithTimeout(
-			fetchFn,
-			statusUrl,
-			{
-				method: "GET",
-				headers: { Authorization: `Bearer ${challenge.statusAuthToken}` },
-			},
-			timeoutMs,
-			signal,
-		);
-
-		if (response.status === 404) {
-			throw new Error("Prime login challenge expired");
-		}
-		if (!response.ok) {
-			throw new Error(`Failed to check Prime login status: ${await readResponseMessage(response)}`);
-		}
-
-		const data = await readJsonObject(response, "Prime login status");
-		const encryptedResult = stringField(data, "result");
-		if (encryptedResult) {
-			return decryptPrimeChallengeResult(privateKey, encryptedResult);
-		}
-
-		await abortableSleep(pollIntervalMs, signal);
-	}
-}
-
-async function runPrimeBrowserLogin(
-	config: PrimeChallengeConfig,
-	callbacks: PrimeInferenceLoginCallbacks,
-	fetchFn: typeof fetch,
-	timeoutMs: number,
-	pollIntervalMs: number,
-	scope?: PrimeAccessScope,
-): Promise<string> {
-	const { privateKey, publicKey } = createPrimeChallengeKeypair();
-	const challenge = await generatePrimeChallenge(config, publicKey, fetchFn, timeoutMs, callbacks.signal);
-	const url = new URL(`${config.frontendUrl}/dashboard/tokens/challenge`);
-	url.searchParams.set("code", challenge.challenge);
-	if (scope) {
-		url.searchParams.set("scope", scope);
-	}
-	callbacks.onAuth({ url: url.toString(), instructions: `Code: ${challenge.challenge}` });
-	return pollPrimeChallengeResult(config, challenge, privateKey, fetchFn, timeoutMs, pollIntervalMs, callbacks.signal);
-}
-
 async function checkPrimeScopeAccess(
 	apiKey: string,
 	baseUrl: string,
@@ -645,35 +486,19 @@ export async function loginPrimeInference(
 	callbacks: PrimeInferenceLoginCallbacks,
 	options: PrimeInferenceLoginOptions = {},
 ): Promise<PrimeInferenceLoginResult> {
+	throwIfCancelled(callbacks.signal);
 	const config = loadPrimeCliConfig(options.configPath);
-	const fetchFn = options.fetchFn ?? fetch;
-	const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-
-	if (config.apiKey) {
-		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeInferenceAccess(config.apiKey, config.baseUrl, {
-			fetchFn,
-			requestTimeoutMs,
-			signal: callbacks.signal,
-		});
-		if (access.ok) {
-			throwIfCancelled(callbacks.signal);
-			return { apiKey: config.apiKey, source: "prime-cli" };
-		}
-		callbacks.onProgress?.(
-			`Existing Prime CLI key cannot access Prime Inference (${formatAccessFailure(access)}). Starting browser login...`,
+	const apiKey = options.apiKey?.trim() || stringEnv("PRIME_API_KEY") || config.apiKey;
+	if (!apiKey) {
+		throw new Error(
+			"Base Context does not support Prime browser sign-in. Use /login to enter a Prime Inference API key, or set PRIME_API_KEY.",
 		);
-	} else {
-		callbacks.onProgress?.("No Prime CLI API key found. Starting browser login...");
 	}
 
-	const apiKey = await runPrimeBrowserLogin(config, callbacks, fetchFn, requestTimeoutMs, pollIntervalMs);
-	throwIfCancelled(callbacks.signal);
 	callbacks.onProgress?.("Checking Prime Inference access...");
 	const access = await checkPrimeInferenceAccess(apiKey, config.baseUrl, {
-		fetchFn,
-		requestTimeoutMs,
+		fetchFn: options.fetchFn,
+		requestTimeoutMs: options.requestTimeoutMs,
 		signal: callbacks.signal,
 	});
 	if (!access.ok) {
@@ -681,56 +506,14 @@ export async function loginPrimeInference(
 	}
 
 	throwIfCancelled(callbacks.signal);
-	return { apiKey, source: "browser" };
+	return { apiKey, source: "api-key" };
 }
 
 export async function loginPrimeAgentTraces(
-	callbacks: PrimeInferenceLoginCallbacks,
-	options: PrimeInferenceLoginOptions = {},
+	_callbacks: PrimeInferenceLoginCallbacks,
+	_options: PrimeInferenceLoginOptions = {},
 ): Promise<PrimeInferenceLoginResult> {
-	const config = loadPrimeCliConfig(options.configPath);
-	const traceConfig = resolvePrimeAgentTracesChallengeConfig(config);
-	const fetchFn = options.fetchFn ?? fetch;
-	const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-
-	if (config.apiKey) {
-		callbacks.onProgress?.("Checking existing Prime CLI credentials...");
-		const access = await checkPrimeAgentTracesAccess(config.apiKey, traceConfig.baseUrl, {
-			fetchFn,
-			requestTimeoutMs,
-			signal: callbacks.signal,
-		});
-		if (access.ok) {
-			throwIfCancelled(callbacks.signal);
-			return { apiKey: config.apiKey, source: "prime-cli" };
-		}
-		callbacks.onProgress?.(
-			`Existing Prime CLI key cannot upload Prime Agent traces (${formatAccessFailure(access)}). Starting browser login...`,
-		);
-	} else {
-		callbacks.onProgress?.("No Prime CLI API key found. Starting browser login...");
-	}
-
-	const apiKey = await runPrimeBrowserLogin(
-		traceConfig,
-		callbacks,
-		fetchFn,
-		requestTimeoutMs,
-		pollIntervalMs,
-		"agent_traces",
+	throw new Error(
+		"Base Context trace browser sign-in is not configured. Set BASE_CONTEXT_TRACES_BASE_URL and a dedicated BASE_CONTEXT_TRACES_API_KEY; Prime Inference credentials are not used for traces.",
 	);
-	throwIfCancelled(callbacks.signal);
-	callbacks.onProgress?.("Checking Prime Agent trace access...");
-	const access = await checkPrimeAgentTracesAccess(apiKey, traceConfig.baseUrl, {
-		fetchFn,
-		requestTimeoutMs,
-		signal: callbacks.signal,
-	});
-	if (!access.ok) {
-		throw new Error(`Prime API key does not have Prime Agent trace access (${formatAccessFailure(access)})`);
-	}
-
-	throwIfCancelled(callbacks.signal);
-	return { apiKey, source: "browser" };
 }

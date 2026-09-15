@@ -12,11 +12,23 @@
           "path": "quickstart.md"
         },
         {
+          "title": "Installation and updates",
+          "path": "installation.md"
+        },
+        {
+          "title": "Why this fork",
+          "path": "fork-philosophy.md"
+        },
+        {
+          "title": "Context management",
+          "path": "context-management.md"
+        },
+        {
           "title": "Architecture Overview",
           "path": "architecture.md"
         },
         {
-          "title": "Using Prime Agent",
+          "title": "Using Base Context",
           "path": "usage.md"
         },
         {
@@ -73,7 +85,7 @@
           "path": "themes.md"
         },
         {
-          "title": "Prime Agent Packages",
+          "title": "Base Context Packages",
           "path": "packages.md"
         },
         {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import {
 	type Api,
 	type AssistantMessage,
@@ -12,8 +12,8 @@ import {
 	type ServiceTier,
 	supportsFastMode,
 	type ToolCall,
-} from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
+} from "@ponythewhite/base-context-ai";
+import { BUILTIN_MCP_CATALOG } from "@ponythewhite/base-context-ai/mcp";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -24,7 +24,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
@@ -41,12 +41,13 @@ import {
 	TUI,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@ponythewhite/base-context-tui";
 import { spawn, spawnSync } from "child_process";
 import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
+	selectedUpdateInstallation,
 } from "../../cli/daemon-update-restart.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -56,6 +57,7 @@ import {
 	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
+	getPhysicalPackageDir,
 	getShareViewerUrl,
 	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
@@ -134,6 +136,8 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
+import { getOwnedInstallation } from "../../owned-install-layout.js";
+import { assertProductStatePath } from "../../runtime-paths.js";
 import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -1142,7 +1146,11 @@ export class InteractiveMode {
 			this.resetSideQuestion();
 		});
 		this.version = VERSION;
-		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
+		this.ui = new TUI(
+			new ProcessTerminal(),
+			this.settingsManager.getShowHardwareCursor(),
+			assertProductStatePath(path.join(getAgentDir(), "tui")),
+		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.ui.onCopy = (text) => {
 			void this.copyFullscreenSelection(text);
@@ -3153,7 +3161,7 @@ export class InteractiveMode {
 			shutdown: () => {
 				this.shutdownRequested = true;
 			},
-			getContextUsage: () => this.getConnectionContextUsage(),
+			getContextUsage: async () => this.getConnectionContextUsage(),
 			compact: (options) => {
 				void (async () => {
 					try {
@@ -5749,7 +5757,7 @@ export class InteractiveMode {
 				this.statusContainer.clear();
 				this.retryCountdown?.dispose();
 				const retryMessage = (seconds: number) =>
-					`Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s... (${keyText("app.clear")} to cancel)`;
+					`Retrying (${event.attempt}${event.maxAttempts === undefined ? "" : `/${event.maxAttempts}`}) in ${seconds}s... (${keyText("app.clear")} to cancel)`;
 				this.retryLoader = new Loader(
 					this.ui,
 					(spinner) => theme.fg("muted", spinner),
@@ -8368,7 +8376,7 @@ export class InteractiveMode {
 
 	private async handleCloneCommand(): Promise<void> {
 		try {
-			const { leafId } = await this.agentConnection.getSessionTree();
+			const { leafId } = await this.agentConnection.getState();
 			if (!leafId) {
 				this.showStatus("Nothing to clone yet");
 				return;
@@ -8699,7 +8707,7 @@ export class InteractiveMode {
 		}
 
 		const authStorage = this.modelRegistry.authStorage;
-		const isAuthed = (name: string) => authStorage.get(`mcp:${name}`) !== undefined;
+		const isAuthed = (name: string) => authStorage.hasAuth(`mcp:${name}`);
 		if (sub === "login") {
 			if (!server || argv.length !== 2) {
 				this.showError("Usage: /mcp login <name> (e.g. /mcp login linear)");
@@ -8728,13 +8736,12 @@ export class InteractiveMode {
 			const result = await runMcpManagementCommand(argv, this.settingsManager, this.modelRegistry.authStorage);
 			if (result.changed && result.serverChange) {
 				const { name, transport, verb, usesOAuth } = result.serverChange;
-				const hasMcpProviderRefresh = this.uiServices.refreshMcpProviders !== undefined;
 				this.uiServices.refreshMcpProviders?.();
 				const successMessage =
 					verb === "removed"
 						? `Removed MCP server "${name}" (${transport}). It is no longer available through mcp.`
 						: usesOAuth
-							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). ${hasMcpProviderRefresh ? "Run" : "Restart Prime Agent, then run"} /mcp login ${name} to connect.`
+							? `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). OAuth is unavailable until the Base Context provider contract is validated. Use explicit bearer-token or API-key configuration instead.`
 							: `${verb === "replaced" ? "Replaced" : "Added"} MCP server "${name}" (${transport}). Available next turn through mcp.`;
 				await this.reloadAfterMcpChange(usesOAuth ? successMessage : result.message, successMessage);
 			} else if (result.action === "list") {
@@ -8789,6 +8796,7 @@ export class InteractiveMode {
 			resolveDaemonUpdateRestartSocketPath(this.options.daemonSocketPath),
 		);
 		const updateChildArgs = includesSelf ? buildUpdateChildArgs(updateArgs, daemonSocketPath) : updateArgs;
+		const sourceInstallation = includesSelf ? getOwnedInstallation(getPhysicalPackageDir()) : undefined;
 		this.stopWorkingLoader();
 		await this.ui.terminal.drainInput(1000).catch(() => undefined);
 		this.ui.stop();
@@ -8808,6 +8816,12 @@ export class InteractiveMode {
 			includesSelf && !updateResult.error && updateExitCode === SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE;
 
 		if (includesSelf && !selfUpdateNotAttempted) {
+			const selectedInstallation = selectedUpdateInstallation();
+			const selectedPairChanged =
+				selectedInstallation !== undefined && selectedInstallation.packageDir !== sourceInstallation?.packageDir;
+			const relaunchEntrypoint = selectedInstallation
+				? path.join(selectedInstallation.packageDir, "dist", "bundle", "cli.js")
+				: entrypoint;
 			const relaunchArgs = buildUpdateRelaunchArgs(process.argv.slice(2), this.connectionState?.sessionFile);
 			if (updateResult.error) {
 				console.error(`Update failed: ${updateResult.error.message}`);
@@ -8820,6 +8834,11 @@ export class InteractiveMode {
 				);
 				console.error(`Relaunching ${APP_NAME}...`);
 			}
+			if (selectedPairChanged && (updateResult.error || updateExitCode !== 0)) {
+				console.error(
+					`The captured Base-Context selection is ${selectedInstallation.packageDir}; coordinating that pair before relaunch despite the failed update command.`,
+				);
+			}
 			this.stop();
 			await this.agentConnection.dispose().catch(() => undefined);
 			try {
@@ -8827,13 +8846,15 @@ export class InteractiveMode {
 			} catch {
 				// The update already completed; do not block relaunch on local teardown.
 			}
-			if (!updateResult.error && updateExitCode === 0) {
+			if ((!updateResult.error && updateExitCode === 0) || selectedPairChanged) {
 				try {
 					const status = await launchDaemonUpdateRestartCoordinator({
 						socketPath: daemonSocketPath,
 						agentDir: getAgentDir(),
 						cwd: updateCwd,
 						originActiveSessionId: this.connectionState?.activeSessionId,
+						installation: selectedInstallation,
+						keepSocket: [...process.argv.slice(2), ...updateArgs].includes("--daemon-socket"),
 					});
 					const report = buildDaemonUpdateRestartReport(status);
 					for (const message of report.info) {
@@ -8844,11 +8865,19 @@ export class InteractiveMode {
 					}
 				} catch (error: unknown) {
 					console.error(
-						`Warning: updated, but could not coordinate the daemon restart (${error instanceof Error ? error.message : String(error)}).`,
+						`Warning: could not coordinate the daemon restart before relaunch (${error instanceof Error ? error.message : String(error)}).`,
 					);
 				}
 			}
-			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const relaunch = createCliSubprocessLaunchSpec(
+				relaunchArgs,
+				process.execPath,
+				process.execArgv,
+				relaunchEntrypoint,
+			);
+			const relaunchEnvironment = selectedInstallation
+				? { ...process.env, BASE_CONTEXT_PACKAGE_DIR: selectedInstallation.packageDir }
+				: process.env;
 			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
 			try {
 				if (
@@ -8857,7 +8886,7 @@ export class InteractiveMode {
 						nodeVersion: process.versions.node,
 						cwd: updateCwd,
 						previousCwd: process.cwd(),
-						environment: process.env,
+						environment: relaunchEnvironment,
 						chdir: (directory) => process.chdir(directory),
 						execve: updateProcess.execve,
 					})
@@ -8872,7 +8901,7 @@ export class InteractiveMode {
 			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
-				env: process.env,
+				env: relaunchEnvironment,
 			});
 			if (relaunchResult.error) {
 				console.error(`Failed to relaunch ${APP_NAME}: ${relaunchResult.error.message}`);
@@ -9352,7 +9381,7 @@ export class InteractiveMode {
 				return `Trace upload skipped: session file is ${result.size.toLocaleString()} bytes; limit is ${result.maxBytes.toLocaleString()} bytes.`;
 			case "failed":
 				if (result.statusCode === 404) {
-					return "Trace upload endpoint was not found. The platform API may not be deployed yet, or PRIME_AGENT_TRACES_BASE_URL points at the wrong API.";
+					return "Trace upload endpoint was not found. The platform API may not be deployed yet, or BASE_CONTEXT_TRACES_BASE_URL points at the wrong API.";
 				}
 				return `Trace upload failed: ${result.statusCode ? `HTTP ${result.statusCode}: ` : ""}${result.message}. See ${getAgentTracesLogPath()} for details.`;
 		}

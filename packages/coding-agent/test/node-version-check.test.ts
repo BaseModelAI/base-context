@@ -54,7 +54,8 @@ describe("assertNodeVersion", () => {
 		const text = logs.join("\n");
 		expect(text).toContain(`Node ${MIN_NODE_VERSION}`);
 		expect(text).toContain("20.18.1");
-		expect(text).toContain("github.com/PrimeIntellect-ai/prime-agent/releases/latest");
+		expect(text).toContain("base-context requires Node");
+		expect(text).toContain("github.com/BaseModelAI/base-context/releases/latest");
 	});
 
 	test("accepts the v prefix used by process.version", () => {

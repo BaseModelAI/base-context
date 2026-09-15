@@ -1,4 +1,5 @@
-import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
+import type { ServiceTier, Transport } from "@ponythewhite/base-context-ai";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -8,16 +9,39 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 
+export interface CompactionModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+}
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
 	agentCallable?: boolean; // default: true - expose the compact skill so the model can request compaction
+	/** Absent: inherit the main session model and its current thinking level. */
+	model?: CompactionModelSettings;
+}
+
+export interface BranchSummaryModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
 }
 
 export interface BranchSummarySettings {
 	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
+	/** Absent: inherit the main model and retain omitted request effort. */
+	model?: BranchSummaryModelSettings;
+}
+
+/** One explicit learning-model selection, shared by the real reviewer and planner. */
+export interface AutoRefineModelSettings {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
 }
 
 export interface AutoRefineSettings {
@@ -25,6 +49,8 @@ export interface AutoRefineSettings {
 	turnInterval?: number; // default: 25 assistant turns
 	compact?: boolean; // default: true
 	cooldownMs?: number; // default: 20 minutes
+	/** Absent: inherit the main model and retain legacy omitted request effort. */
+	model?: AutoRefineModelSettings;
 }
 
 export interface ProviderRetrySettings {
@@ -136,13 +162,19 @@ export interface Settings {
 	recentModels?: string[]; // "provider/id" keys, most-recently-used first
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
-	rlmMaxDepth?: number; // default for new sessions; unset falls through to RLM_MAX_DEPTH, then 2
+	rlmMaxDepth?: number; // default for new sessions; unset falls through to BASE_CONTEXT_RLM_MAX_DEPTH, then 2
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
-	transport?: TransportSetting; // default: "auto"
+	transport?: TransportSetting; // default: "sse"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
+	/** Resource caps on complete canonical reconstruction, not model/token/heap limits. */
+	canonicalContext?: { maxMessages?: number; maxSourceBytes?: number };
+	/** Complete native invocation output, separate from the working context. */
+	invocationOutput?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
+	/** Creation default; an existing session changes policy through its canonical owner. */
+	context?: { mode?: "on" | "off" };
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
@@ -154,7 +186,9 @@ export interface Settings {
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	mcpServers?: Record<string, McpServerConfig>; // User-declared MCP servers (name → config); built-ins are in the ai/mcp catalog
-	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
+	packages?: PackageSource[];
+	/** Imported declarations only; never resolved or installed until an explicit package install. */
+	inactivePackages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
@@ -816,13 +850,56 @@ export class SettingsManager {
 	}
 
 	getTransport(): TransportSetting {
-		return this.settings.transport ?? "auto";
+		return this.settings.transport ?? "sse";
 	}
 
 	setTransport(transport: TransportSetting): void {
 		this.globalSettings.transport = transport;
 		this.markModified("transport");
 		this.save();
+	}
+
+	/** Resolve resource caps without truncating or changing context selection. */
+	getCanonicalContextLimits(): { maxMessages: number; maxSourceBytes: number } {
+		const configured = this.settings.canonicalContext;
+		if (
+			configured !== undefined &&
+			(typeof configured !== "object" || configured === null || Array.isArray(configured))
+		)
+			throw new Error("canonicalContext must be an object");
+		const limits = {
+			maxMessages: configured?.maxMessages === undefined ? 16384 : configured.maxMessages,
+			maxSourceBytes: configured?.maxSourceBytes === undefined ? 64 * 1024 * 1024 : configured.maxSourceBytes,
+		};
+		for (const [field, value] of Object.entries(limits)) {
+			if (!Number.isSafeInteger(value) || value <= 0)
+				throw new Error(`canonicalContext.${field} must be a positive safe integer`);
+		}
+		return limits;
+	}
+
+	getInvocationOutputLimits(): { maxMessages: number; maxSourceBytes: number } {
+		const configured = this.settings.invocationOutput;
+		if (
+			configured !== undefined &&
+			(typeof configured !== "object" || configured === null || Array.isArray(configured))
+		)
+			throw new Error("invocationOutput must be an object");
+		const limits = {
+			maxMessages: configured?.maxMessages === undefined ? 16384 : configured.maxMessages,
+			maxSourceBytes: configured?.maxSourceBytes === undefined ? 64 * 1024 * 1024 : configured.maxSourceBytes,
+		};
+		for (const [field, value] of Object.entries(limits)) {
+			if (!Number.isSafeInteger(value) || value <= 0)
+				throw new Error(`invocationOutput.${field} must be a positive safe integer`);
+		}
+		return limits;
+	}
+
+	getContextMode(): "on" | "off" {
+		const mode = this.settings.context?.mode ?? "on";
+		if (mode !== "on" && mode !== "off") throw new Error("context.mode must be on or off");
+		return mode;
 	}
 
 	getCompactionEnabled(): boolean {
@@ -852,7 +929,7 @@ export class SettingsManager {
 	}
 
 	getTelemetryEnabled(): boolean {
-		const globalEnabled = this.globalSettings.telemetry?.enabled ?? true;
+		const globalEnabled = this.globalSettings.telemetry?.enabled ?? false;
 		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
 		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
 		return globalEnabled && projectEnabled && runtimeEnabled;
@@ -894,12 +971,24 @@ export class SettingsManager {
 		return this.settings.compaction?.agentCallable ?? true;
 	}
 
+	/** Detached explicit configuration; compaction resolves and validates its model/effort. */
+	getCompactionModel(): CompactionModelSettings | undefined {
+		const model = this.settings.compaction?.model;
+		return model === undefined ? undefined : structuredClone(model);
+	}
+
 	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
 		};
+	}
+
+	/** Detached explicit configuration; the request path resolves and validates its model/effort. */
+	getAutoRefineModel(): AutoRefineModelSettings | undefined {
+		const model = this.settings.autoRefine?.model;
+		return model === undefined ? undefined : structuredClone(model);
 	}
 
 	getAutoRefineSettings(): { enabled: boolean; turnInterval: number; compact: boolean; cooldownMs: number } {
@@ -917,6 +1006,12 @@ export class SettingsManager {
 				typeof cooldownMs === "number" && Number.isFinite(cooldownMs) ? cooldownMs : 20 * 60_000,
 			),
 		};
+	}
+
+	/** Detached explicit configuration; branch navigation validates the selected model/effort. */
+	getBranchSummaryModel(): BranchSummaryModelSettings | undefined {
+		const model = this.settings.branchSummary?.model;
+		return model === undefined ? undefined : structuredClone(model);
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
@@ -1013,16 +1108,24 @@ export class SettingsManager {
 		return [...(this.settings.packages ?? [])];
 	}
 
-	setPackages(packages: PackageSource[]): void {
+	setPackages(packages: PackageSource[], inactivePackages?: PackageSource[]): void {
 		this.globalSettings.packages = packages;
 		this.markModified("packages");
+		if (inactivePackages !== undefined) {
+			this.globalSettings.inactivePackages = inactivePackages;
+			this.markModified("inactivePackages");
+		}
 		this.save();
 	}
 
-	setProjectPackages(packages: PackageSource[]): void {
+	setProjectPackages(packages: PackageSource[], inactivePackages?: PackageSource[]): void {
 		const projectSettings = structuredClone(this.projectSettings);
 		projectSettings.packages = packages;
 		this.markProjectModified("packages");
+		if (inactivePackages !== undefined) {
+			projectSettings.inactivePackages = inactivePackages;
+			this.markProjectModified("inactivePackages");
+		}
 		this.saveProjectSettings(projectSettings);
 	}
 
@@ -1145,7 +1248,7 @@ export class SettingsManager {
 		if (this.settings.terminal?.clearOnShrink !== undefined) {
 			return this.settings.terminal.clearOnShrink;
 		}
-		return process.env.PI_CLEAR_ON_SHRINK === "1";
+		return process.env.BASE_CONTEXT_CLEAR_ON_SHRINK === "1";
 	}
 
 	setClearOnShrink(enabled: boolean): void {
@@ -1158,8 +1261,8 @@ export class SettingsManager {
 	}
 
 	getFullscreen(): boolean {
-		if (process.env.PI_FULLSCREEN !== undefined) {
-			return process.env.PI_FULLSCREEN === "1";
+		if (process.env.BASE_CONTEXT_FULLSCREEN !== undefined) {
+			return process.env.BASE_CONTEXT_FULLSCREEN === "1";
 		}
 		return this.settings.terminal?.fullscreen ?? true;
 	}
@@ -1272,7 +1375,7 @@ export class SettingsManager {
 	}
 
 	getShowHardwareCursor(): boolean {
-		return this.settings.showHardwareCursor ?? process.env.PI_HARDWARE_CURSOR === "1";
+		return this.settings.showHardwareCursor ?? process.env.BASE_CONTEXT_HARDWARE_CURSOR === "1";
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {

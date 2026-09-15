@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.0] - 2026-09-15
+
+- First public Synerise base-context 1.0.0 release of `@ponythewhite/base-context-tui`, preserving the upstream terminal UI and MIT notices.
+
 ## [0.9.0] - 2026-09-01
 
 - Add an optional `transform` hook to `Markdown` so callers can rewrite markdown with the exact content width before rendering.

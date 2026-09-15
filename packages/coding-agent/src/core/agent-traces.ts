@@ -4,14 +4,10 @@ import { type Dirent, existsSync, mkdirSync, renameSync, writeFileSync } from "n
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, VERSION } from "../config.js";
-import { readFirstLineSync } from "../utils/file-lines.js";
+import { assertProductStatePath } from "../runtime-paths.js";
 import type { AuthStorage } from "./auth-storage.js";
-import {
-	loadPrimeCliConfig,
-	PRIME_AGENT_TRACES_PROVIDER_ID,
-	PRIME_INFERENCE_PROVIDER_ID,
-	resolvePrimeAgentTracesBaseUrl,
-} from "./prime-inference-auth.js";
+import { BASE_CONTEXT_TRACES_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "./prime-inference-auth.js";
+import { readSessionJournal, readSessionJournalHeader } from "./session-journal-reader.js";
 import { getSessionArtifactsRoot, type SessionHeader, type SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 
@@ -32,7 +28,7 @@ const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS =
 	Math.ceil(TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS / TRACE_UPLOAD_RATE_LIMIT_REQUESTS) + TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS;
 
-export type AgentTraceCredentialSource = "environment" | "stored" | "prime-inference" | "prime-cli";
+export type AgentTraceCredentialSource = "environment" | "stored";
 
 export interface AgentTraceCredential {
 	apiKey: string;
@@ -97,7 +93,7 @@ export type AgentTracePreviewResult =
 			size: number;
 			maxBytes: number;
 			uploadable: boolean;
-			endpoint: string;
+			endpoint?: string;
 			gitRepo?: string;
 			gitCommit?: string;
 			contentPreview: string;
@@ -218,15 +214,19 @@ function isSessionHeader(value: unknown): value is SessionHeader {
 
 function readSessionHeader(sessionFile: string): SessionHeader | undefined {
 	try {
-		const firstLine = readFirstLineSync(sessionFile);
-		if (!firstLine?.trim()) {
-			return undefined;
-		}
-		const parsed = JSON.parse(firstLine) as unknown;
+		const parsed = readSessionJournalHeader(sessionFile);
 		return isSessionHeader(parsed) ? parsed : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+async function readSessionTraceBody(sessionFile: string): Promise<string> {
+	const lines: string[] = [];
+	for await (const { json } of readSessionJournal(sessionFile)) {
+		lines.push(`${json}\n`);
+	}
+	return lines.join("");
 }
 
 /** Active-branch git for the indexing headers: walk leaf to root, not the last git_state in
@@ -490,7 +490,7 @@ export async function previewAgentTraceFile(options: AgentTracePreviewOptions): 
 	let body = "";
 	if (fileSize <= MAX_TRACE_BYTES) {
 		try {
-			body = await readFile(options.sessionFile, "utf8");
+			body = await readSessionTraceBody(options.sessionFile);
 		} catch (error) {
 			return { status: "failed", message: describeError(error) };
 		}
@@ -514,8 +514,8 @@ export async function previewAgentTraceFile(options: AgentTracePreviewOptions): 
 		cwd: header.cwd,
 		size: fileSize,
 		maxBytes: MAX_TRACE_BYTES,
-		uploadable: fileSize <= MAX_TRACE_BYTES,
-		endpoint: `${baseUrl}/api/v1/agent-traces/sessions/${encodeURIComponent(header.id)}`,
+		uploadable: fileSize <= MAX_TRACE_BYTES && baseUrl !== undefined,
+		endpoint: baseUrl ? `${baseUrl}/api/v1/agent-traces/sessions/${encodeURIComponent(header.id)}` : undefined,
 		gitRepo: git?.repoUrl,
 		gitCommit: git?.commit,
 		contentPreview: preview.content,
@@ -651,7 +651,7 @@ export interface AgentTraceCatchUpResult {
 }
 
 function getAgentTraceOutboxDir(): string {
-	return join(getAgentDir(), "agent-traces-outbox");
+	return assertProductStatePath(join(getAgentDir(), "trace-export-outbox"));
 }
 
 // One entry file per session file (keyed by path hash): concurrent writers cannot lose each other's cursors, and a bad read costs only its own entry.
@@ -737,9 +737,8 @@ async function recordAgentTraceOutboxUpload(
 }
 
 /**
- * Startup catch-up: upload every outbox entry whose file content is ahead of its
- * cursor, and prune entries whose file no longer exists. Runs once per process,
- * in whichever process hosts sessions (the only place trace upload is installed).
+ * Explicit catch-up for the Base Context export outbox. This is never run at
+ * startup and does not read inherited agent-traces-outbox entries.
  */
 export async function catchUpAgentTraceUploads(
 	options: Omit<AgentTraceUploadOptions, "sessionFile">,
@@ -840,36 +839,18 @@ export async function getPrimeAgentTraceCredential(
 	authStorage: AuthStorage,
 	options: { reloadAuth?: boolean; configPath?: string } = {},
 ): Promise<AgentTraceCredential | undefined> {
-	const traceEnvKey = stringEnv("PRIME_AGENT_TRACES_API_KEY");
+	const traceEnvKey = stringEnv("BASE_CONTEXT_TRACES_API_KEY");
 	if (traceEnvKey) {
-		return { apiKey: traceEnvKey, source: "environment", label: "PRIME_AGENT_TRACES_API_KEY" };
+		return { apiKey: traceEnvKey, source: "environment", label: "BASE_CONTEXT_TRACES_API_KEY" };
 	}
 
 	if (options.reloadAuth !== false) {
 		authStorage.reload();
 	}
 
-	const traceKey = await authStorage.getApiKey(PRIME_AGENT_TRACES_PROVIDER_ID, { includeFallback: false });
+	const traceKey = await authStorage.getApiKey(BASE_CONTEXT_TRACES_PROVIDER_ID, { includeFallback: false });
 	if (traceKey) {
-		return { apiKey: traceKey, source: "stored", label: "Prime Agent Traces credential" };
-	}
-
-	const primeEnvKey = stringEnv("PRIME_API_KEY");
-	if (primeEnvKey) {
-		return { apiKey: primeEnvKey, source: "environment", label: "PRIME_API_KEY" };
-	}
-
-	const primeCredential = authStorage.get(PRIME_INFERENCE_PROVIDER_ID);
-	if (primeCredential) {
-		const primeKey = await authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID, { includeFallback: false });
-		if (primeKey) {
-			return { apiKey: primeKey, source: "prime-inference", label: "Prime Inference credential" };
-		}
-	}
-
-	const primeCliKey = loadPrimeCliConfig(options.configPath).apiKey;
-	if (primeCliKey) {
-		return { apiKey: primeCliKey, source: "prime-cli", label: "Prime CLI credential" };
+		return { apiKey: traceKey, source: "stored", label: "Base Context Traces credential" };
 	}
 
 	return undefined;
@@ -913,7 +894,7 @@ function logAgentTraceOutcome(sessionFile: string | undefined, result: AgentTrac
 			line = `upload skipped: ${result.message}`;
 			break;
 		case "missing_credentials":
-			line = "upload skipped: no Prime credential configured (run /traces login)";
+			line = "upload skipped: configure a dedicated BASE_CONTEXT_TRACES_API_KEY or Base Context Traces credential";
 			break;
 		default:
 			return;
@@ -929,6 +910,14 @@ async function performAgentTraceUpload(
 	const requireEnabled = options.requireEnabled !== false;
 	if (requireEnabled && !(await getAgentTracesEnabled(options))) {
 		return { status: "disabled" };
+	}
+	const baseUrl = resolvePrimeAgentTracesBaseUrl(options.baseUrl);
+	if (!baseUrl) {
+		return {
+			status: "failed",
+			message:
+				"Trace export requires an explicit BASE_CONTEXT_TRACES_BASE_URL and dedicated BASE_CONTEXT_TRACES_API_KEY.",
+		};
 	}
 	if (!options.sessionFile) {
 		return { status: "no_session_file" };
@@ -975,7 +964,7 @@ async function performAgentTraceUpload(
 
 	let body: string;
 	try {
-		body = await readFile(options.sessionFile, "utf8");
+		body = await readSessionTraceBody(options.sessionFile);
 	} catch (error) {
 		return { status: "failed", message: describeError(error) };
 	}
@@ -1008,7 +997,6 @@ async function performAgentTraceUpload(
 		return { status: "disabled" };
 	}
 
-	const baseUrl = resolvePrimeAgentTracesBaseUrl(options.baseUrl);
 	const url = `${baseUrl}/api/v1/agent-traces/sessions/${encodeURIComponent(header.id)}`;
 	const fetchFn = options.fetchFn ?? fetch;
 
@@ -1019,6 +1007,7 @@ async function performAgentTraceUpload(
 			url,
 			{
 				method: "PUT",
+				redirect: "error",
 				headers,
 				body,
 			},
@@ -1079,6 +1068,12 @@ class AgentTraceUploadController {
 	}
 
 	schedule = (): void => {
+		if (
+			!this.options.settingsManager.getAgentTracesEnabled() ||
+			!resolvePrimeAgentTracesBaseUrl(this.options.baseUrl)
+		) {
+			return;
+		}
 		this.pending = true;
 		// Intent is consent-gated at persist time: an entry created while sharing
 		// is off would turn a later enable into retroactive collection of
@@ -1151,13 +1146,8 @@ function isRescheduledUploadFailure(statusCode: number | undefined): boolean {
 }
 
 const traceUploadControllers = new WeakMap<SessionManager, AgentTraceUploadController>();
-let catchUpTriggered = false;
-
 export function installAgentTraceUpload(sessionManager: SessionManager, options: AgentTraceUploadInstallOptions): void {
-	if (!catchUpTriggered) {
-		catchUpTriggered = true;
-		void catchUpAgentTraceUploads(options).catch(() => undefined);
-	}
+	// Enabling export applies to live sessions, not an inherited outbox backlog.
 	let controller = traceUploadControllers.get(sessionManager);
 	if (controller) {
 		controller.update(options);

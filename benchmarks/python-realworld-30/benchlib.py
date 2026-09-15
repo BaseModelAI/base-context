@@ -1,0 +1,1400 @@
+#!/usr/bin/env python3
+"""Small shared helpers for the Python Real-World 30 benchmark."""
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Iterable
+
+SCHEMA = "prime-context.python-realworld-task/v1"
+SUITE_SCHEMA = "prime-context.python-realworld-suite/v1"
+RUN_SCHEMA = "prime-context.python-realworld-run/v1"
+PRESSURE_COUNTS = {"N": 8, "L": 10, "M": 8, "H": 4}
+PRESSURE_TIMEOUTS = {"N": 600, "L": 900, "M": 1200, "H": 1800}
+EXPECTED_PROFILES = {
+    1: ("N", 1), 2: ("L", 2), 3: ("L", 2), 4: ("N", 1), 5: ("L", 2),
+    6: ("M", 3), 7: ("N", 1), 8: ("L", 2), 9: ("N", 1), 10: ("N", 1),
+    11: ("L", 2), 12: ("M", 3), 13: ("H", 4), 14: ("N", 1), 15: ("N", 1),
+    16: ("L", 2), 17: ("M", 3), 18: ("L", 2), 19: ("N", 1), 20: ("M", 3),
+    21: ("L", 2), 22: ("M", 3), 23: ("M", 3), 24: ("M", 3), 25: ("L", 2),
+    26: ("L", 2), 27: ("H", 4), 28: ("H", 4), 29: ("M", 3), 30: ("H", 5),
+}
+USAGE_KEYS = ("input", "inputTotal", "output", "cacheRead", "cacheWrite", "totalTokens")
+COST_KEYS = ("input", "output", "cacheRead", "cacheWrite", "total")
+
+
+def text_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(block.get("text", ""))
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def parse_task_ids(value: str, available: Iterable[int]) -> list[int]:
+    allowed = set(available)
+    if value.strip().lower() == "all":
+        return sorted(allowed)
+    selected: set[int] = set()
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            left, right = part.split("-", 1)
+            start, end = int(left), int(right)
+            if start > end:
+                raise ValueError(f"descending task range: {part}")
+            selected.update(range(start, end + 1))
+        else:
+            selected.add(int(part))
+    missing = sorted(selected - allowed)
+    if missing:
+        raise ValueError(f"unknown task ids: {missing}")
+    if not selected:
+        raise ValueError("no tasks selected")
+    return sorted(selected)
+
+
+def load_scenarios(root: Path, *, require_complete: bool = True) -> dict[int, tuple[Path, dict[str, Any]]]:
+    tasks_root = root / "tasks"
+    found: dict[int, tuple[Path, dict[str, Any]]] = {}
+    errors: list[str] = []
+    for scenario_path in sorted(tasks_root.glob("*/scenario.json")):
+        task_dir = scenario_path.parent
+        try:
+            data = json.loads(scenario_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{scenario_path}: {exc}")
+            continue
+        task_id = data.get("id")
+        if not isinstance(task_id, int) or not (1 <= task_id <= 30):
+            errors.append(f"{scenario_path}: id must be an integer in 1..30")
+            continue
+        if task_id in found:
+            errors.append(f"duplicate task id {task_id}")
+            continue
+        errors.extend(validate_scenario(task_dir, data))
+        found[task_id] = (task_dir, data)
+    if require_complete and set(found) != set(range(1, 31)):
+        errors.append(f"expected task ids 1..30; found {sorted(found)}")
+    if require_complete:
+        counts = {key: 0 for key in PRESSURE_COUNTS}
+        for _, data in found.values():
+            if data.get("pressure") in counts:
+                counts[data["pressure"]] += 1
+        if counts != PRESSURE_COUNTS:
+            errors.append(f"pressure counts must be {PRESSURE_COUNTS}; found {counts}")
+        fixture_service_ids = {task_id for task_id, (_, data) in found.items() if "fixture_service" in data}
+        candidate_service_ids = {task_id for task_id, (_, data) in found.items() if "candidate_service" in data}
+        if fixture_service_ids != {10, 12}:
+            errors.append(f"fixture_service tasks must be exactly 10 and 12; found {sorted(fixture_service_ids)}")
+        if candidate_service_ids != {30}:
+            errors.append(f"candidate_service tasks must be exactly 30; found {sorted(candidate_service_ids)}")
+        index_path = root / "tasks.json"
+        try:
+            index = json.loads(index_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"{index_path}: {exc}")
+        else:
+            expected = [
+                {
+                    "id": task_id,
+                    "slug": data["slug"],
+                    "title": data["title"],
+                    "pressure": data["pressure"],
+                    "scenario": f"tasks/{task_dir.name}/scenario.json",
+                }
+                for task_id, (task_dir, data) in sorted(found.items())
+            ]
+            if index.get("schema") != SUITE_SCHEMA or index.get("tasks") != expected:
+                errors.append(f"{index_path}: suite index does not exactly match scenario files")
+    if errors:
+        raise ValueError("invalid benchmark corpus:\n- " + "\n- ".join(errors))
+    return found
+
+
+def validate_scenario(task_dir: Path, data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    label = str(task_dir / "scenario.json")
+    required = {
+        "schema", "id", "slug", "title", "pressure", "timeout_seconds",
+        "editable_paths", "initial_prompt", "stages", "judge_command",
+    }
+    missing = sorted(required - set(data))
+    if missing:
+        errors.append(f"{label}: missing keys {missing}")
+        return errors
+    if data["schema"] != SCHEMA:
+        errors.append(f"{label}: schema must be {SCHEMA}")
+    task_id = data.get("id")
+    slug = data.get("slug")
+    if isinstance(task_id, int) and isinstance(slug, str) and task_dir.name != f"{task_id:02d}-{slug}":
+        errors.append(f"{label}: directory name must be {task_id:02d}-{slug}")
+    if data.get("initial_prompt") != "Read TASK.md and complete the requested workflow using only the Python standard library.":
+        errors.append(f"{label}: initial_prompt must use the suite's fixed wording")
+    pressure = data.get("pressure")
+    if pressure not in PRESSURE_COUNTS:
+        errors.append(f"{label}: invalid pressure {pressure!r}")
+    elif data.get("timeout_seconds") != PRESSURE_TIMEOUTS[pressure]:
+        errors.append(
+            f"{label}: timeout for {pressure} must be {PRESSURE_TIMEOUTS[pressure]}"
+        )
+    expected_stages = {"N": 1, "L": 2, "M": 3, "H": (4, 5)}.get(pressure)
+    stages = data.get("stages")
+    if not isinstance(stages, list) or not stages:
+        errors.append(f"{label}: stages must be a non-empty list")
+        stages = []
+    if isinstance(expected_stages, tuple):
+        if len(stages) not in expected_stages:
+            errors.append(f"{label}: {pressure} task must have 4 or 5 stages")
+    elif expected_stages is not None and len(stages) != expected_stages:
+        errors.append(f"{label}: {pressure} task must have {expected_stages} stages")
+    fixed_profile = EXPECTED_PROFILES.get(task_id) if isinstance(task_id, int) else None
+    if fixed_profile is None:
+        errors.append(f"{label}: task id must be one of 1..30")
+    elif (pressure, len(stages)) != fixed_profile:
+        errors.append(
+            f"{label}: task {task_id:02d} profile must be pressure {fixed_profile[0]} with {fixed_profile[1]} stages"
+        )
+    if stages and isinstance(stages[0], dict) and (stages[0].get("id") != "initial" or stages[0].get("inject") != "visible/"):
+        errors.append(f"{label}: first stage must be initial and inject visible/")
+    if stages and isinstance(stages[-1], dict) and stages[-1].get("compact_after") is True:
+        errors.append(f"{label}: final stage cannot request a context-free terminal compaction")
+    ids: set[str] = set()
+    compact_count = 0
+    for index, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            errors.append(f"{label}: stage {index} is not an object")
+            continue
+        stage_missing = sorted({"id", "inject", "message", "compact_after"} - set(stage))
+        if stage_missing:
+            errors.append(f"{label}: stage {index} missing {stage_missing}")
+            continue
+        if stage["id"] in ids:
+            errors.append(f"{label}: duplicate stage id {stage['id']!r}")
+        ids.add(str(stage["id"]))
+        compact_count += int(stage.get("compact_after") is True)
+        inject_relative = Path(str(stage["inject"]))
+        inject = task_dir / inject_relative
+        if inject_relative.is_absolute() or ".." in inject_relative.parts:
+            errors.append(f"{label}: unsafe inject path: {stage['inject']}")
+        elif not inject.is_dir():
+            errors.append(f"{label}: inject directory not found: {stage['inject']}")
+    expected_compactions = 0 if pressure in {"N", "L"} else 1 if pressure == "M" else 2
+    if compact_count != expected_compactions:
+        errors.append(
+            f"{label}: {pressure} task requires {expected_compactions} requested compactions; found {compact_count}"
+        )
+    expected_compaction_positions = {
+        "N": [], "L": [], "M": [0], "H": [0, 2],
+    }.get(pressure, [])
+    actual_compaction_positions = [index for index, stage in enumerate(stages) if isinstance(stage, dict) and stage.get("compact_after") is True]
+    if actual_compaction_positions != expected_compaction_positions:
+        errors.append(
+            f"{label}: compactions must follow stages {[index + 1 for index in expected_compaction_positions]}"
+        )
+    for filename in ("TASK.md", "seed.py", "judge.py"):
+        if not (task_dir / filename).is_file():
+            errors.append(f"{label}: missing {filename}")
+    for editable in data.get("editable_paths") or []:
+        editable_path = Path(str(editable))
+        if editable_path.is_absolute() or ".." in editable_path.parts:
+            errors.append(f"{label}: unsafe editable path: {editable}")
+    for service_key in ("fixture_service", "candidate_service"):
+        service = data.get(service_key)
+        if service is None:
+            continue
+        if not isinstance(service, dict) or not service.get("command") or not service.get("url_file"):
+            errors.append(f"{label}: {service_key} requires command and url_file")
+    has_fixture = isinstance(data.get("fixture_service"), dict)
+    has_candidate = isinstance(data.get("candidate_service"), dict)
+    if has_fixture != (task_id in {10, 12}):
+        errors.append(f"{label}: fixture_service is required only for tasks 10 and 12")
+    if has_candidate != (task_id == 30):
+        errors.append(f"{label}: candidate_service is required only for task 30")
+    if task_id == 30 and has_fixture:
+        errors.append(f"{label}: task 30 must not declare a second fixture service")
+    judge = data.get("judge_command")
+    if not isinstance(judge, list) or "{workspace}" not in judge:
+        errors.append(f"{label}: judge_command must be an argv list containing {{workspace}}")
+    return errors
+
+
+def copy_payload(source: Path, destination: Path, *, exclude_generators: bool = True) -> None:
+    if not source.exists():
+        return
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if exclude_generators and relative.name == "_generate.py":
+            continue
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+            shutil.copy2(path, target)
+
+
+def python312() -> str:
+    executable = os.environ.get("PRIME_CONTEXT_BENCHMARK_PYTHON") or shutil.which("python3.12")
+    if executable is None:
+        raise RuntimeError("Python 3.12 is required (set PRIME_CONTEXT_BENCHMARK_PYTHON to its executable)")
+    return executable
+
+
+def require_python312() -> str:
+    executable = python312()
+    completed = subprocess.run(
+        [executable, "-E", "-S", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    if completed.returncode != 0 or completed.stdout.strip() != "3.12":
+        raise RuntimeError(f"benchmark Python must be 3.12.x: {executable}")
+    return executable
+
+
+def run_seed(task_dir: Path, workspace: Path, fixture: str) -> None:
+    task_dir = task_dir.resolve()
+    workspace = workspace.resolve()
+    temporary = Path(tempfile.mkdtemp(prefix="pcbench-seed-"))
+    try:
+        subprocess.run(
+            [python312(), "-E", "-S", str(task_dir / "seed.py"), "--workspace", str(temporary), "--fixture", fixture],
+            cwd=task_dir,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        workspace.mkdir(parents=True, exist_ok=True)
+        copy_payload(temporary, workspace, exclude_generators=False)
+    finally:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+
+def materialize_payload(source: Path, fixture: str = "main") -> Path:
+    source = source.resolve()
+    temporary = Path(tempfile.mkdtemp(prefix="pcbench-stage-"))
+    copy_payload(source, temporary)
+    generator = source / "_generate.py"
+    if generator.is_file():
+        subprocess.run(
+            [python312(), "-E", "-S", str(generator), "--output", str(temporary), "--fixture", fixture],
+            cwd=source,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+    return temporary
+
+
+def inject_stage(task_dir: Path, workspace: Path, stage: dict[str, Any], fixture: str = "main") -> None:
+    source = task_dir / str(stage["inject"])
+    payload = materialize_payload(source, fixture)
+    changed_directories: set[Path] = set()
+    try:
+        for item in payload.rglob("*"):
+            relative = item.relative_to(payload)
+            parent = (workspace / relative).parent
+            while parent != workspace and workspace in parent.parents:
+                if parent.exists():
+                    parent.chmod(parent.stat().st_mode | stat.S_IWUSR)
+                    changed_directories.add(parent)
+                parent = parent.parent
+        copy_payload(payload, workspace, exclude_generators=False)
+        make_payload_read_only(payload, workspace)
+        for directory in sorted(changed_directories, key=lambda path: len(path.parts), reverse=True):
+            make_read_only(directory)
+    finally:
+        shutil.rmtree(payload, ignore_errors=True)
+
+
+def prepare_workspace(task_dir: Path, scenario: dict[str, Any], workspace: Path) -> None:
+    run_seed(task_dir, workspace, "main")
+    task_target = workspace / "TASK.md"
+    shutil.copy2(task_dir / "TASK.md", task_target)
+    # The initial inject is copied after seeding so static visible files win.
+    initial = scenario["stages"][0]
+    inject_stage(task_dir, workspace, initial, "main")
+    for editable in scenario["editable_paths"]:
+        (workspace / str(editable)).mkdir(parents=True, exist_ok=True)
+    for item in sorted(workspace.rglob("*"), reverse=True):
+        make_read_only(item)
+    for editable in scenario["editable_paths"]:
+        make_writable_tree(workspace / str(editable))
+
+
+def make_read_only(path: Path) -> None:
+    try:
+        mode = path.stat().st_mode
+        path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    except FileNotFoundError:
+        return
+
+
+def make_payload_read_only(source: Path, destination: Path) -> None:
+    for path in sorted(source.rglob("*"), reverse=True):
+        make_read_only(destination / path.relative_to(source))
+
+
+def make_writable_tree(path: Path) -> None:
+    for item in [path, *path.rglob("*")]:
+        try:
+            mode = item.stat().st_mode
+            item.chmod(mode | stat.S_IWUSR)
+        except FileNotFoundError:
+            pass
+
+
+def clean_environment(
+    config: Path, home: Path, *, variant: str, node: Path, tmpdir: Path,
+) -> dict[str, str]:
+    environment = {
+        "HOME": str(home), "PATH": f"{node.parent}:/usr/bin:/bin", "TMPDIR": str(tmpdir),
+        "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "TERM": "dumb", "TZ": "UTC",
+        "DO_NOT_TRACK": "1", "NO_COLOR": "1",
+        "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1", "UV_OFFLINE": "1",
+        "npm_config_offline": "true", "npm_config_audit": "false", "npm_config_fund": "false",
+    }
+    if variant == "vanilla":
+        environment.update({"PRIME_AGENT_CODING_AGENT_DIR": str(config), "PI_OFFLINE": "1", "PRIME_AGENT_TELEMETRY": "0"})
+    elif variant == "current":
+        environment.update({"BASE_CONTEXT_HOME": str(config), "BASE_CONTEXT_OFFLINE": "1", "BASE_CONTEXT_TELEMETRY": "0"})
+    else:
+        raise ValueError(f"unknown benchmark variant: {variant}")
+    return environment
+
+
+def sum_known(values: Iterable[int | float | None]) -> int | float | None:
+    """Sum a complete set of observations; an absent observation is not zero."""
+    items = list(values)
+    return sum(items) if items and all(value is not None for value in items) else None
+
+
+def _price_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def _profile_estimate(
+    identity: dict[str, Any], usage: dict[str, Any], profiles: list[dict[str, Any]], *,
+    stock: bool = False, complete: bool = True, input_semantics: str | None = None,
+) -> dict[str, Any]:
+    """Price one existing observation, not a new provider receipt."""
+    matches = [item for item in profiles if all(
+        identity.get(key) is not None and identity.get(key) == item.get(key)
+        for key in ("provider", "api", "model")
+    )]
+    profile = matches[0] if len(matches) == 1 else None
+    cost = {key: None for key in COST_KEYS}
+    interval = None
+    if profile and profile.get("currency") == "USD" and profile.get("unit") == "million-tokens":
+        rates = dict(profile.get("rates") or {})
+        stock_openai = stock and identity.get("api") == "openai-codex-responses"
+        combined_input = stock_openai or input_semantics == "uncached_including_unknown_cache_write"
+        gross_input = usage.get("inputTotal")
+        if stock_openai:
+            input_parts = [usage.get(key) for key in ("input", "cacheRead")]
+            gross_input = sum(input_parts) if all(_price_number(value) for value in input_parts) else None
+        long_rule = profile.get("long_input")
+        if long_rule:
+            if not _price_number(gross_input):
+                rates = {}
+            elif gross_input > long_rule["above_tokens"]:
+                rates = {key: value * long_rule["multipliers"][key]
+                         if _price_number(value) else None for key, value in rates.items()}
+        # Stock zero defaults have no raw presence/completeness evidence.
+        stock_values = [usage.get(key) for key in ("input", "cacheRead", "output")]
+        if not stock or (all(_price_number(value) for value in stock_values) and any(stock_values)):
+            for key in COST_KEYS[:-1]:
+                rate, quantity = rates.get(key), usage.get(key)
+                if _price_number(rate):
+                    cost[key] = 0 if rate == 0 else quantity * rate / 1_000_000 if _price_number(quantity) else None
+            if combined_input:
+                # Unreported writes cannot be split from the observed uncached input quantity.
+                cost["input"] = cost["cacheWrite"] = None
+                ordinary, write = rates.get("input"), rates.get("cacheWrite")
+                remainder = sum_known(cost[key] for key in ("cacheRead", "output"))
+                if complete and _price_number(usage.get("input")) and _price_number(ordinary) and _price_number(write) and remainder is not None:
+                    interval = {
+                        "lower": usage["input"] * min(ordinary, write) / 1_000_000 + remainder,
+                        "upper": usage["input"] * max(ordinary, write) / 1_000_000 + remainder,
+                    }
+            cost["total"] = sum_known(cost[key] for key in COST_KEYS[:-1]) if complete else None
+    return {
+        "profile_id": profile.get("id") if profile else None,
+        "basis": profile.get("basis") if profile else None,
+        "coverage": "stock_messages_conditional" if stock else "native_recorded_attempts",
+        "models": [{key: identity[key] for key in ("provider", "api", "model", "responseModel") if key in identity}],
+        "observations": 1,
+        "unpriced_observations": int(cost["total"] is None and interval is None),
+        "known_subtotal": cost["total"],
+        "conditional_range": interval,
+        "cost": cost,
+    }
+
+
+def aggregate_api_price_estimates(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group only like profiles, bases and quantity sources; missing rows are not zero-priced."""
+    groups: dict[tuple, dict[str, Any]] = {}
+    for item in items:
+        key = (item["profile_id"], item["basis"], item["coverage"])
+        if key not in groups:
+            groups[key] = {
+                "profile_id": key[0], "basis": key[1], "coverage": key[2], "models": [],
+                "observations": 0, "unpriced_observations": 0, "known_subtotal": None, "conditional_range": None,
+            }
+        group = groups[key]
+        group["observations"] += item["observations"]
+        group["unpriced_observations"] += item["unpriced_observations"]
+        for model in item["models"]:
+            if model not in group["models"]:
+                group["models"].append(dict(model))
+        if item["known_subtotal"] is not None:
+            group["known_subtotal"] = (group["known_subtotal"] or 0) + item["known_subtotal"]
+        if item["conditional_range"] is not None:
+            if group["conditional_range"] is None:
+                group["conditional_range"] = {"lower": 0, "upper": 0}
+            for bound in ("lower", "upper"):
+                group["conditional_range"][bound] += item["conditional_range"][bound]
+    return list(groups.values())
+
+
+def _native_request_accounting(
+    requests: dict[str, dict[str, Any]], profiles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Measure existing physical records; keep no separate accounting store."""
+    usages: list[dict[str, Any]] = []
+    costs: list[dict[str, Any]] = []
+    purposes: dict[str, int] = {}
+    usage_complete = True
+    unsettled_attempts = 0
+    capacity_confirmed = False
+    final_response_tokens = None
+    price_estimates = []
+    for request in requests.values():
+        receipt = request.get("receipt") or {}
+        item = {key: (receipt.get("usage") or {}).get(key) for key in USAGE_KEYS}
+        usages.append(item)
+        complete = request.get("type") == "attempt_settled" and receipt.get("usageCompleteness") == "complete" and receipt.get("invalidUsage") is not True
+        if profiles is None:
+            pricing = (request.get("modelContract") or {}).get("pricing") or {}
+            # ResolvedModelContract exposes unvalidated catalog estimates, not bills.
+            rates = pricing.get("catalogRates") or {}
+            if pricing.get("status") != "unvalidated" or pricing.get("currency") != "USD" or pricing.get("unit") != "million-tokens":
+                rates = {}
+            # A zero tariff charge does not imply an observed zero token quantity.
+            item_cost = {
+                key: 0 if type(rates.get(key)) in (int, float) and rates[key] == 0
+                else item[key] * rates[key] / 1_000_000
+                if item[key] is not None and rates.get(key) is not None else None
+                for key in COST_KEYS[:-1]
+            }
+            item_cost["total"] = sum_known(item_cost.values()) if complete else None
+        else:
+            contract = request.get("modelContract") or {}
+            identity = {key: receipt.get(key, contract.get(key)) for key in ("provider", "api", "model", "responseModel")}
+            semantics = receipt.get("inputSemantics")
+            if identity.get("api") == "openai-codex-responses" and item["cacheWrite"] is None:
+                semantics = "uncached_including_unknown_cache_write"
+            estimate = _profile_estimate(identity, item, profiles, complete=complete, input_semantics=semantics)
+            price_estimates.append(estimate)
+            item_cost = estimate["cost"]
+        costs.append(item_cost)
+        usage_complete = usage_complete and complete
+        unsettled_attempts += int(request.get("type") != "attempt_settled")
+        capacity_confirmed = capacity_confirmed or receipt.get("capacityConfirmed") is True
+        purpose = request.get("purpose")
+        if purpose is not None:
+            purposes[purpose] = purposes.get(purpose, 0) + 1
+        if purpose in {"main", "child"}:
+            final_response_tokens = item["output"]
+    usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
+    cost = {key: sum_known(item[key] for item in costs) for key in COST_KEYS}
+    bases = {item["basis"] for item in price_estimates}
+    if profiles is not None and len(bases) > 1:
+        cost = {key: None for key in COST_KEYS}
+    return {
+        "accounting_source": "native_request_receipts",
+        "cost_basis": "catalog_estimate" if profiles is None else next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None,
+        **({"api_price_estimates": aggregate_api_price_estimates(price_estimates)} if profiles is not None else {}),
+        "usage_complete": usage_complete and all(value is not None for value in usage.values()),
+        "cost_complete": usage_complete and all(value is not None for value in cost.values()),
+        "provider_capacity_confirmed": capacity_confirmed,
+        "unsettled_attempts": unsettled_attempts,
+        "model_calls": len(requests) if requests else None,
+        "model_calls_by_purpose": purposes,
+        "usage": usage,
+        "cost": cost,
+        "final_response_tokens": final_response_tokens,
+        "provider_prompt_token_samples": [item["inputTotal"] for item in usages],
+    }
+
+
+def _raw_accounting_request(request: dict[str, Any]) -> dict[str, Any]:
+    """Use selected adapters' raw presence, not legacy normalized zero defaults."""
+    receipt = dict(request.get("receipt") or {})
+    api = receipt.get("api", (request.get("modelContract") or {}).get("api"))
+    if api not in {"openai-codex-responses", "openai-completions"}:
+        return request
+    responses = api == "openai-codex-responses"
+    input_key, output_key = ("input_tokens", "output_tokens") if responses else ("prompt_tokens", "completion_tokens")
+    raw = {}
+    for observation in receipt.get("rawUsage") or []:
+        if isinstance(observation, dict):
+            raw = observation  # Latest reported usage snapshot; do not assemble a synthetic full snapshot.
+    details = raw.get("input_tokens_details" if responses else "prompt_tokens_details") or {}
+    details = details if isinstance(details, dict) else {}
+    cached = details.get("cached_tokens", raw.get("prompt_cache_hit_tokens") if not responses else None)
+    written = details.get("cache_write_tokens")
+    total_input, output = raw.get(input_key), raw.get(output_key)
+    reported = [total_input, output, cached, written, raw.get("total_tokens")]
+    invalid = any(value is not None and not _price_number(value) for value in reported)
+    total_input, output, cached, written = [value if _price_number(value) else None
+                                          for value in (total_input, output, cached, written)]
+    ordinary = total_input - cached if total_input is not None and cached is not None else None
+    if responses and ordinary is not None and written is not None:
+        ordinary -= written
+    usage = {
+        "input": ordinary, "inputTotal": total_input, "output": output,
+        "cacheRead": cached if responses or written is None or cached is None else cached - written,
+        "cacheWrite": written,
+        "totalTokens": raw.get("total_tokens") if responses else
+        total_input + output if total_input is not None and output is not None else None,
+    }
+    invalid = invalid or any(value is not None and not _price_number(value) for value in usage.values())
+    known_input = sum(value for key in ("input", "cacheRead", "cacheWrite")
+                      if _price_number(value := usage[key]))
+    invalid = invalid or total_input is not None and known_input > total_input
+    invalid = invalid or (_price_number(usage["totalTokens"]) and total_input is not None and output is not None
+                          and total_input + output > usage["totalTokens"])
+    receipt["usage"] = {key: value if _price_number(value) else None for key, value in usage.items()}
+    if responses and written is None:
+        receipt["inputSemantics"] = "uncached_including_unknown_cache_write"
+    if not raw:
+        receipt["usageCompleteness"] = "none"
+    elif invalid or total_input is None or output is None:
+        receipt["usageCompleteness"] = "partial"
+    receipt["aggregateUsageComplete"] = not invalid and all(value is not None for value in receipt["usage"].values())
+    return {**request, "receipt": receipt} if request.get("type") == "attempt_settled" else request
+
+
+def _apply_physical_accounting(
+    metrics: dict[str, Any], requests: dict[str, dict[str, Any]], profiles: list[dict[str, Any]],
+    *, source: str, reasons: set[str],
+) -> dict[str, Any]:
+    requests = {key: _raw_accounting_request(value) for key, value in requests.items()}
+    if not requests:
+        reasons.add("no_physical_attempts")
+    accounting = _native_request_accounting(requests, profiles if profiles is not None else [])
+    if accounting["unsettled_attempts"]:
+        reasons.add("unsettled_attempts")
+    covered = not reasons
+    purposes = accounting["model_calls_by_purpose"]
+    usage = accounting["usage"] if covered else {key: None for key in USAGE_KEYS}
+    cost = accounting["cost"] if covered else {key: None for key in COST_KEYS}
+    samples = accounting["provider_prompt_token_samples"]
+    sample_total = sum_known(samples) if covered else None
+    estimates = accounting.get("api_price_estimates", [])
+    for estimate in estimates:
+        estimate["coverage"] = "instrumented_recorded_attempts" if source == "instrumented_physical_attempts" else "native_recorded_attempts"
+    priced = accounting["cost_complete"] and _price_number(cost["total"])
+    return {
+        **metrics,
+        "accounting_source": source, "cost_basis": accounting["cost_basis"],
+        "accounting_incomplete": not covered,
+        "invocation_capture": "complete" if covered else "unknown",
+        "invocation_capture_reasons": sorted(reasons),
+        "incurred_cost_complete": covered and priced,
+        "usage_complete": covered and accounting["usage_complete"],
+        "cost_complete": covered and priced,
+        "observed_attempt_pricing_complete": accounting["cost_complete"],
+        "observed_physical_attempts": len(requests),
+        "observed_attempt_calls_by_purpose": purposes,
+        "api_price_estimates": estimates,
+        "physical_attempts": list(requests.values()),
+        "provider_usage": usage, "api_cost": cost,
+        "unsettled_attempts": accounting["unsettled_attempts"] if requests else None,
+        "provider_capacity_confirmed": metrics.get("provider_capacity_confirmed") is True or accounting["provider_capacity_confirmed"],
+        "main_model_calls": purposes.get("main", 0) if covered else None,
+        "all_model_calls": len(requests) if covered else None,
+        "auxiliary_model_calls": len(requests) - purposes.get("main", 0) if covered else None,
+        "model_calls_by_purpose": {key: count if covered else None for key, count in purposes.items()},
+        "prompt_cache_reuse": usage["cacheRead"] / usage["inputTotal"]
+        if usage["cacheRead"] is not None and usage["inputTotal"] else None,
+        "provider_prompt_token_samples": samples,
+        "provider_prompt_token_sum": sample_total,
+        "provider_prompt_sample_count": len(samples) if covered else None,
+        "peak_provider_prompt_tokens": max(samples) if samples and sample_total is not None else None,
+        "average_provider_prompt_tokens": sample_total / len(samples) if samples and sample_total is not None else None,
+        "final_response_tokens": accounting["final_response_tokens"] if covered else None,
+    }
+
+
+def apply_instrumented_accounting(
+    metrics: dict[str, Any], path: Path, profiles: list[dict[str, Any]], *, invocation_finished: bool = False,
+) -> dict[str, Any]:
+    """Merge the qualified private SDK sidecar, never stock observational cost."""
+    reasons: set[str] = set()
+    if not invocation_finished:
+        reasons.add("invocation_not_finished")
+    if metrics.get("child_sessions") != 0:
+        reasons.add("child_scope_unqualified")
+    requests: dict[str, dict[str, Any]] = {}
+    admissions: set[str] = set()
+    connections: dict[str, dict[str, Any]] = {}
+    processes: dict[int, dict[str, Any]] = {}
+    operations: dict[str, dict[str, Any]] = {}
+    supported = {"openai-codex-responses", "openai-completions"}
+    purposes = {"main", "compaction", "branch-summary", "refinement", "auto-refine-review"}
+    try:
+        handle = Path(path).open(encoding="utf-8", errors="replace")
+    except OSError:
+        handle = None
+        reasons.add("sidecar_missing")
+    if handle is not None:
+        with handle:
+            for line in handle:
+                if not line.endswith("\n"):
+                    reasons.add("partial_sidecar_tail")
+                    break
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    reasons.add("malformed_sidecar")
+                    continue
+                if not isinstance(record, dict) or record.get("schema") != "prime-cost-accounting/1" or type(record.get("pid")) is not int:
+                    reasons.add("unsupported_sidecar_record")
+                    continue
+                pid, kind = record["pid"], record.get("type")
+                state = processes.setdefault(pid, {"opened": False, "closed": False, "apis": set(), "operations": set(), "attempts": set(), "connections": set()})
+                if state["closed"]:
+                    reasons.add("record_after_footer")
+                if kind == "accounting_opened":
+                    if state["opened"] or record.get("patchVersion") != "prime-agent-0.9.4-cost-accounting-1":
+                        reasons.add("unqualified_patch_scope")
+                    state["opened"] = True
+                    state["apis"] = set(record.get("coveredApis") or []) & supported
+                elif kind == "accounting_closed":
+                    state["closed"] = True
+                    if record.get("writeFailures") != 0:
+                        reasons.add("sidecar_write_failures")
+                    if any(record.get(key) != [] for key in ("openAttemptIds", "openOperationIds", "openConnectionIds")):
+                        reasons.add("open_footer_scopes")
+                elif kind in {"operation_started", "operation_settled", "attempt_admitted", "attempt_settled", "transport_connection_started", "transport_connection_settled"}:
+                    op_id = record.get("operationId")
+                    if not isinstance(op_id, str) or not op_id:
+                        reasons.add("missing_operation_id")
+                        continue
+                    if record.get("purpose") not in purposes:
+                        reasons.add("unknown_or_unqualified_purpose")
+                    api = (record.get("modelContract") or {}).get("api")
+                    if api not in state["apis"]:
+                        reasons.add("uncovered_api")
+                    if kind == "operation_started":
+                        if op_id in operations:
+                            reasons.add("duplicate_operation")
+                        operations[op_id] = {"record": record, "attempts": set(), "closed": False, "declared": None}
+                        state["operations"].add(op_id)
+                    else:
+                        operation = operations.get(op_id)
+                        if operation is None or operation["record"]["pid"] != pid:
+                            reasons.add("unscoped_operation")
+                        elif any(record.get(key) != operation["record"].get(key) for key in ("purpose", "purposeDetail", "modelContract")):
+                            reasons.add("inconsistent_operation_scope")
+                        if kind == "operation_settled":
+                            if operation is not None:
+                                operation["closed"] = True
+                                operation["declared"] = record.get("physicalAttempts")
+                            state["operations"].discard(op_id)
+                        elif kind.startswith("attempt_"):
+                            attempt_id = record.get("attemptId")
+                            if not isinstance(attempt_id, str) or not attempt_id:
+                                reasons.add("missing_attempt_id")
+                                continue
+                            if operation is not None:
+                                operation["attempts"].add(attempt_id)
+                            if kind == "attempt_admitted":
+                                if attempt_id in admissions:
+                                    reasons.add("duplicate_admission")
+                                admissions.add(attempt_id)
+                                state["attempts"].add(attempt_id)
+                                requests.setdefault(attempt_id, record)
+                            else:
+                                receipt = record.get("receipt")
+                                if not isinstance(receipt, dict) or receipt.get("attemptId") != attempt_id:
+                                    reasons.add("malformed_settlement")
+                                    continue
+                                if attempt_id not in admissions:
+                                    reasons.add("settlement_without_admission")
+                                if attempt_id in requests and requests[attempt_id].get("operationId") != op_id:
+                                    reasons.add("inconsistent_attempt_scope")
+                                state["attempts"].discard(attempt_id)
+                                requests[attempt_id] = record  # Native parsed-error enrichment is the same attempt.
+                        else:
+                            connection_id = record.get("connectionId")
+                            if not isinstance(connection_id, str) or not connection_id:
+                                reasons.add("missing_connection_id")
+                                continue
+                            if kind.endswith("started"):
+                                state["connections"].add(connection_id)
+                            else:
+                                if connection_id not in state["connections"]:
+                                    reasons.add("connection_without_start")
+                                state["connections"].discard(connection_id)
+                            connections[connection_id] = record
+                else:
+                    reasons.add("unsupported_sidecar_record")
+                if not state["opened"]:
+                    reasons.add("missing_sidecar_header")
+    for state in processes.values():
+        if not state["opened"] or not state["closed"]:
+            reasons.add("missing_sidecar_header_or_footer")
+        if state["operations"] or state["attempts"] or state["connections"]:
+            reasons.add("unclosed_sidecar_scopes")
+    for operation in operations.values():
+        if not operation["closed"] or operation["declared"] != len(operation["attempts"]):
+            reasons.add("incomplete_operation_capture")
+    result = _apply_physical_accounting(metrics, requests, profiles, source="instrumented_physical_attempts", reasons=reasons)
+    result.update({"accounting_sidecar": str(path), "transport_connections": list(connections.values()),
+                   "adapter_invocations": len(operations) if not reasons else None})
+    return result
+
+
+def apply_native_incurred_accounting(
+    metrics: dict[str, Any], profiles: list[dict[str, Any]], *, invocation_finished: bool = False,
+    capture_qualified: bool = False,
+) -> dict[str, Any]:
+    """Require external selected-source scope qualification AND finished invocation."""
+    reasons: set[str] = set()
+    if not invocation_finished:
+        reasons.add("invocation_not_finished")
+    if not capture_qualified:
+        reasons.add("native_capture_scope_unqualified")
+    if metrics.get("accounting_source") != "native_request_receipts" or metrics.get("accounting_incomplete") is not False:
+        reasons.add("native_records_incomplete")
+    if metrics.get("child_sessions") != 0:
+        reasons.add("child_scope_unqualified")
+    requests = {}
+    for request in metrics.get("physical_attempts") or []:
+        attempt_id = request.get("attemptId")
+        if not isinstance(attempt_id, str) or not attempt_id:
+            reasons.add("missing_attempt_id")
+            continue
+        if request.get("purpose") not in {"main", "summary", "refine", "learning", "native-control"}:
+            reasons.add("unknown_or_unqualified_purpose")
+        if (request.get("modelContract") or {}).get("api") not in {"openai-codex-responses", "openai-completions"}:
+            reasons.add("uncovered_api")
+        source = request.get("source") or {}
+        if source.get("persistent") is not True or not source.get("sessionId") or type(source.get("sourceSequence")) is not int:
+            reasons.add("unqualified_native_source")
+        if request.get("type") == "attempt_settled":
+            requests[attempt_id] = request
+        else:
+            requests.setdefault(attempt_id, request)
+    return _apply_physical_accounting(metrics, requests, profiles, source="native_request_receipts", reasons=reasons)
+
+
+def _mark_incomplete(accounting: dict[str, Any]) -> None:
+    accounting.update({
+        "accounting_incomplete": True,
+        "usage_complete": False,
+        "cost_complete": False,
+        "usage": {key: None for key in USAGE_KEYS},
+        "cost": {key: None for key in COST_KEYS},
+        "model_calls": None,
+        "final_response_tokens": None,
+    })
+
+
+def _recorded_request_output(
+    entry: dict[str, Any], header: dict[str, Any], requests: dict[str, list[dict[str, Any]]],
+    *, purpose: str = "main", purpose_detail: str | None = None,
+) -> dict[str, Any] | None:
+    """Recorded association only: neither an append ACK nor output delivery/attempt attribution."""
+    output = entry.get("requestOutput")
+    if not isinstance(entry.get("id"), str) or not entry["id"] or not isinstance(output, dict):
+        return None
+    operation_id = output.get("operationId")
+    attempt_ids = output.get("attemptIds")
+    source = output.get("source")
+    if not isinstance(operation_id, str) or not operation_id or not isinstance(source, dict):
+        return None
+    if not isinstance(attempt_ids, list) or not attempt_ids or any(
+        not isinstance(attempt_id, str) or not attempt_id for attempt_id in attempt_ids
+    ) or len(set(attempt_ids)) != len(attempt_ids):
+        return None
+    required = {"sessionId", "leafId", "sourceSequence", "persistent"}
+    if not required <= source.keys() or source.keys() - required - {"sessionFile"}:
+        return None
+    if (
+        not isinstance(source["sessionId"], str) or not source["sessionId"]
+        or source["sessionId"] != header.get("id") or source["persistent"] is not True
+        or type(source["sourceSequence"]) is not int or source["sourceSequence"] < 0
+        or source["leafId"] is not None and not isinstance(source["leafId"], str)
+        or "sessionFile" in source and not isinstance(source["sessionFile"], str)
+    ):
+        return None
+    for attempt_id in attempt_ids:
+        matching = requests.get(attempt_id, [])
+        if not matching or any(
+            request.get("operationId") != operation_id or request.get("source") != source
+            or any(type(request["source"][key]) is not type(value) for key, value in source.items())
+            or request.get("purpose") != purpose
+            or purpose_detail is not None and request.get("purposeDetail") != purpose_detail
+            for request in matching
+        ):
+            return None
+    return {"operationId": operation_id, "attemptIds": list(attempt_ids), "source": dict(source)}
+
+
+def _recorded_compaction_requests(
+    entry: dict[str, Any], header: dict[str, Any], requests: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]] | None:
+    # The reader retains only supported part metadata, not a claim of complete part coverage.
+    outputs = entry.get("requestOutputs")
+    if not outputs or not isinstance(entry.get("id"), str) or not entry["id"]:
+        return None
+    return [
+        {"part": output["part"], "recorded_request": _recorded_request_output(
+            {"id": entry["id"], "requestOutput": output}, header, requests,
+            purpose="summary",
+            purpose_detail="compaction" if output["part"] == "history" else "compaction-turn-prefix",
+        )}
+        for output in outputs
+    ]
+
+
+def parse_session_file(path: Path, profiles: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    header: dict[str, Any] | None = None
+    requests: dict[str, dict[str, Any]] = {}
+    assistant_usage: list[dict[str, Any]] = []
+    assistant_price_observations: list[dict[str, Any]] = []
+    assistant_sources: list[tuple[dict[str, Any], bool]] = []
+    compaction_sources: list[tuple[dict[str, Any], bool]] = []
+    branch_summary_sources: list[tuple[dict[str, Any], bool]] = []
+    refinement_planner_sources: list[tuple[dict[str, Any], bool]] = []
+    association_requests: dict[str, list[dict[str, Any]]] = {}
+    original_header = False
+    native = False
+    capacity_confirmed = False
+    incomplete = False
+    framed_format: bool | None = None
+    tool_calls = tool_results = visible_tool_bytes = compactions = refinement_entries = recovery_tool_calls = 0
+    try:
+        handle = path.open(errors="ignore")
+    except OSError:
+        return None
+    with handle:
+        for line in handle:
+            if not line.endswith("\n"):
+                incomplete = True
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                incomplete = True
+                continue
+            if not isinstance(entry, dict):
+                incomplete = True
+                continue
+            # SessionJournalDecoder identifies frames by these exact fields.
+            # This benchmark reads their payload, not assistant usage attributions.
+            framed = "journalFrame" in entry or "previousChecksum" in entry
+            original_envelope = (
+                type(entry.get("journalFrame")) is int and entry["journalFrame"] == 1
+                and line.endswith("\n") and "retention" not in entry
+            )
+            original_frame = original_envelope and "qualification" not in entry
+            compaction_frame = original_envelope and (
+                "qualification" not in entry or entry["qualification"] == "native-context-epoch"
+            )
+            if framed_format is not None and framed_format != framed:
+                incomplete = True
+            framed_format = framed
+            if framed:
+                native = True
+                if not line.endswith("\n"):
+                    break  # The native reader ignores an incomplete tail.
+                entry = entry.get("payload") if entry.get("journalFrame") == 1 else None
+                if not isinstance(entry, dict):
+                    incomplete = True
+                    continue
+            entry_type = entry.get("type")
+            if entry_type is None:
+                incomplete = True
+            if entry_type == "session":
+                header = entry
+                original_header = original_frame
+            elif entry_type == "request":
+                native = True
+                if not line.endswith("\n"):
+                    break
+                request = entry.get("request")
+                if not isinstance(request, dict):
+                    incomplete = True
+                    continue
+                attempt_id = request.get("attemptId")
+                if attempt_id and request.get("type") == "attempt_settled":
+                    receipt = request.get("receipt")
+                    if not isinstance(receipt, dict) or not isinstance(receipt.get("usage"), dict):
+                        incomplete = True
+                        continue
+                    requests[attempt_id] = request
+                elif attempt_id and request.get("type") == "attempt_admitted":
+                    requests.setdefault(attempt_id, request)
+                else:
+                    incomplete = True
+                    continue
+                if original_frame and isinstance(attempt_id, str):
+                    association_requests.setdefault(attempt_id, []).append({
+                        "operationId": request.get("operationId"), "source": request.get("source"),
+                        "purpose": request.get("purpose"), "purposeDetail": request.get("purposeDetail"),
+                    })
+            elif entry_type == "compaction":
+                compactions += 1
+                outputs = entry.get("requestOutputs")
+                compaction_sources.append(({
+                    "id": entry.get("id"),
+                    "requestOutputs": [
+                        {key: output.get(key) for key in ("part", "operationId", "attemptIds", "source")}
+                        for output in outputs
+                        if isinstance(output, dict) and output.get("part") in ("history", "turn-prefix")
+                    ] if isinstance(outputs, list) else None,
+                }, compaction_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
+            elif entry_type == "branch_summary":
+                branch_summary_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("requestOutput"),
+                }, original_frame and ("fromHook" not in entry or entry["fromHook"] is False)))
+            elif entry_type == "custom" and entry.get("customType") == "prime-agent.refinement":
+                refinement_entries += 1
+                refinement_planner_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("plannerRequest"),
+                }, original_frame and isinstance(entry.get("data"), dict) and "rollbackOf" not in entry["data"]))
+            if entry_type != "message":
+                continue
+            message = entry.get("message") or {}
+            role = message.get("role")
+            if role == "assistant":
+                assistant_sources.append(({
+                    "id": entry.get("id"), "requestOutput": entry.get("requestOutput"),
+                }, original_frame))
+                assistant_usage.append(message.get("usage") or {})
+                if profiles is not None and not native:
+                    assistant_price_observations.append({
+                        **{key: message[key] for key in ("provider", "api", "model", "responseModel") if key in message},
+                        "usage": {key: (message.get("usage") or {}).get(key) for key in USAGE_KEYS},
+                    })
+                capacity_confirmed = capacity_confirmed or (
+                    message.get("stopReason") == "error"
+                    and message.get("errorMessage") == "Selected model is at capacity."
+                )
+                calls = [
+                    block for block in message.get("content") or []
+                    if isinstance(block, dict) and block.get("type") == "toolCall"
+                ]
+                tool_calls += len(calls)
+                recovery_tool_calls += sum(1 for block in calls if block.get("name") == "prime_context")
+            elif role == "toolResult":
+                tool_results += 1
+                visible_tool_bytes += len(text_content(message.get("content")).encode())
+    if not header:
+        return None
+
+    usages = []
+    for item in assistant_usage:
+        usage_item = {key: item.get(key) for key in USAGE_KEYS}
+        usage_item["inputTotal"] = sum_known(item.get(key) for key in ("input", "cacheRead", "cacheWrite"))
+        usages.append(usage_item)
+    observed_usage = {key: sum_known(item[key] for item in usages) for key in USAGE_KEYS}
+    observed_cost = {key: sum_known((item.get("cost") or {}).get(key) for item in assistant_usage) for key in COST_KEYS}
+    observed_basis = "assistant_usage_cost"
+    stock_estimates = []
+    if profiles is not None and not native:
+        stock_estimates = [_profile_estimate(item, item["usage"], profiles, stock=True)
+                           for item in assistant_price_observations]
+        bases = {item["basis"] for item in stock_estimates}
+        observed_basis = next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None
+        observed_cost = {key: sum_known(item["cost"][key] for item in stock_estimates)
+                         if len(bases) == 1 else None for key in COST_KEYS}
+    if native:
+        accounting = _native_request_accounting(requests, profiles)
+        accounting["_native_requests"] = requests
+        accounting["accounting_incomplete"] = incomplete
+        if incomplete:
+            _mark_incomplete(accounting)
+    else:
+        # Legacy assistant messages cannot enumerate failed/retried physical calls.
+        accounting = {
+            "accounting_source": "assistant_messages_observational",
+            "cost_basis": None,
+            "accounting_incomplete": True,
+            "usage_complete": False,
+            "cost_complete": False,
+            "provider_capacity_confirmed": capacity_confirmed,
+            "unsettled_attempts": None,
+            "model_calls": None,
+            "model_calls_by_purpose": {},
+            "usage": {key: None for key in USAGE_KEYS},
+            "cost": {key: None for key in COST_KEYS},
+            "final_response_tokens": assistant_usage[-1].get("output") if assistant_usage else None,
+            "provider_prompt_token_samples": [item["inputTotal"] for item in usages],
+            **({"api_price_estimates": aggregate_api_price_estimates(stock_estimates)} if profiles is not None else {}),
+        }
+    accounting.update({
+        "assistant_usage_observations": assistant_usage,
+        "observed_model_calls": len(assistant_usage),
+        "observed_provider_usage": observed_usage,
+        "observed_api_cost": observed_cost,
+        "observed_cost_basis": observed_basis,
+        **({"assistant_price_observations": assistant_price_observations} if profiles is not None else {}),
+    })
+    return {
+        "path": str(path),
+        "session_id": header.get("id"),
+        "rlm_depth": header.get("rlmDepth", 0),
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "recovery_tool_calls": recovery_tool_calls,
+        "visible_tool_bytes": visible_tool_bytes,
+        "compactions": compactions,
+        "automatic_refinement_applied": refinement_entries,
+        "assistant_request_associations": [
+            {"assistant_entry_id": entry.get("id"),
+             "recorded_request": _recorded_request_output(entry, header, association_requests)
+             if original_header and original else None}
+            for entry, original in assistant_sources
+        ],
+        "compaction_request_associations": [
+            {"compaction_entry_id": entry.get("id"),
+             "recorded_requests": _recorded_compaction_requests(entry, header, association_requests)
+             if original_header and original else None}
+            for entry, original in compaction_sources
+        ],
+        "branch_summary_request_associations": [
+            {"branch_summary_entry_id": entry.get("id"), "recorded_request": _recorded_request_output(
+                entry, header, association_requests, purpose="summary", purpose_detail="branch",
+             ) if original_header and original else None}
+            for entry, original in branch_summary_sources
+        ],
+        "refinement_planner_associations": [
+            {"refinement_entry_id": entry.get("id"), "recorded_request": _recorded_request_output(
+                entry, header, association_requests, purpose="refine", purpose_detail="plan",
+             ) if original_header and original else None}
+            for entry, original in refinement_planner_sources
+        ],
+        **accounting,
+    }
+
+
+def collect_sessions(root: Path, profiles: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    # Keep native receipts across copies; assistant exports cannot replace them.
+    paths = sorted(root.rglob("*.jsonl"), key=lambda path: path.stat().st_mtime_ns)
+    for path in paths:
+        parsed = parse_session_file(path, profiles)
+        if not parsed:
+            continue
+        session_id = str(parsed["session_id"])
+        previous = by_id.get(session_id)
+        if previous and previous["accounting_source"] == "native_request_receipts":
+            if parsed["accounting_source"] != "native_request_receipts":
+                continue
+            requests = dict(previous["_native_requests"])
+            for attempt_id, request in parsed["_native_requests"].items():
+                if request.get("type") == "attempt_settled":
+                    requests[attempt_id] = request
+                else:
+                    requests.setdefault(attempt_id, request)
+            incomplete = previous.get("accounting_incomplete") is True or parsed.get("accounting_incomplete") is True
+            capacity_confirmed = previous.get("provider_capacity_confirmed") is True or parsed.get("provider_capacity_confirmed") is True
+            parsed.update(_native_request_accounting(requests, profiles))
+            parsed["provider_capacity_confirmed"] = parsed["provider_capacity_confirmed"] or capacity_confirmed
+            parsed["_native_requests"] = requests
+            parsed["accounting_incomplete"] = incomplete
+            if incomplete:
+                _mark_incomplete(parsed)
+        by_id[session_id] = parsed
+    return list(by_id.values())
+
+
+def aggregate_sessions(
+    sessions: list[dict[str, Any]], profiles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    incomplete = not sessions or any(item.get("accounting_incomplete") is True for item in sessions)
+    requests: dict[str, dict[str, Any]] = {}
+    accounting = []
+    for item in sessions:
+        native_requests = item.get("_native_requests")
+        if not native_requests:
+            # Includes empty native journals: no records cannot prove zero spend.
+            accounting.append(item)
+            continue
+        for attempt_id, request in native_requests.items():
+            if request.get("type") == "attempt_settled":
+                requests[attempt_id] = request
+            else:
+                requests.setdefault(attempt_id, request)
+    if requests:
+        accounting.append(_native_request_accounting(requests, profiles))
+    usage = {key: sum_known(item["usage"].get(key) for item in accounting) if not incomplete else None for key in USAGE_KEYS}
+    cost = {key: sum_known(item["cost"].get(key) for item in accounting) if not incomplete else None for key in COST_KEYS}
+    roots = [item for item in sessions if not item["rlm_depth"]]
+    native_roots = [item for item in roots if item["accounting_source"] == "native_request_receipts"]
+    root_ids = {item["session_id"] for item in native_roots}
+    main_counts = [item["model_calls"] for item in roots if item["accounting_source"] != "native_request_receipts"]
+    if native_roots:
+        main_counts.append(sum(
+            request.get("purpose") == "main" and (request.get("source") or {}).get("sessionId") in root_ids
+            for request in requests.values()
+        ))
+        if any(not item.get("_native_requests") for item in native_roots):
+            main_counts.append(None)
+    samples = [sample for item in accounting for sample in item["provider_prompt_token_samples"]]
+    sample_total = sum_known(samples)
+    sources = {item["accounting_source"] for item in sessions}
+    bases = {item["cost_basis"] for item in (sessions if profiles is None else accounting) if item.get("cost_basis")}
+    observed_bases = {item.get("observed_cost_basis") for item in sessions}
+    observed_sources = {item.get("accounting_source") for item in sessions}
+    if profiles is not None and len(bases) > 1:
+        cost = {key: None for key in COST_KEYS}
+    purposes: dict[str, int] = {}
+    for item in accounting:
+        for purpose, count in item["model_calls_by_purpose"].items():
+            purposes[purpose] = purposes.get(purpose, 0) + count
+    return {
+        "session_count": len(sessions),
+        "child_sessions": sum(1 for item in sessions if item["rlm_depth"]),
+        "accounting_source": next(iter(sources)) if len(sources) == 1 else "mixed" if sources else "none",
+        "cost_basis": next(iter(bases)) if len(bases) == 1 else "mixed" if bases else None,
+        "accounting_incomplete": incomplete,
+        "usage_complete": not incomplete and bool(accounting) and all(item["usage_complete"] for item in accounting),
+        "cost_complete": not incomplete and bool(accounting) and all(item["cost_complete"] for item in accounting)
+        and (profiles is None or len(bases) == 1),
+        **({"api_price_estimates": aggregate_api_price_estimates(
+            estimate for item in accounting for estimate in item.get("api_price_estimates", [])
+        ), "assistant_price_observations": [
+            {"session_id": item["session_id"], "path": item["path"], "observations": item.get("assistant_price_observations", [])}
+            for item in sessions
+        ]} if profiles is not None else {}),
+        "provider_capacity_confirmed": any(item["provider_capacity_confirmed"] for item in sessions + accounting),
+        "unsettled_attempts": sum_known(item["unsettled_attempts"] for item in accounting),
+        "physical_attempts": list(requests.values()),
+        "observed_model_calls": sum_known(item["observed_model_calls"] for item in sessions),
+        "observed_main_model_calls": sum_known(item["observed_model_calls"] for item in roots),
+        "observed_provider_usage": {
+            key: sum_known(item["observed_provider_usage"].get(key) for item in sessions) for key in USAGE_KEYS
+        },
+        "observed_api_cost": {
+            key: sum_known(item["observed_api_cost"].get(key) for item in sessions)
+            if profiles is None or (len(observed_bases) == 1 and len(observed_sources) == 1) else None
+            for key in COST_KEYS
+        },
+        "observed_cost_basis": ("assistant_usage_cost" if sessions else None) if profiles is None
+        else next(iter(observed_bases)) if len(observed_bases) == 1 else "mixed" if observed_bases else None,
+        "assistant_usage_observations": [
+            {"session_id": item["session_id"], "path": item["path"], "usage": item["assistant_usage_observations"]}
+            for item in sessions
+        ],
+        "assistant_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("assistant_request_associations")}
+            for item in sessions
+        ],
+        "compaction_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("compaction_request_associations")}
+            for item in sessions
+        ],
+        "branch_summary_request_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("branch_summary_request_associations")}
+            for item in sessions
+        ],
+        "refinement_planner_associations": [
+            {"session_id": item["session_id"], "path": item["path"],
+             "associations": item.get("refinement_planner_associations")}
+            for item in sessions
+        ],
+        "observed_accounting_scope": "solver_messages",
+        "main_model_calls": sum_known(main_counts) if not incomplete else None,
+        "all_model_calls": sum_known(item["model_calls"] for item in accounting) if not incomplete else None,
+        "model_calls_by_purpose": purposes,
+        "tool_calls": sum(item["tool_calls"] for item in sessions),
+        "tool_results": sum(item["tool_results"] for item in sessions),
+        "recovery_tool_calls": sum(item["recovery_tool_calls"] for item in sessions),
+        "tool_result_bytes_shown": sum(item["visible_tool_bytes"] for item in sessions),
+        "session_compactions": sum(item["compactions"] for item in sessions),
+        "automatic_refinement_applied": sum(item["automatic_refinement_applied"] for item in sessions),
+        "provider_usage": usage,
+        "api_cost": cost,
+        "prompt_cache_reuse": usage["cacheRead"] / usage["inputTotal"]
+        if usage["cacheRead"] is not None and usage["inputTotal"] else None,
+        "peak_provider_prompt_tokens": max(samples) if sample_total is not None else None,
+        "average_provider_prompt_tokens": sample_total / len(samples) if sample_total is not None else None,
+        "provider_prompt_token_sum": sample_total,
+        "provider_prompt_sample_count": len(samples),
+        "provider_prompt_token_samples": samples,
+        "final_response_tokens": roots[-1]["final_response_tokens"] if roots else None,
+    }
+
+
+def last_json_object(stdout: str) -> dict[str, Any]:
+    for line in reversed(stdout.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise ValueError("judge did not print a JSON object")
+
+
+def clean_python_environment() -> dict[str, str]:
+    return {
+        "HOME": "/tmp", "TMPDIR": "/tmp", "PATH": "/usr/bin:/bin", "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8", "TZ": "UTC", "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1",
+    }
+
+
+def isolated_python_command(
+    command: list[str], cwd: Path, workspace: Path, bwrap: str, *, task_dir: Path | None = None,
+    private_network: bool = True,
+) -> list[str]:
+    result = [
+        str(Path(bwrap).resolve()), "--die-with-parent",
+        *(["--unshare-net"] if private_network else []), "--unshare-pid",
+        "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+        "--symlink", "usr/bin", "/bin", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+    ]
+    for source in ("/etc/ld.so.cache", "/etc/hosts", "/etc/localtime"):
+        if Path(source).exists():
+            result.extend(["--ro-bind", source, source])
+    if task_dir is not None:
+        result.extend(["--ro-bind", str(task_dir), str(task_dir)])
+    result.extend(["--bind", str(workspace), str(workspace), "--clearenv"])
+    for name, value in clean_python_environment().items():
+        result.extend(["--setenv", name, value])
+    result.extend(["--chdir", str(cwd), "--", *command])
+    return result
+
+
+def run_judge(
+    task_dir: Path,
+    scenario: dict[str, Any],
+    workspace: Path,
+    bwrap: str | None = None,
+) -> tuple[dict[str, Any], float, str]:
+    task_dir = task_dir.resolve()
+    workspace = workspace.resolve()
+    command = [str(workspace) if part == "{workspace}" else str(part) for part in scenario["judge_command"]]
+    if command and command[0] in {"python", "python3", "python3.12"}:
+        command[0:1] = [python312(), "-E", "-S"]
+    if not bwrap:
+        raise ValueError("bubblewrap is required for candidate judge execution")
+    command = isolated_python_command(command, task_dir, workspace, bwrap, task_dir=task_dir)
+    started = time.monotonic()
+    completed = subprocess.run(
+        command,
+        cwd=task_dir,
+        env=clean_python_environment(),
+        text=True,
+        capture_output=True,
+        timeout=600,
+    )
+    elapsed = time.monotonic() - started
+    transcript = completed.stdout + (("\n" + completed.stderr) if completed.stderr else "")
+    try:
+        result = last_json_object(completed.stdout)
+    except ValueError as exc:
+        result = {
+            "status": "error",
+            "progress_level": 0,
+            "main_checks_passed": 0,
+            "main_checks_total": 0,
+            "edge_check_passed": False,
+            "notes": [str(exc), f"judge exit code {completed.returncode}"],
+        }
+    result.setdefault("notes", [])
+    if completed.returncode and result.get("status") == "pass":
+        result["status"] = "error"
+        result["notes"].append(f"judge exit code {completed.returncode}")
+    return result, elapsed, transcript
+
+
+def primary_attempt_index(attempts: list[dict[str, Any]]) -> int | None:
+    """The first capacity-valid attempt is primary, even when it fails."""
+    return next((index for index, attempt in enumerate(attempts) if attempt.get("capacity_invalid") is not True), None)
+
+
+def summarize_results(results: list[dict[str, Any]]) -> dict[str, Any]:
+    by_variant: dict[str, dict[str, Any]] = {}
+    for result in results:
+        attempts = result["attempts"]
+        index = primary_attempt_index(attempts)
+        bucket = by_variant.setdefault(result["variant"], {
+            "runs": 0,
+            "unscored_runs": 0,
+            "strict_passes": 0,
+            "progress_sum": 0.0,
+            "primary_cost": 0.0,
+            "all_attempt_cost": 0.0,
+            "primary_agent_wall_seconds": 0.0,
+            "primary_cost_complete": True,
+            "all_attempt_cost_complete": True,
+        })
+        retained_cost = sum_known(
+            (item.get("metrics", {}).get("api_cost") or {}).get("total")
+            if item.get("metrics", {}).get("cost_complete") is True else None
+            for item in attempts
+        )
+        bucket["all_attempt_cost"] = sum_known((bucket["all_attempt_cost"], retained_cost))
+        bucket["all_attempt_cost_complete"] = bucket["all_attempt_cost_complete"] and bool(attempts) and all(
+            item.get("metrics", {}).get("cost_complete") is True for item in attempts
+        )
+        if index is None:
+            bucket["unscored_runs"] += 1
+            continue
+        attempt = attempts[index]
+        judge = attempt.get("judge") or {}
+        metrics = attempt.get("metrics") or {}
+        bucket["runs"] += 1
+        bucket["strict_passes"] += int(judge.get("status") == "pass" and judge.get("progress_level") == 5)
+        bucket["progress_sum"] += float(judge.get("progress_level") or 0)
+        bucket["primary_cost"] = sum_known((
+            bucket["primary_cost"],
+            (metrics.get("api_cost") or {}).get("total") if metrics.get("cost_complete") is True else None,
+        ))
+        bucket["primary_cost_complete"] = bucket["primary_cost_complete"] and metrics.get("cost_complete") is True
+        bucket["primary_agent_wall_seconds"] = sum_known((bucket["primary_agent_wall_seconds"], attempt.get("agent_wall_seconds")))
+    for bucket in by_variant.values():
+        count = bucket["runs"]
+        bucket["strict_pass_rate"] = bucket["strict_passes"] / count if count else None
+        bucket["mean_progress"] = bucket["progress_sum"] / count if count else None
+        if not count:
+            bucket["primary_cost"] = None
+            bucket["primary_cost_complete"] = False
+            bucket["primary_agent_wall_seconds"] = None
+    return {
+        "runs": sum(bucket["runs"] for bucket in by_variant.values()),
+        "unscored_runs": sum(bucket["unscored_runs"] for bucket in by_variant.values()),
+        "primary_strict_passes": sum(bucket["strict_passes"] for bucket in by_variant.values()),
+        "by_variant": by_variant,
+    }

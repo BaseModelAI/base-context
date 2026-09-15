@@ -1,28 +1,21 @@
-# Termux (Android) Setup
+# Termux (Android) notes
 
-Prime Agent runs on Android via [Termux](https://termux.dev/), a terminal emulator and Linux environment for Android.
+These notes describe inherited [Termux](https://termux.dev/) integration points. They are not a claim that Base Context 1.0.0 has been validated on Android. Node's native SQLite support, Python setup, and optional native dependencies must work in your environment.
 
 ## Prerequisites
 
-1. Install [Termux](https://github.com/termux/termux-app#installation) from GitHub or F-Droid (not Google Play, that version is deprecated)
-2. Install [Termux:API](https://github.com/termux/termux-api#installation) from GitHub or F-Droid for clipboard and other device integrations
+1. Install [Termux](https://github.com/termux/termux-app#installation) from a currently supported distribution.
+2. Install [Termux:API](https://github.com/termux/termux-api#installation) for clipboard and device integrations.
+3. Install a Node version satisfying `^22.12.0 || >=23.3.0` and arrange a compatible Python runtime as described in [installation](installation.md#python-setup).
 
-## Installation
+The repository and build commands are the same as on other source installations:
 
 ```bash
-# Update packages
-pkg update && pkg upgrade
-
-# Install dependencies
-pkg install nodejs termux-api git ripgrep
-
-# Clone and install Prime Agent from source
-git clone https://github.com/PrimeIntellect-ai/prime-agent.git
-cd prime-agent
+git clone https://github.com/BaseModelAI/base-context.git
+cd base-context
 npm ci
-
-# Run Prime Agent
-./prime-agent.sh
+npm run build:source
+node packages/coding-agent/dist/bundle/cli.js
 ```
 
 ## Clipboard Support
@@ -33,9 +26,9 @@ Image clipboard is not supported on Termux (the `ctrl+v` image paste feature wil
 
 ## Example AGENTS.md for Termux
 
-Create `~/.prime/agent/AGENTS.md` to help the agent understand the Termux environment:
+Create `~/.base-context/AGENTS.md` to help the agent understand the Termux environment:
 
-```markdown
+````markdown
 # Agent Environment: Termux on Android
 
 ## Location
@@ -90,7 +83,7 @@ termux-camera-photo out.jpg   # Take photo
 - Termux:API app must be installed for `termux-*` commands
 - Use `pkg install termux-api` for the command-line tools
 - Storage permission needed for `/storage/emulated/0` access
-```
+````
 
 ## Limitations
 

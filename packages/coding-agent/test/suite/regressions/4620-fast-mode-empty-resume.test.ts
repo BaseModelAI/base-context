@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
@@ -9,11 +9,11 @@ describe("ENG-4620 fast mode empty resume", () => {
 	let harness: Harness | undefined;
 	const sessions: AgentSession[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const session of sessions.splice(0)) {
 			session.dispose();
 		}
-		harness?.cleanup();
+		await harness?.cleanup();
 		harness = undefined;
 	});
 
@@ -42,7 +42,7 @@ describe("ENG-4620 fast mode empty resume", () => {
 
 		const { session } = await createSession();
 		sessions.push(session);
-		session.setServiceTier("priority");
+		await session.setServiceTier("priority");
 		expect(session.messages).toHaveLength(0);
 		session.dispose();
 

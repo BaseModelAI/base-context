@@ -1,21 +1,31 @@
 # Sessions
 
-Prime Agent saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
+Base Context saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
 
 ## Session Storage
 
-Sessions auto-save to `~/.prime/agent/sessions/`. Each session is a JSONL file with a tree structure.
+Sessions use a flat owned directory by default, not a separate directory for each project:
+
+```text
+~/.base-context/
+  sessions/<session-id>.jsonl
+  session-artifacts/<session-id>/
+```
+
+`BASE_CONTEXT_HOME` selects the product root. `BASE_CONTEXT_SESSION_DIR` can select a different absolute sessions directory. The artifact root is the sibling `session-artifacts/` directory under that sessions directory's parent; use `SessionManager.getSessionArtifactDir()` for the actual owned path.
+
+Native sessions use canonical **native-framed journals** and derived indexes. The `.jsonl` extension is retained, but the file is not an ordinary editable transcript. Use native owners and bounded asynchronous reads, not `jq`, manual appends or text-editor changes. Legacy flat JSONL belongs on the explicit offline import path below, not in a manually assembled native journal.
 
 ```bash
-prime-agent --continue          # Continue the most recent session
-prime-agent --resume [path|id]  # Browse past sessions or resume one directly
-prime-agent --no-session        # Ephemeral mode; do not save
-prime-agent --fork <path|id>    # Fork a session file or partial session ID into a new session
+base-context --continue          # Continue the most recent session
+base-context --resume [path|id]  # Browse past sessions or resume one directly
+base-context --no-session        # Ephemeral mode; do not save
+base-context --fork <path|id>    # Fork a session file or partial session ID into a new session
 ```
 
 Use `/session` in interactive mode to see the current session file, session ID, and message count. Use `/usage` for token, cost, and context usage.
 
-For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+For native journal storage and the SessionManager API, see [Session Format](session-format.md).
 
 ## Session Commands
 
@@ -33,13 +43,116 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 
+## Importing an External Session
+
+Use an explicit path to a coherent offline source file to create a new owned session for the current project:
+
+```bash
+base-context session import /path/to/session.jsonl
+```
+
+The command prints the new session path. It does not resume the session or start
+an agent runtime. Use `base-context --resume <printed-path>` separately if desired.
+The source is read-only. No credentials, settings, packages, Python environment or
+running processes are migrated.
+
+This route uses `SessionManager.importRetainedFrom`, including for native-framed
+input. Copied entries are retained imports, not newly admitted native authority.
+The existing `--fork` route is a different copy operation; it does not force this
+lowering for every source. Source claims about tools, jobs or variables do not make
+those resources live in the new session. Native version6 tool-continuation copies
+still refuse because they need their original native execution source.
+
+Explicit retained imports accept missing-version/v1, v2 and current v3 session
+headers. Future or invalid versions and an incomplete final record refuse before
+destination creation. Records must be LF-terminated. The reader holds one read-only
+descriptor and imports within one captured size; this is not an atomic snapshot of
+a file that is still changing.
+
+The existing copy limits are 16,384 entries after the header and 64MiB of consumed
+JSON payload, including header bytes. These are not raw-file-size or global-memory
+limits. Supported older payloads use the existing conversion path. Some later copy
+or activation failures can leave an owned destination; there is no automatic
+delete/rollback or atomic whole-import guarantee. A successful import and a later
+close/report error remain separate outcomes.
+
+### Previewing Source Preparation
+
+```bash
+base-context session import --preview /path/to/session.jsonl
+```
+
+Preview uses the same captured-source preparation as an actual import. It reports
+input format/version, decoded record/JSON-byte counts, prepared retained entries,
+and the intended target directory. It creates no destination or reserved session
+ID. The SDK entry point is `SessionManager.previewRetainedImport`.
+
+This is **not a full import dry run**. Destination creation/indexing, canonical
+epoch activation, and reference/replay coverage are not assessed. For example,
+the native version6 tool-continuation refusal above remains on actual activation.
+A later import reads the source again and can still fail. Preview does not read
+legacy parent-session files to infer worker depth or inspect runtime ownership.
+
+## Importing an Offline Prime Root
+
+The separate root-migration command accepts an externally produced, coherent offline/filesystem export of a Prime root. It does not create a snapshot, attach to or stop Prime, or certify a changing source as coherent. Keep the original export. Do not point it at a live user root.
+
+```bash
+base-context migrate --from-prime-agent /exports/prime-offline --dry-run --destination /new/base-context-home
+base-context migrate --from-prime-agent /exports/prime-offline --destination /new/base-context-home
+```
+
+The destination must be a new, separate path; an existing destination is refused, not merged or overwritten. The command publishes the imported directory only. It does not select that root for future commands or start an agent. A failure can leave retained staging or an uncertain activation; do not assume rollback or retry/delete after an uncertain result.
+
+This route supports flat legacy JSONL session files only. It prepares all journals before staging and imports through the real session owners. Unlike the narrower `session import` route above, whole-root migration refuses native-framed journals. Qualified native epochs and artifact/external references can depend on original session paths and owners; copying or renaming files does not make them portable. Full native, opaque-runtime and artifact migration is not supported.
+
+Supported preferences are copied, and package declarations stay inactive until an explicit install. Credentials, model credential/configuration files, executable/resource activation, daemon recovery state, pending dispatches, Python processes and source artifact trees are not copied. Historical chat and goal entries remain retained data, not secret-scrubbed text. They can influence future model context, but imported goals are not reactivated; new explicit goals and autonomy remain available.
+
+The one supported artifact projection is paused schedule data. The importer reads only the known root `cron-jobs.json` and matched per-session `scheduled-jobs.json` files. Uniquely matched top-level cron jobs, user heartbeats and recurring RLM heartbeats become **paused** records with new job IDs, mapped destination session IDs/final journal paths/cwd, no old active-session identity, no `nextRunAt` and no imported dispatches. Completed/cancelled jobs and unsupported or ambiguous records are counted as skipped. Subagent/nonzero-depth owners, unmatched targets and one-shot RLM heartbeats remain unsupported.
+
+```bash
+BASE_CONTEXT_HOME=/new/base-context-home base-context schedule list --offline --json
+```
+
+This lists metadata through the real store without a daemon connection. Retained instruction, label and schedule-expression text is omitted from the output, not scrubbed from the stored declaration. Opening the new session does not resume paused schedules.
+
+After its normal runtime has actually bound the new session, explicitly resume a recurring generic cron job by its new ID:
+
+```bash
+BASE_CONTEXT_HOME=/new/base-context-home base-context schedule resume <new-job-id>
+```
+
+The bound session and journal file must match the retained destination. Resume uses the normal next-run rules; import, listing and opening do not activate jobs. Existing heartbeat controls remain separate: call `rlm_heartbeat.list()` in that session, then `rlm_heartbeat.update("<new-heartbeat-id>", status="resume")` for an RLM heartbeat. Old handles and kernel state are not restored. One-shot cron jobs need explicit rescheduling. See [Heartbeats and Scheduled Prompts](long-running-agents.md#heartbeats-and-scheduled-prompts).
+
 ## Resuming and Deleting Sessions
 
-`/resume` opens an interactive session picker for the current project. `prime-agent --resume` opens the same picker at startup, and `prime-agent --resume <path|id>` resumes a specific session.
+In a running session, `/resume` opens the agents view. Its live roster is separate
+from saved-session browsing. `base-context --resume` opens startup session selection,
+and `base-context --resume <path|id>` resumes a specific session.
 
-An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `prime-agent --resume -- "continue this work"`.
+Saved-session results in the agents view are queried and paged by the existing
+catalog. A page holds at most 64 saved rows, including required ancestor/context
+rows, and 1MiB of encoded page data. Search and scope apply before page selection.
+New pages replace old pages; browsing does not retain the whole archive. Page counts
+and partial rollups are not totals for all saved sessions. The separate live roster
+is outside this saved-page budget.
 
-In the picker you can:
+Paging preserves the agents view's existing hierarchy and ranking, including its
+empty-session, anchor, heartbeat and busy-descendant rules. Continuations use that
+order, not modification time alone. Relevant ordering-context changes reset the
+saved page. This is a live listing, not a frozen snapshot; metadata changes can
+require a refresh. Metadata traversal can still scale with the total session count.
+The page limit is not a global heap/RSS, latency or directory-size guarantee.
+
+Use PageUp/PageDown at the first/last selectable row to request the previous/next
+saved page. Away from those edges, the keys keep their viewport-navigation role.
+The view displays the configured bindings and marks repeated ancestor rows as
+page context. Search keeps one active query plus its latest replacement.
+
+
+An invalid ID exits with the closest unambiguous session ID when one is available. To open the picker and send an initial prompt after selecting a session, separate the prompt with `--`: `base-context --resume -- "continue this work"`.
+
+The startup picker has separate controls:
 
 - search by typing
 - toggle path display with Ctrl+P
@@ -48,7 +161,6 @@ In the picker you can:
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-When available, Prime Agent uses the `trash` CLI for deletion instead of permanently removing files.
 
 ## Naming Sessions
 
@@ -58,7 +170,7 @@ Use `/name <name>` to set a human-readable session name:
 /name Refactor auth module
 ```
 
-Named sessions are easier to find in `/resume` and `prime-agent --resume`.
+Named sessions are easier to find in `/resume` and `base-context --resume`.
 
 ## Branching with `/tree`
 
@@ -122,7 +234,7 @@ Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone`
 
 ## Branch Summaries
 
-When `/tree` switches away from one branch to another, Prime Agent can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
+When `/tree` switches away from one branch to another, Base Context can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
 
 When prompted, choose one of:
 
@@ -134,6 +246,119 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 ## Session Format
 
-Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
+Native `.jsonl` journals store framed canonical records, not plain transcript JSONL. Their payloads include message entries, model and thinking-level changes, labels, compactions, branch summaries and extension entries. The index is derived data, not a replacement for the canonical journal.
 
-For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).
+Use `SessionManager` through the actual owner. For a native session that you own and open directly, both opening and closing are asynchronous:
+
+```ts
+import { SessionManager } from "@ponythewhite/base-context";
+
+const manager = await SessionManager.open("/owned/base-context-home/sessions/<session-id>.jsonl");
+try {
+  const history = await manager.materializeBranchHistory({
+    maxEntries: 256,
+    maxSourceBytes: 1_048_576,
+  });
+  console.log(history.entries);
+} finally {
+  await manager.close();
+}
+```
+
+Opening a manager acquires native ownership and can maintain the derived index; it is not a raw read-only parser for arbitrary source files. If a runtime already owns the session, use its existing manager. `materializeBranchHistory` requires explicit entry/byte limits and refuses when the bounded materialization cannot fit. `readBranchHistory` and `readSourceHistory` provide asynchronous captured read scopes for selective access. Resident-only synchronous getters are not whole-archive readers for indexed sessions.
+
+Do not parse or rewrite native journals with `jq`, append hand-written records, edit frame payloads, or copy index/artifact files to manufacture a new session. Use explicit import for offline legacy JSONL. A retained import does not grant native epoch, tool-continuation, request-source or opaque-resource authority. A successful preview/import of supported data does not establish full reference portability or restore the original running process.
+
+For parsers, extensions, SDK usage and the full SessionManager API, see [Session Format](session-format.md).
+
+
+### Native Main-Request Output Links
+
+An assistant source entry from the native main-response path can include
+`requestOutput`, containing the original `operationId`, its admitted `attemptIds`,
+and the captured request `source` (`SourceSnapshotRef`). This links recorded output
+to its request; it does not identify which physical attempt produced the output.
+The metadata is outside the provider message and does not add input/task authority.
+
+The existing benchmark parser reports `assistant_request_associations`. Each
+`recorded_request` is an exact matched source link or `null` (unknown). A match
+requires the original session header and matching request records to agree. Recorded
+source presence, the append call's ACK, and later caller delivery or refusal are
+separate facts. A later invocation refusal does not undo a known source ACK.
+Missing, old, ineligible or unmatched links remain unknown, not rejected output
+or zero committed output. Retained imports and copied destination headers do not
+create new native output links; an archived copy can still contain historical data.
+
+This covers native main-response source association only. It does not complete
+auxiliary-output or downstream delivery/rejection accounting.
+
+### Native Compaction-Request Output Links
+
+A native built-in compaction entry can also record `requestOutputs`: per-part
+`operationId`, admitted `attemptIds` and captured `source`, with `part` equal to
+`history` or `turn-prefix`. These link the requests used by the built-in text
+projection and composition. They do not mean that whole provider messages were
+saved, or identify a producing attempt. Literal and file-operation text can also
+appear in the composed summary; literal text does not create a model-request link.
+
+The native session invocation, original source owner and built-in result path
+establish eligibility. Standalone helper results do not create these links.
+Extension-provided summaries and copied labels cannot create these links. The
+metadata does not change epoch/replay qualification or physical outcome/usage.
+As with main-output links, recorded source presence, the append API's ACK and later
+caller delivery/refusal are separate. A later error does not undo a known ACK.
+
+The native parser reports `compaction_request_associations` with the compaction
+entry ID and per-part recorded request matches. Missing, ineligible or unmatched
+data is `null` (unknown), not rejected or zero committed output.
+Only understood part labels are listed; the list is not complete-output coverage.
+These are historical recorded associations, not current authority or delivery
+completeness. Learning outputs and downstream delivery remain separate coverage.
+
+### Native Branch-Summary Request Output Links
+
+A native built-in `branch_summary` entry can record `requestOutput`: the actual
+returned request's `operationId`, admitted `attemptIds` and captured `source`.
+This links the text projection, including its existing preamble and file-operation
+suffix, not a stored whole provider message or a producing attempt. Literal text
+without a model request has no link.
+
+The request's input source is separate from `parentId` and `fromId`, which describe
+the destination branch. Native invocation/result identity and the original source
+owner must reach the same append for a link. Missing or changed ownership remains
+unassociated through ordinary append behavior; it does not prove rejection.
+Extension/standalone results and copied labels cannot create this native binding.
+Metadata stays outside provider/replay bodies and does not change qualification,
+physical accounting, branch selection or ACK handling. Leaf selection advances
+only after the existing summary append ACK. Later caller errors do not undo it.
+
+The native parser reports `branch_summary_request_associations` with the branch
+summary entry ID and its recorded `summary`/`branch` request match, or `null` for
+unknown/ineligible data. It does not use destination fields as the input source.
+Recorded source presence, historical append API ACK and later caller delivery are
+separate facts. Imported or mismatched data does not establish native authority.
+
+
+### Native Refinement-Planner Associations
+
+An existing `custom` / `prime-agent.refinement` result entry can record a top-level
+`plannerRequest` with the actual native planner request's `operationId`, admitted
+`attemptIds` and captured `source`. It is outside `data: RefinementResult`, harness
+state, global history, outcome messages and provider/replay bodies. The generated
+refinement ID is not the request operation ID.
+
+This describes a normalized planner proposal's contribution to the actual computed
+result. Edits can be applied or skipped, including on conflicts. It does not mean
+whole provider output was saved, every edit succeeded, or `expectedOutcome` happened.
+Native plan/result and original source ownership establish the binding; copied,
+changed-proposal, extension, rollback and standalone labels cannot create it.
+Existing baseline references are retained, not certified deeply immutable. The link
+does not prove unchanged host state or certify conflict decisions. Existing state,
+history, source-record and outcome/error ordering remain unchanged. Later errors
+do not undo already-applied effects or known source ACKs.
+
+The native parser reports `refinement_planner_associations` for exact `refine` /
+`plan` request matches, or `null` for unknown/ineligible data. Recorded source
+presence, historical append API ACK and later delivery remain separate. REVIEW is
+an input gate for a separate planner call, not a newly saved review response or an
+attributed part of this result. These links do not establish full-workflow delivery.

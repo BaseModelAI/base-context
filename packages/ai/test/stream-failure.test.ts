@@ -102,8 +102,9 @@ describe("extractStreamFailureInfo", () => {
 		expect(extractStreamFailureInfo(awsError)).toMatchObject({ requestId: "aws_req" });
 	});
 
-	test("falls back to classifying the message text", () => {
-		expect(extractStreamFailureInfo(new Error("provider overloaded, retry later")).kind).toBe("overloaded");
+	test("does not promote message text or bare termination to provider identity", () => {
+		expect(extractStreamFailureInfo(new Error("provider overloaded, retry later")).kind).toBe("unknown");
+		expect(extractStreamFailureInfo(new Error("terminated")).kind).toBe("unknown");
 		expect(extractStreamFailureInfo("not an error").kind).toBe("unknown");
 	});
 });

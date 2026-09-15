@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	captureOrphanProcessJournalOwner,
 	clearOrphanProcessJournal,
 	isOrphanProcessIdentityCurrent,
 	ORPHAN_PROCESS_JOURNAL_ENV,
@@ -35,7 +36,8 @@ describe("orphan process journal", () => {
 		const path = join(directory, "orphans.jsonl");
 		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = path;
 
-		recordOrphanProcessState(process.pid, true);
+		expect(recordOrphanProcessState(process.pid, true)).toBeUndefined();
+		const owner = captureOrphanProcessJournalOwner();
 
 		const active = readActiveOrphanProcesses(path, process.pid);
 		expect(active).toHaveLength(1);
@@ -43,8 +45,13 @@ describe("orphan process journal", () => {
 		expect(active[0] && isOrphanProcessIdentityCurrent(active[0])).toBe(true);
 		expect(readActiveOrphanProcesses(path, process.pid + 1)).toEqual([]);
 
-		recordOrphanProcessState(process.pid, false);
+		// The real external-Node writer retires through its captured source, not later environment state.
+		const otherPath = join(directory, "other-orphans.jsonl");
+		process.env[ORPHAN_PROCESS_JOURNAL_ENV] = otherPath;
+		expect(owner.record(process.pid, false)).toBeUndefined();
 		expect(readActiveOrphanProcesses(path, process.pid)).toEqual([]);
+		expect(existsSync(otherPath)).toBe(false);
+		expect(existsSync(`${path}.owner.sqlite`)).toBe(true);
 		clearOrphanProcessJournal(path);
 		expect(existsSync(path)).toBe(false);
 	});

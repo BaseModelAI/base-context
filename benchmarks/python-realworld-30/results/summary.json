@@ -1,0 +1,776 @@
+{
+  "schema": "python-realworld-30-public/v1",
+  "cells": 180,
+  "effective_attempts": 208,
+  "models": {
+    "astra": "gpt-6-astra",
+    "deepseek": "deepseek-flash",
+    "sol": "gpt-5.6-sol"
+  },
+  "groups": [
+    {
+      "model": "astra",
+      "harness": "current",
+      "cells": 30,
+      "attempts": 30,
+      "retries": 0,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 30,
+        "strict_runtime_clean": 30
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 30,
+        "strict_runtime_clean": 30
+      },
+      "whole_cost_complete_attempts": 30,
+      "unknown_cost_attempts": 0,
+      "whole_cost_usd": 18.4129,
+      "known_cost_subtotal_usd": 18.4129,
+      "known_cost_subtotal_observed_attempts": 30,
+      "price_profiles": [
+        "openai-standard-astra-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 5727.6333151361905,
+          "known_subtotal": 5727.6333151361905,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "lifecycle_wall_seconds": {
+          "total": 5894.142654922558,
+          "known_subtotal": 5894.142654922558,
+          "observed_attempts": 30,
+          "attempts": 30
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 0,
+          "known_subtotal": null,
+          "observed_attempts": 0,
+          "attempts": 0
+        },
+        "lifecycle_wall_seconds": {
+          "total": 0,
+          "known_subtotal": null,
+          "observed_attempts": 0,
+          "attempts": 0
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 234,
+          "known_subtotal": 234,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "compaction_completions": {
+          "total": 16,
+          "known_subtotal": 16,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "compaction_failures": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "compaction_requests": {
+          "total": 16,
+          "known_subtotal": 16,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 30,
+          "attempts": 30
+        },
+        "session_count": {
+          "total": 30,
+          "known_subtotal": 30,
+          "observed_attempts": 30,
+          "attempts": 30
+        }
+      },
+      "cumulative_attempt_hours": 1.6372618485895993,
+      "attempt_minutes_per_terminal_strict_pass": 3.2745236971791987
+    },
+    {
+      "model": "astra",
+      "harness": "vanilla",
+      "cells": 30,
+      "attempts": 41,
+      "retries": 11,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 19,
+        "strict_runtime_clean": 19
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 19,
+        "strict_runtime_clean": 19
+      },
+      "whole_cost_complete_attempts": 38,
+      "unknown_cost_attempts": 3,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 30.15255,
+      "known_cost_subtotal_observed_attempts": 41,
+      "price_profiles": [
+        "openai-standard-astra-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 10474.517715276219,
+          "known_subtotal": 10474.517715276219,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "lifecycle_wall_seconds": {
+          "total": 10553.252893320518,
+          "known_subtotal": 10553.252893320518,
+          "observed_attempts": 41,
+          "attempts": 41
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 3964.256625696318,
+          "known_subtotal": 3964.256625696318,
+          "observed_attempts": 11,
+          "attempts": 11
+        },
+        "lifecycle_wall_seconds": {
+          "total": 3980.582191182999,
+          "known_subtotal": 3980.582191182999,
+          "observed_attempts": 11,
+          "attempts": 11
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 4,
+          "known_subtotal": 4,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "compaction_completions": {
+          "total": 4,
+          "known_subtotal": 4,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "compaction_failures": {
+          "total": 26,
+          "known_subtotal": 26,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "compaction_requests": {
+          "total": 30,
+          "known_subtotal": 30,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 41,
+          "attempts": 41
+        },
+        "session_count": {
+          "total": 41,
+          "known_subtotal": 41,
+          "observed_attempts": 41,
+          "attempts": 41
+        }
+      },
+      "cumulative_attempt_hours": 2.9314591370334773,
+      "attempt_minutes_per_terminal_strict_pass": 5.8629182740669545
+    },
+    {
+      "model": "deepseek",
+      "harness": "current",
+      "cells": 30,
+      "attempts": 31,
+      "retries": 1,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 29,
+        "strict_runtime_clean": 29
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 29,
+        "strict_runtime_clean": 29
+      },
+      "whole_cost_complete_attempts": 28,
+      "unknown_cost_attempts": 3,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 3.237592536,
+      "known_cost_subtotal_observed_attempts": 31,
+      "price_profiles": [
+        "deepseek-flash-peak-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 10492.665182104334,
+          "known_subtotal": 10492.665182104334,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "lifecycle_wall_seconds": {
+          "total": 10549.562900219578,
+          "known_subtotal": 10549.562900219578,
+          "observed_attempts": 31,
+          "attempts": 31
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 1200.000187461963,
+          "known_subtotal": 1200.000187461963,
+          "observed_attempts": 1,
+          "attempts": 1
+        },
+        "lifecycle_wall_seconds": {
+          "total": 1201.0852654250339,
+          "known_subtotal": 1201.0852654250339,
+          "observed_attempts": 1,
+          "attempts": 1
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 91,
+          "known_subtotal": 91,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_completions": {
+          "total": 17,
+          "known_subtotal": 17,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_failures": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_requests": {
+          "total": 17,
+          "known_subtotal": 17,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "session_count": {
+          "total": 31,
+          "known_subtotal": 31,
+          "observed_attempts": 31,
+          "attempts": 31
+        }
+      },
+      "cumulative_attempt_hours": 2.9304341389498827,
+      "attempt_minutes_per_terminal_strict_pass": 5.860868277899766
+    },
+    {
+      "model": "deepseek",
+      "harness": "vanilla",
+      "cells": 30,
+      "attempts": 33,
+      "retries": 3,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 29,
+        "runtime_clean": 27,
+        "strict_runtime_clean": 27
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 27,
+        "strict_runtime_clean": 27
+      },
+      "whole_cost_complete_attempts": 26,
+      "unknown_cost_attempts": 7,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 3.5537344679999996,
+      "known_cost_subtotal_observed_attempts": 33,
+      "price_profiles": [
+        "deepseek-flash-peak-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 11463.112108977279,
+          "known_subtotal": 11463.112108977279,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "lifecycle_wall_seconds": {
+          "total": 11521.49767256435,
+          "known_subtotal": 11521.49767256435,
+          "observed_attempts": 33,
+          "attempts": 33
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 1732.2621979420073,
+          "known_subtotal": 1732.2621979420073,
+          "observed_attempts": 3,
+          "attempts": 3
+        },
+        "lifecycle_wall_seconds": {
+          "total": 1735.2185241738334,
+          "known_subtotal": 1735.2185241738334,
+          "observed_attempts": 3,
+          "attempts": 3
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 14,
+          "known_subtotal": 14,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "compaction_completions": {
+          "total": 14,
+          "known_subtotal": 14,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "compaction_failures": {
+          "total": 5,
+          "known_subtotal": 5,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "compaction_requests": {
+          "total": 19,
+          "known_subtotal": 19,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 33,
+          "attempts": 33
+        },
+        "session_count": {
+          "total": 33,
+          "known_subtotal": 33,
+          "observed_attempts": 33,
+          "attempts": 33
+        }
+      },
+      "cumulative_attempt_hours": 3.200416020156764,
+      "attempt_minutes_per_terminal_strict_pass": 6.400832040313528
+    },
+    {
+      "model": "sol",
+      "harness": "current",
+      "cells": 30,
+      "attempts": 31,
+      "retries": 1,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 29,
+        "runtime_clean": 30,
+        "strict_runtime_clean": 29
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 30,
+        "runtime_clean": 30,
+        "strict_runtime_clean": 30
+      },
+      "whole_cost_complete_attempts": 30,
+      "unknown_cost_attempts": 1,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 21.1386096,
+      "known_cost_subtotal_observed_attempts": 31,
+      "price_profiles": [
+        "openai-standard-sol-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 9715.272891380824,
+          "known_subtotal": 9715.272891380824,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "lifecycle_wall_seconds": {
+          "total": 9819.421159078833,
+          "known_subtotal": 9819.421159078833,
+          "observed_attempts": 31,
+          "attempts": 31
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 420.5486579418648,
+          "known_subtotal": 420.5486579418648,
+          "observed_attempts": 1,
+          "attempts": 1
+        },
+        "lifecycle_wall_seconds": {
+          "total": 421.186499054078,
+          "known_subtotal": 421.186499054078,
+          "observed_attempts": 1,
+          "attempts": 1
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 568,
+          "known_subtotal": 568,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_completions": {
+          "total": 27,
+          "known_subtotal": 27,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_failures": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "compaction_requests": {
+          "total": 18,
+          "known_subtotal": 18,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 31,
+          "attempts": 31
+        },
+        "session_count": {
+          "total": 31,
+          "known_subtotal": 31,
+          "observed_attempts": 31,
+          "attempts": 31
+        }
+      },
+      "cumulative_attempt_hours": 2.727616988633009,
+      "attempt_minutes_per_terminal_strict_pass": 5.455233977266018
+    },
+    {
+      "model": "sol",
+      "harness": "vanilla",
+      "cells": 30,
+      "attempts": 42,
+      "retries": 12,
+      "primary": {
+        "completed": 30,
+        "strict_pass": 28,
+        "runtime_clean": 19,
+        "strict_runtime_clean": 18
+      },
+      "terminal": {
+        "completed": 30,
+        "strict_pass": 27,
+        "runtime_clean": 19,
+        "strict_runtime_clean": 18
+      },
+      "whole_cost_complete_attempts": 40,
+      "unknown_cost_attempts": 2,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 24.9840664,
+      "known_cost_subtotal_observed_attempts": 42,
+      "price_profiles": [
+        "openai-standard-sol-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 12424.049172810046,
+          "known_subtotal": 12424.049172810046,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "lifecycle_wall_seconds": {
+          "total": 12552.912179266103,
+          "known_subtotal": 12552.912179266103,
+          "observed_attempts": 42,
+          "attempts": 42
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 4941.798166804714,
+          "known_subtotal": 4941.798166804714,
+          "observed_attempts": 12,
+          "attempts": 12
+        },
+        "lifecycle_wall_seconds": {
+          "total": 4974.184190831846,
+          "known_subtotal": 4974.184190831846,
+          "observed_attempts": 12,
+          "attempts": 12
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 10,
+          "known_subtotal": 10,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "compaction_completions": {
+          "total": 10,
+          "known_subtotal": 10,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "compaction_failures": {
+          "total": 22,
+          "known_subtotal": 22,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "compaction_requests": {
+          "total": 32,
+          "known_subtotal": 32,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 42,
+          "attempts": 42
+        },
+        "session_count": {
+          "total": 42,
+          "known_subtotal": 42,
+          "observed_attempts": 42,
+          "attempts": 42
+        }
+      },
+      "cumulative_attempt_hours": 3.4869200497961397,
+      "attempt_minutes_per_terminal_strict_pass": 7.7487112217692
+    },
+    {
+      "model": "TOTAL",
+      "harness": "current",
+      "cells": 90,
+      "attempts": 92,
+      "retries": 2,
+      "primary": {
+        "completed": 90,
+        "strict_pass": 89,
+        "runtime_clean": 89,
+        "strict_runtime_clean": 88
+      },
+      "terminal": {
+        "completed": 90,
+        "strict_pass": 90,
+        "runtime_clean": 89,
+        "strict_runtime_clean": 89
+      },
+      "whole_cost_complete_attempts": 88,
+      "unknown_cost_attempts": 4,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 42.789102136000004,
+      "known_cost_subtotal_observed_attempts": 92,
+      "price_profiles": [
+        "deepseek-flash-peak-2026-09-11",
+        "openai-standard-astra-2026-09-11",
+        "openai-standard-sol-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 25935.57138862135,
+          "known_subtotal": 25935.57138862135,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "lifecycle_wall_seconds": {
+          "total": 26263.12671422097,
+          "known_subtotal": 26263.12671422097,
+          "observed_attempts": 92,
+          "attempts": 92
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 1620.5488454038277,
+          "known_subtotal": 1620.5488454038277,
+          "observed_attempts": 2,
+          "attempts": 2
+        },
+        "lifecycle_wall_seconds": {
+          "total": 1622.2717644791119,
+          "known_subtotal": 1622.2717644791119,
+          "observed_attempts": 2,
+          "attempts": 2
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 893,
+          "known_subtotal": 893,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "compaction_completions": {
+          "total": 60,
+          "known_subtotal": 60,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "compaction_failures": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "compaction_requests": {
+          "total": 51,
+          "known_subtotal": 51,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 92,
+          "attempts": 92
+        },
+        "session_count": {
+          "total": 92,
+          "known_subtotal": 92,
+          "observed_attempts": 92,
+          "attempts": 92
+        }
+      },
+      "cumulative_attempt_hours": 7.295312976172491,
+      "attempt_minutes_per_terminal_strict_pass": 4.863541984114994
+    },
+    {
+      "model": "TOTAL",
+      "harness": "vanilla",
+      "cells": 90,
+      "attempts": 116,
+      "retries": 26,
+      "primary": {
+        "completed": 90,
+        "strict_pass": 87,
+        "runtime_clean": 65,
+        "strict_runtime_clean": 64
+      },
+      "terminal": {
+        "completed": 90,
+        "strict_pass": 87,
+        "runtime_clean": 65,
+        "strict_runtime_clean": 64
+      },
+      "whole_cost_complete_attempts": 104,
+      "unknown_cost_attempts": 12,
+      "whole_cost_usd": null,
+      "known_cost_subtotal_usd": 58.690350868,
+      "known_cost_subtotal_observed_attempts": 116,
+      "price_profiles": [
+        "deepseek-flash-peak-2026-09-11",
+        "openai-standard-astra-2026-09-11",
+        "openai-standard-sol-2026-09-11"
+      ],
+      "timing": {
+        "agent_wall_seconds": {
+          "total": 34361.678997063544,
+          "known_subtotal": 34361.678997063544,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "lifecycle_wall_seconds": {
+          "total": 34627.66274515097,
+          "known_subtotal": 34627.66274515097,
+          "observed_attempts": 116,
+          "attempts": 116
+        }
+      },
+      "retry_timing": {
+        "agent_wall_seconds": {
+          "total": 10638.31699044304,
+          "known_subtotal": 10638.31699044304,
+          "observed_attempts": 26,
+          "attempts": 26
+        },
+        "lifecycle_wall_seconds": {
+          "total": 10689.984906188678,
+          "known_subtotal": 10689.984906188678,
+          "observed_attempts": 26,
+          "attempts": 26
+        }
+      },
+      "counters": {
+        "session_compactions": {
+          "total": 28,
+          "known_subtotal": 28,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "compaction_completions": {
+          "total": 28,
+          "known_subtotal": 28,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "compaction_failures": {
+          "total": 53,
+          "known_subtotal": 53,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "compaction_requests": {
+          "total": 81,
+          "known_subtotal": 81,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "child_sessions": {
+          "total": 0,
+          "known_subtotal": 0,
+          "observed_attempts": 116,
+          "attempts": 116
+        },
+        "session_count": {
+          "total": 116,
+          "known_subtotal": 116,
+          "observed_attempts": 116,
+          "attempts": 116
+        }
+      },
+      "cumulative_attempt_hours": 9.61879520698638,
+      "attempt_minutes_per_terminal_strict_pass": 6.633651866887158
+    }
+  ]
+}

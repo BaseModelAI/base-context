@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as orphanProcessModule from "../src/core/orphan-process-journal.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
@@ -141,7 +141,7 @@ vi.mock("../src/core/session-lease.js", async (importOriginal) => {
 	};
 });
 
-const supervisorRegistryDirEnv = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+const supervisorRegistryDirEnv = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 const previousSupervisorRegistryDir = process.env[supervisorRegistryDirEnv];
 const supervisorRegistryDirs = new Set<string>();
 
