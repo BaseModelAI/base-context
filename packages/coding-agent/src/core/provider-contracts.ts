@@ -29,13 +29,6 @@ export const BUILT_IN_PROVIDER_AUTH_CONTRACTS: readonly ProviderAuthContract[] =
 			"OpenAI Codex subscription OAuth is unavailable in Base Context: its client identity has not been validated for this distribution. For API-key inference, select the openai provider and configure OPENAI_API_KEY.",
 		apiKeyProviderId: "openai",
 	},
-	{
-		providerId: "prime-inference",
-		oauth: "unsupported",
-		guidance:
-			"Prime browser login is unavailable in Base Context. Use Prime Inference API-key login or PRIME_API_KEY instead.",
-		apiKeyProviderId: "prime-inference",
-	},
 ];
 
 export function getProviderAuthContract(providerId: string): ProviderAuthContract {

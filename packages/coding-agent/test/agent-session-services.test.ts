@@ -41,35 +41,8 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
-	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-telemetry-notice-${Date.now()}`);
-		mkdirSync(tempDir, { recursive: true });
-		cleanupPaths.push(tempDir);
-		const settingsManager = SettingsManager.inMemory();
-
-		const services = await createAgentSessionServices({
-			cwd: tempDir,
-			agentDir: tempDir,
-			settingsManager,
-			noBuiltinHerdrReporter: true,
-			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
-		});
-
-		expect(services.diagnostics).toContainEqual(
-			expect.objectContaining({
-				type: "info",
-				message: expect.stringContaining("Base Context analytics are opt-in"),
-			}),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(true);
-	});
-
-	it("honors an explicit daemon-carried telemetry opt-out", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);
+	it("creates local services and enforces request budgets", async () => {
+		const tempDir = join(tmpdir(), `pi-session-request-budget-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 		const settingsManager = SettingsManager.inMemory();
@@ -77,24 +50,16 @@ describe("createAgentSessionFromServices", () => {
 			cwd: tempDir,
 			agentDir: tempDir,
 			settingsManager,
-			telemetryDisabled: true,
 			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
 		});
-
-		expect(services.diagnostics).not.toContainEqual(
-			expect.objectContaining({ message: expect.stringContaining("Base Context analytics are opt-in") }),
-		);
-		expect(settingsManager.getTelemetryNoticeShown()).toBe(false);
 
 		const { session } = await createAgentSessionFromServices({
 			services,
 			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
-			telemetryDisabled: true,
 			requestTokenBudget: { mode: "enforce", profiles: [] },
 		});
 		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unbudgeted service request sent"));
 		try {
-			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
 			const model: Model<"openai-responses"> = {
 				id: "offline-services",
 				name: "Offline services",
@@ -129,7 +94,6 @@ describe("createAgentSessionFromServices", () => {
 			cwd: epochDir,
 			agentDir: epochDir,
 			authStorage: AuthStorage.inMemory(),
-			telemetryDisabled: true,
 			settingsManager: SettingsManager.inMemory({
 				compaction: { enabled: false, reserveTokens: 16, keepRecentTokens: 4 },
 				autoRefine: { enabled: false },
@@ -140,6 +104,8 @@ describe("createAgentSessionFromServices", () => {
 				noPromptTemplates: true,
 				noThemes: true,
 				noSkills: true,
+				// Keep this byte-budget fixture independent of ancestor AGENTS.md files.
+				noContextFiles: true,
 				skillsOverride: () => ({ skills: skillFixtures, diagnostics: [] }),
 			},
 		});
@@ -361,7 +327,6 @@ describe("createAgentSessionFromServices", () => {
 			includeGoals: false,
 			includeCompactSkill: false,
 			prewarmIpythonKernel: false,
-			telemetryDisabled: true,
 			requestTokenBudget: {
 				mode: "enforce",
 				profiles: [
@@ -1113,16 +1078,14 @@ describe("createAgentSessionFromServices", () => {
 		}
 	});
 
-	it("does not install top-level telemetry for a resumed child session", async () => {
-		vi.stubEnv("DO_NOT_TRACK", "0");
-		vi.stubEnv("BASE_CONTEXT_TELEMETRY", "1");
-		const tempDir = join(tmpdir(), `pi-session-child-telemetry-${Date.now()}`);
+	it("preserves resumed child depth and validates request budgets", async () => {
+		const tempDir = join(tmpdir(), `pi-session-child-budget-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
 		const services = await createAgentSessionServices({
 			cwd: tempDir,
 			agentDir: tempDir,
-			settingsManager: SettingsManager.inMemory({ telemetry: { noticeShown: true } }),
+			settingsManager: SettingsManager.inMemory(),
 			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
 		});
 		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
@@ -1131,7 +1094,6 @@ describe("createAgentSessionFromServices", () => {
 		const { session } = await createAgentSessionFromServices({ services, sessionManager });
 		try {
 			expect(session.rlmDepth).toBe(1);
-			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
 		} finally {
 			await session.disposeAsync();
 		}
@@ -1141,7 +1103,6 @@ describe("createAgentSessionFromServices", () => {
 				createAgentSessionFromServices({
 					services,
 					sessionManager: invalidManager,
-					telemetryDisabled: true,
 					// Invalid runtime configuration must reach the SDK validator, not disappear in the factory.
 					requestTokenBudget: { mode: "invalid" as "enforce", profiles: [] },
 				}),

@@ -54,7 +54,6 @@ import {
 	APP_NAME,
 	APP_TITLE,
 	getAgentDir,
-	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
 	getPhysicalPackageDir,
@@ -68,15 +67,6 @@ import {
 	isAgentSessionMessage,
 	startsAgentRun,
 } from "../../core/agent-messages.js";
-import {
-	type AgentTracePreviewResult,
-	type AgentTraceUploadAllResult,
-	type AgentTraceUploadResult,
-	getPrimeAgentTraceCredential,
-	previewAgentTraceFile,
-	uploadAgentTraceFile,
-	uploadAllAgentTraces,
-} from "../../core/agent-traces.js";
 import { isNoModelsAvailableMessage } from "../../core/auth-guidance.js";
 import {
 	type AgentCronJob,
@@ -116,8 +106,6 @@ import {
 } from "../../core/messages.js";
 import { findExactModelReferenceMatch, resolveModelScopeFromModels } from "../../core/model-resolver.js";
 import { parseNewSessionCommand } from "../../core/new-session-command.js";
-import { resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
-import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
@@ -130,11 +118,6 @@ import {
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
-import {
-	captureAgentCommandUsed,
-	captureOnboardingCompleted,
-	type TelemetryOnboardingOutcome,
-} from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { getOwnedInstallation } from "../../owned-install-layout.js";
 import { assertProductStatePath } from "../../runtime-paths.js";
@@ -180,7 +163,7 @@ import {
 	formatUpdateAvailableNotice,
 } from "../shared/startup-notices.js";
 import { AGENT_ACTIVITY_LABELS, AgentActivityTracker, formatTokenCount } from "./agent-activity.js";
-import { type AuthenticationResult, getAnthropicSubscriptionAuthWarning, ProviderAuthFlows } from "./auth-flows.js";
+import { getAnthropicSubscriptionAuthWarning, ProviderAuthFlows } from "./auth-flows.js";
 import { AgentMessageComponent } from "./components/agent-message.js";
 import { ArminComponent } from "./components/armin.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
@@ -213,7 +196,6 @@ import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./compo
 import { formatKeyText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.js";
 import { createMermaidMarkdownTransform } from "./components/mermaid.js";
 import type { AuthSelectorProvider } from "./components/oauth-selector.js";
-import { PrimeOnboardingSplashComponent } from "./components/prime-onboarding-splash.js";
 import {
 	MalformedRefinementOutcomeMessageComponent,
 	RefinementOutcomeMessageComponent,
@@ -256,12 +238,7 @@ import type {
 	InteractiveModeLocalToolRendererDefinition,
 	InteractiveModeUiServices,
 } from "./interactive-mode-services.js";
-import {
-	isOnboardingModelReady,
-	type OnboardingStartupState,
-	shouldRunOnboarding,
-	shouldRunPrimeCliOnboardingSplash,
-} from "./onboarding.js";
+import { isOnboardingModelReady, type OnboardingStartupState, shouldRunOnboarding } from "./onboarding.js";
 import type { ClientPromptStashStore, PromptStash, PromptStashState } from "./prompt-stash-state.js";
 import { QueueSelection, type QueueSelectionItem } from "./queue-selection.js";
 import { formatResumeHint } from "./resume-hint.js";
@@ -534,11 +511,6 @@ type GoalAnnouncementSnapshot = {
 };
 
 type ModelFallbackWarningAction = "show" | "suppress";
-
-interface OnboardingSplashHandle {
-	showProgress(message: string): void;
-	dismiss(): void;
-}
 
 const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	off: "No reasoning",
@@ -1076,7 +1048,6 @@ export class InteractiveMode {
 
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
-	private traceUploadAllAbortController: AbortController | undefined = undefined;
 
 	private readonly queueSelection = new QueueSelection();
 	private isApplyingQueueSelectionText = false;
@@ -1773,10 +1744,6 @@ export class InteractiveMode {
 		return shouldRunOnboarding(this.getOnboardingState());
 	}
 
-	private shouldRunPrimeCliOnboardingSplash(): boolean {
-		return shouldRunPrimeCliOnboardingSplash(this.getOnboardingState());
-	}
-
 	private markOnboardingShown(): void {
 		if (!this.settingsManager.getOnboardingShown()) {
 			this.settingsManager.setOnboardingShown(true);
@@ -1788,75 +1755,22 @@ export class InteractiveMode {
 			return false;
 		}
 
-		const startedAt = Date.now();
-		const showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash();
-		let outcome: TelemetryOnboardingOutcome = "aborted";
-		try {
+		const setupCompleted = await this.runOnboardingFlow();
+		if (setupCompleted && isOnboardingModelReady(this.getOnboardingState())) {
 			this.markOnboardingShown();
 			await this.settingsManager.flush();
-			await this.runOnboardingFlow(showPrimeCliSplash);
-			outcome = isOnboardingModelReady(this.getOnboardingState()) ? "success" : "aborted";
-			return true;
-		} catch (error) {
-			outcome = "error";
-			throw error;
-		} finally {
-			const model = this.getCurrentModel();
-			const authStatus = model ? this.modelRegistry.getProviderAuthStatus(model.provider) : undefined;
-			const storedCredential = model ? this.modelRegistry.authStorage.get(model.provider) : undefined;
-			void captureOnboardingCompleted({
-				agentDir: getAgentDir(),
-				settingsManager: this.settingsManager,
-				durationMs: Date.now() - startedAt,
-				outcome,
-				provider: model?.provider,
-				authSource: authStatus?.source,
-				storedCredentialType: storedCredential?.type,
-			}).catch(() => {});
 		}
+		return true;
 	}
 
-	private async showOnboardingModelSelection(splash: OnboardingSplashHandle): Promise<void> {
-		try {
-			await this.showConfigurationMenu("models");
-		} finally {
-			splash.dismiss();
-		}
-	}
-
-	private async runOnboardingFlow(showPrimeCliSplash = this.shouldRunPrimeCliOnboardingSplash()): Promise<void> {
+	private async runOnboardingFlow(): Promise<boolean> {
 		this.modelRegistry.refresh();
-		if (showPrimeCliSplash) {
-			const splash = await this.showOnboardingSplash("choose a model");
-			if (!splash) {
-				return;
-			}
-
-			await this.showOnboardingModelSelection(splash);
-			return;
+		const model = this.getCurrentModel();
+		if (model) {
+			const authFlows = this.createAuthFlows();
+			return this.ensureModelProviderConfigured(model, authFlows, authFlows.getLoginProviderOptions());
 		}
-
-		const availableModels = await this.getModelCandidates();
-		if (availableModels.length > 0) {
-			await this.showConfigurationMenu("models");
-			return;
-		}
-
-		const splash = await this.showOnboardingSplash();
-		if (!splash) {
-			return;
-		}
-
-		splash.showProgress("Signing in to Prime Intellect...");
-		const authResult = await this.createAuthFlows().runPrimeInferenceLogin();
-		if (authResult.status !== "success") {
-			splash.dismiss();
-			return;
-		}
-
-		splash.showProgress("Preparing models...");
-		await this.prepareForModelSelectionAfterLogin(authResult);
-		await this.showOnboardingModelSelection(splash);
+		return this.showConfigurationMenu("providers", undefined, true);
 	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
@@ -2806,7 +2720,6 @@ export class InteractiveMode {
 			this.isBashRunning() ||
 			this.getRetryAttempt() > 0 ||
 			this.connectionState?.sessionActions.active !== undefined ||
-			this.traceUploadAllAbortController !== undefined ||
 			this.sideQuestionEvent?.status === "running"
 		);
 	}
@@ -4727,14 +4640,6 @@ export class InteractiveMode {
 					this.ui.requestRender();
 					return;
 				}
-				if (commandName) {
-					void captureAgentCommandUsed({
-						agentDir: getAgentDir(),
-						settingsManager: this.settingsManager,
-						commandName,
-					}).catch(() => {});
-				}
-
 				if (commandName === "btw") {
 					this.editor.setText("");
 					await this.handleSideQuestion(commandArgs);
@@ -4809,11 +4714,6 @@ export class InteractiveMode {
 				if (commandName === "system-prompt" && !commandArgs) {
 					this.echoLocalCommand(text);
 					await this.handleSystemPromptCommand();
-					this.editor.setText("");
-					return;
-				}
-				if (commandName === "traces") {
-					await this.handleTracesCommand(canonicalCommandText);
 					this.editor.setText("");
 					return;
 				}
@@ -6782,7 +6682,6 @@ export class InteractiveMode {
 	}
 
 	private interruptOrClearInput(): void {
-		this.traceUploadAllAbortController?.abort(new Error("Trace upload cancelled"));
 		if (this.sideQuestionEvent?.status === "running") {
 			this.abortSideQuestion(this.sideQuestionEvent.id, true);
 		}
@@ -8118,7 +8017,11 @@ export class InteractiveMode {
 		void this.showConfigurationMenu("models", initialSearchInput);
 	}
 
-	private showConfigurationMenu(initialTab: ConfigurationMenuTab, initialModelSearch?: string): Promise<void> {
+	private showConfigurationMenu(
+		initialTab: ConfigurationMenuTab,
+		initialModelSearch?: string,
+		providerFirst = this.getCurrentModel() === undefined,
+	): Promise<boolean> {
 		const modelCatalog = this.getCachedModelCandidates();
 		const authFlows = this.createAuthFlows();
 		const providerOptions = authFlows.getLoginProviderOptions();
@@ -8149,11 +8052,11 @@ export class InteractiveMode {
 				handle?.focus();
 				this.ui.requestRender();
 			};
-			const finish = () => {
+			const finish = (modelSelected = false) => {
 				if (settled) return;
 				settled = true;
 				hide();
-				resolve();
+				resolve(modelSelected);
 			};
 			const refreshModels = (force: boolean) => {
 				const refreshPromise = this.getModelSelectorRefreshPromise({ force });
@@ -8166,8 +8069,27 @@ export class InteractiveMode {
 						if (!settled) this.showError(error instanceof Error ? error.message : String(error));
 					});
 			};
+			const showProviderModels = (providerId: string) => {
+				menu.updateModels(
+					this.getCurrentModel(),
+					this.getCachedModelCandidates(),
+					this.connectionConfiguredProviders,
+				);
+				if (providerFirst) menu.showProviderModels(providerId);
+				else menu.setActiveTab("models");
+				refreshModels(true);
+			};
 			const authenticate = (provider: AuthSelectorProvider, tab: "providers" | "mcp-connections") => {
 				if (settled) return;
+				if (
+					providerFirst &&
+					tab === "providers" &&
+					(this.connectionConfiguredProviders.has(provider.id) ||
+						this.modelRegistry.getProviderAuthStatus(provider.id).configured)
+				) {
+					showProviderModels(provider.id);
+					return;
+				}
 				void authFlows
 					.loginProvider(provider)
 					.then(async (authResult) => {
@@ -8187,14 +8109,7 @@ export class InteractiveMode {
 							return;
 						}
 
-						await this.prepareForModelSelectionAfterLogin(authResult);
-						menu.updateModels(
-							this.getCurrentModel(),
-							this.getCachedModelCandidates(),
-							this.connectionConfiguredProviders,
-						);
-						menu.setActiveTab("models");
-						refreshModels(true);
+						showProviderModels(authResult.providerId);
 					})
 					.catch((error) => {
 						handle?.focus();
@@ -8204,6 +8119,7 @@ export class InteractiveMode {
 
 			menu = new ConfigurationMenuComponent({
 				initialTab,
+				providerFirst,
 				tui: this.ui,
 				authStorage: this.modelRegistry.authStorage,
 				providerOptions,
@@ -8238,7 +8154,7 @@ export class InteractiveMode {
 							show();
 							this.showError(error instanceof Error ? error.message : String(error));
 						} finally {
-							if (completed) finish();
+							if (completed) finish(true);
 						}
 					})();
 				},
@@ -8591,55 +8507,6 @@ export class InteractiveMode {
 		}
 	}
 
-	private showOnboardingSplash(continueActionLabel?: string): Promise<OnboardingSplashHandle | undefined> {
-		return new Promise((resolve) => {
-			let settled = false;
-			let dismissed = false;
-			let handle: OverlayHandle | undefined;
-			let selector: PrimeOnboardingSplashComponent | undefined;
-			const settle = (result: OnboardingSplashHandle | undefined) => {
-				if (settled) {
-					return;
-				}
-				settled = true;
-				resolve(result);
-			};
-			const dismiss = () => {
-				if (dismissed) {
-					return;
-				}
-				dismissed = true;
-				selector?.dispose();
-				handle?.hide();
-				this.ui.requestRender();
-			};
-			selector = new PrimeOnboardingSplashComponent(
-				() => {
-					selector?.dispose();
-					settle({
-						showProgress: (message) => selector?.showProgress(message),
-						dismiss,
-					});
-				},
-				() => {
-					dismiss();
-					settle(undefined);
-				},
-				{
-					getRows: () => this.ui.terminal.rows,
-					requestRender: () => this.ui.requestRender(),
-					...(continueActionLabel ? { continueActionLabel } : {}),
-				},
-			);
-			handle = this.ui.showOverlay(selector, {
-				width: "100%",
-				maxHeight: "100%",
-				row: 0,
-				col: 0,
-			});
-		});
-	}
-
 	private createAuthFlows(): ProviderAuthFlows {
 		return new ProviderAuthFlows({
 			ui: this.ui,
@@ -8657,45 +8524,6 @@ export class InteractiveMode {
 				void this.maybeWarnAboutAnthropicSubscriptionAuth();
 			},
 		});
-	}
-
-	private async prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean> {
-		const currentModel = this.getCurrentModel();
-		// The agent core uses unknown/unknown as its no-model sentinel.
-		const selectedModel =
-			currentModel?.provider === "unknown" && currentModel.id === "unknown" ? undefined : currentModel;
-		let action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, this.modelRegistry);
-		if (!action.openModelPicker) {
-			return false;
-		}
-
-		if (!selectedModel) {
-			try {
-				const availableModels = await this.getConnectionAvailableModels();
-				action = resolvePrimeInferencePostLoginModelAction(authResult, selectedModel, {
-					find: (provider, modelId) =>
-						availableModels.find((model) => model.provider === provider && model.id === modelId) ??
-						this.modelRegistry.find(provider, modelId),
-				});
-			} catch {
-				// Preserve the registry fallback so selection can still report a specific failure below.
-			}
-		}
-
-		if (action.fallbackModel) {
-			try {
-				await this.applySelectedModel(action.fallbackModel);
-				await this.settingsManager.flush();
-			} catch (error) {
-				this.showError(
-					`Prime Inference login succeeded, but the default model could not be selected: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		} else if (!selectedModel) {
-			this.showError("Prime Inference login succeeded, but the default GLM 5.2 model is unavailable.");
-		}
-
-		return true;
 	}
 
 	private async handleMcpCommand(args: string | undefined): Promise<void> {
@@ -9359,254 +9187,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(prompt, 1, 0));
 		this.ui.requestRender();
-	}
-
-	private formatTraceUploadResult(result: AgentTraceUploadResult): string {
-		switch (result.status) {
-			case "uploaded":
-				return `Trace uploaded (${result.bytesStored.toLocaleString()} bytes).`;
-			case "disabled":
-				return "Trace sharing is disabled.";
-			case "unchanged":
-				return "Trace is already uploaded; no new content since the last upload.";
-			case "missing_credentials":
-				return "Trace sharing needs a Prime API key. Run /traces login.";
-			case "no_session_file":
-				return "Current session has no persisted trace yet.";
-			case "empty_session":
-				return "Current session trace is empty.";
-			case "invalid_session":
-				return `Trace upload skipped: ${result.message}.`;
-			case "too_large":
-				return `Trace upload skipped: session file is ${result.size.toLocaleString()} bytes; limit is ${result.maxBytes.toLocaleString()} bytes.`;
-			case "failed":
-				if (result.statusCode === 404) {
-					return "Trace upload endpoint was not found. The platform API may not be deployed yet, or BASE_CONTEXT_TRACES_BASE_URL points at the wrong API.";
-				}
-				return `Trace upload failed: ${result.statusCode ? `HTTP ${result.statusCode}: ` : ""}${result.message}. See ${getAgentTracesLogPath()} for details.`;
-		}
-	}
-
-	private async uploadCurrentTraceOnce(): Promise<AgentTraceUploadResult> {
-		const state = await this.agentConnection.getState();
-		return uploadAgentTraceFile({
-			sessionFile: state.sessionFile,
-			authStorage: this.modelRegistry.authStorage,
-			settingsManager: this.settingsManager,
-			requireEnabled: false,
-			reloadConfig: false,
-		});
-	}
-
-	private async previewCurrentTrace(): Promise<void> {
-		const state = await this.agentConnection.getState();
-		const result = await previewAgentTraceFile({ sessionFile: state.sessionFile });
-		let info: string;
-		switch (result.status) {
-			case "no_session_file":
-				info = "Trace preview is unavailable until the current session has a persisted assistant response.";
-				break;
-			case "empty_session":
-				info = "The current trace is empty.";
-				break;
-			case "invalid_session":
-			case "failed":
-				info = `Trace preview failed: ${result.message}.`;
-				break;
-			case "ready":
-				info = this.formatTracePreview(result);
-				break;
-		}
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(info, 1, 0));
-		this.ui.requestRender();
-	}
-
-	private formatTracePreview(result: Extract<AgentTracePreviewResult, { status: "ready" }>): string {
-		const lines = [
-			theme.bold("Trace Preview"),
-			theme.fg("dim", "Nothing has been uploaded by this command."),
-			"",
-			`${theme.fg("dim", "File:")} ${result.sessionFile}`,
-			`${theme.fg("dim", "Size:")} ${result.size.toLocaleString()} bytes`,
-			`${theme.fg("dim", "Uploadable:")} ${result.uploadable ? "Yes" : `No (limit ${result.maxBytes.toLocaleString()} bytes)`}`,
-			`${theme.fg("dim", "Endpoint:")} ${result.endpoint}`,
-			`${theme.fg("dim", "Session ID:")} ${result.sessionId}`,
-			`${theme.fg("dim", "Trace ID:")} ${result.traceId}`,
-		];
-		if (result.parentSessionId) {
-			lines.push(`${theme.fg("dim", "Parent session:")} ${result.parentSessionId}`);
-		}
-		if (result.gitRepo) {
-			lines.push(`${theme.fg("dim", "Git repository:")} ${result.gitRepo}`);
-		}
-		if (result.gitCommit) {
-			lines.push(`${theme.fg("dim", "Git commit:")} ${result.gitCommit}`);
-		}
-		lines.push("", theme.bold("Raw JSONL payload preview"));
-		if (result.contentPreview) {
-			lines.push(result.contentPreview);
-			if (result.truncated) {
-				lines.push("", theme.fg("dim", "Preview truncated; upload sends the complete file."));
-			}
-		} else {
-			lines.push(theme.fg("dim", "Payload omitted because the trace exceeds the upload limit."));
-		}
-		return lines.join("\n");
-	}
-
-	private async uploadAllTraces(sessionDir?: string, signal?: AbortSignal): Promise<AgentTraceUploadAllResult> {
-		return uploadAllAgentTraces({
-			authStorage: this.modelRegistry.authStorage,
-			settingsManager: this.settingsManager,
-			sessionDir,
-			requireEnabled: false,
-			reloadConfig: false,
-			signal,
-			onProgress: ({ completed, total }) => {
-				if (total > 0 && (completed === 0 || completed === total || completed % 10 === 0)) {
-					this.showStatus(
-						`Uploading traces: ${completed.toLocaleString()}/${total.toLocaleString()} (${keyText("app.clear")} to cancel)`,
-					);
-				}
-			},
-		});
-	}
-
-	private async handleTracesCommand(text: string): Promise<void> {
-		const command =
-			text
-				.replace(/^\/traces\b/, "")
-				.trim()
-				.toLowerCase() || "status";
-
-		if (command === "status") {
-			await this.settingsManager.reload().catch(() => undefined);
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			const state = await this.agentConnection.getState();
-			const info = [
-				theme.bold("Trace Sharing"),
-				"",
-				`${theme.fg("dim", "Automatic uploads:")} ${this.settingsManager.getAgentTracesEnabled() ? "Enabled" : "Disabled"}`,
-				`${theme.fg("dim", "Credential:")} ${credential?.label ?? "Not configured"}`,
-				`${theme.fg("dim", "Endpoint:")} ${resolvePrimeAgentTracesBaseUrl()}`,
-				`${theme.fg("dim", "Session file:")} ${state.sessionFile ?? "In-memory"}`,
-				"",
-				theme.fg(
-					"dim",
-					"Commands: /traces on, /traces off, /traces preview, /traces upload-current, /traces upload-all, /traces login",
-				),
-			].join("\n");
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(info, 1, 0));
-			this.ui.requestRender();
-			return;
-		}
-
-		if (command === "off" || command === "disable") {
-			this.settingsManager.setAgentTracesEnabled(false);
-			await this.settingsManager.flush();
-			this.showStatus("Trace sharing disabled.");
-			return;
-		}
-
-		if (command === "login") {
-			await this.createAuthFlows().runPrimeAgentTracesLogin();
-			return;
-		}
-
-		if (command === "preview") {
-			await this.previewCurrentTrace();
-			return;
-		}
-
-		if (command === "on" || command === "enable") {
-			let credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				const authResult = await this.createAuthFlows().runPrimeAgentTracesLogin();
-				if (authResult.status !== "success") {
-					return;
-				}
-				credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			}
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key.");
-				return;
-			}
-
-			this.settingsManager.setAgentTracesEnabled(true);
-			await this.settingsManager.flush();
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const uploadMessage =
-				uploadResult.status === "no_session_file" || uploadResult.status === "empty_session"
-					? "Current session will upload after the first assistant response."
-					: this.formatTraceUploadResult(uploadResult);
-			this.showStatus(`Trace sharing enabled. ${uploadMessage}`);
-			return;
-		}
-
-		if (command === "upload" || command === "upload-current") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
-				return;
-			}
-			const uploadResult = await this.uploadCurrentTraceOnce();
-			const message = this.formatTraceUploadResult(uploadResult);
-			if (uploadResult.status === "failed") {
-				this.showError(message);
-			} else {
-				this.showStatus(message);
-			}
-			return;
-		}
-
-		if (command === "upload-all") {
-			const credential = await getPrimeAgentTraceCredential(this.modelRegistry.authStorage);
-			if (!credential) {
-				this.showError("Trace sharing needs a Prime API key. Run /traces login.");
-				return;
-			}
-			if (this.traceUploadAllAbortController) {
-				this.showWarning("A trace upload is already running. Cancel it before starting another.");
-				return;
-			}
-			const state = await this.agentConnection.getState();
-			const abortController = new AbortController();
-			this.traceUploadAllAbortController = abortController;
-			let result: AgentTraceUploadAllResult;
-			try {
-				result = await this.uploadAllTraces(state.sessionDir, abortController.signal);
-			} finally {
-				if (this.traceUploadAllAbortController === abortController) {
-					this.traceUploadAllAbortController = undefined;
-				}
-			}
-			if (abortController.signal.aborted) {
-				this.showStatus("Trace upload cancelled.");
-				return;
-			}
-			if (result.total === 0) {
-				this.showStatus("No persisted traces were found.");
-				return;
-			}
-			const summary = [
-				`Uploaded ${result.uploaded.toLocaleString()} of ${result.total.toLocaleString()} traces`,
-				result.skipped > 0 ? `${result.skipped.toLocaleString()} skipped` : undefined,
-				result.failed > 0 ? `${result.failed.toLocaleString()} failed` : undefined,
-				`${result.bytesStored.toLocaleString()} bytes stored`,
-			]
-				.filter((part): part is string => part !== undefined)
-				.join("; ");
-			if (result.failed > 0) {
-				this.showWarning(`${summary}. See ${getAgentTracesLogPath()} for details.`);
-			} else {
-				this.showStatus(`${summary}.`);
-			}
-			return;
-		}
-
-		this.showWarning("Usage: /traces [status|on|off|preview|upload|upload-current|upload-all|login]");
 	}
 
 	private async handleContextCommand(): Promise<void> {

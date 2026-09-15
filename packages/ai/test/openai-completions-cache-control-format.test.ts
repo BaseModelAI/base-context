@@ -43,6 +43,11 @@ const emptyUsage: Usage = {
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
+		static APIConnectionTimeoutError = class extends Error {};
+		baseURL: string;
+		constructor(options: { baseURL: string }) {
+			this.baseURL = options.baseURL;
+		}
 		chat = {
 			completions: {
 				create: (params: CapturedParams) => {
@@ -180,7 +185,7 @@ describe("openai-completions cacheControlFormat", () => {
 	});
 
 	it("advances the Anthropic cache marker to a tool result", async () => {
-		const model = getModel("prime-inference", "anthropic/claude-haiku-4.5");
+		const model = getModel("openrouter", "anthropic/claude-haiku-4.5");
 		const now = Date.now();
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the file", timestamp: now },
@@ -224,20 +229,6 @@ describe("openai-completions cacheControlFormat", () => {
 		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.cacheWrite) / 1_000_000);
 	});
 
-	it("applies Anthropic-style cache markers for Prime Inference Anthropic models", async () => {
-		const model = getModel("prime-inference", "anthropic/claude-fable-5");
-		const { params, result } = await runCompletion(model);
-		expectAnthropicCacheMarkers(params);
-		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.input * 1.25) / 1_000_000);
-	});
-
-	it("prices one-hour Prime Inference cache writes at twice the input rate", async () => {
-		const model = getModel("prime-inference", "anthropic/claude-fable-5");
-		const { params, result } = await runCompletion(model, { cacheRetention: "long" });
-		expectAnthropicCacheMarkers(params, { type: "ephemeral", ttl: "1h" });
-		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.input * 2) / 1_000_000);
-	});
-
 	it("prices one-hour OpenRouter Anthropic cache writes at twice the input rate", async () => {
 		const model = getModel("openrouter", "anthropic/claude-sonnet-4");
 		const { params, result } = await runCompletion(model, { cacheRetention: "long" });
@@ -268,8 +259,8 @@ describe("openai-completions cacheControlFormat", () => {
 		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.input * 1.25) / 1_000_000);
 	});
 
-	it("does not apply Anthropic-style cache markers to other Prime Inference models", async () => {
-		const model = getModel("prime-inference", "openai/gpt-5.6-sol");
+	it("does not apply Anthropic-style cache markers to other OpenRouter models", async () => {
+		const model = getModel("openrouter", "openai/gpt-5.6-sol");
 		const params = await capturePayload(model);
 		expectNoAnthropicCacheMarkers(params);
 	});

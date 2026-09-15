@@ -1,35 +1,35 @@
 # Providers
 
-Base Context resolves providers through their actual API and credential routes. API keys can come from environment variables or the owned auth file. A model catalog entry does not establish subscription entitlement, OAuth-client permission or native context capabilities.
+Choose a supported **provider and model**, then use that provider's authentication. Base Context does not choose a provider or model automatically. Accounts, usage limits, and billing belong to the provider you select.
 
-## Table of Contents
+## First-time setup
 
-- [Subscriptions](#subscriptions)
-- [API Keys](#api-keys)
-- [Auth File](#auth-file)
-- [Cloud Providers](#cloud-providers)
-- [Custom Providers](#custom-providers)
-- [Resolution Order](#resolution-order)
+1. Start `base-context`.
+2. Open `/login`, select a provider, and sign in or enter that provider's API key.
+3. Open `/model` and choose a supported model. The selected provider/model is saved for later sessions.
+
+For command-line selection, list the supported models and name both parts:
+
+```bash
+base-context model list
+base-context --provider openai --model gpt-5.4
+# Equivalent:
+base-context --model openai/gpt-5.4
+```
+
+An API key alone does not select a model. A missing or unavailable saved model is not silently replaced with another provider. For models outside the built-in list, register the provider/model in [models.json](models.md) first.
 
 ## Subscriptions
 
-Use only the provider/auth routes authorized for your setup. `/login` exposes the available configured routes; a fork does not inherit permission to use upstream OAuth clients. Where writable credential storage is supported, it belongs under `~/.base-context/auth.json` (or `BASE_CONTEXT_HOME`), not Prime's root. Login, refresh and logout behavior follows the selected route's permissions.
+Use `/login` to see the supported sign-in routes. Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root).
 
-Do not copy a Prime credential store or enable an API-key billing fallback to bypass a subscription refusal. The offline migration command excludes credentials.
+- **OpenAI Codex:** choose OpenAI Codex and sign in with your OpenAI account.
+- **Claude Pro/Max:** choose Anthropic's subscription sign-in route. An Anthropic API key is a separate option.
+- **GitHub Copilot:** choose GitHub Copilot and the correct github.com or GitHub Enterprise domain.
 
-### OpenAI Codex
+Model access and usage limits follow the selected provider account.
 
-An existing authorized OpenAI Codex subscription can be supplied to an individual SDK instance through an explicitly injected read-only backend. See [SDK authentication](sdk.md#api-keys-and-oauth).
-
-That mode uses the official `openai-codex` / `openai-codex-responses` route. It refuses missing, stale or expired credentials and disables login, refresh, credential writes and API-key fallback. Keep the backend outside tools. This is an instance-scoped permission, not a global OAuth-client approval or an OpenAI endorsement of this fork.
-
-### Claude Pro/Max
-
-Use this route only where the exact client and account are authorized. This guide does not establish Claude subscription access, included usage or billing terms for the fork. An Anthropic API key is a separate credential route.
-
-### GitHub Copilot
-
-If the authorized Copilot login route is available, use the correct github.com or GitHub Enterprise domain. Model availability also depends on the account and enabled models. This guide does not grant the fork access to a Copilot subscription.
+For advanced SDK use, an explicitly injected read-only OpenAI Codex backend can reuse existing credentials without login, refresh, credential writes, or API-key fallback. See [SDK authentication](sdk.md#api-keys-and-oauth).
 
 ## API Keys
 
@@ -47,7 +47,6 @@ base-context
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
-| Prime Inference | `PRIME_API_KEY` | `prime-inference` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
@@ -81,7 +80,6 @@ Store credentials in the owned `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` 
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
   "openai": { "type": "api_key", "key": "sk-..." },
-  "prime-inference": { "type": "api_key", "key": "..." },
   "deepseek": { "type": "api_key", "key": "sk-..." },
   "google": { "type": "api_key", "key": "..." },
   "opencode": { "type": "api_key", "key": "..." },
@@ -114,10 +112,6 @@ The `key` field supports three formats:
   ```
 
 Writable OAuth storage is used only when the configured route permits it. The read-only existing-Codex subscription mode does not write this file or refresh credentials. Shell-backed API-key entries execute commands; use only trusted local configuration, never unreviewed imported instructions.
-
-### Prime Inference
-
-Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
 
 ## Cloud Providers
 
@@ -159,7 +153,7 @@ Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_
 base-context --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
-Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
+Register custom application inference profile IDs in [models.json](models.md) before selecting them. Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
 
 ```bash
 export AWS_BEDROCK_FORCE_CACHE=1

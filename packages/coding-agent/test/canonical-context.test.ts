@@ -789,7 +789,6 @@ it("reconstructs the whole retained context across pages and caches immutable so
 							cwd: destination.getCwd(),
 							agentDir: join(destination.getSessionDir(), "native-agent"),
 							authStorage: AuthStorage.inMemory(),
-							telemetryDisabled: true,
 							settingsManager: SettingsManager.inMemory({
 								canonicalContext: { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 },
 								compaction: { enabled: false },
@@ -900,7 +899,6 @@ it("reconstructs the whole retained context across pages and caches immutable so
 								includeGoals: false,
 								includeCompactSkill: false,
 								prewarmIpythonKernel: false,
-								telemetryDisabled: true,
 								requestTokenBudget: {
 									mode: "enforce",
 									profiles: [

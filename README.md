@@ -11,7 +11,7 @@ Built by [Synerise](https://synerise.com), forked from [Prime Agent](https://git
 
 [![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](benchmarks/python-realworld-30/REPORT.md)
 
-*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of release 1.0.0. “Clean” adds runtime requirements to task correctness. [Methodology and full results](benchmarks/python-realworld-30/REPORT.md).*
+*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of this release. “Clean” adds runtime requirements to task correctness. [Methodology and full results](benchmarks/python-realworld-30/REPORT.md).*
 
 ## Why Base Context?
 
@@ -26,19 +26,38 @@ Base Context is built to help you:
 
 That is the bet: **less repeated detective work, more continuity, and a clearer link between what the agent says and the evidence it can recover.** The benchmark below measures one harness-level outcome; it does not prove that each mechanism independently caused the gain.
 
-## Install
+## Install (recommended)
 
-Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm:
+On **macOS or Linux**, run the interactive installer:
 
 ```bash
-npm install -g @ponythewhite/base-context
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
+```
+
+**Use this instead of the npm route below. You do not install Python or `uv` first.** The installer checks Node.js/npm and offers to install a compatible version if needed. It installs `uv` when needed, prepares the agent's Python environment, and installs the bundled runtime **before activating the CLI**.
+
+Follow the final PATH/activation command printed by the installer, then start work:
+
+```bash
 cd /path/to/your/project
 base-context
 ```
 
-In the terminal UI, run `/login` to configure an authorized provider, then `/model` to choose a model. For API-key routes, you can instead set the provider's environment variable before launch. See [provider setup](packages/coding-agent/docs/providers.md).
+In the terminal UI, select and authenticate with a supported provider using `/login`, then choose a model with `/model`. Both choices are explicit. The installer prepares the application; you use only the selected provider's account and authentication. See [provider setup](packages/coding-agent/docs/providers.md).
 
-The Python workspace uses `uv`. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; the default runtime prepares Python 3.11 and the bundled `base-context-runtime` on first use. Initial setup can download dependencies. The Python import is `rlm`.
+### npm alternative: for users who already manage Node.js
+
+Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm. These must already be installed **before** this route:
+
+```bash
+npm install -g @ponythewhite/base-context
+cd /path/to/your/project
+BASE_CONTEXT_INSTALL_UV=1 base-context
+```
+
+`npm install` installs the CLI; it does not prepare Python at that step. Starting a normal CLI session begins preparing the managed Python environment in the background. `BASE_CONTEXT_INSTALL_UV=1` lets that bootstrap install `uv` if it is missing. **No manual Python installation is needed.** Initial setup needs network access and can take a little longer; later launches reuse the environment.
+
+The environment-variable syntax above is for Bash/Zsh. See [installation](packages/coding-agent/docs/installation.md) for PowerShell, manual Python environments, updates, and rollback.
 
 ### Build from source
 
@@ -101,7 +120,7 @@ In a frozen study of **30 Python tasks × 3 models × 2 agents**, Base Context c
 
 That is **24.16% less cumulative attempt time**, or **26.68% less all-attempt time per strict pass**, in this study. These are sums of attempt lifecycle durations, **not campaign wall time, user-perceived latency, or CPU time**. Runtime-clean is a separate reliability measure: it includes compaction failures and must not be read as task correctness alone.
 
-This is one SDK-level coding harness with a shared Bash tool, not a native Python/RLM workflow evaluation or a general product-performance claim. It used logical `medium` effort and a fixed single-deferred-retry policy. The historical Base Context package was `0.1.0`, using source revision `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Release `1.0.0` builds on the latter source line; it is not a newly measured artifact. There are **16 attempts with unknown cost**. Reported prices are API-equivalent estimates, not cash charges; complete fees and a whole-campaign cost advantage are unknown.
+This is one SDK-level coding harness with a shared Bash tool, not a native Python/RLM workflow evaluation or a general product-performance claim. It used logical `medium` effort and a fixed single-deferred-retry policy. The historical Base Context package was `0.1.0`, using source revision `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Current releases build on the latter source line; they are not newly measured artifacts. There are **16 attempts with unknown cost**. Reported prices are API-equivalent estimates, not cash charges; complete fees and a whole-campaign cost advantage are unknown.
 
 See the [methodology and results](benchmarks/python-realworld-30/REPORT.md), [all 180 cells](benchmarks/python-realworld-30/results/cells.md), and [reproduction guide](benchmarks/python-realworld-30/REPRODUCE.md).
 
@@ -130,7 +149,7 @@ Task state is selected recorded evidence, not automatically current truth. Budge
 
 These choices favor **recoverable evidence and controlled working sets**, even when that requires more structure or refusing a request that cannot meet its configured contract. They describe this fork's emphasis—not a claim that every capability is absent from every upstream version.
 
-The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Remote telemetry and trace sharing are off by default and require explicit configuration.
+The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Diagnostics stay local; there is no telemetry upload feature.
 
 There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](packages/coding-agent/docs/context-management.md) and [fork philosophy](packages/coding-agent/docs/fork-philosophy.md) for the contracts and limits.
 
@@ -153,25 +172,6 @@ Retained sessions and artifacts can contain sensitive information. Compaction is
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues through [SECURITY.md](SECURITY.md), not in public transcripts or issues.
 
-## Credits and license
+## License
 
-Base Context is an MIT-licensed fork of **[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent)** by **[Prime Intellect](https://www.primeintellect.ai/)**. Its lineage includes **Mario Zechner's [Pi / pi-mono](https://github.com/badlogic/pi-mono)** agent and terminal UI work. We preserve upstream credits and license notices.
-
-We also acknowledge Prime Intellect's **[PrimeRL](https://github.com/PrimeIntellect-ai/prime-rl)** project and its contribution to open reinforcement-learning infrastructure. PrimeRL is a separate project, not a direct dependency of this CLI.
-
-See [LICENSE](LICENSE).
-
-## Citation
-
-If you use this codebase in your research, please cite Prime Agent:
-
-```bibtex
-@article{karten2026prime,
-  title={Prime Agent: A Self-Improving RLM Harness},
-  author={Karten, Seth and Zhang, Alex L. and Thomas, Kevin and Müller, Sebastian and Bakouch, Elie and Auras, Daniel and Senghaas, Mika and Obeid, Fares and Dunas, Konstantin and Hagemann, Johannes and Jaghouar, Sami},
-  journal={arXiv preprint arXiv:2608.23552},
-  year={2026}
-}
-```
-
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for copyright and license terms.

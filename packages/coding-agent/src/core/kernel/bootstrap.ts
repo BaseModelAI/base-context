@@ -15,7 +15,7 @@ import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const ownedRuntime = getOwnedInstallation(getPhysicalPackageDir());
 const BOOTSTRAP_SCHEMA = 11;
-const PYTHON_VERSION = "3.11";
+const PYTHON_VERSION = "3.13";
 const RUNTIME_REQUIREMENT = PRODUCT.runtimeDistribution;
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.

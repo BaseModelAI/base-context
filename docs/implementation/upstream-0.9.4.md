@@ -55,7 +55,6 @@ A candidate is not an implemented or tested port. The older leading tables in
 | `fb2db8ee1b6` | later main | DEFER | Whole-subtree running/idle counts. Adapt only to owned live topology; bounded saved pages cannot prove whole-tree totals. |
 | `65674748530` | later main | DEFER | Short model labels are display-only. Keep full provider/model identities in request contracts and indexed saved metadata. |
 | `1eee2938b4e` | later main | SKIP | Upstream stacked-PR benchmark CI. Do not import its experiment launcher or populations. |
-| `55c611fbf63` | later main | DEFER | /traces completion is convenience UI. No new tracing store or mandatory review workflow. |
 | `27daf22125a` | later main | DEFER | Autonomous budget flags touch policy/accounting. Do not widen W72 or native admission through a CLI port. |
 | `4f4d51c5b5e` | later main | SKIP wholesale | Roster consolidation must not replace native family access and bounded indexed catalog/page owners. |
 | `5a843023781` | later main | SKIP wholesale | Synthetic bracket grammar rewrites message/prompt contracts. It cannot replace native qualification, source identity or stable replay. |

@@ -66,6 +66,8 @@ export async function listDaemonSavedSessions(
 			if (!page.after) throw new Error("Saved-session page has no continuation");
 			cursor = { identity: page.after, direction: "next" };
 		}
+		// Only the completed page walk has an exact total for the requested sessions.
+		options.onProgress?.(sessions.size, sessions.size);
 		return [...sessions.values()]
 			.sort((a, b) => {
 				if (a.source !== b.source) return a.source === "catalog" ? -1 : 1;

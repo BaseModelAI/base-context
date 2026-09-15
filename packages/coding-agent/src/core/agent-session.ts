@@ -211,6 +211,7 @@ import {
 	captureNativeReviewerRequests,
 	InferenceCoordinator,
 	type SessionRuntimeServices,
+	takeNativeInferenceAuthSource,
 } from "./inference-coordinator.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
@@ -1310,7 +1311,6 @@ export class AgentSession {
 	private _retryAttempt = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
-	private _retryAuthFailureSources: AuthSourceToken[] = [];
 	private _agentMessageClearEpoch = 0;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
 	private _lateIpythonSentAgentMessages = new Map<string, KernelSentAgentMessage[]>();
@@ -1868,7 +1868,6 @@ export class AgentSession {
 					});
 				}
 				this._retryAttempt = 0;
-				this._retryAuthFailureSources = [];
 				this._resolveRetry();
 			},
 		});
@@ -5005,6 +5004,12 @@ export class AgentSession {
 				if (record) record.started = true;
 			}
 		}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			// Native result settlement precedes message publication. Keep auth failure
+			// ownership independent of later message replacement, cancellation, or retry cleanup.
+			const source = takeNativeInferenceAuthSource(event.message);
+			if (source && this._isConcreteProviderAuthFailure(event.message)) this._markProviderAuthStale(source);
+		}
 		const compactionOwner = event.type === "agent_end" ? this._invocationCompactionOwner : undefined;
 		const job = this._agentEventQueue.then(
 			() => this._processAgentEvent(event, nativeMessageWrite, compactionOwner),
@@ -5105,7 +5110,6 @@ export class AgentSession {
 				});
 				this._retryAttempt = 0;
 			}
-			this._retryAuthFailureSources = [];
 			this._resolveRetry();
 			await this._emitExtensionEvent(event);
 			this._emit(event);
@@ -5215,9 +5219,6 @@ export class AgentSession {
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecovery = "idle";
 				}
-				if (this._isConcreteProviderAuthFailure(assistantMsg)) {
-					this._captureRetryAuthFailureSource(assistantMsg);
-				}
 
 				// Reset retry counter immediately on successful assistant response
 				// This prevents accumulation across multiple LLM calls within a turn
@@ -5232,7 +5233,6 @@ export class AgentSession {
 						attempt: this._retryAttempt,
 					});
 					this._retryAttempt = 0;
-					this._retryAuthFailureSources = [];
 				}
 				if ((await this._accountGoalUsageForAssistantMessage(assistantMsg)) && !this._invocationOutputRefused) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
@@ -5259,12 +5259,6 @@ export class AgentSession {
 				return;
 			}
 
-			if (this._isConcreteProviderAuthFailure(msg)) {
-				this._markProviderAuthStaleForRetryFailure(msg, {
-					markAuthStaleOnFailure: true,
-					authSourceTokens: this._retryAuthFailureSources,
-				});
-			}
 			const compactionWillRetry = await this._checkCompaction(msg, true, true, compactionOwner);
 			if (compactionWillRetry && this._retryAttempt > 0) {
 				return;
@@ -13585,71 +13579,16 @@ export class AgentSession {
 		);
 	}
 
-	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {
-		const token = this._modelRegistry.getCurrentProviderAuthSourceToken(message.provider);
-		if (!token) {
-			return undefined;
+	private _markProviderAuthStale(source: AuthSourceToken): void {
+		if (this._modelRegistry.markProviderAuthSourceStale(source)) {
+			this._emit({ type: "auth_stale", provider: source.provider, sourceTokens: [source] });
 		}
-		if (
-			!this._retryAuthFailureSources.some(
-				(existing) =>
-					existing.provider === token.provider &&
-					existing.source === token.source &&
-					existing.identityFingerprint === token.identityFingerprint &&
-					existing.valueFingerprint === token.valueFingerprint,
-			)
-		) {
-			this._retryAuthFailureSources.push(token);
-		}
-		return token;
-	}
-
-	private _markProviderAuthStale(message: AssistantMessage, authSourceTokens?: readonly AuthSourceToken[]): boolean {
-		if (authSourceTokens && authSourceTokens.length > 0) {
-			let marked = false;
-			for (const token of authSourceTokens) {
-				marked = this._modelRegistry.markProviderAuthSourceStale(token) || marked;
-			}
-			if (marked) {
-				this._emit({
-					type: "auth_stale",
-					provider: message.provider,
-					sourceTokens: authSourceTokens,
-				});
-			}
-			return marked;
-		}
-		const marked = this._modelRegistry.markProviderAuthStale(message.provider);
-		if (marked) {
-			this._emit({ type: "auth_stale", provider: message.provider });
-		}
-		return marked;
-	}
-
-	private _markProviderAuthStaleForRetryFailure(
-		message: AssistantMessage,
-		options?: {
-			markAuthStaleOnFailure?: boolean;
-			authSourceTokens?: readonly AuthSourceToken[];
-		},
-	): boolean {
-		const authSourceTokens =
-			this._retryAuthFailureSources.length > 0 ? this._retryAuthFailureSources : options?.authSourceTokens;
-		if ((authSourceTokens?.length ?? 0) > 0 || options?.markAuthStaleOnFailure) {
-			const marked = this._markProviderAuthStale(message, authSourceTokens);
-			if (marked && message.errorMessage) {
-				message.errorMessage = addLoginGuidanceToAuthError(message.errorMessage);
-			}
-			return marked;
-		}
-		return false;
 	}
 
 	private _finishActiveRetryWithFailure(message: AssistantMessage): void {
 		if (this._retryAttempt === 0) {
 			return;
 		}
-		this._markProviderAuthStaleForRetryFailure(message);
 		this._emit({
 			type: "auto_retry_end",
 			success: false,
@@ -13657,7 +13596,6 @@ export class AgentSession {
 			finalError: message.errorMessage,
 		});
 		this._retryAttempt = 0;
-		this._retryAuthFailureSources = [];
 	}
 
 	private async _handleRetryableError(message: AssistantMessage, signal?: AbortSignal): Promise<boolean> {
@@ -13720,7 +13658,6 @@ export class AgentSession {
 			});
 			this._retryAttempt = 0;
 		}
-		this._retryAuthFailureSources = [];
 		this._resolveRetry();
 	}
 

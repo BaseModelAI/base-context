@@ -3,7 +3,17 @@
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
@@ -184,6 +194,7 @@ export class ReplKernelManager {
 	private child?: ChildProcess;
 	private childOrphanOwner?: OrphanProcessJournalOwner;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
+	private pythonVersion?: string;
 	private kernelStderr = "";
 	/** Serializes execute() calls — the runtime runs one request at a time. */
 	private executionQueue: Promise<unknown> = Promise.resolve();
@@ -353,6 +364,7 @@ export class ReplKernelManager {
 		this.child = child;
 		this.childOrphanOwner = orphanOwner;
 		this.readyDeferred = createDeferred<number>();
+		this.pythonVersion = undefined;
 		this.startupProtocolError = undefined;
 		this.wireChild(child);
 
@@ -371,6 +383,7 @@ export class ReplKernelManager {
 						`Update ${PRODUCT.runtimeDistribution} in the kernel Python (BASE_CONTEXT_KERNEL_PYTHON) to match this ${PRODUCT.name}.`,
 				);
 			}
+			this.assertSnapshotPythonCompatible();
 		} catch (e) {
 			if (this.startStale(generation)) throw e; // never tear down a newer start's kernel
 			const canRetryStartup = (this.state as string) !== "shutdown";
@@ -388,6 +401,38 @@ export class ReplKernelManager {
 		}
 
 		this.state = "running";
+	}
+
+	private assertSnapshotPythonCompatible(): void {
+		const snapshot = this.options.snapshot;
+		if (!snapshot || !existsSync(snapshot.path)) return;
+
+		let savedVersion: unknown;
+		try {
+			const manifest: unknown = JSON.parse(readFileSync(snapshot.manifestPath, "utf8"));
+			savedVersion = isRecord(manifest) ? manifest.pythonVersion : undefined;
+		} catch {
+			// The payload alone cannot identify the Python bytecode it contains.
+		}
+		const minorVersion = (value: unknown): string | undefined =>
+			typeof value === "string" ? /^(\d+\.\d+)\.\d+(?:a\d+|b\d+|rc\d+)?$/.exec(value)?.[1] : undefined;
+		const savedMinor = minorVersion(savedVersion);
+		const currentMinor = minorVersion(this.pythonVersion);
+		const preserved = "The saved state was not restored or changed. ";
+		if (!savedMinor || !currentMinor) {
+			throw new Error(
+				`Cannot resume saved Python state: ${!savedMinor ? `its Python version is missing or unreadable (${snapshot.manifestPath})` : "the kernel did not report a valid Python version"}. ` +
+					preserved +
+					"Resume with the original Python runtime or start a new session.",
+			);
+		}
+		if (savedMinor !== currentMinor) {
+			throw new Error(
+				`Saved Python state uses Python ${savedVersion}; this kernel uses ${this.pythonVersion}. ` +
+					preserved +
+					`Resume with a matching Python ${savedMinor} runtime or start a new session.`,
+			);
+		}
 	}
 
 	/** True when a teardown (or newer start) superseded the start that captured `generation`. */
@@ -779,6 +824,7 @@ export class ReplKernelManager {
 	private handleEvent(event: Record<string, unknown>): void {
 		const type = event.event;
 		if (type === "ready") {
+			this.pythonVersion = typeof event.python === "string" ? event.python : undefined;
 			this.readyDeferred?.resolve(typeof event.protocol === "number" ? event.protocol : -1);
 			return;
 		}

@@ -26,7 +26,6 @@ it("keeps ordinary API keys usable without claiming OAuth validation", async () 
 	expect(getProviderAuthContract("anthropic").oauth).toBe("unvalidated");
 	expect(isProviderApiKeyAllowed("anthropic", "sk-ant-api-test")).toBe(true);
 	expect(isProviderApiKeyAllowed("openai", "sk-openai-test")).toBe(true);
-	expect(isProviderApiKeyAllowed("prime-inference", "prime-test-key")).toBe(true);
 	expect(registry.hasConfiguredAuth(model)).toBe(true);
 	await expect(registry.getApiKeyAndHeaders(model)).resolves.toMatchObject({
 		ok: true,
@@ -107,7 +106,6 @@ it("does not validate OAuth by registration, token relabeling, headers, or proto
 	const nativeStream = getApiProvider("openai-codex-responses")!.streamSimple;
 	const subscriptionStorage = AuthStorage.fromStorage(backend, {
 		existingOpenAICodexSubscription: true,
-		usePrimeCliConfig: false,
 	});
 	const subscriptionRegistry = ModelRegistry.inMemory(subscriptionStorage);
 	expect(subscriptionRegistry.hasConfiguredAuth(codexModel)).toBe(true);

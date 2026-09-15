@@ -105,32 +105,6 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("includes private Prime models authorized for the selected team", async () => {
-		const harness = await createHarness({ provider, models: [{ id: "parent-model" }] });
-		const fetchModels = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ data: [{ id: "internal/glm-5.2-fast" }] }), {
-					status: 200,
-					headers: { "content-type": "application/json" },
-				}),
-		);
-		vi.stubGlobal("fetch", fetchModels);
-		try {
-			harness.authStorage.set("prime-inference", {
-				type: "api_key",
-				key: "prime-key",
-				primeTeam: { teamId: "engineering-team", name: "Prime Engineering" },
-			});
-
-			const discovered = await harness.session.findRlmModels("glm 5.2", 8);
-			expect(discovered.models.map((model) => model.selector)).toContain("prime-inference/internal/glm-5.2-fast");
-			expect(fetchModels).toHaveBeenCalledOnce();
-		} finally {
-			vi.unstubAllGlobals();
-			await harness.cleanup();
-		}
-	});
-
 	it("does not enable unvalidated ChatGPT discovery after the cache interval", async () => {
 		const codexProvider = "openai-codex";
 		const harness = await createHarness({ provider: codexProvider, models: [{ id: "parent-model" }] });
@@ -209,7 +183,7 @@ describe("ENG-4649 subagent model selection", () => {
 			const disposal = harness.session.disposeAsync();
 			releasePreflight();
 
-			await expect(run).rejects.toThrow("Cannot spawn a subagent after its parent was disposed");
+			await expect(run).rejects.toThrow("Parent session disposed");
 			await disposal;
 			expect(providerCalls).toBe(0);
 			expect((await harness.session.listRlmSubagents()).subagents).toEqual([]);
@@ -219,7 +193,7 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("reserves an explicit child name while model validation is pending", async () => {
+	it("rejects a second resident child while model validation is pending", async () => {
 		const harness = await createHarness({
 			provider,
 			models: [{ id: "parent-model" }],
@@ -229,7 +203,7 @@ describe("ENG-4649 subagent model selection", () => {
 
 			const first = harness.session.runRlmChild("first task", { name: "shared-reviewer" });
 			await expect(harness.session.runRlmChild("second task", { name: "shared-reviewer" })).rejects.toThrow(
-				'Agent name "shared-reviewer" is unavailable: an agent of that name already exists at depth 1 under this parent',
+				"RLM resident child limit reached",
 			);
 			await expect(first).resolves.toMatchObject({ name: "shared-reviewer" });
 		} finally {

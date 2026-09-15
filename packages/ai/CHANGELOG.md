@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.1] - 2026-09-15
+
+- Removed the Prime Inference provider, model catalog entries, and Prime credential environment integration.
+
 ## [1.0.0] - 2026-09-15
 
 - Changed builds to use the checked-in model catalog; model discovery remains an explicit operation.

@@ -46,7 +46,6 @@ describe("SettingsManager", () => {
 					agentDir,
 					authStorage,
 					settingsManager,
-					telemetryDisabled: true,
 					resourceLoaderOptions: {
 						noContextFiles: true,
 						noExtensions: true,
@@ -69,7 +68,6 @@ describe("SettingsManager", () => {
 					tools: [],
 					includeGoals: false,
 					prewarmIpythonKernel: false,
-					telemetryDisabled: true,
 				}));
 				await session.prompt("Say done.");
 				return { agentTransport: session.agent.transport, providerTransports };
@@ -656,64 +654,6 @@ describe("SettingsManager", () => {
 			manager.setIdleEvictionMinutes("off");
 			await manager.flush();
 			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")).idleEvictionMinutes).toBe("off");
-		});
-	});
-
-	describe("telemetry privacy controls", () => {
-		it("keeps telemetry and traces disabled until explicitly enabled", () => {
-			const manager = SettingsManager.create(projectDir, agentDir);
-			expect(manager.getTelemetryEnabled()).toBe(false);
-			expect(manager.getAgentTracesEnabled()).toBe(false);
-		});
-
-		it("does not let project settings override a global opt-out or disclosure state", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ telemetry: { enabled: false, noticeShown: false } }),
-			);
-			writeFileSync(
-				join(projectDir, ".base-context", "settings.json"),
-				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-			expect(manager.getTelemetryNoticeShown()).toBe(false);
-		});
-
-		it("allows project settings to further disable globally enabled telemetry", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: true } }));
-			writeFileSync(
-				join(projectDir, ".base-context", "settings.json"),
-				JSON.stringify({ telemetry: { enabled: false } }),
-			);
-
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-		});
-
-		it("allows runtime overrides to further disable telemetry and control disclosure", () => {
-			writeFileSync(
-				join(agentDir, "settings.json"),
-				JSON.stringify({ telemetry: { enabled: true, noticeShown: true } }),
-			);
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.applyOverrides({ telemetry: { enabled: false, noticeShown: false } });
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
-			expect(manager.getTelemetryNoticeShown()).toBe(false);
-		});
-
-		it("does not let a runtime override re-enable a global opt-out", () => {
-			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ telemetry: { enabled: false } }));
-			const manager = SettingsManager.create(projectDir, agentDir);
-
-			manager.applyOverrides({ telemetry: { enabled: true } });
-
-			expect(manager.getTelemetryEnabled()).toBe(false);
 		});
 	});
 });

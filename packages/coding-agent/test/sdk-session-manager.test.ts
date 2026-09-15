@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.js";
+import { type AuthSourceToken, AuthStorage } from "../src/core/auth-storage.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;
@@ -88,11 +90,163 @@ describe("createAgentSession session manager defaults", () => {
 			expect(resumed.model?.provider).toBe(restoredModel.provider);
 			expect(resumed.messages[0]).toMatchObject({ role: "user", content: "Canonical-only input" });
 			expect(resumed.thinkingLevel).toBe("off");
-			expect(reopened.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(2);
-			expect(reopened.getEntries().filter((entry) => entry.type === "service_tier_change")).toHaveLength(1);
+			expect((await reopened.readEntries()).filter((entry) => entry.type === "thinking_level_change")).toHaveLength(
+				2,
+			);
+			expect((await reopened.readEntries()).filter((entry) => entry.type === "service_tier_change")).toHaveLength(1);
 			expect(liveContext).not.toHaveBeenCalled();
 		} finally {
 			await resumed.disposeAsync();
+		}
+	});
+
+	it("keeps an unavailable session selection instead of using another saved model", async () => {
+		const sessionManager = SessionManager.inMemory(cwd);
+		await sessionManager.appendModelChange("openai", "unavailable-model");
+		await sessionManager.appendMessage({ role: "user", content: "Existing session", timestamp: 1 });
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager,
+			authStorage: AuthStorage.inMemory({ anthropic: { type: "api_key", key: "offline-fixture-key" } }),
+			settingsManager: SettingsManager.inMemory({
+				defaultProvider: "anthropic",
+				defaultModel: "claude-sonnet-4-5",
+			}),
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
+		});
+		try {
+			expect(session.model).toBeUndefined();
+			expect(session.agent.state.model).toBeUndefined();
+			expect(modelFallbackMessage).toContain("Could not restore model openai/unavailable-model");
+			expect(modelFallbackMessage).not.toContain("Using");
+		} finally {
+			await session.disposeAsync();
+		}
+	});
+
+	it.each([false, true])(
+		"keeps an explicit unselected model without restoring saved choices (session=%s)",
+		async (savedSession) => {
+			const sessionManager = SessionManager.inMemory(cwd);
+			if (savedSession) {
+				await sessionManager.appendModelChange("openai", "gpt-4o-mini");
+				await sessionManager.appendMessage({ role: "user", content: "Existing session", timestamp: 1 });
+			}
+			const { session } = await createAgentSession({
+				cwd,
+				agentDir,
+				model: null,
+				sessionManager,
+				authStorage: AuthStorage.inMemory({ openai: { type: "api_key", key: "offline-fixture-key" } }),
+				settingsManager: SettingsManager.inMemory({ defaultProvider: "openai", defaultModel: "gpt-4o-mini" }),
+				tools: [],
+				includeGoals: false,
+				prewarmIpythonKernel: false,
+			});
+			try {
+				expect(session.model).toBeUndefined();
+				expect(session.agent.state.model).toBeUndefined();
+			} finally {
+				await session.disposeAsync();
+			}
+		},
+	);
+
+	it("keeps a supported saved model selected when its provider needs authentication", async () => {
+		const authStorage = AuthStorage.inMemory();
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: SessionManager.inMemory(cwd),
+			authStorage,
+			settingsManager: SettingsManager.inMemory({
+				defaultProvider: "openai",
+				defaultModel: "gpt-4o-mini",
+			}),
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
+		});
+		try {
+			expect(session.model?.provider).toBe("openai");
+			expect(session.model?.id).toBe("gpt-4o-mini");
+			expect(modelFallbackMessage).toContain("openai/gpt-4o-mini needs authentication");
+			expect(authStorage.hasAuth("openai")).toBe(false);
+			const transport = vi.spyOn(globalThis, "fetch");
+			try {
+				await expect(session.prompt("hello")).rejects.toThrow("No API key found for openai");
+				expect(transport).not.toHaveBeenCalled();
+			} finally {
+				transport.mockRestore();
+			}
+		} finally {
+			await session.disposeAsync();
+		}
+	});
+
+	it("marks the native request's auth source stale without invalidating a replacement credential", async () => {
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey("openai", "offline-original-key");
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(api) => {
+					api.on("message_end", (event) => {
+						if (event.message.role === "assistant") {
+							return { message: { ...event.message, content: [{ type: "text", text: "Replaced result" }] } };
+						}
+					});
+				},
+			],
+			cwd,
+		);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: getModel("openai", "gpt-4o-mini"),
+			authStorage,
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager: SettingsManager.inMemory({ retry: { enabled: true, provider: { maxRetries: 0 } } }),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			tools: [],
+			includeGoals: false,
+			prewarmIpythonKernel: false,
+		});
+		const sourceTokens: AuthSourceToken[] = [];
+		const resolveAuth = session.modelRegistry.getApiKeyAndHeaders.bind(session.modelRegistry);
+		const authLookup = vi.spyOn(session.modelRegistry, "getApiKeyAndHeaders").mockImplementation(async (model) => {
+			const auth = await resolveAuth(model);
+			if (auth.ok && auth.sourceToken) sourceTokens.push(auth.sourceToken);
+			return auth;
+		});
+		const markSource = vi.spyOn(authStorage, "markAuthSourceStale");
+		const transport = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			authStorage.setRuntimeApiKey("openai", "offline-replacement-key");
+			return new Response(JSON.stringify({ error: { message: "Invalid API key", type: "authentication_error" } }), {
+				status: 401,
+				headers: { "content-type": "application/json" },
+			});
+		});
+		try {
+			await session.prompt("hello");
+			await session.waitForIdle();
+			expect(transport).toHaveBeenCalledOnce();
+			expect(authLookup).toHaveBeenCalledOnce();
+			expect(sourceTokens).toMatchObject([{ provider: "openai", source: "runtime" }]);
+			expect(markSource).toHaveBeenCalledExactlyOnceWith(sourceTokens[0]);
+			const assistant = session.messages
+				.slice()
+				.reverse()
+				.find((message) => message.role === "assistant");
+			expect(assistant?.content).toEqual([{ type: "text", text: "Replaced result" }]);
+			await expect(authStorage.getApiKey("openai")).resolves.toBe("offline-replacement-key");
+			expect(session.isRetrying).toBe(false);
+			expect(session.agent.state.isStreaming).toBe(false);
+		} finally {
+			transport.mockRestore();
+			await session.disposeAsync();
 		}
 	});
 

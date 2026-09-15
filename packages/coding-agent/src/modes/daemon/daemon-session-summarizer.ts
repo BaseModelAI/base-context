@@ -9,9 +9,6 @@ const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 
-const SUMMARY_MODEL_PROVIDER = "prime-inference";
-const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
-
 const SUMMARY_CONTEXT_MESSAGES = 8;
 const SUMMARY_MAX_CHARS_PER_MESSAGE = 600;
 // Generous so a chatty model still closes the tags before truncation.
@@ -35,15 +32,6 @@ Example:
 export interface AgentStatusResult {
 	summary: string;
 	taskState?: AgentTaskState;
-}
-
-/** Resolve the cheap summary model, or undefined when it has no configured auth. */
-export function resolveSummaryModel(registry: ModelRegistry): Model<Api> | undefined {
-	const model = registry.find(SUMMARY_MODEL_PROVIDER, SUMMARY_MODEL_ID);
-	if (model && registry.hasConfiguredAuth(model)) {
-		return model;
-	}
-	return undefined;
 }
 
 function messageText(content: unknown): { text: string; tools: string[] } {
@@ -142,19 +130,19 @@ export function parseAgentStatusResponse(text: string, isWorking: boolean): Agen
 
 export interface GenerateAgentStatusParams {
 	registry: ModelRegistry;
+	model?: Model<Api>;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
 	signal?: AbortSignal;
 	requests?: InferenceCoordinator;
 }
 
-/** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
+/** Use the session's selected model, or keep the local status when unavailable. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal, requests } = params;
+	const { registry, messages, isWorking, signal, requests, model: selectedModel } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
-	const selectedModel = resolveSummaryModel(registry);
 	if (!selectedModel) {
 		return undefined;
 	}
@@ -363,6 +351,7 @@ export class DaemonSessionSummarizer {
 			requests = this.getRequests?.(session);
 			const generated = await this.generate({
 				registry: session.modelRegistry,
+				model: session.model,
 				messages: contextMessages,
 				isWorking,
 				signal: controller.signal,

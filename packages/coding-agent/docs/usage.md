@@ -48,7 +48,6 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session file, ID, and message counts |
-| `/traces [status\|on\|off\|preview\|upload-current\|upload-all\|login]` | Preview, upload, or manage opt-in trace sharing |
 | `/usage`, `/context` | Show the parent and subagent context, token, and cost breakdown |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
@@ -373,15 +372,12 @@ base-context --tools ipython -p "Review the code"
 | `BASE_CONTEXT_SKIP_VERSION_CHECK` | Skip the Base Context version lookup at startup |
 | `BASE_CONTEXT_DOWNLOAD_BASE_URL` | Explicit custom static update-manifest base; leave unset for owned npm updates. A GitHub repository URL is not that manifest endpoint; see [update settings](settings.md#update-checks) |
 | `BASE_CONTEXT_CACHE_RETENTION` | Set to `long` for extended prompt cache where the provider supports it |
-| `PRIME_API_KEY` | Prime Inference API key; not a trace-sharing credential |
-| `BASE_CONTEXT_TRACES_API_KEY` | Dedicated key for explicitly configured, opt-in Base Context trace sharing |
-| `BASE_CONTEXT_TRACES_BASE_URL` | Explicit trace upload API base; no upstream destination is selected by default |
 | `BASE_CONTEXT_KERNEL_PYTHON` | Explicit Python executable with a current `base-context-runtime` for a manual runtime route |
 | `BASE_CONTEXT_KERNEL_VENV` | Explicit manual kernel environment directory; owned preparation still creates its own fresh release-local environment |
 | `BASE_CONTEXT_INSTALL_UV` | Set to `1` to allow uv installation for kernel bootstrap |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
-`BASE_CONTEXT_HOME`, `BASE_CONTEXT_SESSION_DIR` and kernel path overrides require non-empty absolute paths (`~/` is supported). The project configuration directory is `.base-context/`; changing the product HOME does not rename it. These product settings do not redirect into old Prime state. `PRIME_API_KEY` remains a provider name, not a product-prefix alias. The Python import stays `rlm`, but an upstream `prime-agent-runtime` environment is not the Base Context runtime. Non-owned default bootstrap uses `~/.base-context/runtime`; the owned installer prepares each release's runtime before activation.
+`BASE_CONTEXT_HOME`, `BASE_CONTEXT_SESSION_DIR` and kernel path overrides require non-empty absolute paths (`~/` is supported). The project configuration directory is `.base-context/`; changing the product HOME does not rename it. These product settings do not redirect into old Prime state. Provider variables such as `OPENAI_API_KEY` keep their provider names; they are not product-prefix aliases. The Python import stays `rlm`, but an upstream `prime-agent-runtime` environment is not the Base Context runtime. Non-owned default bootstrap uses `~/.base-context/runtime`; the owned installer prepares each release's runtime before activation.
 
 ## Design Principles
 

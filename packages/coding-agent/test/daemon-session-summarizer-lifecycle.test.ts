@@ -1,3 +1,4 @@
+import { getModel } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summarizer.js";
@@ -22,8 +23,11 @@ function makeState(
 				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 				messages: Array.from({ length: opts.messages ?? 2 }, () => ({ role: "user", content: "hi" })),
 				state: { streamingMessage: undefined },
+				model: getModel("openai", "gpt-4o-mini"),
 				modelRegistry: {},
 				sessionManager: {
+					getSessionId: () => "session-1",
+					getSessionFile: () => undefined,
 					appendAgentStatus: (s: unknown) => appended.push(s),
 					getLatestAgentStatus: () => opts.persisted,
 				},
@@ -53,6 +57,7 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 
 		await vi.advanceTimersByTimeAsync(600);
 		expect(generate).toHaveBeenCalledOnce();
+		expect(generate.mock.calls[0]?.[0].model).toBe(state.runtime.session.model);
 		expect(state.summaryState).toMatchObject({ summary: "Added the health endpoint", taskState: "completed" });
 		expect(onStatusChanged).toHaveBeenCalled();
 	});

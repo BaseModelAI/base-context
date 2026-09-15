@@ -153,6 +153,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private onCancelCallback: () => void;
 	private availableModels?: ReadonlyArray<Model<any>>;
 	private configuredProviders?: ReadonlySet<string>;
+	private providerFilter?: string;
 	private recentRank: Map<string, number>;
 	private errorMessage?: string;
 	private tui: TUI;
@@ -245,6 +246,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.tui.requestRender();
 	}
 
+	setProviderFilter(provider: string): void {
+		this.providerFilter = provider;
+		this.scope = "all";
+		this.panel.setTitle(`Models: ${provider}`);
+		if (this.scopeText) this.scopeText.setText(this.getScopeText());
+		this.updateState(this.currentModel);
+	}
+
 	updateAvailableModels(availableModels: ReadonlyArray<Model<any>>): void {
 		this.updateState(this.currentModel, availableModels);
 	}
@@ -305,7 +314,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return;
 		}
 
-		this.allModels = this.sortModels(models);
+		this.allModels = this.sortModels(
+			models.filter((model) => this.providerFilter === undefined || model.provider === this.providerFilter),
+		);
 		const availableModelsById = new Map(availableModels.map((model) => [`${model.provider}/${model.id}`, model]));
 		this.scopedModels = this.scopedModels.map((scoped) => {
 			const scopedModelId = `${scoped.model.provider}/${scoped.model.id}`;
@@ -316,11 +327,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					: this.modelRegistry.find(scoped.model.provider, scoped.model.id));
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
-		this.scopedModelItems = this.scopedModels.map((scoped) => ({
-			provider: scoped.model.provider,
-			id: scoped.model.id,
-			model: scoped.model,
-		}));
+		this.scopedModelItems = this.scopedModels
+			.filter((scoped) => this.providerFilter === undefined || scoped.model.provider === this.providerFilter)
+			.map((scoped) => ({
+				provider: scoped.model.provider,
+				id: scoped.model.id,
+				model: scoped.model,
+			}));
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
 		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));

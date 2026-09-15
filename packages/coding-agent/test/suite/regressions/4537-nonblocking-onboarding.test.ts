@@ -10,7 +10,7 @@ describe("ENG-4537 non-blocking onboarding", () => {
 		}
 	});
 
-	test("never reopens shown onboarding for a client-local auth mismatch", async () => {
+	test("reopens authentication for a saved model without configured credentials", async () => {
 		const harness = await createHarness({
 			settings: { onboardingShown: true },
 			withConfiguredAuth: false,
@@ -23,10 +23,10 @@ describe("ENG-4537 non-blocking onboarding", () => {
 				modelRegistry: harness.session.modelRegistry,
 				model: harness.session.model,
 			}),
-		).toBe(false);
+		).toBe(true);
 	});
 
-	test("never reopens shown onboarding when the daemon session has no model", async () => {
+	test("reopens incomplete setup when no model was selected", async () => {
 		const harness = await createHarness({
 			settings: { onboardingShown: true },
 			withConfiguredAuth: false,
@@ -39,6 +39,6 @@ describe("ENG-4537 non-blocking onboarding", () => {
 				modelRegistry: harness.session.modelRegistry,
 				model: undefined,
 			}),
-		).toBe(false);
+		).toBe(true);
 	});
 });

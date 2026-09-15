@@ -157,27 +157,6 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("prime inference requests include selected Prime Agent team header", async () => {
-			const primeAuthStorage = AuthStorage.inMemory({
-				"prime-inference": {
-					type: "api_key",
-					key: "agent-key",
-					primeTeam: { teamId: "team-1", name: "Research" },
-				},
-			});
-			const registry = ModelRegistry.create(primeAuthStorage, modelsJsonPath);
-			const model = getModelsForProvider(registry, "prime-inference")[0];
-			expect(model).toBeDefined();
-
-			const auth = await registry.getApiKeyAndHeaders(model!);
-
-			expect(auth).toEqual({
-				ok: true,
-				apiKey: "agent-key",
-				headers: { "X-Prime-Team-ID": "team-1" },
-			});
-		});
-
 		test("baseUrl-only override does not affect other providers", () => {
 			writeRawModelsJson({
 				anthropic: overrideConfig("https://my-proxy.example.com/v1"),
@@ -1102,10 +1081,8 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("auth refresh across processes", () => {
-		test("model catalog includes unauthenticated public models and hides private Prime routes", async () => {
-			const savedPrimeApiKey = process.env.PRIME_API_KEY;
+		test("model catalog includes unauthenticated public models", async () => {
 			const savedOpenAiApiKey = process.env.OPENAI_API_KEY;
-			delete process.env.PRIME_API_KEY;
 			delete process.env.OPENAI_API_KEY;
 			try {
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
@@ -1113,19 +1090,11 @@ describe("ModelRegistry", () => {
 				const unauthenticated = await registry.refreshModelCatalog();
 				expect(unauthenticated.models.some((model) => model.provider === "openai")).toBe(true);
 				expect(unauthenticated.configuredProviders).not.toContain("openai");
-				expect(
-					unauthenticated.models.some(
-						(model) => model.provider === "prime-inference" && model.id.startsWith("internal/"),
-					),
-				).toBe(false);
 
 				authStorage.setRuntimeApiKey("openai", "test-key");
 				const authenticated = await registry.refreshModelCatalog();
 				expect(authenticated.configuredProviders).toContain("openai");
 			} finally {
-				if (savedPrimeApiKey !== undefined) {
-					process.env.PRIME_API_KEY = savedPrimeApiKey;
-				}
 				if (savedOpenAiApiKey !== undefined) {
 					process.env.OPENAI_API_KEY = savedOpenAiApiKey;
 				}
@@ -1133,20 +1102,20 @@ describe("ModelRegistry", () => {
 		});
 
 		test("refresh() picks up credentials written by another process", () => {
-			const savedEnvKey = process.env.PRIME_API_KEY;
-			delete process.env.PRIME_API_KEY;
+			const savedEnvKey = process.env.OPENAI_API_KEY;
+			delete process.env.OPENAI_API_KEY;
 			try {
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
-				expect(registry.getAvailable().some((m) => m.provider === "prime-inference")).toBe(false);
+				expect(registry.getAvailable().some((m) => m.provider === "openai")).toBe(false);
 
 				const otherProcessAuth = AuthStorage.create(join(tempDir, "auth.json"));
-				otherProcessAuth.set("prime-inference", { type: "api_key", key: "test-key" });
+				otherProcessAuth.set("openai", { type: "api_key", key: "test-key" });
 
 				registry.refresh();
-				expect(registry.getAvailable().some((m) => m.provider === "prime-inference")).toBe(true);
+				expect(registry.getAvailable().some((m) => m.provider === "openai")).toBe(true);
 			} finally {
 				if (savedEnvKey !== undefined) {
-					process.env.PRIME_API_KEY = savedEnvKey;
+					process.env.OPENAI_API_KEY = savedEnvKey;
 				}
 			}
 		});
@@ -1626,6 +1595,7 @@ describe("ModelRegistry", () => {
 				expect(auth1).toEqual({
 					ok: true,
 					apiKey: "token-1",
+					sourceToken: expect.objectContaining({ provider: "custom-provider", source: "models_json_command" }),
 					headers: { Authorization: "Bearer token-1" },
 				});
 
@@ -1635,6 +1605,7 @@ describe("ModelRegistry", () => {
 				expect(auth2).toEqual({
 					ok: true,
 					apiKey: "token-2",
+					sourceToken: expect.objectContaining({ provider: "custom-provider", source: "models_json_command" }),
 					headers: { Authorization: "Bearer token-2" },
 				});
 			});

@@ -167,18 +167,11 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		expect(mergeAgentSessionRuntimeConfig(base).executionMode).toBe("interactive");
 	});
 
-	it("keeps the daemon telemetry opt-out monotonic across config merges", () => {
-		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
-		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
-		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
-	});
-
 	it("persists only typed daemon host settings", () => {
 		const durable = durableAgentSessionRuntimeConfig({
 			cwd: "/repo",
 			agentDir: "/agent",
 			sessionDir: "/sessions",
-			telemetryDisabled: true,
 			provider: "intercept",
 			model: "openai/example",
 			apiKey: "secret-api-key",
@@ -190,14 +183,12 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 			cwd: "/repo",
 			agentDir: "/agent",
 			sessionDir: "/sessions",
-			telemetryDisabled: true,
 		});
 		expect(
 			durableAgentSessionRuntimeConfig({
 				cwd: 1,
 				agentDir: "/agent",
 				sessionDir: false,
-				telemetryDisabled: "yes",
 			} as unknown as AgentSessionRuntimeConfig),
 		).toEqual({ agentDir: "/agent" });
 	});

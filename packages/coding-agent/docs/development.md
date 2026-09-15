@@ -27,7 +27,7 @@ See [installation](installation.md) for Python bootstrap and manual runtime opti
 
 The public CLI package is `@ponythewhite/base-context`; the binary is `base-context`. The other public packages are `@ponythewhite/base-context-ai`, `@ponythewhite/base-context-agent`, and `@ponythewhite/base-context-tui`. The bundled Python distribution is `base-context-runtime`; its import remains `rlm`.
 
-Some extension interfaces and package manifests retain the `pi` API/key. Provider identifiers such as `prime-inference` and `PRIME_API_KEY` keep their real provider meaning. Do not rename these just because the product is a fork.
+Some extension interfaces and package manifests retain the `pi` API/key. Supported provider identifiers and authentication variables keep their provider names. Provider and model choices must be explicit.
 
 ## Local configuration
 

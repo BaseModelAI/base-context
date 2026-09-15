@@ -3,6 +3,7 @@ import * as sessionLease from "../src/core/session-lease.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import {
 	createDaemonCommandEnvelope,
+	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
 	DAEMON_PROTOCOL_NAME,
 	DAEMON_SCHEMA_ID,
@@ -51,7 +52,7 @@ afterEach(() => {
 
 describe("supervisor compatibility refusal", () => {
 	it.each(
-		[8, 9].flatMap(
+		[8, 9, 11].flatMap(
 			(version) =>
 				[
 					{ operation: "adoptOrRecoverWorker", owned: false, version },
@@ -66,8 +67,13 @@ describe("supervisor compatibility refusal", () => {
 			const legacyHello = {
 				...baseLegacyHello,
 				protocol: { name: DAEMON_PROTOCOL_NAME, version },
-				schemaRevision: version === 8 ? 27 : 28,
-				serverCapabilities: version === 9 ? ["native_inference_ownership" as const] : [],
+				schemaRevision: version === 11 ? 47 : version === 8 ? 27 : 28,
+				serverCapabilities:
+					version === 11
+						? DAEMON_DEFAULT_SERVER_CAPABILITIES
+						: version === 9
+							? ["native_inference_ownership" as const]
+							: [],
 			};
 			vi.useFakeTimers();
 			const timers = vi.spyOn(globalThis, "setTimeout");
@@ -207,7 +213,7 @@ describe("supervisor compatibility refusal", () => {
 			] satisfies DaemonCommand[]) {
 				const envelope = createDaemonCommandEnvelope(command, "command", "legacy-client", version);
 				expect(() => parser.parseCommandAndRegisterPromptAdmission(client, JSON.stringify(envelope))).toThrow(
-					"protocol 11 canonical session ownership and bounded invocation output",
+					"protocol 12 canonical session ownership and bounded invocation output",
 				);
 			}
 			expect(admissions.size).toBe(0);

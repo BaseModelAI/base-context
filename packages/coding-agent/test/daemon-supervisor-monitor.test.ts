@@ -3393,7 +3393,7 @@ describe("daemon worker supervisor monitoring", () => {
 			JSON.stringify({
 				version: 1,
 				socketPath: `${root}//supervisor.sock`,
-				defaultSessionConfig: { agentDir, cwd: "/persisted/cwd", telemetryDisabled: true },
+				defaultSessionConfig: { agentDir, cwd: "/persisted/cwd" },
 			}),
 		);
 
@@ -3414,7 +3414,6 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(config).toMatchObject({
 				agentDir,
 				cwd: "/persisted/cwd",
-				telemetryDisabled: true,
 				provider: "fresh-provider",
 				model: "fresh-model",
 				apiKey: "fresh-key",
@@ -3446,7 +3445,6 @@ describe("daemon worker supervisor monitoring", () => {
 						type: "create",
 						config: {
 							sessionDir: "/safe/sessions",
-							telemetryDisabled: true,
 							apiKey: "secret-api-key",
 							extensionFlagValues: { providerSecretKey: "secret-provider-key" },
 						},
@@ -3473,14 +3471,12 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(migrated).toMatchObject({
 				version: 2,
 				sessionDir: "/safe/sessions",
-				telemetryDisabled: true,
 				createCommand: { type: "create" },
 			});
 			expect(JSON.stringify(migrated)).not.toContain("secret-");
 			const runtimeWorker = workers.get("worker-v1");
 			expect(runtimeWorker?.descriptor).toMatchObject({
 				sessionDir: "/safe/sessions",
-				telemetryDisabled: true,
 			});
 			if (!runtimeWorker) throw new Error("missing migrated worker");
 			runtimeWorker.descriptor.lifecycle = "failed";
@@ -3517,7 +3513,6 @@ describe("daemon worker supervisor monitoring", () => {
 					updatedAt: now,
 					lifecycle: "running",
 					sessionDir: "/safe/sessions",
-					telemetryDisabled: true,
 					createCommand: {
 						type: "create",
 						config: { cwd: descriptorDir, agentDir: descriptorDir, apiKey: "secret-api-key" },
@@ -3547,7 +3542,6 @@ describe("daemon worker supervisor monitoring", () => {
 				version: 2,
 				supervisorSocketPath: "/tmp/supervisor.sock",
 				sessionDir: "/safe/sessions",
-				telemetryDisabled: true,
 			});
 			expect(JSON.stringify(loaded.descriptor)).not.toContain("secret-");
 			const persisted = readFileSync(join(descriptorDir, "worker-1.json"), "utf8");
@@ -3667,7 +3661,6 @@ describe("daemon worker supervisor monitoring", () => {
 				rootActiveSessionId: activeSessionId,
 				lifecycle: "failed",
 				consecutiveFailures: 1,
-				telemetryDisabled: true,
 				createCommand: { type: "create" as const, sessionPath: "/tmp/session.jsonl" },
 			},
 			summaries: new Map(),
@@ -3716,7 +3709,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(worker.transientCreateCommand).toEqual({
 			type: "create",
 			sessionPath: "/tmp/session.jsonl",
-			config: { cwd: "/tmp/fresh-owner", telemetryDisabled: true },
+			config: { cwd: "/tmp/fresh-owner" },
 			env: { HERDR_PANE_ID: "pane-1" },
 			launchEnv: { OWNER_SECRET: "fresh" },
 			lifecycle: "client_owned",
@@ -3725,55 +3718,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(recoverWorker).toHaveBeenCalledWith(worker);
 	});
 
-	it("rejects an opted-out attach to a telemetry-enabled worker", async () => {
-		const activeSessionId = "active-telemetry-enabled";
-		const summary = {
-			id: activeSessionId,
-			activeSessionId,
-			lifecycle: "live",
-			activity: "idle",
-			isSessionActive: false,
-			sessionId: "session-telemetry-enabled",
-			cwd: "/tmp/project",
-			isStreaming: false,
-			isCompacting: false,
-			attachedClients: 0,
-			messageCount: 0,
-			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
-		} satisfies SessionSummary;
-		const worker = {
-			descriptor: {
-				workerId: "worker-telemetry-enabled",
-				lifecycle: "ready",
-				pid: 1234,
-				createCommand: { type: "create", config: {} },
-			},
-			summaries: new Map([[activeSessionId, summary]]),
-		};
-		const client = {
-			id: "client-1",
-			capabilities: new Set<string>(),
-			supportsExtensionUi: false,
-			attachedActiveSessionIds: new Set<string>(),
-		};
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			clients: new Set([client]),
-		}) as {
-			attachClient(
-				attachClient: typeof client,
-				command: { type: "attach"; activeSessionId: string; telemetryDisabled?: true },
-			): Promise<unknown>;
-		};
-		seedSupervisorRoster(supervisor, worker);
-
-		await expect(
-			supervisor.attachClient(client, { type: "attach", activeSessionId, telemetryDisabled: true }),
-		).rejects.toThrow("Cannot attach to this active agent while telemetry is disabled");
-		expect(client.attachedActiveSessionIds).toEqual(new Set());
-	});
-
-	it("does not reveal an owned session's telemetry policy to another client", async () => {
+	it("does not reveal an owned session to another client", async () => {
 		const activeSessionId = "private-owned-active";
 		const worker = {
 			descriptor: {
@@ -3798,13 +3743,13 @@ describe("daemon worker supervisor monitoring", () => {
 		}) as {
 			attachClient(
 				attachClient: typeof client,
-				command: { type: "attach"; activeSessionId: string; telemetryDisabled?: true },
+				command: { type: "attach"; activeSessionId: string },
 			): Promise<unknown>;
 		};
 
-		await expect(
-			supervisor.attachClient(client, { type: "attach", activeSessionId, telemetryDisabled: true }),
-		).rejects.toThrow(`Unknown active session: ${activeSessionId}`);
+		await expect(supervisor.attachClient(client, { type: "attach", activeSessionId })).rejects.toThrow(
+			`Unknown active session: ${activeSessionId}`,
+		);
 	});
 
 	it("catches up only after worker events are skipped behind a backpressured write", async () => {
@@ -4343,8 +4288,8 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("limits abort admission to mutation drain", async () => {
-		const root = mkdtempSync(`/tmp/prime-update-drain-${process.pid}-`);
-		const socketPath = join(root, "supervisor.sock");
+		const root = mkdtempSync(join(tmpdir(), "bc-drain-"));
+		const socketPath = join(root, "s.sock");
 		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { cwd: root, agentDir: root },
 			descriptorDir: join(root, "workers"),

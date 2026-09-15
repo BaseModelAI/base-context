@@ -1,6 +1,6 @@
 {
 	"name": "@ponythewhite/base-context-tui",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"description": "Synerise base-context terminal UI components",
 	"type": "module",
 	"main": "dist/index.js",

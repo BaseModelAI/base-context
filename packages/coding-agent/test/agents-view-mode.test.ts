@@ -108,6 +108,7 @@ describe("AgentsViewMode", () => {
 			persistentState: { query: "" },
 			savedSearchFetchStarted: true,
 			selectedIndex: 4,
+			resetSavedPageIfOrderingChanged: vi.fn(() => false),
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
@@ -286,35 +287,7 @@ describe("AgentsViewMode", () => {
 		});
 	});
 
-	it("checks telemetry policy before replying from an opted-out agents view", async () => {
-		const client = { close: vi.fn() };
-		const connectDedicatedClient = vi.fn(async () => client);
-		const self = {
-			options: {
-				config: { telemetryDisabled: true },
-				recoverDaemon: vi.fn(async () => undefined),
-				reconnectTimeoutMs: 1234,
-			},
-			connectDedicatedClient,
-		};
-
-		await invoke("sendPrompt", self, "active-1", "private prompt", "followUp");
-
-		expect(connectDedicatedClient).toHaveBeenCalledOnce();
-		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(client, "active-1", {
-			closeClientOnDispose: true,
-			supportsExtensionUi: false,
-			recoverDaemon: self.options.recoverDaemon,
-			reconnectTimeoutMs: 1234,
-			telemetryDisabled: true,
-		});
-		expect(modeMocks.connectionPrompt).toHaveBeenCalledWith("private prompt", {
-			streamingBehavior: "followUp",
-		});
-		expect(modeMocks.dispose).toHaveBeenCalledOnce();
-	});
-
-	it("keeps direct agents-view replies when telemetry is enabled", async () => {
+	it("sends agents-view replies directly", async () => {
 		const request = vi.fn(async () => ({ success: true as const, data: undefined }));
 		const self = {
 			options: { config: {} },
@@ -347,7 +320,7 @@ describe("AgentsViewMode", () => {
 
 		await runAgentsViewMode({
 			socketPath: "/tmp/fake-daemon.sock",
-			config: { cwd: "/tmp", telemetryDisabled: true } as never,
+			config: { cwd: "/tmp" } as never,
 			initialSession: previous,
 			uiServices: {
 				settingsManager: settingsManager as never,
@@ -363,7 +336,7 @@ describe("AgentsViewMode", () => {
 		expect(DaemonAgentConnection.attach).toHaveBeenCalledWith(
 			expect.anything(),
 			opened.activeSessionId,
-			expect.objectContaining({ telemetryDisabled: true }),
+			expect.objectContaining({ closeClientOnDispose: true }),
 		);
 		runView.mockRestore();
 	});
@@ -623,6 +596,7 @@ describe("AgentsViewMode", () => {
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
 			savedCatalogReady: true,
+			savedPageHints: () => undefined,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
 			programShownParents: new Set(),
@@ -710,6 +684,7 @@ describe("AgentsViewMode", () => {
 				inactiveAgentIdentities: new Set(),
 				pendingDeleteAgent: undefined,
 				savedCatalogReady: true,
+				savedPageHints: () => undefined,
 				expandedSubagentParents,
 				programShownParents: new Set(),
 				editor: { getText: () => "" },
@@ -1172,7 +1147,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 		}
 	});
 
-	it("keeps a live-only scope through reconnect timeout and settles it on the next successful list", async () => {
+	it("keeps a live-only scope through reconnect timeout until both catalogs settle", async () => {
 		vi.useFakeTimers();
 		const root = summary();
 		const frame = { scope: { sessionId: root.sessionId, activeSessionId: root.activeSessionId } };
@@ -1197,6 +1172,9 @@ describe("AgentsViewMode persistent catalog state", () => {
 			Reflect.set(view, "client", { isConnected: true });
 			Reflect.set(view, "rosterStore", { summaries: () => [] });
 			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
+			expect(persistentState.scopeFrames).toEqual([frame]);
+			Reflect.set(view, "savedCatalogReady", true);
+			invoke("reconcileCatalogs", view);
 			expect(persistentState.scopeFrames).toEqual([]);
 		} finally {
 			vi.useRealTimers();

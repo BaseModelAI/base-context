@@ -9,14 +9,14 @@ vi.mock("node:net", async (importOriginal) => ({
 	createConnection: () => transport.socket,
 }));
 
-// Freeze the shipped protocol10 policy, including its actual legacy-inspection allowlist.
+// Freeze the previous protocol11 policy, including its actual legacy-inspection allowlist.
 vi.mock("../src/modes/daemon/daemon-protocol.js", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
-	DAEMON_PROTOCOL_VERSION: 10,
-	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: [8, 9],
+	DAEMON_PROTOCOL_VERSION: 11,
+	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: [8, 9, 10],
 }));
 
-it("rejects a refusal-aware protocol11 hello under the old protocol10 client policy before sending any command", async () => {
+it("rejects a protocol12 hello under the old protocol11 client policy before sending any command", async () => {
 	const socket = new Socket(); // Unconnected; createConnection is fully mocked.
 	transport.socket = socket;
 	const write = vi.spyOn(socket, "write").mockReturnValue(true);
@@ -28,8 +28,8 @@ it("rejects a refusal-aware protocol11 hello under the old protocol10 client pol
 		"data",
 		`${JSON.stringify({
 			type: "daemon_hello",
-			protocol: { name: "base-context.daemon", version: 11 },
-			schemaRevision: 47,
+			protocol: { name: "base-context.daemon", version: 12 },
+			schemaRevision: 48,
 			clientId: "new-server",
 			serverCapabilities: [
 				"native_inference_ownership",
@@ -41,9 +41,9 @@ it("rejects a refusal-aware protocol11 hello under the old protocol10 client pol
 		})}\n`,
 	);
 	await expect(client.waitForHello()).rejects.toThrow("incompatible daemon");
-	await expect(client.request({ type: "create" })).rejects.toThrow("expected base-context.daemon protocol 10");
+	await expect(client.request({ type: "create" })).rejects.toThrow("expected base-context.daemon protocol 11");
 	await expect(client.request({ type: "cron_resume", jobId: "imported-job" })).rejects.toThrow(
-		"expected base-context.daemon protocol 10",
+		"expected base-context.daemon protocol 11",
 	);
 	expect(write).not.toHaveBeenCalled();
 	client.close();

@@ -53,7 +53,6 @@ describe("daemon protocol helpers", () => {
 				sessionPath: "/sessions/root.jsonl",
 				config: {
 					sessionDir: "/legacy/sessions",
-					telemetryDisabled: true,
 					apiKey: "secret-api-key",
 					extensionFlagValues: { providerSecretKey: "secret-extension" },
 				},
@@ -75,17 +74,14 @@ describe("daemon protocol helpers", () => {
 			workerInstanceId: "instance-1",
 			sessionFile: "/sessions/root.jsonl",
 			sessionDir: "/legacy/sessions",
-			telemetryDisabled: true,
 		});
 		expect(JSON.stringify(durable)).not.toContain("secret-");
 	});
 
 	it("advertises optional agent results without raising startup requirements", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
-		expect(DAEMON_SCHEMA_REVISION).toBe(47);
-		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-agent-results`,
-		);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(12);
+		expect(DAEMON_SCHEMA_REVISION).toBe(48);
+		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-local-only`);
 		const command: DaemonCommand = {
 			type: "send_result",
 			targetActiveSessionId: "parent",
@@ -106,11 +102,11 @@ describe("daemon protocol helpers", () => {
 		expect(meetsDaemonCommandCompatibility({ ...currentHello, serverCapabilities: [] }, compatibility)).toBe(false);
 		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
-		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(45);
+		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(48);
 	});
 
 	it("requires compatibility metadata for the scheduled-job protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(12);
 		const resume: DaemonCommand = { type: "cron_resume", jobId: "imported-job" };
 		const compatibility = { minProtocol: 11, minSchemaRevision: 46, capability: "cron_resume" } as const;
 		expect(DAEMON_COMMAND_COMPATIBILITY.cron_resume).toEqual(compatibility);
@@ -186,18 +182,13 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 10, minSchemaRevision: 11 });
 	});
 
-	it("requires native ownership independently of telemetry fields", () => {
-		const native = NATIVE_WORK_COMPATIBILITIES;
-		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual(native);
+	it("requires native ownership for session creation and attachment", () => {
 		for (const command of [
-			{ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } },
-			{ type: "attach", activeSessionId: "active-1", telemetryDisabled: true },
-			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2", telemetryDisabled: true },
+			{ type: "create", config: { cwd: "/tmp" } },
+			{ type: "attach", activeSessionId: "active-1" },
+			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2" },
 		] satisfies DaemonCommand[]) {
-			expect(getDaemonCommandCompatibilities(command)).toEqual([
-				...native,
-				{ minProtocol: 8, minSchemaRevision: 14 },
-			]);
+			expect(getDaemonCommandCompatibilities(command)).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		}
 	});
 

@@ -10,7 +10,6 @@ import { createHash } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
-	getPrimeTeamId,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
@@ -21,31 +20,12 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
 import { assertProductStatePath } from "../runtime-paths.js";
-import {
-	clearPrimeCliCredentials,
-	getPrimeCliConfigPath,
-	loadPrimeCliConfig,
-	PRIME_INFERENCE_PROVIDER_ID,
-	type PrimeCliConfig,
-	type PrimeTeam,
-	savePrimeCliApiKey,
-	savePrimeCliTeamSelection,
-} from "./prime-inference-auth.js";
 import { getProviderAuthContract, isProviderApiKeyAllowed } from "./provider-contracts.js";
 import { resolveConfigValue, resolveConfigValueUncached } from "./resolve-config-value.js";
-
-export type PrimeTeamCredential = {
-	teamId: string;
-	name: string;
-	slug?: string;
-	role?: string;
-	createdAt?: string;
-};
 
 export type ApiKeyCredential = {
 	type: "api_key";
 	key: string;
-	primeTeam?: PrimeTeamCredential | null;
 };
 
 export type OAuthCredential = {
@@ -58,23 +38,8 @@ export type AuthStorageData = Record<string, AuthCredential>;
 
 export type AuthStatus = {
 	configured: boolean;
-	source?:
-		| "stored"
-		| "runtime"
-		| "environment"
-		| "prime_cli"
-		| "fallback"
-		| "models_json_key"
-		| "models_json_command"
-		| "stale";
+	source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command" | "stale";
 	label?: string;
-};
-
-export type AuthStorageOptions = {
-	/** Optional explicit provider config; the default is Base Context prime-inference.json. */
-	primeCliConfigPath?: string;
-	/** Enable the isolated Prime Inference provider config. */
-	usePrimeCliConfig?: boolean;
 };
 
 type LockResult<T> = {
@@ -269,15 +234,13 @@ export class AuthStorage {
 
 	private constructor(
 		private storage: AuthStorageBackend,
-		private options: AuthStorageOptions = {},
 		private readonly existingOpenAICodexSubscription = false,
 	) {
 		this.reload();
 	}
 
-	static create(authPath?: string, options?: AuthStorageOptions): AuthStorage {
-		const authOptions = options ?? { usePrimeCliConfig: authPath === undefined };
-		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")), authOptions);
+	static create(authPath?: string): AuthStorage {
+		return new AuthStorage(new FileAuthStorageBackend(authPath ?? join(getAgentDir(), "auth.json")));
 	}
 
 	/** Reuse an existing host login only through an explicitly read-only backend.
@@ -285,10 +248,10 @@ export class AuthStorage {
 	 */
 	static fromStorage(
 		storage: AuthStorageBackend,
-		options?: AuthStorageOptions & { existingOpenAICodexSubscription?: boolean },
+		options?: { existingOpenAICodexSubscription?: boolean },
 	): AuthStorage {
 		const existing = options?.existingOpenAICodexSubscription === true;
-		if (!existing) return new AuthStorage(storage, options);
+		if (!existing) return new AuthStorage(storage);
 		if (storage instanceof FileAuthStorageBackend)
 			throw new Error("Existing OpenAI subscription requires a read-only auth backend");
 		const readOnly: AuthStorageBackend = {
@@ -303,7 +266,7 @@ export class AuthStorage {
 				throw new Error("Existing OpenAI subscription refresh is disabled");
 			},
 		};
-		return new AuthStorage(readOnly, { ...options, usePrimeCliConfig: false }, true);
+		return new AuthStorage(readOnly, true);
 	}
 
 	isExistingOpenAICodexSubscription(provider: string): boolean {
@@ -314,10 +277,10 @@ export class AuthStorage {
 		if (this.existingOpenAICodexSubscription) throw new Error("Existing OpenAI subscription storage is read-only");
 	}
 
-	static inMemory(data: AuthStorageData = {}, options?: AuthStorageOptions): AuthStorage {
+	static inMemory(data: AuthStorageData = {}): AuthStorage {
 		const storage = new InMemoryAuthStorageBackend();
 		storage.withLock(() => ({ result: undefined, next: JSON.stringify(data, null, 2) }));
-		return AuthStorage.fromStorage(storage, options);
+		return AuthStorage.fromStorage(storage);
 	}
 
 	/**
@@ -426,22 +389,6 @@ export class AuthStorage {
 			...this.createAuthSourceCandidate({
 				configured: false,
 				source: "runtime",
-				identityMaterial: provider,
-				valueMaterial: apiKey,
-			}),
-		};
-	}
-
-	private getPrimeCliAuthCandidate(provider: string): AuthSourceCandidate | undefined {
-		const apiKey = this.getPrimeCliApiKey(provider);
-		if (!apiKey) {
-			return undefined;
-		}
-		return {
-			label: "Base Context provider config",
-			...this.createAuthSourceCandidate({
-				configured: false,
-				source: "prime_cli",
 				identityMaterial: provider,
 				valueMaterial: apiKey,
 			}),
@@ -558,21 +505,12 @@ export class AuthStorage {
 	private getAuthSourceCandidates(provider: string, options?: { includeFallback?: boolean }): AuthSourceCandidate[] {
 		const fallbackCandidate =
 			options?.includeFallback === false ? undefined : this.getFallbackAuthCandidate(provider);
-		const candidates =
-			provider === PRIME_INFERENCE_PROVIDER_ID
-				? [
-						this.getRuntimeAuthCandidate(provider),
-						this.getEnvironmentAuthCandidate(provider),
-						this.getPrimeCliAuthCandidate(provider),
-						this.getStoredAuthCandidate(provider),
-						fallbackCandidate,
-					]
-				: [
-						this.getRuntimeAuthCandidate(provider),
-						this.getStoredAuthCandidate(provider),
-						this.getEnvironmentAuthCandidate(provider),
-						fallbackCandidate,
-					];
+		const candidates = [
+			this.getRuntimeAuthCandidate(provider),
+			this.getStoredAuthCandidate(provider),
+			this.getEnvironmentAuthCandidate(provider),
+			fallbackCandidate,
+		];
 		return candidates.filter((candidate): candidate is AuthSourceCandidate => candidate !== undefined);
 	}
 
@@ -847,15 +785,6 @@ export class AuthStorage {
 	 * Logout from a provider.
 	 */
 	logout(provider: string): void {
-		if (provider === PRIME_INFERENCE_PROVIDER_ID && this.isPrimeCliConfigEnabled()) {
-			try {
-				clearPrimeCliCredentials(this.getEnabledPrimeCliConfigPath());
-				this.clearStaleAuthSource(provider, "prime_cli");
-			} catch (error) {
-				this.recordError(error);
-				throw error;
-			}
-		}
 		this.remove(provider);
 	}
 
@@ -916,8 +845,8 @@ export class AuthStorage {
 	 * Get API key for a provider.
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)
-	 * 2. Prime Inference: environment variable, Base Context provider config, auth.json
-	 * 3. Other providers: auth.json, environment variable
+	 * 2. auth.json
+	 * 3. Environment variable
 	 * 4. Fallback resolver (models.json custom providers)
 	 */
 	async getApiKeyWithSourceToken(
@@ -954,31 +883,6 @@ export class AuthStorage {
 				apiKey: runtimeKey,
 				sourceToken: this.getAuthSourceTokenForCandidate(providerId, runtimeCandidate),
 			};
-		}
-
-		const envCandidate = this.getEnvironmentAuthCandidate(providerId);
-		const envKey = this.getEnvironmentApiKey(providerId);
-		if (
-			providerId === PRIME_INFERENCE_PROVIDER_ID &&
-			envKey &&
-			envCandidate &&
-			!this.isAuthSourceStale(providerId, envCandidate)
-		) {
-			return {
-				apiKey: envKey,
-				sourceToken: this.getAuthSourceTokenForCandidate(providerId, envCandidate),
-			};
-		}
-
-		if (providerId === PRIME_INFERENCE_PROVIDER_ID) {
-			const primeCliCandidate = this.getPrimeCliAuthCandidate(providerId);
-			const primeCliKey = this.getPrimeCliApiKey(providerId);
-			if (primeCliKey && primeCliCandidate && !this.isAuthSourceStale(providerId, primeCliCandidate)) {
-				return {
-					apiKey: primeCliKey,
-					sourceToken: this.getAuthSourceTokenForCandidate(providerId, primeCliCandidate),
-				};
-			}
 		}
 
 		const cred = this.data[providerId];
@@ -1060,13 +964,9 @@ export class AuthStorage {
 				}
 			}
 		}
-		// Stored auth wins over environment variables for non-Prime-Inference providers.
-		if (
-			providerId !== PRIME_INFERENCE_PROVIDER_ID &&
-			envKey &&
-			envCandidate &&
-			!this.isAuthSourceStale(providerId, envCandidate)
-		) {
+		const envCandidate = this.getEnvironmentAuthCandidate(providerId);
+		const envKey = this.getEnvironmentApiKey(providerId);
+		if (envKey && envCandidate && !this.isAuthSourceStale(providerId, envCandidate)) {
 			return {
 				apiKey: envKey,
 				sourceToken: this.getAuthSourceTokenForCandidate(providerId, envCandidate),
@@ -1098,168 +998,5 @@ export class AuthStorage {
 	 */
 	getOAuthProviders() {
 		return getOAuthProviders().filter((provider) => getProviderAuthContract(provider.id).oauth === "validated");
-	}
-
-	setPrimeInferenceTeamSelection(team: PrimeTeam | null): void {
-		if (this.isPrimeCliConfigEnabled()) {
-			try {
-				savePrimeCliTeamSelection(team, this.getEnabledPrimeCliConfigPath());
-			} catch (error) {
-				this.recordError(error);
-				throw error;
-			}
-			return;
-		}
-
-		const credential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-		if (credential?.type !== "api_key") {
-			return;
-		}
-		this.set(PRIME_INFERENCE_PROVIDER_ID, {
-			...credential,
-			primeTeam: team ? this.toPrimeTeamCredential(team) : null,
-		});
-	}
-
-	setPrimeInferenceApiKey(apiKey: string): void {
-		if (this.isPrimeCliConfigEnabled()) {
-			try {
-				const configPath = this.getEnabledPrimeCliConfigPath();
-				const config = loadPrimeCliConfig(configPath);
-				const existingCredential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-				const legacyPrimeTeam = existingCredential?.type === "api_key" ? existingCredential.primeTeam : undefined;
-				if (config.apiKey !== apiKey) {
-					savePrimeCliApiKey(apiKey, configPath);
-				} else if (!config.teamIdFromEnv && (legacyPrimeTeam === null || (!config.teamId && legacyPrimeTeam))) {
-					savePrimeCliTeamSelection(legacyPrimeTeam, configPath);
-				}
-				this.clearStaleAuthSource(PRIME_INFERENCE_PROVIDER_ID, "prime_cli");
-			} catch (error) {
-				this.recordError(error);
-				throw error;
-			}
-			if (this.data[PRIME_INFERENCE_PROVIDER_ID]) {
-				this.remove(PRIME_INFERENCE_PROVIDER_ID);
-			}
-			return;
-		}
-
-		const existingCredential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-		const existingPrimeTeam = existingCredential?.type === "api_key" ? existingCredential.primeTeam : undefined;
-		this.set(PRIME_INFERENCE_PROVIDER_ID, {
-			type: "api_key",
-			key: apiKey,
-			...(existingPrimeTeam !== undefined ? { primeTeam: existingPrimeTeam } : {}),
-		});
-	}
-
-	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {
-		if (getPrimeTeamId()) {
-			return undefined;
-		}
-		let config: PrimeCliConfig | undefined;
-		if (this.isPrimeCliConfigEnabled()) {
-			config = this.getPrimeCliConfig(PRIME_INFERENCE_PROVIDER_ID);
-			if (config?.teamIdFromEnv) {
-				return undefined;
-			}
-		}
-
-		const credential = this.data[PRIME_INFERENCE_PROVIDER_ID];
-		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source;
-		if (authSource === "runtime" || authSource === "environment") {
-			return undefined;
-		}
-		if (authSource === "prime_cli") {
-			if (credential?.type === "api_key" && credential.primeTeam === null) {
-				return null;
-			}
-			if (config?.teamId) {
-				return this.toPrimeTeamCredential({
-					teamId: config.teamId,
-					name: config.teamName ?? "Prime Inference team",
-					...(config.teamRole ? { role: config.teamRole } : {}),
-				});
-			}
-			if (credential?.type === "api_key" && credential.primeTeam) {
-				return credential.primeTeam;
-			}
-			return null;
-		}
-		if (credential?.type === "api_key" && credential.primeTeam !== undefined) {
-			return credential.primeTeam;
-		}
-		if (!config?.apiKey && config?.teamId) {
-			return this.toPrimeTeamCredential({
-				teamId: config.teamId,
-				name: config.teamName ?? "Prime Inference team",
-				...(config.teamRole ? { role: config.teamRole } : {}),
-			});
-		}
-		return undefined;
-	}
-
-	getProviderHeaders(providerId: string): Record<string, string> | undefined {
-		if (providerId !== PRIME_INFERENCE_PROVIDER_ID) {
-			return undefined;
-		}
-
-		const environmentTeamId = getPrimeTeamId();
-		if (environmentTeamId) {
-			return { "X-Prime-Team-ID": environmentTeamId };
-		}
-
-		const teamId = this.getPrimeInferenceTeamSelection()?.teamId;
-		return teamId ? { "X-Prime-Team-ID": teamId } : undefined;
-	}
-
-	getPrimeCliConfigPath(): string | undefined {
-		if (!this.isPrimeCliConfigEnabled()) {
-			return undefined;
-		}
-		return getPrimeCliConfigPath(this.options.primeCliConfigPath);
-	}
-
-	private toPrimeTeamCredential(team: PrimeTeam): PrimeTeamCredential {
-		const credential: PrimeTeamCredential = {
-			teamId: team.teamId,
-			name: team.name,
-		};
-		if (team.slug) {
-			credential.slug = team.slug;
-		}
-		if (team.role) {
-			credential.role = team.role;
-		}
-		if (team.createdAt) {
-			credential.createdAt = team.createdAt;
-		}
-		return credential;
-	}
-
-	private getPrimeCliConfig(providerId: string): PrimeCliConfig | undefined {
-		if (providerId !== PRIME_INFERENCE_PROVIDER_ID) {
-			return undefined;
-		}
-		if (!this.isPrimeCliConfigEnabled()) {
-			return undefined;
-		}
-		return loadPrimeCliConfig(this.options.primeCliConfigPath);
-	}
-
-	private getPrimeCliApiKey(providerId: string): string | undefined {
-		return this.getPrimeCliConfig(providerId)?.apiKey;
-	}
-
-	private getEnabledPrimeCliConfigPath(): string {
-		const configPath = this.getPrimeCliConfigPath();
-		if (!configPath) {
-			throw new Error("Base Context Prime Inference config is not enabled");
-		}
-		return configPath;
-	}
-
-	private isPrimeCliConfigEnabled(): boolean {
-		return Boolean(this.options.usePrimeCliConfig || this.options.primeCliConfigPath);
 	}
 }

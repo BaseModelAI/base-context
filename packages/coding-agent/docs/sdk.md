@@ -422,10 +422,9 @@ const { session } = await createAgentSession({
 });
 ```
 
-If no model is provided:
-1. Tries to restore from session (if continuing)
-2. Uses default from settings
-3. Falls back to first available model
+Pass a supported `model` explicitly, or omit it to reuse an explicit selection saved in the session or settings. Pass `model: null` to leave the session unselected without restoring a saved choice. Base Context never chooses the first available model or switches providers because another credential exists.
+
+A supported saved model remains selected when its authentication needs setup. Requests fail before transport until that provider is authenticated. An unavailable saved model produces a diagnostic and requires a new explicit selection.
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 
@@ -439,7 +438,6 @@ import { AuthStorage } from "@ponythewhite/base-context";
 
 const authStorage = AuthStorage.fromStorage(readOnlyBackend, {
   existingOpenAICodexSubscription: true,
-  usePrimeCliConfig: false,
 });
 ```
 

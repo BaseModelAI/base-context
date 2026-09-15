@@ -912,7 +912,7 @@ export async function runAcpModeWithConnection(
 				const outcome = failure ? "error" : "result";
 				let terminalStatus = status;
 				const observedQuiescence = quiescenceMeta(status, liveChildren);
-				// The roster is telemetry at the response cut, not proof of terminality:
+				// The roster is a status snapshot at the response cut, not proof of terminality:
 				// a child can publish a terminal status before its result reaches the parent.
 				// Every turn therefore finalizes through the strong settlement barrier.
 				entry.producer.commitResponse(promptTurnId);

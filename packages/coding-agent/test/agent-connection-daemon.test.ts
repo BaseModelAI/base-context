@@ -68,7 +68,12 @@ class FakeDaemonClient {
 		protocol: DAEMON_PROTOCOL_INFO,
 		schemaRevision: DAEMON_SCHEMA_REVISION,
 		clientId: "fake-client",
-		serverCapabilities: ["prompt_admission_cancellation", "session_input_admission"],
+		serverCapabilities: [
+			"prompt_admission_cancellation",
+			"session_input_admission",
+			"native_inference_ownership",
+			"canonical_session_ownership",
+		],
 	};
 	private readonly messageListeners = new Set<DaemonClientMessageListener>();
 	private readonly closeListeners = new Set<DaemonClientCloseListener>();
@@ -76,7 +81,7 @@ class FakeDaemonClient {
 	async request(
 		command: DaemonCommand,
 		timeoutMs = 30000,
-		options: DaemonClientRequestOptions = {},
+		_options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		this.requests.push(command);
 		this.requestTimeouts.push(timeoutMs);
@@ -333,45 +338,25 @@ class FakeDaemonClient {
 							error: "Unknown daemon command: heartbeat_manage",
 						};
 			case "list_saved_sessions": {
-				const activeSessionId = "activeSessionId" in command ? command.activeSessionId : undefined;
-				options.onProgress?.({
-					id: "daemon_test",
-					type: "session_list_progress",
-					command: "list_saved_sessions",
-					...(activeSessionId ? { activeSessionId } : {}),
-					loaded: 1,
-					total: 2,
-				});
-				options.onProgress?.({
-					id: "daemon_test",
-					type: "session_list_item",
-					command: "list_saved_sessions",
-					...(activeSessionId ? { activeSessionId } : {}),
-					session: {
-						path: "/tmp/session-a.jsonl",
-						id: "session-a",
-						cwd: "/tmp",
-						name: "Saved session",
-						created: "2026-01-01T00:00:00.000Z",
-						modified: "2026-01-02T00:00:00.000Z",
-						messageCount: 2,
-						firstMessage: "hello",
-						allMessagesText: "hello world",
-					},
-				});
-				options.onProgress?.({
-					id: "daemon_test",
-					type: "session_list_progress",
-					command: "list_saved_sessions",
-					...(activeSessionId ? { activeSessionId } : {}),
-					loaded: 2,
-					total: 2,
-				});
 				return {
 					type: "response",
 					command: command.type,
 					success: true,
 					data: {
+						status: "page",
+						primary: ["file:/tmp/session-a.jsonl"],
+						sourceOrder: [{ path: "/tmp/session-a.jsonl", source: "catalog", ordinal: 0 }],
+						moreBefore: false,
+						moreAfter: false,
+						limited: true,
+						hints: {
+							liveMatches: [],
+							liveEnrichment: [],
+							busyAncestors: [],
+							moreChildren: [],
+							allChildren: [],
+							groups: [],
+						},
 						sessions: [
 							{
 								path: "/tmp/session-a.jsonl",
@@ -1460,21 +1445,6 @@ describe("DaemonAgentConnection", () => {
 		expect(close).not.toHaveBeenCalled();
 		expect(routed.hasDirectTransport).toBe(true);
 		routed.close();
-	});
-
-	it("carries an opt-out-only telemetry policy on attach", async () => {
-		const fakeClient = new FakeDaemonClient();
-		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1", {
-			telemetryDisabled: true,
-		});
-
-		await connection.attach();
-
-		expect(fakeClient.requests[0]).toMatchObject({
-			type: "attach",
-			activeSessionId: "active-1",
-			telemetryDisabled: true,
-		});
 	});
 
 	it.each([true, false])("capability-gates owned-session recovery context: %s", async (supported) => {
@@ -3663,10 +3633,7 @@ describe("DaemonAgentConnection", () => {
 				allMessagesText: "hello world",
 			},
 		]);
-		expect(progress).toEqual([
-			[1, 2],
-			[2, 2],
-		]);
+		expect(progress).toEqual([[1, 1]]);
 		expect(discovered).toEqual(sessions);
 		expect(fakeClient.requests[1]).toMatchObject({
 			type: "list_saved_sessions",

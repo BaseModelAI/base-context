@@ -6,25 +6,42 @@ An MIT-licensed coding and research agent for tasks that outgrow a chat window. 
 
 [Repository](https://github.com/BaseModelAI/base-context) · [Quickstart](docs/quickstart.md) · [Documentation](docs/index.md) · [Why this fork](docs/fork-philosophy.md)
 
-[![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.0/packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](https://github.com/BaseModelAI/base-context/blob/v1.0.0/benchmarks/python-realworld-30/REPORT.md)
+[![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.1/packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](https://github.com/BaseModelAI/base-context/blob/v1.0.1/benchmarks/python-realworld-30/REPORT.md)
 
-*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of release 1.0.0. “Clean” adds runtime requirements to task correctness. [Methodology and full results](https://github.com/BaseModelAI/base-context/blob/v1.0.0/benchmarks/python-realworld-30/REPORT.md).*
+*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of this release. “Clean” adds runtime requirements to task correctness. [Methodology and full results](https://github.com/BaseModelAI/base-context/blob/v1.0.1/benchmarks/python-realworld-30/REPORT.md).*
 
-## Install
+## Install (recommended)
 
-Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm:
+On **macOS or Linux**, run the interactive installer:
 
 ```bash
-npm install -g @ponythewhite/base-context
-cd /path/to/project
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
+```
+
+**Use this instead of the npm route below. You do not install Python or `uv` first.** The installer checks Node.js/npm and offers to install a compatible version if needed. It installs `uv` when needed, prepares the agent's Python environment, and installs the bundled runtime **before activating the CLI**.
+
+Follow the final PATH/activation command printed by the installer, then start work:
+
+```bash
+cd /path/to/your/project
 base-context
 ```
 
-Run `/login` to configure an authorized provider, then `/model` to select a model. You can also set the provider's API-key environment variable before launch. See [providers](docs/providers.md); model catalog entries do not grant subscription access.
+In the terminal UI, select and authenticate with a supported provider using `/login`, then choose a model with `/model`. Both choices are explicit. The installer prepares the application; you use only the selected provider's account and authentication. See [provider setup](docs/providers.md).
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) for the Python workspace. First use prepares Python 3.11 and the bundled `base-context-runtime` under `~/.base-context/runtime`. Initial setup can download dependencies. The Python import remains `rlm`.
+### npm alternative: for users who already manage Node.js
 
-For source builds, versioned owned installations, manual Python environments, updates, and rollback, see [installation](docs/installation.md). Prime Agent installers do not install Base Context.
+Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm. These must already be installed **before** this route:
+
+```bash
+npm install -g @ponythewhite/base-context
+cd /path/to/your/project
+BASE_CONTEXT_INSTALL_UV=1 base-context
+```
+
+`npm install` installs the CLI; it does not prepare Python at that step. Starting a normal CLI session begins preparing the managed Python environment in the background. `BASE_CONTEXT_INSTALL_UV=1` lets that bootstrap install `uv` if it is missing. **No manual Python installation is needed.** Initial setup needs network access and can take a little longer; later launches reuse the environment.
+
+The environment-variable syntax above is for Bash/Zsh. See [installation](docs/installation.md) for PowerShell, manual Python environments, updates, and rollback.
 
 ## Why Base Context?
 
@@ -47,7 +64,7 @@ Our different bet is **how to manage the context around that work**. A longer tr
 
 Think of retained history as a **project notebook**, and the model's context as your **desk**. You do not need every notebook page on the desk at once. You do need the current task, the relevant evidence, and a way to fetch an earlier page. That is a design analogy—not a promise that all information is retained forever or that summaries are lossless.
 
-![Base Context architecture: retain source history, select and recover a task-aware working set, then send the supported model request. Stable epochs preserve accepted context choices.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.0/docs/images/benchmarks/context-working-set.png)
+![Base Context architecture: retain source history, select and recover a task-aware working set, then send the supported model request. Stable epochs preserve accepted context choices.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.1/packages/coding-agent/docs/images/benchmarks/context-working-set.png)
 
 ### How the design delivers
 
@@ -64,7 +81,7 @@ Task state is selected recorded evidence, not automatically current truth. Budge
 
 These choices favor **recoverable evidence and controlled working sets**, even when that requires more structure or refusing a request that cannot meet its configured contract. They describe this fork's emphasis—not a claim that every capability is absent from every upstream version.
 
-The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Remote telemetry and trace sharing are off by default and require explicit configuration.
+The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Diagnostics stay local; there is no telemetry upload feature.
 
 There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](docs/context-management.md) and [fork philosophy](docs/fork-philosophy.md) for the contracts and limits.
 
@@ -99,11 +116,11 @@ See [usage and CLI](docs/usage.md), [settings](docs/settings.md), and [long-runn
 
 ## Benchmark evidence
 
-![Runtime-clean strict finishes for all three models: Sol 30/30 versus 18/30; Astra 30/30 versus 19/30; DeepSeek 29/30 versus 27/30. Base Context is first in each pair; all chart scales run from zero to thirty.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.0/packages/coding-agent/docs/images/benchmarks/benchmark-models.png)
+![Runtime-clean strict finishes for all three models: Sol 30/30 versus 18/30; Astra 30/30 versus 19/30; DeepSeek 29/30 versus 27/30. Base Context is first in each pair; all chart scales run from zero to thirty.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.1/packages/coding-agent/docs/images/benchmarks/benchmark-models.png)
 
 One frozen SDK-level study covered 30 Python tasks, three model selections, and two agents: 180 cells and 208 attempts. Base Context reached **90/90 terminal strict passes**, versus **87/90** for stock Prime Agent, with **2 versus 26 additional task attempts** and **24.16% less cumulative attempt lifecycle time**.
 
-The harness used a shared Bash tool, not the native Python/RLM workflow. This is cumulative attempt time, not campaign wall time, CPU time, or user-perceived latency. The study used logical `medium` effort, a fixed single-deferred-retry policy, and historical package `0.1.0` at mixed source revisions (`84a7e6f` for Sol/Astra; `077f463` for DeepSeek). Release `1.0.0` builds on the latter source line; it has not been newly measured in this study. Sixteen attempts have unknown cost; full fees and a whole-campaign cost advantage are unknown. Reported prices are API-equivalent estimates, not cash charges.
+The harness used a shared Bash tool, not the native Python/RLM workflow. This is cumulative attempt time, not campaign wall time, CPU time, or user-perceived latency. The study used logical `medium` effort, a fixed single-deferred-retry policy, and historical package `0.1.0` at mixed source revisions (`84a7e6f` for Sol/Astra; `077f463` for DeepSeek). Current releases build on the latter source line; they have not been newly measured in this study. Sixteen attempts have unknown cost; full fees and a whole-campaign cost advantage are unknown. Reported prices are API-equivalent estimates, not cash charges.
 
 Read the [full report and methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/REPORT.md) and [reproduction guide](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/REPRODUCE.md).
 
@@ -118,10 +135,8 @@ Read the [full report and methodology](https://github.com/BaseModelAI/base-conte
 
 The agent executes generated Python and project commands with your user permissions. Worker and kernel processes are **not a security sandbox**. Use an external sandbox for untrusted work and review skills and extensions before loading them.
 
-Retained history and artifacts can contain sensitive information. Compaction is not deletion or secret removal. Do not copy upstream credential stores. Telemetry and trace sharing are off by default and need explicit configuration. SSE is the default provider transport.
+Retained history and artifacts can contain sensitive information. Compaction is not deletion or secret removal. Do not copy upstream credential stores. Diagnostics stay local; there is no telemetry upload feature. SSE is the default provider transport.
 
-## Credits and license
+## License
 
-Base Context preserves the MIT-licensed work of **Prime Agent** and **Prime Intellect**, and the **Pi / pi-mono** lineage created by **Mario Zechner**. We also acknowledge Prime Intellect's separate **[PrimeRL](https://github.com/PrimeIntellect-ai/prime-rl)** project; it is not a direct dependency of this CLI.
-
-See [LICENSE](LICENSE), [contributing](https://github.com/BaseModelAI/base-context/blob/main/CONTRIBUTING.md), and [security](https://github.com/BaseModelAI/base-context/blob/main/SECURITY.md).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for copyright and license terms.

@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1] - 2026-09-15
+
+- Made the Synerise base-context installer the primary setup path, with automatic prerequisites, optional shell-profile updates, and clear launch instructions.
+- Changed fresh managed Python environments to Python 3.13 and refused cross-minor snapshots before restore without overwriting saved state.
+- Removed remote telemetry, trace uploads and sharing, their configuration, and the `/traces` command; retained local diagnostics.
+- Removed Prime account, provider, team, and billing integration and the bundled Prime products skill.
+- Required provider-first fresh setup and explicit model selection, persisted the choice and login credentials, and removed scope-based model defaults.
+- Preserved supported saved model selections while authentication needs setup.
+- Fixed authentication failures to mark the credential used by the request rather than a replacement credential.
+- Restored final exact progress notification for explicit saved-session list requests.
+- Removed upstream-only Linear ticket checks and directed contribution links to Base Context.
+
 ## [1.0.0] - 2026-09-15
 
 - Added native tool intent and finalized execution evidence to session history without duplicate results, with assistant source order restored for parallel tools.

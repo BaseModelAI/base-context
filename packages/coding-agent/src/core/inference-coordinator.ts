@@ -17,6 +17,7 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@ponythewhite/base-context-ai";
+import type { AuthSourceToken } from "./auth-storage.js";
 import type {
 	BoundRequestSink,
 	ContextEpochEntryRef,
@@ -145,6 +146,14 @@ function modelContract(model: Model<Api>): ResolvedModelContract {
 }
 
 const nativeStreamFunctions = new WeakSet<StreamFn>();
+const nativeAuthSources = new WeakMap<AssistantMessage, AuthSourceToken>();
+
+/** Consume the credential source resolved for this exact native request. Never persisted or sent to providers. */
+export function takeNativeInferenceAuthSource(message: AssistantMessage): AuthSourceToken | undefined {
+	const source = nativeAuthSources.get(message);
+	nativeAuthSources.delete(message);
+	return source;
+}
 
 /** Internal SDK auth/options resolver; transport stays the known instrumented AI dispatcher. */
 export function createNativeInferenceStream(
@@ -152,16 +161,25 @@ export function createNativeInferenceStream(
 		model: Model<Api>,
 		context: Context,
 		options: SimpleStreamOptions | undefined,
-	) => Promise<SimpleStreamOptions>,
+	) => Promise<SimpleStreamOptions & { authSourceToken?: AuthSourceToken }>,
 ): StreamFn {
 	const dispatch: StreamFn = async (model, context, options) => {
-		const resolved = await resolveOptions(model, context, options);
-		return streamSimple(model, context, {
+		const { authSourceToken, ...resolved } = await resolveOptions(model, context, options);
+		const events = streamSimple(model, context, {
 			...resolved,
 			signal: options?.signal,
 			attempts: options?.attempts,
 			requireProviderAttempts: true,
 		});
+		if (authSourceToken) {
+			const source = { ...authSourceToken };
+			const result = events.result().then((message) => {
+				nativeAuthSources.set(message, source);
+				return message;
+			});
+			events.result = () => result;
+		}
+		return events;
 	};
 	nativeStreamFunctions.add(dispatch);
 	return dispatch;

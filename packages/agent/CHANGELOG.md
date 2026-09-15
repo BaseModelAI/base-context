@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.1] - 2026-09-15
+
+- Required a selected model before starting provider requests instead of exposing a fabricated placeholder model.
+
 ## [1.0.0] - 2026-09-15
 
 - Added awaited native tool-invocation admission before effects, with stable execution IDs shared by finalized evidence.

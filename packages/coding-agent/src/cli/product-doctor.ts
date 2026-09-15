@@ -64,7 +64,6 @@ export function getProductDiagnostics() {
 			customThemes: getCustomThemesDir(),
 			settings: join(paths.home, "settings.json"),
 			projectSettings: join(paths.project, "settings.json"),
-			providerConfiguration: join(paths.home, "prime-inference.json"),
 			daemonSockets: defaultDaemonSocketDir(),
 			defaultDaemonSocket: defaultDaemonSocketPath(),
 		},

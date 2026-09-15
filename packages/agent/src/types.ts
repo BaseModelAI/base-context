@@ -447,7 +447,7 @@ export interface AgentState {
 	/** System prompt sent with each model request. */
 	systemPrompt: string;
 	/** Model used for future turns. */
-	model: Model<any>;
+	model: Model<any> | undefined;
 	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
 	/** Requested provider service tier for future turns. */

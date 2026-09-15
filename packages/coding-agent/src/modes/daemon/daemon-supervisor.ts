@@ -3284,7 +3284,6 @@ export class DaemonSupervisor {
 				rootActiveSessionId,
 				ownerClientId: existing?.descriptor.ownerClientId ?? ownerClientId,
 				sessionDir: createCommand.config?.sessionDir,
-				telemetryDisabled: createCommand.config?.telemetryDisabled,
 				createdAt: existing?.descriptor.createdAt ?? now,
 				updatedAt: now,
 				lifecycle: "starting",
@@ -5105,16 +5104,12 @@ export class DaemonSupervisor {
 			if (ownedWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
 				throw new Error(`Unknown active session: ${command.activeSessionId}`);
 			}
-			this.assertTelemetryAttachAllowed(ownedWorker, command.telemetryDisabled);
 			ownedWorker.launchEnv = command.launchEnv ?? ownedWorker.launchEnv;
 			if (!ownedWorker.client || ownedWorker.descriptor.lifecycle !== "ready") {
 				if (command.recoveryConfig) {
 					ownedWorker.transientCreateCommand = {
 						...ownedWorker.descriptor.createCommand,
-						config: {
-							...command.recoveryConfig,
-							...(ownedWorker.descriptor.telemetryDisabled === true ? { telemetryDisabled: true } : {}),
-						},
+						config: command.recoveryConfig,
 						env: command.env,
 						launchEnv: command.launchEnv,
 						lifecycle: "client_owned",
@@ -5134,7 +5129,6 @@ export class DaemonSupervisor {
 			}
 		}
 		const match = await this.findWorkerForClient(client, command.activeSessionId);
-		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
 		this.requireAvailableWorkerClient(match.worker);
 		const activeSessionId = match.summary.activeSessionId ?? match.summary.id;
 		const duplicateValidation = this.currentSnapshotGeneration(match.worker, activeSessionId)?.validation;
@@ -5281,14 +5275,6 @@ export class DaemonSupervisor {
 				client.attachedActiveSessionIds.delete(activeSessionId);
 			}
 			throw error;
-		}
-	}
-
-	private assertTelemetryAttachAllowed(worker: ResidentWorker, telemetryDisabled: true | undefined): void {
-		if (telemetryDisabled && worker.descriptor.telemetryDisabled !== true) {
-			throw new Error(
-				"Cannot attach to this active agent while telemetry is disabled for the current invocation. Stop the agent and retry so it can restart without telemetry.",
-			);
 		}
 	}
 

@@ -23,6 +23,11 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
+		static APIConnectionTimeoutError = class extends Error {};
+		baseURL: string;
+		constructor(options: { baseURL: string }) {
+			this.baseURL = options.baseURL;
+		}
 		chat = {
 			completions: {
 				create: (params: unknown) => {
@@ -1104,8 +1109,14 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning?: unknown }).reasoning).toBeUndefined();
 	});
 
-	it("distinguishes omitted reasoning from explicit off for Prime effort models", async () => {
-		const model = getModel("prime-inference", "moonshotai/kimi-k3")!;
+	it("distinguishes omitted reasoning from explicit off for configured effort models", async () => {
+		const model = {
+			...getModel("openrouter", "deepseek/deepseek-r1"),
+			provider: "custom-provider",
+			baseUrl: "https://custom-provider.test/v1",
+			compat: { supportsReasoningEffort: true },
+			thinkingLevelMap: { high: "high" },
+		};
 		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
 		let payload: unknown;
 

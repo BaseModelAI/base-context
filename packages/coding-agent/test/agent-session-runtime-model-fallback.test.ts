@@ -5,7 +5,7 @@ import { AgentSessionRuntime, type CreateAgentSessionRuntimeFactory } from "../s
 import type { AgentSessionServices } from "../src/core/agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "../src/core/auth-guidance.js";
 
-const model = { provider: "prime-inference", id: "gpt-5.5" } as Model<Api>;
+const model = { provider: "openai", id: "gpt-5.5" } as Model<Api>;
 
 function makeRuntime(options: { model?: Model<Api>; modelFallbackMessage?: string }): AgentSessionRuntime {
 	const session = {
@@ -31,8 +31,8 @@ describe("AgentSessionRuntime.modelFallbackMessage", () => {
 		expect(runtime.modelFallbackMessage).toBeUndefined();
 	});
 
-	it("keeps one-time restore notices even when the session has a model", () => {
-		const message = "Could not restore model anthropic/claude-old. Using prime-inference/gpt-5.5";
+	it("keeps explicit model-selection notices even when the session has a model", () => {
+		const message = "Selected model openai/gpt-5.5 needs authentication.";
 		const runtime = makeRuntime({ model, modelFallbackMessage: message });
 
 		expect(runtime.modelFallbackMessage).toBe(message);

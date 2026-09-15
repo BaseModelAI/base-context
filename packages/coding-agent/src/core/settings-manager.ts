@@ -176,8 +176,6 @@ export interface Settings {
 	/** Creation default; an existing session changes policy through its canonical owner. */
 	context?: { mode?: "on" | "off" };
 	autoRefine?: AutoRefineSettings;
-	agentTraces?: AgentTracesSettings;
-	telemetry?: TelemetrySettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -207,15 +205,6 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
-}
-
-export interface AgentTracesSettings {
-	enabled?: boolean;
-}
-
-export interface TelemetrySettings {
-	enabled?: boolean;
-	noticeShown?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -500,15 +489,6 @@ export class SettingsManager {
 				};
 			}
 			delete retrySettings.maxDelayMs;
-		}
-
-		if (typeof settings.telemetry === "boolean") {
-			settings.telemetry = { enabled: settings.telemetry };
-		} else if (
-			settings.telemetry !== undefined &&
-			(typeof settings.telemetry !== "object" || settings.telemetry === null || Array.isArray(settings.telemetry))
-		) {
-			delete settings.telemetry;
 		}
 
 		if (
@@ -912,50 +892,6 @@ export class SettingsManager {
 		}
 		this.globalSettings.compaction.enabled = enabled;
 		this.markModified("compaction", "enabled");
-		this.save();
-	}
-
-	getAgentTracesEnabled(): boolean {
-		return this.settings.agentTraces?.enabled ?? false;
-	}
-
-	setAgentTracesEnabled(enabled: boolean): void {
-		if (!this.globalSettings.agentTraces) {
-			this.globalSettings.agentTraces = {};
-		}
-		this.globalSettings.agentTraces.enabled = enabled;
-		this.markModified("agentTraces", "enabled");
-		this.save();
-	}
-
-	getTelemetryEnabled(): boolean {
-		const globalEnabled = this.globalSettings.telemetry?.enabled ?? false;
-		const projectEnabled = this.projectSettings.telemetry?.enabled ?? true;
-		const runtimeEnabled = this.runtimeOverrides.telemetry?.enabled ?? true;
-		return globalEnabled && projectEnabled && runtimeEnabled;
-	}
-
-	private getOrCreateGlobalTelemetrySettings(): TelemetrySettings {
-		const telemetry = this.globalSettings.telemetry;
-		if (typeof telemetry !== "object" || telemetry === null || Array.isArray(telemetry)) {
-			this.globalSettings.telemetry = {};
-		}
-		return this.globalSettings.telemetry!;
-	}
-
-	setTelemetryEnabled(enabled: boolean): void {
-		this.getOrCreateGlobalTelemetrySettings().enabled = enabled;
-		this.markModified("telemetry", "enabled");
-		this.save();
-	}
-
-	getTelemetryNoticeShown(): boolean {
-		return this.runtimeOverrides.telemetry?.noticeShown ?? this.globalSettings.telemetry?.noticeShown ?? false;
-	}
-
-	setTelemetryNoticeShown(shown: boolean): void {
-		this.getOrCreateGlobalTelemetrySettings().noticeShown = shown;
-		this.markModified("telemetry", "noticeShown");
 		this.save();
 	}
 

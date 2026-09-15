@@ -170,7 +170,11 @@ describe("daemon session summarizer", () => {
 						messages: options.messages,
 						modelRegistry: {},
 						state: { streamingMessage: undefined },
-						sessionManager: { appendAgentStatus: () => {} },
+						sessionManager: {
+							appendAgentStatus: () => {},
+							getSessionId: () => "session-1",
+							getSessionFile: () => undefined,
+						},
 					},
 				},
 			} as unknown as ActiveSessionState;

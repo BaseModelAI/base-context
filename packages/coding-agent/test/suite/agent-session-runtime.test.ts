@@ -24,6 +24,7 @@ import {
 } from "../../src/core/semantic-edges.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type RequestJournalEntry, type SessionEntry, SessionManager } from "../../src/core/session-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -587,7 +588,6 @@ describe("AgentSessionRuntime characterization", () => {
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
-				telemetryDisabled: true,
 				noTools: true,
 			},
 			[
@@ -853,8 +853,7 @@ describe("AgentSessionRuntime characterization", () => {
 		}
 		expect(sessionAssistant.usage.cost.total).toBe(0.123);
 
-		const persistedAssistant = runtime.session.sessionManager
-			.getEntries()
+		const persistedAssistant = (await runtime.session.sessionManager.readEntries())
 			.filter((entry) => entry.type === "message")
 			.map((entry) => entry.message)
 			.find((message) => message.role === "assistant");
@@ -933,15 +932,15 @@ describe("AgentSessionRuntime characterization", () => {
 		]);
 		expect(runtime.session.goalState).toMatchObject({ active: false, status: "idle" });
 		expect(runtime.session.goalState.objective).toBeUndefined();
-		expect(runtime.session.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		expect(await runtime.session.sessionManager.readEntryRetention(goalEntryId)).toBe("retained-import");
 		const imported = await SessionManager.openReadOnly(importedSessionFile);
 		try {
-			expect(imported.getEntry(goalEntryId)).toMatchObject({
+			expect(await imported.readEntry(goalEntryId)).toMatchObject({
 				type: "custom",
 				customType: GOAL_STATE_CUSTOM_TYPE,
 				data: persistedGoal,
 			});
-			expect(imported.getEntryRetention(goalEntryId)).toBe("retained-import");
+			expect(await imported.readEntryRetention(goalEntryId)).toBe("retained-import");
 		} finally {
 			await imported.close();
 		}
@@ -1065,9 +1064,11 @@ describe("AgentSessionRuntime characterization", () => {
 								.filter((part): part is { type: "text"; text: string } => part.type === "text")
 								.map((part) => part.text)
 								.join("")
-					: message.role,
+					: message.role === "custom"
+						? message.customType
+						: message.role,
 			),
-		).toEqual(["Say one", "assistant"]);
+		).toEqual([TASK_FRAME_CUSTOM_TYPE, "Say one", "assistant"]);
 		expect(runtime.session.sessionFile).toBeDefined();
 	});
 
@@ -1327,28 +1328,10 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.prompt("hello");
 		await runtime.session.prompt("again");
 
-		const beforeMessages = runtime.session.messages.map((message) => ({
-			role: message.role,
-			text:
-				message.role === "user"
-					? typeof message.content === "string"
-						? message.content
-						: message.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
-								.map((part) => part.text)
-								.join("")
-					: undefined,
-		}));
-		const previousSessionFile = runtime.session.sessionFile;
-		const leafId = runtime.session.sessionManager.getLeafId();
-		expect(leafId).toBeTruthy();
-
-		const result = await runtime.fork(leafId!, { position: "at" });
-		expect(result).toEqual({ cancelled: false, selectedText: undefined });
-		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
-		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
-		expect(
-			runtime.session.messages.map((message) => ({
+		// A fork rebuilds one TaskFrame base instead of replaying the old render-cache revisions.
+		const beforeMessages = runtime.session.messages
+			.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
+			.map((message) => ({
 				role: message.role,
 				text:
 					message.role === "user"
@@ -1359,8 +1342,37 @@ describe("AgentSessionRuntime characterization", () => {
 									.map((part) => part.text)
 									.join("")
 						: undefined,
-			})),
+			}));
+		const previousSessionFile = runtime.session.sessionFile;
+		const leafId = runtime.session.sessionManager.getLeafId();
+		expect(leafId).toBeTruthy();
+
+		const result = await runtime.fork(leafId!, { position: "at" });
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
+		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
+				.map((message) => ({
+					role: message.role,
+					text:
+						message.role === "user"
+							? typeof message.content === "string"
+								? message.content
+								: message.content
+										.filter((part): part is { type: "text"; text: string } => part.type === "text")
+										.map((part) => part.text)
+										.join("")
+							: undefined,
+				})),
 		).toEqual(beforeMessages);
+		const rebuiltFrames = runtime.session.messages
+			.filter((message) => message.role === "custom")
+			.filter((message) => message.customType === TASK_FRAME_CUSTOM_TYPE);
+		expect(rebuiltFrames).toHaveLength(1);
+		expect(rebuiltFrames[0]?.content).toContain('"text":"hello"');
+		expect(rebuiltFrames[0]?.content).toContain('"text":"again"');
 	});
 
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
@@ -1460,6 +1472,7 @@ describe("AgentSessionRuntime characterization", () => {
 					services,
 					sessionManager,
 					sessionStartEvent,
+					model: faux.getModel(),
 				})),
 				services,
 				diagnostics: services.diagnostics,

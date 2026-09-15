@@ -2,17 +2,24 @@
 
 This page gets you to a useful first Base Context session. Base Context is a fork of Prime Agent, which descends from pi-mono; it uses its own command, packages and state.
 
-## Install
+## Install and launch
 
-Use Node.js `^22.12.0 || >=23.3.0` and a compatible npm version:
+On macOS or Linux, use the interactive **Synerise base-context installer**:
 
 ```bash
-npm install -g @ponythewhite/base-context
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
+```
+
+It checks Node.js/npm and offers to install them if needed, installs `uv` when needed, and prepares the agent's Python environment before activation. **Do not install Python or `uv` manually before this command. Do not also run `npm install -g` unless you intentionally want a separate installation.**
+
+Follow the installer's final PATH/activation instruction, then launch:
+
+```bash
 cd /path/to/project
 base-context
 ```
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) for the managed Python workspace. First use prepares Python 3.11 and the bundled `base-context-runtime`; initial setup can download dependencies.
+The next step is provider login below. The installer prepares the application, not your model-provider account. If you prefer npm or need Windows instructions, use the clearly separate [npm installation route](installation.md#npm-alternative).
 
 ### Build from source
 
@@ -35,7 +42,9 @@ For a source build, replace `base-context` in the examples below with that Node 
 
 ## Authenticate
 
-Base Context uses `~/.base-context/auth.json` under its own product root. Do not copy Prime credential stores or assume that upstream OAuth clients are authorized for the fork. Choose an explicitly supported route in the [provider guide](providers.md).
+On first launch, choose a provider, authenticate if needed, then choose one of that provider's models. Existing credentials do not choose a provider or model for you. Cancelling leaves setup incomplete.
+
+Base Context stores credentials entered through `/login` in `~/.base-context/auth.json` and saves your explicit provider/model selection in settings. Later launches reuse that choice. If its credentials need renewal, authenticate the same provider; Base Context does not substitute another model. Environment credentials stay in the environment. See the [provider guide](providers.md) for supported routes.
 
 ### Subscription or Stored API Credentials
 
@@ -45,7 +54,7 @@ Start Base Context and run:
 /login
 ```
 
-Use only the provider/auth routes supported for your setup. A model catalog entry does not establish subscription entitlement or authentication. See [SDK authentication](sdk.md) for explicit subscription configuration.
+After login, choose a model in `/model`. Base Context does not pick a provider or model automatically. A saved selection is reused on later launches. See [SDK authentication](sdk.md) for programmatic setup.
 
 ### API Key
 
@@ -56,17 +65,17 @@ export ANTHROPIC_API_KEY=sk-ant-...
 base-context
 ```
 
-You can also select a supported API-key provider in `/login` to store its credential under `~/.base-context/auth.json`. `BASE_CONTEXT_HOME` changes that product root. Provider variables such as `ANTHROPIC_API_KEY` and `PRIME_API_KEY` keep their real provider names; they are not product-prefix aliases.
+You can also select a supported API-key provider in `/login` to store its credential under `~/.base-context/auth.json`. `BASE_CONTEXT_HOME` changes that product root. Provider variables such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` keep their real provider names; they are not product-prefix aliases.
 
 ## First Session
 
-Once Base Context starts, type a request and press Enter:
+Once you have authenticated and selected a model, type a request and press Enter:
 
 ```text
 Summarize this repository and tell me how to run its checks.
 ```
 
-Base Context uses the persistent `ipython` kernel for file operations, project commands, data analysis and installed skills. The owned installer prepares a fresh release-local Python environment before activation. A non-owned source setup bootstraps its default environment under `~/.base-context/runtime` on first use. `BASE_CONTEXT_KERNEL_PYTHON` selects an explicit manual Python executable with a current `base-context-runtime`; the Python import remains `rlm`. An upstream `prime-agent-runtime` environment is not a substitute.
+Base Context uses the persistent `ipython` kernel for file operations, project commands, data analysis and installed skills. The owned installer prepares a fresh release-local Python 3.13 environment before activation. A source launch starts preparing its default environment under `~/.base-context/runtime` in the background. Set `BASE_CONTEXT_INSTALL_UV=1` before launching if `uv` must be installed automatically. `BASE_CONTEXT_KERNEL_PYTHON` selects an explicit manual Python executable with a current `base-context-runtime`; the Python import remains `rlm`. An upstream `prime-agent-runtime` environment is not a substitute.
 
 Base Context runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
 
@@ -146,7 +155,7 @@ For legacy data, use the [offline migration steps](usage.md#import-an-offline-pr
 For one-shot prompts:
 
 ```bash
-base-context -p "Summarize this codebase"
+base-context --provider anthropic --model claude-sonnet-4-6 -p "Summarize this codebase"
 cat README.md | base-context -p "Summarize this text"
 base-context -p @screenshot.png "What's in this image?"
 ```
