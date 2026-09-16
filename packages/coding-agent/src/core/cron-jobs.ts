@@ -10,6 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { getLogger } from "@ponythewhite/base-context-ai";
 import { lockSync } from "proper-lockfile";
 import { getSessionArtifactPathForFile } from "./session-manager.js";
 
@@ -111,6 +112,7 @@ interface CronJobsState {
 
 export const SESSION_SCHEDULED_JOBS_FILENAME = "scheduled-jobs.json";
 
+const log = getLogger("coding-agent.cron");
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const ONE_SECOND_MS = 1000;
 const ONE_MINUTE_MS = 60_000;
@@ -1138,7 +1140,11 @@ export class AgentCronScheduler {
 		}
 		this.timer = setTimeout(
 			() => {
-				void this.runDue();
+				void this.runDue().catch((error) => {
+					log.error("Scheduled job dispatch failed", {
+						error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+					});
+				});
 			},
 			Math.min(nextDelay, MAX_TIMEOUT_MS),
 		);

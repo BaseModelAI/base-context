@@ -146,6 +146,69 @@ class PairedMediumReferenceTest(unittest.TestCase):
         summary = json.loads((root / "summary.json").read_text())
         return cells, summary, starts
 
+    def test_current_only_subset_keeps_three_queues_and_defers_retry(self):
+        tasks = [1, 5, 6, 8, 9, 10, 14, 18, 23, 28]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenarios = {task: (root, {"id": task, "slug": f"case-{task}"}) for task in tasks}
+            manifest = {"output": str(root), "tasks": tasks, "variants": ["current"],
+                        "run_kind": "new-subset-regression"}
+            starts, finishes = [], []
+            lock, initial = threading.Lock(), threading.Barrier(3)
+            active_by_model, maximum_by_model = {}, {}
+
+            def runner(variant, task_dir, scenario, attempt_dir, configured):
+                number = int(attempt_dir.name.split("-")[-1])
+                model, task = configured.model, scenario["id"]
+                self.assertEqual(variant, "current")
+                self.assertEqual(configured.thinking, "medium")
+                with lock:
+                    if number == 2:
+                        self.assertEqual(len([n for n in finishes if n == 1]), 30)
+                    starts.append((task, model, number))
+                    active_by_model[model] = active_by_model.get(model, 0) + 1
+                    maximum_by_model[model] = max(maximum_by_model.get(model, 0), active_by_model[model])
+                if task == 1 and number == 1:
+                    initial.wait(timeout=5)
+                result = self.make_result(task, variant, model)
+                if task == 5 and model == "gpt-5.6-sol" and number == 1:
+                    result["error"] = "offline synthetic primary failure"
+                with lock:
+                    active_by_model[model] -= 1
+                    finishes.append(number)
+                return result
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                cells = campaign.run_campaign(argparse.Namespace(output=root), scenarios, manifest, runner=runner)
+            summary = json.loads((root / "summary.json").read_text())
+            self.assertEqual(len(cells), 30)
+            self.assertEqual(summary["expected_primaries"], 30)
+            self.assertEqual(summary["completed_primaries"], 30)
+            self.assertEqual(summary["benchmark_retries"], 1)
+            self.assertEqual(summary["all_incurred"]["admitted_attempts"], 31)
+            self.assertTrue(summary["complete"])
+            self.assertEqual(set(maximum_by_model.values()), {1})
+            self.assertEqual(len(maximum_by_model), 3)
+            for model in maximum_by_model:
+                self.assertEqual([t for t, m, n in starts if m == model and n == 1], tasks)
+            self.assertTrue(all(g["matched_clean_first_primary"] is None for g in summary["groups"]))
+            self.assertTrue(all(set(g["variants"]) == {"current"} for g in summary["groups"]))
+            self.assertIn("30/30", (root / "SUMMARY.md").read_text())
+            self.assertNotIn("/180", (root / "SUMMARY.md").read_text())
+
+    def test_subset_cli_requires_new_qualified_pin_and_cannot_change_historical_restart(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            for extra in (["--variants", "current"],
+                          ["--tasks", "1,5", "--qualified-current-commit", "new", "--finalize-deepseek-restart"]):
+                with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()), \
+                        patch("sys.argv", ["paired_medium_reference.py", "--output", directory, *extra]), \
+                        patch.object(campaign.harness, "apply_hosts_manifest", side_effect=AssertionError("host access")):
+                    with self.assertRaises(SystemExit) as error:
+                        campaign.main()
+                    self.assertEqual(error.exception.code, 2)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
     def test_180_independent_pair_medium_primaries(self):
         with tempfile.TemporaryDirectory() as directory:
             cells, summary, starts = self.run_fake(Path(directory))

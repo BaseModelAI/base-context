@@ -1323,7 +1323,7 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
   sessionManager: await SessionManager.create(process.cwd()),
 });
 
-await runRpcMode(runtime, 11);
+await runRpcMode(runtime, 13);
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.
@@ -1333,7 +1333,7 @@ See [RPC documentation](rpc.md) for the JSON protocol.
 For subprocess-based integration without building with the SDK, use the CLI directly:
 
 ```bash
-base-context --mode rpc --rpc-protocol-version 11 --no-session
+base-context --mode rpc --rpc-protocol-version 13 --no-session
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.

@@ -47,16 +47,6 @@ function runtimeResult(harness: Harness, cwd: string, agentDir: string) {
 	};
 }
 
-async function waitForCondition(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 100; attempt++) {
-		if (predicate()) {
-			return;
-		}
-		await new Promise((resolve) => setTimeout(resolve, 0));
-	}
-	throw new Error("condition was not met");
-}
-
 describe("ENG-4519 heartbeat rebirth", () => {
 	const harnesses: Harness[] = [];
 
@@ -138,7 +128,12 @@ describe("ENG-4519 heartbeat rebirth", () => {
 		const runtimeGate = new Promise<void>((resolve) => {
 			releaseRuntime = resolve;
 		});
+		let runtimeEntered!: () => void;
+		const runtimeStarted = new Promise<void>((resolve) => {
+			runtimeEntered = resolve;
+		});
 		const createRuntime = vi.fn<CreateAgentSessionRuntimeFactory>(async ({ cwd, agentDir, sessionManager }) => {
+			runtimeEntered();
 			await runtimeGate;
 			const restored = await createHarness({ sessionManager });
 			harnesses.push(restored);
@@ -155,7 +150,13 @@ describe("ENG-4519 heartbeat rebirth", () => {
 
 		const run = internals.runCronJob(heartbeat);
 		try {
-			await waitForCondition(() => createRuntime.mock.calls.length > 0);
+			// Wait for the real async source open, not a fixed number of timer turns.
+			await Promise.race([
+				runtimeStarted,
+				run.then(() => {
+					throw new Error("Heartbeat run settled before entering the runtime factory");
+				}),
+			]);
 			expect(createRuntime).toHaveBeenCalledOnce();
 			internals.cronStore.cancel(heartbeat.id);
 			releaseRuntime();

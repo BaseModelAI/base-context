@@ -8638,11 +8638,9 @@ export class AgentSession {
 		const current = () => !owner || this._isCompactionOwnerCurrent(owner);
 		while (current() && (settlement === undefined || this._postCompactionContinuationSettlement === settlement)) {
 			if (this._actionStore.queuedActions().length > 0) {
-				if (
-					this._sessionInputPumpSuspended ||
-					this._queuedWorkPauses.size > 0 ||
-					(settlement && this._sessionInputAdmissionPauses.size > 0)
-				) {
+				// A blocked pump must wait for a checkpoint change, not spin in
+				// microtasks and starve the IO that clears its busy state.
+				if (this._isBusyForSessionInput("pump") || (settlement && this._sessionInputAdmissionPauses.size > 0)) {
 					let wake = () => {};
 					const changed = new Promise<void>((resolve) => {
 						wake = resolve;

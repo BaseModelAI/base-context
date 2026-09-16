@@ -1,4 +1,4 @@
-import { getModel } from "@ponythewhite/base-context-ai";
+import { type AssistantMessage, getModel } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summarizer.js";
@@ -6,6 +6,28 @@ import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summ
 // The debounce the summarizer waits for after a turn settles (kept in sync with
 // SETTLE_DEBOUNCE_MS in the module).
 const SETTLE_MS = 2000;
+
+function assistantMessage(
+	options: Pick<AssistantMessage, "content" | "stopReason" | "errorMessage">,
+): AssistantMessage {
+	const model = getModel("openai", "gpt-4o-mini");
+	return {
+		role: "assistant",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 0,
+		...options,
+	};
+}
 
 function makeState(
 	opts: { working?: boolean; messages?: number; kind?: "top-level" | "subagent"; persisted?: unknown } = {},
@@ -165,6 +187,75 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		expect(generate).toHaveBeenCalledOnce();
 		expect(state.summaryState).toMatchObject({ summary: "Auditing the migration scripts", taskState: "completed" });
 		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(1);
+	});
+
+	test("repairs a seeded completed error verdict after the native async write without a classifier", async () => {
+		vi.useFakeTimers();
+		const previous = { summary: "Completed the task", taskState: "completed", basedOnMessageCount: 2 };
+		const state = makeState({ persisted: previous });
+		state.runtime.session.messages[1] = assistantMessage({
+			content: [],
+			stopReason: "error",
+			errorMessage: "  400 invalid\n request  ",
+		});
+		const generate = vi.fn();
+		const getRequests = vi.fn();
+		const onStatusChanged = vi.fn();
+		const summarizer = new DaemonSessionSummarizer(() => [], onStatusChanged, generate, getRequests);
+		let finishWrite!: () => void;
+		const writing = new Promise<void>((resolve) => {
+			finishWrite = resolve;
+		});
+		const manager = state.runtime.session.sessionManager;
+		const append = manager.appendAgentStatus.bind(manager);
+		const appendStatus = vi.spyOn(manager, "appendAgentStatus").mockImplementation(async (status) => {
+			await writing;
+			return append(status);
+		});
+		summarizer.seed(state);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+		expect(appendStatus).toHaveBeenCalledOnce();
+		expect(state.summaryState).toEqual(previous);
+		expect(onStatusChanged).not.toHaveBeenCalled();
+		finishWrite();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.summaryState).toEqual({
+			summary: "Model request failed: 400 invalid request",
+			taskState: "needs_input",
+			basedOnMessageCount: 2,
+		});
+		expect(onStatusChanged).toHaveBeenCalledOnce();
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+		expect(appendStatus).toHaveBeenCalledOnce();
+		expect(generate).not.toHaveBeenCalled();
+		expect(getRequests).not.toHaveBeenCalled();
+		await summarizer.stop();
+	});
+
+	test("classifies a successful final turn normally after an earlier recovered error", async () => {
+		vi.useFakeTimers();
+		const state = makeState();
+		state.runtime.session.messages.push(
+			assistantMessage({ content: [], stopReason: "error", errorMessage: "429 temporary" }),
+			assistantMessage({
+				content: [{ type: "text", text: "Finished the requested change" }],
+				stopReason: "stop",
+			}),
+		);
+		const generate = vi.fn().mockResolvedValue({ summary: "Finished the requested change", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+		expect(generate).toHaveBeenCalledOnce();
+		expect(state.summaryState).toEqual({
+			summary: "Finished the requested change",
+			taskState: "completed",
+			basedOnMessageCount: 4,
+		});
+		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(1);
+		await summarizer.stop();
 	});
 
 	test("seeds a subagent's persisted recap into memory", () => {

@@ -6422,17 +6422,29 @@ Use prime_context read/search with selected lines or a query.`;
 			// runs, in which case the draft is no longer abandoned and must be kept.
 			queueMicrotask(() => {
 				if (this.sessions.has(state.activeSessionId) && this.isDiscardableDraft(state)) {
-					void this.closeSession(state, "killed");
+					this.discardAbandonedDraft(state);
 				}
 			});
 		}
+	}
+
+	/** Best-effort discard: a teardown rejection must not stop other hosted sessions. */
+	private discardAbandonedDraft(state: ActiveSessionState): void {
+		void this.closeSession(state, "killed").catch((error) => {
+			this.log(
+				`failed to discard abandoned empty draft ${state.activeSessionId}: ${
+					error instanceof Error ? (error.stack ?? error.message) : String(error)
+				}`,
+			);
+		});
 	}
 
 	private isDiscardableDraft(state: ActiveSessionState): boolean {
 		if (this.options.worker) {
 			return false;
 		}
-		if (state.clients.size > 0) {
+		// An attaching client is not in state.clients yet, but still owns the draft.
+		if (state.clients.size > 0 || state.pendingAttaches > 0) {
 			return false;
 		}
 		if (state.runtime.metadata.kind === "subagent") {
@@ -7041,7 +7053,7 @@ Use prime_context read/search with selected lines or a query.`;
 				(eventType === "turn_end" || eventType === "compaction_end" || eventType === "bash_end") &&
 				this.isDiscardableDraft(state)
 			) {
-				void this.closeSession(state, "killed");
+				this.discardAbandonedDraft(state);
 			}
 			if (RECOVERY_CHECKPOINT_EVENTS.has(eventType)) {
 				this.recordWorkerRecoveryState(state, eventType);

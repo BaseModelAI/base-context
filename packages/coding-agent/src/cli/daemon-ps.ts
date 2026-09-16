@@ -23,6 +23,7 @@ import {
 	NATIVE_WORK_COMPATIBILITIES,
 } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
+import { createDaemonStateRootMatcher } from "../modes/daemon/daemon-state-root.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import { DaemonWorkerClient, DaemonWorkerCompatibilityError } from "../modes/daemon/daemon-worker-client.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
@@ -32,7 +33,7 @@ import { promptYesNo } from "./daemon-stop-confirm.js";
 import { formatProductDiagnostics, type ProductDiagnostics } from "./product-doctor.js";
 
 /**
- * `daemon ps` discovers every base-context daemon on the machine, not just the
+ * `daemon ps` discovers base-context daemons in this state root, not just the
  * one on a single socket. Discovery has two sources merged by socket path:
  *
  *  1. The OS list of listening unix sockets owned by a base-context process
@@ -40,7 +41,8 @@ import { formatProductDiagnostics, type ProductDiagnostics } from "./product-doc
  *     APP_NAME and carry nothing useful in argv, so the socket→pid mapping the
  *     kernel keeps is the only reliable way to find daemons on arbitrary
  *     `--daemon-socket` paths. This is the same data as `ss -lxp | grep
- *     base-context`, just parsed.
+ *     base-context`, parsed and filtered to this root before any listing or
+ *     cleanup. Other agent directories must not become shutdown targets.
  *  2. A sweep of the default socket dir, which catches orphaned socket *files*
  *     left behind by daemons that are no longer running.
  *
@@ -180,6 +182,11 @@ export function parsePsEtimes(stdout: string): Map<number, number> {
 }
 
 function scanListeningDaemons(): DiscoveredDaemonProcess[] {
+	const belongsToStateRoot = createDaemonStateRootMatcher();
+	return scanAllListeningDaemons().filter((daemon) => belongsToStateRoot(daemon.socketPath));
+}
+
+function scanAllListeningDaemons(): DiscoveredDaemonProcess[] {
 	if (process.platform === "win32") {
 		return [];
 	}
@@ -348,7 +355,7 @@ export function verifyHelloSupervisorPid(
 	return pid;
 }
 
-/** Discover every daemon on the machine and probe each for version + session count. */
+/** Discover daemons in this state root and probe each for version + session count. */
 export async function discoverDaemons(): Promise<DaemonInfo[]> {
 	const processBySocket = new Map<string, DiscoveredDaemonProcess>();
 	for (const daemon of scanListeningDaemons()) {

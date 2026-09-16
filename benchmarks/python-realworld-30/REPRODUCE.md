@@ -220,6 +220,49 @@ run. Replaying those modes with one current SDK would not recreate the old mixed
 reference. Raw historical outputs are private, so exact local replay of their
 provider responses and queue timing is not offered.
 
+## 5a. Run a qualified CURRENT-only task subset
+
+For a release regression, the same scheduler accepts an explicit subset and a
+CURRENT-only arm. This does not run stock Prime Agent again. Select the tasks
+once, before seeing new outputs, and use that same selection for all three
+models. For the 1.0.1 regression, the random selection is
+`1,5,6,8,9,10,14,18,23,28`.
+
+After qualifying the exact clean installed CURRENT build, invoke the existing
+driver directly (the full-paired wrapper above keeps its original defaults):
+
+```sh
+python3.12 -E -S -B benchmarks/python-realworld-30/paired_medium_reference.py \
+  --tasks 1,5,6,8,9,10,14,18,23,28 --variants current \
+  --hosts-manifest "$RUN_ROOT/hosts/hosts.json" \
+  --qualified-current-commit "$(git rev-parse HEAD)" \
+  --api-price-profiles benchmarks/python-realworld-30/api-price-profiles.json \
+  --host-openai-codex-auth-file "$OPENAI_AUTH_FILE" \
+  --host-deepseek-api-key-file "$DEEPSEEK_KEY_FILE" \
+  --output "$RUN_ROOT/new-subset-run" \
+  --qualification-complete --admit-provider-calls
+```
+
+The host manifest can contain only the qualified CURRENT host for this mode;
+no stock archive or stock accounting patch is required or loaded. The existing
+CURRENT package, clean commit, Node and dependency checks still apply. This mode
+is marked `new-subset-regression`, not a historical replay or a paired stock run.
+
+It runs **30 first primaries**, using three independent sequential model queues
+and one active attempt per model. All 30 primaries finish before any benchmark
+retry. Each failed or runtime-unclean cell can have one retry; all attempts count.
+The task/judge Python 3.12 environment, logical MEDIUM effort, DeepSeek native
+`high` mapping, task deadlines and SDK/shared-Bash adapter are unchanged. This is
+not a native-RLM benchmark. Product Python 3.13 installer/kernel qualification is
+separate.
+
+Compare the selected historical CURRENT cells with the new first primaries and
+terminal attempts separately. Report the changed build, calendar/model-service
+conditions and reduced concurrency (three queues instead of the old six-arm
+paired run). Do not claim contemporaneous stock performance or replace frozen
+historical results. Unknown whole-invocation costs remain unknown. If a product
+bug is confirmed, stop, fix and qualify a new build before starting a fresh run.
+
 ## 6. Export numeric results without publishing raw artifacts
 
 ```sh

@@ -509,6 +509,34 @@ export async function acquireDaemonSupervisorOwnership(
 	return new DaemonSupervisorOwnership(record, registryDir, ownerDirectory);
 }
 
+/** Read only: discovery must not acquire ownership or reclaim registry directories. */
+export function listDaemonSupervisorSocketPathsForAgentDir(
+	agentDir: string,
+	registryDir: string = defaultDaemonSupervisorRegistryDir(),
+): string[] {
+	let canonicalAgentDir: string;
+	let directories: string[];
+	try {
+		canonicalAgentDir = canonicalizeFilesystemPath(agentDir);
+		directories = listOwnerDirectories(registryDir);
+	} catch {
+		return [];
+	}
+	const socketPaths: string[] = [];
+	for (const directory of directories) {
+		const owner = readOwnerRecord(directory);
+		if (!owner) continue;
+		try {
+			if (canonicalizeFilesystemPath(owner.agentDir) === canonicalAgentDir) {
+				socketPaths.push(normalizeSocketPath(owner.socketPath));
+			}
+		} catch {
+			// A stale or inaccessible record must not hide the other supervisors.
+		}
+	}
+	return socketPaths;
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;

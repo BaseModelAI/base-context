@@ -28,6 +28,8 @@ Base Context retains that core approach, along with agent messaging, goals, sche
 
 `await rlm(...)` returns an admission handle. Children deliver results through messages or files. This distinction matters: a parent should continue independent work and read results when they arrive, not assume the spawn call contains the answer.
 
+For 1.0.1, we reviewed the 113 commits in Prime Agent 0.9.5 and selected small runtime, provider and packaging fixes rather than merging the release. The [complete selection and exclusions](upstream-0.9.5.md) explain how that choice preserves the fork's architecture.
+
 ## What Base Context changes
 
 | Area | Base Context approach | Important limit |

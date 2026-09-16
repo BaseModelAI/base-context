@@ -188,6 +188,18 @@ function isSessionWorking(state: ActiveSessionState): boolean {
 	return session.isSessionActive;
 }
 
+/** Use the last assistant turn's real failure instead of asking a classifier to invent completed work. */
+function terminalTurnError(messages: readonly AgentMessage[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		if (message.stopReason !== "error") return undefined;
+		const detail = message.errorMessage?.trim();
+		return detail ? `Model request failed: ${clamp(detail, 160)}` : "Model request failed";
+	}
+	return undefined;
+}
+
 /**
  * Background status summarization for daemon-hosted sessions, top-level and
  * subagents alike. A periodic sweep refreshes working sessions; debounced
@@ -319,7 +331,8 @@ export class DaemonSessionSummarizer {
 		const messageCount = messages.length;
 		const isWorking = isSessionWorking(state);
 		const previous = state.summaryState;
-		// Idle sessions with a current verdict need no refresh; working sessions
+		// Idle sessions with a current verdict need no refresh unless a terminal
+		// error must replace a previously fabricated verdict. Working sessions
 		// always refresh so the recap keeps up with the in-progress turn.
 		const contentUnchanged = previous?.basedOnMessageCount === messageCount;
 		const owesIdleVerdict = !isWorking && previous?.taskState === undefined;
@@ -327,7 +340,10 @@ export class DaemonSessionSummarizer {
 		// needs_input fallback fired on a transient failure); keep retrying until a
 		// real summary lands so the recap isn't left permanently empty.
 		const owesSummary = !isWorking && !previous?.summary;
-		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
+		const turnError = !isWorking ? terminalTurnError(messages) : undefined;
+		const owesErrorVerdict =
+			turnError !== undefined && (previous?.taskState !== "needs_input" || previous?.summary !== turnError);
+		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary && !owesErrorVerdict) {
 			return;
 		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
@@ -348,15 +364,18 @@ export class DaemonSessionSummarizer {
 		let status: AgentStatus | undefined;
 		let changed = false;
 		try {
-			requests = this.getRequests?.(session);
-			const generated = await this.generate({
-				registry: session.modelRegistry,
-				model: session.model,
-				messages: contextMessages,
-				isWorking,
-				signal: controller.signal,
-				requests,
-			});
+			if (turnError === undefined) requests = this.getRequests?.(session);
+			const generated: AgentStatusResult | undefined =
+				turnError !== undefined
+					? { summary: turnError, taskState: "needs_input" }
+					: await this.generate({
+							registry: session.modelRegistry,
+							model: session.model,
+							messages: contextMessages,
+							isWorking,
+							signal: controller.signal,
+							requests,
+						});
 			// An unused capture otherwise counts this idle subject as working.
 			await requests?.dispose();
 			// A failed classification on an idle session would spin at "working"

@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.1] - 2026-09-15
+## [1.0.1] - 2026-09-16
 
 - Made the Synerise base-context installer the primary setup path, with automatic prerequisites, optional shell-profile updates, and clear launch instructions.
 - Changed fresh managed Python environments to Python 3.13 and refused cross-minor snapshots before restore without overwriting saved state.
@@ -20,6 +20,18 @@
 - Preserved subagent capacity across daemon worker recovery and saved-session resumes, and advanced the daemon contract to protocol 13 / schema 49.
 - Released newly bound context sources when request admission closes during disposal, preventing child shutdown from hanging.
 - Kept independently resumed live subagents visible and routable when their parent publishes inactive saved-child entries.
+- Fixed Bedrock provider loading in the bundled Node CLI while retaining native request-attempt accounting and local logs.
+- Fixed returning to the agents view during chat initialization without disposing its connection too early or applying late heartbeat updates.
+- Fixed failed terminal turns being marked completed by using a factual error recap with the existing needs-input state, without a classifier request.
+- Scoped daemon discovery and shutdown candidates to the current base-context state root, including owned custom sockets, rather than every matching process on the machine (adapted from [Prime Agent #2361](https://github.com/PrimeIntellect-ai/prime-agent/pull/2361)).
+- Fixed credential rejection attribution when a custom authentication header overrides the selected API key.
+- Handled current Python kernel pipe errors without crashing the worker (adapted from Prime Agent #2213).
+- Prevented blocked input-pump idle waits from starving the I/O needed to resume queued work.
+- Allowed Python `rlm.delete_subagent` to accept the handle returned by `await rlm(...)`, without changing the callable spawn API or subagent limits.
+- Kept drafts alive during pending attaches and handled asynchronous discard failures without crashing other sessions.
+- Rejected missing CLI option values, invalid modes and invalid thinking levels while retaining extension flags and `--` handling.
+- Corrected RPC examples to protocol 13 and schema revision 49, and documented actual provider authentication availability.
+- Reported background scheduler storage failures instead of letting an unhandled promise rejection terminate the daemon worker.
 
 ## [1.0.0] - 2026-09-15
 

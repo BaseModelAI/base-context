@@ -30,6 +30,19 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 }
 
 describe("isContextOverflow", () => {
+	const litellmError =
+		"400 litellm.BadRequestError: OpenAIException - Requested token count exceeds the model's maximum context length of 262144 tokens. You requested a total of 270128 tokens: 261936 tokens from the input messages and 8192 tokens for the completion.";
+
+	it("detects LiteLLM input-plus-output context rejection", () => {
+		expect(isContextOverflow(createErrorMessage(litellmError), 262144)).toBe(true);
+		expect(isContextOverflow(createErrorMessage(litellmError))).toBe(true);
+	});
+
+	it("does not treat a rate limit quoting an earlier context rejection as overflow", () => {
+		const message = createErrorMessage(`429 rate limit: upstream previously returned ${litellmError}`);
+		expect(isContextOverflow(message, 262144)).toBe(false);
+	});
+
 	it("detects explicit Ollama prompt-too-long errors", () => {
 		const message = createErrorMessage("400 `prompt too long; exceeded max context length by 100918 tokens`");
 		expect(isContextOverflow(message, 32768)).toBe(true);

@@ -155,6 +155,89 @@ describe("parseArgs", () => {
 	});
 
 	describe("flags with values", () => {
+		const requiredValueFlags = [
+			"--mode",
+			"--daemon-socket",
+			"--provider",
+			"--model",
+			"--api-key",
+			"--cwd",
+			"--system-prompt",
+			"--append-system-prompt",
+			"--fork",
+			"--session-dir",
+			"--models",
+			"--tools",
+			"-t",
+			"--thinking",
+			"--extension",
+			"-e",
+			"--skill",
+			"--prompt-template",
+			"--theme",
+			"--rpc-protocol-version",
+		];
+
+		test.each(requiredValueFlags)("reports a missing value for %s without treating it as an extension", (flag) => {
+			const result = parseArgs([flag]);
+			expect(result.diagnostics).toEqual([{ type: "error", message: `${flag} requires a value` }]);
+			expect(result.unknownFlags.size).toBe(0);
+		});
+
+		test("keeps following options after missing values, including RPC and API-key flags", () => {
+			const result = parseArgs([
+				"--model",
+				"-t",
+				"ipython,prime_context",
+				"--provider",
+				"--verbose",
+				"--rpc-protocol-version",
+				"-p",
+				"--api-key",
+				"--extension-option",
+				"custom",
+			]);
+			expect(result.tools).toEqual(["ipython", "prime_context"]);
+			expect(result.verbose).toBe(true);
+			expect(result.print).toBe(true);
+			expect(result.apiKey).toBeUndefined();
+			expect(result.unknownFlags.get("extension-option")).toBe("custom");
+			expect(result.diagnostics).toEqual(
+				["--model", "--provider", "--rpc-protocol-version", "--api-key"].map((flag) => ({
+					type: "error",
+					message: `${flag} requires a value`,
+				})),
+			);
+		});
+
+		test("rejects invalid mode and thinking values as hard errors", () => {
+			const result = parseArgs(["--mode", "invalid", "--thinking", "hig"]);
+			expect(result.mode).toBeUndefined();
+			expect(result.thinking).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{ type: "error", message: 'Invalid --mode "invalid". Valid values: text, json, rpc, acp, daemon' },
+				{ type: "error", message: expect.stringMatching(/^Invalid thinking level "hig"\. Valid values: .*high/) },
+			]);
+		});
+
+		test("retains free-form prompt values but never consumes the end-of-options delimiter", () => {
+			const result = parseArgs([
+				"--system-prompt",
+				"- Respond only with JSON",
+				"--append-system-prompt",
+				"---\nrole: assistant\n---",
+			]);
+			expect(result.systemPrompt).toBe("- Respond only with JSON");
+			expect(result.appendSystemPrompt).toEqual(["---\nrole: assistant\n---"]);
+			expect(result.diagnostics).toEqual([]);
+			for (const flag of ["--system-prompt", "--append-system-prompt"]) {
+				const delimited = parseArgs([flag, "--", "--model", "positional"]);
+				expect(delimited.model).toBeUndefined();
+				expect(delimited.messages).toEqual(["--model", "positional"]);
+				expect(delimited.diagnostics).toEqual([{ type: "error", message: `${flag} requires a value` }]);
+			}
+		});
+
 		test("parses --provider", () => {
 			const result = parseArgs(["--provider", "openai"]);
 			expect(result.provider).toBe("openai");
@@ -235,7 +318,7 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 			expect(result.diagnostics).toContainEqual({
 				type: "error",
-				message: '--export was removed. Use "prime-agent session export <file> [output]".',
+				message: '--export was removed. Use "base-context session export <file> [output]".',
 			});
 		});
 
@@ -250,7 +333,7 @@ describe("parseArgs", () => {
 			expect(result.messages).toEqual([]);
 			expect(result.diagnostics).toContainEqual({
 				type: "error",
-				message: '--list-models was removed. Use "prime-agent model list [search]".',
+				message: '--list-models was removed. Use "base-context model list [search]".',
 			});
 		});
 
@@ -537,7 +620,7 @@ describe("parseArgs", () => {
 			expect(result.tools).toEqual(["read", "bash", "edit"]);
 			expect(result.diagnostics).toContainEqual({
 				type: "error",
-				message: "Unknown built-in tool(s): read. Available built-in tools: ipython",
+				message: "Unknown built-in tool(s): read. Available built-in tools: ipython, prime_context",
 			});
 		});
 	});

@@ -5,7 +5,7 @@ Choose a supported **provider and model**, then use that provider's authenticati
 ## First-time setup
 
 1. Start `base-context`.
-2. Open `/login`, select a provider, and sign in or enter that provider's API key.
+2. Open `/login`, select a supported provider, and enter that provider's API key. For bearer or cloud credentials, use the provider-specific setup below.
 3. Open `/model` and choose a supported model. The selected provider/model is saved for later sessions.
 
 For command-line selection, list the supported models and name both parts:
@@ -19,17 +19,13 @@ base-context --model openai/gpt-5.4
 
 An API key alone does not select a model. A missing or unavailable saved model is not silently replaced with another provider. For models outside the built-in list, register the provider/model in [models.json](models.md) first.
 
-## Subscriptions
+## Authentication availability
 
-Use `/login` to see the supported sign-in routes. Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root).
+Use `/login` to configure a supported provider's API key. Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root). Provider-specific bearer and cloud credentials are described below. Model access and usage limits follow the selected provider account.
 
-- **OpenAI Codex:** choose OpenAI Codex and sign in with your OpenAI account.
-- **Claude Pro/Max:** choose Anthropic's subscription sign-in route. An Anthropic API key is a separate option.
-- **GitHub Copilot:** choose GitHub Copilot and the correct github.com or GitHub Enterprise domain.
+Built-in OpenAI Codex, Claude Pro/Max, and GitHub Copilot subscription OAuth sign-in is unavailable. Their copied OAuth client identities have not been validated for this distribution. An OpenAI API key belongs to the `openai` provider, not `openai-codex`; Anthropic API-key authentication is separate from Claude subscriptions.
 
-Model access and usage limits follow the selected provider account.
-
-For advanced SDK use, an explicitly injected read-only OpenAI Codex backend can reuse existing credentials without login, refresh, credential writes, or API-key fallback. See [SDK authentication](sdk.md#api-keys-and-oauth).
+For advanced SDK use only, an explicitly injected read-only OpenAI Codex backend can reuse existing credentials without login, refresh, credential writes, or API-key fallback. This does not enable interactive subscription sign-in. See [SDK authentication](sdk.md#api-keys-and-oauth).
 
 ## API Keys
 

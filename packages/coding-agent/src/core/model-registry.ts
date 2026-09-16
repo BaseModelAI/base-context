@@ -344,6 +344,56 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	return result;
 }
 
+function isApiKeyOverriddenByHeaders(
+	model: Model<Api>,
+	apiKey: string,
+	headers: Record<string, string> | undefined,
+): boolean {
+	if (!headers) return false;
+
+	let headerName: string;
+	let expectedValue = apiKey;
+	switch (model.api) {
+		case "openai-completions":
+		case "openai-responses":
+			expectedValue = `Bearer ${apiKey}`;
+			headerName = model.provider === "cloudflare-ai-gateway" ? "cf-aig-authorization" : "authorization";
+			if (model.provider === "cloudflare-ai-gateway") {
+				// These adapters set the gateway key after merging custom headers.
+				headers = { ...headers, "cf-aig-authorization": expectedValue };
+			}
+			break;
+		case "anthropic-messages":
+			headerName = model.provider === "cloudflare-ai-gateway" ? "cf-aig-authorization" : "x-api-key";
+			if (model.provider === "cloudflare-ai-gateway") expectedValue = `Bearer ${apiKey}`;
+			break;
+		case "azure-openai-responses":
+			headerName = "api-key";
+			break;
+		case "google-generative-ai":
+		case "google-vertex":
+			headerName = "x-goog-api-key";
+			break;
+		case "mistral-conversations":
+			headerName = "authorization";
+			expectedValue = /^bearer /i.test(apiKey) ? apiKey : `Bearer ${apiKey}`;
+			break;
+		default:
+			return false;
+	}
+
+	// Google and Mistral append differently cased duplicates; Stainless SDKs use the last entry.
+	const values = Object.entries(headers)
+		.filter(([name]) => name.toLowerCase() === headerName)
+		.map(([, value]) => value.trim());
+	if (values.length === 0) return false;
+	const actualValue =
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "mistral-conversations"
+			? values.join(", ")
+			: values.at(-1);
+	return actualValue !== expectedValue.trim();
+}
+
 function readOpenAICodexAccountId(token: string): string | undefined {
 	try {
 		const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as {
@@ -1152,8 +1202,6 @@ export class ModelRegistry {
 					authSourceToken = this.getProviderRequestAuthSourceToken(model.provider, providerRequestAuthSource);
 				}
 			}
-			this.setLastProviderAuthSourceToken(model.provider, apiKey === undefined ? undefined : authSourceToken);
-
 			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
 			const modelHeaders = resolveHeadersOrThrow(
 				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
@@ -1178,6 +1226,10 @@ export class ModelRegistry {
 			) {
 				return { ok: false, error: contract.guidance };
 			}
+			if (apiKey === undefined || isApiKeyOverriddenByHeaders(model, apiKey, headers)) {
+				authSourceToken = undefined;
+			}
+			this.setLastProviderAuthSourceToken(model.provider, authSourceToken);
 			return {
 				ok: true,
 				apiKey,

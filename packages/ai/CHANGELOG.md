@@ -1,9 +1,13 @@
 # Changelog
 
-## [1.0.1] - 2026-09-15
+## [1.0.1] - 2026-09-16
 
 - Removed the Prime Inference provider, model catalog entries, and Prime credential environment integration.
 - Updated local authentication result pages to Synerise base-context branding without changing provider authentication protocols.
+- Fixed orphaned tool results in provider projections after interrupted assistant turns without changing retained records or native replay admission.
+- Fixed invalid sub-1024-token budget-based thinking requests without enlarging the existing computed output limit, and rejected impossible limits before transport.
+- Fixed recognition of LiteLLM input-plus-output context-limit errors without treating rate limits as overflow (adapted from [Prime Agent #2129](https://github.com/PrimeIntellect-ai/prime-agent/pull/2129)).
+- Fixed interleaved Responses tool calls, final argument handling, and usage/stop reasons for incomplete responses (adapted from the generic parser changes in [Prime Agent #2252](https://github.com/PrimeIntellect-ai/prime-agent/pull/2252)).
 
 ## [1.0.0] - 2026-09-15
 

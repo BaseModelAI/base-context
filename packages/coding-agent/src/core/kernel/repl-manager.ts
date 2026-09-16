@@ -511,6 +511,16 @@ export class ReplKernelManager {
 				this.appendKernelDiagnostic(`kernel stderr log close failed: ${errorMessage(error)}`);
 			}
 		});
+		// Pipe errors must not crash the worker. The pending writeLine rejection
+		// and child exit handler own cleanup; only record the current child's diagnosis.
+		child.stdin?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdin error: ${errorMessage(error)}`);
+		});
+		child.stdout?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stdout error: ${errorMessage(error)}`);
+		});
 		child.once("exit", () => {
 			// One turn for the poll phase to deliver the bytes the kernel wrote
 			// before dying (the pipe buffer bounds them), then destroy: EOF may

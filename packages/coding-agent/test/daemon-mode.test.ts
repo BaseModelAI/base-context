@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
 	chmodSync,
@@ -14,6 +15,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { type Api, fauxAssistantMessage, type Model } from "@ponythewhite/base-context-ai";
+import { lockSync } from "proper-lockfile";
 import { describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
 import {
@@ -26,7 +28,7 @@ import {
 } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
-import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -45,6 +47,7 @@ import {
 	SessionManager,
 } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import {
 	AgentDaemon,
 	cancelPendingExtensionUiRequests,
@@ -4229,6 +4232,11 @@ describe("daemon mode helpers", () => {
 
 	it("registers passive descendants' scheduled jobs when their root becomes resident", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-descendant-jobs-"));
+		const socketPath = join(tempDir, "supervisor.sock");
+		const client = new DaemonClient(socketPath);
+		let supervisor: ReturnType<typeof spawn> | undefined;
+		let exited: Promise<void> | undefined;
+		let releaseJobsLock: (() => void) | undefined;
 		try {
 			const fixture = await makePersistedRlmDaemonFixture(tempDir);
 			const childSessionId = basename(fixture.childArtifactDir);
@@ -4251,32 +4259,73 @@ describe("daemon mode helpers", () => {
 				});
 			makeJob(childSessionId, fixture.childSessionFile);
 			const grandchildHeartbeat = makeJob(grandchildSessionId, fixture.grandchildSessionFile);
-
-			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
-				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
-				createRuntime: fixture.createRuntime,
-				worker: { authenticationToken: "worker-token" },
+			// A real recovery failure on one child must not strand the remaining descendants.
+			releaseJobsLock = lockSync(join(fixture.childArtifactDir, SESSION_SCHEDULED_JOBS_FILENAME), {
+				realpath: false,
 			});
-			await fixture.openJournal();
-			const internals = workerDaemon as unknown as {
-				cronStore: AgentCronJobStore;
-				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-			};
-			// A corrupt child artifact must not strand the remaining descendants.
-			const recover = internals.cronStore.recoverSessionArtifact.bind(internals.cronStore);
-			vi.spyOn(internals.cronStore, "recoverSessionArtifact").mockImplementation((sessionId) => {
-				if (sessionId === childSessionId) throw new Error("corrupt scheduled-jobs.json");
-				return recover(sessionId);
-			});
-
-			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
-
-			await vi.waitFor(() =>
-				expect(internals.cronStore.list().some((job) => job.id === grandchildHeartbeat.id)).toBe(true),
+			// Let the real supervisor create the worker incarnation and own family admission.
+			supervisor = spawn(
+				process.execPath,
+				[
+					resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs"),
+					resolve(__dirname, "../src/cli.ts"),
+					"--mode",
+					"daemon",
+					"--daemon-socket",
+					socketPath,
+					"--session-dir",
+					join(tempDir, "sessions"),
+					"--offline",
+					"--no-tools",
+					"--no-extensions",
+				],
+				{
+					cwd: tempDir,
+					env: {
+						...process.env,
+						[ENV_AGENT_DIR]: tempDir,
+						BASE_CONTEXT_OFFLINE: "1",
+						TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
+					},
+					stdio: ["ignore", "ignore", "pipe"],
+				},
 			);
+			exited = new Promise<void>((resolveExit) => supervisor!.once("exit", () => resolveExit()));
+			let stderr = "";
+			supervisor.stderr?.on("data", (chunk: Buffer) => {
+				stderr += chunk.toString("utf8");
+			});
+			await vi.waitFor(() => client.connect(250), { timeout: 10_000 });
+			const created = await client.request({ type: "create", sessionPath: fixture.parentSessionFile });
+			if (!created.success) throw new Error(`${created.error}\n${stderr}`);
+			const parentActiveSessionId = (created.data as SessionSummary).activeSessionId!;
+			await vi.waitFor(
+				() => expect(stderr).toContain(`Could not register scheduled jobs for passive subagent ${fixture.childId}`),
+				{ timeout: 10_000 },
+			);
+			await vi.waitFor(async () => {
+				// Supplying the resident root routes directly to its worker, not the passive catalog.
+				const response = await client.request({ type: "heartbeats_list", activeSessionId: parentActiveSessionId });
+				if (!response.success) throw new Error(response.error);
+				const { heartbeats } = response.data as { heartbeats: Array<{ job: AgentCronJob }> };
+				expect(heartbeats.some(({ job }) => job.id === grandchildHeartbeat.id)).toBe(true);
+			});
 		} finally {
-			await closeFixtureSessions();
-			rmSync(tempDir, { recursive: true, force: true });
+			releaseJobsLock?.();
+			try {
+				if (supervisor && supervisor.exitCode === null) {
+					try {
+						await client.request({ type: "shutdown" }, 10_000);
+					} catch {
+						supervisor.kill("SIGTERM");
+					}
+				}
+			} finally {
+				client.close();
+				await exited;
+				await closeFixtureSessions();
+				rmSync(tempDir, { recursive: true, force: true });
+			}
 		}
 	});
 
