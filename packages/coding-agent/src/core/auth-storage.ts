@@ -244,7 +244,7 @@ export class AuthStorage {
 	}
 
 	/** Reuse an existing host login only through an explicitly read-only backend.
-	 * This does not authorize this distribution's OAuth login or refresh client.
+	 * This SDK mode never logs in, writes credentials, or refreshes tokens.
 	 */
 	static fromStorage(
 		storage: AuthStorageBackend,
@@ -371,7 +371,7 @@ export class AuthStorage {
 		}
 		if (this.isExistingOpenAICodexSubscription(providerId))
 			return `oauth:${credential.access}\0${credential.expires}`;
-		if (getProviderAuthContract(providerId).oauth !== "validated") {
+		if (getProviderAuthContract(providerId).oauth !== "supported") {
 			return undefined;
 		}
 		const provider = getOAuthProvider(providerId);
@@ -403,7 +403,7 @@ export class AuthStorage {
 		if (
 			!credential ||
 			(credential.type === "oauth" &&
-				getProviderAuthContract(provider).oauth !== "validated" &&
+				getProviderAuthContract(provider).oauth !== "supported" &&
 				!this.isExistingOpenAICodexSubscription(provider))
 		) {
 			return undefined;
@@ -437,13 +437,12 @@ export class AuthStorage {
 	}
 
 	private getEnvironmentApiKey(provider: string): string | undefined {
-		// The generic resolver prefers ANTHROPIC_OAUTH_TOKEN, an unavailable subscription route.
-		const apiKey = provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : getEnvApiKey(provider);
+		const apiKey = getEnvApiKey(provider);
 		return apiKey && isProviderApiKeyAllowed(provider, apiKey) ? apiKey : undefined;
 	}
 
 	private getEnvironmentAuthCandidate(provider: string): AuthSourceCandidate | undefined {
-		const envKeys = findEnvKeys(provider)?.filter((key) => key !== "ANTHROPIC_OAUTH_TOKEN");
+		const envKeys = findEnvKeys(provider);
 		const envKey = envKeys?.[0];
 		const apiKey = this.getEnvironmentApiKey(provider);
 		if (!apiKey) {
@@ -769,7 +768,7 @@ export class AuthStorage {
 	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
 		this.assertWritableStorage();
 		const contract = getProviderAuthContract(providerId);
-		if (contract.oauth !== "validated") {
+		if (contract.oauth !== "supported") {
 			throw new Error(contract.guidance);
 		}
 		const provider = getOAuthProvider(providerId);
@@ -795,7 +794,7 @@ export class AuthStorage {
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
-		if (getProviderAuthContract(providerId).oauth !== "validated") {
+		if (getProviderAuthContract(providerId).oauth !== "supported") {
 			return null;
 		}
 		const provider = getOAuthProvider(providerId);
@@ -809,7 +808,7 @@ export class AuthStorage {
 			this.loadError = null;
 
 			const cred = currentData[providerId];
-			if (cred?.type !== "oauth" || getProviderAuthContract(providerId).oauth !== "validated") {
+			if (cred?.type !== "oauth" || getProviderAuthContract(providerId).oauth !== "supported") {
 				return { result: null };
 			}
 
@@ -911,7 +910,7 @@ export class AuthStorage {
 			}
 		}
 
-		if (cred?.type === "oauth" && getProviderAuthContract(providerId).oauth === "validated") {
+		if (cred?.type === "oauth" && getProviderAuthContract(providerId).oauth === "supported") {
 			const storedCandidate = this.getStoredAuthCandidate(providerId);
 			if (storedCandidate && !this.isAuthSourceStale(providerId, storedCandidate)) {
 				const provider = getOAuthProvider(providerId);
@@ -941,7 +940,7 @@ export class AuthStorage {
 
 						if (
 							updatedCred?.type === "oauth" &&
-							getProviderAuthContract(providerId).oauth === "validated" &&
+							getProviderAuthContract(providerId).oauth === "supported" &&
 							Date.now() < updatedCred.expires
 						) {
 							const updatedCandidate = this.getStoredAuthCandidate(providerId);
@@ -994,9 +993,10 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Get registered OAuth providers validated for this distribution.
+	 * Get supported registered OAuth providers. Read-only SDK storage cannot log in.
 	 */
 	getOAuthProviders() {
-		return getOAuthProviders().filter((provider) => getProviderAuthContract(provider.id).oauth === "validated");
+		if (this.existingOpenAICodexSubscription) return [];
+		return getOAuthProviders().filter((provider) => getProviderAuthContract(provider.id).oauth === "supported");
 	}
 }

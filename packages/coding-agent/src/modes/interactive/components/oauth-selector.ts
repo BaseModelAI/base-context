@@ -119,7 +119,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			title: options.title ?? (mode === "login" ? "Providers" : "Saved Credentials"),
 			subtitle:
 				options.subtitle ??
-				(mode === "login" ? "API keys; unvalidated OAuth unavailable." : "Choose a credential to remove."),
+				(mode === "login" ? "Subscription login or API keys." : "Choose a credential to remove."),
 		});
 		this.addChild(panel);
 		if (options.header) {
@@ -322,7 +322,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		}
 		if (
 			credential?.type === "oauth" &&
-			getProviderAuthContract(provider.id).oauth !== "validated" &&
+			getProviderAuthContract(provider.id).oauth !== "supported" &&
 			(provider.authType === "oauth" || (!status.configured && !status.source))
 		) {
 			return theme.fg("warning", "saved OAuth unavailable");

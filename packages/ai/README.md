@@ -44,7 +44,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - [OAuth Availability and Adapters](#oauth-availability-and-adapters)
   - [CLI Availability](#cli-availability)
   - [Low-Level OAuth API](#low-level-oauth-api)
-  - [Read-Only Codex SDK Exception](#read-only-codex-sdk-exception)
+  - [Optional Read-Only Codex SDK Mode](#optional-read-only-codex-sdk-mode)
 - [Provider Notes](#provider-notes)
 - [License](#license)
 
@@ -73,7 +73,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Xiaomi MiMo** (uses Anthropic-compatible API; defaults to API billing endpoint, with separate Token Plan providers for `cn`/`ams`/`sgp` regions)
 - **Any OpenAI-compatible API**: Ollama, vLLM, LM Studio, etc.
 
-OpenAI Codex and GitHub Copilot protocol adapters are also retained, but built-in subscription OAuth sign-in is unavailable. See [OAuth availability and adapters](#oauth-availability-and-adapters).
+OpenAI Codex (ChatGPT), Anthropic (Claude Pro/Max), and GitHub Copilot support subscription OAuth sign-in. See [OAuth availability and adapters](#oauth-availability-and-adapters).
 
 ## Installation
 
@@ -1023,7 +1023,7 @@ const response = await complete(model, {
 ### Browser Compatibility Notes
 
 - Amazon Bedrock (`bedrock-converse-stream`) is not supported in browser environments.
-- The inherited OAuth adapters are Node.js-only. They do not provide validated Base Context sign-in; see [OAuth availability and adapters](#oauth-availability-and-adapters).
+- OAuth login and credential refresh run in Node.js, not browser builds. The login flow displays a browser authorization link; see [OAuth availability and adapters](#oauth-availability-and-adapters).
 - In browser builds, Bedrock can still appear in model lists. Calls to Bedrock models fail at runtime.
 - Use a server-side proxy or backend service for Bedrock or to keep provider credentials out of browser code.
 
@@ -1125,31 +1125,40 @@ Official docs: [Application Default Credentials](https://cloud.google.com/docs/a
 
 ## OAuth Availability and Adapters
 
-Built-in Anthropic (Claude Pro/Max), OpenAI Codex, and GitHub Copilot subscription OAuth sign-in is unavailable. Their copied OAuth client identities have not been validated for Base Context. Use supported provider API keys or the cloud authentication described above. An OpenAI API key belongs to `openai`, not `openai-codex`; Anthropic API-key authentication is separate from Claude subscriptions. See [Base Context authentication availability](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/providers.md#authentication-availability).
+Subscription OAuth is supported for Anthropic (Claude Pro/Max), OpenAI Codex (ChatGPT), and GitHub Copilot. Each provider uses its browser authorization flow; account access and usage limits remain provider-controlled. Prime integrations are disabled. An OpenAI API key belongs to `openai`, not `openai-codex`; Claude subscription login is separate from Anthropic API-key authentication.
+
+For the Base Context application, use `/login` to choose the provider and authenticate, then `/model` to select a model. See [Base Context authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/providers.md#authentication-availability).
 
 ### CLI Availability
 
-`base-context-ai login` rejects every login request, including provider-specific requests, with an unavailable message and exit code 1. It does not save credentials to `auth.json`. `base-context-ai list` lists the inherited adapters as unavailable; it is not a list of supported sign-in routes.
+The library CLI lists its supported OAuth adapters and can log in to a selected provider:
+
+```bash
+npx @ponythewhite/base-context-ai list
+npx @ponythewhite/base-context-ai login openai-codex
+```
+
+Follow the displayed browser link and authorization prompts. The library CLI saves credentials in `auth.json` in the current directory. This is separate from the Base Context application's default `~/.base-context/auth.json`; use the application's `/login` for its normal setup.
 
 ### Low-Level OAuth API
 
-The Node.js entry point `@ponythewhite/base-context-ai/oauth` still exports caller-managed OAuth adapter APIs. The CLI rejection does not disable these exports, but the inherited provider flows are not validated as supported Base Context product login routes:
+The Node.js entry point `@ponythewhite/base-context-ai/oauth` exports caller-managed APIs:
 
 - `loginAnthropic`, `loginOpenAICodex`, and `loginGitHubCopilot` return credentials to the caller; they do not store them.
-- `getOAuthProvider` and `getOAuthProviders` expose the adapter registry, not product sign-in availability.
+- `getOAuthProvider` and `getOAuthProviders` expose the registered adapter implementations.
 - `refreshOAuthToken(providerId, credentials)` returns refreshed credentials. It is deprecated in favor of `getOAuthProvider(providerId).refreshToken(credentials)`.
 - `getOAuthApiKey(providerId, credentialsMap)` returns `{ newCredentials, apiKey }`, or `null` when the caller supplied no credentials for that provider. It refreshes expired credentials and can fail if refresh fails; it is not a read-only credential lookup.
 - `OAuthProviderId`, `OAuthCredentials`, and `OAuthLoginCallbacks` are exported types.
 
-Credential storage and persistence of refreshed credentials are the caller's responsibility. This entry point does not create or load `auth.json` for you. Retaining these APIs does not validate the copied clients or enable built-in subscription onboarding.
+Credential storage and persistence of refreshed credentials are the caller's responsibility. This entry point does not create or load `auth.json` for you.
 
-### Read-Only Codex SDK Exception
+### Optional Read-Only Codex SDK Mode
 
-The separate Base Context coding-agent SDK permits advanced use of an explicitly injected read-only OpenAI Codex backend with existing credentials. That path does not log in, refresh credentials, write credential storage, or fall back to API keys. It is not a library login/refresh workflow and does not enable interactive subscription sign-in. See [SDK authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sdk.md#api-keys-and-oauth).
+The separate Base Context coding-agent SDK can use an explicitly injected read-only OpenAI Codex backend with existing credentials. Only this mode disables login, refresh, credential writes, and API-key fallback. Normal writable OAuth storage supports interactive subscription login and refresh. See [SDK authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sdk.md#api-keys-and-oauth).
 
 ## Provider Notes
 
-**OpenAI Codex (inherited adapter)**: The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex (ChatGPT subscription)**: The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
 
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.

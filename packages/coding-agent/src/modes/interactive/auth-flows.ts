@@ -42,7 +42,7 @@ export async function getAnthropicSubscriptionAuthWarning(
 	modelRegistry: ModelRegistry,
 	model: { provider: string } | undefined,
 ): Promise<string | undefined> {
-	if (!model || model.provider !== "anthropic" || getProviderAuthContract(model.provider).oauth !== "validated") {
+	if (!model || model.provider !== "anthropic" || getProviderAuthContract(model.provider).oauth !== "supported") {
 		return undefined;
 	}
 
@@ -110,7 +110,7 @@ export class ProviderAuthFlows {
 	runMcpLogin(server: string, label?: string): Promise<AuthenticationResult> {
 		const providerId = `mcp:${server}`;
 		const contract = getProviderAuthContract(providerId);
-		if (contract.oauth !== "validated") {
+		if (contract.oauth !== "supported") {
 			this.host.showError(contract.guidance);
 			return Promise.resolve({ status: "failed" });
 		}
@@ -128,7 +128,7 @@ export class ProviderAuthFlows {
 		if (providerOptions.length === 0) {
 			this.host.showStatus(
 				authType === "oauth"
-					? "Subscription OAuth is unavailable in Base Context until provider client contracts are validated. Use /login API Keys instead."
+					? "No supported OAuth providers are registered. Use /login to configure an API-key provider."
 					: authType === "api_key"
 						? "No API key providers available."
 						: "No providers available.",
@@ -430,7 +430,7 @@ export class ProviderAuthFlows {
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
 		const contract = getProviderAuthContract(providerId);
-		if (contract.oauth !== "validated") {
+		if (contract.oauth !== "supported") {
 			this.host.showError(contract.guidance);
 			return { status: "failed" };
 		}
@@ -500,7 +500,13 @@ export class ProviderAuthFlows {
 			});
 
 			closeDialog();
-			return await this.completeProviderAuthentication(providerId, providerName, "oauth", undefined, kind);
+			return await this.completeProviderAuthentication(
+				providerId,
+				providerName,
+				"oauth",
+				kind === "provider" ? "Use /model to select a model" : undefined,
+				kind,
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);

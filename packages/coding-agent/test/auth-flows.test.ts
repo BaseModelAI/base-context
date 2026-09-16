@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import type { Component, OverlayHandle, TUI } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -78,6 +79,7 @@ describe("ProviderAuthFlows", () => {
 		writeFileSync(authJsonPath, "{}");
 		vi.stubEnv("HOME", tempDir);
 		vi.stubEnv("BASE_CONTEXT_HOME", join(tempDir, "base-context"));
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network in auth flow tests"));
 	});
 
 	afterEach(() => {
@@ -86,6 +88,7 @@ describe("ProviderAuthFlows", () => {
 		}
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
+		resetOAuthProviders();
 	});
 
 	it("stores an API key only for the selected provider without sending it", async () => {
@@ -119,6 +122,49 @@ describe("ProviderAuthFlows", () => {
 
 		expect(authStorage.list()).toEqual([]);
 		expect(errorMessages).toEqual([]);
+	});
+
+	it.each(["anthropic", "github-copilot", "openai-codex"])(
+		"runs the selected %s subscription login",
+		async (providerId) => {
+			const provider = getOAuthProvider(providerId)!;
+			const showAuth = vi.spyOn(LoginDialogComponent.prototype, "showAuth").mockImplementation(() => {});
+			vi.spyOn(LoginDialogComponent.prototype, "showManualInput").mockResolvedValue(
+				"http://localhost/callback?code=test",
+			);
+			const login = vi.spyOn(provider, "login").mockImplementation(async (callbacks) => {
+				callbacks.onAuth({ url: "https://login.example.test/authorize" });
+				if (provider.usesCallbackServer) {
+					await expect(callbacks.onManualCodeInput?.()).resolves.toContain("code=test");
+				}
+				return { access: "test-access", refresh: "test-refresh", expires: Date.now() + 60_000 };
+			});
+			const { host, overlays, statusMessages, errorMessages } = createHost(AuthStorage.create(authJsonPath));
+			const flow = new ProviderAuthFlows(host);
+			expect(flow.getLoginProviderOptions("oauth").map((entry) => entry.id)).not.toContain("prime-intellect");
+			const result = flow.runLogin({ authType: "oauth" });
+			for (const character of providerId) overlays[0]?.handleInput?.(character);
+			overlays[0]?.handleInput?.("\r");
+			await expect(result).resolves.toMatchObject({ status: "success", providerId, authType: "oauth" });
+			expect(login).toHaveBeenCalledOnce();
+			expect(showAuth).toHaveBeenCalledWith("https://login.example.test/authorize", undefined);
+			expect(errorMessages).toEqual([]);
+			expect(statusMessages.join(" ")).toContain("Use /model to select a model");
+			expect(Object.keys(JSON.parse(readFileSync(authJsonPath, "utf8")))).toEqual([providerId]);
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		},
+	);
+
+	it("leaves OAuth storage unchanged after a cancelled browser login", async () => {
+		vi.spyOn(getOAuthProvider("openai-codex")!, "login").mockRejectedValue(new Error("Login cancelled"));
+		const authStorage = AuthStorage.create(authJsonPath);
+		const { host, errorMessages } = createHost(authStorage);
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai-codex", name: "Codex", authType: "oauth" }),
+		).resolves.toEqual({ status: "cancelled" });
+		expect(authStorage.list()).toEqual([]);
+		expect(errorMessages).toEqual([]);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
 
 	it("opens login on the requested MCP Connections category", async () => {

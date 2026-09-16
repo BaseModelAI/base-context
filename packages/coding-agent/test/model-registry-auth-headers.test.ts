@@ -61,6 +61,31 @@ describe("request auth header attribution", () => {
 		}
 	});
 
+	it("attributes subscription tokens only when their bearer header is effective", async () => {
+		for (const [provider, api] of [
+			["anthropic", "anthropic-messages"],
+			["github-copilot", "anthropic-messages"],
+			["openai-codex", "openai-codex-responses"],
+		] as const) {
+			const token = provider === "anthropic" ? "sk-ant-oat-test" : "codex-access-test";
+			const storage = AuthStorage.inMemory({
+				[provider]: { type: "oauth", access: token, refresh: "refresh", expires: Date.now() + 60_000 },
+			});
+			const registry = ModelRegistry.inMemory(storage);
+			for (const effective of [true, false]) {
+				const auth = await registry.getApiKeyAndHeaders({
+					...model,
+					provider,
+					api,
+					headers: { Authorization: `Bearer ${effective ? token : otherKey}` },
+				});
+				if (!auth.ok) throw new Error(auth.error);
+				// Native Codex sets Authorization after custom headers; Anthropic permits overrides.
+				expect(Boolean(auth.sourceToken)).toBe(api === "openai-codex-responses" || effective);
+			}
+		}
+	});
+
 	it.each([
 		["openai-responses", "test-provider", "Authorization", `Bearer ${otherKey}`, false],
 		["anthropic-messages", "test-provider", "X-Api-Key", otherKey, false],

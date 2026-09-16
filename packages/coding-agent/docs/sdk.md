@@ -434,8 +434,14 @@ A supported saved model remains selected when its authentication needs setup. Re
 
 ### API Keys and OAuth
 
+`AuthStorage.create()` uses normal writable credential storage. Supported subscription
+providers can log in through `/login` in the CLI, or through `authStorage.login(providerId,
+callbacks)` in an SDK application. Supply the browser/prompt callbacks for the provider
+flow. Normal storage persists credentials and refreshes OAuth tokens when needed.
+Authentication does not select a model; choose one explicitly or reuse a saved choice.
+Prime integrations remain disabled.
 
-For an existing OpenAI Codex subscription, explicitly inject a read-only backend:
+For **optional read-only** use of an existing OpenAI Codex subscription, explicitly inject a backend:
 
 ```typescript
 import { AuthStorage } from "@ponythewhite/base-context";
@@ -448,9 +454,10 @@ const authStorage = AuthStorage.fromStorage(readOnlyBackend, {
 The backend implements `AuthStorageBackend` and supplies only the existing OAuth access
 credential and expiry. File-backed writable storage is rejected in this mode. Missing,
 stale or expired credentials refuse use; login, refresh, storage writes and API-key
-fallback are disabled. This authorizes only this instance's official
-`openai-codex` / `openai-codex-responses` route. It does not globally validate OAuth clients
-or protect against trusted in-process code. Keep the credential backend outside tools.
+fallback are disabled. This mode is limited to this instance's
+`openai-codex` / `openai-codex-responses` route. These restrictions do not apply to normal
+writable OAuth storage, and do not protect against trusted in-process code. Keep the
+credential backend outside tools.
 
 API key resolution priority (handled by AuthStorage):
 1. Runtime overrides (via `setRuntimeApiKey`, not persisted)

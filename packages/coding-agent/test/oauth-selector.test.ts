@@ -1,6 +1,6 @@
 import { setKeybindings } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../src/core/provider-display-names.js";
@@ -20,9 +20,19 @@ describe("OAuthSelectorComponent", () => {
 
 	beforeEach(() => {
 		setKeybindings(new KeybindingsManager());
+		for (const name of [
+			"ANTHROPIC_API_KEY",
+			"ANTHROPIC_OAUTH_TOKEN",
+			"COPILOT_GITHUB_TOKEN",
+			"GH_TOKEN",
+			"GITHUB_TOKEN",
+		]) {
+			vi.stubEnv(name, "");
+		}
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (originalOpenAiApiKey === undefined) {
 			delete process.env.OPENAI_API_KEY;
 		} else {
@@ -102,7 +112,7 @@ describe("OAuthSelectorComponent", () => {
 		expect(output.indexOf("OpenAI")).toBeLessThan(output.indexOf("GitHub Copilot"));
 	});
 
-	it("shows saved unvalidated OAuth as unavailable in the API key selector", () => {
+	it("shows saved subscription auth in the API key selector", () => {
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
 				type: "oauth",
@@ -122,7 +132,7 @@ describe("OAuthSelectorComponent", () => {
 		const output = stripAnsi(selector.render(120).join("\n"));
 
 		expect(output).toContain("Anthropic");
-		expect(output).toContain("saved OAuth unavailable");
+		expect(output).toContain("subscription configured");
 	});
 
 	it("shows environment API key auth as configured", () => {
@@ -249,7 +259,7 @@ describe("OAuthSelectorComponent", () => {
 		expect(output).not.toContain("expired");
 	});
 
-	it("keeps a saved OAuth row unavailable when models.json API-key auth is active", () => {
+	it("keeps a stale OAuth row expired when models.json API-key auth is active", () => {
 		const authStorage = AuthStorage.inMemory({
 			anthropic: {
 				type: "oauth",
@@ -271,8 +281,8 @@ describe("OAuthSelectorComponent", () => {
 		const output = stripAnsi(selector.render(120).join("\n"));
 
 		expect(output).toContain("Anthropic");
-		expect(output).toContain("saved OAuth unavailable");
-		expect(output).not.toContain("expired");
+		expect(output).toContain("expired");
+		expect(output).not.toContain("saved OAuth unavailable");
 		expect(output).not.toContain("configured");
 	});
 

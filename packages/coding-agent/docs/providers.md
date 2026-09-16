@@ -1,11 +1,11 @@
 # Providers
 
-Choose a supported **provider and model**, then use that provider's authentication. Base Context does not choose a provider or model automatically. Accounts, usage limits, and billing belong to the provider you select.
+Choose a supported **provider**, authenticate, then select a **model**. Base Context does not choose a provider or model automatically. Accounts, usage limits, and billing belong to the provider you select.
 
 ## First-time setup
 
 1. Start `base-context`.
-2. Open `/login`, select a supported provider, and enter that provider's API key. For bearer or cloud credentials, use the provider-specific setup below.
+2. Open `/login` and select a provider. For a supported subscription, follow its browser authorization link. For API-key authentication, enter that provider's key. Bearer and cloud credentials use the provider-specific setup below.
 3. Open `/model` and choose a supported model. The selected provider/model is saved for later sessions.
 
 For command-line selection, list the supported models and name both parts:
@@ -21,11 +21,19 @@ An API key alone does not select a model. A missing or unavailable saved model i
 
 ## Authentication availability
 
-Use `/login` to configure a supported provider's API key. Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root). Provider-specific bearer and cloud credentials are described below. Model access and usage limits follow the selected provider account.
+Use `/login` for supported subscription OAuth or API-key authentication. The built-in subscription routes are **OpenAI Codex (ChatGPT)**, **Anthropic (Claude Pro/Max)**, and **GitHub Copilot**. Open the provider's browser link and complete its authorization steps. Access and usage limits depend on your provider account.
 
-Built-in OpenAI Codex, Claude Pro/Max, and GitHub Copilot subscription OAuth sign-in is unavailable. Their copied OAuth client identities have not been validated for this distribution. An OpenAI API key belongs to the `openai` provider, not `openai-codex`; Anthropic API-key authentication is separate from Claude subscriptions.
+Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root). Normal OAuth storage persists credentials and refreshes them when needed. Provider-specific bearer and cloud credentials are described below. Prime integrations are disabled; this does not disable other registered OAuth providers.
 
-For advanced SDK use only, an explicitly injected read-only OpenAI Codex backend can reuse existing credentials without login, refresh, credential writes, or API-key fallback. This does not enable interactive subscription sign-in. See [SDK authentication](sdk.md#api-keys-and-oauth).
+### ChatGPT / Codex subscription
+
+1. Open `/login` and choose **OpenAI Codex**.
+2. Open the displayed browser link and sign in with the ChatGPT account that has Codex access. Complete the callback or paste the requested authorization response when prompted.
+3. Open `/model` and explicitly choose an `openai-codex` model available to your account.
+
+An OpenAI API key belongs to the separate `openai` provider; it is not required for the Codex subscription route. Anthropic API-key authentication is likewise separate from Claude subscription login. Logging in does not automatically select or replace a model.
+
+The SDK also offers an optional, explicitly injected read-only Codex backend for existing credentials. Only that mode disables login, refresh, credential writes, and API-key fallback. It does not restrict normal interactive subscription login. See [SDK authentication](sdk.md#api-keys-and-oauth).
 
 ## API Keys
 

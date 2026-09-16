@@ -17,7 +17,7 @@ afterEach(() => {
 	home = undefined;
 });
 
-test("reports owned product paths and unavailable auth contracts without credential values", () => {
+test("reports owned product paths and supported auth adapters without credential values", () => {
 	home = mkdtempSync(join(tmpdir(), "bc-doctor-"));
 	vi.stubEnv("BASE_CONTEXT_HOME", home);
 	vi.stubEnv("OPENAI_API_KEY", "fake-provider-key-do-not-export");
@@ -32,7 +32,10 @@ test("reports owned product paths and unavailable auth contracts without credent
 	const formatted = formatProductDiagnostics(report);
 	expect(formatted).toContain(`native context: ${report.schemas.nativeContext}`);
 	expect(formatted).not.toContain("fake-provider-key-do-not-export");
-	expect(report.providerContracts.every((contract) => contract.oauth !== "validated")).toBe(true);
+	expect(report.providerContracts.find((contract) => contract.providerId === "openai-codex")?.oauth).toBe("supported");
+	expect(report.providerContracts.find((contract) => contract.providerId === "prime-intellect")?.oauth).toBe(
+		"unsupported",
+	);
 	expect(JSON.stringify(report)).not.toContain("fake-provider-key-do-not-export");
 });
 

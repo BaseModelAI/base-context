@@ -366,6 +366,10 @@ function isApiKeyOverriddenByHeaders(
 		case "anthropic-messages":
 			headerName = model.provider === "cloudflare-ai-gateway" ? "cf-aig-authorization" : "x-api-key";
 			if (model.provider === "cloudflare-ai-gateway") expectedValue = `Bearer ${apiKey}`;
+			else if (model.provider === "github-copilot" || apiKey.includes("sk-ant-oat")) {
+				headerName = "authorization";
+				expectedValue = `Bearer ${apiKey}`;
+			}
 			break;
 		case "azure-openai-responses":
 			headerName = "api-key";
@@ -866,11 +870,13 @@ export class ModelRegistry {
 	}
 
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		if (this.isExistingOpenAICodexSubscription(model)) return this.authStorage.hasAuth(model.provider);
-		return (
-			isProviderApiKeyAllowed(model.provider, "", model.api) &&
-			(this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider))
-		);
+		if (this.authStorage.isExistingOpenAICodexSubscription(model.provider)) {
+			return this.isExistingOpenAICodexSubscription(model) && this.authStorage.hasAuth(model.provider);
+		}
+		if (!isProviderApiKeyAllowed(model.provider, "", model.api)) {
+			return this.isUsingOAuth(model) && this.authStorage.hasAuth(model.provider);
+		}
+		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
 	}
 
 	private fingerprintProviderRequestAuthSource(source: ProviderRequestAuthSource["source"], material: string): string {
@@ -1143,6 +1149,12 @@ export class ModelRegistry {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
+			if (
+				this.authStorage.isExistingOpenAICodexSubscription(model.provider) &&
+				!this.isExistingOpenAICodexSubscription(model)
+			) {
+				return { ok: false, error: "Existing OpenAI subscription requires the native Codex endpoint and API" };
+			}
 			if (this.isExistingOpenAICodexSubscription(model)) {
 				const config = this.providerRequestConfigs.get(model.provider);
 				const modelHeaders = this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id));
@@ -1175,7 +1187,8 @@ export class ModelRegistry {
 			const contract = getProviderAuthContract(
 				model.api === "openai-codex-responses" ? "openai-codex" : model.provider,
 			);
-			if (!isProviderApiKeyAllowed(model.provider, "", model.api)) {
+			const usingOAuth = this.isUsingOAuth(model);
+			if (!usingOAuth && !isProviderApiKeyAllowed(model.provider, "", model.api)) {
 				return { ok: false, error: contract.guidance };
 			}
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
@@ -1220,10 +1233,7 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
-			if (
-				!isProviderApiKeyAllowed(model.provider, apiKey ?? "", model.api) ||
-				Object.values(headers ?? {}).some((value) => !isProviderApiKeyAllowed(model.provider, value, model.api))
-			) {
+			if (!usingOAuth && !isProviderApiKeyAllowed(model.provider, apiKey ?? "", model.api)) {
 				return { ok: false, error: contract.guidance };
 			}
 			if (apiKey === undefined || isApiKeyOverriddenByHeaders(model, apiKey, headers)) {
@@ -1323,11 +1333,17 @@ export class ModelRegistry {
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
+		if (
+			this.authStorage.isExistingOpenAICodexSubscription(model.provider) &&
+			!this.isExistingOpenAICodexSubscription(model)
+		) {
+			return false;
+		}
 		const cred = this.authStorage.get(model.provider);
 		return (
 			cred?.type === "oauth" &&
 			(this.isExistingOpenAICodexSubscription(model) ||
-				getProviderAuthContract(model.provider).oauth === "validated")
+				getProviderAuthContract(model.provider).oauth === "supported")
 		);
 	}
 
@@ -1448,7 +1464,7 @@ export class ModelRegistry {
 					compat: modelDef.compat,
 				} as Model<Api>);
 			}
-			if (config.oauth?.modifyModels && getProviderAuthContract(providerName).oauth === "validated") {
+			if (config.oauth?.modifyModels && getProviderAuthContract(providerName).oauth === "supported") {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
 					this.models = config.oauth.modifyModels(this.models, cred);

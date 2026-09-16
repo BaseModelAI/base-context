@@ -16,6 +16,15 @@ describe("AuthStorage", () => {
 		tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		authJsonPath = join(tempDir, "auth.json");
+		for (const name of [
+			"ANTHROPIC_API_KEY",
+			"ANTHROPIC_OAUTH_TOKEN",
+			"COPILOT_GITHUB_TOKEN",
+			"GH_TOKEN",
+			"GITHUB_TOKEN",
+		]) {
+			vi.stubEnv(name, "");
+		}
 		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Provider calls are not allowed in these tests"));
 	});
 
@@ -357,39 +366,54 @@ describe("AuthStorage", () => {
 	});
 
 	describe("OAuth distribution capability", () => {
-		test("registration does not enable login or stored-token use for unvalidated providers", async () => {
-			for (const name of [
-				"ANTHROPIC_OAUTH_TOKEN",
-				"ANTHROPIC_API_KEY",
-				"COPILOT_GITHUB_TOKEN",
-				"GH_TOKEN",
-				"GITHUB_TOKEN",
-			]) {
-				vi.stubEnv(name, "");
+		test("persists registered non-Prime logins and refreshes expired credentials", async () => {
+			for (const providerId of ["anthropic", "github-copilot", "openai-codex", "custom-oauth", "mcp:custom"]) {
+				const credentials = { access: "saved-access", refresh: "saved-refresh", expires: Date.now() + 60_000 };
+				const refreshed = { access: "new-access", refresh: "new-refresh", expires: Date.now() + 120_000 };
+				const login = vi.fn(async () => credentials);
+				const refreshToken = vi.fn(async () => refreshed);
+				registerOAuthProvider({
+					id: providerId,
+					name: providerId,
+					login,
+					refreshToken,
+					getApiKey: (credential) => credential.access,
+				});
+				authStorage = AuthStorage.create(authJsonPath);
+				expect(authStorage.getOAuthProviders().some((provider) => provider.id === providerId)).toBe(true);
+				const callbacks = { onAuth: vi.fn(), onPrompt: vi.fn() };
+				await authStorage.login(providerId, callbacks);
+				expect(login).toHaveBeenCalledWith(callbacks);
+				expect(JSON.parse(readFileSync(authJsonPath, "utf8"))[providerId]).toEqual({
+					type: "oauth",
+					...credentials,
+				});
+				authStorage = AuthStorage.create(authJsonPath);
+				expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: true, source: "stored" });
+				await expect(authStorage.getApiKey(providerId)).resolves.toBe(credentials.access);
+				expect(refreshToken).not.toHaveBeenCalled();
+				authStorage.set(providerId, { type: "oauth", ...credentials, expires: 0 });
+				const expiredSource = authStorage.getCurrentAuthSourceToken(providerId);
+				const result = await authStorage.getApiKeyWithSourceToken(providerId);
+				expect(result.apiKey).toBe(refreshed.access);
+				expect(result.sourceToken?.source).toBe("stored");
+				expect(result.sourceToken).not.toEqual(expiredSource);
+				expect(refreshToken).toHaveBeenCalledOnce();
+				expect(JSON.parse(readFileSync(authJsonPath, "utf8"))[providerId]).toEqual({ type: "oauth", ...refreshed });
 			}
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		});
+
+		test("keeps the existing Codex SDK mode read-only without login or refresh", async () => {
 			const login = vi.fn();
 			const refreshToken = vi.fn();
-			const getApiKey = vi.fn();
-			const callbacks = { onAuth: vi.fn(), onPrompt: vi.fn() };
-
-			for (const providerId of ["anthropic", "github-copilot", "openai-codex", "test-unvalidated-oauth"]) {
-				registerOAuthProvider({ id: providerId, name: providerId, login, refreshToken, getApiKey });
-				for (const expires of [Date.now() + 60_000, Date.now() - 60_000]) {
-					const credential = { type: "oauth" as const, access: "saved-access", refresh: "saved-refresh", expires };
-					authStorage = AuthStorage.inMemory({ [providerId]: credential });
-					expect(authStorage.getOAuthProviders()).toEqual([]);
-					expect(authStorage.hasAuth(providerId)).toBe(false);
-					expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: false });
-					expect(authStorage.getCurrentAuthSourceToken(providerId)).toBeUndefined();
-					expect(await authStorage.getApiKey(providerId)).toBeUndefined();
-					expect(await authStorage.getApiKeyWithSourceToken(providerId)).toEqual({});
-					await expect(authStorage.login(providerId, callbacks)).rejects.toThrow(
-						providerContracts.getProviderAuthContract(providerId).guidance,
-					);
-					expect(authStorage.getAll()).toEqual({ [providerId]: credential });
-				}
-			}
-
+			registerOAuthProvider({
+				id: "openai-codex",
+				name: "Codex",
+				login,
+				refreshToken,
+				getApiKey: (cred) => cred.access,
+			});
 			for (const fresh of [true, false]) {
 				const credential = {
 					type: "oauth",
@@ -404,27 +428,19 @@ describe("AuthStorage", () => {
 						return result;
 					},
 					withLockAsync: vi.fn(async () => {
-						throw new Error("Borrowed host storage must not use async callbacks");
+						throw new Error("Read-only storage must not refresh");
 					}),
 				};
-				authStorage = AuthStorage.fromStorage(backend, {
-					existingOpenAICodexSubscription: true,
-				});
-				const isolated = AuthStorage.fromStorage(backend);
-				expect(await isolated.getApiKey("openai-codex")).toBeUndefined();
-				expect(providerContracts.getProviderAuthContract("openai-codex").oauth).toBe("unvalidated");
+				authStorage = AuthStorage.fromStorage(backend, { existingOpenAICodexSubscription: true });
 				expect(authStorage.getOAuthProviders()).toEqual([]);
-				await expect(authStorage.login("openai-codex", callbacks)).rejects.toThrow(
-					"Existing OpenAI subscription storage is read-only",
+				await expect(authStorage.login("openai-codex", { onAuth: vi.fn(), onPrompt: vi.fn() })).rejects.toThrow(
+					"read-only",
 				);
 				if (fresh) {
 					expect(authStorage.hasAuth("openai-codex")).toBe(true);
-					expect(authStorage.getAuthStatus("openai-codex")).toEqual({ configured: true, source: "stored" });
-					expect(await authStorage.getApiKey("openai-codex")).toBe(credential.access);
+					await expect(authStorage.getApiKey("openai-codex")).resolves.toBe(credential.access);
 				} else {
-					await expect(authStorage.getApiKey("openai-codex")).rejects.toThrow(
-						"Existing OpenAI subscription credential has expired",
-					);
+					await expect(authStorage.getApiKey("openai-codex")).rejects.toThrow("has expired");
 				}
 				expect(() => authStorage.set("openai-codex", { type: "api_key", key: "dummy" })).toThrow("read-only");
 				expect(() => authStorage.remove("openai-codex")).toThrow("read-only");
@@ -434,57 +450,36 @@ describe("AuthStorage", () => {
 			}
 			expect(login).not.toHaveBeenCalled();
 			expect(refreshToken).not.toHaveBeenCalled();
-			expect(getApiKey).not.toHaveBeenCalled();
-			expect(callbacks.onAuth).not.toHaveBeenCalled();
-			expect(callbacks.onPrompt).not.toHaveBeenCalled();
-			expect(globalThis.fetch).not.toHaveBeenCalled();
 		});
 
-		test("subscription tokens cannot bypass capability checks through API-key sources", async () => {
-			vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-unavailable");
-			vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-oat01-unavailable");
-			vi.stubEnv("COPILOT_GITHUB_TOKEN", "unvalidated-copilot-token");
-			for (const providerId of ["anthropic", "github-copilot", "openai-codex"]) {
-				const token = providerId === "anthropic" ? "sk-ant-oat01-unavailable" : "unvalidated-subscription-token";
-				authStorage = AuthStorage.inMemory({ [providerId]: { type: "api_key", key: token } });
-				authStorage.setRuntimeApiKey(providerId, token);
-				authStorage.setFallbackResolver(() => token);
-				expect(authStorage.hasAuth(providerId)).toBe(false);
-				expect(authStorage.getAuthStatus(providerId)).toEqual({ configured: false });
-				expect(await authStorage.getApiKeyWithSourceToken(providerId)).toEqual({});
-				expect(authStorage.get(providerId)).toEqual({ type: "api_key", key: token });
-			}
-
-			// Resolve command output at request time, not by running commands for status checks.
-			vi.stubEnv("ANTHROPIC_API_KEY", "ordinary-api-key");
-			const tokenPath = join(tempDir, "command-output");
-			writeFileSync(tokenPath, "sk-ant-oat01-unavailable");
-			authStorage = AuthStorage.inMemory({ anthropic: { type: "api_key", key: `!cat "${toShPath(tokenPath)}"` } });
-			expect(await authStorage.getApiKey("anthropic")).toBe("ordinary-api-key");
-			expect(globalThis.fetch).not.toHaveBeenCalled();
-		});
-
-		test("unavailable stored OAuth leaves ordinary API-key fallbacks usable", async () => {
-			vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-unavailable");
-			vi.stubEnv("ANTHROPIC_API_KEY", "environment-api-key");
-			const credential = { type: "oauth" as const, access: "saved-access", refresh: "saved-refresh", expires: 0 };
-			authStorage = AuthStorage.inMemory({ anthropic: credential });
-			expect(authStorage.hasAuth("anthropic")).toBe(true);
-			expect(authStorage.getAuthStatus("anthropic")).toEqual({
-				configured: false,
-				source: "environment",
-				label: "ANTHROPIC_API_KEY",
+		test("keeps Prime and unregistered OAuth unavailable without blocking ordinary API keys", async () => {
+			const login = vi.fn();
+			const refreshToken = vi.fn();
+			registerOAuthProvider({
+				id: "prime-intellect",
+				name: "Prime",
+				login,
+				refreshToken,
+				getApiKey: () => "unused",
 			});
-			expect(await authStorage.getApiKey("anthropic")).toBe("environment-api-key");
+			for (const providerId of ["prime-intellect", "unregistered-provider"]) {
+				const credential = { type: "oauth" as const, access: "access", refresh: "refresh", expires: 0 };
+				authStorage = AuthStorage.inMemory({ [providerId]: credential });
+				expect(authStorage.hasAuth(providerId)).toBe(false);
+				await expect(authStorage.getApiKey(providerId)).resolves.toBeUndefined();
+				await expect(authStorage.login(providerId, { onAuth: vi.fn(), onPrompt: vi.fn() })).rejects.toThrow(
+					providerContracts.getProviderAuthContract(providerId).guidance,
+				);
+				expect(authStorage.get(providerId)).toEqual(credential);
+			}
+			expect(login).not.toHaveBeenCalled();
+			expect(refreshToken).not.toHaveBeenCalled();
+			vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat-test");
+			authStorage = AuthStorage.inMemory();
+			await expect(authStorage.getApiKey("anthropic")).resolves.toBe("sk-ant-oat-test");
+			expect(authStorage.getAuthStatus("anthropic").label).toBe("ANTHROPIC_OAUTH_TOKEN");
 			authStorage.setRuntimeApiKey("anthropic", "runtime-api-key");
-			expect(await authStorage.getApiKey("anthropic")).toBe("runtime-api-key");
-			authStorage.removeRuntimeApiKey("anthropic");
-			vi.stubEnv("ANTHROPIC_API_KEY", "");
-			authStorage.setFallbackResolver(() => "fallback-api-key");
-			expect(await authStorage.getApiKey("anthropic")).toBe("fallback-api-key");
-			expect(authStorage.get("anthropic")).toEqual(credential);
-			authStorage.set("anthropic", { type: "api_key", key: "stored-api-key" });
-			expect(await authStorage.getApiKey("anthropic")).toBe("stored-api-key");
+			await expect(authStorage.getApiKey("anthropic")).resolves.toBe("runtime-api-key");
 			expect(globalThis.fetch).not.toHaveBeenCalled();
 		});
 	});
@@ -492,11 +487,6 @@ describe("AuthStorage", () => {
 	describe("oauth lock compromise handling", () => {
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-			vi.spyOn(providerContracts, "getProviderAuthContract").mockReturnValue({
-				providerId,
-				oauth: "validated",
-				guidance: "Test-only validated OAuth contract",
-			});
 			registerOAuthProvider({
 				id: providerId,
 				name: "Test OAuth Provider",

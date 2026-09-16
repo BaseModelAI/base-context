@@ -1257,7 +1257,7 @@ describe("InteractiveMode MCP command", () => {
 
 		expect(events[0]).toBe("refresh");
 		expect(fakeThis.handleReloadCommand).not.toHaveBeenCalled();
-		expect(events.join("\n")).toContain("Use explicit bearer-token or API-key configuration instead.");
+		expect(events.join("\n")).toContain("Run /mcp login remote to connect its OAuth account.");
 		expect(events.join("\n")).toContain("Run /reload after the current turn to activate it.");
 	});
 
@@ -1275,7 +1275,7 @@ describe("InteractiveMode MCP command", () => {
 
 		expect(events).toEqual(["refresh", "reload"]);
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
-			"Use explicit bearer-token or API-key configuration instead.",
+			"Run /mcp login remote to connect its OAuth account.",
 		);
 	});
 
@@ -1288,7 +1288,7 @@ describe("InteractiveMode MCP command", () => {
 		await handleMcpCommand.call(fakeThis, "add remote --url https://example.test/mcp --oauth");
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toContain(
-			"OAuth is unavailable until the Base Context provider contract is validated.",
+			"Run /mcp login remote to connect its OAuth account.",
 		);
 	});
 

@@ -1,49 +1,42 @@
-/** Product auth capabilities, independent of protocol adapter registration. */
+import { getOAuthProvider } from "@ponythewhite/base-context-ai/oauth";
+
+/** Supported adapters, not a claim of provider endorsement or live account validation. */
 export interface ProviderAuthContract {
 	providerId: string;
-	oauth: "validated" | "unvalidated" | "unsupported";
+	oauth: "supported" | "unsupported";
 	guidance: string;
 	apiKeyProviderId?: string;
 }
 
-/** No copied model OAuth client has been validated for this distribution. */
-export const BUILT_IN_PROVIDER_AUTH_CONTRACTS: readonly ProviderAuthContract[] = [
-	{
-		providerId: "anthropic",
-		oauth: "unvalidated",
-		guidance:
-			"Anthropic subscription OAuth is unavailable in Base Context: its client identity has not been validated for this distribution. Use Anthropic API-key login or ANTHROPIC_API_KEY instead.",
-		apiKeyProviderId: "anthropic",
-	},
-	{
-		providerId: "github-copilot",
-		oauth: "unvalidated",
-		guidance:
-			"GitHub Copilot authentication is unavailable in Base Context: the copied client identity has not been validated for this distribution. Use an API-key provider such as openai or anthropic instead.",
-		apiKeyProviderId: "openai",
-	},
-	{
-		providerId: "openai-codex",
-		oauth: "unvalidated",
-		guidance:
-			"OpenAI Codex subscription OAuth is unavailable in Base Context: its client identity has not been validated for this distribution. For API-key inference, select the openai provider and configure OPENAI_API_KEY.",
-		apiKeyProviderId: "openai",
-	},
-];
-
 export function getProviderAuthContract(providerId: string): ProviderAuthContract {
-	return (
-		BUILT_IN_PROVIDER_AUTH_CONTRACTS.find((entry) => entry.providerId === providerId) ?? {
-			providerId,
-			oauth: "unvalidated",
-			guidance: `OAuth for ${providerId} is unavailable in Base Context until its provider contract is validated. Local registration is not validation. Use a supported API-key or bearer-token configuration instead.`,
-		}
-	);
+	if (providerId === "prime" || providerId === "prime-intellect") {
+		return { providerId, oauth: "unsupported", guidance: "Prime integrations are disabled in Base Context." };
+	}
+	const provider = getOAuthProvider(providerId);
+	return {
+		providerId,
+		oauth: provider ? "supported" : "unsupported",
+		guidance: provider
+			? providerId.startsWith("mcp:")
+				? `Use /mcp login ${providerId.slice(4)} to connect ${provider.name}.`
+				: `Use /login to authenticate with ${provider.name}, then select a model with /model.`
+			: `No OAuth adapter is registered for ${providerId}. Configure a supported provider or register its OAuth adapter.`,
+	};
 }
 
-/** Pasting a subscription token into an API-key field does not validate its OAuth route. */
-export function isProviderApiKeyAllowed(providerId: string, apiKey: string, api?: string): boolean {
-	if (providerId === "github-copilot" || providerId === "openai-codex" || api === "openai-codex-responses")
-		return false;
-	return (providerId !== "anthropic" && api !== "anthropic-messages") || !apiKey.includes("sk-ant-oat");
+export const BUILT_IN_PROVIDER_AUTH_CONTRACTS: readonly ProviderAuthContract[] = [
+	"anthropic",
+	"github-copilot",
+	"openai-codex",
+	"prime-intellect",
+].map(getProviderAuthContract);
+
+/** Codex uses OAuth credentials, not OpenAI API keys. */
+export function isProviderApiKeyAllowed(providerId: string, _apiKey: string, api?: string): boolean {
+	return (
+		providerId !== "prime" &&
+		providerId !== "prime-intellect" &&
+		providerId !== "openai-codex" &&
+		api !== "openai-codex-responses"
+	);
 }
