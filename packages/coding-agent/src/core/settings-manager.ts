@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { assertRlmMaxSubagents, DEFAULT_RLM_MAX_SUBAGENTS } from "./rlm-max-subagents.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -163,6 +164,7 @@ export interface Settings {
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	defaultServiceTier?: ServiceTier;
 	rlmMaxDepth?: number; // default for new sessions; unset falls through to BASE_CONTEXT_RLM_MAX_DEPTH, then 2
+	rlmMaxSubagents?: number; // root-family live admission limit; default: 4
 	idleEvictionMinutes?: number | "off"; // global daemon policy; default: 90
 	transport?: TransportSetting; // default: "sse"
 	steeringMode?: "all" | "one-at-a-time";
@@ -801,6 +803,19 @@ export class SettingsManager {
 	setDefaultServiceTier(serviceTier: ServiceTier): void {
 		this.globalSettings.defaultServiceTier = serviceTier;
 		this.markModified("defaultServiceTier");
+		this.save();
+	}
+
+	getRlmMaxSubagents(): number {
+		const value = this.globalSettings.rlmMaxSubagents ?? DEFAULT_RLM_MAX_SUBAGENTS;
+		assertRlmMaxSubagents(value);
+		return value;
+	}
+
+	setRlmMaxSubagents(maxSubagents: number): void {
+		assertRlmMaxSubagents(maxSubagents);
+		this.globalSettings.rlmMaxSubagents = maxSubagents;
+		this.markModified("rlmMaxSubagents");
 		this.save();
 	}
 

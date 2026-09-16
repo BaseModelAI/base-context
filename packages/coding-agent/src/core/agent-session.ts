@@ -582,6 +582,8 @@ export interface AgentSessionConfig {
 	rlmParentNodeId?: string;
 	rlmParentAgent?: string;
 	rlmChildAdmission?: RlmChildAdmission;
+	rlmSubagentCapacity?: RlmSubagentCapacity;
+	rlmRootAdmission?: RlmRootAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -1057,6 +1059,13 @@ type GoalSlashCommand =
 type AutonomousSlashCommand = { kind: "status" } | { kind: "on" } | { kind: "off" };
 
 import type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
+import {
+	LocalRlmSubagentCapacity,
+	type RlmMaxSubagentsStatus,
+	type RlmRootAdmission,
+	type RlmSubagentCapacity,
+	type RlmSubagentCapacityReservation,
+} from "./rlm-max-subagents.js";
 
 export type { RlmMaxDepthSource, RlmMaxDepthStatus, SetRlmMaxDepthResult } from "./rlm-max-depth.js";
 
@@ -1375,10 +1384,12 @@ export class AgentSession {
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
-	private _rlmChildAdmission?: RlmChildAdmission & { cancel(reason: string): boolean };
+	private readonly _rlmChildAdmissions = new Set<RlmChildAdmission & { cancel(reason: string): boolean }>();
+	private _rlmSubagentCapacity: RlmSubagentCapacity;
 	private _rlmParentAdmission?: RlmChildAdmission;
+	private readonly _rlmRootAdmission?: RlmRootAdmission;
 	private _rlmResidentDisposalComplete = false;
-	private _releaseRlmResidentCapacity?: () => void;
+	private _releaseRlmResidentCapacity?: () => Promise<void>;
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
@@ -1454,6 +1465,12 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		this._rlmRootAdmission = config.rlmRootAdmission;
+		this._rlmRootAdmission?.bind(this);
+		this._rlmSubagentCapacity =
+			config.rlmChildAdmission?.parent._rlmSubagentCapacity ??
+			config.rlmSubagentCapacity ??
+			new LocalRlmSubagentCapacity(config.settingsManager);
 		this._rlmParentAdmission = config.rlmChildAdmission;
 		this._rlmParentAdmission?.bind(this);
 		this.agent = config.agent;
@@ -1546,7 +1563,17 @@ export class AgentSession {
 				maxEntries: limits.maxMessages,
 				maxSourceBytes: limits.maxSourceBytes,
 			});
-			const captured = this.requests.capture(compaction);
+			let captured: InferenceCoordinator;
+			try {
+				captured = this.requests.capture(compaction);
+			} catch (error) {
+				try {
+					await compaction.release();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "Canonical context capture and release failed");
+				}
+				throw error;
+			}
 			try {
 				const messages = await captured.readHistory(async (view) => {
 					const sameSource =
@@ -5452,7 +5479,7 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
-		this._rlmChildAdmission?.cancel("Parent session disposed");
+		for (const admission of this._rlmChildAdmissions) admission.cancel("Parent session disposed");
 		if (this._disposeAsyncPromise) return this._disposeAsyncPromise;
 		this.closeAutoRefineAdmission();
 		const kernelSnapshot = options?.kernelSnapshot ?? true;
@@ -5473,7 +5500,8 @@ export class AgentSession {
 			if (errors.length === 1) throw errors[0];
 			if (errors.length > 1) throw new AggregateError(errors, "Session disposal failed");
 			this._rlmResidentDisposalComplete = true;
-			this._releaseRlmResidentCapacity?.();
+			await this._releaseRlmResidentCapacity?.();
+			await this._rlmRootAdmission?.release();
 		})();
 		return this._disposeAsyncPromise;
 	}
@@ -5564,7 +5592,7 @@ export class AgentSession {
 	}
 
 	private async _disposeAsyncOnce(kernelSnapshot: boolean): Promise<void> {
-		const admission = this._rlmChildAdmission;
+		const admissions = [...this._rlmChildAdmissions];
 		const errors: unknown[] = [];
 		const drain = async (operation: () => unknown | Promise<unknown>): Promise<void> => {
 			try {
@@ -5583,9 +5611,10 @@ export class AgentSession {
 			// Initialization reports errors through its own promise, like an active Agent run.
 			// Join it before disposing any runtime resources it may still be constructing.
 			if (this._initialization) await Promise.allSettled([this._initialization]);
-			const admittedChild = admission?.session;
-			// Includes a native child constructed but not yet published by its factory.
-			if (admittedChild) await drain(() => admittedChild.disposeAsync());
+			// Includes native children constructed but not yet published by their factories.
+			for (const admission of admissions) {
+				if (admission.session) await drain(() => admission.session?.disposeAsync());
+			}
 			for (const run of [...this._activeRlmChildRuns.values()]) {
 				const childSession = run.session;
 				if (!childSession) continue;
@@ -5610,9 +5639,9 @@ export class AgentSession {
 			while (this._rlmRunTasks.size > 0) {
 				for (const task of [...this._rlmRunTasks]) await drain(() => task);
 			}
-			await drain(() => admission?.settlement);
-			if (admission?.session && admission.session !== admittedChild) {
-				await drain(() => admission.session?.disposeAsync());
+			for (const admission of admissions) {
+				await drain(() => admission.settlement);
+				if (admission.session) await drain(() => admission.session?.disposeAsync());
 			}
 			await drain(() => this.agent.waitForIdle());
 			await drain(() => this._compactionOperation);
@@ -8827,7 +8856,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 		if (!(await this._modelRegistry.canUseModel(model))) {
-			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
+			throw new Error(`Model "${model.provider}/${model.id}" is not available with the configured authentication.`);
 		}
 
 		if (this.sessionManager.getSessionId() !== sourceId || this.sessionManager.getSessionFile() !== sourceFile) {
@@ -11968,15 +11997,10 @@ export class AgentSession {
 		return this._releaseRlmResidentCapacity !== undefined;
 	}
 
-	/** Reserve before setup awaits. The concrete parent lifetime owns this one slot. */
-	reserveRlmChildAdmission(): RlmChildAdmission {
+	/** Reserve before setup awaits. Capacity remains owned until real cleanup completes. */
+	async reserveRlmChildAdmission(): Promise<RlmChildAdmission> {
 		if (this._disposed || this._disposing || this._disposeAsyncPromise) {
 			throw new Error("Cannot spawn a subagent after its parent was disposed");
-		}
-		if (this._rlmChildAdmission) {
-			throw new Error(
-				"RLM resident child limit reached (one child per parent); dispose or passivate the existing child first",
-			);
 		}
 		const controller = new AbortController();
 		const settlement = createAgentMessageDeferred();
@@ -11984,9 +12008,15 @@ export class AgentSession {
 		let settled = false;
 		let factoryClaimed = false;
 		let unboundCleanupComplete = true;
-		const release = () => {
+		let capacity: RlmSubagentCapacityReservation | undefined;
+		let capacityRelease: Promise<void> | undefined;
+		const release = async () => {
 			if (!settled || (child ? !child._rlmResidentDisposalComplete : !unboundCleanupComplete)) return;
-			if (this._rlmChildAdmission === admission) this._rlmChildAdmission = undefined;
+			if (capacity) {
+				capacityRelease ??= capacity.release();
+				await capacityRelease;
+			}
+			this._rlmChildAdmissions.delete(admission);
 			if (child?._releaseRlmResidentCapacity === release) child._releaseRlmResidentCapacity = undefined;
 			if (child?._rlmParentAdmission === admission) child._rlmParentAdmission = undefined;
 		};
@@ -12005,13 +12035,13 @@ export class AgentSession {
 					this._disposed ||
 					this._disposing ||
 					this._disposeAsyncPromise ||
-					this._rlmChildAdmission !== admission
+					!this._rlmChildAdmissions.has(admission)
 				) {
 					throw new Error("RLM child admission is no longer current");
 				}
 			},
 			bind: (session) => {
-				if (this._rlmChildAdmission !== admission) throw new Error("RLM child admission is no longer current");
+				if (!this._rlmChildAdmissions.has(admission)) throw new Error("RLM child admission is no longer current");
 				if (
 					(child && child !== session) ||
 					(session._releaseRlmResidentCapacity && session._releaseRlmResidentCapacity !== release)
@@ -12019,8 +12049,9 @@ export class AgentSession {
 					throw new Error("RLM child already belongs to another resident admission");
 				}
 				child = session;
+				session._rlmParentAdmission = admission;
+				session._rlmSubagentCapacity = this._rlmSubagentCapacity;
 				session._releaseRlmResidentCapacity = release;
-				release();
 			},
 			beginSetup: () => {
 				if (settled || child) throw new Error("RLM child admission already started a child");
@@ -12031,14 +12062,17 @@ export class AgentSession {
 				admission.beginSetup();
 				factoryClaimed = true;
 			},
-			confirmUnboundCleanup: () => {
+			confirmUnboundCleanup: async () => {
 				unboundCleanupComplete = true;
-				release();
+				await release();
 			},
-			settle: () => {
+			settle: async () => {
 				settled = true;
-				settlement.resolve();
-				release();
+				try {
+					await release();
+				} finally {
+					settlement.resolve();
+				}
 			},
 			cancel: (reason) => {
 				if (settled || controller.signal.aborted) return false;
@@ -12047,8 +12081,15 @@ export class AgentSession {
 				return true;
 			},
 		};
-		this._rlmChildAdmission = admission;
-		return admission;
+		this._rlmChildAdmissions.add(admission);
+		try {
+			capacity = await this._rlmSubagentCapacity.reserve();
+			admission.assertCurrent();
+			return admission;
+		} catch (error) {
+			await admission.settle();
+			throw error;
+		}
 	}
 
 	private _createRlmSubagentRuntimeOptions(options: {
@@ -12183,7 +12224,7 @@ export class AgentSession {
 				if (failedChild) await failedChild.disposeAsync();
 				else {
 					await childSessionManager.close();
-					options.admission.confirmUnboundCleanup();
+					await options.admission.confirmUnboundCleanup();
 				}
 			} catch (cleanupError) {
 				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
@@ -12204,7 +12245,7 @@ export class AgentSession {
 	}
 
 	private _cancelActiveRlmChildRuns(reason: string): void {
-		this._rlmChildAdmission?.cancel(reason);
+		for (const admission of this._rlmChildAdmissions) admission.cancel(reason);
 		for (const run of this._activeRlmChildRuns.values()) {
 			this._cancelRlmChildRun(run, reason);
 		}
@@ -12678,13 +12719,13 @@ export class AgentSession {
 			return false;
 		}
 		if (!session._rlmResidentDisposalComplete) {
-			if (this._rlmChildAdmission) this._rlmChildAdmission.bind(session);
+			if (session._rlmParentAdmission?.parent === this) session._rlmParentAdmission.bind(session);
 			else {
-				const admission = this.reserveRlmChildAdmission();
+				const admission = await this.reserveRlmChildAdmission();
 				try {
 					admission.bind(session);
 				} finally {
-					admission.settle();
+					await admission.settle();
 				}
 			}
 		}
@@ -12818,7 +12859,7 @@ export class AgentSession {
 	/** True when any direct or nested subagent is still running or queued. */
 	hasRunningRlmChildren(): boolean {
 		for (const session of this._rlmSubtreeSessions()) {
-			if (session._rlmChildAdmission?.pending) return true;
+			for (const admission of session._rlmChildAdmissions) if (admission.pending) return true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (run.status === "running" || run.status === "queued") {
 					return true;
@@ -12966,7 +13007,7 @@ export class AgentSession {
 	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
 		let cancelled = false;
 		for (const session of this._rlmSubtreeSessions()) {
-			if (session._rlmChildAdmission?.cancel(reason)) cancelled = true;
+			for (const admission of session._rlmChildAdmissions) if (admission.cancel(reason)) cancelled = true;
 			for (const run of session._activeRlmChildRuns.values()) {
 				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
 			}
@@ -13212,7 +13253,7 @@ export class AgentSession {
 					childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
 					admission.bind(childRuntime.session);
 				} finally {
-					admission.settle();
+					await admission.settle();
 				}
 				admission.assertCurrent();
 				const child = childRuntime.session;
@@ -13508,7 +13549,7 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const admission = this.reserveRlmChildAdmission();
+		const admission = await this.reserveRlmChildAdmission();
 		const start = this._startRlmChildRun(prompt, admission, kwargs, spawnCode);
 		// Join pre-runtime name/model work during disposal as well as the detached task.
 		const pending = start.then(
@@ -13519,7 +13560,7 @@ export class AgentSession {
 		try {
 			return await start;
 		} catch (error) {
-			admission.settle();
+			await admission.settle();
 			throw error;
 		} finally {
 			this._rlmRunTasks.delete(pending);
@@ -13939,6 +13980,14 @@ export class AgentSession {
 			this._pendingBashMessages.shift();
 			this.agent.state.messages.push(bashMessage);
 		}
+	}
+
+	getRlmMaxSubagentsStatus(): Promise<RlmMaxSubagentsStatus> {
+		return this._rlmSubagentCapacity.getStatus();
+	}
+
+	setRlmMaxSubagents(maxSubagents: number): Promise<RlmMaxSubagentsStatus> {
+		return this._rlmSubagentCapacity.setMaxSubagents(maxSubagents);
 	}
 
 	getRlmMaxDepthStatus(): RlmMaxDepthStatus {

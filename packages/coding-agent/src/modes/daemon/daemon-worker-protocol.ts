@@ -53,6 +53,48 @@ export type DaemonWorkerFrameHeader =
 			snapshotPurpose?: "attach" | "replacement" | "catchup";
 	  };
 
+export interface DaemonRlmCapacityOrigin {
+	sessionFile?: string;
+	sessionId: string;
+}
+
+export type DaemonRlmCapacityOperation =
+	| (DaemonRlmCapacityOrigin & { op: "status" })
+	| (DaemonRlmCapacityOrigin & { op: "set"; maxSubagents: number })
+	| (DaemonRlmCapacityOrigin & { op: "reserve"; reservationId: string; residentRoot?: true })
+	| { op: "release"; reservationId: string };
+
+export interface DaemonRlmCapacityReservation extends DaemonRlmCapacityOrigin {
+	reservationId: string;
+	residentRoot?: true;
+}
+
+export interface DaemonRlmCapacitySnapshot {
+	reservations: DaemonRlmCapacityReservation[];
+}
+
+export function isDaemonRlmCapacitySnapshot(value: unknown): value is DaemonRlmCapacitySnapshot {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"reservations" in value &&
+		Array.isArray(value.reservations) &&
+		value.reservations.every(
+			(entry: unknown) =>
+				typeof entry === "object" &&
+				entry !== null &&
+				"reservationId" in entry &&
+				typeof entry.reservationId === "string" &&
+				entry.reservationId.length > 0 &&
+				"sessionId" in entry &&
+				typeof entry.sessionId === "string" &&
+				entry.sessionId.length > 0 &&
+				(!("sessionFile" in entry) || entry.sessionFile === undefined || typeof entry.sessionFile === "string") &&
+				(!("residentRoot" in entry) || entry.residentRoot === undefined || entry.residentRoot === true),
+		)
+	);
+}
+
 export type DaemonCreateCommand = Extract<DaemonCommand, { type: "create" }>;
 
 export interface DurableDaemonCreateCommand {
@@ -118,6 +160,7 @@ export type DaemonWorkerCommand =
 	| { id?: string; type: "worker_unsubscribe"; activeSessionId: string }
 	| { id?: string; type: "worker_register_peer_transport"; grant: DaemonWorkerPeerGrant }
 	| { id?: string; type: "worker_archive_and_shutdown" }
+	| { id?: string; type: "worker_get_rlm_capacity" }
 	| {
 			id?: string;
 			type: "worker_passivate_idle_children";

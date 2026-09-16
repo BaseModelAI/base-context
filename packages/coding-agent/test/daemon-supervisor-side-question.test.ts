@@ -8,6 +8,7 @@ import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.
 import {
 	createDaemonCommandEnvelope,
 	DAEMON_COMMAND_COMPATIBILITY,
+	DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
 	type DaemonCommand,
 	type DaemonResponse,
 } from "../src/modes/daemon/daemon-protocol.js";
@@ -118,7 +119,7 @@ describe("daemon supervisor side-question routing", () => {
 				id: "state-1",
 				command: "parse",
 				success: false,
-				error: expect.stringContaining("require protocol 7"),
+				error: expect.stringContaining(`require protocol ${DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION}`),
 			}),
 		);
 	});
@@ -171,7 +172,7 @@ describe("daemon supervisor side-question routing", () => {
 					type: "response",
 					command: "parse",
 					success: false,
-					error: expect.stringContaining("require protocol 7"),
+					error: expect.stringContaining(`require protocol ${DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION}`),
 				}),
 			]);
 		} finally {

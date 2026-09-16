@@ -279,8 +279,11 @@ Normally the package manager's global modules location is queried using `root -g
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `rlmMaxDepth` | number | Falls through to `BASE_CONTEXT_RLM_MAX_DEPTH`, then `2` | Global default recursion-depth limit for new sessions |
+| `rlmMaxSubagents` | number | `4` | Maximum live subagents in a root-agent family; non-negative safe integer |
 
-This is a global setting, not a project override. Session-local and inherited limits can differ from the creation default. See [RLM programming](rlm.md) and [long-running agents](long-running-agents.md).
+These are global settings, not project overrides. Session-local and inherited depth limits can differ from the creation default. See [RLM programming](rlm.md) and [long-running agents](long-running-agents.md).
+
+Use [`/agents N`](usage.md#limit-concurrent-subagents) to apply and save `rlmMaxSubagents`; `/agents` reports the current family limit. This preference survives restarts. Running and idle descendants count, but the main agent and inactive saved sessions do not. `0` disables new spawns. Lowering the limit only blocks new admissions; it never kills or passivates existing agents.
 
 ### Daemon
 

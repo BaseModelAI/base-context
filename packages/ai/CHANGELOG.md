@@ -3,6 +3,7 @@
 ## [1.0.1] - 2026-09-15
 
 - Removed the Prime Inference provider, model catalog entries, and Prime credential environment integration.
+- Updated local authentication result pages to Synerise base-context branding without changing provider authentication protocols.
 
 ## [1.0.0] - 2026-09-15
 

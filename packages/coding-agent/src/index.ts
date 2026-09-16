@@ -203,6 +203,10 @@ export {
 	createIpythonTool,
 	createPrimeContextTool,
 	type PromptTemplate,
+	type RlmMaxSubagentsStatus,
+	type RlmRootAdmission,
+	type RlmSubagentCapacity,
+	type RlmSubagentCapacityReservation,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";

@@ -636,26 +636,32 @@ describe("daemon worker supervisor monitoring", () => {
 		let assertionCount = 0;
 		const workers = new Map<string, unknown>();
 		const connectWorker = vi.fn();
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			...createSupervisorSnapshotState(),
-			defaultSessionConfig: { cwd: root, agentDir: root },
-			descriptorDir,
-			socketPath: join(root, "supervisor.sock"),
-			workers,
-			shuttingDown: false,
-			assertRecoveryAllowed: vi.fn(async () => {
-				assertionCount++;
-				if (assertionCount === 3) {
-					const child = workerLaunchTestState.spawned.at(-1)?.child;
-					if (!child) {
-						throw new Error("Worker child was not captured");
-					}
-					await waitForCapturedChildClose(child);
-				}
+		const supervisor = Object.assign(
+			new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
 			}),
-			connectWorker,
-			log: vi.fn(),
-		}) as {
+			{
+				...createSupervisorSnapshotState(),
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+				socketPath: join(root, "supervisor.sock"),
+				workers,
+				shuttingDown: false,
+				assertRecoveryAllowed: vi.fn(async () => {
+					assertionCount++;
+					if (assertionCount === 3) {
+						const child = workerLaunchTestState.spawned.at(-1)?.child;
+						if (!child) {
+							throw new Error("Worker child was not captured");
+						}
+						await waitForCapturedChildClose(child);
+					}
+				}),
+				connectWorker,
+				log: vi.fn(),
+			},
+		) as {
 			launchWorker(command: { type: "create"; config: { cwd: string; agentDir: string } }): Promise<unknown>;
 		};
 
@@ -795,24 +801,30 @@ describe("daemon worker supervisor monitoring", () => {
 			await waitForFile(markerPath);
 			throw cancellation;
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			...createSupervisorSnapshotState(),
-			defaultSessionConfig: { cwd: root, agentDir: root },
-			descriptorDir,
-			socketPath: join(root, "supervisor.sock"),
-			workers,
-			shuttingDown: false,
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-			connectWorker,
-			persistWorker: vi.fn(function (this: object, worker: object) {
-				persistenceCalls++;
-				if (persistenceCalls === 2) {
-					throw rollbackPersistenceError;
-				}
-				Reflect.apply(persistWorker, this, [worker]);
+		const supervisor = Object.assign(
+			new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
 			}),
-			log: vi.fn(),
-		}) as {
+			{
+				...createSupervisorSnapshotState(),
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+				socketPath: join(root, "supervisor.sock"),
+				workers,
+				shuttingDown: false,
+				assertRecoveryAllowed: vi.fn(async () => undefined),
+				connectWorker,
+				persistWorker: vi.fn(function (this: object, worker: object) {
+					persistenceCalls++;
+					if (persistenceCalls === 2) {
+						throw rollbackPersistenceError;
+					}
+					Reflect.apply(persistWorker, this, [worker]);
+				}),
+				log: vi.fn(),
+			},
+		) as {
 			launchWorker(command: { type: "create"; config: { cwd: string; agentDir: string } }): Promise<unknown>;
 		};
 
@@ -854,25 +866,31 @@ describe("daemon worker supervisor monitoring", () => {
 			await waitForFile(markerPath);
 			throw cancellation;
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			...createSupervisorSnapshotState(),
-			defaultSessionConfig: { cwd: root, agentDir: root },
-			descriptorDir,
-			socketPath: join(root, "supervisor.sock"),
-			workers,
-			shuttingDown: false,
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-			connectWorker,
-			persistWorker: vi.fn(function (this: object, worker: object) {
-				persistenceCalls++;
-				if (persistenceCalls === 3) {
-					throw restorationError;
-				}
-				Reflect.apply(persistWorker, this, [worker]);
+		const supervisor = Object.assign(
+			new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
 			}),
-			deferWorkerRecovery,
-			log: vi.fn(),
-		}) as {
+			{
+				...createSupervisorSnapshotState(),
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+				socketPath: join(root, "supervisor.sock"),
+				workers,
+				shuttingDown: false,
+				assertRecoveryAllowed: vi.fn(async () => undefined),
+				connectWorker,
+				persistWorker: vi.fn(function (this: object, worker: object) {
+					persistenceCalls++;
+					if (persistenceCalls === 3) {
+						throw restorationError;
+					}
+					Reflect.apply(persistWorker, this, [worker]);
+				}),
+				deferWorkerRecovery,
+				log: vi.fn(),
+			},
+		) as {
 			launchWorker(
 				command: { type: "create"; config: { cwd: string; agentDir: string } },
 				existing: object,
@@ -945,19 +963,25 @@ describe("daemon worker supervisor monitoring", () => {
 			await waitForFile(markerPath);
 			throw cancellation;
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			...createSupervisorSnapshotState(),
-			defaultSessionConfig: { cwd: root, agentDir: root },
-			descriptorDir,
-			socketPath: join(root, "supervisor.sock"),
-			workers,
-			shuttingDown: false,
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-			connectWorker,
-			stopWorker: controlledStopWorker,
-			deferWorkerRecovery,
-			log: vi.fn(),
-		}) as {
+		const supervisor = Object.assign(
+			new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+			}),
+			{
+				...createSupervisorSnapshotState(),
+				defaultSessionConfig: { cwd: root, agentDir: root },
+				descriptorDir,
+				socketPath: join(root, "supervisor.sock"),
+				workers,
+				shuttingDown: false,
+				assertRecoveryAllowed: vi.fn(async () => undefined),
+				connectWorker,
+				stopWorker: controlledStopWorker,
+				deferWorkerRecovery,
+				log: vi.fn(),
+			},
+		) as {
 			shuttingDown: boolean;
 			launchWorker(
 				command: { type: "create"; config: { cwd: string; agentDir: string } },
@@ -1757,15 +1781,22 @@ describe("daemon worker supervisor monitoring", () => {
 			intentionalStop: false,
 			stopRevision: 0,
 		};
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
-			connectWorker: vi.fn(),
-			recoverUncertainWorkerOperations: vi.fn(async () => {}),
-			launchWorker: vi.fn(async () => worker),
-			persistWorker: vi.fn(),
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as RecoveryHarness;
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-pid-reuse-test-"));
+		supervisorRegistryDirs.add(root);
+		const supervisor = Object.assign(
+			new DaemonSupervisor(join(root, "supervisor.sock"), {
+				defaultSessionConfig: { cwd: root, agentDir: root },
+			}),
+			{
+				workers: new Map([[worker.descriptor.workerId, worker]]),
+				shuttingDown: false,
+				connectWorker: vi.fn(),
+				recoverUncertainWorkerOperations: vi.fn(async () => {}),
+				launchWorker: vi.fn(async () => worker),
+				persistWorker: vi.fn(),
+				assertRecoveryAllowed: vi.fn(async () => {}),
+			},
+		) as RecoveryHarness;
 
 		const recovery = supervisor.recoverWorker(worker);
 		await vi.advanceTimersByTimeAsync(250);

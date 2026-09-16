@@ -351,7 +351,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 				? options.parentSession.requests.getRequestTokenBudgetOptions()
 				: structuredClone(options.requestTokenBudget);
 		if (requestTokenBudget !== undefined) options = { ...options, requestTokenBudget };
-		const admission = options.admission ?? options.parentSession.reserveRlmChildAdmission();
+		const admission = options.admission ?? (await options.parentSession.reserveRlmChildAdmission());
 		try {
 			if (admission.parent !== options.parentSession)
 				throw new Error("RLM child admission belongs to another parent");
@@ -359,7 +359,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			admission.claimFactory();
 			return await this.createAdmittedRlmSubagentRuntime({ ...options, admission });
 		} finally {
-			if (!options.admission) admission.settle();
+			if (!options.admission) await admission.settle();
 		}
 	}
 
@@ -427,7 +427,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		} catch (error) {
 			try {
 				await sessionManager.close();
-				if (!factoryStarted) options.admission.confirmUnboundCleanup();
+				if (!factoryStarted) await options.admission.confirmUnboundCleanup();
 			} catch (cleanupError) {
 				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
 					throw error;
@@ -716,7 +716,9 @@ export async function createAgentSessionRuntime(
 		const errors: unknown[] = error instanceof AggregateError ? [...error.errors] : [error];
 		const initialErrorCount = errors.length;
 		try {
-			const admitted = runtimeOptions.sessionOptions?.rlmChildAdmission?.session;
+			const admitted =
+				runtimeOptions.sessionOptions?.rlmChildAdmission?.session ??
+				runtimeOptions.sessionOptions?.rlmRootAdmission?.session;
 			const failedSession =
 				result?.session ?? (admitted?.sessionManager === runtimeOptions.sessionManager ? admitted : undefined);
 			if (failedSession) await failedSession.disposeAsync();

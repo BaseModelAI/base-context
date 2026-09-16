@@ -13,6 +13,7 @@ import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
+import type { RlmRootAdmission, RlmSubagentCapacity } from "./rlm-max-subagents.js";
 import type { RlmChildAdmission, SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import type { SessionManager } from "./session-manager.js";
@@ -65,6 +66,8 @@ export interface AgentSessionCreationOptions {
 	rlmParentAgent?: string;
 	/** Live parent-owned setup admission; never restored from session metadata. */
 	rlmChildAdmission?: RlmChildAdmission;
+	rlmSubagentCapacity?: RlmSubagentCapacity;
+	rlmRootAdmission?: RlmRootAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -242,6 +245,8 @@ export async function createAgentSessionFromServices(
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
 		rlmChildAdmission: options.rlmChildAdmission,
+		rlmSubagentCapacity: options.rlmSubagentCapacity,
+		rlmRootAdmission: options.rlmRootAdmission,
 		semanticParentSessionId: options.semanticParentSessionId,
 		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 		subagentRuntimeHost: options.subagentRuntimeHost,

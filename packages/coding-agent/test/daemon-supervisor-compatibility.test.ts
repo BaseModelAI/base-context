@@ -1,7 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as sessionLease from "../src/core/session-lease.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	createDaemonCommandEnvelope,
 	DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	DAEMON_PROTOCOL_INFO,
@@ -44,7 +48,10 @@ const baseLegacyHello = {
 	serverCapabilities: [],
 } satisfies Extract<DaemonOutbound, { type: "daemon_hello" }>;
 
+const fixtureDirectories: string[] = [];
+
 afterEach(() => {
+	for (const directory of fixtureDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 	vi.clearAllTimers();
 	vi.restoreAllMocks();
 	vi.useRealTimers();
@@ -118,14 +125,22 @@ describe("supervisor compatibility refusal", () => {
 				launchWorker: vi.fn(),
 				stopWorker: vi.fn().mockResolvedValue(undefined),
 			};
-			const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), effects, {
-				workers,
-				clients: new Set(),
-				assertRecoveryAllowed: vi.fn().mockResolvedValue(undefined),
-				supervisorAuthenticationClaim: vi.fn(() => ({})),
-				processIdentity: vi.fn(() => "current"),
-				log: vi.fn(),
-			}) as SupervisorHarness;
+			const directory = mkdtempSync(join(tmpdir(), "base-context-supervisor-compat-"));
+			fixtureDirectories.push(directory);
+			const supervisor = Object.assign(
+				new DaemonSupervisor("/mock/supervisor.sock", {
+					defaultSessionConfig: { cwd: directory, agentDir: join(directory, "agent") },
+				}),
+				effects,
+				{
+					workers,
+					clients: new Set(),
+					assertRecoveryAllowed: vi.fn().mockResolvedValue(undefined),
+					supervisorAuthenticationClaim: vi.fn(() => ({})),
+					processIdentity: vi.fn(() => "current"),
+					log: vi.fn(),
+				},
+			) as SupervisorHarness;
 			const originalDescriptor = { ...worker.descriptor };
 			supervisor.scheduleOwnedWorkerCleanup(worker);
 			const cleanupCallback = timers.mock.calls.find(([, delay]) => delay === 30_000)?.[0];
@@ -213,7 +228,7 @@ describe("supervisor compatibility refusal", () => {
 			] satisfies DaemonCommand[]) {
 				const envelope = createDaemonCommandEnvelope(command, "command", "legacy-client", version);
 				expect(() => parser.parseCommandAndRegisterPromptAdmission(client, JSON.stringify(envelope))).toThrow(
-					"protocol 12 canonical session ownership and bounded invocation output",
+					`protocol ${CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minProtocol} canonical session ownership and bounded invocation output`,
 				);
 			}
 			expect(admissions.size).toBe(0);

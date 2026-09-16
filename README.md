@@ -92,6 +92,7 @@ Add project instructions in `AGENTS.md`. Use `/settings` for common preferences 
 | Command | Use |
 | --- | --- |
 | `/model`, `/effort` | Choose a configured model and reasoning level |
+| `/agents [N]` | Show or save the live-subagent cap (default 4); lowering only blocks new spawns |
 | `/usage`, `/context` | Inspect context, token usage, and reported costs |
 | `/compact`, `/refine` | Summarize context or refine durable harness state |
 | `base-context agents` | List agents; add `--all` to include saved agents |

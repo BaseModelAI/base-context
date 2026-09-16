@@ -15,7 +15,10 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 
 ## Quick Start
 
+Choose a supported provider and model explicitly. This example uses Anthropic; configure `ANTHROPIC_API_KEY` or its saved authentication before running it.
+
 ```typescript
+import { getModel } from "@ponythewhite/base-context-ai";
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@ponythewhite/base-context";
 
 // Set up credential storage and model registry
@@ -26,6 +29,7 @@ const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
   authStorage,
   modelRegistry,
+  model: getModel("anthropic", "claude-sonnet-4-5"),
 });
 
 session.subscribe((event) => {

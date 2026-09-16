@@ -32,7 +32,7 @@ import {
 	createRlmRunHostHandler,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { type SessionEntry, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager, type SettingsStorage } from "../src/core/settings-manager.js";
 import type { Skill } from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
@@ -153,6 +153,17 @@ async function waitFor(condition: () => boolean): Promise<void> {
 			throw new Error("Timed out waiting for condition");
 		}
 		await sleep(10);
+	}
+}
+
+async function readFixtureEntries(manager: SessionManager, branch = false): Promise<SessionEntry[]> {
+	const file = manager.getSessionFile();
+	if (!file) throw new Error("Missing persisted fixture session");
+	const snapshot = await SessionManager.openReadOnly(file);
+	try {
+		return branch ? snapshot.getBranch() : snapshot.getEntries();
+	} finally {
+		await snapshot.close();
 	}
 }
 
@@ -2102,7 +2113,7 @@ describe("AgentSession rlm recursion", () => {
 			throw new Error("Missing child session directory");
 		}
 		daemonChildId = basename(result.session_dir);
-		await waitFor(() => root.getRlmChildSession(daemonChildId)?.getLastAssistantText() !== undefined);
+		await root.waitForRlmQuiescence();
 
 		expect(root.getRlmChildSession(daemonChildId)?.getLastAssistantText()).toBe("child answer: retained worker");
 		const expectedSessionName = createDefaultRlmSubagentSessionName("retained worker", daemonChildId);
@@ -2450,15 +2461,18 @@ describe("AgentSession rlm recursion", () => {
 		const parentAssistant = findLastMessage(root.messages, (message) => message.role === "assistant");
 		if (!parentAssistant || parentAssistant.role !== "assistant") throw new Error("Missing parent assistant");
 		const parentUsage = structuredClone(parentAssistant.usage);
-		const initialParentEntry = root.sessionManager
-			.getEntries()
-			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+		const initialParentEntry = (await readFixtureEntries(root.sessionManager)).find(
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		);
 		if (!initialParentEntry) throw new Error("Missing acknowledged parent assistant entry");
 		const parentEntryId = initialParentEntry.id;
 
 		const before = await root.getSessionStats();
 		const spawned = await root.runRlmChild("summarize shard 2");
-		await waitFor(() => root.sessionManager.getEntries().some((entry) => entry.type === "child_usage_attributed"));
+		await root.waitForRlmQuiescence();
+		expect(
+			(await readFixtureEntries(root.sessionManager)).some((entry) => entry.type === "child_usage_attributed"),
+		).toBe(true);
 		const child = root.getRlmChildSession(spawned.rlm_child_id);
 		if (!child) throw new Error("Missing completed child session");
 		const observedUsage = lastAssistantUsage(child);
@@ -2470,7 +2484,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(after.cost).toBeGreaterThanOrEqual(before.cost + observedUsage.cost.total);
 		expect(parentAssistant.usage.totalTokens).toBe(parentUsage.totalTokens);
 
-		const parentEntry = root.sessionManager.getEntries().find((entry) => entry.id === parentEntryId);
+		const parentEntry = (await readFixtureEntries(root.sessionManager)).find((entry) => entry.id === parentEntryId);
 		if (!parentEntry || parentEntry.type !== "message" || parentEntry.message.role !== "assistant") {
 			throw new Error("parent assistant entry was not recorded");
 		}
@@ -2522,10 +2536,11 @@ describe("AgentSession rlm recursion", () => {
 		await root.promptAndWait("prepare parent attribution");
 
 		await root.runRlmChild("use a tool");
-		await vi.waitFor(() => {
-			const attributions = root.sessionManager
-				.getEntries()
-				.filter((entry) => entry.type === "child_usage_attributed");
+		await root.waitForRlmQuiescence();
+		await vi.waitFor(async () => {
+			const attributions = (await readFixtureEntries(root.sessionManager)).filter(
+				(entry) => entry.type === "child_usage_attributed",
+			);
 			expect(attributions).toHaveLength(2);
 			expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
 		});
@@ -2541,9 +2556,9 @@ describe("AgentSession rlm recursion", () => {
 
 		expect(root.getRlmMaxDepthStatus()).toEqual({ maxDepth: 3, source: "chat" });
 		expect(root.messages).toEqual(originalMessages);
-		const stateEntries = root.sessionManager
-			.getBranch()
-			.filter((entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state");
+		const stateEntries = (await readFixtureEntries(root.sessionManager, true)).filter(
+			(entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state",
+		);
 		expect(stateEntries.at(-1)).toMatchObject({ data: { maxDepth: 3 } });
 	});
 
@@ -2735,9 +2750,9 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.rlmMaxDepth).toBe(2);
 		expect(root.systemPrompt).toBe(originalPrompt);
 		expect(
-			root.sessionManager
-				.getBranch()
-				.some((entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state"),
+			(await readFixtureEntries(root.sessionManager, true)).some(
+				(entry) => entry.type === "custom" && entry.customType === "rlm_max_depth_state",
+			),
 		).toBe(false);
 
 		const snapshot = await SessionManager.openReadOnly(root.sessionFile!);

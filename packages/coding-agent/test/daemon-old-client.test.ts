@@ -1,6 +1,7 @@
 import { Socket } from "node:net";
 import { expect, it, vi } from "vitest";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import { DAEMON_PROTOCOL_INFO, DAEMON_SCHEMA_REVISION } from "../src/modes/daemon/daemon-protocol.js";
 
 const transport = vi.hoisted(() => ({ socket: undefined as Socket | undefined }));
 
@@ -16,7 +17,7 @@ vi.mock("../src/modes/daemon/daemon-protocol.js", async (importOriginal) => ({
 	DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: [8, 9, 10],
 }));
 
-it("rejects a protocol12 hello under the old protocol11 client policy before sending any command", async () => {
+it("rejects the current daemon hello under the old protocol11 client policy before sending any command", async () => {
 	const socket = new Socket(); // Unconnected; createConnection is fully mocked.
 	transport.socket = socket;
 	const write = vi.spyOn(socket, "write").mockReturnValue(true);
@@ -28,8 +29,8 @@ it("rejects a protocol12 hello under the old protocol11 client policy before sen
 		"data",
 		`${JSON.stringify({
 			type: "daemon_hello",
-			protocol: { name: "base-context.daemon", version: 12 },
-			schemaRevision: 48,
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
 			clientId: "new-server",
 			serverCapabilities: [
 				"native_inference_ownership",

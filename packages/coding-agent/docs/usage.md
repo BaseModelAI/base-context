@@ -42,6 +42,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/effort` | Set the reasoning/thinking level |
+| `/agents [N]` | Show or save the maximum live subagents (default: 4) |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
@@ -57,11 +58,20 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/copy` | Copy last assistant message to clipboard |
 | `/btw <question>`, `/side <question>` | Ask an inline side question without adding it to the session; replies continue the side conversation, esc returns |
 | `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit Base Context |
+
+### Limit concurrent subagents
+
+`/agents` reads the current configured limit from the active root-agent family and displays exactly `The current maximum number of concurrent subagents is {N}.`, with `{N}` replaced by that current value, not a hardcoded default.
+
+`/agents 6` sets the limit to 6 for the current root agent and all its descendants. The main agent does not count. Running and idle subagents count; inactive saved sessions do not. A fresh installation defaults to **4** live subagents.
+
+The value is saved as the global `rlmMaxSubagents` preference, so it survives restarts and supplies the limit for later sessions. Use a non-negative safe integer. `/agents 0` disables new subagent spawns. Malformed, fractional, negative, and unsafe integer values are rejected without changing the setting.
+
+Lowering the limit never kills or passivates existing agents. They keep running or remain idle. Only new spawns/admissions are blocked until the live count is below the limit. This slash command is separate from `base-context agents`, which lists agents.
 
 ## Message Queue
 
@@ -164,11 +174,9 @@ Replace the default system prompt with:
 
 Append to the default prompt without replacing it with `APPEND_SYSTEM.md` in either location.
 
-## Exporting and Sharing Sessions
+## Exporting Sessions
 
-Use `/export [file]` to write a session to HTML.
-
-Use `/share` to upload a private GitHub gist with a shareable HTML link.
+Use `/export [file]` to write a session to a local HTML file.
 
 ## CLI Reference
 

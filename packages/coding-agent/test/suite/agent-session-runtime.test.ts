@@ -16,6 +16,7 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "../../src/core/goals.js";
+import { LocalRlmSubagentCapacity } from "../../src/core/rlm-max-subagents.js";
 import type { RlmChildAdmission, SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import {
 	deriveSemanticEdges,
@@ -37,6 +38,7 @@ import { createDefaultRuntimeFactory } from "../../src/main.js";
 import type { ActiveSessionState } from "../../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../../src/modes/daemon/daemon-mode.js";
 import type { DaemonCommand } from "../../src/modes/daemon/daemon-protocol.js";
+import { DaemonRlmCapacityClient } from "../../src/modes/daemon/daemon-rlm-capacity.js";
 import { createDeferred } from "./scheduling.js";
 
 const branchSummaryModel: Model<"openai-responses"> = {
@@ -194,6 +196,68 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtime = new AgentSessionRuntime(session, services, createRuntime);
 		return { runtime, disposeSession };
 	}
+
+	it("owns daemon root capacity through native replacement and failed setup without charging children twice", async () => {
+		const { runtime: fixture, tempDir } = await createRuntimeForTest(() => {});
+		const client = new DaemonRlmCapacityClient({
+			socketPath: "fixture",
+			workerToken: "fixture",
+			workerInstanceId: "worker-1",
+		});
+		const releases: Array<ReturnType<typeof vi.fn>> = [];
+		const reserve = vi.spyOn(client, "reserveRoot").mockImplementation(async () => {
+			const release = vi.fn(async () => {});
+			releases.push(release);
+			return { release };
+		});
+		vi.spyOn(client, "forSession").mockImplementation(
+			() => new LocalRlmSubagentCapacity(fixture.session.settingsManager),
+		);
+		let failSetup = false;
+		const factory: CreateAgentSessionRuntimeFactory = async (options) => {
+			const result = await createAgentSessionFromServices({
+				services: fixture.services,
+				sessionManager: options.sessionManager,
+				model: fixture.session.model,
+				...options.sessionOptions,
+			});
+			if (failSetup) throw new Error("root setup failed");
+			return { ...result, services: fixture.services, diagnostics: [] };
+		};
+		const daemon = new AgentDaemon(join(tempDir, "root-capacity.sock"), {
+			defaultSessionConfig: { cwd: tempDir, agentDir: tempDir },
+			createRuntime: factory,
+		});
+		const internals = daemon as unknown as {
+			workerRlmCapacityClient(): DaemonRlmCapacityClient;
+			createRuntimeWithRlmCapacity: CreateAgentSessionRuntimeFactory;
+		};
+		vi.spyOn(internals, "workerRlmCapacityClient").mockReturnValue(client);
+		const runtime = await createAgentSessionRuntime(internals.createRuntimeWithRlmCapacity, {
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "root-capacity-sessions")),
+		});
+		cleanups.push(() => runtime.dispose());
+		expect(reserve).toHaveBeenCalledOnce();
+		await runtime.newSession();
+		expect(reserve).toHaveBeenCalledTimes(2);
+		expect(releases[0]).toHaveBeenCalledOnce();
+		await runtime.session.runRlmChild("child uses its parent admission", { name: "native-child" });
+		await runtime.session.waitForRlmQuiescence();
+		expect(reserve).toHaveBeenCalledTimes(2);
+		await runtime.dispose();
+		expect(releases[1]).toHaveBeenCalledOnce();
+		failSetup = true;
+		await expect(
+			createAgentSessionRuntime(internals.createRuntimeWithRlmCapacity, {
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(tempDir),
+			}),
+		).rejects.toThrow("root setup failed");
+		expect(releases[2]).toHaveBeenCalledOnce();
+	});
 
 	it("passes session config to replacement runtimes", async () => {
 		const calls: Array<Parameters<CreateAgentSessionRuntimeFactory>[0]> = [];
@@ -404,6 +468,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("releases a failed child run from the inline runtime host", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
+		await runtime.session.setRlmMaxSubagents(1);
 		const deleteRlmSubagentRuntime = vi.spyOn(runtime, "deleteRlmSubagentRuntime");
 		let failedChild!: AgentSession;
 		let restoreDisposal!: () => void;
@@ -475,6 +540,7 @@ describe("AgentSessionRuntime characterization", () => {
 		initialization.mockRestore();
 
 		const { runtime: unknownStart } = await createRuntimeForTest(() => {});
+		await unknownStart.session.setRlmMaxSubagents(1);
 		vi.spyOn(unknownStart, "createRlmSubagentRuntime").mockRejectedValueOnce(new Error("start outcome unavailable"));
 		await unknownStart.session.runRlmChild("unknown factory outcome", { name: "unknown-child" });
 		await vi.waitFor(() => expect(unknownStart.session.hasRunningRlmChildren()).toBe(false));
@@ -708,6 +774,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const parentFile = manager.getSessionFile()!;
 		await manager.close();
 		const parent = await internals.createRuntime({ type: "create", sessionPath: parentFile });
+		await parent.runtime.session.setRlmMaxSubagents(1);
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("done")]);
 		const firstStart = parent.runtime.session.runRlmChild("first resident", { name: "resident-one" });
 		// Neither name/model selection nor the factory has completed its first await.

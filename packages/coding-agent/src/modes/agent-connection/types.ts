@@ -27,6 +27,7 @@ import type { KernelSentAgentMessage } from "../../core/kernel/index.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import type { RlmMaxDepthStatus, SetRlmMaxDepthResult } from "../../core/rlm-max-depth.js";
+import type { RlmMaxSubagentsStatus } from "../../core/rlm-max-subagents.js";
 import type {
 	QueuedMessageLane,
 	QueuedMessageMutation,
@@ -758,6 +759,8 @@ export interface AgentConnection {
 	exportToHtml(outputPath?: string): Promise<string>;
 	exportToJsonl(outputPath?: string): Promise<string>;
 	setSessionName(name: string): Promise<void>;
+	getRlmMaxSubagentsStatus(): Promise<RlmMaxSubagentsStatus>;
+	setRlmMaxSubagents(maxSubagents: number): Promise<RlmMaxSubagentsStatus>;
 	getRlmMaxDepthStatus(): Promise<RlmMaxDepthStatus>;
 	setRlmMaxDepth(maxDepth: number, options?: { global?: boolean }): Promise<SetRlmMaxDepthResult>;
 	renameSavedSession(sessionPath: string, name: string): Promise<void>;

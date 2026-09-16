@@ -41,7 +41,6 @@ For native journal storage and the SessionManager API, see [Session Format](sess
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
 | `/export [file]` | Export session to HTML |
-| `/share` | Upload as private GitHub gist with shareable HTML link |
 
 ## Importing an External Session
 

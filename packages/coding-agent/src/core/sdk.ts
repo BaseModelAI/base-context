@@ -112,6 +112,12 @@ export type {
 } from "./extensions/index.js";
 export type { PromptTemplate } from "./prompt-templates.js";
 export type {
+	RlmMaxSubagentsStatus,
+	RlmRootAdmission,
+	RlmSubagentCapacity,
+	RlmSubagentCapacityReservation,
+} from "./rlm-max-subagents.js";
+export type {
 	CreateRlmSubagentRuntimeOptions,
 	RlmChildAdmission,
 	RlmSubagentRuntime,
@@ -418,6 +424,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rlmParentNodeId: options.rlmParentNodeId,
 			rlmParentAgent: options.rlmParentAgent,
 			rlmChildAdmission: options.rlmChildAdmission,
+			rlmSubagentCapacity: options.rlmSubagentCapacity,
+			rlmRootAdmission: options.rlmRootAdmission,
 			semanticParentSessionId: options.semanticParentSessionId,
 			semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 			subagentRuntimeHost: options.subagentRuntimeHost,
@@ -437,12 +445,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 	} catch (error) {
 		try {
-			const admitted = options.rlmChildAdmission?.session;
+			const admitted = options.rlmChildAdmission?.session ?? options.rlmRootAdmission?.session;
 			const failedSession = session ?? (admitted?.sessionManager === sessionManager ? admitted : undefined);
 			if (failedSession) await failedSession.disposeAsync();
 			else {
 				await sessionManager.close();
-				options.rlmChildAdmission?.confirmUnboundCleanup();
+				await options.rlmChildAdmission?.confirmUnboundCleanup();
 			}
 		} catch (cleanupError) {
 			if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))

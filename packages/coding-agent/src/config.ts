@@ -499,12 +499,6 @@ export function expandTildePath(path: string): string {
 	return expandHomePath(path);
 }
 
-/** Sharing is explicit; no upstream session viewer receives fork sessions by default. */
-export function getShareViewerUrl(gistId: string): string {
-	const baseUrl = process.env[PRODUCT_ENV.shareViewer];
-	return baseUrl ? `${baseUrl}#${gistId}` : `https://gist.github.com/${gistId}`;
-}
-
 // =============================================================================
 // User Config Paths (~/.prime/agent/*)
 // =============================================================================

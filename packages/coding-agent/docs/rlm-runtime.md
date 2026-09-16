@@ -155,6 +155,14 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 2, so root sessions may create children and grandchildren; grandchildren may not create another generation unless the limit is configured higher.
 
+## Concurrent Subagent Limit
+
+A root agent and its descendants share one live-subagent cap, independent of the recursion-depth limit. The default is **4**. Running and idle subagents at every depth count; the main/root agent and inactive saved sessions do not. Admission fails when there are no free slots.
+
+[`/agents N`](usage.md#limit-concurrent-subagents) updates the current family cap and saves the global `rlmMaxSubagents` preference for later sessions and restarts. `N` must be a non-negative safe integer; `0` blocks new subagent spawns. `/agents` queries the effective current family value rather than displaying the default.
+
+Lowering the cap never cancels, kills, or passivates existing subagents. It only prevents new admissions while the live count is at or above the cap. Existing running and idle agents retain their state.
+
 ## Independent Delegation
 
 Each direct call admits an independent child and returns its handle immediately:

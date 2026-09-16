@@ -14,6 +14,12 @@
 - Prevented uv bootstrap from editing shell profiles before the installer’s explicit PATH consent.
 - Prevented repeated installer runs from adding duplicate PATH entries for managed Node.js.
 - Propagated failed RPC prompt admission to SDK callers without treating successful acknowledgement as completion.
+- Removed remote session sharing through `/share` and stale `/traces` menu entries while retaining local `/export`.
+- Removed stale Prime-team wording from model authentication errors.
+- Added persisted `/agents N` control with a default of four concurrent subagents across the root family, including running and idle residents but excluding the main agent and inactive sessions. Lowering the limit only restricts new admissions.
+- Preserved subagent capacity across daemon worker recovery and saved-session resumes, and advanced the daemon contract to protocol 13 / schema 49.
+- Released newly bound context sources when request admission closes during disposal, preventing child shutdown from hanging.
+- Kept independently resumed live subagents visible and routable when their parent publishes inactive saved-child entries.
 
 ## [1.0.0] - 2026-09-15
 

@@ -193,12 +193,13 @@ describe("ENG-4649 subagent model selection", () => {
 		}
 	});
 
-	it("rejects a second resident child while model validation is pending", async () => {
+	it("rejects a second resident child at an explicit limit of one while model validation is pending", async () => {
 		const harness = await createHarness({
 			provider,
 			models: [{ id: "parent-model" }],
 		});
 		try {
+			await harness.session.setRlmMaxSubagents(1);
 			harness.setResponses([fauxAssistantMessage("first child answer")]);
 
 			const first = harness.session.runRlmChild("first task", { name: "shared-reviewer" });

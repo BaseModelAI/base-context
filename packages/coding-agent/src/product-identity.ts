@@ -25,7 +25,6 @@ export const PRODUCT_ENV = Object.freeze({
 	home: "BASE_CONTEXT_HOME",
 	sessions: "BASE_CONTEXT_SESSION_DIR",
 	packageDirectory: "BASE_CONTEXT_PACKAGE_DIR",
-	shareViewer: "BASE_CONTEXT_SHARE_VIEWER_URL",
 	interactiveSelfUpdate: "BASE_CONTEXT_INTERACTIVE_SELF_UPDATE",
 	kernelPython: "BASE_CONTEXT_KERNEL_PYTHON",
 	kernelVenv: "BASE_CONTEXT_KERNEL_VENV",

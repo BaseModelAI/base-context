@@ -34,7 +34,7 @@ describe("Base Context identity and paths", () => {
 
 		const guide = readFileSync(new URL("../docs/sdk.md", import.meta.url), "utf8");
 		expect(guide).toContain('from "@ponythewhite/base-context"');
-		expect(guide).toContain("../../../README.md#getting-started");
+		expect(guide).toContain("installation.md#source-installation");
 		expect(guide).toContain("agentDir: getAgentDir()");
 		expect(guide).toContain("`BASE_CONTEXT_SESSION_DIR`");
 		expect(guide).toContain("sessionManager: await SessionManager.create(process.cwd())");

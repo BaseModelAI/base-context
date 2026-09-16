@@ -115,6 +115,7 @@ import {
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
+import { DaemonRlmCapacityCoordinator } from "./daemon-rlm-capacity-coordinator.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
@@ -165,6 +166,7 @@ import {
 	type DaemonWorkerRosterOutbound,
 	durableDaemonCreateCommand,
 	durableDaemonWorkerDescriptor,
+	isDaemonRlmCapacitySnapshot,
 	ROSTER_HEARTBEAT_INTERVAL_MS,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -231,6 +233,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"list",
 	"list_agent_peers",
 	"rlm_ledger_mutate",
+	"rlm_capacity",
 	"get_direct_worker_transport",
 	"roster_subscribe",
 	"roster_unsubscribe",
@@ -322,6 +325,8 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_session_name",
 	"get_rlm_max_depth_status",
 	"set_rlm_max_depth",
+	"get_rlm_max_subagents_status",
+	"set_rlm_max_subagents",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",
@@ -734,6 +739,9 @@ export class DaemonSupervisor {
 	private readonly pendingSessionNames = new Set<string>();
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
+	private readonly rlmCapacity: DaemonRlmCapacityCoordinator;
+	private readonly pendingRlmCapacity = new Set<ResidentWorker>();
+	private readonly releasedDuringCapacityRecovery = new Map<ResidentWorker, Set<string>>();
 	private rosterStore?: AgentRoster;
 	private readonly pendingRosterChanged = new Set<string>();
 	private readonly pendingRosterRemoved = new Set<string>();
@@ -774,6 +782,7 @@ export class DaemonSupervisor {
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);
 		this.catalog = new DaemonCatalogClient((message) => this.log(message));
 		this.settingsManager = SettingsManager.create(process.cwd(), this.defaultSessionConfig.agentDir ?? agentDir);
+		this.rlmCapacity = new DaemonRlmCapacityCoordinator(this.settingsManager);
 	}
 
 	async start(): Promise<void> {
@@ -809,6 +818,7 @@ export class DaemonSupervisor {
 			this.commandJournal = new CommandRecoveryJournal(join(this.descriptorDir, "command-journal.jsonl"));
 			this.loadWorkerDescriptors();
 			const workersToAdopt = [...this.workers.values()];
+			for (const worker of workersToAdopt) this.pendingRlmCapacity.add(worker);
 
 			this.server = createServer((socket) => this.handleConnection(socket));
 			await this.listen();
@@ -841,7 +851,7 @@ export class DaemonSupervisor {
 			await Promise.all(
 				workersToAdopt.map(async (worker) => {
 					try {
-						await this.adoptOrRecoverWorker(worker);
+						await this.adoptOrRecoverWorker(worker, this.ready);
 					} catch (error) {
 						if (!adoptionFailed) {
 							adoptionFailed = true;
@@ -1767,7 +1777,10 @@ export class DaemonSupervisor {
 	private isWorkerLedgerEnvelope(line: string): boolean {
 		try {
 			const parsed: unknown = JSON.parse(line);
-			return isDaemonCommandEnvelope(parsed) && parsed.command.type === "rlm_ledger_mutate";
+			return (
+				isDaemonCommandEnvelope(parsed) &&
+				(parsed.command.type === "rlm_ledger_mutate" || parsed.command.type === "rlm_capacity")
+			);
 		} catch {
 			return false;
 		}
@@ -1835,7 +1848,7 @@ export class DaemonSupervisor {
 
 		try {
 			await waitForPromptAdmission(
-				this.assertServingCurrentOwnership(command.type === "rlm_ledger_mutate"),
+				this.assertServingCurrentOwnership(command.type === "rlm_ledger_mutate" || command.type === "rlm_capacity"),
 				parsedAdmission?.controller.signal,
 			);
 		} catch (error) {
@@ -1872,7 +1885,7 @@ export class DaemonSupervisor {
 			phase === "draining"
 				? !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)
 				: phase !== undefined && !(phase === "prepared" && command.type === "shutdown");
-		if (restartRejected && mutation && command.type !== "rlm_ledger_mutate") {
+		if (restartRejected && mutation && command.type !== "rlm_ledger_mutate" && command.type !== "rlm_capacity") {
 			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;
@@ -1882,7 +1895,9 @@ export class DaemonSupervisor {
 			if (idleEvictionFence) {
 				await idleEvictionFence;
 				try {
-					await this.assertServingCurrentOwnership(command.type === "rlm_ledger_mutate");
+					await this.assertServingCurrentOwnership(
+						command.type === "rlm_ledger_mutate" || command.type === "rlm_capacity",
+					);
 				} catch (error) {
 					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
@@ -1957,6 +1972,168 @@ export class DaemonSupervisor {
 		}
 	}
 
+	private rlmCapacityOwner(worker: ResidentWorker): string {
+		return `${worker.descriptor.workerId}:${worker.descriptor.workerInstanceId ?? "unavailable"}`;
+	}
+
+	private async rlmCapacityFamily(sessionFile: string | undefined, owner: string, sessionId: string): Promise<string> {
+		if (!sessionFile) return `memory:${owner}:${sessionId}`;
+		const parents = new Map(
+			(await this.rlmSpawnLedger().liveEdges({ strict: true })).map(
+				(edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)] as const,
+			),
+		);
+		let root = canonicalSessionPath(sessionFile);
+		const visited = new Set<string>();
+		while (parents.has(root)) {
+			if (visited.has(root)) throw new Error("RLM family ancestry contains a cycle");
+			visited.add(root);
+			const parent = parents.get(root);
+			if (parent === undefined) break;
+			root = parent;
+		}
+		return `file:${root}`;
+	}
+
+	private isRlmMainRoot(sessionFile: string | undefined, family: string): boolean {
+		return sessionFile === undefined || family === `file:${canonicalSessionPath(sessionFile)}`;
+	}
+
+	private releaseWorkerRlmCapacity(worker: ResidentWorker): void {
+		this.rlmCapacity.releaseOwner(this.rlmCapacityOwner(worker));
+		this.pendingRlmCapacity.delete(worker);
+		this.releasedDuringCapacityRecovery.delete(worker);
+	}
+
+	private async assertRlmCapacityKnown(family: string): Promise<void> {
+		for (const worker of [...this.pendingRlmCapacity]) {
+			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+			if (identity === "gone" || identity === "replaced") {
+				this.releaseWorkerRlmCapacity(worker);
+				continue;
+			}
+			const path = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
+			const pendingFamily = path
+				? await this.rlmCapacityFamily(
+						path,
+						this.rlmCapacityOwner(worker),
+						worker.descriptor.rootSessionId ?? "pending",
+					)
+				: undefined;
+			if (this.pendingRlmCapacity.has(worker) && (pendingFamily === undefined || pendingFamily === family)) {
+				throw new Error("RLM family capacity is waiting for a live worker to reconnect");
+			}
+		}
+	}
+
+	private async restoreWorkerRlmCapacity(worker: ResidentWorker, client: DaemonWorkerClient): Promise<void> {
+		if (!this.pendingRlmCapacity.has(worker)) return;
+		const owner = this.rlmCapacityOwner(worker);
+		const response = await client.requestWorker({ type: "worker_get_rlm_capacity" }, 2000);
+		if (!response.success) throw deserializeDaemonError(response);
+		if (!isDaemonRlmCapacitySnapshot(response.data))
+			throw new Error("Worker returned an invalid RLM capacity snapshot");
+		const recovered = await Promise.all(
+			response.data.reservations.map(async (reservation) => ({
+				reservation,
+				family: await this.rlmCapacityFamily(reservation.sessionFile, owner, reservation.sessionId),
+			})),
+		);
+		if (this.rlmCapacityOwner(worker) !== owner || !this.pendingRlmCapacity.has(worker)) return;
+		const released = this.releasedDuringCapacityRecovery.get(worker);
+		for (const { reservation, family } of recovered) {
+			if (released?.has(reservation.reservationId)) continue;
+			if (reservation.residentRoot && this.isRlmMainRoot(reservation.sessionFile, family)) continue;
+			this.rlmCapacity.restore(owner, reservation.reservationId, family);
+		}
+		this.pendingRlmCapacity.delete(worker);
+		this.releasedDuringCapacityRecovery.delete(worker);
+	}
+
+	private async handleRlmCapacity(command: Extract<DaemonCommand, { type: "rlm_capacity" }>): Promise<DaemonResponse> {
+		const worker = [...this.workers.values()].find(
+			(candidate) =>
+				candidate.descriptor.authenticationToken === command.workerToken &&
+				candidate.descriptor.workerInstanceId === command.workerInstanceId,
+		);
+		if (
+			!worker ||
+			!command.workerInstanceId ||
+			worker.compatibilityError ||
+			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) !== "current"
+		) {
+			throw new Error("Worker authentication failed for RLM capacity");
+		}
+		const owner = this.rlmCapacityOwner(worker);
+		const journal = this.assertRlmJournalAdmission();
+		const scope = this.rlmJournalScope(worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir);
+		if (canonicalSessionPath(scope.journalPath) !== journal.ledgerPath) {
+			throw new Error("Worker RLM family is not owned by this supervisor");
+		}
+		const operation = command.operation;
+		if (!operation || typeof operation !== "object") throw new Error("Invalid RLM capacity operation");
+		if (operation.op === "release") {
+			if (typeof operation.reservationId !== "string" || !operation.reservationId)
+				throw new Error("Invalid RLM reservation id");
+			this.rlmCapacity.release(owner, operation.reservationId);
+			if (this.pendingRlmCapacity.has(worker)) {
+				let released = this.releasedDuringCapacityRecovery.get(worker);
+				if (!released) {
+					released = new Set();
+					this.releasedDuringCapacityRecovery.set(worker, released);
+				}
+				released.add(operation.reservationId);
+			}
+			return success(command.id, command.type);
+		}
+		if (operation.op !== "status" && operation.op !== "set" && operation.op !== "reserve")
+			throw new Error("Unknown RLM capacity operation");
+		if (
+			typeof operation.sessionId !== "string" ||
+			!operation.sessionId ||
+			(operation.sessionFile !== undefined && (typeof operation.sessionFile !== "string" || !operation.sessionFile))
+		) {
+			throw new Error("Invalid RLM capacity origin");
+		}
+		const family = await this.rlmCapacityFamily(operation.sessionFile, owner, operation.sessionId);
+		await this.assertServingCurrentOwnership(true);
+		if (this.rlmCapacityOwner(worker) !== owner || worker.descriptor.authenticationToken !== command.workerToken) {
+			throw new Error("RLM capacity worker incarnation changed");
+		}
+		if (operation.op === "status") return success(command.id, command.type, this.rlmCapacity.getStatus(family));
+		if (this.shuttingDown || this.updateRestartPhase !== undefined || worker.descriptor.stopRequestedAt) {
+			throw new Error("RLM capacity admission is closed while the worker or daemon is stopping");
+		}
+		if (operation.op === "set") {
+			return success(
+				command.id,
+				command.type,
+				await this.rlmCapacity.setMaxSubagents(family, operation.maxSubagents),
+			);
+		}
+		if (
+			typeof operation.reservationId !== "string" ||
+			!operation.reservationId ||
+			(operation.residentRoot !== undefined && operation.residentRoot !== true)
+		)
+			throw new Error("Invalid RLM reservation");
+		if (operation.residentRoot && this.isRlmMainRoot(operation.sessionFile, family)) {
+			return success(command.id, command.type, this.rlmCapacity.getStatus(family));
+		}
+		await this.assertRlmCapacityKnown(family);
+		await this.assertServingCurrentOwnership();
+		if (
+			this.updateRestartPhase !== undefined ||
+			worker.descriptor.stopRequestedAt ||
+			this.rlmCapacityOwner(worker) !== owner ||
+			this.workers.get(worker.descriptor.workerId) !== worker ||
+			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) !== "current"
+		) {
+			throw new Error("RLM capacity admission changed while resolving its family");
+		}
+		return success(command.id, command.type, this.rlmCapacity.reserve(owner, operation.reservationId, family));
+	}
+
 	private async handleCommand(
 		client: DaemonSocketClient,
 		command: DaemonCommand,
@@ -2024,6 +2201,8 @@ export class DaemonSupervisor {
 					});
 				return success(command.id, command.type, { peers });
 			}
+			case "rlm_capacity":
+				return this.handleRlmCapacity(command);
 			case "rlm_ledger_mutate": {
 				const worker = [...this.workers.values()].find(
 					(candidate) => candidate.descriptor.authenticationToken === command.workerToken,
@@ -3468,6 +3647,7 @@ export class DaemonSupervisor {
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
 						throw new PreRosterWorkerError("Session worker predates the roster protocol and must be restarted");
 					}
+					await this.restoreWorkerRlmCapacity(worker, client);
 					worker.peerTransportCapable = workerAuthAdvertisesPeerTransport(authResponse.data);
 					worker.lastFrameAt = Date.now();
 					worker.client?.close();
@@ -3532,7 +3712,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async adoptOrRecoverWorker(worker: ResidentWorker): Promise<void> {
+	private async adoptOrRecoverWorker(worker: ResidentWorker, recoveryReady?: Promise<void>): Promise<void> {
 		await this.assertRecoveryAllowed();
 		if (worker.descriptor.stopRequestedAt) {
 			try {
@@ -3593,6 +3773,19 @@ export class DaemonSupervisor {
 				return;
 			}
 			this.log(`Could not adopt worker ${worker.descriptor.workerId}: ${String(error)}`);
+			if (recoveryReady) {
+				// Recovery can create workers that call back for capacity. Keep it single-flight,
+				// but let adoption finish before those callbacks need the normal ready gate.
+				void this.recoverWorker(worker, {
+					ready: recoveryReady,
+					...(error instanceof PreRosterWorkerError && worker.descriptor.ownerClientId === undefined
+						? { preRoster: { observedProcessStartId } }
+						: {}),
+				}).catch((recoveryError) =>
+					this.log(`Could not recover worker ${worker.descriptor.workerId}: ${String(recoveryError)}`),
+				);
+				return;
+			}
 			// A client-owned worker's launch env lives only with its owner; recoverWorker parks it instead.
 			if (error instanceof PreRosterWorkerError && worker.descriptor.ownerClientId === undefined) {
 				try {
@@ -3623,7 +3816,15 @@ export class DaemonSupervisor {
 		worker: ResidentWorker,
 		observedProcessStartId: string | undefined,
 	): Promise<void> {
+		const stopRevision = worker.stopRevision;
+		const workerInstanceId = worker.descriptor.workerInstanceId;
 		await this.assertRecoveryAllowed();
+		if (
+			this.isWorkerRecoveryCancelled(worker) ||
+			worker.stopRevision !== stopRevision ||
+			worker.descriptor.workerInstanceId !== workerInstanceId
+		)
+			return;
 		if (worker.descriptor.processStartId === undefined && observedProcessStartId !== undefined) {
 			worker.descriptor.processStartId = observedProcessStartId;
 		}
@@ -3959,11 +4160,15 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async recoverWorker(worker: ResidentWorker): Promise<void> {
+	private async recoverWorker(
+		worker: ResidentWorker,
+		startup?: { ready: Promise<void>; preRoster?: { observedProcessStartId?: string } },
+	): Promise<void> {
 		if (this.isWorkerRecoveryCancelled(worker)) {
 			return;
 		}
 		if (worker.descriptor.ownerClientId && !worker.launchEnv && !isProcessAlive(worker.descriptor.pid)) {
+			this.releaseWorkerRlmCapacity(worker);
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = "Waiting for the owning client to reconnect";
 			this.persistWorker(worker);
@@ -3972,7 +4177,29 @@ export class DaemonSupervisor {
 		if (worker.recovery) {
 			return worker.recovery;
 		}
+		const stopRevision = worker.stopRevision;
+		const workerInstanceId = worker.descriptor.workerInstanceId;
 		worker.recovery = (async () => {
+			if (startup) {
+				await startup.ready;
+				if (
+					this.isWorkerRecoveryCancelled(worker) ||
+					worker.stopRevision !== stopRevision ||
+					worker.descriptor.workerInstanceId !== workerInstanceId
+				)
+					return;
+				if (startup.preRoster) {
+					try {
+						await this.restartPreRosterWorker(worker, startup.preRoster.observedProcessStartId);
+						return;
+					} catch (restartError) {
+						if (isSupervisorRecoveryCancelled(restartError)) return;
+						this.log(
+							`Could not restart pre-roster worker ${worker.descriptor.workerId}: ${String(restartError)}`,
+						);
+					}
+				}
+			}
 			let keepProbingLiveWorker = false;
 			for (const retryDelay of WORKER_RETRY_DELAYS_MS) {
 				await delay(retryDelay);
@@ -4026,6 +4253,7 @@ export class DaemonSupervisor {
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
 						);
 					}
+					this.releaseWorkerRlmCapacity(worker);
 					const recoveryCommand = worker.descriptor.ownerClientId ? worker.transientCreateCommand : undefined;
 					if (!recoveryCommand || !worker.launchEnv) {
 						await this.recoverUncertainWorkerOperations(worker);
@@ -4372,6 +4600,18 @@ export class DaemonSupervisor {
 		worker?: ResidentWorker,
 		statusLabel?: AgentRosterEntry["statusLabel"],
 	): AgentRosterEntry {
+		const existing = entry.summary.sessionFile
+			? this.roster().bySessionFile(entry.summary.sessionFile)
+			: this.roster().get(entry.agentId);
+		// A parent's saved-child row cannot replace that child's independent live worker.
+		if (
+			worker &&
+			!entry.summary.activeSessionId &&
+			existing?.summary.activeSessionId &&
+			existing.workerId !== undefined &&
+			existing.workerId !== worker.descriptor.workerId
+		)
+			return existing;
 		const previousDirect = this.roster().get(entry.agentId)?.summary.directAttachedClients ?? 0;
 		const stored = this.roster().write(entry, worker?.descriptor.workerId, statusLabel);
 		// Direct peers attach and detach on the worker socket, so their last detach arrives
@@ -6569,6 +6809,7 @@ export class DaemonSupervisor {
 		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
 			ephemeralCancelSettled = await this.cancelEphemeralWorkerScheduledJobs(worker);
 		}
+		this.releaseWorkerRlmCapacity(worker);
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
 		// A failed cancel keeps the stop tombstone as the durable intent; the enumeration retry or the next boot finishes it.

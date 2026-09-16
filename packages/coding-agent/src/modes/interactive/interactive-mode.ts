@@ -42,7 +42,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@ponythewhite/base-context-tui";
-import { spawn, spawnSync } from "child_process";
+import { spawnSync } from "child_process";
 import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
@@ -57,7 +57,6 @@ import {
 	getDebugLogPath,
 	getLogsDir,
 	getPhysicalPackageDir,
-	getShareViewerUrl,
 	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
 	VERSION,
@@ -168,7 +167,6 @@ import { AgentMessageComponent } from "./components/agent-message.js";
 import { ArminComponent } from "./components/armin.js";
 import { AssistantMessageComponent } from "./components/assistant-message.js";
 import { BashExecutionComponent } from "./components/bash-execution.js";
-import { BorderedLoader } from "./components/bordered-loader.js";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.js";
 import { type FullPaneOverlayOptions, showFullPaneOverlay } from "./components/centered-overlay.js";
 import {
@@ -4685,11 +4683,6 @@ export class InteractiveMode {
 					this.editor.setText("");
 					return;
 				}
-				if (commandName === "share" && !commandArgs) {
-					await this.handleShareCommand();
-					this.editor.setText("");
-					return;
-				}
 				if (commandName === "copy" && !commandArgs) {
 					await this.handleCopyCommand();
 					this.editor.setText("");
@@ -4698,6 +4691,11 @@ export class InteractiveMode {
 				if (commandName === "name") {
 					await this.handleNameCommand(canonicalCommandText);
 					this.editor.setText("");
+					return;
+				}
+				if (commandName === "agents") {
+					this.editor.setText("");
+					await this.handleAgentsCommand(commandArgs);
 					return;
 				}
 				if (commandName === "rlm-max-depth") {
@@ -8942,100 +8940,6 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleShareCommand(): Promise<void> {
-		// Check if gh is available and logged in
-		try {
-			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
-			if (authResult.status !== 0) {
-				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
-				return;
-			}
-		} catch {
-			this.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
-			return;
-		}
-
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
-		try {
-			await this.agentConnection.exportToHtml(tmpFile);
-		} catch (error: unknown) {
-			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-			return;
-		}
-
-		// Show cancellable loader, replacing the editor
-		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
-
-		const restoreEditor = () => {
-			loader.dispose();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
-		};
-
-		// Create a secret gist asynchronously
-		let proc: ReturnType<typeof spawn> | null = null;
-
-		loader.onAbort = () => {
-			proc?.kill();
-			restoreEditor();
-			this.showStatus("Share cancelled");
-		};
-
-		try {
-			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
-				let stdout = "";
-				let stderr = "";
-				proc.stdout?.on("data", (data) => {
-					stdout += data.toString();
-				});
-				proc.stderr?.on("data", (data) => {
-					stderr += data.toString();
-				});
-				proc.on("close", (code) => resolve({ stdout, stderr, code }));
-			});
-
-			if (loader.signal.aborted) return;
-
-			restoreEditor();
-
-			if (result.code !== 0) {
-				const errorMsg = result.stderr?.trim() || "Unknown error";
-				this.showError(`Failed to create gist: ${errorMsg}`);
-				return;
-			}
-
-			// Extract gist ID from the URL returned by gh
-			// gh returns something like: https://gist.github.com/username/GIST_ID
-			const gistUrl = result.stdout?.trim();
-			const gistId = gistUrl?.split("/").pop();
-			if (!gistId) {
-				this.showError("Failed to parse gist ID from gh output");
-				return;
-			}
-
-			// Create the preview URL
-			const previewUrl = getShareViewerUrl(gistId);
-			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
-		} catch (error: unknown) {
-			if (!loader.signal.aborted) {
-				restoreEditor();
-				this.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
-			}
-		}
-	}
-
 	private async handleCopyCommand(): Promise<void> {
 		const text = await this.agentConnection.getLastAssistantText();
 		if (!text) {
@@ -9069,6 +8973,23 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	private async handleAgentsCommand(args: string): Promise<void> {
+		const value = args.trim();
+		const maxSubagents = Number(value);
+		if (value && (!/^\d+$/.test(value) || !Number.isSafeInteger(maxSubagents))) {
+			this.showWarning("Usage: /agents [N]. N must be a non-negative safe integer; 0 disables new subagent spawns.");
+			return;
+		}
+		try {
+			const status = value
+				? await this.agentConnection.setRlmMaxSubagents(maxSubagents)
+				: await this.agentConnection.getRlmMaxSubagentsStatus();
+			this.showStatus(`The current maximum number of concurrent subagents is ${status.maxSubagents}.`);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async handleRlmMaxDepthCommand(args: string): Promise<void> {

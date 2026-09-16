@@ -726,6 +726,8 @@ export function resolveRuntimeSessionOptions(
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
 		rlmChildAdmission: runtimeSessionOptions?.rlmChildAdmission,
+		rlmSubagentCapacity: runtimeSessionOptions?.rlmSubagentCapacity,
+		rlmRootAdmission: runtimeSessionOptions?.rlmRootAdmission,
 		semanticParentSessionId: runtimeSessionOptions?.semanticParentSessionId,
 		semanticSpawnedByRequestId: runtimeSessionOptions?.semanticSpawnedByRequestId,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,

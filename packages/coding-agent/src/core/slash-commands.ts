@@ -102,7 +102,6 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "<path.jsonl>",
 		takesArgument: true,
 	},
-	{ name: "share", description: "Share session as a secret GitHub gist" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	{
 		name: "btw",
@@ -116,14 +115,15 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "[name]",
 		takesArgument: true,
 	},
+	{
+		name: "agents",
+		description: "Set or view the saved maximum live subagents; lowering only blocks new spawns",
+		argumentHint: "[N]",
+		takesArgument: true,
+	},
 	{ name: "session", description: "Show session info" },
 	{ name: "system-prompt", description: "Show the exact system prompt sent to the model" },
 	{ name: "logs", description: "Show where daemon and client logs are saved" },
-	{
-		name: "traces",
-		description: "Preview, upload, or configure Base Context traces",
-		argumentHint: "[status|on|off|preview|upload|upload-current|upload-all|login]",
-	},
 	{ name: "context", description: "Show token, cost, and context usage for agent and sub-agents" },
 	{ name: "changelog", description: "Show changelog entries" },
 	{

@@ -1466,6 +1466,21 @@ export class DaemonAgentConnection implements AgentConnection {
 		await this.requestOk({ type: "set_session_name", activeSessionId: this.activeSessionId, name });
 	}
 
+	async getRlmMaxSubagentsStatus() {
+		return this.requestData<{ maxSubagents: number }>({
+			type: "get_rlm_max_subagents_status",
+			activeSessionId: this.activeSessionId,
+		});
+	}
+
+	async setRlmMaxSubagents(maxSubagents: number) {
+		return this.requestData<{ maxSubagents: number }>({
+			type: "set_rlm_max_subagents",
+			activeSessionId: this.activeSessionId,
+			maxSubagents,
+		});
+	}
+
 	async getRlmMaxDepthStatus() {
 		return this.requestData<{ maxDepth: number; source: "default" | "env" | "global" | "inherited" | "chat" }>({
 			type: "get_rlm_max_depth_status",

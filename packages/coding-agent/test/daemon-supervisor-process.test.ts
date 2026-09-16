@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR, getCronJobsPath } from "../src/config.js";
 import { AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { readActiveOrphanProcesses } from "../src/core/orphan-process-journal.js";
+import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import {
 	acquireSessionLease,
 	SESSION_LEASE_OWNER_ID_ENV,
@@ -23,6 +24,7 @@ import {
 	type DaemonWorkerFrameHeader,
 	isDaemonWorkerFrameHeader,
 } from "../src/modes/daemon/daemon-worker-protocol.js";
+import { rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
@@ -309,6 +311,80 @@ async function startBlockingBash(client: DaemonClient, activeSessionId: string, 
 		throw new Error(response.error);
 	}
 	await waitForCondition(() => existsSync(readyPath), `Blocking bash process did not become ready: ${readyPath}`);
+}
+
+async function createRlmCapacityFamilyFixture() {
+	const root = tempDir();
+	const agentDir = join(root, "agent");
+	const projectDir = join(root, "project");
+	const sessionDir = join(agentDir, "sessions");
+	mkdirSync(projectDir, { recursive: true });
+	const makeSession = async (name: string, parent?: { sessionFile: string; artifactDir: string; depth: number }) => {
+		const depth = parent ? parent.depth + 1 : 0;
+		const manager = trackSession(
+			await SessionManager.create(projectDir, parent ? join(parent.artifactDir, `sub-${name}`) : sessionDir, {
+				parentSession: parent?.sessionFile,
+				rlmDepth: depth,
+			}),
+		);
+		await manager.appendSessionInfo(name);
+		await manager.appendMessage({ role: "user", content: `${name} capacity fixture`, timestamp: 1 });
+		await manager.flushNow();
+		const sessionFile = manager.getSessionFile();
+		const artifactDir = manager.getSessionArtifactDir();
+		if (!sessionFile || !artifactDir) throw new Error("Missing native capacity fixture paths");
+		return { name, depth, sessionFile, artifactDir };
+	};
+	const main = await makeSession("main");
+	const middle = await makeSession("middle", main);
+	const leaf = await makeSession("leaf", middle);
+	const inactive = await makeSession("inactive", main);
+	const owner = await RlmJournalOwner.open({
+		agentDir,
+		sessionsDir: sessionDir,
+		journalPath: rlmLedgerPath(agentDir, sessionDir),
+	});
+	try {
+		for (const [parent, child] of [
+			[main, middle],
+			[middle, leaf],
+			[main, inactive],
+		] as const) {
+			await owner.mutate({
+				op: "spawn",
+				childId: `sub-${child.name}`,
+				parent: parent.sessionFile,
+				child: child.sessionFile,
+				depth: child.depth,
+				name: child.name,
+			});
+		}
+	} finally {
+		await owner.close();
+	}
+	return {
+		root,
+		agentDir,
+		projectDir,
+		main,
+		middle,
+		leaf,
+		inactive,
+		config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+	};
+}
+
+async function resumeCapacityWorker(
+	client: DaemonClient,
+	fixture: Awaited<ReturnType<typeof createRlmCapacityFamilyFixture>>,
+	sessionFile: string,
+): Promise<SessionSummary> {
+	const response = await client.request({ type: "create", sessionPath: sessionFile, config: fixture.config });
+	if (!response.success) throw new Error(`${response.error}\n${readDaemonLogs(fixture.agentDir)}`);
+	const summary = requireSummary(response.data);
+	if (!summary.workerPid) throw new Error("Capacity fixture worker did not expose its pid");
+	workerPids.add(summary.workerPid);
+	return summary;
 }
 
 describe("daemon supervisor resident workers", () => {
@@ -1265,6 +1341,158 @@ describe("daemon supervisor resident workers", () => {
 		replacementClient.close();
 		await waitForSocketGone(socketPath);
 	});
+
+	it("shares the live subagent cap across resumed workers without killing them when lowered", async () => {
+		const fixture = await createRlmCapacityFamilyFixture();
+		const socketPath = join(tmpdir(), `bctx-capacity-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		const supervisor = await spawnSupervisor(fixture.agentDir, socketPath, fixture.projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		try {
+			// Resume deepest first so each retained descendant owns a separate worker.
+			const leaf = await resumeCapacityWorker(client, fixture, fixture.leaf.sessionFile);
+			const initial = await client.request({
+				type: "get_rlm_max_subagents_status",
+				activeSessionId: leaf.activeSessionId ?? leaf.id,
+			});
+			if (!initial.success) throw new Error(initial.error);
+			expect(initial.data).toEqual({ maxSubagents: 4 });
+			expect(
+				await client.request({
+					type: "set_rlm_max_subagents",
+					activeSessionId: leaf.activeSessionId ?? leaf.id,
+					maxSubagents: 2,
+				}),
+			).toMatchObject({ success: true, data: { maxSubagents: 2 } });
+			const middle = await resumeCapacityWorker(client, fixture, fixture.middle.sessionFile);
+			// The main agent must still start while both child slots are occupied.
+			const main = await resumeCapacityWorker(client, fixture, fixture.main.sessionFile);
+			expect(new Set([leaf.workerPid, middle.workerPid, main.workerPid]).size).toBe(3);
+			expect(
+				await client.request({
+					type: "get_rlm_max_subagents_status",
+					activeSessionId: main.activeSessionId ?? main.id,
+				}),
+			).toMatchObject({ success: true, data: { maxSubagents: 2 } });
+
+			await startBlockingBash(client, leaf.activeSessionId ?? leaf.id, join(fixture.root, "leaf-running"));
+			expect(
+				await client.request({ type: "get_state", activeSessionId: leaf.activeSessionId ?? leaf.id }),
+			).toMatchObject({ success: true, data: { isBashRunning: true } });
+			expect(
+				await client.request({ type: "get_state", activeSessionId: middle.activeSessionId ?? middle.id }),
+			).toMatchObject({ success: true, data: { isBashRunning: false } });
+			const saved = await client.request({ type: "list", all: true });
+			if (!saved.success) throw new Error(saved.error);
+			expect(
+				requireSessionList(saved.data).find((row) => row.sessionFile === fixture.inactive.sessionFile),
+			).toMatchObject({ isSessionActive: false });
+
+			expect(
+				await client.request({
+					type: "set_rlm_max_subagents",
+					activeSessionId: main.activeSessionId ?? main.id,
+					maxSubagents: 1,
+				}),
+			).toMatchObject({ success: true, data: { maxSubagents: 1 } });
+			for (const retained of [leaf, middle, main]) {
+				expect(
+					await client.request({ type: "get_state", activeSessionId: retained.activeSessionId ?? retained.id }),
+				).toMatchObject({ success: true, data: { activeSessionId: retained.activeSessionId ?? retained.id } });
+				if (retained.workerPid) expect(() => process.kill(retained.workerPid!, 0)).not.toThrow();
+			}
+			const resumeInactive = () =>
+				client.request({
+					type: "create",
+					sessionPath: fixture.inactive.sessionFile,
+					config: fixture.config,
+				});
+			expect(await resumeInactive()).toMatchObject({
+				success: false,
+				error: expect.stringContaining("maximum 1 concurrent subagents"),
+			});
+			expect(await client.request({ type: "kill", activeSessionId: leaf.activeSessionId ?? leaf.id })).toMatchObject(
+				{ success: true },
+			);
+			if (leaf.workerPid) await waitForProcessGone(leaf.workerPid);
+			// One idle child still occupies the now-full limit of one.
+			expect(await resumeInactive()).toMatchObject({
+				success: false,
+				error: expect.stringContaining("maximum 1 concurrent subagents"),
+			});
+			expect(
+				await client.request({ type: "kill", activeSessionId: middle.activeSessionId ?? middle.id }),
+			).toMatchObject({ success: true });
+			if (middle.workerPid) await waitForProcessGone(middle.workerPid);
+			const resumed = await resumeCapacityWorker(client, fixture, fixture.inactive.sessionFile);
+			expect(resumed.sessionFile).toBe(fixture.inactive.sessionFile);
+		} finally {
+			client.close();
+		}
+	}, 90_000);
+
+	it("reconstructs the live subagent cap when a replacement supervisor adopts retained workers", async () => {
+		const fixture = await createRlmCapacityFamilyFixture();
+		const socketPath = join(tmpdir(), `bctx-capacity-adopt-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		const supervisor = await spawnSupervisor(fixture.agentDir, socketPath, fixture.projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		const leaf = await resumeCapacityWorker(client, fixture, fixture.leaf.sessionFile);
+		expect(
+			await client.request({
+				type: "set_rlm_max_subagents",
+				activeSessionId: leaf.activeSessionId ?? leaf.id,
+				maxSubagents: 2,
+			}),
+		).toMatchObject({ success: true, data: { maxSubagents: 2 } });
+		const middle = await resumeCapacityWorker(client, fixture, fixture.middle.sessionFile);
+		const main = await resumeCapacityWorker(client, fixture, fixture.main.sessionFile);
+		const retained = [leaf, middle, main];
+		const expectedWorkers = retained.map((summary) =>
+			expect.objectContaining({
+				activeSessionId: summary.activeSessionId ?? summary.id,
+				workerPid: summary.workerPid,
+				workerState: "ready",
+			}),
+		);
+		for (const summary of retained) {
+			expect(() => process.kill(summary.workerPid!, 0)).not.toThrow();
+		}
+		const beforeRestart = await client.request({ type: "list" });
+		if (!beforeRestart.success) throw new Error(beforeRestart.error);
+		expect(requireSessionList(beforeRestart.data)).toEqual(expect.arrayContaining(expectedWorkers));
+		supervisor.kill("SIGTERM");
+		await waitForExit(supervisor);
+		children.delete(supervisor);
+		client.close();
+
+		const replacement = await connectEventually(socketPath);
+		try {
+			const listed = await replacement.request({ type: "list" });
+			if (!listed.success) throw new Error(listed.error);
+			const adopted = requireSessionList(listed.data);
+			expect(adopted).toEqual(expect.arrayContaining(expectedWorkers));
+			expect(
+				await replacement.request({
+					type: "get_rlm_max_subagents_status",
+					activeSessionId: main.activeSessionId ?? main.id,
+				}),
+			).toMatchObject({ success: true, data: { maxSubagents: 2 } });
+			expect(
+				await replacement.request({
+					type: "create",
+					sessionPath: fixture.inactive.sessionFile,
+					config: fixture.config,
+				}),
+			).toMatchObject({ success: false, error: expect.stringContaining("maximum 2 concurrent subagents") });
+			expect(
+				await replacement.request({ type: "kill", activeSessionId: leaf.activeSessionId ?? leaf.id }),
+			).toMatchObject({ success: true });
+			if (leaf.workerPid) await waitForProcessGone(leaf.workerPid);
+			const resumed = await resumeCapacityWorker(replacement, fixture, fixture.inactive.sessionFile);
+			expect(resumed.sessionFile).toBe(fixture.inactive.sessionFile);
+		} finally {
+			replacement.close();
+		}
+	}, 90_000);
 
 	it("hosts and adopts isolated worker processes", async () => {
 		const root = tempDir();

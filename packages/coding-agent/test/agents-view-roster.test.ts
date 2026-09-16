@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { buildAgentsViewRows } from "../src/modes/agents-view/agents-view-state.js";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
@@ -515,7 +516,19 @@ describe("subscriber push transitions", () => {
 		mkdirSync(join(directory, "artifacts"), { recursive: true });
 		writeFileSync(parentPath, "");
 		writeFileSync(childPath, "");
-		await ledger.appendSpawn({ childId: "live-child", parent: parentPath, child: childPath, depth: 1, name: "c" });
+		const owner = await RlmJournalOwner.open({ agentDir: directory, sessionsDir, journalPath: ledger.ledgerPath });
+		try {
+			await owner.mutate({
+				op: "spawn",
+				childId: "live-child",
+				parent: parentPath,
+				child: childPath,
+				depth: 1,
+				name: "c",
+			});
+		} finally {
+			await owner.close();
+		}
 		const { supervisor, pushes, settle } = makePushSupervisor({
 			rlmSpawnLedger: () => ledger,
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
