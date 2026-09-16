@@ -4,7 +4,7 @@
 
 An MIT-licensed coding and research agent for tasks that outgrow a chat window. Base Context combines a persistent Python workspace, recursive agents, and source-backed context management. It is developed by [Synerise](https://synerise.com) as a fork of [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-[Repository](https://github.com/BaseModelAI/base-context) · [Quickstart](docs/quickstart.md) · [Documentation](docs/index.md) · [Why this fork](docs/fork-philosophy.md)
+[Repository](https://github.com/BaseModelAI/base-context) · [Quickstart](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/quickstart.md) · [Documentation](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/index.md) · [Why this fork](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/fork-philosophy.md)
 
 [![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.0.1/packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](https://github.com/BaseModelAI/base-context/blob/v1.0.1/benchmarks/python-realworld-30/REPORT.md)
 
@@ -27,7 +27,7 @@ cd /path/to/your/project
 base-context
 ```
 
-In the terminal UI, select and authenticate with a supported provider using `/login`, then choose a model with `/model`. Both choices are explicit. The installer prepares the application; you use only the selected provider's account and authentication. See [provider setup](docs/providers.md).
+In the terminal UI, select and authenticate with a supported provider using `/login`, then choose a model with `/model`. Both choices are explicit. The installer prepares the application; you use only the selected provider's account and authentication. See [provider setup](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/providers.md).
 
 ### npm alternative: for users who already manage Node.js
 
@@ -41,7 +41,7 @@ BASE_CONTEXT_INSTALL_UV=1 base-context
 
 `npm install` installs the CLI; it does not prepare Python at that step. Starting a normal CLI session begins preparing the managed Python environment in the background. `BASE_CONTEXT_INSTALL_UV=1` lets that bootstrap install `uv` if it is missing. **No manual Python installation is needed.** Initial setup needs network access and can take a little longer; later launches reuse the environment.
 
-The environment-variable syntax above is for Bash/Zsh. See [installation](docs/installation.md) for PowerShell, manual Python environments, updates, and rollback.
+The environment-variable syntax above is for Bash/Zsh. See [installation](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/installation.md) for PowerShell, manual Python environments, updates, and rollback.
 
 ## Why Base Context?
 
@@ -83,7 +83,7 @@ These choices favor **recoverable evidence and controlled working sets**, even w
 
 The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Diagnostics stay local; there is no telemetry upload feature.
 
-There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](docs/context-management.md) and [fork philosophy](docs/fork-philosophy.md) for the contracts and limits.
+There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/context-management.md) and [fork philosophy](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/fork-philosophy.md) for the contracts and limits.
 
 ## Use it
 
@@ -99,7 +99,7 @@ For independent work, ask the agent to delegate:
 Delegate the API review to a subagent. Update the documentation while it runs, then read its reply before integrating the findings.
 ```
 
-The agent works through a persistent Python REPL. `await rlm(...)` returns a **child admission handle**, not the child's answer. Child results arrive through explicit messages or files. See [RLM programming](docs/rlm.md).
+The agent works through a persistent Python REPL. `await rlm(...)` returns a **child admission handle**, not the child's answer. Child results arrive through explicit messages or files. See [RLM programming](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/rlm.md).
 
 Use `/agents N` to save the concurrent subagent limit globally (default **4**); `/agents` shows its current value. Pending admissions and running or idle subagents count across the root family; the main agent and inactive sessions do not. Lowering the limit never stops existing subagents. A value of **0** blocks new admissions.
 
@@ -114,7 +114,7 @@ base-context doctor
 base-context shutdown
 ```
 
-See [usage and CLI](docs/usage.md), [settings](docs/settings.md), and [long-running agents](docs/long-running-agents.md) for complete instructions.
+See [usage and CLI](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/usage.md), [settings](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/settings.md), and [long-running agents](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/long-running-agents.md) for complete instructions.
 
 ## Benchmark evidence
 
@@ -124,14 +124,14 @@ One frozen SDK-level study covered 30 Python tasks, three model selections, and 
 
 The harness used a shared Bash tool, not the native Python/RLM workflow. This is cumulative attempt time, not campaign wall time, CPU time, or user-perceived latency. The study used logical `medium` effort, a fixed single-deferred-retry policy, and historical package `0.1.0` at mixed source revisions (`84a7e6f` for Sol/Astra; `077f463` for DeepSeek). Current releases build on the latter source line; they have not been newly measured in this study. Sixteen attempts have unknown cost; full fees and a whole-campaign cost advantage are unknown. Reported prices are API-equivalent estimates, not cash charges.
 
-Read the [full report and methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/REPORT.md) and [reproduction guide](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/REPRODUCE.md).
+Read the [full report and methodology](https://github.com/BaseModelAI/base-context/blob/v1.0.1/benchmarks/python-realworld-30/REPORT.md) and [reproduction guide](https://github.com/BaseModelAI/base-context/blob/v1.0.1/benchmarks/python-realworld-30/REPRODUCE.md).
 
 ## Integrate and extend
 
-- [SDK](docs/sdk.md), [JSON mode](docs/json.md), [RPC](docs/rpc.md), and [ACP](docs/acp.md)
-- [Python and markdown skills](docs/skills.md), [MCP](docs/mcp-integrations.md), and [extensions](docs/extensions.md)
-- [Custom models](docs/models.md), [custom providers](docs/custom-provider.md), and [packages](docs/packages.md)
-- [Sessions](docs/sessions.md), [compaction](docs/compaction.md), and [architecture](docs/architecture.md)
+- [SDK](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sdk.md), [JSON mode](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/json.md), [RPC](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/rpc.md), and [ACP](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/acp.md)
+- [Python and markdown skills](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/skills.md), [MCP](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/mcp-integrations.md), and [extensions](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/extensions.md)
+- [Custom models](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/models.md), [custom providers](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/custom-provider.md), and [packages](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/packages.md)
+- [Sessions](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sessions.md), [compaction](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/compaction.md), and [architecture](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/architecture.md)
 
 ## Trust and data
 
