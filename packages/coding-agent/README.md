@@ -101,6 +101,8 @@ Delegate the API review to a subagent. Update the documentation while it runs, t
 
 The agent works through a persistent Python REPL. `await rlm(...)` returns a **child admission handle**, not the child's answer. Child results arrive through explicit messages or files. See [RLM programming](docs/rlm.md).
 
+Use `/agents N` to save the concurrent subagent limit globally (default **4**); `/agents` shows its current value. Pending admissions and running or idle subagents count across the root family; the main agent and inactive sessions do not. Lowering the limit never stops existing subagents. A value of **0** blocks new admissions.
+
 Add an `AGENTS.md` file for project instructions. Use `/settings` for common options or `.base-context/settings.json` for project configuration. Global state lives in `~/.base-context`; `BASE_CONTEXT_HOME` selects a separate absolute root.
 
 ```bash
