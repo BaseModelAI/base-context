@@ -1,6 +1,8 @@
 # Prime Agent 0.9.5 selection for base-context 1.0.1
 
-Base-context forked Prime Agent 0.9.4. We reviewed all **113 commits** between
+Base-context forked Prime Agent 0.9.3 at
+`915c78f42c248b08238dd27fcd4bcab32c60beab`. The selection range below is separate
+from that fork ancestor. We reviewed all **113 commits** between
 upstream `v0.9.4` (`f771dfcedd684d1afff84ca2c6fa95c7a21efbc2`) and
 `v0.9.5` (`a7d791bc1be09793ed5f3ec05bf4cccbc60679ea`). This is a selective
 adaptation, not a merge of the release's 500-file net change.
