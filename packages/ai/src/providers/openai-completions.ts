@@ -745,7 +745,7 @@ function captureDeepSeekProjection(
 				message.api !== model.api ||
 				message.provider !== model.provider ||
 				message.model !== model.id ||
-				(message.stopReason !== "stop" && message.stopReason !== "toolUse") ||
+				(message.stopReason !== "stop" && message.stopReason !== "toolUse" && message.stopReason !== "length") ||
 				item.role !== "assistant" ||
 				(item.content !== null && typeof item.content !== "string") ||
 				typeof (item as { reasoning_content?: unknown }).reasoning_content !== "string" ||
