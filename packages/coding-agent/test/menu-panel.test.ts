@@ -55,6 +55,29 @@ describe("MenuPanel", () => {
 		expect(visibleWidth(output)).toBe(24);
 	});
 
+	it("delegates secret masking without changing search text, focus, or submission", () => {
+		const field = new MenuSearchInput("Search models");
+		field.focused = true;
+		field.handleInput("secret");
+		expect(stripAnsi(field.render(24).join("\n"))).toContain("secret");
+
+		field.setMasked(true);
+		const masked = stripAnsi(field.render(24).join("\n"));
+		expect(masked).toContain("••••••");
+		expect(masked).not.toContain("secret");
+		expect(field.focused).toBe(true);
+		expect(field.getValue()).toBe("secret");
+		expect(field.getCursor()).toBe(6);
+		let submitted: string | undefined;
+		field.onSubmit = (value) => {
+			submitted = value;
+		};
+		field.handleInput("\r");
+		expect(submitted).toBe("secret");
+		field.setMasked(false);
+		expect(stripAnsi(field.render(24).join("\n"))).toContain("secret");
+	});
+
 	it("keeps the menu background behind ellipses", () => {
 		const panel = new MenuPanel({ title: "Menu" });
 		panel.addChild(new TruncatedText(theme.fg("muted", "A long line that must be truncated")));

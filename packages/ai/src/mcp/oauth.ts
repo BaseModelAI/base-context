@@ -1,4 +1,4 @@
-import type { Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { oauthErrorHtml, oauthSuccessHtml } from "../utils/oauth/oauth-page.js";
 import { generatePKCE } from "../utils/oauth/pkce.js";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthProviderInterface } from "../utils/oauth/types.js";
@@ -13,6 +13,8 @@ const CALLBACK_PORTS = Array.from({ length: CALLBACK_PORT_COUNT }, (_, i) => CAL
 const redirectUriFor = (port: number) => `http://localhost:${port}${CALLBACK_PATH}`;
 const ALL_REDIRECT_URIS = CALLBACK_PORTS.map(redirectUriFor);
 const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
+const OAUTH_MAX_RESPONSE_BYTES = 1024 * 1024;
 
 interface AuthServerMetadata {
 	issuer: string;
@@ -25,10 +27,12 @@ interface AuthServerMetadata {
 interface ProtectedResourceMetadata {
 	resource: string;
 	authorization_servers: string[];
+	scopes_supported?: string[];
 }
 
 interface Discovery {
 	metadata: AuthServerMetadata;
+	scopes?: string[];
 	resource?: string;
 	issuer?: string;
 }
@@ -42,7 +46,7 @@ export interface McpOAuthConfig {
 	url: string;
 	/** Pre-registered client id (servers without DCR, e.g. Slack). */
 	clientId?: string;
-	/** Requested OAuth scopes; defaults to the server's advertised scopes. */
+	/** Requested OAuth scopes; defaults to resource metadata scopes, or is omitted. */
 	scopes?: string;
 }
 
@@ -85,16 +89,79 @@ function authorizationServerMetadataUrls(issuer: string): string[] {
 	];
 }
 
-async function fetchResponse(url: string, init?: RequestInit): Promise<Response> {
-	return fetch(url, { ...init, redirect: "error" });
+async function withResponse<T>(
+	url: string,
+	init: RequestInit,
+	read: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const controller = new AbortController();
+	const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+	const timer = setTimeout(() => controller.abort(new Error("MCP OAuth request timed out")), OAUTH_REQUEST_TIMEOUT_MS);
+	let response: Response | undefined;
+	try {
+		signal.throwIfAborted();
+		response = await fetch(url, { ...init, signal, redirect: "error" });
+		return await read(response, signal);
+	} finally {
+		clearTimeout(timer);
+		if (response?.body && !response.body.locked) void response.body.cancel().catch(() => {});
+	}
 }
 
-async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
-	const res = await fetchResponse(url, init);
-	if (!res.ok) {
-		throw new Error(`${init?.method ?? "GET"} ${url} failed: ${res.status}`);
+async function readJson(response: Response, signal: AbortSignal, label: string): Promise<unknown> {
+	const reader = response.body?.getReader();
+	if (!reader) throw new Error(`${label} returned invalid JSON`);
+	const decoder = new TextDecoder();
+	let text = "";
+	let bytes = 0;
+	const cancel = () => {
+		void reader.cancel().catch(() => {});
+	};
+	signal.addEventListener("abort", cancel, { once: true });
+	try {
+		while (true) {
+			signal.throwIfAborted();
+			const { done, value } = await reader.read();
+			signal.throwIfAborted();
+			if (done) break;
+			bytes += value.byteLength;
+			if (bytes > OAUTH_MAX_RESPONSE_BYTES) throw new Error(`${label} exceeded the OAuth response size limit`);
+			text += decoder.decode(value, { stream: true });
+		}
+		text += decoder.decode();
+	} finally {
+		signal.removeEventListener("abort", cancel);
+		cancel();
+		reader.releaseLock();
 	}
-	return res.json();
+	try {
+		return JSON.parse(text);
+	} catch {
+		throw new Error(`${label} returned invalid JSON`);
+	}
+}
+
+async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
+	return withResponse(url, init, async (response, signal) => {
+		const label = `${init.method ?? "GET"} ${url}`;
+		if (!response.ok) throw new Error(`${label} failed: ${response.status}`);
+		return readJson(response, signal, label);
+	});
+}
+
+async function abortable<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return work;
+	let onAbort: (() => void) | undefined;
+	const aborted = new Promise<never>((_, reject) => {
+		onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+	});
+	try {
+		return await Promise.race([work, aborted]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
 }
 
 function authorizationServerMetadata(value: unknown, issuer: string, requireExactIssuer: boolean): AuthServerMetadata {
@@ -122,22 +189,33 @@ function authorizationServerMetadata(value: unknown, issuer: string, requireExac
 	return metadata as AuthServerMetadata;
 }
 
-async function jsonMetadata(response: Response, url: string): Promise<unknown> {
+async function jsonMetadata(response: Response, url: string, signal: AbortSignal): Promise<unknown> {
 	if (response.status !== 200) throw new Error(`GET ${url} failed: ${response.status}`);
 	const contentType = response.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
 	if (contentType !== "application/json") throw new Error(`GET ${url} did not return application/json`);
-	return response.json();
+	return readJson(response, signal, `GET ${url}`);
 }
 
-async function discoverAuthorizationServer(issuer: string, requireExactIssuer: boolean): Promise<AuthServerMetadata> {
+async function discoverAuthorizationServer(
+	issuer: string,
+	requireExactIssuer: boolean,
+	signal?: AbortSignal,
+): Promise<AuthServerMetadata> {
 	const candidates = authorizationServerMetadataUrls(issuer);
 	let lastError: unknown;
 	for (const candidate of candidates) {
 		try {
-			const response = await fetchResponse(candidate);
-			if (response.status === 404) continue;
-			return authorizationServerMetadata(await jsonMetadata(response, candidate), issuer, requireExactIssuer);
+			const metadata = await withResponse(candidate, { signal }, async (response, requestSignal) => {
+				if (response.status === 404) return undefined;
+				return authorizationServerMetadata(
+					await jsonMetadata(response, candidate, requestSignal),
+					issuer,
+					requireExactIssuer,
+				);
+			});
+			if (metadata) return metadata;
 		} catch (error) {
+			signal?.throwIfAborted();
 			lastError = error;
 		}
 	}
@@ -169,6 +247,13 @@ function resourceMetadata(value: unknown, resource: string): ProtectedResourceMe
 			throw new Error("Protected-resource metadata has an invalid authorization server");
 		validatedHttpsUrl(issuer, "Authorization server issuer");
 	}
+	if (
+		metadata.scopes_supported !== undefined &&
+		(!Array.isArray(metadata.scopes_supported) ||
+			metadata.scopes_supported.some((scope) => typeof scope !== "string"))
+	) {
+		throw new Error("Protected-resource metadata has invalid scopes_supported");
+	}
 	return metadata as ProtectedResourceMetadata;
 }
 
@@ -183,42 +268,48 @@ function headerResourceMetadata(value: string | null): string | undefined {
 	return match[1].replace(/\\(.)/g, "$1");
 }
 
-async function tryProtectedResourceMetadata(url: string): Promise<ProtectedResourceMetadata | undefined> {
+async function tryProtectedResourceMetadata(
+	url: string,
+	signal?: AbortSignal,
+): Promise<ProtectedResourceMetadata | undefined> {
 	const resource = validatedHttpsUrl(url, "MCP endpoint");
 	let headerUrl: string | undefined;
 	try {
 		// This probe deliberately has no Authorization header. It must not leak an existing token.
-		const response = await fetchResponse(resource.toString());
-		headerUrl = headerResourceMetadata(response.headers.get("www-authenticate"));
-		await response.body?.cancel();
+		headerUrl = await withResponse(resource.toString(), { signal }, async (response) =>
+			headerResourceMetadata(response.headers.get("www-authenticate")),
+		);
 	} catch {
+		signal?.throwIfAborted();
 		// The server need not support a GET probe; use the RFC well-known locations below.
 	}
 
 	const candidate = headerUrl
 		? validatedHttpsUrl(headerUrl, "resource_metadata").toString()
 		: resourceMetadataUrl(resource);
-	const response = await fetchResponse(candidate);
-	if (response.status === 404 && !headerUrl) return undefined;
-	return resourceMetadata(await jsonMetadata(response, candidate), canonicalResource(resource));
+	return withResponse(candidate, { signal }, async (response, requestSignal) => {
+		if (response.status === 404 && !headerUrl) return undefined;
+		return resourceMetadata(await jsonMetadata(response, candidate, requestSignal), canonicalResource(resource));
+	});
 }
 
 /** Discover RFC 9728 protected-resource metadata before the origin-level authorization server fallback. */
-async function discover(url: string): Promise<Discovery> {
-	const protectedResource = await tryProtectedResourceMetadata(url);
+async function discover(url: string, signal?: AbortSignal): Promise<Discovery> {
+	const protectedResource = await tryProtectedResourceMetadata(url, signal);
 	if (protectedResource) {
 		const issuer = protectedResource.authorization_servers[0];
 		return {
-			metadata: await discoverAuthorizationServer(issuer, true),
+			metadata: await discoverAuthorizationServer(issuer, true, signal),
+			scopes: protectedResource.scopes_supported,
 			resource: protectedResource.resource,
 			issuer,
 		};
 	}
 	const issuer = validatedHttpsUrl(url, "MCP endpoint").origin;
-	return { metadata: await discoverAuthorizationServer(issuer, false) };
+	return { metadata: await discoverAuthorizationServer(issuer, false, signal) };
 }
 
-async function registerClient(registrationEndpoint: string, label: string): Promise<string> {
+async function registerClient(registrationEndpoint: string, label: string, signal?: AbortSignal): Promise<string> {
 	validatedHttpsUrl(registrationEndpoint, "Registration endpoint");
 	const body = {
 		client_name: label,
@@ -231,6 +322,7 @@ async function registerClient(registrationEndpoint: string, label: string): Prom
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify(body),
+		signal,
 	})) as { client_id?: unknown };
 	if (typeof data.client_id !== "string" || !data.client_id) {
 		throw new Error(`Dynamic client registration at ${registrationEndpoint} returned no client_id`);
@@ -246,7 +338,6 @@ async function startCallbackServer(label: string): Promise<{
 	cancel: () => void;
 	waitForCode: () => Promise<CallbackResult>;
 }> {
-	const { createServer } = await import("node:http");
 	let settle: ((value: CallbackResult) => void) | undefined;
 	const waitPromise = new Promise<CallbackResult>((resolve) => {
 		let settled = false;
@@ -258,7 +349,7 @@ async function startCallbackServer(label: string): Promise<{
 		};
 	});
 
-	const handler = (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => {
+	const handler = (req: IncomingMessage, res: ServerResponse) => {
 		const url = new URL(req.url || "", "http://localhost");
 		if (url.pathname !== CALLBACK_PATH) {
 			res.writeHead(404, { "Content-Type": "text/html; charset=utf-8" });
@@ -346,23 +437,23 @@ function parseRedirectInput(input: string, expectedState: string): { code: strin
 async function exchangeToken(
 	tokenEndpoint: string,
 	params: Record<string, string>,
+	signal?: AbortSignal,
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number }> {
 	validatedHttpsUrl(tokenEndpoint, "Token endpoint");
-	const res = await fetchResponse(tokenEndpoint, {
-		method: "POST",
-		headers: { "Content-Type": "application/x-www-form-urlencoded" },
-		body: new URLSearchParams(params).toString(),
-	});
-	const text = await res.text();
-	if (!res.ok) {
-		throw new Error(`Token request to ${tokenEndpoint} failed: ${res.status}`);
-	}
-	let token: unknown;
-	try {
-		token = JSON.parse(text);
-	} catch {
-		throw new Error(`Token request to ${tokenEndpoint} returned invalid JSON`);
-	}
+	const token = await withResponse(
+		tokenEndpoint,
+		{
+			method: "POST",
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			body: new URLSearchParams(params).toString(),
+			signal,
+		},
+		async (response, requestSignal) => {
+			const label = `Token request to ${tokenEndpoint}`;
+			if (!response.ok) throw new Error(`${label} failed: ${response.status}`);
+			return readJson(response, requestSignal, label);
+		},
+	);
 	if (!token || typeof token !== "object" || typeof (token as { access_token?: unknown }).access_token !== "string") {
 		throw new Error(`Token request to ${tokenEndpoint} returned no access_token`);
 	}
@@ -408,7 +499,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 	const label = config.label ?? config.server;
 
 	async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-		const discovery = await discover(config.url);
+		const discovery = await discover(config.url, callbacks.signal);
 		const { metadata: meta } = discovery;
 		callbacks.onProgress?.(`Discovered ${discovery.issuer ?? meta.issuer}`);
 
@@ -421,16 +512,18 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 				);
 			}
 			callbacks.onProgress?.("Registering OAuth client…");
-			clientId = await registerClient(meta.registration_endpoint, `Prime Agent (${label})`);
+			clientId = await registerClient(meta.registration_endpoint, `Base Context (${label})`, callbacks.signal);
 		}
 
 		const { verifier, challenge } = await generatePKCE();
 		// `state` must be independent of the PKCE verifier — the verifier is the
 		// secret used at token exchange, while `state` is echoed on the redirect URL.
 		const state = randomState();
-		const scope = config.scopes ?? meta.scopes_supported?.join(" ");
+		const scope = config.scopes ?? discovery.scopes?.join(" ");
+		callbacks.signal?.throwIfAborted();
 		const cb = await startCallbackServer(label);
 		try {
+			callbacks.signal?.throwIfAborted();
 			const authParams = new URLSearchParams({
 				client_id: clientId,
 				response_type: "code",
@@ -450,6 +543,7 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 					"Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.",
 			});
 
+			callbacks.signal?.throwIfAborted();
 			// Race the local callback server against a manual paste (browser on
 			// another machine). The login dialog supplies onManualCodeInput; when
 			// absent we fall back to a blocking prompt after the callback resolves.
@@ -481,16 +575,19 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 						cb.cancel();
 						return null;
 					});
-				const fromCallback = await cb.waitForCode();
-				result = fromCallback ?? (await manual);
+				const fromCallback = await abortable(cb.waitForCode(), callbacks.signal);
+				result = fromCallback ?? (await abortable(manual, callbacks.signal));
 				if (!result && manualError) throw manualError;
 			} else {
-				result = await cb.waitForCode();
+				result = await abortable(cb.waitForCode(), callbacks.signal);
 				if (!result) {
-					const input = await callbacks.onPrompt({
-						message: "Paste the authorization code or full redirect URL:",
-						placeholder: cb.redirectUri,
-					});
+					const input = await abortable(
+						callbacks.onPrompt({
+							message: "Paste the authorization code or full redirect URL:",
+							placeholder: cb.redirectUri,
+						}),
+						callbacks.signal,
+					);
 					result = parseRedirectInput(input, state);
 				}
 			}
@@ -502,16 +599,21 @@ export function createMcpOAuthProvider(config: McpOAuthConfig): OAuthProviderInt
 			}
 
 			callbacks.onProgress?.("Exchanging authorization code for tokens…");
-			const token = await exchangeToken(meta.token_endpoint, {
-				grant_type: "authorization_code",
-				code: result.code,
-				redirect_uri: cb.redirectUri,
-				client_id: clientId,
-				code_verifier: verifier,
-				...(discovery.resource ? { resource: discovery.resource } : {}),
-			});
+			const token = await exchangeToken(
+				meta.token_endpoint,
+				{
+					grant_type: "authorization_code",
+					code: result.code,
+					redirect_uri: cb.redirectUri,
+					client_id: clientId,
+					code_verifier: verifier,
+					...(discovery.resource ? { resource: discovery.resource } : {}),
+				},
+				callbacks.signal,
+			);
 			return toCredentials(token, meta.token_endpoint, clientId, config.url, discovery.resource, discovery.issuer);
 		} finally {
+			cb.cancel();
 			cb.server.close();
 		}
 	}

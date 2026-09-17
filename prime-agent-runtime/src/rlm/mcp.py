@@ -10,6 +10,7 @@ import re
 import threading
 import time
 from contextlib import AsyncExitStack
+from copy import deepcopy
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
@@ -20,6 +21,7 @@ __all__ = ["McpStartupError", "call_tool", "close", "list_tools", "reload"]
 
 _DEFAULT_STARTUP_TIMEOUT = 20.0
 _DEFAULT_CALL_TIMEOUT = 60.0
+_MAX_TOOL_LIST_PAGES = 100
 # Must stay strictly below the host's KERNEL_SHUTDOWN_TIMEOUT_MS (5s) kill deadline.
 _SHUTDOWN_TIMEOUT = 2.5
 _T = TypeVar("_T")
@@ -259,21 +261,41 @@ class _Generation:
         return await self.stack.enter_async_context(stdio_client(params, errlog=self._stderr))
 
     async def discover(self) -> None:
-        response = await self.session.list_tools()
+        from mcp.types import PaginatedRequestParams
+
         tools: dict[str, dict[str, Any]] = {}
-        for tool in response.tools:
-            name = getattr(tool, "name", None)
-            if not isinstance(name, str):
-                continue
-            schema = getattr(tool, "input_schema", None)
-            if schema is None:
-                schema = getattr(tool, "inputSchema", None)
-            tools[name] = {
-                "name": name,
-                "description": getattr(tool, "description", "") or "",
-                "inputSchema": schema if isinstance(schema, dict) else {},
-            }
-        self.tools = tools
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for _ in range(_MAX_TOOL_LIST_PAGES):
+            response = (
+                await self.session.list_tools()
+                if cursor is None
+                else await self.session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+            )
+            for tool in response.tools:
+                name = getattr(tool, "name", None)
+                if not isinstance(name, str):
+                    continue
+                schema = getattr(tool, "input_schema", None)
+                if schema is None:
+                    schema = getattr(tool, "inputSchema", None)
+                tools[name] = {
+                    "name": name,
+                    "description": getattr(tool, "description", "") or "",
+                    "inputSchema": schema if isinstance(schema, dict) else {},
+                }
+            cursor = getattr(response, "next_cursor", None)
+            if cursor is None:
+                cursor = getattr(response, "nextCursor", None)
+            if cursor is None:
+                self.tools = tools
+                return
+            if not isinstance(cursor, str):
+                raise RuntimeError(f"MCP server '{self.server}' returned an invalid tools/list cursor")
+            if cursor in seen_cursors:
+                raise RuntimeError(f"MCP server '{self.server}' repeated a tools/list cursor")
+            seen_cursors.add(cursor)
+        raise RuntimeError(f"MCP server '{self.server}' exceeded the tools/list page limit")
 
     def allows(self, tool: str) -> bool:
         enabled = self.config.get("enabledTools")
@@ -379,7 +401,7 @@ class _Registry:
     async def tools(self, server: str) -> list[dict[str, Any]]:
         async def operation() -> list[dict[str, Any]]:
             generation = await self._get(server)
-            return [dict(tool) for name, tool in generation.tools.items() if generation.allows(name)]
+            return [deepcopy(tool) for name, tool in generation.tools.items() if generation.allows(name)]
 
         return await self._tracked(operation)
 
@@ -529,7 +551,7 @@ def _bound_auth(provider: str, config: dict[str, Any]) -> dict[str, Any] | None:
 async def _auth_identity(server: str, config: dict[str, Any]) -> str:
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
-    if config.get("oauth") is True and not token:
+    if config.get("oauth") is True and not env_name:
         provider = f"mcp:{server}"
         cred = _bound_auth(provider, config)
         expires = (cred or {}).get("expires")
@@ -556,7 +578,7 @@ async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
         return headers
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
-    if config.get("oauth") is True and not token:
+    if config.get("oauth") is True and not env_name:
         cred = _bound_auth(f"mcp:{server}", config)
         token = _resolve_config_value(str((cred or {}).get("access") or (cred or {}).get("key") or ""))
     if token:

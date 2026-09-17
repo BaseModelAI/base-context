@@ -21,6 +21,7 @@ describe("McpManager", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		resetOAuthProviders();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -186,6 +187,27 @@ describe("McpManager", () => {
 			expect(status?.enabled).toBe(true);
 		} finally {
 			delete process.env.MY_MCP_TOKEN;
+		}
+	});
+
+	it("never falls back to stored OAuth when a configured token environment variable is missing", () => {
+		authStorage.set("mcp:custom", {
+			type: "oauth",
+			access: "stored-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://example.test/mcp",
+		});
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				custom: { type: "http", url: "https://example.test/mcp", oauth: true, bearerTokenEnvVar: "MY_MCP_TOKEN" },
+			}),
+		});
+		for (const value of [undefined, "", "  ", "env-token"]) {
+			vi.stubEnv("MY_MCP_TOKEN", value);
+			expect(manager.listStatus().find((entry) => entry.server === "custom")?.enabled).toBe(value === "env-token");
+			expect(manager.getEnabledPersistentGenericServers()).toEqual(value === "env-token" ? ["custom"] : []);
 		}
 	});
 

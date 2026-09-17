@@ -149,6 +149,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
+		this.input.setMasked(true);
 		this.addSectionSpacer();
 		this.addSectionTitle("Manual fallback");
 		this.addMutedText(prompt);
@@ -175,7 +176,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Called by onPrompt callback - show prompt and wait for input
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
+	showPrompt(message: string, placeholder?: string, options?: { masked?: boolean }): Promise<string> {
+		this.input.setMasked(options?.masked === true);
 		this.addSectionSpacer();
 		this.addSectionTitle(message);
 		if (placeholder) {

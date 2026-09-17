@@ -92,7 +92,7 @@ describe("ProviderAuthFlows", () => {
 	});
 
 	it("stores an API key only for the selected provider without sending it", async () => {
-		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("test-provider-key");
+		const showPrompt = vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("test-provider-key");
 		const fetch = vi.spyOn(globalThis, "fetch");
 		const authStorage = AuthStorage.create(authJsonPath);
 		const { host, errorMessages } = createHost(authStorage);
@@ -104,12 +104,63 @@ describe("ProviderAuthFlows", () => {
 		});
 
 		expect(result).toMatchObject({ status: "success", providerId: "openai" });
+		expect(showPrompt).toHaveBeenCalledWith("Enter API key:", undefined, { masked: true });
 		expect(errorMessages).toEqual([]);
 		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
 			openai: { type: "api_key", key: "test-provider-key" },
 		});
 		expect(fetch).not.toHaveBeenCalled();
 	});
+
+	it("does not save a late API-key prompt after peer logout", async () => {
+		let submit!: (value: string) => void;
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					submit = resolve;
+				}),
+		);
+		const authStorage = AuthStorage.create(authJsonPath);
+		const { host, statusMessages, errorMessages } = createHost(authStorage);
+		const login = new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" });
+		AuthStorage.create(authJsonPath).logout("openai");
+		submit("late-key");
+		await expect(login).resolves.toEqual({ status: "failed" });
+		expect(statusMessages).toEqual([]);
+		expect(errorMessages.join(" ")).toContain("Login cancelled");
+		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({});
+	});
+
+	it.each([
+		{ providerId: "mcp:custom", failWrite: false },
+		{ providerId: "mcp:custom", failWrite: true },
+		{ providerId: "openai", failWrite: false },
+		{ providerId: "openai", failWrite: true },
+	])(
+		"$providerId logout reports success only after verified removal (write failure: $failWrite)",
+		async ({ providerId, failWrite }) => {
+			const authStorage = AuthStorage.create(authJsonPath);
+			authStorage.set(providerId, { type: "api_key", key: "stored-token" });
+			const { host, overlays, statusMessages, errorMessages } = createHost(authStorage);
+			const onAuthChanged = vi.fn();
+			host.onAuthChanged = onAuthChanged;
+			const logout = new ProviderAuthFlows(host).runLogout();
+			if (failWrite) writeFileSync(authJsonPath, "{invalid-json");
+			overlays[0]?.handleInput?.("\r");
+			await expect(logout).resolves.toBe(failWrite ? null : providerId);
+			expect(host.modelRegistry.refresh).toHaveBeenCalledTimes(failWrite ? 0 : 1);
+			expect(onAuthChanged).toHaveBeenCalledTimes(failWrite ? 0 : 1);
+			if (failWrite) {
+				expect(statusMessages).toEqual([]);
+				expect(errorMessages.join(" ")).toContain("Logout failed");
+				expect(authStorage.has(providerId)).toBe(true);
+			} else {
+				expect(errorMessages).toEqual([]);
+				expect(statusMessages).toHaveLength(1);
+				expect(authStorage.has(providerId)).toBe(false);
+			}
+		},
+	);
 
 	it("leaves credentials unchanged when provider login is cancelled", async () => {
 		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockRejectedValue(new Error("Login cancelled"));

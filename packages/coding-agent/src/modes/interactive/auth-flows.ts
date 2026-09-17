@@ -195,7 +195,7 @@ export class ProviderAuthFlows {
 					close();
 
 					try {
-						this.host.modelRegistry.authStorage.logout(providerOption.id);
+						this.host.modelRegistry.authStorage.removeVerified(providerOption.id);
 						this.host.modelRegistry.refresh();
 						await this.host.onAuthChanged?.();
 						const message =
@@ -376,12 +376,15 @@ export class ProviderAuthFlows {
 		};
 
 		try {
-			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
-			if (!apiKey) {
-				throw new Error("API key cannot be empty.");
-			}
-
-			this.host.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			await this.host.modelRegistry.authStorage.setFromLogin(
+				providerId,
+				async () => {
+					const apiKey = (await dialog.showPrompt("Enter API key:", undefined, { masked: true })).trim();
+					if (!apiKey) throw new Error("API key cannot be empty.");
+					return { type: "api_key", key: apiKey };
+				},
+				dialog.signal,
+			);
 
 			closeDialog();
 			return await this.completeProviderAuthentication(providerId, providerName, "api_key", undefined, kind);

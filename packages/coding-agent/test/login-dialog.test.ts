@@ -180,6 +180,41 @@ describe("LoginDialogComponent", () => {
 		await expect(second).resolves.toBe("pk");
 	});
 
+	it("masks requested prompts and resets ordinary prompts to visible text", async () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "openai", () => {}, "OpenAI");
+		dialog.focused = true;
+		const secret = "sk-test-secret";
+		const prompt = dialog.showPrompt("Enter API key:", undefined, { masked: true });
+		dialog.handleInput(secret);
+		const masked = stripAnsi(dialog.render(88).join("\n"));
+		expect(masked).toContain("•".repeat(secret.length));
+		expect(masked).not.toContain(secret);
+		expect(dialog.focused).toBe(true);
+		dialog.handleInput("\r");
+		await expect(prompt).resolves.toBe(secret);
+
+		const ordinary = dialog.showPrompt("Enter account name:");
+		dialog.handleInput("work");
+		expect(stripAnsi(dialog.render(88).join("\n"))).toContain("work");
+		dialog.handleInput("\r");
+		await expect(ordinary).resolves.toBe("work");
+	});
+
+	it("masks pasted callback values while keeping the browser link readable", async () => {
+		const dialog = new LoginDialogComponent(createFakeTui(), "openai", () => {}, "OpenAI");
+		const url = "https://example.com/oauth";
+		dialog.showAuth(url);
+		const prompt = dialog.showManualInput("Paste the callback value:");
+		const callback = "https://localhost/callback?code=secret";
+		dialog.handleInput(`\x1b[200~${callback}\x1b[201~`);
+		const output = stripAnsi(dialog.render(88).join("\n"));
+		expect(output).toContain(url);
+		expect(output).toContain("•".repeat(callback.length));
+		expect(output).not.toContain(callback);
+		dialog.handleInput("\r");
+		await expect(prompt).resolves.toBe(callback);
+	});
+
 	it("renders API key prompts without shell input markers", () => {
 		const dialog = new LoginDialogComponent(createFakeTui(), "openai", () => {}, "OpenAI");
 

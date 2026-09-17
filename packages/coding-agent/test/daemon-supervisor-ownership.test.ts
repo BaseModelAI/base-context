@@ -2,12 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	acquireDaemonShutdownAdmission,
 	acquireDaemonSupervisorOwnership,
 	assertDaemonSupervisorOwnerCurrent,
+	isDaemonShutdownAdmissionActive,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 
@@ -239,6 +240,59 @@ describe("daemon supervisor ownership registry", () => {
 		await expect(pending).rejects.toMatchObject({ code: "daemon_shutdown_in_progress" });
 		await releasing;
 		expect(existsSync(admissionPath)).toBe(false);
+	});
+
+	it("renews an elapsed shutdown admission without a read-only probe removing it", async () => {
+		const paths = createPaths();
+		process.env[registryDirEnv] = paths.registryDir;
+		vi.useFakeTimers();
+		let admission: Awaited<ReturnType<typeof acquireDaemonShutdownAdmission>> | undefined;
+		try {
+			admission = await acquireDaemonShutdownAdmission();
+			const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+			const bytes = readFileSync(admissionPath, "utf8");
+			const record = readJson(admissionPath);
+			expect(await isDaemonShutdownAdmissionActive()).toBe(true);
+			vi.setSystemTime(Date.parse(record.expiresAt as string) + 1);
+
+			expect(await isDaemonShutdownAdmissionActive()).toBe(false);
+			expect(readFileSync(admissionPath, "utf8")).toBe(bytes);
+			await admission.assertOrRenew();
+
+			const renewed = readJson(admissionPath);
+			expect(renewed).toMatchObject({
+				token: record.token,
+				pid: record.pid,
+				processStartId: record.processStartId,
+			});
+			expect(Date.parse(renewed.expiresAt as string)).toBeGreaterThan(Date.now());
+			expect(await isDaemonShutdownAdmissionActive()).toBe(true);
+			await admission.release();
+			expect(existsSync(admissionPath)).toBe(false);
+		} finally {
+			await admission?.release();
+			vi.useRealTimers();
+		}
+	});
+
+	it("can renew after a transient shutdown admission read error", async () => {
+		const paths = createPaths();
+		process.env[registryDirEnv] = paths.registryDir;
+		const admission = await acquireDaemonShutdownAdmission();
+		const admissionPath = join(paths.registryDir, "shutdown-admission.json");
+		const bytes = readFileSync(admissionPath, "utf8");
+		try {
+			writeFileSync(admissionPath, "{ truncated");
+			await expect(admission.assertOrRenew()).rejects.toBeInstanceOf(SyntaxError);
+
+			writeFileSync(admissionPath, bytes);
+			await admission.assertOrRenew();
+			expect(readJson(admissionPath).token).toBe((JSON.parse(bytes) as OwnerRecord).token);
+			expect(await isDaemonShutdownAdmissionActive()).toBe(true);
+		} finally {
+			writeFileSync(admissionPath, bytes);
+			await admission.release();
+		}
 	});
 
 	it("disambiguates never-acquired from lost-on-disk ownership errors", async () => {

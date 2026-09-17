@@ -18,6 +18,7 @@ interface InputState {
 export class Input implements Component, Focusable {
 	private value: string = "";
 	private cursor: number = 0; // Cursor position in the value
+	private masked = false;
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
 
@@ -30,6 +31,10 @@ export class Input implements Component, Focusable {
 	private lastAction: "kill" | "yank" | "type-word" | null = null;
 
 	private undoStack = new UndoStack<InputState>();
+
+	setMasked(masked: boolean): void {
+		this.masked = masked;
+	}
 
 	getValue(): string {
 		return this.value;
@@ -401,6 +406,14 @@ export class Input implements Component, Focusable {
 
 	invalidate(): void {}
 
+	private displayState(): InputState {
+		if (!this.masked) return { value: this.value, cursor: this.cursor };
+		// Mask by grapheme; edits and submissions keep the original buffer.
+		const graphemes = [...segmenter.segment(this.value)];
+		const beforeCursor = [...segmenter.segment(this.value.slice(0, this.cursor))];
+		return { value: "•".repeat(graphemes.length), cursor: beforeCursor.length };
+	}
+
 	render(width: number): string[] {
 		const prompt = "> ";
 		const availableWidth = width - prompt.length;
@@ -409,15 +422,16 @@ export class Input implements Component, Focusable {
 			return [prompt];
 		}
 
+		const display = this.displayState();
 		let visibleText = "";
-		let cursorDisplay = this.cursor;
-		const totalWidth = visibleWidth(this.value);
+		let cursorDisplay = display.cursor;
+		const totalWidth = visibleWidth(display.value);
 
 		if (totalWidth < availableWidth) {
-			visibleText = this.value;
+			visibleText = display.value;
 		} else {
-			const scrollWidth = this.cursor === this.value.length ? availableWidth - 1 : availableWidth;
-			const cursorCol = visibleWidth(this.value.slice(0, this.cursor));
+			const scrollWidth = display.cursor === display.value.length ? availableWidth - 1 : availableWidth;
+			const cursorCol = visibleWidth(display.value.slice(0, display.cursor));
 
 			if (scrollWidth > 0) {
 				const halfWidth = Math.floor(scrollWidth / 2);
@@ -431,8 +445,8 @@ export class Input implements Component, Focusable {
 					startCol = Math.max(0, cursorCol - halfWidth);
 				}
 
-				visibleText = sliceByColumn(this.value, startCol, scrollWidth, true);
-				const beforeCursor = sliceByColumn(this.value, startCol, Math.max(0, cursorCol - startCol), true);
+				visibleText = sliceByColumn(display.value, startCol, scrollWidth, true);
+				const beforeCursor = sliceByColumn(display.value, startCol, Math.max(0, cursorCol - startCol), true);
 				cursorDisplay = beforeCursor.length;
 			} else {
 				visibleText = "";

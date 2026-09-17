@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.3] - 2026-09-17
+
+- Fixed MCP OAuth cancellation, request deadlines, and response size limits during discovery, registration, and token exchange.
+- Fixed MCP OAuth scope selection to prefer configured scopes, then resource-specific scopes, rather than all authorization-server scopes.
+
 ## [1.0.1] - 2026-09-16
 
 - Removed the Prime Inference provider, model catalog entries, and Prime credential environment integration.

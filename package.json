@@ -49,10 +49,10 @@
 	"engines": {
 		"node": "^22.12.0 || >=23.3.0"
 	},
-	"version": "1.0.2",
+	"version": "1.0.3",
 	"dependencies": {
 		"get-east-asian-width": "^1.6.0",
-		"@ponythewhite/base-context": "1.0.2"
+		"@ponythewhite/base-context": "1.0.3"
 	},
 	"overrides": {
 		"rimraf": "6.1.2",

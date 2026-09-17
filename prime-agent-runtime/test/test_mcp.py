@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, PaginatedRequestParams, TextContent
 from rlm import McpToolError, mcp
 from rlm.mcp_base import _parse_result
 
@@ -103,6 +103,55 @@ class McpRegistryTest(unittest.TestCase):
         tool = SimpleNamespace(name="raw.tool/name", description="raw", input_schema=schema)
         generation = self.generation({"type": "http"}, [tool])
         self.assertEqual(generation.tools["raw.tool/name"]["inputSchema"], schema)
+
+    def test_listing_detaches_nested_cached_schemas(self):
+        schema = {"type": "object", "properties": {"x": {"enum": ["original"]}}}
+        generation = self.generation({"type": "http"}, [SimpleNamespace(name="tool", inputSchema=schema)])
+
+        async def scenario():
+            with mock.patch.object(mcp._registry, "_get_locked", mock.AsyncMock(return_value=generation)):
+                first = await mcp.list_tools("svc")
+                first[0]["inputSchema"]["properties"]["x"]["enum"].append("caller mutation")
+                second = await mcp.list_tools("svc")
+                self.assertEqual(second[0]["inputSchema"], schema)
+                self.assertEqual(schema["properties"]["x"]["enum"], ["original"])
+
+        run(scenario())
+
+    def test_discovers_all_pages_with_sdk_params_and_cursor_aliases(self):
+        generation = mcp._Generation("svc", {"type": "http"})
+        generation.session = SimpleNamespace(list_tools=mock.AsyncMock(side_effect=[
+            SimpleNamespace(tools=[SimpleNamespace(name="first")], next_cursor=""),
+            SimpleNamespace(tools=[SimpleNamespace(name="second")], nextCursor="page-3"),
+            SimpleNamespace(tools=[SimpleNamespace(name="third")], next_cursor=None),
+        ]))
+        run(generation.discover())
+        self.assertEqual(list(generation.tools), ["first", "second", "third"])
+        self.assertEqual(generation.session.list_tools.call_args_list, [
+            mock.call(),
+            mock.call(params=PaginatedRequestParams(cursor="")),
+            mock.call(params=PaginatedRequestParams(cursor="page-3")),
+        ])
+
+    def test_failed_pagination_never_publishes_partial_inventory(self):
+        for case, cursors, message in (
+            ("cycle", ["repeat", "repeat"], "repeated"),
+            ("malformed", [17], "invalid"),
+            ("excessive", ["page-2", "page-3"], "page limit"),
+        ):
+            with self.subTest(case=case):
+                generation = self.generation({"type": "http"}, [SimpleNamespace(name="previous")])
+                previous = generation.tools
+                generation.session = SimpleNamespace(list_tools=mock.AsyncMock(side_effect=[
+                    SimpleNamespace(tools=[SimpleNamespace(name="partial")], next_cursor=cursor)
+                    for cursor in cursors
+                ]))
+                with mock.patch.object(mcp, "_MAX_TOOL_LIST_PAGES", 2):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        run(generation.discover())
+                self.assertIs(generation.tools, previous)
+                self.assertNotIn("partial", generation.tools)
+                self.assertLessEqual(generation.session.list_tools.call_count, 2)
 
     def test_sdk_result_aliases_preserve_structured_output_and_errors(self):
         structured = CallToolResult(content=[], structuredContent={})
@@ -316,6 +365,43 @@ class McpRegistryTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": "/bin", "UNRELATED": "ambient-secret"}, clear=True):
             env = mcp._stdio_env({"credentialSource": "acp", "env": {"TOKEN": "task-secret"}})
         self.assertEqual(env, {"PATH": "/bin", "TOKEN": "task-secret"})
+
+    def test_selected_environment_token_refuses_missing_values_before_connection(self):
+        config = {
+            "type": "http", "url": "https://srv.example/mcp", "oauth": True,
+            "bearerTokenEnvVar": "SELECTED_MCP_TOKEN",
+            "headers": {"Authorization": "Bearer configured-header"},
+        }
+        for token in (None, "", "  "):
+            with self.subTest(token=token), mock.patch.dict(
+                os.environ, {} if token is None else {"SELECTED_MCP_TOKEN": token}, clear=True
+            ), mock.patch.object(mcp, "host_request", new=mock.AsyncMock(return_value=config)) as request, mock.patch.object(
+                mcp, "_read_auth", side_effect=AssertionError("must not read stored OAuth")
+            ), mock.patch.object(mcp._Generation, "_open_http", new=mock.AsyncMock()) as connect:
+                with self.assertRaisesRegex(RuntimeError, "credentials.*not available"):
+                    run(mcp.list_tools("remote"))
+                with self.assertRaisesRegex(RuntimeError, "credentials.*not available"):
+                    run(mcp._headers("remote", config))
+                request.assert_awaited_once_with("mcp.config", {"server": "remote"})
+                connect.assert_not_called()
+                self.assertEqual(mcp._registry._generations, {})
+                mcp._registry = mcp._Registry()
+
+    def test_selected_environment_token_is_the_only_auth_source(self):
+        config = {
+            "oauth": True, "url": "https://srv.example/mcp", "bearerTokenEnvVar": "SELECTED_MCP_TOKEN",
+            "headers": {"Authorization": "Bearer configured-header", "X-Other": "keep"},
+        }
+        with mock.patch.dict(os.environ, {"SELECTED_MCP_TOKEN": "  selected-token  "}), mock.patch.object(
+            mcp, "_read_auth", side_effect=AssertionError("must not read stored OAuth")
+        ), mock.patch.object(mcp, "host_request", new=mock.AsyncMock()) as request:
+            identity = run(mcp._auth_identity("remote", config))
+            self.assertNotEqual(identity, "anonymous")
+            self.assertNotIn("selected-token", identity)
+            self.assertEqual(run(mcp._headers("remote", config)), {
+                "Authorization": "Bearer selected-token", "X-Other": "keep",
+            })
+            request.assert_not_called()
 
     def test_endpoint_bound_credential_never_attaches_to_another_url(self):
         cred = {"access": "old-token", "endpoint": "https://old.example/mcp"}

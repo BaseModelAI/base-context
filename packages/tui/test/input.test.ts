@@ -1,6 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Input } from "../src/components/input.js";
+import { CURSOR_MARKER } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 
 describe("Input component", () => {
@@ -33,6 +34,49 @@ describe("Input component", () => {
 	});
 
 	describe("render", () => {
+		it("masks only rendered text while preserving the submitted value", () => {
+			const input = new Input();
+			input.handleInput("sk-secret");
+			assert.ok(input.render(20)[0]?.includes("sk-secret"));
+
+			input.setMasked(true);
+			const [line] = input.render(20);
+			assert.ok(line?.includes("•".repeat(9)));
+			assert.ok(!line?.includes("sk-secret"));
+			assert.strictEqual(input.getValue(), "sk-secret");
+			let submitted: string | undefined;
+			input.onSubmit = (value) => {
+				submitted = value;
+			};
+			input.handleInput("\r");
+			assert.strictEqual(submitted, "sk-secret");
+
+			input.setMasked(false);
+			assert.ok(input.render(20)[0]?.includes("sk-secret"));
+		});
+
+		it("keeps masked grapheme editing and the focused cursor correct when clipped", () => {
+			const input = new Input();
+			input.setMasked(true);
+			input.focused = true;
+			input.handleInput("\x1b[200~a界e\u0301👩‍💻z\x1b[201~");
+			input.handleInput("\x1b[D");
+			assert.strictEqual(input.getCursor(), "a界e\u0301👩‍💻".length);
+			const [line] = input.render(6);
+			assert.strictEqual(line, `> •••${CURSOR_MARKER}\x1b[7m•\x1b[27m`);
+			assert.strictEqual(visibleWidth(line!), 6);
+
+			input.handleInput("\x7f");
+			assert.strictEqual(input.getValue(), "a界e\u0301z");
+			input.handleInput("\x7f");
+			assert.strictEqual(input.getValue(), "a界z");
+			assert.strictEqual(input.getCursor(), 2);
+			input.focused = false;
+			const [unfocusedLine] = input.render(6);
+			assert.ok(!unfocusedLine?.includes(CURSOR_MARKER));
+			assert.ok(!unfocusedLine?.includes("界"));
+		});
+
 		it("does not overflow with wide CJK and fullwidth text", () => {
 			const width = 93;
 			const cases = [

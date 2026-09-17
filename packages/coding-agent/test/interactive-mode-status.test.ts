@@ -1160,6 +1160,28 @@ describe("InteractiveMode MCP command", () => {
 		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("mcp-connections");
 	});
 
+	test.each([false, true])("verifies /mcp logout before reload or success (write failure: %s)", async (failWrite) => {
+		const removeVerified = vi.fn(() => {
+			if (failWrite) throw new Error("Fixture write failure");
+		});
+		const fakeThis = {
+			modelRegistry: { authStorage: { hasAuth: () => false, removeVerified } },
+			reloadAfterMcpChange: vi.fn(async () => {}),
+			showStatus: vi.fn(),
+			showError: vi.fn(),
+		} as unknown as McpCommandHarness;
+		await handleMcpCommand.call(fakeThis, "logout custom");
+		expect(removeVerified).toHaveBeenCalledWith("mcp:custom");
+		if (failWrite) {
+			expect(fakeThis.reloadAfterMcpChange).not.toHaveBeenCalled();
+			expect(fakeThis.showError).toHaveBeenCalledWith("Logout failed: Fixture write failure");
+		} else {
+			expect(fakeThis.reloadAfterMcpChange).toHaveBeenCalledWith("Disconnected custom.");
+			expect(fakeThis.showError).not.toHaveBeenCalled();
+		}
+		expect(fakeThis.showStatus).not.toHaveBeenCalled();
+	});
+
 	test("preserves the explicit /mcp list status output", async () => {
 		const fakeThis = {
 			modelRegistry: { authStorage: { get: vi.fn(() => undefined), hasAuth: vi.fn(() => false) } },

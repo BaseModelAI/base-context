@@ -7,5 +7,5 @@ const destination = new URL("../dist/base-context-runtime", import.meta.url);
 rmSync(destination, { recursive: true, force: true });
 cpSync(source, destination, {
 	recursive: true,
-	filter: (path) => basename(path) !== "__pycache__" && !/\.py[co]$/.test(path),
+	filter: (path) => ![".venv", "__pycache__"].includes(basename(path)) && !/\.py[co]$/.test(path),
 });

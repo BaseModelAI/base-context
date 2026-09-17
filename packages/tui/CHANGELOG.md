@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.3] - 2026-09-17
+
+- Added optional masked text rendering to single-line inputs without changing editing or submitted values.
+
 ## [1.0.0] - 2026-09-15
 
 - First public Synerise base-context 1.0.0 release of `@ponythewhite/base-context-tui`, preserving the upstream terminal UI and MIT notices.

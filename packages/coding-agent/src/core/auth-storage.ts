@@ -6,7 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	findEnvKeys,
 	getEnvApiKey,
@@ -45,6 +45,12 @@ export type AuthStatus = {
 type LockResult<T> = {
 	result: T;
 	next?: string;
+};
+
+// Only active login ownership is persisted; it is not a credential or a history.
+type AuthStorageState = {
+	credentials: AuthStorageData;
+	loginAttempts: Record<string, string>;
 };
 
 type ActiveAuthStatusSource = Exclude<NonNullable<AuthStatus["source"]>, "stale">;
@@ -627,11 +633,26 @@ export class AuthStorage {
 		}
 	}
 
+	private parseStorageState(content: string | undefined): AuthStorageState {
+		const { __base_context_login_attempts: loginAttempts = {}, ...credentials } = JSON.parse(
+			content || "{}",
+		) as AuthStorageData & { __base_context_login_attempts?: Record<string, string> };
+		return { credentials, loginAttempts };
+	}
+
+	private serializeStorageState({ credentials, loginAttempts }: AuthStorageState): string {
+		return JSON.stringify(
+			{
+				...credentials,
+				...(Object.keys(loginAttempts).length > 0 ? { __base_context_login_attempts: loginAttempts } : {}),
+			},
+			null,
+			2,
+		);
+	}
+
 	private parseStorageData(content: string | undefined): AuthStorageData {
-		if (!content) {
-			return {};
-		}
-		return JSON.parse(content) as AuthStorageData;
+		return this.parseStorageState(content).credentials;
 	}
 
 	/**
@@ -659,14 +680,14 @@ export class AuthStorage {
 
 		try {
 			this.storage.withLock((current) => {
-				const currentData = this.parseStorageData(current);
-				const merged: AuthStorageData = { ...currentData };
+				const state = this.parseStorageState(current);
+				delete state.loginAttempts[provider];
 				if (credential) {
-					merged[provider] = credential;
+					state.credentials[provider] = credential;
 				} else {
-					delete merged[provider];
+					delete state.credentials[provider];
 				}
-				return { result: undefined, next: JSON.stringify(merged, null, 2) };
+				return { result: undefined, next: this.serializeStorageState(state) };
 			});
 		} catch (error) {
 			this.recordError(error);
@@ -709,11 +730,11 @@ export class AuthStorage {
 	removeVerified(provider: string): void {
 		this.assertWritableStorage();
 		this.storage.withLock((current) => {
-			const currentData = this.parseStorageData(current);
-			if (!(provider in currentData)) return { result: undefined };
-			const merged: AuthStorageData = { ...currentData };
-			delete merged[provider];
-			return { result: undefined, next: JSON.stringify(merged, null, 2) };
+			const state = this.parseStorageState(current);
+			if (!(provider in state.credentials) && !(provider in state.loginAttempts)) return { result: undefined };
+			delete state.credentials[provider];
+			delete state.loginAttempts[provider];
+			return { result: undefined, next: this.serializeStorageState(state) };
 		});
 		delete this.data[provider];
 		// Post-success only: a failed removal must not make a stale-marked credential selectable again.
@@ -776,8 +797,62 @@ export class AuthStorage {
 			throw new Error(`Unknown OAuth provider: ${providerId}`);
 		}
 
-		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
+		await this.setFromLogin(
+			providerId,
+			async () => ({ type: "oauth", ...(await provider.login(callbacks)) }),
+			callbacks.signal,
+		);
+	}
+
+	/** Collect credentials without holding the lock, then commit only for the current login. */
+	async setFromLogin(
+		providerId: string,
+		collectCredential: () => Promise<AuthCredential>,
+		signal?: AbortSignal,
+	): Promise<void> {
+		this.assertWritableStorage();
+		if (signal?.aborted) throw new Error("Login cancelled");
+		const attemptId = randomUUID();
+		this.storage.withLock((current) => {
+			const state = this.parseStorageState(current);
+			state.loginAttempts[providerId] = attemptId;
+			return { result: undefined, next: this.serializeStorageState(state) };
+		});
+
+		const releaseAttempt = () => {
+			try {
+				this.storage.withLock((current) => {
+					const state = this.parseStorageState(current);
+					if (state.loginAttempts[providerId] !== attemptId) return { result: undefined };
+					delete state.loginAttempts[providerId];
+					return { result: undefined, next: this.serializeStorageState(state) };
+				});
+			} catch (error) {
+				this.recordError(error);
+			}
+		};
+		signal?.addEventListener("abort", releaseAttempt, { once: true });
+		try {
+			const credential = await collectCredential();
+			if (signal?.aborted) throw new Error("Login cancelled");
+			const data = this.storage.withLock((current) => {
+				const state = this.parseStorageState(current);
+				if (state.loginAttempts[providerId] !== attemptId) {
+					throw new Error("Login cancelled: credentials changed or login was superseded");
+				}
+				delete state.loginAttempts[providerId];
+				state.credentials[providerId] = credential;
+				return { result: state.credentials, next: this.serializeStorageState(state) };
+			});
+			this.data = data;
+			this.loadError = null;
+			this.clearStaleAuthSource(providerId, "stored");
+		} catch (error) {
+			releaseAttempt();
+			throw error;
+		} finally {
+			signal?.removeEventListener("abort", releaseAttempt);
+		}
 	}
 
 	/**
@@ -803,7 +878,8 @@ export class AuthStorage {
 		}
 
 		const result = await this.storage.withLockAsync(async (current) => {
-			const currentData = this.parseStorageData(current);
+			const state = this.parseStorageState(current);
+			const currentData = state.credentials;
 			this.data = currentData;
 			this.loadError = null;
 
@@ -834,7 +910,7 @@ export class AuthStorage {
 			};
 			this.data = merged;
 			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return { result: refreshed, next: this.serializeStorageState({ ...state, credentials: merged }) };
 		});
 
 		return result;

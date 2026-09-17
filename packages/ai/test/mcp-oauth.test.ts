@@ -61,6 +61,7 @@ async function loginWithManualCode(
 describe.sequential("MCP OAuth provider", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.useRealTimers();
 	});
 
 	it("has a namespaced id and label", () => {
@@ -70,16 +71,26 @@ describe.sequential("MCP OAuth provider", () => {
 		expect(provider.usesCallbackServer).toBe(true);
 	});
 
-	it("discovers Plane protected-resource metadata and its external pathful issuer", async () => {
+	it.each([
+		{ scopes: undefined, expectedScope: "resource:read" },
+		{ scopes: "configured:write", expectedScope: "configured:write" },
+		{ scopes: "", expectedScope: null },
+	])("discovers resource-bound OAuth with scope $expectedScope", async ({ scopes, expectedScope }) => {
 		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
 			const url = urlOf(input);
 			if (url === RESOURCE) {
 				expect(init?.headers).toBeUndefined();
 				return new Response("", { status: 401 });
 			}
-			if (url === PLANE_PRM_URL) return jsonResponse({ resource: RESOURCE, authorization_servers: [PLANE_ISSUER] });
+			if (url === PLANE_PRM_URL)
+				return jsonResponse({
+					resource: RESOURCE,
+					authorization_servers: [PLANE_ISSUER],
+					scopes_supported: ["resource:read"],
+				});
 			if (url === PLANE_META_URL) return jsonResponse(PLANE_META);
 			if (url === PLANE_META.registration_endpoint) {
+				expect(JSON.parse(String(init?.body)).client_name).toBe("Base Context (plane)");
 				expect(init?.redirect).toBe("error");
 				return jsonResponse({ client_id: "plane-client" });
 			}
@@ -94,7 +105,9 @@ describe.sequential("MCP OAuth provider", () => {
 		});
 		vi.stubGlobal("fetch", fetchMock);
 
-		const { creds, authUrl } = await loginWithManualCode(createMcpOAuthProvider({ server: "plane", url: RESOURCE }));
+		const { creds, authUrl } = await loginWithManualCode(
+			createMcpOAuthProvider({ server: "plane", url: RESOURCE, scopes }),
+		);
 		expect(creds).toMatchObject({
 			access: "access-1",
 			endpoint: RESOURCE,
@@ -105,7 +118,7 @@ describe.sequential("MCP OAuth provider", () => {
 		const authParams = new URL(authUrl).searchParams;
 		expect(authParams.get("client_id")).toBe("plane-client");
 		expect(authParams.get("resource")).toBe(RESOURCE);
-		expect(authParams.get("scope")).toBe("read write");
+		expect(authParams.get("scope")).toBe(expectedScope);
 		expect(fetchMock).toHaveBeenCalledWith(RESOURCE, expect.objectContaining({ redirect: "error" }));
 	});
 
@@ -191,6 +204,7 @@ describe.sequential("MCP OAuth provider", () => {
 			issuer: undefined,
 		});
 		expect(new URL(authUrl).searchParams.get("resource")).toBeNull();
+		expect(new URL(authUrl).searchParams.get("scope")).toBeNull();
 		expect(fetchMock.mock.calls.map(([input]) => urlOf(input))).not.toContain(
 			"https://srv.test/.well-known/oauth-protected-resource",
 		);
@@ -423,6 +437,134 @@ describe.sequential("MCP OAuth provider", () => {
 		} finally {
 			if (blockerBound) await new Promise<void>((resolve) => blocker.close(() => resolve()));
 		}
+	});
+
+	it.each(["headers", "body"])("bounds a stalled refresh token %s response", async (stage) => {
+		vi.useFakeTimers();
+		let started!: () => void;
+		const tokenStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let requestSignal: AbortSignal | undefined;
+		const cancel = vi.fn();
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				const url = urlOf(input);
+				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+				if (url !== ORIGIN_META.token_endpoint) throw new Error(`unexpected fetch: ${url}`);
+				const signal = init?.signal;
+				if (!signal) throw new Error("Missing request abort signal");
+				requestSignal = signal;
+				started();
+				if (stage === "headers")
+					return new Promise<Response>((_, reject) => {
+						signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+					});
+				return new Response(new ReadableStream<Uint8Array>({ cancel }));
+			}),
+		);
+		const result = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL }).refreshToken({
+			access: "old",
+			refresh: "refresh",
+			expires: 0,
+			endpoint: ORIGIN_URL,
+			clientId: "c",
+		});
+		const assertion = expect(result).rejects.toThrow("MCP OAuth request timed out");
+		await tokenStarted;
+		await vi.advanceTimersByTimeAsync(30_001);
+		await assertion;
+		expect(requestSignal?.aborted).toBe(true);
+		if (stage === "body") expect(cancel).toHaveBeenCalledOnce();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("rejects an oversized token body without exposing its contents", async () => {
+		const cancel = vi.fn();
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				const url = urlOf(input);
+				if (url === "https://srv.test/.well-known/oauth-authorization-server") return jsonResponse(ORIGIN_META);
+				if (url !== ORIGIN_META.token_endpoint) throw new Error(`unexpected fetch: ${url}`);
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(controller) {
+							controller.enqueue(new TextEncoder().encode('{"access_token":"fixture-secret"'));
+							controller.enqueue(new Uint8Array(1024 * 1024));
+						},
+						cancel,
+					}),
+				);
+			}),
+		);
+		const result = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL }).refreshToken({
+			access: "old",
+			refresh: "refresh",
+			expires: 0,
+			endpoint: ORIGIN_URL,
+			clientId: "c",
+		});
+		await expect(result).rejects.toThrow("exceeded the OAuth response size limit");
+		await expect(result).rejects.not.toThrow("fixture-secret");
+		expect(cancel).toHaveBeenCalledOnce();
+	});
+
+	it("stops discovery immediately when login is cancelled", async () => {
+		const controller = new AbortController();
+		const fetchMock = vi.fn(
+			(_input: unknown, init?: RequestInit) =>
+				new Promise<Response>((_, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+				}),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const onAuth = vi.fn();
+		const result = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL }).login({
+			onAuth,
+			onPrompt: async () => "",
+			signal: controller.signal,
+		});
+		controller.abort(new Error("Login cancelled"));
+		await expect(result).rejects.toThrow("Login cancelled");
+		expect(fetchMock).toHaveBeenCalledOnce();
+		expect(onAuth).not.toHaveBeenCalled();
+	});
+
+	it("cancels a browser login even while manual input is pending", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: unknown): Promise<Response> => {
+				const missing = absentPrm(input);
+				if (missing) return missing;
+				if (urlOf(input) === "https://srv.test/.well-known/oauth-authorization-server")
+					return jsonResponse(ORIGIN_META);
+				throw new Error(`unexpected fetch: ${urlOf(input)}`);
+			}),
+		);
+		const controller = new AbortController();
+		let started!: () => void;
+		const manualStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const result = createMcpOAuthProvider({ server: "origin", url: ORIGIN_URL, clientId: "c" }).login({
+			onAuth: () => {},
+			onPrompt: async () => "",
+			signal: controller.signal,
+			onManualCodeInput: () => {
+				started();
+				return new Promise<string>(() => {});
+			},
+		});
+		const assertion = expect(result).rejects.toThrow("Login cancelled");
+		await manualStarted;
+		controller.abort(new Error("Login cancelled"));
+		await assertion;
 	});
 
 	it("fails clearly when dynamic client registration is unavailable", async () => {

@@ -724,6 +724,7 @@ async function stopHiddenSupervisors(
 	assertAdmission: () => Promise<void>,
 ): Promise<void> {
 	while (true) {
+		await assertAdmission();
 		const listeners = scanListeningDaemons().filter((listener) => !isWorkerSocketPath(listener.socketPath));
 		const bySocket = new Map<string, DiscoveredDaemonProcess[]>();
 		for (const listener of listeners) {

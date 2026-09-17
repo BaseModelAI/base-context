@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.3] - 2026-09-17
+
+- Fixed late OAuth and API-key logins overwriting a newer login or undoing logout.
+- Fixed configured MCP environment-token authentication falling back to stored credentials.
+- Fixed MCP tool discovery to retrieve paginated inventories without partial results and protect cached schemas from caller edits.
+- Masked API-key prompts and pasted sign-in codes and callback values while keeping browser sign-in links readable.
+- Fixed provider logout reporting success when saved credentials could not be removed.
+- Fixed shutdown admission loss after slow process scans or transient registry errors while the shutdown process still owns its record.
+- Fixed source builds including the development Python virtual environment in release packages.
+
 ## [1.0.2] - 2026-09-17
 
 - Fixed RPC requests waiting for a timeout after the agent process exits, and removed the shutdown delay for an already-exited process.

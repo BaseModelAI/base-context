@@ -8561,12 +8561,13 @@ export class InteractiveMode {
 				this.showError("Usage: /mcp logout <name>");
 				return;
 			}
-			if (!isAuthed(server)) {
-				this.showStatus(`${server} is not connected.`);
-				return;
+			try {
+				// Revoke pending logins even when no credential has been saved yet.
+				authStorage.removeVerified(`mcp:${server}`);
+				await this.reloadAfterMcpChange(`Disconnected ${server}.`);
+			} catch (error) {
+				this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
-			authStorage.logout(`mcp:${server}`);
-			await this.reloadAfterMcpChange(`Disconnected ${server}.`);
 			return;
 		}
 

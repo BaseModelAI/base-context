@@ -300,6 +300,10 @@ export class MenuSearchInput implements Component, Focusable, FullWidthMenuCompo
 		this.input.setValue(value);
 	}
 
+	setMasked(masked: boolean): void {
+		this.input.setMasked(masked);
+	}
+
 	handleInput(data: string): void {
 		this.input.handleInput(data);
 	}

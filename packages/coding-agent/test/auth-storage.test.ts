@@ -1,10 +1,11 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage, type AuthStorageBackend } from "../src/core/auth-storage.js";
+import { AuthStorage, type AuthStorageBackend, FileAuthStorageBackend } from "../src/core/auth-storage.js";
 import * as providerContracts from "../src/core/provider-contracts.js";
 
 describe("AuthStorage", () => {
@@ -484,6 +485,148 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	describe("login ownership", () => {
+		const credentials = { access: "late-access", refresh: "refresh", expires: 4_000_000_000_000 };
+		const callbacks = { onAuth: vi.fn(), onPrompt: vi.fn() };
+
+		function pendingLogin(providerId: string) {
+			let resolve!: (value: typeof credentials) => void;
+			const promise = new Promise<typeof credentials>((done) => {
+				resolve = done;
+			});
+			registerOAuthProvider({
+				id: providerId,
+				name: providerId,
+				login: () => promise,
+				refreshToken: async () => credentials,
+				getApiKey: (credential) => credential.access,
+			});
+			return () => resolve(credentials);
+		}
+
+		test.each(["custom-oauth", "mcp:custom"])(
+			"peer logout revokes %s login with and without an existing credential",
+			async (providerId) => {
+				for (const initiallyPresent of [false, true]) {
+					writeAuthJson(initiallyPresent ? { [providerId]: { type: "oauth", ...credentials } } : {});
+					authStorage = AuthStorage.create(authJsonPath);
+					const finish = pendingLogin(providerId);
+					const login = authStorage.login(providerId, callbacks);
+					const peer = AuthStorage.create(authJsonPath);
+					expect(peer.list()).toEqual(initiallyPresent ? [providerId] : []);
+					if (initiallyPresent) peer.logout(providerId);
+					else peer.removeVerified(providerId);
+					peer.set("openai", { type: "api_key", key: "other-provider" });
+					finish();
+					await expect(login).rejects.toThrow("Login cancelled");
+					expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
+						openai: { type: "api_key", key: "other-provider" },
+					});
+				}
+			},
+		);
+
+		test("logout in a separate process revokes an initially absent login", async () => {
+			authStorage = AuthStorage.create(authJsonPath);
+			const finish = pendingLogin("mcp:custom");
+			const login = authStorage.login("mcp:custom", callbacks);
+			const child = spawnSync(
+				process.execPath,
+				[
+					"--import",
+					"tsx",
+					"--input-type=module",
+					"--eval",
+					`import { AuthStorage } from "./src/core/auth-storage.ts";
+					AuthStorage.create(${JSON.stringify(authJsonPath)}).removeVerified("mcp:custom");`,
+				],
+				{ cwd: process.cwd(), encoding: "utf8" },
+			);
+			finish();
+			await expect(login).rejects.toThrow("Login cancelled");
+			expect(child.status, child.stderr).toBe(0);
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({});
+		});
+
+		test("superseded login cleanup leaves the newer attempt and other provider writes intact", async () => {
+			authStorage = AuthStorage.create(authJsonPath);
+			const finishOld = pendingLogin("mcp:custom");
+			const oldLogin = authStorage.login("mcp:custom", callbacks);
+			const finishNew = pendingLogin("mcp:custom");
+			const peer = AuthStorage.create(authJsonPath);
+			const newLogin = peer.login("mcp:custom", callbacks);
+			peer.set("openai", { type: "api_key", key: "other-provider" });
+			finishOld();
+			await expect(oldLogin).rejects.toThrow("superseded");
+			finishNew();
+			await expect(newLogin).resolves.toBeUndefined();
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
+				"mcp:custom": { type: "oauth", ...credentials },
+				openai: { type: "api_key", key: "other-provider" },
+			});
+		});
+
+		test("explicit peer replacement survives an older login completion", async () => {
+			authStorage = AuthStorage.create(authJsonPath);
+			const finish = pendingLogin("custom-oauth");
+			const login = authStorage.login("custom-oauth", callbacks);
+			const peer = AuthStorage.create(authJsonPath);
+			peer.set("custom-oauth", { type: "api_key", key: "newer-key" });
+			finish();
+			await expect(login).rejects.toThrow("Login cancelled");
+			expect(AuthStorage.create(authJsonPath).getAll()).toEqual({
+				"custom-oauth": { type: "api_key", key: "newer-key" },
+			});
+		});
+
+		test("abort removes only its own pending claim and never commits late credentials", async () => {
+			writeAuthJson({ openai: { type: "api_key", key: "other-provider" } });
+			authStorage = AuthStorage.create(authJsonPath);
+			const finish = pendingLogin("custom-oauth");
+			const controller = new AbortController();
+			const login = authStorage.login("custom-oauth", { ...callbacks, signal: controller.signal });
+			controller.abort();
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual(authStorage.getAll());
+			finish();
+			await expect(login).rejects.toThrow("Login cancelled");
+			const collect = vi.fn();
+			await expect(authStorage.setFromLogin("openai", collect, controller.signal)).rejects.toThrow(
+				"Login cancelled",
+			);
+			expect(collect).not.toHaveBeenCalled();
+			expect(AuthStorage.create(authJsonPath).getAll()).toEqual({
+				openai: { type: "api_key", key: "other-provider" },
+			});
+		});
+
+		test.each(["claim", "commit"])("rejects a failed %s write without claiming login success", async (failure) => {
+			const disk = new FileAuthStorageBackend(authJsonPath);
+			let failNextWrite = failure === "claim";
+			const backend: AuthStorageBackend = {
+				withLock(fn) {
+					return disk.withLock((current) => {
+						const result = fn(current);
+						if (result.next !== undefined && failNextWrite) {
+							failNextWrite = false;
+							throw new Error("Fixture write failure");
+						}
+						return result;
+					});
+				},
+				withLockAsync: (fn) => disk.withLockAsync(fn),
+			};
+			authStorage = AuthStorage.fromStorage(backend);
+			const collect = vi.fn(async () => {
+				failNextWrite = failure === "commit";
+				return { type: "api_key" as const, key: "not-saved" };
+			});
+			await expect(authStorage.setFromLogin("openai", collect)).rejects.toThrow("Fixture write failure");
+			expect(collect).toHaveBeenCalledTimes(failure === "claim" ? 0 : 1);
+			expect(authStorage.getAll()).toEqual({});
+			expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({});
+		});
+	});
+
 	describe("oauth lock compromise handling", () => {
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -606,6 +749,16 @@ describe("AuthStorage", () => {
 			expect(updated["mcp:remote"]).toBeUndefined();
 			expect(authStorage.get("mcp:remote")).toBeUndefined();
 			expect((updated.openai as { key: string }).key).toBe("openai-key");
+		});
+
+		test("removeVerified clears cached credentials after an authoritative no-op", () => {
+			writeAuthJson({ "mcp:remote": { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.markAuthStale("mcp:remote");
+			AuthStorage.create(authJsonPath).removeVerified("mcp:remote");
+			authStorage.removeVerified("mcp:remote");
+			expect(authStorage.get("mcp:remote")).toBeUndefined();
+			expect(authStorage.getAuthStatus("mcp:remote")).toEqual({ configured: false });
 		});
 
 		test("removeVerified throws while the credential may still exist on disk", () => {

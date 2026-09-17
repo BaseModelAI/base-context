@@ -152,8 +152,8 @@ export class McpManager {
 		if (integration.config.type === "stdio") return true;
 		const { bearerTokenEnvVar } = integration.config;
 		if (!integration.usesOAuth && !bearerTokenEnvVar) return true;
-		if (bearerTokenEnvVar && process.env[bearerTokenEnvVar]?.trim()) {
-			return true;
+		if (bearerTokenEnvVar) {
+			return Boolean(process.env[bearerTokenEnvVar]?.trim());
 		}
 		const providerId = this.providerId(integration.server);
 		const cred = this.authStorage.get(providerId);
