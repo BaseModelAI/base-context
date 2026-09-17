@@ -121,29 +121,33 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		const child = spawn("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
+		this.process = child;
+		this.stderr = "";
 
 		// Collect stderr for debugging
-		this.process.stderr?.on("data", (data) => {
+		child.stderr?.on("data", (data) => {
+			if (this.process !== child) return;
 			this.stderr += data.toString();
 			process.stderr.write(data);
 		});
-
-		// Set up strict JSONL reader for stdout.
-		this.stopReadingStdout = attachJsonlLineReader(this.process.stdout!, (line) => {
-			this.handleLine(line);
+		child.once("error", (error) => {
+			if (this.process === child) this.rejectPendingRequests(error);
+		});
+		// Drain final stdout/stderr before rejecting requests that received no response.
+		child.once("close", () => {
+			if (this.process === child) this.rejectPendingRequests(this.processExitError(child));
 		});
 
-		// Wait a moment for process to initialize
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		// Set up strict JSONL reader for stdout.
+		this.stopReadingStdout = attachJsonlLineReader(child.stdout!, (line) => {
+			if (this.process === child) this.handleLine(line);
+		});
 
-		if (this.process.exitCode !== null) {
-			throw new Error(`Agent process exited immediately with code ${this.process.exitCode}. Stderr: ${this.stderr}`);
-		}
 		try {
 			const state = await this.getState();
 			if (state.protocolVersion !== DAEMON_PROTOCOL_VERSION)
@@ -156,10 +160,12 @@ export class RpcClient {
 					`Incompatible RPC schema: expected at least ${minimumSchema}, got ${state.schemaRevision ?? "unversioned"}`,
 				);
 		} catch (error) {
-			try {
-				await this.stop();
-			} catch (cleanupError) {
-				throw new AggregateError([error, cleanupError], "RPC startup and cleanup failed", { cause: error });
+			if (this.process === child) {
+				try {
+					await this.stop();
+				} catch (cleanupError) {
+					throw new AggregateError([error, cleanupError], "RPC startup and cleanup failed", { cause: error });
+				}
 			}
 			throw error;
 		}
@@ -169,27 +175,31 @@ export class RpcClient {
 	 * Stop the RPC agent process.
 	 */
 	async stop(): Promise<void> {
-		if (!this.process) return;
+		const child = this.process;
+		if (!child) return;
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
-		this.process.kill("SIGTERM");
 
-		// Wait for process to exit
-		await new Promise<void>((resolve) => {
-			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
-				resolve();
-			}, 1000);
+		if (child.exitCode === null && child.signalCode === null) {
+			await new Promise<void>((resolve) => {
+				const timeout = setTimeout(() => {
+					child.kill("SIGKILL");
+					resolve();
+				}, 1000);
 
-			this.process?.on("exit", () => {
-				clearTimeout(timeout);
-				resolve();
+				child.once("exit", () => {
+					clearTimeout(timeout);
+					resolve();
+				});
+				child.kill("SIGTERM");
 			});
-		});
+		}
 
-		this.process = null;
-		this.pendingRequests.clear();
+		if (this.process === child) {
+			this.process = null;
+			this.rejectPendingRequests(new Error("RPC client stopped"));
+		}
 	}
 
 	/**
@@ -657,6 +667,16 @@ export class RpcClient {
 	// Internal
 	// =========================================================================
 
+	private processExitError(child: ChildProcess): Error {
+		const reason = child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`;
+		return new Error(`Agent process exited with ${reason}. Stderr: ${this.stderr}`);
+	}
+
+	private rejectPendingRequests(error: Error): void {
+		for (const pending of this.pendingRequests.values()) pending.reject(error);
+		this.pendingRequests.clear();
+	}
+
 	private handleLine(line: string): void {
 		try {
 			const data = JSON.parse(line);
@@ -693,16 +713,18 @@ export class RpcClient {
 	}
 
 	private async send(command: RpcCommandBody, timeoutMs = 30000): Promise<RpcResponse> {
-		if (!this.process?.stdin) {
+		const child = this.process;
+		if (!child?.stdin) {
 			throw new Error("Client not started");
+		}
+		if (child.exitCode !== null || child.signalCode !== null) {
+			throw this.processExitError(child);
 		}
 
 		const id = `req_${++this.requestId}`;
 		const fullCommand = { ...command, id } as RpcCommand;
 
 		return new Promise((resolve, reject) => {
-			this.pendingRequests.set(id, { resolve, reject });
-
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
@@ -719,7 +741,7 @@ export class RpcClient {
 				},
 			});
 
-			this.process!.stdin!.write(serializeJsonLine(fullCommand));
+			child.stdin!.write(serializeJsonLine(fullCommand));
 		});
 	}
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.2] - 2026-09-17
+
+- Fixed RPC requests waiting for a timeout after the agent process exits, and removed the shutdown delay for an already-exited process.
+
 ## [1.0.1] - 2026-09-16
 
 - Made the Synerise base-context installer the primary setup path, with automatic prerequisites, optional shell-profile updates, and clear launch instructions.
