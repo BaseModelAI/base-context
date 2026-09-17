@@ -26,19 +26,36 @@ Base Context is built to help you:
 
 That is the bet: **less repeated detective work, more continuity, and a clearer link between what the agent says and the evidence it can recover.** The benchmark below measures one harness-level outcome; it does not prove that each mechanism independently caused the gain.
 
-## Install
-
-Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm:
+## Install (recommended)
 
 ```bash
-npm install -g @ponythewhite/base-context
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
+```
+
+On **macOS or Linux**, this installs the **latest stable release** and its dependencies. The interactive installer asks for consent to install missing prerequisites. It supplies compatible Node.js/npm and `uv` when needed, then prepares managed Python and the bundled runtime **before activating the CLI**. **No manual dependency installation is needed.**
+
+Follow the final PATH/activation command printed by the installer, then start work:
+
+```bash
 cd /path/to/your/project
 base-context
 ```
 
 In the terminal UI, run `/login` to configure an authorized provider, then `/model` to choose a model. For API-key routes, you can instead set the provider's environment variable before launch. See [provider setup](packages/coding-agent/docs/providers.md).
 
-The Python workspace uses `uv`. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first; the default runtime prepares Python 3.11 and the bundled `base-context-runtime` on first use. Initial setup can download dependencies. The Python import is `rlm`.
+### npm alternative: for users who already manage Node.js
+
+Use Node.js **22.12+ on the 22.x line, or 23.3+**, and npm. These must already be installed **before** this route:
+
+```bash
+npm install -g @ponythewhite/base-context
+cd /path/to/your/project
+BASE_CONTEXT_INSTALL_UV=1 base-context
+```
+
+`npm install` installs the CLI; it does not prepare Python at that step. Starting a normal CLI session prepares the managed Python environment in the background. `BASE_CONTEXT_INSTALL_UV=1` allows it to install `uv` if missing. No manual Python installation is needed. Initial setup needs network access; later launches reuse the environment.
+
+The environment-variable syntax above is for Bash/Zsh. See [installation](packages/coding-agent/docs/installation.md) for PowerShell, manual Python environments, updates, and rollback.
 
 ### Build from source
 
