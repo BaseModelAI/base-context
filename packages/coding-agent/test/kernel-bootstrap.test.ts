@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -161,7 +170,10 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
-		process.env = originalEnv;
+		for (const key of Object.keys(process.env)) {
+			if (!(key in originalEnv)) delete process.env[key];
+		}
+		Object.assign(process.env, originalEnv);
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
@@ -203,6 +215,48 @@ describe("kernel bootstrap", () => {
 			pythonSkills: [],
 		});
 		expect(version.runtime).toMatch(/^sha256:/);
+	});
+
+	it.each([false, true])("installs uv in its expected home bin (custom XDG data: %s)", async (customXdg) => {
+		const logPath = installFakeUv();
+		const binDir = join(tempDir, "bin");
+		const downloadedUv = join(tempDir, "downloaded-uv");
+		renameSync(join(binDir, "uv"), downloadedUv);
+		for (const utility of ["sh", "cat", "mkdir", "cp", "chmod"]) {
+			symlinkSync(`/bin/${utility}`, join(binDir, utility));
+		}
+		process.env.PATH = binDir;
+		const home = join(tempDir, "home with spaces");
+		mkdirSync(home);
+		process.env.HOME = home;
+		process.env.BASE_CONTEXT_INSTALL_UV = "1";
+		process.env.BASE_CONTEXT_KERNEL_VENV = join(tempDir, "kernel-venv");
+		if (customXdg) process.env.XDG_DATA_HOME = join(tempDir, "xdg-data");
+		delete process.env.UV_INSTALL_DIR;
+		delete process.env.UV_UNMANAGED_INSTALL;
+		process.env.UV_TEST_BINARY = downloadedUv;
+		const installLog = join(tempDir, "uv-install.log");
+		process.env.UV_TEST_INSTALL_LOG = installLog;
+		writeExecutable(
+			join(binDir, "curl"),
+			[
+				"#!/bin/sh",
+				"cat <<'INSTALLER'",
+				"set -e",
+				`printf "%s\\n" "$UV_INSTALL_DIR" "$UV_NO_MODIFY_PATH" "\${UV_UNMANAGED_INSTALL-unset}" > "$UV_TEST_INSTALL_LOG"`,
+				`install_dir="\${UV_INSTALL_DIR:-\${XDG_DATA_HOME:-$HOME/.local/share}/../bin}"`,
+				'mkdir -p "$install_dir"',
+				'cp "$UV_TEST_BINARY" "$install_dir/uv"',
+				"INSTALLER",
+				"",
+			].join("\n"),
+		);
+
+		await expect(ensureKernelPython()).resolves.toBe(join(tempDir, "kernel-venv", "bin", "python"));
+		expect(readFileSync(installLog, "utf8")).toBe(`${join(home, ".local", "bin")}\n1\nunset\n`);
+		expect(readFileSync(join(home, ".local", "bin", "uv"), "utf8")).toBe(readFileSync(downloadedUv, "utf8"));
+		expect(readFileSync(logPath, "utf8")).toContain("python install 3.13");
+		expect(process.env.UV_INSTALL_DIR).toBeUndefined();
 	});
 
 	it("routes bootstrap progress through the provided callback", async () => {

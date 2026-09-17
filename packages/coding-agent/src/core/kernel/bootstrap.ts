@@ -342,10 +342,14 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 	return venv;
 }
 
-function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
+function run(
+	command: string,
+	args: string[],
+	options: { stdio?: "ignore" | "inherit"; env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
-			env: process.env,
+			env: options.env ?? process.env,
 			stdio: options.stdio ?? "ignore",
 		});
 		child.on("error", reject);
@@ -496,7 +500,10 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 
 	reportProgress(options, "› installing uv (one-time)…");
 	try {
-		await run("sh", ["-c", UV_INSTALL_COMMAND], { stdio: options.onProgress ? "ignore" : "inherit" });
+		await run("sh", ["-c", UV_INSTALL_COMMAND], {
+			stdio: options.onProgress ? "ignore" : "inherit",
+			env: { ...process.env, UV_INSTALL_DIR: path.dirname(localUv) },
+		});
 	} catch (error) {
 		throw new Error(
 			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run base-context. ${errorMessage(error)}`,

@@ -1,6 +1,6 @@
 [project]
 name = "base-context-runtime"
-version = "1.0.3"
+version = "1.0.4"
 description = "Kernel-side runtime shim for Base Context recursion"
 license = "MIT"
 license-files = ["LICENSE", "NOTICE"]

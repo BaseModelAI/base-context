@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.4] - 2026-09-17
+
+- Updated internal package dependencies to 1.0.4.
+
 ## [1.0.3] - 2026-09-17
 
 - Updated internal package dependencies to 1.0.3.

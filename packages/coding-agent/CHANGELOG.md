@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.4] - 2026-09-17
+
+- Fixed first-time Python setup failing to find its newly installed uv when XDG data paths are configured.
+
 ## [1.0.3] - 2026-09-17
 
 - Fixed late OAuth and API-key logins overwriting a newer login or undoing logout.

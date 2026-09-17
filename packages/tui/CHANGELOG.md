@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.4] - 2026-09-17
+
+- Updated the lockstep package release to 1.0.4.
+
 ## [1.0.3] - 2026-09-17
 
 - Added optional masked text rendering to single-line inputs without changing editing or submitted values.

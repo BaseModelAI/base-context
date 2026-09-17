@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.4] - 2026-09-17
+
+- Updated the lockstep package release to 1.0.4.
+
 ## [1.0.3] - 2026-09-17
 
 - Fixed MCP OAuth cancellation, request deadlines, and response size limits during discovery, registration, and token exchange.

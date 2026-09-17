@@ -1,6 +1,6 @@
 {
 	"name": "@ponythewhite/base-context-agent",
-	"version": "1.0.3",
+	"version": "1.0.4",
 	"description": "Synerise base-context agent runtime with context management and native recovery",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -19,7 +19,7 @@
 		"prepublishOnly": "npm --prefix ../.. run build:source"
 	},
 	"dependencies": {
-		"@ponythewhite/base-context-ai": "1.0.3",
+		"@ponythewhite/base-context-ai": "1.0.4",
 		"typebox": "^1.3.9"
 	},
 	"keywords": [
