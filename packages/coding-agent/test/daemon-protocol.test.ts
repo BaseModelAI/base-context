@@ -24,6 +24,7 @@ import {
 	meetsDaemonCommandCompatibility,
 	NATIVE_WORK_COMPATIBILITIES,
 	salvageDaemonCommandId,
+	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "../src/modes/daemon/daemon-protocol.js";
 import {
 	type DaemonWorkerDescriptor,
@@ -53,7 +54,6 @@ describe("daemon protocol helpers", () => {
 				sessionPath: "/sessions/root.jsonl",
 				config: {
 					sessionDir: "/legacy/sessions",
-					telemetryDisabled: true,
 					apiKey: "secret-api-key",
 					extensionFlagValues: { providerSecretKey: "secret-extension" },
 				},
@@ -75,16 +75,15 @@ describe("daemon protocol helpers", () => {
 			workerInstanceId: "instance-1",
 			sessionFile: "/sessions/root.jsonl",
 			sessionDir: "/legacy/sessions",
-			telemetryDisabled: true,
 		});
 		expect(JSON.stringify(durable)).not.toContain("secret-");
 	});
 
 	it("advertises optional agent results without raising startup requirements", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
-		expect(DAEMON_SCHEMA_REVISION).toBe(47);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
+		expect(DAEMON_SCHEMA_REVISION).toBe(49);
 		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-agent-results`,
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-subagent-capacity`,
 		);
 		const command: DaemonCommand = {
 			type: "send_result",
@@ -106,11 +105,11 @@ describe("daemon protocol helpers", () => {
 		expect(meetsDaemonCommandCompatibility({ ...currentHello, serverCapabilities: [] }, compatibility)).toBe(false);
 		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
-		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(45);
+		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(49);
 	});
 
 	it("requires compatibility metadata for the scheduled-job protocol surface", () => {
-		expect(DAEMON_PROTOCOL_VERSION).toBe(11);
+		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
 		const resume: DaemonCommand = { type: "cron_resume", jobId: "imported-job" };
 		const compatibility = { minProtocol: 11, minSchemaRevision: 46, capability: "cron_resume" } as const;
 		expect(DAEMON_COMMAND_COMPATIBILITY.cron_resume).toEqual(compatibility);
@@ -186,18 +185,52 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.set_rlm_max_depth).toEqual({ minProtocol: 10, minSchemaRevision: 11 });
 	});
 
-	it("requires native ownership independently of telemetry fields", () => {
-		const native = NATIVE_WORK_COMPATIBILITIES;
-		expect(getDaemonCommandCompatibilities({ type: "create", config: { cwd: "/tmp" } })).toEqual(native);
+	it("routes current subagent-limit commands on the session plane", () => {
+		const commands = [
+			{ type: "get_rlm_max_subagents_status", activeSessionId: "active-1" },
+			{ type: "set_rlm_max_subagents", activeSessionId: "active-1", maxSubagents: 0 },
+		] satisfies DaemonCommand[];
+		for (const command of commands) {
+			expect(DAEMON_COMMAND_COMPATIBILITY[command.type]).toEqual({ minProtocol: 13, minSchemaRevision: 49 });
+			expect(DAEMON_COMMAND_PLANE[command.type]).toBe("session");
+			expect(getDaemonCommandCompatibilities(command)).toContainEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
+		}
+		expect(isDaemonMutatingCommand(commands[0])).toBe(false);
+		expect(isDaemonMutatingCommand(commands[1])).toBe(true);
+	});
+
+	it("requires protocol 13 and schema 49 for subagent-capacity operations", () => {
+		const currentHello = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+		};
 		for (const command of [
-			{ type: "create", config: { cwd: "/tmp", telemetryDisabled: true } },
-			{ type: "attach", activeSessionId: "active-1", telemetryDisabled: true },
-			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2", telemetryDisabled: true },
+			{ type: "get_rlm_max_subagents_status", activeSessionId: "active-1" },
+			{ type: "set_rlm_max_subagents", activeSessionId: "active-1", maxSubagents: 6 },
+			{
+				type: "rlm_capacity",
+				workerToken: "worker-token",
+				workerInstanceId: "worker-1",
+				operation: { op: "status", sessionId: "session-1" },
+			},
 		] satisfies DaemonCommand[]) {
-			expect(getDaemonCommandCompatibilities(command)).toEqual([
-				...native,
-				{ minProtocol: 8, minSchemaRevision: 14 },
-			]);
+			const requirements = getDaemonCommandCompatibilities(command);
+			const accepts = (hello: typeof currentHello) =>
+				requirements.every((requirement) => meetsDaemonCommandCompatibility(hello, requirement));
+			expect(accepts(currentHello)).toBe(true);
+			expect(accepts({ ...currentHello, protocol: { ...DAEMON_PROTOCOL_INFO, version: 12 } })).toBe(false);
+			expect(accepts({ ...currentHello, schemaRevision: 48 })).toBe(false);
+		}
+	});
+
+	it("requires native ownership for session creation and attachment", () => {
+		for (const command of [
+			{ type: "create", config: { cwd: "/tmp" } },
+			{ type: "attach", activeSessionId: "active-1" },
+			{ type: "reattach", activeSessionId: "active-1", targetActiveSessionId: "active-2" },
+		] satisfies DaemonCommand[]) {
+			expect(getDaemonCommandCompatibilities(command)).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		}
 	});
 
@@ -508,7 +541,7 @@ describe("daemon protocol helpers", () => {
 		).toBe(true);
 	});
 
-	it("reserves worker-authenticated ledger mutation only on the control plane", () => {
+	it("reserves worker-authenticated ledger and capacity operations for the control plane", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.rlm_ledger_mutate).toEqual({
 			minProtocol: 10,
 			minSchemaRevision: 28,
@@ -516,5 +549,9 @@ describe("daemon protocol helpers", () => {
 		});
 		expect(DAEMON_COMMAND_PLANE.rlm_ledger_mutate).toBe("control");
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).not.toContain("rlm_ledger_mutation");
+		expect(DAEMON_COMMAND_COMPATIBILITY.rlm_capacity).toEqual({ minProtocol: 13, minSchemaRevision: 49 });
+		expect(DAEMON_COMMAND_PLANE.rlm_capacity).toBe("control");
+		expect(isSessionPlaneDaemonCommand("rlm_capacity")).toBe(false);
+		expect(UPDATE_RESTART_DRAIN_COMMANDS.has("rlm_capacity")).toBe(true);
 	});
 });

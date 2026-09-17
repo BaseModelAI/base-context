@@ -39,7 +39,7 @@ print_render_meta() {
 }
 
 render_case() {
-	base_context_screen_title="Installing Base-Context"
+	base_context_screen_title="Installing Synerise base-context"
 	base_context_screen_detail="Fetching the verified package."
 	base_context_screen_question=
 	base_context_screen_frame=1
@@ -82,13 +82,13 @@ screen_case() {
 	base_context_test_cols="$1"
 	base_context_test_rows="$2"
 	printf '__SCREEN_START__ first\\n' >&2
-	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
+	base_context_screen "Installing Synerise base-context" "Installing Synerise base-context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ first\\n' >&2
 
 	base_context_test_cols="$3"
 	base_context_test_rows="$4"
 	printf '__SCREEN_START__ second\\n' >&2
-	base_context_screen "Installing Base-Context" "Installing Base-Context" "Fetching the verified package." ""
+	base_context_screen "Installing Synerise base-context" "Installing Synerise base-context" "Fetching the verified package." ""
 	printf '__SCREEN_END__ second\\n' >&2
 }
 
@@ -98,7 +98,7 @@ Linking command binaries.
 Finalizing npm install."
 	for progress_frame in 1 24 25 48 49 200; do
 		base_context_animation_frame="$progress_frame"
-		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(base_context_animation_status "Installing Base-Context" "$progress_details" static)" "$(base_context_animation_detail "$progress_details")"
+		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(base_context_animation_status "Installing Synerise base-context" "$progress_details" static)" "$(base_context_animation_detail "$progress_details")"
 	done
 }
 
@@ -117,8 +117,8 @@ try {
 	check(stableVisible.meta.first.visible === "1", "expected the initial large render to show the logo");
 	check(stableVisible.meta.second.visible === "1", "expected a safe resize to keep showing the logo");
 	check(
-		stableVisible.renders.first.some((line) => line.includes("| Base-Context |")),
-		"expected the visible installer wordmark to say Base-Context",
+		stableVisible.renders.first.some((line) => line.includes("| Synerise base-context |")),
+		"expected the visible installer wordmark to say Synerise base-context",
 	);
 	check(
 		stableVisible.meta.first.lab_width === stableVisible.meta.second.lab_width,
@@ -177,6 +177,8 @@ function checkOwnedInstallerRoute() {
 	const checksumsPath = join(downloadDir, "SHA256SUMS");
 	const root = join(tempDir, "owned install");
 	const original = JSON.stringify({ generation: "original", active: "old", previous: null });
+	const profile = join(tempDir, "shell profile");
+	const originalProfile = "# Existing unrelated shell settings\n";
 	// Run the real main/resolver/URL owners; prerequisites and external effects stay offline boundaries.
 	const installHarnessSource = `${installerSource.slice(0, mainCallIndex)}
 base_context_install_traps() { :; }
@@ -184,6 +186,7 @@ base_context_init_screen() { base_context_screen_enabled=0; }
 start_preflight_checks() { :; }
 finish_preflight_checks() { return 0; }
 confirm_install() { :; }
+base_context_prompt_yes_no() { return 0; }
 verify_base_context_package_checksum() { :; }
 create_temp_dir() {
   mkdir -p "$FIXTURE_DOWNLOAD_DIR"
@@ -194,6 +197,7 @@ main "$@"
 	mkdirSync(binDir);
 	mkdirSync(root);
 	writeFileSync(join(root, "current.json"), original, "utf8");
+	writeFileSync(profile, originalProfile, "utf8");
 	writeFileSync(installHarnessPath, installHarnessSource, "utf8");
 	writeFileSync(join(binDir, "npm"), `#!/bin/sh
 [ "$EXPECT_NPM_VIEW" = 1 ] || exit 1
@@ -226,15 +230,29 @@ fi
 [ "$1" = "$EXPECTED_ENTRY" ] && [ "$2" = install ] && [ "$3" = "$EXPECTED_ROOT" ] &&
 [ "$4" = "$EXPECTED_SELECTION" ] && [ "$5" = "$EXPECTED_TARBALL" ] && [ "$6" = 1.2.3 ]
 `, { mode: 0o755 });
+	const nodeDataDir = join(tempDir, "node data");
+	const standaloneNodeBin = join(nodeDataDir, "base-context-node", "current", "bin");
+	mkdirSync(standaloneNodeBin, { recursive: true });
+	writeFileSync(join(standaloneNodeBin, "node"), readFileSync(join(binDir, "node")), { mode: 0o755 });
 	for (const [name, args, expectNpmView] of [
 		["default stable", [], "1"],
 		["explicit version", ["v1.2.3"], "0"],
+		["standalone setup", ["v1.2.3"], "0"],
+		["standalone rerun", ["v1.2.3"], "0"],
 	]) {
-		const result = spawnSync("sh", [installHarnessPath, ...args], {
+		const standalone = name.startsWith("standalone");
+		if (name === "standalone setup") writeFileSync(profile, originalProfile, "utf8");
+		const shellArgs = name === "standalone rerun"
+			? ["-c", '. "$BASE_CONTEXT_SHELL_PROFILE"; exec sh "$@"', "sh", installHarnessPath, ...args]
+			: [installHarnessPath, ...args];
+		const result = spawnSync("sh", shellArgs, {
 			encoding: "utf8",
 			env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+				XDG_DATA_HOME: nodeDataDir,
+				BASE_CONTEXT_STANDALONE_NODE_BIN: name === "standalone setup" ? standaloneNodeBin : undefined,
 				BASE_CONTEXT_DOWNLOAD_BASE_URL: "https://github.com/BaseModelAI/base-context",
 				BASE_CONTEXT_INSTALL_ROOT: root, BASE_CONTEXT_PACKAGE: "@ponythewhite/base-context",
+				BASE_CONTEXT_SHELL_PROFILE: profile,
 				BASE_CONTEXT_RELEASE_CHANNEL: "stable", BASE_CONTEXT_VERSION: "",
 				FIXTURE_DOWNLOAD_DIR: downloadDir, EXPECT_NPM_VIEW: expectNpmView,
 				NPM_VIEW_MARKER: join(tempDir, "npm-view"), EXPECTED_CHECKSUMS: checksumsPath,
@@ -242,6 +260,15 @@ fi
 				EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
 		});
 		check(result.status === 0, `${name} owned Base-Context installer route failed\n${result.stderr}${result.stdout}`);
+		const updatedProfile = readFileSync(profile, "utf8");
+		check(updatedProfile.startsWith(originalProfile), `${name} changed unrelated shell profile content`);
+		check(updatedProfile.split("# Synerise base-context").length === 2, `${name} should add one owned PATH entry`);
+		const ownedPath = `${root}/bin${standalone ? `${delimiter}${standaloneNodeBin}` : ""}`;
+		check(updatedProfile.includes(`export PATH='${ownedPath}':"$PATH"`), `${name} omitted the owned launcher PATH`);
+		check(result.stdout.includes(`export PATH='${ownedPath}':"$PATH" && base-context`), `${name} omitted the current-shell launch command`);
+		if (name === "standalone rerun") {
+			check(result.stdout.includes("PATH entry is already in"), "standalone rerun should reuse the sourced PATH entry");
+		}
 	}
 }
 
@@ -336,7 +363,7 @@ function assertInstallerProgress(progress) {
 			`expected progress sample ${index + 1} to show "${expectedDetail}", got "${progress[index].detail}"`,
 		);
 		check(
-			progress[index].status === "Installing Base-Context...",
+			progress[index].status === "Installing Synerise base-context...",
 			`expected progress sample ${index + 1} to use indeterminate status`,
 		);
 		check(!progress[index].status.includes("%"), `expected progress sample ${index + 1} not to include a percent`);

@@ -172,7 +172,6 @@ describe("compaction continuation", () => {
 		vi.spyOn(AuthStorage, "inMemory").mockReturnValueOnce(
 			AuthStorage.fromStorage(authBackend, {
 				existingOpenAICodexSubscription: true,
-				usePrimeCliConfig: false,
 			}),
 		);
 		const failures: unknown[] = [];
@@ -748,7 +747,9 @@ describe("compaction continuation", () => {
 			fauxAssistantMessage("final answer after the tool call"),
 		]);
 
-		await harness.session.prompt("run the tool then summarize");
+		// A real-sized public prompt keeps faux wire-overhead calibration below the retention target.
+		await harness.session.prompt(`Run the tool, then summarize this input:
+${"input ".repeat(128)}`);
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		await harness.session.waitForIdle();
 		await new Promise((resolve) => setTimeout(resolve, 300));

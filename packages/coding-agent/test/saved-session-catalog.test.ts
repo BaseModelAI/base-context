@@ -13,42 +13,29 @@ class FakeDaemonClient {
 	async request(
 		command: DaemonCommand,
 		_timeoutMs = 30000,
-		options: DaemonClientRequestOptions = {},
+		_options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		this.commands.push(command);
 		if (command.type === "list_saved_sessions") {
-			options.onProgress?.({
-				type: "session_list_progress",
-				command: "list_saved_sessions",
-				loaded: 1,
-				total: 1,
-			});
-			options.onProgress?.({
-				type: "session_list_item",
-				command: "list_saved_sessions",
-				session: {
-					path: "/tmp/sessions/one.jsonl",
-					id: "one",
-					cwd: "/tmp/project",
-					parentSessionPath: "/tmp/sessions/parent.jsonl",
-					rlmDepth: 1,
-					created: "2026-01-01T00:00:00.000Z",
-					modified: "2026-01-02T00:00:00.000Z",
-					messageCount: 1,
-					firstMessage: "hello",
-					allMessagesText: "hello",
-					agentStatus: {
-						summary: "Finished the task",
-						taskState: "completed",
-						basedOnMessageCount: 1,
-					},
-				},
-			});
 			return {
 				type: "response",
 				command: "list_saved_sessions",
 				success: true,
 				data: {
+					status: "page",
+					primary: ["file:/tmp/sessions/one.jsonl"],
+					sourceOrder: [{ path: "/tmp/sessions/one.jsonl", source: "catalog", ordinal: 0 }],
+					moreBefore: false,
+					moreAfter: false,
+					limited: true,
+					hints: {
+						liveMatches: [],
+						liveEnrichment: [],
+						busyAncestors: [],
+						moreChildren: [],
+						allChildren: [],
+						groups: [],
+					},
 					sessions: [
 						{
 							path: "/tmp/sessions/one.jsonl",
@@ -108,6 +95,7 @@ describe("saved session catalog", () => {
 			cwd: "/tmp/project",
 			sessionDir: "/tmp/sessions",
 			scope: "current",
+			page: {},
 		});
 		expect(progress).toEqual([[1, 1]]);
 		expect(discovered).toEqual(["one"]);

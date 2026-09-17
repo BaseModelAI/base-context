@@ -9,27 +9,15 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
-interface OnboardingSplashHandle {
-	showProgress(message: string): void;
-	dismiss(): void;
-}
-
 interface InteractiveOnboardingHarness {
-	runOnboardingFlow(showPrimeCliSplash?: boolean): Promise<void>;
-	uiServices: {
-		modelRegistry: ModelRegistry;
-	};
-	getModelCandidates(): Promise<AgentConnectionModel[]>;
-	showOnboardingSplash(continueActionLabel?: string): Promise<OnboardingSplashHandle | undefined>;
-	createAuthFlows(): {
-		runPrimeInferenceLogin(): Promise<AuthenticationResult>;
-	};
-	prepareForModelSelectionAfterLogin(authResult: AuthenticationResult): Promise<boolean>;
-	showConfigurationMenu(tab: "providers" | "models" | "mcp-connections"): Promise<void>;
+	runOnboardingFlow(): Promise<boolean>;
+	uiServices: { modelRegistry: ModelRegistry };
+	getCurrentModel(): undefined;
+	showConfigurationMenu(tab: "providers" | "models" | "mcp-connections"): Promise<boolean>;
 }
 
 interface ConfigurationHarness {
-	showConfigurationMenu(tab: "providers" | "models" | "mcp-connections"): Promise<void>;
+	showConfigurationMenu(tab: "providers" | "models" | "mcp-connections"): Promise<boolean>;
 	ui: TUI;
 	uiServices: {
 		modelRegistry: ModelRegistry;
@@ -70,56 +58,17 @@ describe("ENG-4658 onboarding transitions", () => {
 		}
 	});
 
-	test("keeps the splash mounted until first-launch model selection closes", async () => {
-		const harness = await createHarness({ provider: "prime-inference", withConfiguredAuth: false });
+	test.each([false, true])("opens explicit setup with authenticated models=%s", async (configured) => {
+		const harness = await createHarness({ withConfiguredAuth: configured });
 		harnesses.push(harness);
-		const order: string[] = [];
-		const configuration = deferred<void>();
-		const splash: OnboardingSplashHandle = {
-			showProgress: (message) => order.push(`progress:${message}`),
-			dismiss: () => order.push("dismiss"),
-		};
 		const fakeThis = Object.create(InteractiveMode.prototype) as InteractiveOnboardingHarness;
 		fakeThis.uiServices = { modelRegistry: harness.session.modelRegistry };
-		fakeThis.getModelCandidates = vi.fn(async () => []);
-		fakeThis.showOnboardingSplash = vi.fn(async () => splash);
-		fakeThis.createAuthFlows = vi.fn(() => ({
-			runPrimeInferenceLogin: async (): Promise<AuthenticationResult> => {
-				order.push("login");
-				return {
-					status: "success",
-					providerId: "prime-inference",
-					providerName: "Prime Inference",
-					authType: "api_key",
-					kind: "provider",
-				};
-			},
-		}));
-		fakeThis.prepareForModelSelectionAfterLogin = vi.fn(async () => {
-			order.push("prepare");
-			return true;
-		});
-		fakeThis.showConfigurationMenu = vi.fn((tab) => {
-			order.push(`configuration:${tab}`);
-			return configuration.promise;
-		});
+		fakeThis.getCurrentModel = () => undefined;
+		fakeThis.showConfigurationMenu = vi.fn(async () => false);
 
-		const onboarding = fakeThis.runOnboardingFlow(false);
-		await vi.waitFor(() => expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("models"));
+		await fakeThis.runOnboardingFlow();
 
-		expect(order).not.toContain("dismiss");
-		configuration.resolve();
-		await onboarding;
-
-		expect(fakeThis.showOnboardingSplash).toHaveBeenCalledWith();
-		expect(order).toEqual([
-			"progress:Signing in to Prime Intellect...",
-			"login",
-			"progress:Preparing models...",
-			"prepare",
-			"configuration:models",
-			"dismiss",
-		]);
+		expect(fakeThis.showConfigurationMenu).toHaveBeenCalledWith("providers", undefined, true);
 	});
 
 	test("keeps the configuration overlay mounted while provider authentication is pending", async () => {
@@ -173,7 +122,7 @@ describe("ENG-4658 onboarding transitions", () => {
 		login.resolve({ status: "cancelled" });
 		await vi.waitFor(() => expect(focus).toHaveBeenCalled());
 		menu?.handleInput("\x1b");
-		await expect(configuration).resolves.toBeUndefined();
+		await expect(configuration).resolves.toBe(false);
 		expect(hide).toHaveBeenCalledOnce();
 	});
 });

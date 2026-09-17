@@ -176,6 +176,88 @@ describe("ConfigurationMenuComponent", () => {
 		expect(postLoginRow).toContain("current");
 	});
 
+	it("requires an explicit provider and keeps its model list filtered after refresh", async () => {
+		const first = await createHarness({
+			provider: "onboarding-first",
+			models: [{ id: "first-model", name: "First model" }],
+		});
+		const other = await createHarness({
+			provider: "onboarding-other",
+			models: [{ id: "other-model", name: "Other model" }],
+		});
+		harnesses.push(first, other);
+		const firstModel = first.getModel();
+		const otherModel = other.getModel();
+		const onSelectProvider = vi.fn((provider: { id: string }) => menu.showProviderModels(provider.id));
+		const onSelectModel = vi.fn();
+		const menu = new ConfigurationMenuComponent({
+			initialTab: "models",
+			providerFirst: true,
+			tui: createFakeTui(),
+			authStorage: first.authStorage,
+			providerOptions: [{ id: firstModel.provider, name: "First provider", authType: "api_key" }],
+			modelRegistry: first.session.modelRegistry,
+			currentModel: undefined,
+			scopedModels: [{ model: firstModel }, { model: otherModel }],
+			availableModels: [firstModel, otherModel],
+			configuredProviders: new Set([firstModel.provider, otherModel.provider]),
+			requestRender: () => {},
+			onSelectProvider,
+			onSelectMcpConnection: () => {},
+			onSelectModel,
+			onCancel: () => {},
+		});
+
+		expect(menu.getActiveTab()).toBe("providers");
+		menu.handleInput("\t");
+		expect(menu.getActiveTab()).toBe("providers");
+		expect(onSelectProvider).not.toHaveBeenCalled();
+		expect(onSelectModel).not.toHaveBeenCalled();
+		menu.handleInput("\r");
+		expect(onSelectProvider).toHaveBeenCalledWith(expect.objectContaining({ id: firstModel.provider }));
+		expect(menu.getActiveTab()).toBe("models");
+		expect(onSelectModel).not.toHaveBeenCalled();
+
+		menu.updateModels(undefined, [otherModel, firstModel]);
+		const output = stripAnsi(menu.render(120).join("\n"));
+		expect(output).toContain("First model");
+		expect(output).not.toContain("Other model");
+		menu.handleInput("\r");
+		expect(onSelectModel).toHaveBeenCalledWith(firstModel);
+	});
+
+	it("does not select a model when provider-first setup is cancelled", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const model = harness.getModel();
+		const onSelectModel = vi.fn();
+		const onCancel = vi.fn();
+		const menu = new ConfigurationMenuComponent({
+			initialTab: "providers",
+			providerFirst: true,
+			tui: createFakeTui(),
+			authStorage: harness.authStorage,
+			providerOptions: [{ id: model.provider, name: "Provider", authType: "api_key" }],
+			modelRegistry: harness.session.modelRegistry,
+			currentModel: undefined,
+			scopedModels: [],
+			availableModels: [model],
+			configuredProviders: new Set([model.provider]),
+			requestRender: () => {},
+			onSelectProvider: (provider) => menu.showProviderModels(provider.id),
+			onSelectMcpConnection: () => {},
+			onSelectModel,
+			onCancel,
+		});
+
+		menu.handleInput("\r");
+		expect(menu.getActiveTab()).toBe("models");
+		menu.handleInput("\x1b");
+		expect(onCancel).toHaveBeenCalledOnce();
+		expect(onSelectModel).not.toHaveBeenCalled();
+		expect(harness.settingsManager.getOnboardingShown()).toBe(false);
+	});
+
 	it("keeps arrow keys in the active search field and uses Escape to close", async () => {
 		const onCancel = vi.fn();
 		const menu = await createMenu({ initialTab: "models", onCancel });

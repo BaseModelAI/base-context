@@ -14,9 +14,4 @@ this fork is not an official Prime Intellect release.
 Prime Agent builds on Mario Zechner's Pi project:
 https://github.com/badlogic/pi-mono
 
-We also credit Prime Intellect's PrimeRL authors for their open-source
-reinforcement-learning work: https://github.com/PrimeIntellect-ai/prime-rl
-This acknowledgement does not imply that PrimeRL is a runtime dependency
-or that upstream authors endorse this fork.
-
 Third-party dependencies retain their own licenses and notices.

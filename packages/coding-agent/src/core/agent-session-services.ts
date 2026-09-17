@@ -5,7 +5,6 @@ import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
 import type { AgentExecutionMode } from "./agent-session-config.js";
-import { installAgentTraceUpload } from "./agent-traces.js";
 import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
@@ -14,12 +13,11 @@ import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
+import type { RlmRootAdmission, RlmSubagentCapacity } from "./rlm-max-subagents.js";
 import type { RlmChildAdmission, SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
-import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
-import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
 
 export interface AgentSessionRuntimeDiagnostic {
 	type: "info" | "warning" | "error";
@@ -41,14 +39,14 @@ export interface CreateAgentSessionServicesOptions {
 	 * would release the pane while the parent is still running.
 	 */
 	noBuiltinHerdrReporter?: boolean;
-	telemetryDisabled?: true;
 }
 
 export interface AgentSessionCreationOptions {
 	/** Explicit native request-budget rollout; also forwarded by the services/runtime factory. */
 	requestTokenBudget?: RequestTokenBudgetOptions;
 	contextMode?: "on" | "off";
-	model?: Model<any>;
+	/** Undefined restores a saved explicit choice; null creates a session without a selected model. */
+	model?: Model<any> | null;
 	thinkingLevel?: ThinkingLevel;
 	serviceTier?: ServiceTier;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
@@ -68,6 +66,8 @@ export interface AgentSessionCreationOptions {
 	rlmParentAgent?: string;
 	/** Live parent-owned setup admission; never restored from session metadata. */
 	rlmChildAdmission?: RlmChildAdmission;
+	rlmSubagentCapacity?: RlmSubagentCapacity;
+	rlmRootAdmission?: RlmRootAdmission;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
 	subagentRuntimeHost?: SubagentRuntimeHost;
@@ -76,7 +76,6 @@ export interface AgentSessionCreationOptions {
 	autonomous?: AgentAutonomousConfig;
 	serializedRefine?: boolean;
 	executionMode?: AgentExecutionMode;
-	telemetryDisabled?: true;
 	initialGoal?: { objective: string; tokenBudget?: number };
 }
 
@@ -186,18 +185,6 @@ export async function createAgentSessionServices(
 	await resourceLoader.reload();
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
-	if (
-		!options.telemetryDisabled &&
-		isTelemetryEnabled(settingsManager) &&
-		!settingsManager.getTelemetryNoticeShown()
-	) {
-		diagnostics.push({
-			type: "info",
-			message:
-				"Base Context analytics are opt-in. Remote export requires BASE_CONTEXT_TELEMETRY_ENDPOINT and a dedicated BASE_CONTEXT_TELEMETRY_API_KEY; inference credentials are never used. Disable with telemetry.enabled=false, BASE_CONTEXT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.",
-		});
-		settingsManager.setTelemetryNoticeShown(true);
-	}
 	const extensionsResult = resourceLoader.getExtensions();
 	for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
 		try {
@@ -228,14 +215,6 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
-	installAgentTraceUpload(options.sessionManager, {
-		authStorage: options.services.authStorage,
-		settingsManager: options.services.settingsManager,
-		semanticEdgesLedgerPath: semanticEdgeLedgerPath({
-			rlmSessionDir: options.rlmSessionDir,
-			sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
-		}),
-	});
 	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
@@ -266,6 +245,8 @@ export async function createAgentSessionFromServices(
 		rlmParentNodeId: options.rlmParentNodeId,
 		rlmParentAgent: options.rlmParentAgent,
 		rlmChildAdmission: options.rlmChildAdmission,
+		rlmSubagentCapacity: options.rlmSubagentCapacity,
+		rlmRootAdmission: options.rlmRootAdmission,
 		semanticParentSessionId: options.semanticParentSessionId,
 		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 		subagentRuntimeHost: options.subagentRuntimeHost,
@@ -276,12 +257,5 @@ export async function createAgentSessionFromServices(
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
 	});
-	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
-		installAgentTelemetry(result.session, {
-			agentDir: options.services.agentDir,
-			settingsManager: options.services.settingsManager,
-			executionMode: options.executionMode,
-		});
-	}
 	return result;
 }

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
+import { streamSimpleAnthropic } from "../src/providers/anthropic.js";
+import { adjustMaxTokensForThinking } from "../src/providers/simple-options.js";
 import { streamSimple } from "../src/stream.js";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.js";
 
 interface AnthropicThinkingPayload {
+	max_tokens?: number;
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
 	temperature?: number;
@@ -103,6 +106,44 @@ async function runWithoutReasoning(model: Model<"anthropic-messages">): Promise<
 		contentTypes: response.content.map((block) => block.type),
 	};
 }
+
+describe("budget-based Anthropic thinking minimum", () => {
+	it("keeps the existing default additive output budget", () => {
+		expect(adjustMaxTokensForThinking(32000, 64000, "low")).toEqual({
+			maxTokens: 34048,
+			thinkingBudget: 2048,
+		});
+	});
+
+	it("raises a small custom thinking budget without enlarging the computed total", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-4-5"), {
+			reasoning: "low",
+			maxTokens: 4096,
+			thinkingBudgets: { low: 476 },
+		});
+		expect(payload.max_tokens).toBe(4572);
+		expect(payload.thinking).toMatchObject({ type: "enabled", budget_tokens: 1024 });
+	});
+
+	it("rejects an impossible computed total before constructing a provider request", () => {
+		let payloads = 0;
+		expect(() =>
+			streamSimpleAnthropic(
+				{ ...getModel("anthropic", "claude-sonnet-4-5"), maxTokens: 1024 },
+				{ messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+				{
+					apiKey: "test-key",
+					reasoning: "low",
+					maxTokens: 1024,
+					onPayload() {
+						payloads++;
+					},
+				},
+			),
+		).toThrow("Budget-based thinking requires at least 1024 thinking tokens");
+		expect(payloads).toBe(0);
+	});
+});
 
 describe("Anthropic thinking disable payload", () => {
 	it("sends thinking.type=disabled for budget-based reasoning models when thinking is off", async () => {

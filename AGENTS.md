@@ -169,7 +169,7 @@ Create provider file exporting:
 
 ### 6. Coding Agent (`packages/coding-agent/`)
 
-- `src/core/model-resolver.ts`: Add default model ID to `defaultModelPerProvider`
+- `src/core/model-resolver.ts`: Keep provider/model selection explicit through the supported model registry; do not add automatic provider defaults
 - `src/core/provider-display-names.ts`: Add API-key login display name so `/login` and related UI show the provider for built-in API-key auth.
 - `src/cli/args.ts`: Add env var documentation
 - `README.md`: Add provider setup instructions

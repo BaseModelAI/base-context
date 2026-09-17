@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired MEDIUM reference, with an explicit DeepSeek-only recovery mode."""
+"""MEDIUM reference and explicitly selected regressions, with deferred benchmark retries."""
 from __future__ import annotations
 
 import argparse
@@ -146,11 +146,14 @@ def matched(cells, tasks, assisted=False):
 
 
 def report(manifest, cells):
+    variants = tuple(manifest.get("variants", VARIANTS))
+    expected_primaries = len(manifest["tasks"]) * len(MODELS) * len(variants)
+    paired = variants == VARIANTS
     groups = []
     for label, *_ in MODELS:
         model_cells = [c for c in cells if c["model"] == label]
         arms = {}
-        for variant in VARIANTS:
+        for variant in variants:
             selected = [c for c in model_cells if c["variant"] == variant]
             retained = [r for c in selected for r in c["attempts"]]
             arms[variant] = {
@@ -164,22 +167,22 @@ def report(manifest, cells):
                                      for c in selected for r in c["attempts"]],
             }
         groups.append({"model": label, "variants": arms,
-                       "matched_clean_first_primary": matched(model_cells, manifest["tasks"]),
-                       "matched_clean_retry_assisted": matched(model_cells, manifest["tasks"], True)})
+                       "matched_clean_first_primary": matched(model_cells, manifest["tasks"]) if paired else None,
+                       "matched_clean_retry_assisted": matched(model_cells, manifest["tasks"], True) if paired else None})
     primaries = [c["attempts"][0] for c in cells if c["attempts"]]
     retained = [r for c in cells for r in c["attempts"]]
-    complete = (bool(manifest.get("completed_at")) and len(primaries) == 180
+    complete = (bool(manifest.get("completed_at")) and len(primaries) == expected_primaries
                 and all(r.get("result") is not None for r in retained))
     chronology = (
         "User-requested partial restart: retained Sol/Astra retries followed the original 180 primaries; "
         "all 60 fresh DeepSeek primaries precede their retries, not all 180 merged primaries. "
         "At most one retry per failed or runtime-unclean cell."
         if manifest.get("restart_deepseek_from") else
-        "All 180 primaries precede retries. At most one benchmark retry per failed or runtime-unclean cell.")
+        f"All {expected_primaries} primaries precede retries. At most one benchmark retry per failed or runtime-unclean cell.")
     return {
         "generated_at": harness.utc_now(), "campaign_root": manifest["output"],
         "finalization_pending": manifest.get("finalization_pending"),
-        "complete": complete, "expected_primaries": 180,
+        "complete": complete, "expected_primaries": expected_primaries,
         "completed_primaries": sum(r.get("result") is not None for r in primaries),
         "benchmark_retries": sum(r["number"] == 2 for r in retained),
         "all_incurred": activity(retained),
@@ -191,8 +194,9 @@ def report(manifest, cells):
             *(["Discarded source DeepSeek cells and fees are excluded; their raw artifacts stay in the source output."]
                if manifest.get("restart_deepseek_from") else []),
             "Retry-assisted selects the sole retry when present, never the best result.",
-            "Accuracy denominators include all 30 tasks, including invalid, failed and unrun cells.",
-            "Cost comparisons use only strict-passing, runtime-clean cells completed in both harnesses.",
+            f"Accuracy denominators include all {len(manifest['tasks'])} selected tasks, including invalid, failed and unrun cells.",
+            ("Cost comparisons use only strict-passing, runtime-clean cells completed in both harnesses." if paired else
+             "No stock arm was run. Comparisons with historical cells are reported separately, not as a contemporaneous paired campaign."),
             "Cost ratios also require one matching explicit profile/basis and each arm's distinct physical accounting source.",
             "All-incurred and retry-overhead totals include failures and invalids; they are not cost rankings.",
             "Physical provider recoveries stay in raw metrics; they are not benchmark retries.",
@@ -207,16 +211,18 @@ def save(output, manifest, cells):
     harness.json_dump(output / "results.json", cells)
     value = report(manifest, cells)
     harness.json_dump(output / "summary.json", value)
-    lines = ["# Paired MEDIUM reference", "", f"Complete: {value['complete']}",
+    title = "MEDIUM subset regression" if manifest.get("run_kind") == "new-subset-regression" else "Paired MEDIUM reference"
+    lines = [f"# {title}", "", f"Complete: {value['complete']}",
              *([f"Unfinalized: {value['finalization_pending']}"] if value["finalization_pending"] else []),
-             f"First primaries: {value['completed_primaries']}/180; benchmark retries: {value['benchmark_retries']}", "",
+             f"First primaries: {value['completed_primaries']}/{value['expected_primaries']}; benchmark retries: {value['benchmark_retries']}", "",
              "| Model | Harness | First strict | First strict + clean | Retry-assisted strict + clean |",
              "| --- | --- | --- | --- | --- |"]
     for group in value["groups"]:
         for variant, arm in group["variants"].items():
             first, assisted = arm["first_primary_accuracy"], arm["retry_assisted_accuracy"]
-            lines.append(f"| {group['model']} | {variant} | {first['strict_pass']}/30 | "
-                         f"{first['strict_runtime_clean']}/30 | {assisted['strict_runtime_clean']}/30 |")
+            count = first["expected_cells"]
+            lines.append(f"| {group['model']} | {variant} | {first['strict_pass']}/{count} | "
+                         f"{first['strict_runtime_clean']}/{count} | {assisted['strict_runtime_clean']}/{count} |")
     lines += ["", *["- " + note for note in value["notes"]], "",
               "See summary.json for matched cohorts, all costs, completeness, runtime outcomes and retry overhead.",
               "See results.json and each raw_dir for every attempt, including unfinished and failed activity.",
@@ -325,10 +331,15 @@ def run_campaign(args, scenarios, manifest, runner=None):
     """Use one-attempt runner only: run_case has a different retry/primary contract."""
     runner = runner or harness.safe_run_attempt
     tasks = sorted(scenarios)
-    if tasks != list(range(1, 31)):
+    variants = tuple(manifest.get("variants", VARIANTS))
+    if tasks != list(range(1, 31)) and manifest.get("run_kind") != "new-subset-regression":
         raise ValueError("paired reference requires all 30 task IDs")
+    if tasks != manifest["tasks"] or not tasks or set(tasks) - set(range(1, 31)):
+        raise ValueError("campaign tasks must match the declared benchmark selection")
+    if variants not in (VARIANTS, ("current",)):
+        raise ValueError("campaign variants must be current or current,vanilla")
     cells = [{"task_id": task, "model": label, "variant": variant, "attempts": []}
-             for task in tasks for label, *_ in MODELS for variant in VARIANTS]
+             for task in tasks for label, *_ in MODELS for variant in variants]
     restart = bool(manifest.get("restart_deepseek_from"))
     active_models = [model for model in MODELS if not restart or model[0] == "deepseek"]
     if restart:
@@ -358,7 +369,8 @@ def run_campaign(args, scenarios, manifest, runner=None):
             harness.json_dump(attempt_dir / "orchestrator-error.json", result)
             return result
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2 * len(active_models)) as executor:
+    queue_count = len(variants) * len(active_models)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=queue_count) as executor:
         def dispatch(selected, number):
             queues = {}
             for cell in selected:
@@ -396,7 +408,7 @@ def run_campaign(args, scenarios, manifest, runner=None):
                           f"attempt {number}: clean_pass={clean_pass(record['result'])}", flush=True)
                     submit_next((cell["model"], cell["variant"]))
 
-        print(f"starting MEDIUM primaries in {2 * len(active_models)} independent model/variant queues", flush=True)
+        print(f"starting MEDIUM primaries in {queue_count} independent model/variant queues", flush=True)
         dispatch(active_cells, 1)
         manifest["new_work_primaries_completed_at" if restart else "primaries_completed_at"] = harness.utc_now()
         retry_queue = [c for c in active_cells if not clean_pass(result_of(selected_record(c)))]
@@ -414,6 +426,8 @@ def run_campaign(args, scenarios, manifest, runner=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--tasks", default="all", help="Task IDs/ranges for a newly qualified regression (default: all)")
+    parser.add_argument("--variants", choices=("current,vanilla", "current"), default="current,vanilla")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--restart-deepseek-from", type=Path, metavar="OLD_OUTPUT")
     mode.add_argument("--finalize-deepseek-restart", action="store_true",
@@ -429,6 +443,11 @@ def main():
                         help="Acknowledge completed host/accounting qualification; does not replace archive checks")
     args = parser.parse_args()
     args.output = args.output.expanduser().resolve()
+    subset = args.tasks != "all" or args.variants != "current,vanilla"
+    if subset and (args.restart_deepseek_from or args.finalize_deepseek_restart):
+        parser.error("task/variant selection cannot alter the historical DeepSeek restart")
+    if subset and not args.qualified_current_commit:
+        parser.error("task/variant selection requires --qualified-current-commit for a new regression")
     if args.finalize_deepseek_restart:
         if args.admit_provider_calls:
             parser.error("report-only finalization does not accept --admit-provider-calls")
@@ -448,7 +467,8 @@ def main():
         parser.error("--admit-provider-calls is required; this command starts the one paired campaign")
     if not args.bwrap:
         parser.error("bubblewrap is required")
-    args.variants, args.timeout_seconds = "current,vanilla", 1800
+    args.timeout_seconds = 1800
+    variants = tuple(args.variants.split(","))
     args.api_price_profiles = json.loads(args.api_price_profiles_file.read_text())
     if not isinstance(args.api_price_profiles, list) or not args.api_price_profiles or any(
             not isinstance(p, dict) for p in args.api_price_profiles):
@@ -459,11 +479,12 @@ def main():
     expected_commit = args.qualified_current_commit or CURRENT_COMMIT
     if hosts["candidate_commit"] != expected_commit:
         parser.error(f"this run requires the clean CURRENT build {expected_commit}")
-    vanilla = hosts["hosts"]["vanilla"]
-    if not vanilla.get("accounting_patch"):
-        parser.error("hosts.vanilla.accounting_patch must identify the separate accounting hotpatch")
-    if vanilla["package_name"] != "prime-agent" or vanilla["version"] != "0.9.4":
-        parser.error("this reference requires separately accounting-hotpatched public Prime Agent 0.9.4")
+    if "vanilla" in variants:
+        vanilla = hosts["hosts"]["vanilla"]
+        if not vanilla.get("accounting_patch"):
+            parser.error("hosts.vanilla.accounting_patch must identify the separate accounting hotpatch")
+        if vanilla["package_name"] != "prime-agent" or vanilla["version"] != "0.9.4":
+            parser.error("this reference requires separately accounting-hotpatched public Prime Agent 0.9.4")
     # Metadata only: the existing runner reads credentials only inside its native provider process.
     for key in ("host_openai_codex_auth_file", "host_deepseek_api_key_file"):
         path = getattr(args, key).expanduser().resolve(strict=True)
@@ -472,21 +493,28 @@ def main():
         setattr(args, key, path)
     benchmark_python = harness.require_python312()
     scenarios = harness.load_scenarios(harness.ROOT, require_complete=True)
+    try:
+        selected_tasks = harness.parse_task_ids(args.tasks, scenarios)
+    except ValueError as exc:
+        parser.error(str(exc))
+    scenarios = {task: scenarios[task] for task in selected_tasks}
     args.output = args.output.resolve()
     if args.output.exists() and any(args.output.iterdir()):
         parser.error("output must be fresh and empty; no resume or automatic second campaign")
     args.output.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema": "prime-context.python-realworld-paired-medium-reference/v1",
-        "run_kind": "new-method-replication" if args.qualified_current_commit else "historical-reference-protocol",
+        "run_kind": ("new-subset-regression" if subset else
+                     "new-method-replication" if args.qualified_current_commit else "historical-reference-protocol"),
         "started_at": harness.utc_now(), "output": str(args.output),
-        "tasks": sorted(scenarios), "variants": list(VARIANTS), "phases": ["medium"], "thinking": "medium",
+        "tasks": sorted(scenarios), "variants": list(variants), "phases": ["medium"], "thinking": "medium",
         "models": [{"label": label, "provider": provider, "model": model,
                     "expected_provider_api": api, "expected_auth_route": route,
                     "logical_effort": "medium", "expected_wire_effort": "high" if label == "deepseek" else "medium"}
                    for label, provider, model, api, route in MODELS],
-        "expected_primaries": 180, "max_workers": 6, "max_active_per_pair": 1,
-        "scheduling": "six independent sequential queues for primaries and deferred retries",
+        "expected_primaries": len(scenarios) * len(MODELS) * len(variants),
+        "max_workers": len(MODELS) * len(variants), "max_active_per_pair": 1,
+        "scheduling": f"{len(MODELS) * len(variants)} independent sequential queues for primaries and deferred retries",
         "queue_key": ["model", "variant"], "primary_task_order": "ascending task ID per pair",
         "worker_unit": "harness/model/task/attempt", "retry_failed": 1,
         "primary_policy": "first attempt including invalid; never first capacity-valid or best",
@@ -502,7 +530,7 @@ def main():
         "orchestrator": str(Path(__file__).resolve()), "runner": str(harness.ROOT / "run.py"),
         "raw_layout": "medium/{model}/task-{id:02d}-{slug}/{variant}/attempt-{1|2}",
         "raw_config": "each attempt config/settings.json, config/models.json and rpc-bootstrap.mjs",
-        "freeze_policy": "parent freezes this measured reference once; existing frozen LOW is never modified",
+        "freeze_policy": "new output only; existing frozen benchmark results are never modified",
     }
     if args.restart_deepseek_from:
         manifest["restart_deepseek_from"] = str(args.restart_deepseek_from)

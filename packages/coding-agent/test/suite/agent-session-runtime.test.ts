@@ -16,6 +16,7 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "../../src/core/goals.js";
+import { LocalRlmSubagentCapacity } from "../../src/core/rlm-max-subagents.js";
 import type { RlmChildAdmission, SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import {
 	deriveSemanticEdges,
@@ -24,6 +25,7 @@ import {
 } from "../../src/core/semantic-edges.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type RequestJournalEntry, type SessionEntry, SessionManager } from "../../src/core/session-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
@@ -36,6 +38,7 @@ import { createDefaultRuntimeFactory } from "../../src/main.js";
 import type { ActiveSessionState } from "../../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../../src/modes/daemon/daemon-mode.js";
 import type { DaemonCommand } from "../../src/modes/daemon/daemon-protocol.js";
+import { DaemonRlmCapacityClient } from "../../src/modes/daemon/daemon-rlm-capacity.js";
 import { createDeferred } from "./scheduling.js";
 
 const branchSummaryModel: Model<"openai-responses"> = {
@@ -193,6 +196,68 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtime = new AgentSessionRuntime(session, services, createRuntime);
 		return { runtime, disposeSession };
 	}
+
+	it("owns daemon root capacity through native replacement and failed setup without charging children twice", async () => {
+		const { runtime: fixture, tempDir } = await createRuntimeForTest(() => {});
+		const client = new DaemonRlmCapacityClient({
+			socketPath: "fixture",
+			workerToken: "fixture",
+			workerInstanceId: "worker-1",
+		});
+		const releases: Array<ReturnType<typeof vi.fn>> = [];
+		const reserve = vi.spyOn(client, "reserveRoot").mockImplementation(async () => {
+			const release = vi.fn(async () => {});
+			releases.push(release);
+			return { release };
+		});
+		vi.spyOn(client, "forSession").mockImplementation(
+			() => new LocalRlmSubagentCapacity(fixture.session.settingsManager),
+		);
+		let failSetup = false;
+		const factory: CreateAgentSessionRuntimeFactory = async (options) => {
+			const result = await createAgentSessionFromServices({
+				services: fixture.services,
+				sessionManager: options.sessionManager,
+				model: fixture.session.model,
+				...options.sessionOptions,
+			});
+			if (failSetup) throw new Error("root setup failed");
+			return { ...result, services: fixture.services, diagnostics: [] };
+		};
+		const daemon = new AgentDaemon(join(tempDir, "root-capacity.sock"), {
+			defaultSessionConfig: { cwd: tempDir, agentDir: tempDir },
+			createRuntime: factory,
+		});
+		const internals = daemon as unknown as {
+			workerRlmCapacityClient(): DaemonRlmCapacityClient;
+			createRuntimeWithRlmCapacity: CreateAgentSessionRuntimeFactory;
+		};
+		vi.spyOn(internals, "workerRlmCapacityClient").mockReturnValue(client);
+		const runtime = await createAgentSessionRuntime(internals.createRuntimeWithRlmCapacity, {
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: await SessionManager.create(tempDir, join(tempDir, "root-capacity-sessions")),
+		});
+		cleanups.push(() => runtime.dispose());
+		expect(reserve).toHaveBeenCalledOnce();
+		await runtime.newSession();
+		expect(reserve).toHaveBeenCalledTimes(2);
+		expect(releases[0]).toHaveBeenCalledOnce();
+		await runtime.session.runRlmChild("child uses its parent admission", { name: "native-child" });
+		await runtime.session.waitForRlmQuiescence();
+		expect(reserve).toHaveBeenCalledTimes(2);
+		await runtime.dispose();
+		expect(releases[1]).toHaveBeenCalledOnce();
+		failSetup = true;
+		await expect(
+			createAgentSessionRuntime(internals.createRuntimeWithRlmCapacity, {
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(tempDir),
+			}),
+		).rejects.toThrow("root setup failed");
+		expect(releases[2]).toHaveBeenCalledOnce();
+	});
 
 	it("passes session config to replacement runtimes", async () => {
 		const calls: Array<Parameters<CreateAgentSessionRuntimeFactory>[0]> = [];
@@ -403,6 +468,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 	it("releases a failed child run from the inline runtime host", async () => {
 		const { runtime } = await createRuntimeForTest(() => {});
+		await runtime.session.setRlmMaxSubagents(1);
 		const deleteRlmSubagentRuntime = vi.spyOn(runtime, "deleteRlmSubagentRuntime");
 		let failedChild!: AgentSession;
 		let restoreDisposal!: () => void;
@@ -474,6 +540,7 @@ describe("AgentSessionRuntime characterization", () => {
 		initialization.mockRestore();
 
 		const { runtime: unknownStart } = await createRuntimeForTest(() => {});
+		await unknownStart.session.setRlmMaxSubagents(1);
 		vi.spyOn(unknownStart, "createRlmSubagentRuntime").mockRejectedValueOnce(new Error("start outcome unavailable"));
 		await unknownStart.session.runRlmChild("unknown factory outcome", { name: "unknown-child" });
 		await vi.waitFor(() => expect(unknownStart.session.hasRunningRlmChildren()).toBe(false));
@@ -587,7 +654,6 @@ describe("AgentSessionRuntime characterization", () => {
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
-				telemetryDisabled: true,
 				noTools: true,
 			},
 			[
@@ -708,6 +774,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const parentFile = manager.getSessionFile()!;
 		await manager.close();
 		const parent = await internals.createRuntime({ type: "create", sessionPath: parentFile });
+		await parent.runtime.session.setRlmMaxSubagents(1);
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("done")]);
 		const firstStart = parent.runtime.session.runRlmChild("first resident", { name: "resident-one" });
 		// Neither name/model selection nor the factory has completed its first await.
@@ -853,8 +920,7 @@ describe("AgentSessionRuntime characterization", () => {
 		}
 		expect(sessionAssistant.usage.cost.total).toBe(0.123);
 
-		const persistedAssistant = runtime.session.sessionManager
-			.getEntries()
+		const persistedAssistant = (await runtime.session.sessionManager.readEntries())
 			.filter((entry) => entry.type === "message")
 			.map((entry) => entry.message)
 			.find((message) => message.role === "assistant");
@@ -933,15 +999,15 @@ describe("AgentSessionRuntime characterization", () => {
 		]);
 		expect(runtime.session.goalState).toMatchObject({ active: false, status: "idle" });
 		expect(runtime.session.goalState.objective).toBeUndefined();
-		expect(runtime.session.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		expect(await runtime.session.sessionManager.readEntryRetention(goalEntryId)).toBe("retained-import");
 		const imported = await SessionManager.openReadOnly(importedSessionFile);
 		try {
-			expect(imported.getEntry(goalEntryId)).toMatchObject({
+			expect(await imported.readEntry(goalEntryId)).toMatchObject({
 				type: "custom",
 				customType: GOAL_STATE_CUSTOM_TYPE,
 				data: persistedGoal,
 			});
-			expect(imported.getEntryRetention(goalEntryId)).toBe("retained-import");
+			expect(await imported.readEntryRetention(goalEntryId)).toBe("retained-import");
 		} finally {
 			await imported.close();
 		}
@@ -1065,9 +1131,11 @@ describe("AgentSessionRuntime characterization", () => {
 								.filter((part): part is { type: "text"; text: string } => part.type === "text")
 								.map((part) => part.text)
 								.join("")
-					: message.role,
+					: message.role === "custom"
+						? message.customType
+						: message.role,
 			),
-		).toEqual(["Say one", "assistant"]);
+		).toEqual([TASK_FRAME_CUSTOM_TYPE, "Say one", "assistant"]);
 		expect(runtime.session.sessionFile).toBeDefined();
 	});
 
@@ -1327,28 +1395,10 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.prompt("hello");
 		await runtime.session.prompt("again");
 
-		const beforeMessages = runtime.session.messages.map((message) => ({
-			role: message.role,
-			text:
-				message.role === "user"
-					? typeof message.content === "string"
-						? message.content
-						: message.content
-								.filter((part): part is { type: "text"; text: string } => part.type === "text")
-								.map((part) => part.text)
-								.join("")
-					: undefined,
-		}));
-		const previousSessionFile = runtime.session.sessionFile;
-		const leafId = runtime.session.sessionManager.getLeafId();
-		expect(leafId).toBeTruthy();
-
-		const result = await runtime.fork(leafId!, { position: "at" });
-		expect(result).toEqual({ cancelled: false, selectedText: undefined });
-		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
-		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
-		expect(
-			runtime.session.messages.map((message) => ({
+		// A fork rebuilds one TaskFrame base instead of replaying the old render-cache revisions.
+		const beforeMessages = runtime.session.messages
+			.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
+			.map((message) => ({
 				role: message.role,
 				text:
 					message.role === "user"
@@ -1359,8 +1409,37 @@ describe("AgentSessionRuntime characterization", () => {
 									.map((part) => part.text)
 									.join("")
 						: undefined,
-			})),
+			}));
+		const previousSessionFile = runtime.session.sessionFile;
+		const leafId = runtime.session.sessionManager.getLeafId();
+		expect(leafId).toBeTruthy();
+
+		const result = await runtime.fork(leafId!, { position: "at" });
+		expect(result).toEqual({ cancelled: false, selectedText: undefined });
+		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
+		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
+		expect(
+			runtime.session.messages
+				.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
+				.map((message) => ({
+					role: message.role,
+					text:
+						message.role === "user"
+							? typeof message.content === "string"
+								? message.content
+								: message.content
+										.filter((part): part is { type: "text"; text: string } => part.type === "text")
+										.map((part) => part.text)
+										.join("")
+							: undefined,
+				})),
 		).toEqual(beforeMessages);
+		const rebuiltFrames = runtime.session.messages
+			.filter((message) => message.role === "custom")
+			.filter((message) => message.customType === TASK_FRAME_CUSTOM_TYPE);
+		expect(rebuiltFrames).toHaveLength(1);
+		expect(rebuiltFrames[0]?.content).toContain('"text":"hello"');
+		expect(rebuiltFrames[0]?.content).toContain('"text":"again"');
 	});
 
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
@@ -1460,6 +1539,7 @@ describe("AgentSessionRuntime characterization", () => {
 					services,
 					sessionManager,
 					sessionStartEvent,
+					model: faux.getModel(),
 				})),
 				services,
 				diagnostics: services.diagnostics,

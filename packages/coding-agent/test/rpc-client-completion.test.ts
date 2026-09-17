@@ -8,7 +8,7 @@ import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 
 const directories: string[] = [];
 
-function startup(schemaRevision: number) {
+function startup(schemaRevision: number, promptError?: string, exitOnState?: number) {
 	const directory = mkdtempSync(join(tmpdir(), "rpc-schema-"));
 	directories.push(directory);
 	const cliPath = join(directory, "mock-rpc.mjs");
@@ -21,9 +21,19 @@ import { writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 if (process.argv[process.argv.indexOf("--rpc-protocol-version") + 1] !== "${DAEMON_PROTOCOL_VERSION}") process.exit(2);
 process.on("SIGTERM", () => { writeFileSync(${JSON.stringify(stopped)}, "stopped"); process.exit(0); });
+let stateRequests = 0;
 createInterface({ input: process.stdin }).on("line", (line) => {
   const command = JSON.parse(line);
+  if (command.type === "prompt" && ${JSON.stringify(promptError)}) {
+    process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: false,
+      error: ${JSON.stringify(promptError)} }) + "\n");
+    return;
+  }
   if (command.type !== "get_state") throw new Error("Unexpected work before startup checks");
+  if (++stateRequests === ${JSON.stringify(exitOnState)}) {
+    process.stderr.write("mock RPC exit\n", () => process.exit(7));
+    return;
+  }
   process.stdout.write(JSON.stringify({ type: "response", id: command.id, command: command.type, success: true,
     data: { protocolVersion: ${DAEMON_PROTOCOL_VERSION}, schemaRevision: ${schemaRevision} } }) + "\n");
 });
@@ -61,6 +71,40 @@ afterEach(() => {
 });
 
 describe("RpcClient completion", () => {
+	it.each([1, 2])(
+		"rejects pending state request %i when the child exits",
+		async (exitOnState) => {
+			const server = startup(DAEMON_SCHEMA_REVISION, undefined, exitOnState);
+			try {
+				if (exitOnState === 2) await server.client.start();
+				const request = exitOnState === 1 ? server.client.start() : server.client.getState();
+				await expect(request).rejects.toThrow("Agent process exited with code 7. Stderr: mock RPC exit");
+				const stoppedAt = performance.now();
+				await server.client.stop();
+				expect(performance.now() - stoppedAt).toBeLessThan(500);
+				await expect(server.client.getState()).rejects.toThrow("Client not started");
+			} finally {
+				await server.client.stop();
+			}
+		},
+		2000,
+	);
+
+	it("rejects failed prompt admission and cancels its completion waiter", async () => {
+		const failure = "No API key found for openai";
+		const server = startup(DAEMON_SCHEMA_REVISION, failure);
+		try {
+			await server.client.start();
+			await expect(server.client.prompt("work")).rejects.toThrow(failure);
+			vi.useFakeTimers();
+			await expect(server.client.promptAndWait("work")).rejects.toThrow(failure);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+			await server.client.stop();
+		}
+	});
+
 	it("returns the complete event collection after successful completion", async () => {
 		const { client, unsubscribe, events } = completion({ type: "agent_end", messages: [] });
 		await expect(client.promptAndWait("work")).resolves.toEqual(events);

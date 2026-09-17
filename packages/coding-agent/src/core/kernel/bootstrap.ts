@@ -15,7 +15,7 @@ import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const ownedRuntime = getOwnedInstallation(getPhysicalPackageDir());
 const BOOTSTRAP_SCHEMA = 11;
-const PYTHON_VERSION = "3.11";
+const PYTHON_VERSION = "3.13";
 const RUNTIME_REQUIREMENT = PRODUCT.runtimeDistribution;
 // Serializes the kernel's user namespace so it can be revived across session
 // resume. Internal-only; intentionally not surfaced to the model as an import.
@@ -37,7 +37,7 @@ const DEFAULT_RLM_EXTRA_PACKAGES = [
 export const DEFAULT_RLM_EXTRA_UV_ARGS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.uvArg);
 export const DEFAULT_RLM_EXTRA_IMPORT_NAMES = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.importName);
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.promptLabel);
-const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | UV_NO_MODIFY_PATH=1 sh";
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
 	"update_memory",

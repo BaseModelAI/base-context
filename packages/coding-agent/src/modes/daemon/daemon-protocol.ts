@@ -46,6 +46,7 @@ import type {
 } from "../agent-connection/types.js";
 import type { AgentRosterEntry } from "./agent-roster.js";
 import type { SessionSummary } from "./daemon-session-list.js";
+import type { DaemonRlmCapacityOperation } from "./daemon-worker-protocol.js";
 import type { RlmLedgerMutation } from "./rlm-ledger-mutations.js";
 
 /**
@@ -58,7 +59,7 @@ import type { RlmLedgerMutation } from "./rlm-ledger-mutations.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = PRODUCT.daemonService;
-export const DAEMON_PROTOCOL_VERSION = 11;
+export const DAEMON_PROTOCOL_VERSION = 13;
 export const DAEMON_LEGACY_INSPECTION_PROTOCOL_VERSIONS: readonly number[] = [8, 9, 10];
 export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
@@ -66,7 +67,6 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 11 adds immediate get/set commands for active-session RLM max depth.
 // Revision 12 publishes idle-residency metadata on session summary rows.
 // Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
-// Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
 // Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
 // Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
 // Revision 17 gates authoritative child rosters and transient owned-session recovery context.
@@ -99,8 +99,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 45 carries owned checkpoint/resume transitions through the native loop.
 // Revision 46 adds capability-gated explicit resume for bound recurring generic cron jobs.
 // Revision 47 adds capability-gated agent result capsules backed by native session archives.
-export const DAEMON_SCHEMA_REVISION = 47;
-export const DAEMON_SCHEMA_ID = "protocol-11-schema-47-agent-results";
+// Revision 48 removes remote data export policy from session commands and worker state.
+// Revision 49 requires shared root-family subagent capacity and adds its get/set commands.
+export const DAEMON_SCHEMA_REVISION = 49;
+export const DAEMON_SCHEMA_ID = "protocol-13-schema-49-subagent-capacity";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -233,8 +235,6 @@ export interface DaemonAttachClientMetadata {
 	clientId?: DaemonClientId;
 	capabilities?: readonly DaemonClientCapability[];
 	resumeCursor?: DaemonResumeCursor;
-	/** Opt-out-only policy. A telemetry-enabled worker must reject this attach. */
-	telemetryDisabled?: true;
 	/** Fresh owner-supplied runtime context for recovering a client-owned worker. Never persisted. */
 	recoveryConfig?: AgentSessionRuntimeConfig;
 }
@@ -449,6 +449,13 @@ export type DaemonCommand =
 			workerToken: string;
 			workerInstanceId: string;
 			mutation: RlmLedgerMutation;
+	  }
+	| {
+			id?: string;
+			type: "rlm_capacity";
+			workerToken: string;
+			workerInstanceId: string;
+			operation: DaemonRlmCapacityOperation;
 	  }
 	| { id?: string; type: "get_direct_worker_transport"; activeSessionId: string }
 	| { id?: string; type: "roster_subscribe" }
@@ -721,6 +728,8 @@ export type DaemonCommand =
 	| { id?: string; type: "export_html"; activeSessionId: string; outputPath?: string }
 	| { id?: string; type: "export_jsonl"; activeSessionId: string; outputPath?: string }
 	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string; workerToken?: string }
+	| { id?: string; type: "get_rlm_max_subagents_status"; activeSessionId: string }
+	| { id?: string; type: "set_rlm_max_subagents"; activeSessionId: string; maxSubagents: number }
 	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
@@ -760,8 +769,8 @@ export const NATIVE_INFERENCE_OWNERSHIP_COMPATIBILITY = {
 } as const satisfies DaemonCommandCompatibility;
 
 export const CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY = {
-	minProtocol: 11,
-	minSchemaRevision: 45,
+	minProtocol: 13,
+	minSchemaRevision: 49,
 	capability: "canonical_session_ownership",
 } as const satisfies DaemonCommandCompatibility;
 
@@ -789,6 +798,7 @@ export function isLegacyDaemonInspection(command: DaemonCommand): boolean {
 
 const LEGACY_DAEMON_COMMAND = { minProtocol: 8 } as const;
 const RLM_MAX_DEPTH_COMMAND = { minProtocol: 8, minSchemaRevision: 11 } as const;
+const RLM_CAPACITY_COMMAND = { minProtocol: 13, minSchemaRevision: 49 } as const;
 const SESSION_INPUT_ADMISSION_COMMAND = {
 	minProtocol: 8,
 	capability: "session_input_admission",
@@ -812,7 +822,6 @@ const DELETE_RLM_SUBAGENT_COMMAND = {
 	capability: "delete_rlm_subagent",
 } as const;
 const FLAT_SESSION_TREE_COMMAND = { minProtocol: 8 } as const;
-const TELEMETRY_POLICY_COMMAND = { minProtocol: 8, minSchemaRevision: 14 } as const;
 const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
 	minProtocol: 8,
 	minSchemaRevision: 17,
@@ -846,6 +855,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
 	list_agent_peers: { ...AGENT_PEER_LIST_COMMAND, minProtocol: 10 },
 	rlm_ledger_mutate: { minProtocol: 10, minSchemaRevision: 28, capability: "rlm_ledger_mutation" },
+	rlm_capacity: RLM_CAPACITY_COMMAND,
 	get_direct_worker_transport: { ...DIRECT_PEER_TRANSPORT_COMMAND, minProtocol: 10 },
 	create: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	attach: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
@@ -934,6 +944,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	export_html: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	export_jsonl: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	set_session_name: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	get_rlm_max_subagents_status: RLM_CAPACITY_COMMAND,
+	set_rlm_max_subagents: RLM_CAPACITY_COMMAND,
 	get_rlm_max_depth_status: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 10 },
 	set_rlm_max_depth: { ...RLM_MAX_DEPTH_COMMAND, minProtocol: 10 },
 	rename_saved_session: CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
@@ -967,6 +979,7 @@ export const DAEMON_COMMAND_PLANE = {
 	list_saved_sessions: "control",
 	list_agent_peers: "control",
 	rlm_ledger_mutate: "control",
+	rlm_capacity: "control",
 	get_direct_worker_transport: "control",
 	create: "control",
 	attach: "session",
@@ -1055,6 +1068,8 @@ export const DAEMON_COMMAND_PLANE = {
 	export_html: "session",
 	export_jsonl: "session",
 	set_session_name: "control",
+	get_rlm_max_subagents_status: "session",
+	set_rlm_max_subagents: "session",
 	get_rlm_max_depth_status: "session",
 	set_rlm_max_depth: "session",
 	rename_saved_session: "control",
@@ -1084,10 +1099,6 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
 		requirements.push(OWNED_SESSION_RECOVERY_CONTEXT);
 	}
-	const carriesTelemetryPolicy =
-		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
-		(command.type === "create" && command.config?.telemetryDisabled !== undefined);
-	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
 	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
 		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
 	}
@@ -1427,6 +1438,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_user_messages_for_forking",
 	"get_last_assistant_text",
 	"get_system_prompt",
+	"get_rlm_max_subagents_status",
 	"get_rlm_max_depth_status",
 	"get_tool_definition",
 ]);
@@ -1437,6 +1449,7 @@ export function isDaemonMutatingCommand(command: Pick<DaemonCommand, "type">): b
 
 export const UPDATE_RESTART_DRAIN_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"rlm_ledger_mutate",
+	"rlm_capacity",
 	"extension_ui_response",
 	"abort",
 	"abort_bash",

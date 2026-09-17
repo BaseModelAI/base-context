@@ -73,16 +73,16 @@ The Python side does not call providers or implement an agent loop.
 
 ## Kernel Lifecycle
 
-The kernel is created lazily on first Python REPL use. Python resolution is:
+SDK and child sessions normally start the kernel lazily on first Python REPL use. The CLI root starts preparing it in the background; saved snapshots can also trigger prewarming. Python resolution is:
 
-1. `BASE_CONTEXT_KERNEL_PYTHON`, when it has a current `base-context-runtime`; otherwise
-2. the managed environment selected by `BASE_CONTEXT_KERNEL_VENV`, an owned release-local environment, or `~/.base-context/runtime`.
+1. An explicit `BASE_CONTEXT_KERNEL_PYTHON` takes precedence and must provide a current `base-context-runtime`. An invalid override reports an error rather than selecting another interpreter.
+2. Without an interpreter override, use the managed environment selected by `BASE_CONTEXT_KERNEL_VENV`, an owned release-local environment, or `~/.base-context/runtime`.
 
-The default managed environment includes Python 3.11, `base-context-runtime`, `dill`, and the default Python packages. Bootstrap uses `uv`; install it first or opt in with `BASE_CONTEXT_INSTALL_UV=1`. The owned installer prepares its release-local default environment before activation. A bootstrap marker detects stale environments. There is no fallback into upstream Prime state. See [installation](installation.md#python-setup).
+The default managed environment includes Python 3.13, `base-context-runtime`, `dill`, and the default Python packages. Bootstrap uses `uv`; install it first or opt in with `BASE_CONTEXT_INSTALL_UV=1`. The owned installer prepares its release-local default environment before activation. A bootstrap marker detects stale environments. There is no fallback into upstream Prime state. See [installation](installation.md#python-setup).
 
 Startup spawns `python -m rlm.repl` and exchanges newline-delimited JSON over stdio: the runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
 
-The manager owns the child process and a bounded stderr tail. Shutdown sends a `shutdown` request, waits for the process to exit, and terminates it as a fallback. Persistent sessions may snapshot the kernel namespace into their session artifact directory for revival.
+The manager owns the child process and a bounded stderr tail. Shutdown sends a `shutdown` request, waits for the process to exit, and terminates it as a fallback. Persistent sessions may snapshot the kernel namespace into their session artifact directory for revival. Startup refuses snapshots from a different Python major/minor before restoring them and leaves those files unchanged.
 
 ## Stdio Transport
 
@@ -154,6 +154,14 @@ Unknown options fail instead of being ignored. Model search is bounded to active
 8. Attribute child usage to the parent assistant turn and persist the attribution.
 
 Children receive incremented `RLM_DEPTH`, the inherited maximum depth, and their own `RLM_SESSION_DIR`. The default maximum depth is 2, so root sessions may create children and grandchildren; grandchildren may not create another generation unless the limit is configured higher.
+
+## Concurrent Subagent Limit
+
+A root agent and its descendants share one live-subagent cap, independent of the recursion-depth limit. The default is **4**. Running and idle subagents at every depth count; the main/root agent and inactive saved sessions do not. Admission fails when there are no free slots.
+
+[`/agents N`](usage.md#limit-concurrent-subagents) updates the current family cap and saves the global `rlmMaxSubagents` preference for later sessions and restarts. `N` must be a non-negative safe integer; `0` blocks new subagent spawns. `/agents` queries the effective current family value rather than displaying the default.
+
+Lowering the cap never cancels, kills, or passivates existing subagents. It only prevents new admissions while the live count is at or above the cap. Existing running and idle agents retain their state.
 
 ## Independent Delegation
 

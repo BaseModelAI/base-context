@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -76,6 +76,47 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 		}
 	}, 60_000);
 
+	it("refuses incompatible or unknown snapshot Python versions without changing saved state", async () => {
+		const savedDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-version-"));
+		const path = join(savedDir, "state.dill");
+		const manifest = join(savedDir, "state.json");
+		const createManager = () =>
+			new ReplKernelManager({ python: python as string, cwd: savedDir, snapshot: { path, manifestPath: manifest } });
+		const writer = createManager();
+		try {
+			await writer.execute("x = 42\ndef double(n):\n    return n * 2");
+		} finally {
+			await writer.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+		try {
+			const payload = readFileSync(path);
+			const metadata = JSON.parse(readFileSync(manifest, "utf8")) as { pythonVersion: string };
+			const otherVersion = metadata.pythonVersion.startsWith("3.11.") ? "3.13.0" : "3.11.0";
+			for (const savedManifest of [
+				JSON.stringify({ ...metadata, pythonVersion: otherVersion }),
+				"{}",
+				"{",
+				undefined,
+			]) {
+				if (savedManifest === undefined) rmSync(manifest);
+				else writeFileSync(manifest, savedManifest);
+				const reader = createManager();
+				try {
+					await expect(reader.start()).rejects.toThrow(/saved state was not restored or changed/);
+					expect(reader.isRunning).toBe(false);
+					await expect(reader.execute("double(x)")).rejects.toThrow(/saved state was not restored or changed/);
+				} finally {
+					await reader.shutdown({ snapshot: true, drainHostRequests: true });
+				}
+				expect(readFileSync(path)).toEqual(payload);
+				if (savedManifest === undefined) expect(existsSync(manifest)).toBe(false);
+				else expect(readFileSync(manifest, "utf8")).toBe(savedManifest);
+			}
+		} finally {
+			rmSync(savedDir, { recursive: true, force: true });
+		}
+	}, 60_000);
+
 	it("treats a missing snapshot as an empty restore (clean start)", async () => {
 		const freshDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-state-empty-"));
 		const manager = new ReplKernelManager({
@@ -98,7 +139,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 		const ipythonArtifactDir = mkdtempSync(join(tmpdir(), "prime-agent-repl-ipython-artifact-"));
 		const ipythonArtifactPath = join(ipythonArtifactDir, "kernel-state.dill");
 		const buildScript = [
-			"import dill",
+			"import dill, json, sys",
 			"dill.settings['recurse'] = True",
 			"payload = {",
 			"    'kept_number': dill.dumps(41),",
@@ -109,6 +150,8 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			"}",
 			`with open(${JSON.stringify(ipythonArtifactPath)}, "wb") as fh:`,
 			"    dill.dump(payload, fh)",
+			`with open(${JSON.stringify(join(ipythonArtifactDir, "kernel-state.json"))}, "w") as fh:`,
+			"    json.dump({'version': 1, 'pythonVersion': sys.version.split()[0]}, fh)",
 		].join("\n");
 		const build = spawnSync(python as string, ["-c", buildScript], { encoding: "utf8" });
 		expect(build.status).toBe(0);

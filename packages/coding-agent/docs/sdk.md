@@ -15,7 +15,10 @@ See [examples/sdk/](../examples/sdk/) for working examples from minimal to full 
 
 ## Quick Start
 
+Choose a supported provider and model explicitly. This example uses Anthropic; configure `ANTHROPIC_API_KEY` or its saved authentication before running it.
+
 ```typescript
+import { getModel } from "@ponythewhite/base-context-ai";
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@ponythewhite/base-context";
 
 // Set up credential storage and model registry
@@ -26,6 +29,7 @@ const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
   authStorage,
   modelRegistry,
+  model: getModel("anthropic", "claude-sonnet-4-5"),
 });
 
 session.subscribe((event) => {
@@ -422,33 +426,38 @@ const { session } = await createAgentSession({
 });
 ```
 
-If no model is provided:
-1. Tries to restore from session (if continuing)
-2. Uses default from settings
-3. Falls back to first available model
+Pass a supported `model` explicitly, or omit it to reuse an explicit selection saved in the session or settings. Pass `model: null` to leave the session unselected without restoring a saved choice. Base Context never chooses the first available model or switches providers because another credential exists.
+
+A supported saved model remains selected when its authentication needs setup. Requests fail before transport until that provider is authenticated. An unavailable saved model produces a diagnostic and requires a new explicit selection.
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 
 ### API Keys and OAuth
 
+`AuthStorage.create()` uses normal writable credential storage. Supported subscription
+providers can log in through `/login` in the CLI, or through `authStorage.login(providerId,
+callbacks)` in an SDK application. Supply the browser/prompt callbacks for the provider
+flow. Normal storage persists credentials and refreshes OAuth tokens when needed.
+Authentication does not select a model; choose one explicitly or reuse a saved choice.
+Prime integrations remain disabled.
 
-For an existing OpenAI Codex subscription, explicitly inject a read-only backend:
+For **optional read-only** use of an existing OpenAI Codex subscription, explicitly inject a backend:
 
 ```typescript
 import { AuthStorage } from "@ponythewhite/base-context";
 
 const authStorage = AuthStorage.fromStorage(readOnlyBackend, {
   existingOpenAICodexSubscription: true,
-  usePrimeCliConfig: false,
 });
 ```
 
 The backend implements `AuthStorageBackend` and supplies only the existing OAuth access
 credential and expiry. File-backed writable storage is rejected in this mode. Missing,
 stale or expired credentials refuse use; login, refresh, storage writes and API-key
-fallback are disabled. This authorizes only this instance's official
-`openai-codex` / `openai-codex-responses` route. It does not globally validate OAuth clients
-or protect against trusted in-process code. Keep the credential backend outside tools.
+fallback are disabled. This mode is limited to this instance's
+`openai-codex` / `openai-codex-responses` route. These restrictions do not apply to normal
+writable OAuth storage, and do not protect against trusted in-process code. Keep the
+credential backend outside tools.
 
 API key resolution priority (handled by AuthStorage):
 1. Runtime overrides (via `setRuntimeApiKey`, not persisted)
@@ -1321,7 +1330,7 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
   sessionManager: await SessionManager.create(process.cwd()),
 });
 
-await runRpcMode(runtime, 11);
+await runRpcMode(runtime, 13);
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.
@@ -1331,7 +1340,7 @@ See [RPC documentation](rpc.md) for the JSON protocol.
 For subprocess-based integration without building with the SDK, use the CLI directly:
 
 ```bash
-base-context --mode rpc --rpc-protocol-version 11 --no-session
+base-context --mode rpc --rpc-protocol-version 13 --no-session
 ```
 
 See [RPC documentation](rpc.md) for the JSON protocol.

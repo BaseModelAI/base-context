@@ -158,7 +158,7 @@ export class McpManager {
 		const providerId = this.providerId(integration.server);
 		const cred = this.authStorage.get(providerId);
 		if (cred === undefined) return false;
-		if (cred.type === "oauth" && getProviderAuthContract(providerId).oauth !== "validated") return false;
+		if (cred.type === "oauth" && getProviderAuthContract(providerId).oauth !== "supported") return false;
 		// Builtin URLs are code-constant; only user-declared endpoints can be retargeted, so only their
 		// tokens must prove where they belong. Mismatched or unbound tokens require re-login.
 		if (!integration.userDeclared) return true;
@@ -193,7 +193,7 @@ export class McpManager {
 				if (!key) {
 					const contract = getProviderAuthContract(providerId);
 					throw new Error(
-						contract.oauth === "validated" ? `Could not refresh credentials for ${server}` : contract.guidance,
+						contract.oauth === "supported" ? `Could not refresh credentials for ${server}` : contract.guidance,
 					);
 				}
 				return {};
@@ -221,7 +221,7 @@ export class McpManager {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.begin_login requires a server");
 				const contract = getProviderAuthContract(this.providerId(server));
-				if (contract.oauth !== "validated") throw new Error(contract.guidance);
+				if (contract.oauth !== "supported") throw new Error(contract.guidance);
 				await beginLogin(server);
 				return {};
 			};

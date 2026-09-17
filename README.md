@@ -11,7 +11,7 @@ Built by [Synerise](https://synerise.com), forked from [Prime Agent](https://git
 
 [![One historical SDK study: Base Context achieved 89/90 runtime-clean strict finishes versus Prime Agent 64/90, with 2 versus 26 additional attempts and 24.16% less cumulative attempt time.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.png)](benchmarks/python-realworld-30/REPORT.md)
 
-*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of release 1.0.0. “Clean” adds runtime requirements to task correctness. [Methodology and full results](benchmarks/python-realworld-30/REPORT.md).*
+*One study, not a universal ranking: historical SDK/shared-Bash results, not a fresh measurement of this release. “Clean” adds runtime requirements to task correctness. [Methodology and full results](benchmarks/python-realworld-30/REPORT.md).*
 
 ## Why Base Context?
 
@@ -41,7 +41,7 @@ cd /path/to/your/project
 base-context
 ```
 
-In the terminal UI, run `/login` to configure an authorized provider, then `/model` to choose a model. For API-key routes, you can instead set the provider's environment variable before launch. See [provider setup](packages/coding-agent/docs/providers.md).
+In the terminal UI, select and authenticate with a supported provider using `/login`, then choose a model with `/model`. Both choices are explicit. The installer prepares the application; you use only the selected provider's account and authentication. See [provider setup](packages/coding-agent/docs/providers.md).
 
 ### npm alternative: for users who already manage Node.js
 
@@ -90,6 +90,7 @@ Add project instructions in `AGENTS.md`. Use `/settings` for common preferences 
 | Command | Use |
 | --- | --- |
 | `/model`, `/effort` | Choose a configured model and reasoning level |
+| `/agents [N]` | Show or save the live-subagent cap (default 4); lowering only blocks new spawns |
 | `/usage`, `/context` | Inspect context, token usage, and reported costs |
 | `/compact`, `/refine` | Summarize context or refine durable harness state |
 | `base-context agents` | List agents; add `--all` to include saved agents |
@@ -118,7 +119,7 @@ In a frozen study of **30 Python tasks × 3 models × 2 agents**, Base Context c
 
 That is **24.16% less cumulative attempt time**, or **26.68% less all-attempt time per strict pass**, in this study. These are sums of attempt lifecycle durations, **not campaign wall time, user-perceived latency, or CPU time**. Runtime-clean is a separate reliability measure: it includes compaction failures and must not be read as task correctness alone.
 
-This is one SDK-level coding harness with a shared Bash tool, not a native Python/RLM workflow evaluation or a general product-performance claim. It used logical `medium` effort and a fixed single-deferred-retry policy. The historical Base Context package was `0.1.0`, using source revision `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Release `1.0.0` builds on the latter source line; it is not a newly measured artifact. There are **16 attempts with unknown cost**. Reported prices are API-equivalent estimates, not cash charges; complete fees and a whole-campaign cost advantage are unknown.
+This is one SDK-level coding harness with a shared Bash tool, not a native Python/RLM workflow evaluation or a general product-performance claim. It used logical `medium` effort and a fixed single-deferred-retry policy. The historical Base Context package was `0.1.0`, using source revision `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Current releases build on the latter source line; they are not newly measured artifacts. There are **16 attempts with unknown cost**. Reported prices are API-equivalent estimates, not cash charges; complete fees and a whole-campaign cost advantage are unknown.
 
 See the [methodology and results](benchmarks/python-realworld-30/REPORT.md), [all 180 cells](benchmarks/python-realworld-30/results/cells.md), and [reproduction guide](benchmarks/python-realworld-30/REPRODUCE.md).
 
@@ -147,7 +148,7 @@ Task state is selected recorded evidence, not automatically current truth. Budge
 
 These choices favor **recoverable evidence and controlled working sets**, even when that requires more structure or refusing a request that cannot meet its configured contract. They describe this fork's emphasis—not a claim that every capability is absent from every upstream version.
 
-The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Remote telemetry and trace sharing are off by default and require explicit configuration.
+The fork also owns its package, `base-context` command, `~/.base-context` state, and Python runtime distribution. SSE is the default transport; other supported transports are opt-in. Diagnostics stay local; there is no telemetry upload feature.
 
 There is no promise of unlimited context, universal provider support, guaranteed savings, or lossless summaries. Read [context management](packages/coding-agent/docs/context-management.md) and [fork philosophy](packages/coding-agent/docs/fork-philosophy.md) for the contracts and limits.
 
@@ -170,25 +171,6 @@ Retained sessions and artifacts can contain sensitive information. Compaction is
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues through [SECURITY.md](SECURITY.md), not in public transcripts or issues.
 
-## Credits and license
+## License
 
-Base Context is an MIT-licensed fork of **[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent)** by **[Prime Intellect](https://www.primeintellect.ai/)**. Its lineage includes **Mario Zechner's [Pi / pi-mono](https://github.com/badlogic/pi-mono)** agent and terminal UI work. We preserve upstream credits and license notices.
-
-We also acknowledge Prime Intellect's **[PrimeRL](https://github.com/PrimeIntellect-ai/prime-rl)** project and its contribution to open reinforcement-learning infrastructure. PrimeRL is a separate project, not a direct dependency of this CLI.
-
-See [LICENSE](LICENSE).
-
-## Citation
-
-If you use this codebase in your research, please cite Prime Agent:
-
-```bibtex
-@article{karten2026prime,
-  title={Prime Agent: A Self-Improving RLM Harness},
-  author={Karten, Seth and Zhang, Alex L. and Thomas, Kevin and Müller, Sebastian and Bakouch, Elie and Auras, Daniel and Senghaas, Mika and Obeid, Fares and Dunas, Konstantin and Hagemann, Johannes and Jaghouar, Sami},
-  journal={arXiv preprint arXiv:2608.23552},
-  year={2026}
-}
-```
-
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+MIT. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for copyright and license terms.

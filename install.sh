@@ -75,9 +75,10 @@ main() {
 	base_context_install_traps
 	base_context_init_screen
 	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Installing Base-Context" "" "" ""
+		base_context_screen "Installing Synerise base-context" "" "Sets up Node.js, npm, uv and Python as needed." ""
 	else
-		printf '\n\033[1m  Installing Base-Context\033[0m\n\033[2m  owned versioned install\033[0m\n\n'
+		printf '\n\033[1m  Installing Synerise base-context\033[0m\n\033[2m  CLI and Python runtime, ready together\033[0m\n\n'
+		printf 'Sets up Node.js, npm, uv and Python as needed.\n\n'
 	fi
 
 	start_preflight_checks
@@ -120,16 +121,23 @@ main() {
 	rm -rf "$download_dir"
 	base_context_download_dir=
 
+	standalone_node_bin="$(node_standalone_base_dir)/current/bin"
+	if [ -z "${BASE_CONTEXT_STANDALONE_NODE_BIN:-}" ] && [ "$(command -v node)" = "$standalone_node_bin/node" ]; then
+		BASE_CONTEXT_STANDALONE_NODE_BIN="$standalone_node_bin"
+	fi
 	base_context_owned_path="$base_context_install_root/bin"
 	if [ -n "${BASE_CONTEXT_STANDALONE_NODE_BIN:-}" ]; then
 		base_context_owned_path="$base_context_owned_path:$BASE_CONTEXT_STANDALONE_NODE_BIN"
 	fi
 	base_context_restore_terminal
-	printf '\nBase-Context was installed with its prepared Python runtime.\n'
-	printf '\nBefore running Base-Context, apply this PATH and add it to your shell profile:\n\n  export PATH="%s:$PATH"\n' "$base_context_owned_path"
-	printf '\nThen run: %s/bin/base-context\n' "$base_context_install_root"
+	printf '\nSynerise base-context is installed. Its Python runtime is ready.\n'
+	printf 'No separate uv or Python setup is needed.\n'
+	configure_owned_path
+	base_context_restore_terminal
+	printf '\nStart now with this command. It also updates PATH in this shell:\n\n  %s && base-context\n' "$(owned_install_path_line)"
+	printf '\nThe installer cannot change its parent shell PATH itself.\n'
 	printf '\nExplicit rollback: %s/bin/base-context-install rollback\n' "$base_context_install_root"
-	printf '\nExisting package-manager installations were not changed.\n'
+	printf '\nExisting base-context package-manager installations were not changed.\n'
 }
 
 create_temp_dir() {
@@ -371,10 +379,10 @@ base_context_content_line() {
 	fi
 
 	if [ "$index" -eq 1 ]; then
-		if [ -n "$base_context_screen_question" ]; then
-			base_context_set_text_line "Press Enter to continue; type n to cancel." "$base_context_color_muted"
-		elif [ -n "$base_context_screen_detail" ]; then
+		if [ -n "$base_context_screen_detail" ]; then
 			base_context_set_text_line "$base_context_screen_detail" "$base_context_color_muted"
+		elif [ -n "$base_context_screen_question" ]; then
+			base_context_set_text_line "Press Enter to continue; type n to cancel." "$base_context_color_muted"
 		else
 			base_context_set_blank_line
 		fi
@@ -417,9 +425,9 @@ base_context_set_lab_line() {
 
 base_context_logo_line() {
 	case "$1" in
-		5) printf '        +--------------+        ' ;;
-		6) printf '        | Base-Context |        ' ;;
-		7) printf '        +--------------+        ' ;;
+		5) printf '   +-----------------------+    ' ;;
+		6) printf '   | Synerise base-context |    ' ;;
+		7) printf '   +-----------------------+    ' ;;
 	esac
 }
 
@@ -879,16 +887,16 @@ run_preflight_checks() {
 	if command -v node >/dev/null 2>&1; then
 		node_version=$(node --version)
 		if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 23 || (major === 23 && minor >= 3) || (major === 22 && minor >= 12) ? 0 : 1)' >/dev/null; then
-			printf 'error: Base-Context requires Node.js ^22.12.0 || >=23.3.0. Found %s.\n' "$node_version"
+			printf 'Found Node.js %s; base-context needs ^22.12.0 || >=23.3.0. Setup can install a supported version.\n' "$node_version"
 			status=1
 		fi
 	else
-		printf 'error: Node.js ^22.12.0 || >=23.3.0 is required to install Base-Context.\n'
+		printf 'Node.js is not installed. Setup can install Node.js and npm for you.\n'
 		status=1
 	fi
 
 	if ! command -v npm >/dev/null 2>&1; then
-		printf 'error: npm is required to install Base-Context.\n'
+		printf 'npm is not installed. Setup can install it with Node.js.\n'
 		status=1
 	fi
 
@@ -990,7 +998,7 @@ install_node_npm_interactive() {
 
 	if base_context_prompt_yes_no \
 		"Install Node.js and npm with $label?" \
-		"Required before Base-Context can be installed." \
+		"Sets up Node.js and npm with $label, then continues installation." \
 		"Install? [Y/n]"; then
 		install_node_npm "$method" "$label"
 		return
@@ -998,7 +1006,8 @@ install_node_npm_interactive() {
 		prompt_status=$?
 	fi
 	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; install Node.js ^22.12.0 || >=23.3.0 and npm, then run this installer again.\n'
+		printf 'No terminal detected; rerun this installer in a terminal to approve automatic Node.js and npm setup.\n'
+		printf 'Or install Node.js ^22.12.0 || >=23.3.0 and npm yourself, then rerun it.\n'
 	else
 		printf '\nInstall Node.js ^22.12.0 || >=23.3.0 and npm, then run this installer again.\n'
 	fi
@@ -1294,52 +1303,25 @@ run_with_sudo() {
 	fi
 }
 
-configure_standalone_node_path() {
+configure_owned_path() {
 	if original_base_context_path=$(resolve_base_context_with_original_path); then
 		case "$original_base_context_path" in
-			"$BASE_CONTEXT_STANDALONE_NODE_BIN/"*)
-				if [ "$base_context_screen_enabled" = 1 ]; then
-					base_context_screen "Base-Context installed" "" "Run it with: $base_context_cmd" ""
-				else
-					printf '\nRun it with: %s\n' "$base_context_cmd"
-				fi
-				return 0
-				;;
+			"$base_context_install_root/bin/"*) ;;
+			*) printf '\nYour shell currently resolves %s to: %s\n' "$base_context_cmd" "$original_base_context_path" ;;
 		esac
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base-Context installed" "" "PATH update needed for $base_context_cmd." ""
-		else
-			printf '%s was installed, but your shell is not using that install yet.\n' "$base_context_cmd"
-			printf 'Your shell currently resolves %s to: %s\n' "$base_context_cmd" "$original_base_context_path"
-		fi
-	else
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base-Context installed" "" "PATH update needed for $base_context_cmd." ""
-		else
-			printf '%s was installed, but your shell is not using that install yet.\n' "$base_context_cmd"
-		fi
 	fi
 
 	profile=$(detect_shell_profile) || {
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_restore_terminal
-			printf '\n'
-		fi
-		print_standalone_path_manual_instructions
+		print_owned_path_manual_instructions
 		return 0
 	}
 
-	if shell_profile_has_standalone_node_path "$profile"; then
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_screen "Base-Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
-		else
-			printf '%s already contains %s.\n' "$profile" "$BASE_CONTEXT_STANDALONE_NODE_BIN"
-			printf 'Restart your shell or run: %s\n' "$(base_context_source_profile_command "$profile")"
-		fi
+	if shell_profile_has_owned_path "$profile"; then
+		printf '\nThe base-context PATH entry is already in %s.\n' "$profile"
 		return 0
 	fi
 
-	prompt_add_standalone_node_path "$profile"
+	prompt_add_owned_path "$profile"
 }
 
 resolve_base_context_with_original_path() {
@@ -1384,48 +1366,39 @@ detect_shell_profile() {
 	esac
 }
 
-shell_profile_has_standalone_node_path() {
+shell_profile_has_owned_path() {
 	profile="$1"
-	[ -f "$profile" ] && grep -F "$BASE_CONTEXT_STANDALONE_NODE_BIN" "$profile" >/dev/null 2>&1
+	[ -f "$profile" ] && grep -Fx "$(owned_install_path_line)" "$profile" >/dev/null 2>&1
 }
 
-prompt_add_standalone_node_path() {
+prompt_add_owned_path() {
 	profile="$1"
-	path_line=$(standalone_node_path_line)
+	path_line=$(owned_install_path_line)
 
 	if ! base_context_prompt_yes_no \
-		"Add standalone Node.js to your PATH?" \
-		"Updates $profile so future shells can run $base_context_cmd." \
+		"Add base-context to your shell PATH?" \
+		"Adds only the installer PATH entry to $profile." \
 		"Update PATH? [Y/n]"; then
-		if [ "$base_context_screen_enabled" = 1 ]; then
-			base_context_restore_terminal
-			printf '\n'
-		fi
-		print_standalone_path_manual_instructions
+		base_context_restore_terminal
+		print_owned_path_manual_instructions
 		return 0
 	fi
 
 	mkdir -p "$(dirname "$profile")"
 	{
-		printf '\n# Base-Context standalone Node.js\n'
+		printf '\n# Synerise base-context\n'
 		printf '%s\n' "$path_line"
 	} >>"$profile"
-	if [ "$base_context_screen_enabled" = 1 ]; then
-		base_context_screen "Base-Context installed" "" "Run: $(base_context_source_profile_command "$profile")" ""
-	else
-		printf 'Added %s to %s.\n' "$BASE_CONTEXT_STANDALONE_NODE_BIN" "$profile"
-		printf 'Restart your shell or run: %s\n' "$(base_context_source_profile_command "$profile")"
-	fi
+	base_context_restore_terminal
+	printf '\nAdded the base-context PATH entry to %s for future shells.\n' "$profile"
 }
 
-print_standalone_path_manual_instructions() {
-	printf 'Add this to your shell profile to use %s from new shells:\n\n' "$base_context_cmd"
-	printf '  %s\n' "$(standalone_node_path_line)"
-	printf '\nThen restart your shell and run: %s\n' "$base_context_cmd"
+print_owned_path_manual_instructions() {
+	printf '\nShell profile unchanged. For future shells, add only the export PATH part below to your profile.\n'
 }
 
-standalone_node_path_line() {
-	printf 'export PATH="%s:$PATH"' "$BASE_CONTEXT_STANDALONE_NODE_BIN"
+owned_install_path_line() {
+	printf 'export PATH=%s:"$PATH"' "$(base_context_shell_quote "$base_context_owned_path")"
 }
 
 base_context_shell_quote() {
@@ -1516,8 +1489,8 @@ confirm_install() {
 	tarball_url="$2"
 
 	if base_context_prompt_yes_no \
-		"Install Base-Context v$version in an owned version directory?" \
-		"Prepares the CLI and Python runtime before selecting them together." \
+		"Install Synerise base-context v$version?" \
+		"Installs the CLI, uv if needed, and a release-local Python runtime." \
 		"Install? [Y/n]"; then
 		return 0
 	else
@@ -1552,13 +1525,14 @@ base_context_owned_install() {
 install_base_context_package() {
 	tarball_path="$1"
 	version="$2"
-	install_details="Staging a unique Base-Context version.
-Preparing its release-local Python runtime.
-Selecting the executable and runtime together.
-Retaining the previous version for rollback."
+	install_details="Staging a separate base-context version.
+Setting up uv and Python automatically.
+Preparing the release-local Python runtime.
+Selecting the ready CLI and runtime together.
+Keeping the previous version for rollback."
 	base_context_run_quiet_with_animation_steps \
-		"Installing Base-Context" \
-		"Installing Base-Context" \
+		"Installing Synerise base-context" \
+		"Installing Synerise base-context" \
 		"$install_details" \
 		base_context_owned_install "$tarball_path" "$version"
 }

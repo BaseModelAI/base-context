@@ -1,6 +1,8 @@
+import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { Agent } from "@ponythewhite/base-context-agent";
 import { fauxAssistantMessage, getModel, type Model, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +14,7 @@ import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { DAEMON_PROTOCOL_VERSION } from "../src/modes/daemon/daemon-protocol.js";
+import * as rpcJsonl from "../src/modes/rpc/jsonl.js";
 import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.js";
 import { createTestResourceLoader } from "./utilities.js";
@@ -21,6 +24,11 @@ const rpcIo = vi.hoisted(() => ({
 	onOutput: undefined as ((line: string) => void) | undefined,
 	lineHandler: undefined as ((line: string) => void) | undefined,
 }));
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof childProcess>();
+	return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 vi.mock("../src/core/output-guard.js", () => ({
 	takeOverStdout: vi.fn(),
@@ -32,13 +40,17 @@ vi.mock("../src/core/output-guard.js", () => ({
 
 vi.mock("../src/modes/interactive/theme/theme.js", () => ({ theme: {} }));
 
-vi.mock("../src/modes/rpc/jsonl.js", () => ({
-	attachJsonlLineReader: vi.fn((_stream: NodeJS.ReadableStream, onLine: (line: string) => void) => {
+vi.mock("../src/modes/rpc/jsonl.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof rpcJsonl>();
+	const attach: typeof actual.attachJsonlLineReader = (stream, onLine, options) => {
+		if (stream !== process.stdin) return actual.attachJsonlLineReader(stream, onLine, options);
 		rpcIo.lineHandler = onLine;
-		return () => {};
-	}),
-	serializeJsonLine: (value: unknown) => `${JSON.stringify(value)}\n`,
-}));
+		return () => {
+			rpcIo.lineHandler = undefined;
+		};
+	};
+	return { ...actual, attachJsonlLineReader: vi.fn(attach) };
+});
 
 type ParsedOutputLine = Record<string, unknown>;
 
@@ -232,6 +244,8 @@ describe("RPC prompt response semantics", () => {
 		};
 		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected diagnostic network send"));
 		let session: AgentSession | undefined;
+		const client = new RpcClient();
+		let stopReadingCommands: (() => void) | undefined;
 		try {
 			({ session } = await createAgentSession({
 				cwd: tempDir,
@@ -271,34 +285,49 @@ describe("RPC prompt response semantics", () => {
 			void runRpcMode(runtimeHost, DAEMON_PROTOCOL_VERSION);
 			await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-			const client = new RpcClient();
-			rpcIo.onOutput = (line) => client["handleLine"](line);
+			const transport = new childProcess.ChildProcess();
+			const stdin = new PassThrough();
+			const stdout = new PassThrough();
+			transport.stdin = stdin;
+			transport.stdout = stdout;
+			transport.stderr = new PassThrough();
+			vi.spyOn(transport, "kill").mockImplementation(() => {
+				queueMicrotask(() => transport.emit("exit", 0, null));
+				return true;
+			});
+			stopReadingCommands = rpcJsonl.attachJsonlLineReader(stdin, (line) => rpcIo.lineHandler?.(line));
+			rpcIo.onOutput = (line) => {
+				stdout.write(line);
+			};
+			vi.mocked(childProcess.spawn).mockReturnValueOnce(transport);
+			await client.start();
+			rpcIo.outputLines = [];
 			const failure = "Request token budget over-budget: configured context limit exceeded";
 			const collected = expect(client.collectEvents()).rejects.toThrow(failure);
 			const idle = expect(client.waitForIdle()).rejects.toThrow(failure);
 			// Unrelated extension errors must not terminate either completion waiter.
-			rpcIo.onOutput(
-				JSON.stringify({
+			stdout.write(
+				rpcJsonl.serializeJsonLine({
 					type: "extension_error",
 					extensionPath: "test-extension",
 					event: "prompt_completion",
 					error: "nonterminal",
 				}),
 			);
-			rpcIo.onOutput(
-				JSON.stringify({
+			stdout.write(
+				rpcJsonl.serializeJsonLine({
 					type: "extension_error",
 					extensionPath: "<session-input>",
 					event: "session_input",
 					error: "nonterminal",
 				}),
 			);
-			rpcIo.lineHandler!(JSON.stringify({ id: "late", type: "prompt", message: "Diagnostic request" }));
+			await client.prompt("Diagnostic request");
 			await Promise.all([collected, idle]);
 
 			const output = parseOutputLines(rpcIo.outputLines);
-			expect(getPromptResponses(rpcIo.outputLines, "late")).toEqual([
-				{ id: "late", type: "response", command: "prompt", success: true },
+			expect(output.filter((event) => event.type === "response" && event.command === "prompt")).toEqual([
+				{ id: expect.any(String), type: "response", command: "prompt", success: true },
 			]);
 			const failures = output.filter((event) => event.type === "extension_error");
 			expect(failures).toEqual([
@@ -323,6 +352,8 @@ describe("RPC prompt response semantics", () => {
 			expect(fetch).not.toHaveBeenCalled();
 			expect(session.messages.some((message) => message.role === "assistant")).toBe(false);
 		} finally {
+			await client.stop();
+			stopReadingCommands?.();
 			rpcIo.onOutput = undefined;
 			fetch.mockRestore();
 			if (session) await session.disposeAsync();

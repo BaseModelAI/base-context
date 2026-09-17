@@ -88,6 +88,8 @@ export interface HarnessOptions {
 	sessionManager?: SessionManager;
 	rlmDepth?: number;
 	rlmMaxDepth?: number;
+	rlmChildAdmission?: AgentSessionConfig["rlmChildAdmission"];
+	rlmRootAdmission?: AgentSessionConfig["rlmRootAdmission"];
 	autonomous?: AgentAutonomousConfig;
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
@@ -214,6 +216,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		extensionRunnerRef,
 		rlmDepth: options.rlmDepth,
 		rlmMaxDepth: options.rlmMaxDepth,
+		rlmChildAdmission: options.rlmChildAdmission,
+		rlmRootAdmission: options.rlmRootAdmission,
 		autonomous: options.autonomous,
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,

@@ -207,11 +207,11 @@ describe("ModelSelectorComponent", () => {
 		harnesses.push(harness);
 
 		const base = harness.getModel("base")!;
-		const signedInExact = { ...base, provider: "prime-inference", id: "z-ai/glm-5.2", name: "GLM 5.2" };
+		const signedInExact = { ...base, provider: "openrouter", id: "z-ai/glm-5.2", name: "GLM 5.2" };
 		const signedOutExact = { ...base, provider: "opencode", id: "glm-5.2", name: "GLM 5.2" };
 		const signedInFuzzy = {
 			...base,
-			provider: "prime-inference",
+			provider: "openrouter",
 			id: "glorious-language-model-5.2",
 			name: "Glorious Language Model 5.2",
 		};
@@ -225,7 +225,7 @@ describe("ModelSelectorComponent", () => {
 			"glm5.2",
 			{
 				availableModels: [signedInFuzzy, signedOutExact, signedInExact],
-				configuredProviders: new Set(["prime-inference"]),
+				configuredProviders: new Set(["openrouter"]),
 			},
 		);
 
@@ -248,8 +248,8 @@ describe("ModelSelectorComponent", () => {
 
 		const base = harness.getModel("base")!;
 		const exact = { ...base, provider: "openai", id: "gpt-5", name: "GPT-5" };
-		const prefix = { ...base, provider: "prime-inference", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
-		const fuzzy = { ...base, provider: "prime-inference", id: "other-openai-gpt-5", name: "Other GPT-5" };
+		const prefix = { ...base, provider: "openrouter", id: "openai-gpt-5-preview", name: "GPT-5 Preview" };
+		const fuzzy = { ...base, provider: "openrouter", id: "other-openai-gpt-5", name: "Other GPT-5" };
 		const selector = new ModelSelectorComponent(
 			createFakeTui(),
 			undefined,
@@ -260,7 +260,7 @@ describe("ModelSelectorComponent", () => {
 			"openai/gpt5",
 			{
 				availableModels: [fuzzy, prefix, exact],
-				configuredProviders: new Set(["prime-inference"]),
+				configuredProviders: new Set(["openrouter"]),
 			},
 		);
 

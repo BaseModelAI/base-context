@@ -8,7 +8,6 @@ import {
 	TruncatedText,
 } from "@ponythewhite/base-context-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
 import { getProviderAuthContract } from "../../../core/provider-contracts.js";
 import { theme } from "../theme/theme.js";
 import {
@@ -120,7 +119,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			title: options.title ?? (mode === "login" ? "Providers" : "Saved Credentials"),
 			subtitle:
 				options.subtitle ??
-				(mode === "login" ? "API keys; unvalidated OAuth unavailable." : "Choose a credential to remove."),
+				(mode === "login" ? "Subscription login or API keys." : "Choose a credential to remove."),
 		});
 		this.addChild(panel);
 		if (options.header) {
@@ -199,10 +198,6 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			const rankDelta = this.getProviderSortRank(a) - this.getProviderSortRank(b);
 			if (rankDelta !== 0) {
 				return rankDelta;
-			}
-			if (this.mode === "login" && a.id !== b.id) {
-				if (a.id === PRIME_INFERENCE_PROVIDER_ID) return -1;
-				if (b.id === PRIME_INFERENCE_PROVIDER_ID) return 1;
 			}
 			return compareAuthSelectorProviders(a, b);
 		});
@@ -327,7 +322,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		}
 		if (
 			credential?.type === "oauth" &&
-			getProviderAuthContract(provider.id).oauth !== "validated" &&
+			getProviderAuthContract(provider.id).oauth !== "supported" &&
 			(provider.authType === "oauth" || (!status.configured && !status.source))
 		) {
 			return theme.fg("warning", "saved OAuth unavailable");
@@ -354,8 +349,6 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		switch (status.source) {
 			case "environment":
 				return theme.fg("success", `env: ${status.label ?? "API key"}`);
-			case "prime_cli":
-				return theme.fg("success", status.label ?? "Prime CLI");
 			case "runtime":
 				return theme.fg("success", "runtime API key");
 			case "fallback":

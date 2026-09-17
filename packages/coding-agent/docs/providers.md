@@ -1,35 +1,39 @@
 # Providers
 
-Base Context resolves providers through their actual API and credential routes. API keys can come from environment variables or the owned auth file. A model catalog entry does not establish subscription entitlement, OAuth-client permission or native context capabilities.
+Choose a supported **provider**, authenticate, then select a **model**. Base Context does not choose a provider or model automatically. Accounts, usage limits, and billing belong to the provider you select.
 
-## Table of Contents
+## First-time setup
 
-- [Subscriptions](#subscriptions)
-- [API Keys](#api-keys)
-- [Auth File](#auth-file)
-- [Cloud Providers](#cloud-providers)
-- [Custom Providers](#custom-providers)
-- [Resolution Order](#resolution-order)
+1. Start `base-context`.
+2. Open `/login` and select a provider. For a supported subscription, follow its browser authorization link. For API-key authentication, enter that provider's key. Bearer and cloud credentials use the provider-specific setup below.
+3. Open `/model` and choose a supported model. The selected provider/model is saved for later sessions.
 
-## Subscriptions
+For command-line selection, list the supported models and name both parts:
 
-Use only the provider/auth routes authorized for your setup. `/login` exposes the available configured routes; a fork does not inherit permission to use upstream OAuth clients. Where writable credential storage is supported, it belongs under `~/.base-context/auth.json` (or `BASE_CONTEXT_HOME`), not Prime's root. Login, refresh and logout behavior follows the selected route's permissions.
+```bash
+base-context model list
+base-context --provider openai --model gpt-5.4
+# Equivalent:
+base-context --model openai/gpt-5.4
+```
 
-Do not copy a Prime credential store or enable an API-key billing fallback to bypass a subscription refusal. The offline migration command excludes credentials.
+An API key alone does not select a model. A missing or unavailable saved model is not silently replaced with another provider. For models outside the built-in list, register the provider/model in [models.json](models.md) first.
 
-### OpenAI Codex
+## Authentication availability
 
-An existing authorized OpenAI Codex subscription can be supplied to an individual SDK instance through an explicitly injected read-only backend. See [SDK authentication](sdk.md#api-keys-and-oauth).
+Use `/login` for supported subscription OAuth or API-key authentication. The built-in subscription routes are **OpenAI Codex (ChatGPT)**, **Anthropic (Claude Pro/Max)**, and **GitHub Copilot**. Open the provider's browser link and complete its authorization steps. Access and usage limits depend on your provider account.
 
-That mode uses the official `openai-codex` / `openai-codex-responses` route. It refuses missing, stale or expired credentials and disables login, refresh, credential writes and API-key fallback. Keep the backend outside tools. This is an instance-scoped permission, not a global OAuth-client approval or an OpenAI endorsement of this fork.
+Credentials are stored in `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` can select another state root). Normal OAuth storage persists credentials and refreshes them when needed. Provider-specific bearer and cloud credentials are described below. Prime integrations are disabled; this does not disable other registered OAuth providers.
 
-### Claude Pro/Max
+### ChatGPT / Codex subscription
 
-Use this route only where the exact client and account are authorized. This guide does not establish Claude subscription access, included usage or billing terms for the fork. An Anthropic API key is a separate credential route.
+1. Open `/login` and choose **OpenAI Codex**.
+2. Open the displayed browser link and sign in with the ChatGPT account that has Codex access. Complete the callback or paste the requested authorization response when prompted.
+3. Open `/model` and explicitly choose an `openai-codex` model available to your account.
 
-### GitHub Copilot
+An OpenAI API key belongs to the separate `openai` provider; it is not required for the Codex subscription route. Anthropic API-key authentication is likewise separate from Claude subscription login. Logging in does not automatically select or replace a model.
 
-If the authorized Copilot login route is available, use the correct github.com or GitHub Enterprise domain. Model availability also depends on the account and enabled models. This guide does not grant the fork access to a Copilot subscription.
+The SDK also offers an optional, explicitly injected read-only Codex backend for existing credentials. Only that mode disables login, refresh, credential writes, and API-key fallback. It does not restrict normal interactive subscription login. See [SDK authentication](sdk.md#api-keys-and-oauth).
 
 ## API Keys
 
@@ -47,7 +51,6 @@ base-context
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
-| Prime Inference | `PRIME_API_KEY` | `prime-inference` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | Google Gemini | `GEMINI_API_KEY` | `google` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
@@ -81,7 +84,6 @@ Store credentials in the owned `~/.base-context/auth.json` (`BASE_CONTEXT_HOME` 
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
   "openai": { "type": "api_key", "key": "sk-..." },
-  "prime-inference": { "type": "api_key", "key": "..." },
   "deepseek": { "type": "api_key", "key": "sk-..." },
   "google": { "type": "api_key", "key": "..." },
   "opencode": { "type": "api_key", "key": "..." },
@@ -114,10 +116,6 @@ The `key` field supports three formats:
   ```
 
 Writable OAuth storage is used only when the configured route permits it. The read-only existing-Codex subscription mode does not write this file or refresh credentials. Shell-backed API-key entries execute commands; use only trusted local configuration, never unreviewed imported instructions.
-
-### Prime Inference
-
-Prime Inference uses the OpenAI-compatible endpoint at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or store an API key for `prime-inference` via `/login`.
 
 ## Cloud Providers
 
@@ -159,7 +157,7 @@ Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_
 base-context --provider amazon-bedrock --model us.anthropic.claude-sonnet-4-20250514-v1:0
 ```
 
-Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
+Register custom application inference profile IDs in [models.json](models.md) before selecting them. Prompt caching is enabled automatically for Claude models whose ID contains a recognizable model name (base models and system-defined inference profiles). For application inference profiles (whose ARNs don't contain the model name), set `AWS_BEDROCK_FORCE_CACHE=1` to enable cache points:
 
 ```bash
 export AWS_BEDROCK_FORCE_CACHE=1

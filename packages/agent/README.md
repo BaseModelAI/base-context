@@ -2,7 +2,7 @@
 
 Stateful agent runtime with native context and recovery ownership.
 
-Part of **[Synerise base-context](https://github.com/BaseModelAI/base-context)**. Forked from Prime Intellect's [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built on Mario Zechner's Pi. MIT; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Part of **[Synerise base-context](https://github.com/BaseModelAI/base-context)**. MIT; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Workspace Package
 

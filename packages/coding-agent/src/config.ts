@@ -499,12 +499,6 @@ export function expandTildePath(path: string): string {
 	return expandHomePath(path);
 }
 
-/** Sharing is explicit; no upstream session viewer receives fork sessions by default. */
-export function getShareViewerUrl(gistId: string): string {
-	const baseUrl = process.env[PRODUCT_ENV.shareViewer];
-	return baseUrl ? `${baseUrl}#${gistId}` : `https://gist.github.com/${gistId}`;
-}
-
 // =============================================================================
 // User Config Paths (~/.prime/agent/*)
 // =============================================================================
@@ -527,10 +521,6 @@ export function getLogsDir(): string {
 /** Log file capturing client-side agent-open failures. */
 export function getClientErrorLogPath(): string {
 	return join(getLogsDir(), "client-errors.log");
-}
-
-export function getAgentTracesLogPath(): string {
-	return join(getLogsDir(), "agent-traces.log");
 }
 
 /** Shared structured (JSON lines) log for client, daemon, and provider diagnostics. */

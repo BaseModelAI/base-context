@@ -1,28 +1,81 @@
 # Installation, updates, and rollback
 
-The application package is **`@ponythewhite/base-context`**. The executable is **`base-context`**. The repository is [BaseModelAI/base-context](https://github.com/BaseModelAI/base-context). Prime Agent's installers and packages install a different product.
+Install **Synerise base-context** with the installer below. The application package is `@ponythewhite/base-context`; the command is `base-context`.
 
-## Requirements
+## Recommended: the installer
 
-- Node.js `^22.12.0 || >=23.3.0`: Node 22.12 or newer on the 22.x line, or Node 23.3 or newer. Node 22.8–22.11 and 23.0–23.2 are not supported.
-- npm compatible with that Node version.
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) for the managed Python workspace. The default bootstrap installs Python 3.11, the bundled `base-context-runtime`, and its default Python packages.
-- A configured, authorized model provider. Provider inference and first-time dependency setup need network access unless you supply local alternatives.
-
-The Node floor comes from the native SQLite session catalog. It does not change the journal format. Normal session owners rebuild older derived indexes; read-only catalog discovery does not migrate them.
-
-## npm installation
+On **macOS or Linux**, run this in a terminal:
 
 ```bash
-npm install -g @ponythewhite/base-context
-base-context --version
-cd /path/to/project
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
+```
+
+**You do not install Node.js, npm, Python, or `uv` first.** The installer:
+
+1. Checks Node.js/npm and asks to install a supported version when needed. Some system package-manager methods need administrator approval.
+2. Installs `uv` if it is missing, downloads managed Python 3.13, and prepares the bundled runtime and Python packages.
+3. Activates the CLI only after that preparation succeeds.
+4. Offers to add the launcher and any standalone Node.js installation to your shell profile. It preserves existing settings.
+5. Prints one exact `export PATH=... && base-context` command. Run it to activate and launch in your **current terminal**. A child installer cannot change its parent shell's PATH. If you accept the profile update, future shells get the PATH automatically.
+
+Use this route **instead of** the npm alternative. No Python virtual-environment activation is needed. Initial setup needs network access and ordinary shell download/archive tools. Missing Node/npm setup needs terminal approval; rerun in a terminal rather than preinstalling everything manually.
+
+To start work later:
+
+```bash
+cd /path/to/your/project
 base-context
 ```
 
-Make sure your npm global binary directory is on `PATH`. Use a user-owned Node installation rather than adding elevated permissions just for this agent.
+Select a supported provider with `/login`, authenticate with that provider, then select a model with `/model`. You must choose the provider and model. Use that provider's account and authentication. See [provider setup](providers.md).
 
-In the UI, use `/login` and then `/model`. See [provider configuration](providers.md). The fork does not inherit permission to use upstream OAuth clients or subscriptions.
+### Updates and rollback
+
+The installer manages a versioned CLI/Python pair beneath `${XDG_DATA_HOME:-$HOME/.local/share}/base-context`. `BASE_CONTEXT_INSTALL_ROOT` selects another root. The stable launcher is `<owned-root>/bin/base-context`. Existing global package-manager installations remain separate and are not overwritten.
+
+```bash
+base-context update --self
+base-context-install rollback
+```
+
+Rollback selects the retained previous CLI/Python pair for future launches. It does not stop running processes, revert session data or Node.js, or undo changes made by Python skills. Old and failed version directories are retained.
+
+To install a specific release, download that release's installer and pass its version:
+
+```bash
+VERSION=1.0.1
+curl -fsSL "https://github.com/BaseModelAI/base-context/releases/download/v${VERSION}/install.sh" -o install-base-context.sh
+sh install-base-context.sh "$VERSION"
+```
+
+The shell resolves the stable npm tag by default; `beta` selects the npm `beta` tag. A positional version or `BASE_CONTEXT_VERSION` bypasses channel discovery. Matching GitHub release assets must exist. `BASE_CONTEXT_DOWNLOAD_BASE_URL` is an installer repository-base override, not the running application's update-manifest setting; leave it unset for normal use.
+
+## npm alternative
+
+Use this only if you already manage Node.js and npm, or if you use Windows. Install supported **Node.js and npm before this route**: Node.js `^22.12.0 || >=23.3.0` (22.12+ on the 22.x line, or 23.3+).
+
+Bash/Zsh:
+
+```bash
+npm install -g @ponythewhite/base-context
+cd /path/to/project
+BASE_CONTEXT_INSTALL_UV=1 base-context
+```
+
+PowerShell:
+
+```powershell
+npm install -g @ponythewhite/base-context
+Set-Location C:\path\to\project
+$env:BASE_CONTEXT_INSTALL_UV = "1"
+base-context
+```
+
+Make sure the npm global binary directory is on PATH. Use a user-owned Node installation rather than adding administrator permissions just for this agent.
+
+**What happens when:** normal `npm install` installs the CLI but skips Python setup. Starting a normal CLI session begins preparing Python in the background when the Python tool is enabled. `BASE_CONTEXT_INSTALL_UV=1` lets this setup install missing `uv`; it then downloads Python and installs the bundled runtime. You do not install Python manually. Later sessions reuse the environment. `base-context --version` does not start Python.
+
+Without that flag, missing `uv` can make the Python tool fail; normal session startup does not offer an installation prompt. The installer route avoids this separate step by finishing Python setup before activation. Advanced npm postinstall bootstrap flags are optional, not required for this route.
 
 Update an npm-managed installation with:
 
@@ -30,7 +83,7 @@ Update an npm-managed installation with:
 npm install -g @ponythewhite/base-context@latest
 ```
 
-The CLI also provides `base-context update`. npm/pnpm/yarn/bun global installations remain externally owned. They do not gain the owned installer's paired CLI/Python rollback.
+`base-context update` also supports package-manager updates. npm/pnpm/yarn/bun installations remain externally owned and do not gain the installer's paired CLI/Python rollback.
 
 ## Source installation
 
@@ -39,73 +92,41 @@ git clone https://github.com/BaseModelAI/base-context.git
 cd base-context
 npm ci
 npm run build:source
-node packages/coding-agent/dist/bundle/cli.js
+BASE_CONTEXT_INSTALL_UV=1 node packages/coding-agent/dist/bundle/cli.js
 ```
 
-Do not substitute the upstream repository or an old fork-development branch. The source-built CLI starts in the current working directory. To use it in another project:
+The source-built CLI starts in the current working directory. To work in another project, change to that directory and run `node /absolute/path/to/base-context/packages/coding-agent/dist/bundle/cli.js`. Keep source updates under git, then rerun `npm ci` and `npm run build:source`. A global npm update does not update your checkout.
+
+## Custom Python environments
+
+Ordinary installer users can skip this section. npm and source installations normally use `~/.base-context/runtime`; the installer uses a release-local environment. SDK sessions and RLM children normally prepare Python lazily, unlike the normal CLI root session's background prewarm.
+
+For an explicitly managed environment:
+
+- `BASE_CONTEXT_KERNEL_PYTHON` selects an absolute Python executable with the current bundled **`base-context-runtime`** installed.
+- `BASE_CONTEXT_KERNEL_VENV` selects an absolute environment directory.
+- The package exposes the Python import `rlm`. This is not a command users need to run to install the CLI.
+
+Saved Python namespaces are not portable across minor versions; native startup rejects an incompatible snapshot. Start a new session when selecting a different Python minor version. Python skills can install additional packages. See [Python-backed skills](skills.md#python-backed-skills).
+
+## Local release packages
+
+For unpublished packages, use the dedicated installer from the matching, freshly built and extracted main package. Supply all three other first-party archives explicitly:
 
 ```bash
-cd /path/to/project
-node /absolute/path/to/base-context/packages/coding-agent/dist/bundle/cli.js
-```
-
-Replace `base-context` in other examples with that Node invocation when using a source build. Keep source updates under git and rebuild with `npm ci` and `npm run build:source`; a global npm update does not update your checkout.
-
-## Python setup
-
-For npm and source installations, the default kernel environment is `~/.base-context/runtime`. It is prepared lazily when the agent first uses Python. Install `uv` first, or explicitly allow bootstrap to install it with `BASE_CONTEXT_INSTALL_UV=1`. Initial preparation can download Python and dependencies.
-
-For a manual environment:
-
-- `BASE_CONTEXT_KERNEL_PYTHON` selects an absolute Python executable with a current **`base-context-runtime`** already installed.
-- `BASE_CONTEXT_KERNEL_VENV` selects an absolute manual environment directory.
-- The Python import remains `rlm`; an environment containing only `prime-agent-runtime` is not a substitute.
-
-The owned installer below prepares its own release-local default environment before activation. Python skills can later change that environment; it is not immutable. See [Python-backed skills](skills.md#python-backed-skills).
-
-## Owned installer and rollback
-
-Use the versioned, rendered installer from the GitHub release:
-
-```bash
-curl -fL https://github.com/BaseModelAI/base-context/releases/download/v1.0.0/install.sh -o install-base-context.sh
-sh install-base-context.sh 1.0.0
-```
-
-The separate POSIX installer manages versioned CLI/Python pairs. It defaults to `${XDG_DATA_HOME:-$HOME/.local/share}/base-context`; `BASE_CONTEXT_INSTALL_ROOT` chooses another root. Use the installer and assets from a matching Base Context release, not an upstream installer.
-
-The release layout uses the repository base `https://github.com/BaseModelAI/base-context`, with versioned assets under `/releases/download/v<V>/`. Assets include `base-context-<V>.tgz`, the three core tarballs, and `SHA256SUMS`. The shell installer resolves `@ponythewhite/base-context@latest`; its `beta` channel resolves the npm `beta` tag. A positional version such as `sh install.sh v1.0.0`, or `BASE_CONTEXT_VERSION`, bypasses channel discovery. The matching release assets must already exist.
-
-When invoking a local copy of the shell installer, set `BASE_CONTEXT_DOWNLOAD_BASE_URL` for that invocation to the repository base. This installer setting is **not** the running application's custom update-manifest setting. Leave it unset for normal application launches to use owned npm updates.
-
-Preparation must finish before the new CLI/Python pair becomes selected. Follow the installer's PATH instructions, including the separate `base-context-node` directory if it installs standalone Node. The stable launcher is `<owned-root>/bin/base-context`.
-
-After an owned installation:
-
-```bash
-base-context update --self
-base-context-install rollback
-```
-
-Rollback selects the retained previous CLI/Python pair for future launches. It does not stop running owners, roll back session data or Node, or undo changes made by running processes. Old and failed version directories are retained; there is no automatic cleanup. The owned installer does not convert or overwrite existing global package-manager installations.
-
-### Local release packages
-
-For unpublished local packages, use the dedicated installer from the matching, freshly built and extracted main package. Supply the three other first-party tarballs explicitly:
-
-```bash
+VERSION=1.0.1
 PACKS=/absolute/path/to/pack
 node /absolute/path/to/extracted-main/package/dist/installer.mjs install \
   /absolute/path/to/new-install-root null \
-  "$PACKS/ponythewhite-base-context-1.0.0.tgz" 1.0.0 \
-  --local-dependency "$PACKS/ponythewhite-base-context-ai-1.0.0.tgz" \
-  --local-dependency "$PACKS/ponythewhite-base-context-tui-1.0.0.tgz" \
-  --local-dependency "$PACKS/ponythewhite-base-context-agent-1.0.0.tgz"
+  "$PACKS/ponythewhite-base-context-${VERSION}.tgz" "$VERSION" \
+  --local-dependency "$PACKS/ponythewhite-base-context-ai-${VERSION}.tgz" \
+  --local-dependency "$PACKS/ponythewhite-base-context-tui-${VERSION}.tgz" \
+  --local-dependency "$PACKS/ponythewhite-base-context-agent-${VERSION}.tgz"
 ```
 
-Substitute the matching release version and actual tarball names. Use `null` only for a new, unselected owned root. Each `--local-dependency` names a local archive containing `package/package.json`. Relative paths use the invocation's original working directory. `tar` must be available. The installer reads package names and configures candidate-local dependencies; it does not scan adjacent files or modify archive contents.
+Use the actual archive names and a matching version. `null` means a new, unselected owned root. Relative paths use the invocation's original working directory. `tar` must be available. The installer reads package names and sets candidate-local dependencies; it does not scan adjacent files or alter archives.
 
-The dedicated entry skips agent/model/auth startup, but npm scripts and Python bootstrap can still download dependencies. This is not an offline install. Extraction alone does not install or activate the package. Old package sets do not acquire this installer option.
+This entry skips agent/model/auth startup, but npm and Python setup can download dependencies. Extraction alone does not install or activate the package.
 
 ## State and configuration
 
@@ -117,17 +138,17 @@ The dedicated entry skips agent/model/auth startup, but npm scripts and Python b
 | `BASE_CONTEXT_SESSION_DIR` | Absolute independent session-storage override |
 | `--session-dir` | Session-directory override with higher precedence |
 
-Do not point writable Base Context state at `.prime`, `.pi`, or `.prime-context`. Do not copy upstream credential files. Use the explicit [offline history import](sessions.md#importing-an-offline-prime-root) if needed.
+Keep writable Base Context state separate from other applications. Use [offline history import](sessions.md#importing-an-offline-prime-root) when needed.
 
 `--offline` or `BASE_CONTEXT_OFFLINE=1` disables startup network operations, including update and package checks. It is not a network sandbox and does not make a remote model available offline.
 
 ## Troubleshooting
 
-- **Unsupported Node:** upgrade Node before installing or rebuilding.
-- **Command not found:** check the npm global binary directory or the owned installer's PATH instructions.
-- **Python bootstrap cannot find uv:** install uv, or opt in with `BASE_CONTEXT_INSTALL_UV=1`.
-- **Manual Python is rejected:** install the current bundled `base-context-runtime` into the selected environment; do not reuse an upstream-only runtime.
-- **No usable model:** configure the actual provider route. A catalog entry is not authentication or subscription permission.
-- **Background service issue:** use `base-context status`, then `base-context doctor`; add `--fix` only when you want repairs.
+- **Missing or unsupported Node:** rerun the installer in a terminal and approve prerequisite setup. npm/source users must install supported Node themselves.
+- **Command not found:** run the installer's exact PATH command, or check your npm global binary directory if using npm.
+- **Python cannot find uv with npm/source:** launch with `BASE_CONTEXT_INSTALL_UV=1` as shown above.
+- **Manual Python is rejected:** install the current bundled runtime into that environment.
+- **No model selected:** use `/login` for your provider and `/model` for an explicit model choice.
+- **Background service issue:** use `base-context status`, then `base-context doctor`; add `--fix` when you want repairs.
 
 See [settings](settings.md), [usage](usage.md), and [development](development.md) for the full references.

@@ -65,11 +65,16 @@ describe("built-in slash commands", () => {
 		});
 	});
 
-	test("exposes trace preview and backfill syntax", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "traces")).toMatchObject({
-			description: "Preview, upload, or configure Base Context traces",
-			argumentHint: "[status|on|off|preview|upload|upload-current|upload-all|login]",
+	test("keeps local export without remote sharing commands", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "export")).toMatchObject({
+			description: "Export session (HTML default, or specify path: .html/.jsonl)",
+			argumentHint: "[path]",
+			takesArgument: true,
 		});
+		for (const name of ["traces", "share"]) {
+			expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === name)).toBeUndefined();
+			expect(isBuiltinSlashCommandName(name)).toBe(false);
+		}
 	});
 
 	test("marks argument commands as taking a free-form argument", () => {
@@ -78,6 +83,7 @@ describe("built-in slash commands", () => {
 			["export", "[path]"],
 			["import", "<path.jsonl>"],
 			["name", "[name]"],
+			["agents", "[N]"],
 		] as const) {
 			expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === name)).toMatchObject({
 				argumentHint,
@@ -257,6 +263,7 @@ describe("session slash commands", () => {
 			args: "status",
 			text: "/autonomous status",
 		});
+		expect(parseSessionSlashCommand("/agents 3")).toBeUndefined();
 		expect(parseSessionSlashCommand("/rlm-max-depth 3 --global")).toBeUndefined();
 		expect(parseSessionSlashCommand("Explain /compact")).toBeUndefined();
 		expect(parseSessionSlashCommand(" /compact")).toBeUndefined();

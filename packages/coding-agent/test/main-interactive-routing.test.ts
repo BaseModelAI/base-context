@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
 import type { CreateAgentSessionOptions } from "../src/core/sdk.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import {
 	type AppMode,
+	createDefaultRuntimeFactory,
 	type DaemonInteractiveSessionManagerDecision,
 	daemonServerDefaultSessionConfig,
 	findActiveDaemonSessionSummaryForSessionFile,
@@ -24,6 +27,7 @@ import {
 	shouldUseEphemeralSessionManagerForDaemonInteractive,
 } from "../src/main.js";
 import type { SessionSummary } from "../src/modes/index.js";
+import { createHarness } from "./suite/harness.js";
 
 describe("interactive startup routing", () => {
 	test.each([
@@ -318,6 +322,64 @@ describe("agents view command parsing", () => {
 });
 
 describe("runtime session option resolution", () => {
+	test.each(["none", "saved", "same-provider", "other-provider"])(
+		"restores only an explicit persisted selection matching the requested provider (%s)",
+		async (selection) => {
+			const harness = await createHarness();
+			const model = harness.getModel();
+			try {
+				const settings = SettingsManager.create(harness.tempDir, harness.tempDir);
+				settings.setEnabledModels([`${model.provider}/${model.id}`]);
+				if (selection !== "none") settings.setDefaultModelAndProvider(model.provider, model.id);
+				await settings.flush();
+				const factory = createDefaultRuntimeFactory(
+					{
+						provider:
+							selection === "same-provider"
+								? model.provider
+								: selection === "other-provider"
+									? "other-provider"
+									: undefined,
+						agentDir: harness.tempDir,
+						noSkills: true,
+						noPromptTemplates: true,
+						noThemes: true,
+						noContextFiles: true,
+						noTools: true,
+					},
+					[
+						(pi) => {
+							pi.registerProvider(model.provider, {
+								baseUrl: model.baseUrl,
+								apiKey: "faux-key",
+								api: harness.faux.api,
+								models: [model],
+							});
+						},
+					],
+				);
+				const created = await factory({
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					sessionManager: SessionManager.inMemory(),
+					sessionStartEvent: { type: "session_start", reason: "startup" },
+				});
+				try {
+					expect(created.session.scopedModels).toHaveLength(1);
+					if (selection === "saved" || selection === "same-provider") {
+						expect(created.session.model).toMatchObject({ provider: model.provider, id: model.id });
+					} else {
+						expect(created.session.model).toBeUndefined();
+					}
+				} finally {
+					await created.session.disposeAsync();
+				}
+			} finally {
+				await harness.cleanup();
+			}
+		},
+	);
+
 	test("keeps verifier goals per session instead of in the daemon fallback", () => {
 		const headlessCreateConfig = {
 			cwd: "/repo",
@@ -376,6 +438,15 @@ describe("runtime session option resolution", () => {
 			rlmDepth: 1,
 			rlmSessionDir: "/tmp/rlm-session",
 		});
+	});
+
+	test("preserves an explicitly unselected runtime model", async () => {
+		const harness = await createHarness();
+		try {
+			expect(resolveRuntimeSessionOptions({ model: harness.getModel() }, { model: null }).model).toBeNull();
+		} finally {
+			await harness.cleanup();
+		}
 	});
 
 	test("preserves the runtime child parent-agent identity", () => {

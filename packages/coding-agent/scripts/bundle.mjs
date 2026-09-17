@@ -32,7 +32,11 @@ try {
 rmSync(outdir, { recursive: true, force: true });
 
 await build({
-	entryPoints: [join(packageDir, "dist", "cli.js")],
+	entryPoints: {
+		cli: join(packageDir, "dist", "cli.js"),
+		// The Node-only lazy loader uses a variable import that esbuild cannot discover.
+		"amazon-bedrock": join(packageDir, "dist", "node", "amazon-bedrock.js"),
+	},
 	outdir,
 	bundle: true,
 	splitting: true,
@@ -40,7 +44,14 @@ await build({
 	platform: "node",
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
-	external: ["koffi", "undici", "@silvia-odwyer/photon-node", "@mariozechner/clipboard"],
+	external: [
+		"koffi",
+		"undici",
+		"@silvia-odwyer/photon-node",
+		"@mariozechner/clipboard",
+		// Preserve Node's CommonJS interop for the AWS SDK's lazy transport imports.
+		"@ponythewhite/base-context-ai/bedrock-provider",
+	],
 	define: { __PI_BUNDLED__: "true", __PI_BUILD_ID__: JSON.stringify(buildId) },
 	banner: {
 		js: "import { createRequire as __piBundleCreateRequire } from 'node:module'; const require = __piBundleCreateRequire(import.meta.url);",

@@ -27,6 +27,7 @@ export interface ConfigurationMenuScopedModel {
 
 export interface ConfigurationMenuOptions {
 	initialTab: ConfigurationMenuTab;
+	providerFirst?: boolean;
 	tui: TUI;
 	authStorage: AuthStorage;
 	providerOptions: ReadonlyArray<AuthSelectorProvider>;
@@ -109,12 +110,13 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		"mcp-connections": OAuthSelectorComponent;
 	};
 	private activeTab: ConfigurationMenuTab;
+	private selectedProvider?: string;
 	private _focused = false;
 	private renderWidth = 78;
 
 	constructor(private readonly options: ConfigurationMenuOptions) {
 		super();
-		this.activeTab = options.initialTab;
+		this.activeTab = options.providerFirst && options.initialTab === "models" ? "providers" : options.initialTab;
 		const tabBar = new ConfigurationMenuTabBar(() => this.activeTab);
 		const getHeaderRows = () => tabBar.getRowCount(getMenuPanelInnerWidth(this.renderWidth)) + 1;
 		const providerOptions = options.providerOptions.filter(
@@ -134,7 +136,9 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 				header: tabBar,
 				getHeaderRows,
 				title: "Providers",
-				subtitle: "Connect with a subscription or API key.",
+				subtitle: options.providerFirst
+					? "Select a provider, then choose one of its models."
+					: "Connect with a subscription or API key.",
 				searchPlaceholder: "Search providers",
 			},
 		);
@@ -149,6 +153,7 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 			{
 				availableModels: options.availableModels,
 				configuredProviders: options.configuredProviders,
+				subtitle: options.providerFirst ? "Choose a model from the selected provider." : undefined,
 				header: tabBar,
 				getHeaderRows,
 				getRows: options.getRows,
@@ -202,7 +207,14 @@ export class ConfigurationMenuComponent extends Container implements Focusable {
 		return this.bodies[tab].getSearchInput().getValue();
 	}
 
+	showProviderModels(providerId: string): void {
+		this.selectedProvider = providerId;
+		this.bodies.models.setProviderFilter(providerId);
+		this.setActiveTab("models");
+	}
+
 	setActiveTab(tab: ConfigurationMenuTab): void {
+		if (this.options.providerFirst && tab === "models" && !this.selectedProvider) return;
 		if (tab === this.activeTab) return;
 		this.activeBody.focused = false;
 		this.activeTab = tab;

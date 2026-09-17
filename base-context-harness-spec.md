@@ -187,7 +187,7 @@ Pass immutable snapshots and stable IDs across boundaries. Cancellation is an ex
 
 ### 4.1 Required identity matrix
 
-Create a central `ProductIdentity` and `RuntimePaths` implementation. Audit direct paths, environment parsing, package metadata, help text, process labels, update/download URLs, OAuth configuration, telemetry destinations, kernel bootstrapping, and shell completions.
+Create a central `ProductIdentity` and `RuntimePaths` implementation. Audit direct paths, environment parsing, package metadata, help text, process labels, update/download URLs, OAuth configuration, local diagnostic paths, kernel bootstrapping, and shell completions.
 
 | Surface | Base Context requirement | Compatibility decision |
 |---|---|---|
@@ -200,8 +200,8 @@ Create a central `ProductIdentity` and `RuntimePaths` implementation. Audit dire
 | Daemon identity | `base-context.daemon`, own registry, sockets/pipes, locks and ownership root. | Reject Prime Agent handshakes; never auto-adopt its workers. |
 | Runtime installation | Own managed environment and distribution identity, for example `base-context-runtime`. | Keep `import rlm` where needed for program compatibility; no conflicting distributions in one environment. |
 | Update/installer | Own authenticated release origin and expected artifact identity. | No fallback to upstream installers, binaries, runtime packages, or update URLs. |
-| Traces/sharing | Local by default; explicit approved remote destination and consent. | Do not carry over upstream upload schedules/credentials automatically. |
-| Provider identity | Preserve actual provider/model/wire identifiers. | A real Prime Inference adapter does not become a different provider because the product is renamed. |
+| Diagnostics | Local diagnostics and request accounting only. | No telemetry exporter, trace upload/sharing command, remote destination settings, or upload credentials. |
+| Provider identity | Preserve supported provider/model/wire identifiers. | Require explicit provider and model selection with that provider's authentication. No provider-account or billing integration is inherited. |
 | Tool/skill names | Preserve existing useful model-facing interfaces during the control phase. | Avoid exposing duplicate old/new schemas that consume tokens or confuse the model. |
 | Notices | Retain original notices and add fork attribution. | Branding changes do not delete provenance or third-party obligations. |
 
@@ -215,13 +215,13 @@ Use product-specific Windows named pipes and Unix sockets. Validate their owners
 
 Test both products installed and running concurrently. Base Context upgrade, uninstall, crash repair, daemon shutdown, and runtime cleanup must not alter the other product's installation or active state. Cross-product connections must fail locally with an actionable diagnostic, not fall through to a permissive compatibility path.
 
-### 4.3 Authentication, endpoints, and telemetry
+### 4.3 Authentication, endpoints, and local diagnostics
 
-Do not mechanically rename third-party OAuth client IDs, audiences, callback schemes, or API endpoint domains. Inventory every authentication route. Validate whether it is usable by this distribution under the actual provider contract; require explicit credential import or reauthorization. Preserve ordinary API-key support where the adapter is valid. Unvalidated auth paths remain unavailable with an explanation, rather than silently borrowing another product's client identity.
+Use the selected provider's supported authentication route and API endpoint. Keep provider credentials scoped to that provider. A configured credential does not select a model: the user must choose a supported provider and model. Preserve a saved supported model while its authentication needs setup; do not switch to another provider.
 
-Keep provider credentials scoped to their provider and purpose. Update checks, traces, crash reporting, catalog refresh, and sharing must not opportunistically reuse inference credentials. The source contains trace configuration and credential-fallback paths; this is an audit target, not a claim that every installation currently uploads automatically. [N11]
+Base Context has no remote telemetry, trace uploading/sharing, or associated endpoint and credential settings. Update checks and explicit catalog refreshes must not reuse inference credentials. The historical upstream trace/auth finding N11 does not describe an active Base Context feature.
 
-Trace storage, crash diagnostics, and migrated logs can contain prompts, tool output, secrets, and proprietary code. Default to local restricted storage, redact diagnostic bundles, and make export an explicit action. Importing a legacy outbox must not trigger catch-up uploads to an old destination.
+Local diagnostics and migrated logs can contain prompts, tool output, secrets, and proprietary code. Keep them local. Do not import or dispatch remote upload jobs.
 
 ### 4.4 Licensing and distribution
 
@@ -1216,7 +1216,7 @@ Do not let missing external publication credentials block local development. Do 
 
 ### W1 — Establish product isolation without optimizing behavior
 
-**Owners:** Product config, release scripts, package manifests/workspaces, daemon protocol/ownership, runtime bootstrap, installer/updater, telemetry/auth configuration.
+**Owners:** Product config, release scripts, package manifests/workspaces, daemon protocol/ownership, runtime bootstrap, installer/updater, provider authentication and local diagnostics.
 
 **Work:** Implement the identity matrix in §4. Preserve provider protocol identifiers and license notices. Own package/runtime resolution; isolate state and workers. Add `doctor` output for product/source/schema/provider contract and all resolved directories, with secrets redacted. Run two-product coexistence fixtures and extracted packer tests against actual built artifacts.
 
@@ -1486,7 +1486,7 @@ Keep committed archives readable after rollback. A previous release may ignore n
 
 Deliver the Base Context source fork with preserved ancestry, independently named distribution, native context runtime, owned provider/execution/receipt boundaries, exact storage and migrations, and one reproducible build graph. Do not deliver another version-gated plugin patch as the main product.
 
-The implementation handoff must contain the patch-disposition ledger; identity/dependency/auth/telemetry audit; frozen H/D/S controls and manifests; model-policy and capability manifests; schema/import/rollback tools; regression/fault/scale/provider fixtures; corrected benchmark runner; installed-artifact checks; licensing/SBOM materials; and per-model evaluation reports with missing validation stated explicitly. Include short decision records for changed defaults and nontrivial persistent contracts.
+The implementation handoff must contain the patch-disposition ledger; identity/dependency/auth and local-diagnostics review; frozen H/D/S controls and manifests; model-policy and capability manifests; schema/import/rollback tools; regression/fault/scale/provider fixtures; corrected benchmark runner; installed-artifact checks; licensing/SBOM materials; and per-model evaluation reports with missing validation stated explicitly. Include short decision records for changed defaults and nontrivial persistent contracts.
 
 Release documentation must distinguish product version, source ancestry, runtime/storage/daemon contracts, behavioral policy, and provider route support. List native features as validated, unsupported, unknown or experimental. A model name in a catalog is not certification of every feature through every route. Publish the differences among the preserved Sol control, generic improvements and Astra experiments.
 
@@ -1605,7 +1605,7 @@ The new evidence bundle contains the scripts, observed JSON, patch-label CSV, in
 | N8 | H `prime-agent-runtime/pyproject.toml:1–19`; `packages/coding-agent/src/core/kernel/bootstrap.ts:16` and bootstrap implementation | Python distribution name/import boundary and runtime installation identity. |
 | N9 | H `packages/ai/package.json:68`; `packages/ai/scripts/generate-models.ts` around 663, 757, 831, 890 | Ordinary build invokes catalog generation with external fetches; separate refresh from pinned build. |
 | N10 | H `LICENSE`; `scripts/pack-prime-agent-release.mjs` function `copyPackageContents` | Source MIT notices and explicit staging list lacking `LICENSE`. Published artifact omission was not demonstrated. |
-| N11 | H `packages/coding-agent/src/core/agent-traces.ts` around 843 onward; related trace/outbox configuration | Trace/auth fallback paths to audit for fork isolation. Not a claim that trace export is always enabled. |
+| N11 | Historical H trace/outbox configuration | Upstream trace/auth fallback finding. The remote feature and configuration are removed in Base Context 1.0.1; local diagnostics remain. |
 
 New probe results:
 

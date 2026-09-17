@@ -1,22 +1,8 @@
 import * as path from "node:path";
-import {
-	getPrimeTeamId,
-	getProviders,
-	type OAuthProviderId,
-	type OAuthSelectPrompt,
-} from "@ponythewhite/base-context-ai";
+import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@ponythewhite/base-context-ai";
 import type { OverlayHandle, TUI } from "@ponythewhite/base-context-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
-import {
-	BASE_CONTEXT_TRACES_PROVIDER_NAME,
-	checkPrimeInferenceAccess,
-	fetchPrimeTeams,
-	loadPrimeCliConfig,
-	PRIME_INFERENCE_PROVIDER_ID,
-	PRIME_INFERENCE_PROVIDER_NAME,
-	type PrimeTeam,
-} from "../../core/prime-inference-auth.js";
 import { getProviderAuthContract } from "../../core/provider-contracts.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
@@ -29,7 +15,6 @@ import {
 	compareAuthSelectorProviders,
 	OAuthSelectorComponent,
 } from "./components/oauth-selector.js";
-import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
 import { theme } from "./theme/theme.js";
 
 export type AuthenticationResult =
@@ -57,7 +42,7 @@ export async function getAnthropicSubscriptionAuthWarning(
 	modelRegistry: ModelRegistry,
 	model: { provider: string } | undefined,
 ): Promise<string | undefined> {
-	if (!model || model.provider !== "anthropic" || getProviderAuthContract(model.provider).oauth !== "validated") {
+	if (!model || model.provider !== "anthropic" || getProviderAuthContract(model.provider).oauth !== "supported") {
 		return undefined;
 	}
 
@@ -125,7 +110,7 @@ export class ProviderAuthFlows {
 	runMcpLogin(server: string, label?: string): Promise<AuthenticationResult> {
 		const providerId = `mcp:${server}`;
 		const contract = getProviderAuthContract(providerId);
-		if (contract.oauth !== "validated") {
+		if (contract.oauth !== "supported") {
 			this.host.showError(contract.guidance);
 			return Promise.resolve({ status: "failed" });
 		}
@@ -143,7 +128,7 @@ export class ProviderAuthFlows {
 		if (providerOptions.length === 0) {
 			this.host.showStatus(
 				authType === "oauth"
-					? "Subscription OAuth is unavailable in Base Context until provider client contracts are validated. Use /login API Keys instead."
+					? "No supported OAuth providers are registered. Use /login to configure an API-key provider."
 					: authType === "api_key"
 						? "No API key providers available."
 						: "No providers available.",
@@ -180,9 +165,6 @@ export class ProviderAuthFlows {
 		const kind = providerOption.category === "service" ? "service" : "provider";
 		if (providerOption.authType === "oauth") {
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
-		}
-		if (providerOption.id === PRIME_INFERENCE_PROVIDER_ID) {
-			return this.runPrimeInferenceLogin();
 		}
 		if (providerOption.id === BEDROCK_PROVIDER_ID) {
 			return this.showBedrockSetupDialog(providerOption.id, providerOption.name);
@@ -299,17 +281,6 @@ export class ProviderAuthFlows {
 			});
 		}
 
-		if (!options.some((option) => option.id === PRIME_INFERENCE_PROVIDER_ID)) {
-			const primeInferenceStatus = authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID);
-			if (primeInferenceStatus.source === "prime_cli") {
-				options.push({
-					id: PRIME_INFERENCE_PROVIDER_ID,
-					name: PRIME_INFERENCE_PROVIDER_NAME,
-					authType: "api_key",
-				});
-			}
-		}
-
 		return options.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
@@ -390,146 +361,6 @@ export class ProviderAuthFlows {
 		}
 	}
 
-	private showPrimeTeamSelector(
-		teams: PrimeTeam[],
-		currentTeamId: string | undefined,
-	): Promise<PrimeTeam | null | undefined> {
-		return new Promise((resolve) => {
-			let handle: OverlayHandle | undefined;
-			const close = () => {
-				handle?.hide();
-				this.host.ui.requestRender();
-			};
-			const selector = new PrimeTeamSelectorComponent(
-				teams,
-				currentTeamId,
-				(team) => {
-					close();
-					resolve(team);
-				},
-				() => {
-					close();
-					resolve(undefined);
-				},
-				{ getRows: () => this.host.ui.terminal.rows },
-			);
-			handle = showFullPaneOverlay(this.host.ui, selector, 78);
-		});
-	}
-
-	private getPrimeInferenceDefaultTeamStatus(): string {
-		if (getPrimeTeamId()) {
-			return "Using team from PRIME_TEAM_ID.";
-		}
-		const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-		return storedTeam ? `Using team "${storedTeam.name}".` : "Using personal account.";
-	}
-
-	private async selectPrimeInferenceTeam(apiKey: string, dialog: LoginDialogComponent): Promise<string | undefined> {
-		try {
-			if (getPrimeTeamId()) {
-				this.host.modelRegistry.authStorage.reload();
-				return "Using team from PRIME_TEAM_ID.";
-			}
-
-			const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-			dialog.showProgress("Loading Prime teams...");
-			const teams = await fetchPrimeTeams(apiKey, config.baseUrl, { signal: dialog.signal });
-			if (dialog.signal.aborted) {
-				return this.getPrimeInferenceDefaultTeamStatus();
-			}
-			if (teams.length === 0) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(null);
-				return "Using personal account.";
-			}
-
-			const storedTeam = this.host.modelRegistry.authStorage.getPrimeInferenceTeamSelection();
-			const currentTeamId = storedTeam === null ? undefined : (storedTeam?.teamId ?? config.teamId);
-			const selectedTeam = await this.showPrimeTeamSelector(teams, currentTeamId);
-			if (selectedTeam !== undefined) {
-				this.host.modelRegistry.authStorage.setPrimeInferenceTeamSelection(selectedTeam);
-			}
-			return selectedTeam
-				? `Using team "${selectedTeam.name}".`
-				: selectedTeam === null
-					? "Using personal account."
-					: this.getPrimeInferenceDefaultTeamStatus();
-		} catch {
-			this.host.modelRegistry.authStorage.reload();
-			return this.getPrimeInferenceDefaultTeamStatus();
-		}
-	}
-
-	private async completePrimeInferenceLogin(
-		apiKey: string,
-		dialog: LoginDialogComponent,
-		closeDialog: () => void,
-	): Promise<AuthenticationResult> {
-		this.host.modelRegistry.authStorage.setPrimeInferenceApiKey(apiKey);
-		const teamStatus = await this.selectPrimeInferenceTeam(apiKey, dialog);
-
-		closeDialog();
-		return await this.completeProviderAuthentication(
-			PRIME_INFERENCE_PROVIDER_ID,
-			PRIME_INFERENCE_PROVIDER_NAME,
-			"api_key",
-			teamStatus,
-			"provider",
-			this.host.modelRegistry.authStorage.getPrimeCliConfigPath() ?? getAuthPath(),
-		);
-	}
-
-	async runPrimeInferenceLogin(): Promise<AuthenticationResult> {
-		const dialog = new LoginDialogComponent(
-			this.host.ui,
-			PRIME_INFERENCE_PROVIDER_ID,
-			(_success, _message) => {},
-			PRIME_INFERENCE_PROVIDER_NAME,
-		);
-		const handle = showFullPaneOverlay(this.host.ui, dialog, {
-			maxContentWidth: 88,
-			suspendFullscreenMouse: true,
-		});
-		const closeDialog = () => {
-			handle.hide();
-			this.host.ui.requestRender();
-		};
-
-		try {
-			const apiKey = (await dialog.showPrompt("Enter Prime Inference API key:")).trim();
-			if (!apiKey) {
-				throw new Error("API key cannot be empty.");
-			}
-			dialog.showProgress("Checking Prime Inference access...");
-			const config = loadPrimeCliConfig(this.host.modelRegistry.authStorage.getPrimeCliConfigPath());
-			const access = await checkPrimeInferenceAccess(apiKey, config.baseUrl, { signal: dialog.signal });
-			if (dialog.signal.aborted) {
-				closeDialog();
-				return { status: "cancelled" };
-			}
-			if (!access.ok) {
-				const status = access.status === undefined ? "" : `HTTP ${access.status}: `;
-				throw new Error(`Prime API key does not have Prime Inference access (${status}${access.message})`);
-			}
-			return await this.completePrimeInferenceLogin(apiKey, dialog, closeDialog);
-		} catch (error: unknown) {
-			closeDialog();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (!dialog.signal.aborted && errorMsg !== "Login cancelled") {
-				this.host.showError(`Failed to login to ${PRIME_INFERENCE_PROVIDER_NAME}: ${errorMsg}`);
-				return { status: "failed" };
-			}
-			return { status: "cancelled" };
-		}
-	}
-
-	async runPrimeAgentTracesLogin(): Promise<AuthenticationResult> {
-		this.host.showError(
-			`${BASE_CONTEXT_TRACES_PROVIDER_NAME} login is not configured. Set BASE_CONTEXT_TRACES_BASE_URL and a dedicated BASE_CONTEXT_TRACES_API_KEY; Prime Inference credentials are not used for traces.`,
-		);
-		return { status: "failed" };
-	}
-
 	private async showApiKeyLoginDialog(
 		providerId: string,
 		providerName: string,
@@ -599,7 +430,7 @@ export class ProviderAuthFlows {
 		kind: "provider" | "service" = "provider",
 	): Promise<AuthenticationResult> {
 		const contract = getProviderAuthContract(providerId);
-		if (contract.oauth !== "validated") {
+		if (contract.oauth !== "supported") {
 			this.host.showError(contract.guidance);
 			return { status: "failed" };
 		}
@@ -669,7 +500,13 @@ export class ProviderAuthFlows {
 			});
 
 			closeDialog();
-			return await this.completeProviderAuthentication(providerId, providerName, "oauth", undefined, kind);
+			return await this.completeProviderAuthentication(
+				providerId,
+				providerName,
+				"oauth",
+				kind === "provider" ? "Use /model to select a model" : undefined,
+				kind,
+			);
 		} catch (error: unknown) {
 			closeDialog();
 			const errorMsg = error instanceof Error ? error.message : String(error);

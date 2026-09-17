@@ -20,72 +20,60 @@ const model: Model<Api> = {
 
 afterEach(() => resetOAuthProviders());
 
-it("keeps ordinary API keys usable without claiming OAuth validation", async () => {
+it("supports registered non-Prime OAuth and ordinary API keys", async () => {
 	const storage = AuthStorage.inMemory({ anthropic: { type: "api_key", key: "sk-ant-api-test" } });
 	const registry = ModelRegistry.inMemory(storage);
-	expect(getProviderAuthContract("anthropic").oauth).toBe("unvalidated");
+	expect(getProviderAuthContract("anthropic").oauth).toBe("supported");
+	expect(getProviderAuthContract("prime-intellect").oauth).toBe("unsupported");
 	expect(isProviderApiKeyAllowed("anthropic", "sk-ant-api-test")).toBe(true);
 	expect(isProviderApiKeyAllowed("openai", "sk-openai-test")).toBe(true);
-	expect(isProviderApiKeyAllowed("prime-inference", "prime-test-key")).toBe(true);
-	expect(registry.hasConfiguredAuth(model)).toBe(true);
-	await expect(registry.getApiKeyAndHeaders(model)).resolves.toMatchObject({
-		ok: true,
-		apiKey: "sk-ant-api-test",
-	});
-});
+	await expect(registry.getApiKeyAndHeaders(model)).resolves.toMatchObject({ ok: true, apiKey: "sk-ant-api-test" });
 
-it("does not validate OAuth by registration, token relabeling, headers, or protocol aliases", async () => {
-	const credentials = { type: "oauth" as const, access: "access", refresh: "refresh", expires: 0 };
-	const storage = AuthStorage.inMemory({ "unvalidated-provider": credentials });
-	const registry = ModelRegistry.inMemory(storage);
-	const oauth = {
-		name: "Unvalidated Provider",
-		login: vi.fn(async () => credentials),
-		refreshToken: vi.fn(async () => credentials),
-		getApiKey: vi.fn(() => credentials.access),
-		modifyModels: vi.fn((models: Model<Api>[]) => models),
-	};
-	registry.registerProvider("unvalidated-provider", {
+	const credentials = { type: "oauth" as const, access: "access", refresh: "refresh", expires: Date.now() + 60_000 };
+	storage.set("custom-provider", credentials);
+	expect(getProviderAuthContract("custom-provider").oauth).toBe("unsupported");
+	const modifyModels = vi.fn((models: Model<Api>[]) => models);
+	registry.registerProvider("custom-provider", {
 		baseUrl: model.baseUrl,
 		api: model.api,
-		oauth,
 		models: [model],
+		oauth: {
+			name: "Custom Provider",
+			login: vi.fn(async () => credentials),
+			refreshToken: vi.fn(async () => credentials),
+			getApiKey: (credential) => credential.access,
+			modifyModels,
+		},
 	});
-	const registeredModel = registry.find("unvalidated-provider", model.id)!;
-	expect(getProviderAuthContract("unvalidated-provider").oauth).toBe("unvalidated");
-	expect(storage.getOAuthProviders()).toEqual([]);
-	expect(registry.hasConfiguredAuth(registeredModel)).toBe(false);
-	expect(registry.isUsingOAuth(registeredModel)).toBe(false);
-	await expect(registry.getApiKeyAndHeaders(registeredModel)).resolves.toMatchObject({ apiKey: undefined });
-	for (const callback of Object.values(oauth).filter((value) => typeof value === "function")) {
-		expect(callback).not.toHaveBeenCalled();
+	const registeredModel = registry.find("custom-provider", model.id)!;
+	expect(getProviderAuthContract("custom-provider").oauth).toBe("supported");
+	expect(registry.hasConfiguredAuth(registeredModel)).toBe(true);
+	expect(registry.isUsingOAuth(registeredModel)).toBe(true);
+	await expect(registry.getApiKeyAndHeaders(registeredModel)).resolves.toMatchObject({ ok: true, apiKey: "access" });
+	expect(modifyModels).toHaveBeenCalledOnce();
+	storage.markAuthStale("custom-provider");
+	registry.registerProvider("custom-provider", { apiKey: "custom-api-key" });
+	expect(registry.hasConfiguredAuth(registeredModel)).toBe(true);
+	await expect(registry.getApiKeyAndHeaders(registeredModel)).resolves.toMatchObject({
+		ok: true,
+		apiKey: "custom-api-key",
+		sourceToken: { source: "models_json_key" },
+	});
+
+	for (const provider of ["anthropic", "github-copilot", "openai-codex"]) {
+		storage.set(provider, credentials);
+		const subscriptionModel = registry.getAll().find((entry) => entry.provider === provider)!;
+		expect(subscriptionModel).toBeDefined();
+		expect(registry.hasConfiguredAuth(subscriptionModel)).toBe(true);
+		expect(registry.isUsingOAuth(subscriptionModel)).toBe(true);
+		await expect(registry.getApiKeyAndHeaders(subscriptionModel)).resolves.toMatchObject({
+			ok: true,
+			apiKey: "access",
+		});
 	}
-	expect(storage.get("unvalidated-provider")).toEqual(credentials);
+});
 
-	const subscriptionToken = "sk-ant-oat-test";
-	registry.registerProvider("anthropic", { apiKey: subscriptionToken });
-	expect(registry.getProviderAuthStatus("anthropic")).toEqual({ configured: false });
-	await expect(registry.getApiKeyAndHeaders(model)).resolves.toMatchObject({ ok: false });
-	registry.registerProvider("anthropic", {
-		apiKey: "sk-ant-api-test",
-		headers: { Authorization: `Bearer ${subscriptionToken}` },
-	});
-	await expect(registry.getApiKeyAndHeaders(model)).resolves.toMatchObject({ ok: false });
-
-	storage.setRuntimeApiKey("renamed-anthropic", subscriptionToken);
-	await expect(registry.getApiKeyAndHeaders({ ...model, provider: "renamed-anthropic" })).resolves.toMatchObject({
-		ok: false,
-	});
-	for (const deniedModel of [
-		{ ...model, provider: "github-copilot", api: "openai-completions" as const },
-		{ ...model, provider: "openai-codex", api: "openai-codex-responses" as const },
-		{ ...model, provider: "renamed-codex", api: "openai-codex-responses" as const },
-	]) {
-		storage.setRuntimeApiKey(deniedModel.provider, "subscription-access-token");
-		expect(registry.hasConfiguredAuth(deniedModel)).toBe(false);
-		await expect(registry.getApiKeyAndHeaders(deniedModel)).resolves.toMatchObject({ ok: false });
-	}
-
+it("keeps the existing Codex SDK exception read-only and limited to its native route", async () => {
 	const codexModel: Model<Api> = {
 		...model,
 		provider: "openai-codex",
@@ -107,7 +95,6 @@ it("does not validate OAuth by registration, token relabeling, headers, or proto
 	const nativeStream = getApiProvider("openai-codex-responses")!.streamSimple;
 	const subscriptionStorage = AuthStorage.fromStorage(backend, {
 		existingOpenAICodexSubscription: true,
-		usePrimeCliConfig: false,
 	});
 	const subscriptionRegistry = ModelRegistry.inMemory(subscriptionStorage);
 	expect(subscriptionRegistry.hasConfiguredAuth(codexModel)).toBe(true);

@@ -6,7 +6,7 @@ import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
-import { type RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
+import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 
 const rpc = vi.hoisted(() => ({ connect: vi.fn(), hello: vi.fn(), request: vi.fn(), close: vi.fn() }));
 vi.mock("../src/modes/daemon/daemon-client.js", async (importOriginal) => ({
@@ -23,9 +23,7 @@ vi.mock("../src/core/rlm-journal-owner.js", () => ({ RlmJournalOwner: { open: vi
 type ModeLedger = {
 	openRlmJournalOwner(): Promise<void>;
 	rlmSpawnLedger(): RlmSpawnLedger;
-	rlmSpawnLedgerFor(sessionDir: string): RlmSpawnLedger;
 	closeRlmJournal(): Promise<void>;
-	appendRlmLedgerRenameForState(state: unknown, name: string): Promise<void>;
 };
 
 function deferred<T>() {
@@ -105,16 +103,12 @@ describe("daemon ledger ownership", () => {
 
 		rpc.request.mockRejectedValueOnce(new Error("socket disconnected after send"));
 		await expect(
-			worker.appendRlmLedgerRenameForState(
-				{ runtime: { metadata: { rlmChildId: "child" }, session: { sessionFile: mutation.child } } },
-				"renamed",
-			),
+			worker.rlmSpawnLedger().appendRename({ childId: "child", child: mutation.child, name: "renamed" }),
 		).rejects.toThrow("outcome may be unknown");
 		expect(rpc.request).toHaveBeenCalledTimes(2); // No automatic replay after the lost ack.
 		expect(rpc.close).toHaveBeenCalledTimes(2);
-		await expect(worker.rlmSpawnLedgerFor(join(directory, "other-family")).appendSpawn(mutation)).rejects.toThrow(
-			"read-only",
-		);
+		const foreignFamily = new RlmSpawnLedger(agentDir, join(directory, "other-family"));
+		await expect(foreignFamily.appendSpawn(mutation)).rejects.toThrow("read-only");
 		expect(rpc.request).toHaveBeenCalledTimes(2);
 		await worker.closeRlmJournal();
 	});

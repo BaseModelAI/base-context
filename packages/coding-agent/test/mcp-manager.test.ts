@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpManager } from "../src/core/mcp/mcp-manager.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -16,9 +16,11 @@ describe("McpManager", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "mcp-mgr-"));
 		authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		resetOAuthProviders();
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network in MCP manager tests"));
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		resetOAuthProviders();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
@@ -30,7 +32,7 @@ describe("McpManager", () => {
 		expect(overrides).toContain("-notion/SKILL.md");
 	});
 
-	it("does not enable stored OAuth for built-in or dynamically registered integrations", () => {
+	it("enables stored OAuth for built-in and dynamically registered integrations", () => {
 		for (const server of ["linear", "acme"]) {
 			authStorage.set(`mcp:${server}`, {
 				type: "oauth",
@@ -45,11 +47,11 @@ describe("McpManager", () => {
 			getUserServers: () => ({ acme: { type: "http", url: "https://mcp.acme.test/mcp", oauth: true } }),
 		});
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
-		expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+		expect(manager.getDisabledBuiltinSkillOverrides()).not.toContain("-linear/SKILL.md");
 		for (const server of ["linear", "acme"]) {
-			expect(manager.listStatus().find((status) => status.server === server)?.enabled).toBe(false);
+			expect(manager.listStatus().find((status) => status.server === server)?.enabled).toBe(true);
 		}
-		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
+		expect(manager.getEnabledPersistentGenericServers()).toEqual(["acme"]);
 	});
 
 	it("enables an integration with an explicit API key", async () => {
@@ -92,13 +94,12 @@ describe("McpManager", () => {
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
 
 		authStorage.set("mcp:linear", { type: "oauth", access: "old", refresh: "r", expires: 0 });
-		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow(
-			"unavailable in Base Context until its provider contract is validated",
-		);
+		vi.spyOn(getOAuthProvider("mcp:linear")!, "refreshToken").mockRejectedValue(new Error("Refresh failed"));
+		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow("Could not refresh credentials");
 		await expect(handlers["mcp.refresh"]({})).rejects.toThrow("requires a server");
 	});
 
-	it("rejects unvalidated OAuth before invoking an interactive login callback", async () => {
+	it("invokes the interactive login callback for registered OAuth only", async () => {
 		let called = "";
 		const manager = new McpManager({
 			authStorage,
@@ -108,10 +109,10 @@ describe("McpManager", () => {
 		});
 		const handlers = manager.hostHandlers();
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.begin_login", "mcp.config", "mcp.refresh"]);
-		await expect(handlers["mcp.begin_login"]({ server: "linear" })).rejects.toThrow(
-			"unavailable in Base Context until its provider contract is validated",
-		);
-		expect(called).toBe("");
+		await expect(handlers["mcp.begin_login"]({ server: "linear" })).resolves.toEqual({});
+		expect(called).toBe("linear");
+		await expect(handlers["mcp.begin_login"]({ server: "missing" })).rejects.toThrow("No OAuth adapter");
+		expect(called).toBe("linear");
 	});
 
 	it("mcp.config keeps catalog names reserved from generic overrides", async () => {

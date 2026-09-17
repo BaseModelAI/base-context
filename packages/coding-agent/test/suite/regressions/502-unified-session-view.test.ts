@@ -1,7 +1,11 @@
 import stripAnsi from "strip-ansi";
-import { describe, expect, test, vi } from "vitest";
-import { AgentsViewMode } from "../../../src/modes/agents-view/agents-view-mode.js";
+import { beforeAll, describe, expect, test, vi } from "vitest";
+import type { AgentConnectionSavedSessionInfo } from "../../../src/modes/agent-connection/types.js";
+import { AgentsViewMode, type AgentsViewPersistentState } from "../../../src/modes/agents-view/agents-view-mode.js";
+import type { AgentsViewRow } from "../../../src/modes/agents-view/agents-view-state.js";
+import type { DaemonSavedSessionInfo } from "../../../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../../../src/modes/daemon/daemon-session-list.js";
+import type { SavedSessionPage } from "../../../src/modes/daemon/saved-session-page.js";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createDeferred as deferred } from "../scheduling.js";
 
@@ -22,48 +26,83 @@ function summary(id: string): SessionSummary {
 	};
 }
 
-function rawSavedSession(id: string) {
+function rawSavedSession(id: string): DaemonSavedSessionInfo {
 	return {
 		path: `/tmp/${id}.jsonl`,
 		id,
 		cwd: "/tmp/project",
-		state: "idle",
+		state: { status: "archived" },
 		created: new Date(0).toISOString(),
 		modified: new Date(0).toISOString(),
 		messageCount: 1,
+		firstMessage: id,
+		allMessagesText: id,
 	};
 }
 
-function savedSession(id: string) {
-	return { path: `/tmp/${id}.jsonl`, id };
+function savedSession(id: string): AgentConnectionSavedSessionInfo {
+	return { ...rawSavedSession(id), created: new Date(0), modified: new Date(0) };
+}
+
+function savedPage(id: string): { success: true; data: SavedSessionPage } {
+	const session = rawSavedSession(id);
+	return {
+		success: true,
+		data: {
+			status: "page",
+			sessions: [session],
+			primary: [`file:${session.path}`],
+			sourceOrder: [{ path: session.path, source: "catalog", ordinal: 0 }],
+			moreBefore: false,
+			moreAfter: false,
+			limited: true,
+			hints: {
+				liveMatches: [],
+				liveEnrichment: [],
+				busyAncestors: [],
+				moreChildren: [],
+				allChildren: [],
+				groups: [],
+			},
+		},
+	};
 }
 
 function refreshHarness() {
-	const applySessionList = vi.fn();
-	const reconcileCatalogs = vi.fn();
-	const persistentState: {
-		savedSessions?: unknown[];
-		lastSuccessfulSavedSessions?: unknown[];
-		heartbeats?: unknown[];
-		savedCatalogGeneration?: number;
-	} = {};
-	return {
-		reconnectPromise: undefined,
+	const persistentState: AgentsViewPersistentState = {};
+	const fields = {
+		reconnectPromise: undefined as Promise<void> | undefined,
 		daemonShutdownReceived: false,
 		options: {},
 		savedCatalogGeneration: 0,
 		heartbeatCatalogGeneration: 0,
 		savedCatalogRefreshPending: false,
-		heartbeats: [] as unknown[],
 		savedSearchFetchStarted: false,
+		savedCatalogReady: false,
+		savedPage: undefined as AgentsViewPersistentState["savedPage"],
+		savedSessions: [] as AgentConnectionSavedSessionInfo[],
+		lastSuccessfulSavedSessions: [] as AgentConnectionSavedSessionInfo[],
+		heartbeats: [] as unknown[],
+		lastListedSummaries: [] as SessionSummary[],
+		inactiveAgentIdentities: new Set<string>(),
+		expandedSubagentParents: new Set<string>(),
+		programShownParents: new Set<string>(),
+		rows: [] as AgentsViewRow[],
+		selectedIndex: 0,
 		persistentState,
-		applySessionList,
-		reconcileCatalogs,
-		resolveMissingSelectionAnchor: vi.fn(),
+		editor: { getText: () => "" },
+		ui: { requestRender: vi.fn() },
+		getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+		applySessionList: vi.fn(
+			privateMethod<(sessions: SessionSummary[], successful?: boolean) => void>("applySessionList"),
+		),
+		reconcileCatalogs: vi.fn(privateMethod<() => void>("reconcileCatalogs")),
+		resolveMissingSelectionAnchor: vi.fn(privateMethod<() => void>("resolveMissingSelectionAnchor")),
 		setStatusMessage: vi.fn(),
-		startClientReconnect: vi.fn(),
-		rearmSavedSearchFetch: privateMethod<(this: unknown) => void>("rearmSavedSearchFetch"),
 	};
+	const harness = Object.assign(Object.create(AgentsViewMode.prototype) as typeof fields, fields);
+	persistentState.savedPageKey = privateMethod<() => { key: string }>("savedPageRequest").call(harness).key;
+	return harness;
 }
 
 function privateMethod<T>(name: string): T {
@@ -75,6 +114,7 @@ function privateMethod<T>(name: string): T {
 }
 
 describe("#502 unified session view regressions", () => {
+	beforeAll(() => initTheme("dark"));
 	test("an older overlapping heartbeat poll cannot overwrite the newer response", async () => {
 		const old = deferred<unknown>();
 		const newer = { job: { id: "new" } };
@@ -87,7 +127,7 @@ describe("#502 unified session view regressions", () => {
 				.mockReturnValueOnce(old.promise)
 				.mockResolvedValueOnce({ success: true, data: { heartbeats: [newer] } }),
 		};
-		const harness = { ...refreshHarness(), requireClient: () => client };
+		const harness = Object.assign(refreshHarness(), { client, requireClient: () => client });
 		const refresh = privateMethod<(this: typeof harness) => Promise<unknown>>("refreshHeartbeats");
 
 		const oldPoll = refresh.call(harness);
@@ -99,61 +139,50 @@ describe("#502 unified session view regressions", () => {
 		expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
 	});
 
-	test("overlapping saved scans retain the last complete catalog after the newest scan fails", async () => {
+	test("overlapping saved pages release stale rows and expose the newest refusal", async () => {
 		const previous = [savedSession("previous")];
-		const older = deferred<{ success: true; data: { sessions: unknown[] } }>();
+		const older = deferred<ReturnType<typeof savedPage>>();
 		const client = {
-			request: vi
-				.fn()
-				.mockReturnValueOnce(older.promise)
-				.mockImplementationOnce(
-					async (
-						_command: unknown,
-						_timeout: unknown,
-						options: { onProgress: (update: { type: string; session: unknown }) => void },
-					) => {
-						options.onProgress({ type: "session_list_session", session: rawSavedSession("streamed") });
-						throw new Error("scan failed");
-					},
-				),
+			request: vi.fn().mockReturnValueOnce(older.promise).mockRejectedValueOnce(new Error("scan failed")),
 		};
-		const harness = {
-			...refreshHarness(),
+		const harness = Object.assign(refreshHarness(), {
+			client,
 			savedSessions: previous,
 			lastSuccessfulSavedSessions: previous,
 			requireClient: () => client,
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-		};
+		});
 		harness.persistentState.savedSessions = previous;
 		const refresh = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions");
 
 		const oldScan = refresh.call(harness);
 		await Promise.resolve();
-		expect(await refresh.call(harness)).toBe(false);
-		older.resolve({ success: true, data: { sessions: [rawSavedSession("stale")] } });
-		expect(await oldScan).toBe(false);
+		expect(client.request).toHaveBeenCalledOnce();
+		const latest = refresh.call(harness);
+		expect(latest).toBe(oldScan);
+		expect(harness.savedSessions).toEqual([]);
+		older.resolve(savedPage("stale"));
+		expect(await latest).toBe(false);
 
-		expect([harness.savedSessions, harness.persistentState.savedSessions]).toEqual([previous, previous]);
+		expect(client.request).toHaveBeenCalledTimes(2);
+		expect([harness.savedSessions, harness.persistentState.savedSessions]).toEqual([[], []]);
+		expect(harness.savedPage).toMatchObject({ status: "refused", message: "scan failed" });
 		expect(harness.savedCatalogRefreshPending).toBe(false);
 	});
 
-	test("reconnect retries the saved catalog and fences a stale startup scan", async () => {
-		const previous = [savedSession("previous")];
-		const startup = deferred<{ success: true; data: { sessions: unknown[] } }>();
-		const retried = deferred<{ success: true; data: { sessions: unknown[] } }>();
-		const replacement = savedSession("retried");
+	test("reconnect retries the saved page and fences a stale startup request", async () => {
+		const startup = deferred<ReturnType<typeof savedPage>>();
+		const retried = deferred<ReturnType<typeof savedPage>>();
+		const retryStarted = deferred<void>();
 		const client = {
-			request: vi.fn().mockReturnValueOnce(startup.promise).mockReturnValueOnce(retried.promise),
+			request: vi
+				.fn()
+				.mockReturnValueOnce(startup.promise)
+				.mockImplementationOnce(() => {
+					retryStarted.resolve();
+					return retried.promise;
+				}),
 		};
-		const harness = {
-			...refreshHarness(),
-			reconnectPromise: undefined as Promise<void> | undefined,
-			savedSessions: previous,
-			lastSuccessfulSavedSessions: previous,
-			requireClient: () => client,
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-		};
-		harness.persistentState.savedSessions = previous;
+		const harness = Object.assign(refreshHarness(), { client, requireClient: () => client });
 		const refresh =
 			privateMethod<
 				(
@@ -162,40 +191,38 @@ describe("#502 unified session view regressions", () => {
 				) => Promise<boolean>
 			>("refreshSavedSessions");
 
-		harness.reconnectPromise = undefined;
 		const startupScan = refresh.call(harness);
+		await Promise.resolve();
 		harness.reconnectPromise = Promise.resolve();
 		const retry = refresh.call(harness, { duringReconnect: true, preserveStatusOnError: true });
+		expect(retry).toBe(startupScan);
 		expect(harness.savedCatalogGeneration).toBe(2);
 		expect(harness.persistentState.savedCatalogGeneration).toBe(2);
 
-		retried.resolve({ success: true, data: { sessions: [rawSavedSession("retried")] } });
+		startup.resolve(savedPage("stale"));
+		await retryStarted.promise;
+		expect(harness.savedSessions).toEqual([]);
+		retried.resolve(savedPage("retried"));
 		expect(await retry).toBe(true);
-		startup.resolve({ success: true, data: { sessions: [rawSavedSession("stale")] } });
-		expect(await startupScan).toBe(false);
-		expect(harness.savedSessions).toEqual([expect.objectContaining({ path: replacement.path })]);
+		expect(harness.savedSessions).toEqual([expect.objectContaining({ path: "/tmp/retried.jsonl" })]);
+		expect(harness.rows.filter((row) => row.selectable).map((row) => row.summary.sessionId)).toEqual(["retried"]);
 	});
 
-	test("failed saved retry during reconnect preserves status and complete catalog", async () => {
+	test("a refused saved page during reconnect preserves status without retaining stale rows", async () => {
 		const previous = [savedSession("previous")];
 		const client = {
-			request: async (
-				_command: unknown,
-				_timeout: unknown,
-				options: { onProgress: (update: { type: string; session: unknown }) => void },
-			) => {
-				options.onProgress({ type: "session_list_session", session: rawSavedSession("partial") });
-				throw new Error("retry failed");
-			},
+			request: vi.fn(async () => ({
+				success: true,
+				data: { status: "refused", reason: "busy", message: "retry failed" },
+			})),
 		};
-		const harness = {
-			...refreshHarness(),
+		const harness = Object.assign(refreshHarness(), {
+			client,
 			reconnectPromise: Promise.resolve(),
 			savedSessions: previous,
 			lastSuccessfulSavedSessions: previous,
 			requireClient: () => client,
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-		};
+		});
 		harness.persistentState.savedSessions = previous;
 
 		const refreshed = await privateMethod<
@@ -206,8 +233,9 @@ describe("#502 unified session view regressions", () => {
 		>("refreshSavedSessions").call(harness, { duringReconnect: true, preserveStatusOnError: false });
 
 		expect(refreshed).toBe(false);
-		expect(harness.savedSessions).toEqual(previous);
-		expect(harness.persistentState.savedSessions).toEqual(previous);
+		expect(harness.savedSessions).toEqual([]);
+		expect(harness.persistentState.savedSessions).toEqual([]);
+		expect(harness.savedPage).toEqual({ status: "refused", reason: "busy", message: "retry failed" });
 		expect(harness.setStatusMessage).not.toHaveBeenCalled();
 	});
 
@@ -230,8 +258,7 @@ describe("#502 unified session view regressions", () => {
 					return { success: true, data: { heartbeats: [{ job: { id: "healthy" } }] } };
 				}),
 			};
-			const harness = {
-				...refreshHarness(),
+			const harness = Object.assign(refreshHarness(), {
 				stopped: false,
 				reconnectTimedOut: false,
 				client,
@@ -242,7 +269,7 @@ describe("#502 unified session view regressions", () => {
 				refreshHeartbeats: vi.fn(async (_options?: { duringReconnect?: boolean }) => false),
 				armSavedSearchFetch: vi.fn(),
 				reconnectClient: vi.fn(async (_reconnectingClient: typeof client, _error: unknown) => {}),
-			};
+			});
 			const refreshHeartbeats =
 				privateMethod<(this: typeof harness, options?: { duringReconnect?: boolean }) => Promise<boolean>>(
 					"refreshHeartbeats",
@@ -283,25 +310,34 @@ describe("#502 unified session view regressions", () => {
 
 	test("a pending saved scan cannot overwrite daemon shutdown status", async () => {
 		const scan = deferred<void>();
+		const scanStarted = deferred<void>();
 		const client = {
 			request: async () => {
+				scanStarted.resolve();
 				await scan.promise;
 				throw new Error("scan failed");
 			},
 		};
-		const harness = {
-			...refreshHarness(),
+		const harness = Object.assign(refreshHarness(), {
+			client,
 			savedSessions: [],
 			lastSuccessfulSavedSessions: [],
 			requireClient: () => client,
 			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-		};
+		});
 
 		const pending = privateMethod<(this: typeof harness) => Promise<boolean>>("refreshSavedSessions").call(harness);
-		harness.daemonShutdownReceived = true;
+		await scanStarted.promise;
+		privateMethod<(this: typeof harness, client: unknown, error: Error) => void>("handleDaemonShutdown").call(
+			harness,
+			client,
+			new Error("shutdown"),
+		);
+		expect(harness.setStatusMessage).toHaveBeenCalledOnce();
+		const shutdownStatus = harness.setStatusMessage.mock.calls[0];
 		scan.resolve();
 		expect(await pending).toBe(false);
-		expect(harness.setStatusMessage).not.toHaveBeenCalled();
+		expect(harness.setStatusMessage.mock.calls).toEqual([shutdownStatus]);
 	});
 
 	test("a missing selection anchor blocks open only until both catalogs settle", () => {
@@ -380,6 +416,7 @@ describe("#502 unified session view regressions", () => {
 			renderStartupNotices: () => Array.from({ length: 8 }, () => "notice"),
 			renderPrompt: () => prompt,
 			renderSessionRows,
+			savedPageNotice: privateMethod<() => string>("savedPageNotice"),
 		};
 		const height = prompt.length + 2;
 
@@ -397,6 +434,7 @@ describe("#502 unified session view regressions", () => {
 			replyTarget: mode === "reply" ? { key: "active", summary: {} } : undefined,
 			renameTarget: mode === "rename" ? { identity: "target" } : undefined,
 			actionModeSearchQuery: "needle",
+			savedPageHints: privateMethod<() => undefined>("savedPageHints"),
 			editor: { getText: () => "action editor text" },
 			scopedRecords: [
 				{ identity: "match", identityAliases: [], section: "idle", searchableText: "needle session" },
@@ -460,7 +498,7 @@ describe("#502 unified session view regressions", () => {
 				...summary("effort-child"),
 				runtimeKind: "subagent" as const,
 				summary: "Investigate a variable background status that can be truncated",
-				model: { provider: "prime-inference", id: "gpt-5.6-terra" } as SessionSummary["model"],
+				model: { provider: "openai", id: "gpt-5.6-terra" } as SessionSummary["model"],
 				thinkingLevel: "high" as SessionSummary["thinkingLevel"],
 			} as SessionSummary,
 			title: "Inspect agents view",
@@ -493,23 +531,23 @@ describe("#502 unified session view regressions", () => {
 
 		const full = render(160);
 		expect(full).toContain(
-			"Inspect agents view · prime-inference/gpt-5.6-terra:high · Investigate a variable background status",
+			"Inspect agents view · openai/gpt-5.6-terra:high · Investigate a variable background status",
 		);
 		const narrow = render(100);
-		expect(narrow).toContain("prime-inference/gpt-5.6-terra:high");
+		expect(narrow).toContain("openai/gpt-5.6-terra:high");
 		expect(narrow).not.toContain("Investigate a variable background status");
 
 		subagent.summary.summary = "";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toContain("Inspect agents view · openai/gpt-5.6-terra:high");
 
 		// Older daemons identify subagents through persisted linkage instead of runtimeKind.
 		subagent.summary.runtimeKind = undefined;
 		subagent.summary.rlmChildId = "effort-child";
-		expect(render(100)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra:high");
+		expect(render(100)).toContain("Inspect agents view · openai/gpt-5.6-terra:high");
 
 		subagent.summary.thinkingLevel = "off";
 		subagent.summary.summary = "A later summary";
-		expect(render(120)).toContain("Inspect agents view · prime-inference/gpt-5.6-terra · A later summary");
+		expect(render(120)).toContain("Inspect agents view · openai/gpt-5.6-terra · A later summary");
 		expect(render(120)).not.toContain(":off");
 
 		expect(render(20)).toHaveLength(20);

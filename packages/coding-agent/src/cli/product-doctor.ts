@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import {
 	getBinDir,
 	getBundledSkillsDir,
@@ -16,7 +17,7 @@ import {
 	CONTEXT_TOOL_EPOCH_RENDERER,
 } from "../core/context-epoch.js";
 import { getKernelVenvDir, runtimeCandidateDirs } from "../core/kernel/bootstrap.js";
-import { BUILT_IN_PROVIDER_AUTH_CONTRACTS, getProviderAuthContract } from "../core/provider-contracts.js";
+import { getProviderAuthContract } from "../core/provider-contracts.js";
 import { CURRENT_SESSION_VERSION } from "../core/session-manager.js";
 import { DAEMON_PROTOCOL_INFO, DAEMON_SCHEMA_ID } from "../modes/daemon/daemon-protocol.js";
 import { defaultDaemonSocketDir, defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
@@ -64,11 +65,13 @@ export function getProductDiagnostics() {
 			customThemes: getCustomThemesDir(),
 			settings: join(paths.home, "settings.json"),
 			projectSettings: join(paths.project, "settings.json"),
-			providerConfiguration: join(paths.home, "prime-inference.json"),
 			daemonSockets: defaultDaemonSocketDir(),
 			defaultDaemonSocket: defaultDaemonSocketPath(),
 		},
-		providerContracts: [...BUILT_IN_PROVIDER_AUTH_CONTRACTS, getProviderAuthContract("mcp-oauth")],
+		providerContracts: [
+			...getOAuthProviders().map((provider) => getProviderAuthContract(provider.id)),
+			getProviderAuthContract("prime-intellect"),
+		],
 	};
 }
 

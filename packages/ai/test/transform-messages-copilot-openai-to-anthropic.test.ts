@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../src/providers/openai-responses-shared.js";
 import { transformMessages } from "../src/providers/transform-messages.js";
 import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.js";
+import type { ProviderRequestProjection } from "../src/utils/request-token-budget.js";
 
 function anthropicNormalizeToolCallId(
 	id: string,
@@ -186,4 +188,70 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			content: [{ type: "text", text: "No result provided" }],
 		});
 	});
+});
+
+describe("interrupted tool results and native Responses projection", () => {
+	const model: Model<"openai-responses"> = {
+		...makeCopilotClaudeModel(),
+		api: "openai-responses",
+		provider: "openai",
+		id: "gpt-5",
+	};
+	const messages: Message[] = [
+		{ role: "user", content: "Run tools", timestamp: 1 },
+		{
+			...makeAssistantMessage([
+				{ type: "toolCall", id: "call_1|fc_1", name: "ipython", arguments: { code: "1" } },
+				{ type: "toolCall", id: "call_2|fc_2", name: "ipython", arguments: { code: "2" } },
+			]),
+			provider: "openai",
+		},
+		{
+			role: "toolResult",
+			toolCallId: "call_1|fc_1",
+			toolName: "ipython",
+			content: [{ type: "text", text: "1" }],
+			isError: false,
+			timestamp: 2,
+		},
+	];
+
+	it("keeps original pending-public indices without manufacturing a missing result", () => {
+		const original = structuredClone(messages);
+		let projection: ProviderRequestProjection | undefined;
+		const input = convertResponsesMessages(model, { messages }, new Set(["openai"]), {
+			pendingPublicMessageGroups: [[1, 2]],
+			onProjection: (value) => {
+				projection = value;
+			},
+		});
+		expect(messages).toEqual(original);
+		expect(input.filter((item) => item.type === "function_call_output")).toHaveLength(1);
+		expect(projection).toMatchObject({
+			messageIndices: [0, 1, 1, 2],
+			publicMessageGroups: [[1, 2]],
+			pendingPublicMessageGroups: [[1, 2]],
+		});
+	});
+
+	it.each(["aborted", "error"] as const)(
+		"filters an %s turn's orphan result without granting replay",
+		(stopReason) => {
+			const interrupted = structuredClone(messages);
+			const assistant = interrupted[1] as AssistantMessage;
+			assistant.stopReason = stopReason;
+			const original = structuredClone(interrupted);
+			let projection: ProviderRequestProjection | undefined;
+			const input = convertResponsesMessages(model, { messages: interrupted }, new Set(["openai"]), {
+				pendingPublicMessageGroups: [[1, 2]],
+				onProjection: (value) => {
+					projection = value;
+				},
+			});
+			expect(transformMessages(interrupted, model)).toEqual([interrupted[0]]);
+			expect(interrupted).toEqual(original);
+			expect(input).toHaveLength(1);
+			expect(projection).toBeUndefined();
+		},
+	);
 });

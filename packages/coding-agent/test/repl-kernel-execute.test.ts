@@ -193,7 +193,6 @@ async function createNativeLifecycleFixture(cwd: string, name: string) {
 		includeGoals: false,
 		includeCompactSkill: false,
 		prewarmIpythonKernel: false,
-		telemetryDisabled: true,
 		requestTokenBudget: {
 			mode: "enforce",
 			profiles: [
@@ -470,7 +469,7 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 					originalInput: calls[1].arguments,
 				},
 			});
-			expect(finalized!.invocation?.source.qualification).toBeUndefined();
+			expect(finalized!.invocation?.source.qualification).toBe("native-tool-execution");
 			expect(nativeUnits.find((unit) => unit.exactSources.includes(finalized!.source.id))).toMatchObject({
 				kind: "recovery",
 				authority: "tool-data",
@@ -863,8 +862,11 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 					await session.prompt("Run the denied recovery calls.");
 					await sessionManager.readBranchHistory(async (history) => {
 						for await (const item of history.iterateEntries({ maxEntries: 64, maxSourceBytes: 1024 * 1024 })) {
-							if (item.entry.type === "message" && item.entry.message.role === "toolResult")
-								expect(item.source.qualification).toBeUndefined();
+							if (item.entry.type !== "message" || item.entry.message.role !== "toolResult") continue;
+							const unqualified =
+								item.source.id === forgedRef ||
+								(mode === "restricted" && item.entry.message.toolCallId === "denied-direct");
+							expect(item.source.qualification).toBe(unqualified ? undefined : "native-tool-execution");
 						}
 						if (forgedRef) expect(await history.get(forgedRef)).toMatchObject({ authority: "runtime" });
 					});

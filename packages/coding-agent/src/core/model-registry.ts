@@ -22,19 +22,13 @@ import {
 } from "@ponythewhite/base-context-ai";
 import { registerBuiltinMcpOAuthProviders } from "@ponythewhite/base-context-ai/mcp";
 import { getOAuthProvider, registerOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, readFileSync } from "fs";
+import { join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
-import {
-	fetchAuthorizedPrivatePrimeInferenceModelIds,
-	getPrivatePrimeInferenceModels,
-	isPrivatePrimeInferenceModel,
-} from "./prime-inference-models.js";
 import { getProviderAuthContract, isProviderApiKeyAllowed } from "./provider-contracts.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
@@ -263,6 +257,7 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			sourceToken?: AuthSourceToken;
 	  }
 	| {
 			ok: false;
@@ -349,6 +344,60 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	return result;
 }
 
+function isApiKeyOverriddenByHeaders(
+	model: Model<Api>,
+	apiKey: string,
+	headers: Record<string, string> | undefined,
+): boolean {
+	if (!headers) return false;
+
+	let headerName: string;
+	let expectedValue = apiKey;
+	switch (model.api) {
+		case "openai-completions":
+		case "openai-responses":
+			expectedValue = `Bearer ${apiKey}`;
+			headerName = model.provider === "cloudflare-ai-gateway" ? "cf-aig-authorization" : "authorization";
+			if (model.provider === "cloudflare-ai-gateway") {
+				// These adapters set the gateway key after merging custom headers.
+				headers = { ...headers, "cf-aig-authorization": expectedValue };
+			}
+			break;
+		case "anthropic-messages":
+			headerName = model.provider === "cloudflare-ai-gateway" ? "cf-aig-authorization" : "x-api-key";
+			if (model.provider === "cloudflare-ai-gateway") expectedValue = `Bearer ${apiKey}`;
+			else if (model.provider === "github-copilot" || apiKey.includes("sk-ant-oat")) {
+				headerName = "authorization";
+				expectedValue = `Bearer ${apiKey}`;
+			}
+			break;
+		case "azure-openai-responses":
+			headerName = "api-key";
+			break;
+		case "google-generative-ai":
+		case "google-vertex":
+			headerName = "x-goog-api-key";
+			break;
+		case "mistral-conversations":
+			headerName = "authorization";
+			expectedValue = /^bearer /i.test(apiKey) ? apiKey : `Bearer ${apiKey}`;
+			break;
+		default:
+			return false;
+	}
+
+	// Google and Mistral append differently cased duplicates; Stainless SDKs use the last entry.
+	const values = Object.entries(headers)
+		.filter(([name]) => name.toLowerCase() === headerName)
+		.map(([, value]) => value.trim());
+	if (values.length === 0) return false;
+	const actualValue =
+		model.api === "google-generative-ai" || model.api === "google-vertex" || model.api === "mistral-conversations"
+			? values.join(", ")
+			: values.at(-1);
+	return actualValue !== expectedValue.trim();
+}
+
 function readOpenAICodexAccountId(token: string): string | undefined {
 	try {
 		const payload = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as {
@@ -411,26 +460,6 @@ function readOpenAICodexModelIds(value: unknown): Set<string> {
 	);
 }
 
-const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE = "prime-inference-private-models.json";
-const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS = 5 * 60_000;
-const PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS = 3_000;
-
-interface PrivatePrimeAuthorizationCache {
-	fingerprint: string;
-	modelIds: Set<string>;
-	refreshedAt: number;
-}
-
-function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): string {
-	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
-}
-
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.BASE_CONTEXT_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
-
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -441,11 +470,7 @@ export class ModelRegistry {
 	private lastProviderAuthSourceTokens: Map<string, AuthSourceToken> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
-	private authorizedPrivatePrimeInferenceModelIds = new Set<string>();
-	private authorizedPrivatePrimeInferenceTeamId: string | undefined;
-	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
-	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -477,9 +502,6 @@ export class ModelRegistry {
 		this.providerRequestConfigs.clear();
 		this.modelRequestHeaders.clear();
 		this.lastProviderAuthSourceTokens.clear();
-		this.authorizedPrivatePrimeInferenceModelIds.clear();
-		this.authorizedPrivatePrimeInferenceTeamId = undefined;
-		this.explicitPrivatePrimeInferenceModelIds.clear();
 		this.loadError = undefined;
 
 		// Credentials may have been written by another process (e.g. the UI
@@ -523,11 +545,7 @@ export class ModelRegistry {
 			this.loadError = error;
 		}
 
-		this.explicitPrivatePrimeInferenceModelIds = new Set(
-			customModels.filter(isPrivatePrimeInferenceModel).map((model) => model.id),
-		);
-		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPrivatePrimeInferenceModels()];
-		let combined = this.mergeCustomModels(builtInModels, customModels);
+		let combined = this.mergeCustomModels(this.loadBuiltInModels(overrides, modelOverrides), customModels);
 
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
@@ -762,207 +780,27 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((model) => {
-			if (
-				isPrivatePrimeInferenceModel(model) &&
-				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
-				!this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
-			) {
-				return false;
-			}
-			return this.hasConfiguredAuth(model);
-		});
+		return this.models.filter((model) => this.hasConfiguredAuth(model));
 	}
 
 	async refreshAvailableModels(): Promise<Model<Api>[]> {
-		const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
-		const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
 		this.refresh();
-		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
 		return this.getAvailable();
-	}
-
-	private async refreshPrivatePrimeInferenceAuthorization(
-		previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds),
-		previousTeamId = this.authorizedPrivatePrimeInferenceTeamId,
-	): Promise<void> {
-		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
-		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
-		const teamId = teamHeaders?.["X-Prime-Team-ID"];
-		if (!apiKey || !teamHeaders || !teamId) {
-			this.authorizedPrivatePrimeInferenceModelIds.clear();
-			this.authorizedPrivatePrimeInferenceTeamId = undefined;
-			return;
-		}
-
-		const fingerprint = privatePrimeAuthorizationFingerprint(apiKey, teamId);
-		const cached = this.readPrivatePrimeAuthorizationCache();
-		if (cached?.fingerprint === fingerprint) {
-			// Serve the persisted authorization decision so startup and model lists
-			// don't block on the network. A stale cache refreshes in the background
-			// and the updated ids apply to subsequent lookups in this process.
-			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
-			this.authorizedPrivatePrimeInferenceTeamId = teamId;
-			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			if (cacheIsFresh || isOfflineModeEnabled()) {
-				return;
-			}
-			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
-			return;
-		}
-		if (isOfflineModeEnabled()) {
-			this.authorizedPrivatePrimeInferenceModelIds.clear();
-			this.authorizedPrivatePrimeInferenceTeamId = undefined;
-			return;
-		}
-
-		let authorizedIds: Set<string> | undefined;
-		try {
-			authorizedIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(apiKey, teamHeaders);
-		} catch {
-			// Fall back to the previous authorization below.
-		}
-		// Leave newer state untouched if the credentials changed while fetching.
-		if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
-			return;
-		}
-		if (authorizedIds) {
-			this.authorizedPrivatePrimeInferenceModelIds = authorizedIds;
-			this.authorizedPrivatePrimeInferenceTeamId = teamId;
-			this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
-		} else if (teamId === previousTeamId) {
-			this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
-			this.authorizedPrivatePrimeInferenceTeamId = teamId;
-		} else {
-			this.authorizedPrivatePrimeInferenceModelIds.clear();
-			this.authorizedPrivatePrimeInferenceTeamId = undefined;
-		}
-	}
-
-	/**
-	 * Stale cache hits refresh in the background; failures keep the cached ids.
-	 * Refreshes for the same credentials are deduped, a changed-credentials
-	 * refresh is queued after the in-flight one, and a result is only applied
-	 * if the credentials it was fetched with are still current.
-	 */
-	private startBackgroundPrivatePrimeAuthorizationRefresh(
-		apiKey: string,
-		teamHeaders: Record<string, string>,
-		teamId: string,
-		fingerprint: string,
-	): void {
-		if (this.backgroundPrivatePrimeAuthorization?.fingerprint === fingerprint) {
-			return;
-		}
-		const run = async () => {
-			try {
-				const authorizedIds = await fetchAuthorizedPrivatePrimeInferenceModelIds(
-					apiKey,
-					teamHeaders,
-					undefined,
-					PRIVATE_PRIME_BACKGROUND_REFRESH_TIMEOUT_MS,
-				);
-				if ((await this.currentPrivatePrimeAuthorizationFingerprint()) !== fingerprint) {
-					return;
-				}
-				this.authorizedPrivatePrimeInferenceModelIds = authorizedIds;
-				this.authorizedPrivatePrimeInferenceTeamId = teamId;
-				this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
-			} catch {
-				// Keep the cached authorization.
-			}
-		};
-		const pending = this.backgroundPrivatePrimeAuthorization?.promise;
-		const promise = (pending ?? Promise.resolve()).then(run);
-		this.backgroundPrivatePrimeAuthorization = { fingerprint, promise };
-		void promise.finally(() => {
-			if (this.backgroundPrivatePrimeAuthorization?.promise === promise) {
-				this.backgroundPrivatePrimeAuthorization = undefined;
-			}
-		});
-	}
-
-	private async currentPrivatePrimeAuthorizationFingerprint(): Promise<string | undefined> {
-		const apiKey = await this.authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID);
-		const teamId = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID)?.["X-Prime-Team-ID"];
-		return apiKey && teamId ? privatePrimeAuthorizationFingerprint(apiKey, teamId) : undefined;
-	}
-
-	private privatePrimeAuthorizationCachePath(): string | undefined {
-		if (!this.modelsJsonPath) {
-			return undefined;
-		}
-		return join(dirname(this.modelsJsonPath), PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE);
-	}
-
-	private readPrivatePrimeAuthorizationCache(): PrivatePrimeAuthorizationCache | undefined {
-		const cachePath = this.privatePrimeAuthorizationCachePath();
-		if (!cachePath) {
-			return undefined;
-		}
-		try {
-			const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<
-				Omit<PrivatePrimeAuthorizationCache, "modelIds"> & { modelIds: string[] }
-			>;
-			if (
-				typeof parsed.fingerprint !== "string" ||
-				!Array.isArray(parsed.modelIds) ||
-				typeof parsed.refreshedAt !== "number"
-			) {
-				return undefined;
-			}
-			return {
-				fingerprint: parsed.fingerprint,
-				modelIds: new Set(parsed.modelIds),
-				refreshedAt: parsed.refreshedAt,
-			};
-		} catch {
-			return undefined;
-		}
-	}
-
-	private writePrivatePrimeAuthorizationCache(cache: PrivatePrimeAuthorizationCache): void {
-		const cachePath = this.privatePrimeAuthorizationCachePath();
-		if (!cachePath) {
-			return;
-		}
-		try {
-			const tmpPath = `${cachePath}.${process.pid}.tmp`;
-			writeFileSync(tmpPath, JSON.stringify({ ...cache, modelIds: [...cache.modelIds] }), { mode: 0o600 });
-			renameSync(tmpPath, cachePath);
-		} catch {
-			// A failed cache write only requires a later refetch.
-		}
 	}
 
 	async refreshModelCatalog(): Promise<ModelCatalogSnapshot> {
 		const availableModels = await this.refreshAvailableModels();
-		const availablePrivateModels = new Set(
-			availableModels.filter(isPrivatePrimeInferenceModel).map((model) => `${model.provider}/${model.id}`),
-		);
 		return {
-			models: this.models.filter(
-				(model) =>
-					!isPrivatePrimeInferenceModel(model) || availablePrivateModels.has(`${model.provider}/${model.id}`),
-			),
+			models: this.models,
 			configuredProviders: [...new Set(availableModels.map((model) => model.provider))],
 		};
 	}
 
 	async canUseModel(model: Model<Api>): Promise<boolean> {
-		if (!this.hasConfiguredAuth(model)) {
-			return false;
-		}
-		if (!isPrivatePrimeInferenceModel(model)) {
-			return true;
-		}
-
-		const availableModels = await this.refreshAvailableModels();
-		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+		return this.hasConfiguredAuth(model);
 	}
 
 	async getExecutableModels(): Promise<Model<Api>[]> {
-		await this.refreshPrivatePrimeInferenceAuthorization();
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
 		if (codexModels.length === 0) {
@@ -1032,11 +870,13 @@ export class ModelRegistry {
 	}
 
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		if (this.isExistingOpenAICodexSubscription(model)) return this.authStorage.hasAuth(model.provider);
-		return (
-			isProviderApiKeyAllowed(model.provider, "", model.api) &&
-			(this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider))
-		);
+		if (this.authStorage.isExistingOpenAICodexSubscription(model.provider)) {
+			return this.isExistingOpenAICodexSubscription(model) && this.authStorage.hasAuth(model.provider);
+		}
+		if (!isProviderApiKeyAllowed(model.provider, "", model.api)) {
+			return this.isUsingOAuth(model) && this.authStorage.hasAuth(model.provider);
+		}
+		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
 	}
 
 	private fingerprintProviderRequestAuthSource(source: ProviderRequestAuthSource["source"], material: string): string {
@@ -1309,6 +1149,12 @@ export class ModelRegistry {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
+			if (
+				this.authStorage.isExistingOpenAICodexSubscription(model.provider) &&
+				!this.isExistingOpenAICodexSubscription(model)
+			) {
+				return { ok: false, error: "Existing OpenAI subscription requires the native Codex endpoint and API" };
+			}
 			if (this.isExistingOpenAICodexSubscription(model)) {
 				const config = this.providerRequestConfigs.get(model.provider);
 				const modelHeaders = this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id));
@@ -1331,12 +1177,18 @@ export class ModelRegistry {
 					...resolveHeadersOrThrow(modelHeaders, `model "${model.provider}/${model.id}"`),
 				};
 				this.setLastProviderAuthSourceToken(model.provider, auth.sourceToken);
-				return { ok: true, apiKey: auth.apiKey, headers: Object.keys(headers).length ? headers : undefined };
+				return {
+					ok: true,
+					apiKey: auth.apiKey,
+					sourceToken: auth.sourceToken,
+					headers: Object.keys(headers).length ? headers : undefined,
+				};
 			}
 			const contract = getProviderAuthContract(
 				model.api === "openai-codex-responses" ? "openai-codex" : model.provider,
 			);
-			if (!isProviderApiKeyAllowed(model.provider, "", model.api)) {
+			const usingOAuth = this.isUsingOAuth(model);
+			if (!usingOAuth && !isProviderApiKeyAllowed(model.provider, "", model.api)) {
 				return { ok: false, error: contract.guidance };
 			}
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
@@ -1363,18 +1215,15 @@ export class ModelRegistry {
 					authSourceToken = this.getProviderRequestAuthSourceToken(model.provider, providerRequestAuthSource);
 				}
 			}
-			this.setLastProviderAuthSourceToken(model.provider, apiKey === undefined ? undefined : authSourceToken);
-
 			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
-			const authStorageHeaders = this.authStorage.getProviderHeaders(model.provider);
 			const modelHeaders = resolveHeadersOrThrow(
 				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
 				`model "${model.provider}/${model.id}"`,
 			);
 
 			let headers =
-				model.headers || authStorageHeaders || providerHeaders || modelHeaders
-					? { ...model.headers, ...authStorageHeaders, ...providerHeaders, ...modelHeaders }
+				model.headers || providerHeaders || modelHeaders
+					? { ...model.headers, ...providerHeaders, ...modelHeaders }
 					: undefined;
 
 			if (providerConfig?.authHeader) {
@@ -1384,15 +1233,17 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
-			if (
-				!isProviderApiKeyAllowed(model.provider, apiKey ?? "", model.api) ||
-				Object.values(headers ?? {}).some((value) => !isProviderApiKeyAllowed(model.provider, value, model.api))
-			) {
+			if (!usingOAuth && !isProviderApiKeyAllowed(model.provider, apiKey ?? "", model.api)) {
 				return { ok: false, error: contract.guidance };
 			}
+			if (apiKey === undefined || isApiKeyOverriddenByHeaders(model, apiKey, headers)) {
+				authSourceToken = undefined;
+			}
+			this.setLastProviderAuthSourceToken(model.provider, authSourceToken);
 			return {
 				ok: true,
 				apiKey,
+				sourceToken: authSourceToken,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 			};
 		} catch (error) {
@@ -1482,11 +1333,17 @@ export class ModelRegistry {
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
+		if (
+			this.authStorage.isExistingOpenAICodexSubscription(model.provider) &&
+			!this.isExistingOpenAICodexSubscription(model)
+		) {
+			return false;
+		}
 		const cred = this.authStorage.get(model.provider);
 		return (
 			cred?.type === "oauth" &&
 			(this.isExistingOpenAICodexSubscription(model) ||
-				getProviderAuthContract(model.provider).oauth === "validated")
+				getProviderAuthContract(model.provider).oauth === "supported")
 		);
 	}
 
@@ -1607,7 +1464,7 @@ export class ModelRegistry {
 					compat: modelDef.compat,
 				} as Model<Api>);
 			}
-			if (config.oauth?.modifyModels && getProviderAuthContract(providerName).oauth === "validated") {
+			if (config.oauth?.modifyModels && getProviderAuthContract(providerName).oauth === "supported") {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
 					this.models = config.oauth.modifyModels(this.models, cred);

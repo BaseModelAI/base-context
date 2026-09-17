@@ -1,24 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getOAuthProvider, resetOAuthProviders } from "@ponythewhite/base-context-ai/oauth";
 import type { Component, OverlayHandle, TUI } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
-import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
-
-function jsonResponse(body: unknown, status: number = 200): Response {
-	return new Response(JSON.stringify(body), {
-		status,
-		headers: {
-			"Content-Type": "application/json",
-		},
-	});
-}
 
 function createOverlayHandle(): OverlayHandle {
 	return {
@@ -76,9 +67,6 @@ function createHost(authStorage: AuthStorage): {
 describe("ProviderAuthFlows", () => {
 	let tempDir: string;
 	let authJsonPath: string;
-	let primeConfigPath: string;
-	let originalHome: string | undefined;
-	let originalPrimeTeamId: string | undefined;
 
 	beforeAll(() => {
 		initTheme("dark");
@@ -88,153 +76,99 @@ describe("ProviderAuthFlows", () => {
 		tempDir = join(tmpdir(), `pi-auth-flows-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		authJsonPath = join(tempDir, "auth.json");
-		primeConfigPath = join(tempDir, "prime-config.json");
 		writeFileSync(authJsonPath, "{}");
-		originalHome = process.env.HOME;
-		originalPrimeTeamId = process.env.PRIME_TEAM_ID;
 		vi.stubEnv("HOME", tempDir);
 		vi.stubEnv("BASE_CONTEXT_HOME", join(tempDir, "base-context"));
-		vi.stubEnv("PRIME_API_KEY", undefined);
+		vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("No network in auth flow tests"));
 	});
 
 	afterEach(() => {
-		if (originalHome === undefined) {
-			delete process.env.HOME;
-		} else {
-			process.env.HOME = originalHome;
-		}
-		if (originalPrimeTeamId === undefined) {
-			delete process.env.PRIME_TEAM_ID;
-		} else {
-			process.env.PRIME_TEAM_ID = originalPrimeTeamId;
-		}
 		if (existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
+		resetOAuthProviders();
 	});
 
-	it("validates a manually entered key and preserves the isolated provider team", async () => {
-		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("prime-cli-key");
-		process.env.PRIME_TEAM_ID = "env-team";
-		writeFileSync(
-			primeConfigPath,
-			JSON.stringify({
-				api_key: "prime-cli-key",
-				team_id: "cli-team",
-				team_name: "CLI Research",
-				team_role: "admin",
-			}),
-		);
-		writeFileSync(
-			authJsonPath,
-			JSON.stringify({
-				[PRIME_INFERENCE_PROVIDER_ID]: {
-					type: "api_key",
-					key: "legacy-agent-key",
-				},
-			}),
-		);
-		const authStorage = AuthStorage.create(authJsonPath, {
-			primeCliConfigPath: primeConfigPath,
-			usePrimeCliConfig: true,
-		});
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			jsonResponse({
-				data: { scope: { inference: { write: true } } },
-			}),
-		);
-		const { host, statusMessages, errorMessages } = createHost(authStorage);
-
-		const result = await new ProviderAuthFlows(host).runPrimeInferenceLogin();
-
-		expect(errorMessages).toEqual([]);
-		expect(result.status).toBe("success");
-		expect(fetchMock).toHaveBeenCalledOnce();
-		expect(statusMessages.join("\n")).toContain("Using team from PRIME_TEAM_ID.");
-
-		const config = JSON.parse(readFileSync(primeConfigPath, "utf-8")) as Record<string, unknown>;
-		expect(config.api_key).toBe("prime-cli-key");
-		expect(config.team_id).toBe("cli-team");
-		expect(config.team_name).toBe("CLI Research");
-		expect(config.team_role).toBe("admin");
-		expect(authStorage.has(PRIME_INFERENCE_PROVIDER_ID)).toBe(false);
-	});
-
-	it("stores the entered key without borrowing Prime CLI credentials when config sync is disabled", async () => {
-		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("manual-key");
-		process.env.HOME = tempDir;
-		process.env.PRIME_TEAM_ID = "env-team";
-		const defaultPrimeDir = join(tempDir, ".prime");
-		mkdirSync(defaultPrimeDir, { recursive: true });
-		writeFileSync(join(defaultPrimeDir, "config.json"), JSON.stringify({ api_key: "prime-cli-key" }));
-		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
-		const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			jsonResponse({
-				data: { scope: { inference: { write: true } } },
-			}),
-		);
+	it("stores an API key only for the selected provider without sending it", async () => {
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockResolvedValue("test-provider-key");
+		const fetch = vi.spyOn(globalThis, "fetch");
+		const authStorage = AuthStorage.create(authJsonPath);
 		const { host, errorMessages } = createHost(authStorage);
 
-		const result = await new ProviderAuthFlows(host).runPrimeInferenceLogin();
+		const result = await new ProviderAuthFlows(host).loginProvider({
+			id: "openai",
+			name: "OpenAI",
+			authType: "api_key",
+		});
 
+		expect(result).toMatchObject({ status: "success", providerId: "openai" });
 		expect(errorMessages).toEqual([]);
-		expect(result.status).toBe("success");
-		expect(fetchMock).toHaveBeenCalledOnce();
-		expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.primeintellect.ai/api/v1/user/whoami");
-		expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer manual-key" });
-		expect(JSON.parse(readFileSync(join(defaultPrimeDir, "config.json"), "utf-8"))).toEqual({
-			api_key: "prime-cli-key",
+		expect(JSON.parse(readFileSync(authJsonPath, "utf8"))).toEqual({
+			openai: { type: "api_key", key: "test-provider-key" },
 		});
-		await expect(authStorage.getApiKey(PRIME_INFERENCE_PROVIDER_ID)).resolves.toBe("manual-key");
-		expect(authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID)).toEqual({
-			configured: true,
-			source: "stored",
-		});
-
-		const authData = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<
-			string,
-			{ type?: string; key?: string }
-		>;
-		expect(authData[PRIME_INFERENCE_PROVIDER_ID]).toEqual({
-			type: "api_key",
-			key: "manual-key",
-		});
+		expect(fetch).not.toHaveBeenCalled();
 	});
 
-	it("offers Prime Inference logout for isolated provider config credentials", async () => {
-		writeFileSync(primeConfigPath, JSON.stringify({ api_key: "prime-cli-key" }));
-		const authStorage = AuthStorage.create(authJsonPath, {
-			primeCliConfigPath: primeConfigPath,
-			usePrimeCliConfig: true,
-		});
-		const { host, overlays } = createHost(authStorage);
+	it("leaves credentials unchanged when provider login is cancelled", async () => {
+		vi.spyOn(LoginDialogComponent.prototype, "showPrompt").mockRejectedValue(new Error("Login cancelled"));
+		const authStorage = AuthStorage.create(authJsonPath);
+		const { host, errorMessages } = createHost(authStorage);
 
-		const logoutResult = new ProviderAuthFlows(host).runLogout();
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai", name: "OpenAI", authType: "api_key" }),
+		).resolves.toEqual({ status: "cancelled" });
 
-		expect(overlays).toHaveLength(1);
-		expect(stripAnsi(overlays[0]?.render(80).join("\n") ?? "")).toContain("Prime Inference");
-		overlays[0]?.handleInput?.("\x1b");
-		await expect(logoutResult).resolves.toBeNull();
+		expect(authStorage.list()).toEqual([]);
+		expect(errorMessages).toEqual([]);
 	});
 
-	it("explains separate trace configuration without requesting provider credentials", async () => {
-		const authStorage = AuthStorage.inMemory({
-			[PRIME_INFERENCE_PROVIDER_ID]: { type: "api_key", key: "inference-key" },
-		});
-		const fetchMock = vi.spyOn(globalThis, "fetch");
-		const { host, errorMessages, overlays } = createHost(authStorage);
+	it.each(["anthropic", "github-copilot", "openai-codex"])(
+		"runs the selected %s subscription login",
+		async (providerId) => {
+			const provider = getOAuthProvider(providerId)!;
+			const showAuth = vi.spyOn(LoginDialogComponent.prototype, "showAuth").mockImplementation(() => {});
+			vi.spyOn(LoginDialogComponent.prototype, "showManualInput").mockResolvedValue(
+				"http://localhost/callback?code=test",
+			);
+			const login = vi.spyOn(provider, "login").mockImplementation(async (callbacks) => {
+				callbacks.onAuth({ url: "https://login.example.test/authorize" });
+				if (provider.usesCallbackServer) {
+					await expect(callbacks.onManualCodeInput?.()).resolves.toContain("code=test");
+				}
+				return { access: "test-access", refresh: "test-refresh", expires: Date.now() + 60_000 };
+			});
+			const { host, overlays, statusMessages, errorMessages } = createHost(AuthStorage.create(authJsonPath));
+			const flow = new ProviderAuthFlows(host);
+			expect(flow.getLoginProviderOptions("oauth").map((entry) => entry.id)).not.toContain("prime-intellect");
+			const result = flow.runLogin({ authType: "oauth" });
+			for (const character of providerId) overlays[0]?.handleInput?.(character);
+			overlays[0]?.handleInput?.("\r");
+			await expect(result).resolves.toMatchObject({ status: "success", providerId, authType: "oauth" });
+			expect(login).toHaveBeenCalledOnce();
+			expect(showAuth).toHaveBeenCalledWith("https://login.example.test/authorize", undefined);
+			expect(errorMessages).toEqual([]);
+			expect(statusMessages.join(" ")).toContain("Use /model to select a model");
+			expect(Object.keys(JSON.parse(readFileSync(authJsonPath, "utf8")))).toEqual([providerId]);
+			expect(globalThis.fetch).not.toHaveBeenCalled();
+		},
+	);
 
-		await expect(new ProviderAuthFlows(host).runPrimeAgentTracesLogin()).resolves.toEqual({ status: "failed" });
-		expect(errorMessages.join("\n")).toContain("BASE_CONTEXT_TRACES_BASE_URL");
-		expect(errorMessages.join("\n")).toContain("BASE_CONTEXT_TRACES_API_KEY");
-		expect(fetchMock).not.toHaveBeenCalled();
-		expect(overlays).toHaveLength(0);
+	it("leaves OAuth storage unchanged after a cancelled browser login", async () => {
+		vi.spyOn(getOAuthProvider("openai-codex")!, "login").mockRejectedValue(new Error("Login cancelled"));
+		const authStorage = AuthStorage.create(authJsonPath);
+		const { host, errorMessages } = createHost(authStorage);
+		await expect(
+			new ProviderAuthFlows(host).loginProvider({ id: "openai-codex", name: "Codex", authType: "oauth" }),
+		).resolves.toEqual({ status: "cancelled" });
+		expect(authStorage.list()).toEqual([]);
+		expect(errorMessages).toEqual([]);
+		expect(globalThis.fetch).not.toHaveBeenCalled();
 	});
 
 	it("opens login on the requested MCP Connections category", async () => {
-		const authStorage = AuthStorage.create(authJsonPath, { usePrimeCliConfig: false });
+		const authStorage = AuthStorage.create(authJsonPath);
 		const { host, overlays } = createHost(authStorage);
 
 		const loginResult = new ProviderAuthFlows(host).runLogin({ initialCategory: "service" });

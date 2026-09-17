@@ -43,8 +43,8 @@ export interface CreateAgentSessionOptions extends AgentSessionCreationOptions {
 	/** Model registry. Default: ModelRegistry.create(authStorage, agentDir/models.json) */
 	modelRegistry?: ModelRegistry;
 
-	/** Model to use. Default: from settings, else first available */
-	model?: Model<any>;
+	/** Model to use. Undefined restores a saved explicit choice; null leaves the session unselected. */
+	model?: Model<any> | null;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
@@ -94,7 +94,7 @@ export interface CreateAgentSessionResult {
 	session: AgentSession;
 	/** Extensions result (for UI context setup in interactive mode) */
 	extensionsResult: LoadExtensionsResult;
-	/** Warning if session was restored with a different model than saved */
+	/** Diagnostic when the selected session or saved model cannot be used. */
 	modelFallbackMessage?: string;
 }
 
@@ -111,6 +111,12 @@ export type {
 	ToolDefinition,
 } from "./extensions/index.js";
 export type { PromptTemplate } from "./prompt-templates.js";
+export type {
+	RlmMaxSubagentsStatus,
+	RlmRootAdmission,
+	RlmSubagentCapacity,
+	RlmSubagentCapacityReservation,
+} from "./rlm-max-subagents.js";
 export type {
 	CreateRlmSubagentRuntimeOptions,
 	RlmChildAdmission,
@@ -208,20 +214,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			initialContextMode: contextMode ?? settingsManager.getContextMode(),
 		});
 
-		let model = options.model;
+		let model = options.model ?? undefined;
 		let modelFallbackMessage: string | undefined;
 
-		if (!model && hasExistingSession && existingSession.model) {
-			const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-			if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-				model = restoredModel;
+		if (options.model === undefined && hasExistingSession && existingSession.model) {
+			const saved = existingSession.model;
+			const restoredModel = modelRegistry.find(saved.provider, saved.modelId);
+			model = restoredModel;
+			if (!restoredModel) {
+				modelFallbackMessage = `Could not restore model ${saved.provider}/${saved.modelId}. Use /model to select a supported model.`;
+			} else if (!modelRegistry.hasConfiguredAuth(restoredModel)) {
+				modelFallbackMessage = `Selected model ${saved.provider}/${saved.modelId} needs authentication. Use /login to configure this provider.`;
 			}
-			if (!model) {
-				modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
-			}
-		}
-
-		if (!model) {
+		} else if (options.model === undefined) {
 			const result = await findInitialModel({
 				scopedModels: [],
 				isContinuing: hasExistingSession,
@@ -231,10 +236,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				modelRegistry,
 			});
 			model = result.model;
-			if (!model) {
-				modelFallbackMessage = formatNoModelsAvailableMessage();
-			} else if (modelFallbackMessage) {
-				modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			if (model && !modelRegistry.hasConfiguredAuth(model)) {
+				modelFallbackMessage = `Selected model ${model.provider}/${model.id} needs authentication. Use /login to configure this provider.`;
+			} else if (!model) {
+				const provider = settingsManager.getDefaultProvider();
+				const modelId = settingsManager.getDefaultModel();
+				modelFallbackMessage =
+					provider && modelId
+						? `Selected model ${provider}/${modelId} is unavailable. Use /model to select a supported model.`
+						: formatNoModelsAvailableMessage();
 			}
 		}
 
@@ -318,6 +328,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 			convertToLlm: convertToLlmWithBlockImages,
 			streamFn: createNativeInferenceStream(async (model, _context, options) => {
+				if (!modelRegistry.hasConfiguredAuth(model)) {
+					throw new Error(
+						`Selected model ${model.provider}/${model.id} needs authentication. Use /login to configure this provider.`,
+					);
+				}
 				const auth = await modelRegistry.getApiKeyAndHeaders(model);
 				if (!auth.ok) {
 					throw new Error(auth.error);
@@ -326,6 +341,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return {
 					...options,
 					apiKey: auth.apiKey,
+					authSourceToken: auth.sourceToken,
 					timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
 					maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
@@ -408,6 +424,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rlmParentNodeId: options.rlmParentNodeId,
 			rlmParentAgent: options.rlmParentAgent,
 			rlmChildAdmission: options.rlmChildAdmission,
+			rlmSubagentCapacity: options.rlmSubagentCapacity,
+			rlmRootAdmission: options.rlmRootAdmission,
 			semanticParentSessionId: options.semanticParentSessionId,
 			semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
 			subagentRuntimeHost: options.subagentRuntimeHost,
@@ -427,12 +445,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 	} catch (error) {
 		try {
-			const admitted = options.rlmChildAdmission?.session;
+			const admitted = options.rlmChildAdmission?.session ?? options.rlmRootAdmission?.session;
 			const failedSession = session ?? (admitted?.sessionManager === sessionManager ? admitted : undefined);
 			if (failedSession) await failedSession.disposeAsync();
 			else {
 				await sessionManager.close();
-				options.rlmChildAdmission?.confirmUnboundCleanup();
+				await options.rlmChildAdmission?.confirmUnboundCleanup();
 			}
 		} catch (cleanupError) {
 			if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))

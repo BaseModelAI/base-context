@@ -80,7 +80,7 @@ describe("Agent", () => {
 
 		expect(agent.state).toBeDefined();
 		expect(agent.state.systemPrompt).toBe("");
-		expect(agent.state.model).toBeDefined();
+		expect(agent.state.model).toBeUndefined();
 		expect(agent.state.thinkingLevel).toBe("off");
 		expect(agent.state.serviceTier).toBe("default");
 		expect(agent.state.tools).toEqual([]);
@@ -91,9 +91,18 @@ describe("Agent", () => {
 		expect(agent.state.errorMessage).toBeUndefined();
 	});
 
+	it("rejects a prompt without a selected model before calling the provider", async () => {
+		const streamFn = vi.fn();
+		const agent = new Agent({ initialState: { model: undefined }, streamFn });
+		await expect(agent.prompt("hello")).rejects.toThrow("No model selected");
+		expect(streamFn).not.toHaveBeenCalled();
+		expect(agent.state.messages).toEqual([]);
+	});
+
 	it("passes an explicit off reasoning selection to providers", async () => {
 		let reasoning: AgentLoopConfig["reasoning"];
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: (_model, _context, options) => {
 				reasoning = options?.reasoning;
 				const stream = new MockAssistantStream();
@@ -171,6 +180,7 @@ describe("Agent", () => {
 		const limits = { maxMessages: 2, maxSourceBytes: 8192 };
 		const finalizedSubjects: AgentMessage[] = [];
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -272,7 +282,7 @@ describe("Agent", () => {
 		expect(agent.state.isStreaming).toBe(false);
 	});
 	it("can commit only a prefix of a prompt batch when a listener fails", async () => {
-		const agent = new Agent();
+		const agent = new Agent({ initialState: { model: getModel("openai", "gpt-4o-mini") } });
 		const first: AgentMessage = {
 			role: "user",
 			content: [{ type: "text", text: "first" }],
@@ -299,6 +309,7 @@ describe("Agent", () => {
 	it("waitForIdle should wait for async subscribers", async () => {
 		const barrier = createDeferred();
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -334,6 +345,7 @@ describe("Agent", () => {
 	it("should pass the active abort signal to subscribers", async () => {
 		let receivedSignal: AbortSignal | undefined;
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: (_model, _context, options) => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -431,6 +443,7 @@ describe("Agent", () => {
 			streamStarted = resolve;
 		});
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -480,6 +493,7 @@ describe("Agent", () => {
 		};
 		const agent = new Agent({
 			initialState: {
+				model: getModel("openai", "gpt-4o-mini"),
 				tools: [hangingTool],
 			},
 			toolExecution: "sequential",
@@ -544,6 +558,7 @@ describe("Agent", () => {
 
 	it("should preserve the original failure when the recovery agent_end listener throws", async () => {
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -632,6 +647,7 @@ describe("Agent", () => {
 	it("should throw when prompt() called while streaming", async () => {
 		let abortSignal: AbortSignal | undefined;
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: (_model, _context, options) => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
@@ -666,6 +682,7 @@ describe("Agent", () => {
 	it("should throw when continue() called while streaming", async () => {
 		let abortSignal: AbortSignal | undefined;
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: (_model, _context, options) => {
 				abortSignal = options?.signal;
 				const stream = new MockAssistantStream();
@@ -700,6 +717,7 @@ describe("Agent", () => {
 
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -739,6 +757,7 @@ describe("Agent", () => {
 	it("continue() should keep one-at-a-time steering semantics from assistant tail", async () => {
 		let responseCount = 0;
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				responseCount++;
@@ -782,6 +801,7 @@ describe("Agent", () => {
 
 	it("keeps queued message batches atomic in one-at-a-time mode", async () => {
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			streamFn: () => {
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
@@ -841,6 +861,7 @@ describe("Agent", () => {
 		let activeProjection = projections[0];
 		const receivedMessages: AgentMessage[][] = [];
 		const agent = new Agent({
+			initialState: { model: getModel("openai", "gpt-4o-mini") },
 			sessionId: "session-abc",
 			transformContext: async (messages) => {
 				expect(messages).not.toBe(activeProjection.messages);
@@ -915,7 +936,7 @@ describe("Agent", () => {
 	it("forwards the service tier to streamFn options", async () => {
 		let receivedServiceTier: string | null | undefined;
 		const agent = new Agent({
-			initialState: { serviceTier: "priority" },
+			initialState: { model: getModel("openai", "gpt-4o-mini"), serviceTier: "priority" },
 			streamFn: (_model, _context, options) => {
 				receivedServiceTier = options?.serviceTier;
 				const stream = new MockAssistantStream();

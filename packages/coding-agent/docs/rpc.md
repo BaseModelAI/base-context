@@ -9,10 +9,10 @@ RPC mode enables headless operation of the coding agent via a JSON protocol over
 ## Starting RPC Mode
 
 ```bash
-base-context --mode rpc --rpc-protocol-version 11 [options]
+base-context --mode rpc --rpc-protocol-version 13 [options]
 ```
 
-`--rpc-protocol-version 11` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 11 and schema revision at least 45 through the existing `get_state` response before use. Hosts below the current canonical-session ownership minimum are refused; an incompatible startup uses the existing process cleanup path. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
+`--rpc-protocol-version 13` is required. It declares that the client handles both successful `agent_end` events and refusal-only terminal events as described below. A missing or different marker is rejected before a session starts. The typed RpcClient also verifies protocol 13 and schema revision at least 49 through the existing `get_state` response before use. Hosts below the current canonical-session ownership minimum are refused; an incompatible startup uses the existing process cleanup path. Custom RPC server entry points `runRpcMode` and `runRpcModeWithConnection` require the caller's protocol version as their second argument.
 
 This uses the current Base Context daemon protocol marker, not the package version. Updating only the server cannot make an old client understand a new terminal event.
 
@@ -1392,7 +1392,7 @@ import subprocess
 import json
 
 proc = subprocess.Popen(
-    ["base-context", "--mode", "rpc", "--rpc-protocol-version", "11", "--no-session"],
+    ["base-context", "--mode", "rpc", "--rpc-protocol-version", "13", "--no-session"],
     stdin=subprocess.PIPE,
     stdout=subprocess.PIPE,
     text=True
@@ -1433,7 +1433,7 @@ For a complete example of handling the extension UI protocol, see [`examples/rpc
 const { spawn } = require("child_process");
 const { StringDecoder } = require("string_decoder");
 
-const agent = spawn("base-context", ["--mode", "rpc", "--rpc-protocol-version", "11", "--no-session"]);
+const agent = spawn("base-context", ["--mode", "rpc", "--rpc-protocol-version", "13", "--no-session"]);
 
 function attachJsonlReader(stream, onLine) {
     const decoder = new StringDecoder("utf8");

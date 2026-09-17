@@ -161,7 +161,6 @@ async function runNativeRefineEof(mode: "main" | "review", root: string): Promis
 		agentDir: root,
 		authStorage,
 		modelRegistry,
-		telemetryDisabled: true,
 		settingsManager: SettingsManager.inMemory({ autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } }),
 		resourceLoaderOptions: {
 			noContextFiles: true,
@@ -181,7 +180,6 @@ async function runNativeRefineEof(mode: "main" | "review", root: string): Promis
 			tools: [],
 			serializedRefine: false,
 			prewarmIpythonKernel: false,
-			telemetryDisabled: true,
 		})),
 		services,
 		diagnostics: services.diagnostics,

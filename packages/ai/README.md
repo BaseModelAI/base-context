@@ -2,7 +2,7 @@
 
 Unified LLM provider APIs and model configuration.
 
-Part of **[Synerise base-context](https://github.com/BaseModelAI/base-context)**. Forked from Prime Intellect's [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built on Mario Zechner's Pi. MIT; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Part of **[Synerise base-context](https://github.com/BaseModelAI/base-context)**. MIT; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 Unified LLM API with automatic model discovery, provider configuration, token and cost tracking, and simple context persistence and hand-off to other models mid-session.
 
@@ -40,21 +40,18 @@ Unified LLM API with automatic model discovery, provider configuration, token an
   - [Browser Compatibility Notes](#browser-compatibility-notes)
   - [Environment Variables](#environment-variables-nodejs-only)
   - [Checking Environment Variables](#checking-environment-variables)
-- [OAuth Providers](#oauth-providers)
-  - [Vertex AI](#vertex-ai)
-  - [CLI Login](#cli-login)
-  - [Programmatic OAuth](#programmatic-oauth)
-  - [Login Flow Example](#login-flow-example)
-  - [Using OAuth Tokens](#using-oauth-tokens)
-  - [Provider Notes](#provider-notes)
+- [Vertex AI](#vertex-ai)
+- [OAuth Availability and Adapters](#oauth-availability-and-adapters)
+  - [CLI Availability](#cli-availability)
+  - [Low-Level OAuth API](#low-level-oauth-api)
+  - [Optional Read-Only Codex SDK Mode](#optional-read-only-codex-sdk-mode)
+- [Provider Notes](#provider-notes)
 - [License](#license)
 
 ## Supported Providers
 
 - **OpenAI**
-- **Prime Inference** (OpenAI-compatible API)
 - **Azure OpenAI (Responses)**
-- **OpenAI Codex** (ChatGPT Plus/Pro subscription, requires OAuth, see below)
 - **DeepSeek**
 - **Anthropic**
 - **Google**
@@ -68,7 +65,6 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **OpenRouter**
 - **Vercel AI Gateway**
 - **MiniMax**
-- **GitHub Copilot** (requires OAuth, see below)
 - **Amazon Bedrock**
 - **OpenCode Zen**
 - **OpenCode Go**
@@ -76,6 +72,8 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **Kimi For Coding** (Moonshot AI, uses Anthropic-compatible API)
 - **Xiaomi MiMo** (uses Anthropic-compatible API; defaults to API billing endpoint, with separate Token Plan providers for `cn`/`ams`/`sgp` regions)
 - **Any OpenAI-compatible API**: Ollama, vLLM, LM Studio, etc.
+
+OpenAI Codex (ChatGPT), Anthropic (Claude Pro/Max), and GitHub Copilot support subscription OAuth sign-in. See [OAuth availability and adapters](#oauth-availability-and-adapters).
 
 ## Installation
 
@@ -1025,9 +1023,9 @@ const response = await complete(model, {
 ### Browser Compatibility Notes
 
 - Amazon Bedrock (`bedrock-converse-stream`) is not supported in browser environments.
-- OAuth login flows are not supported in browser environments. Use the `@ponythewhite/base-context-ai/oauth` entry point in Node.js.
+- OAuth login and credential refresh run in Node.js, not browser builds. The login flow displays a browser authorization link; see [OAuth availability and adapters](#oauth-availability-and-adapters).
 - In browser builds, Bedrock can still appear in model lists. Calls to Bedrock models fail at runtime.
-- Use a server-side proxy or backend service if you need Bedrock or OAuth-based auth from a web app.
+- Use a server-side proxy or backend service for Bedrock or to keep provider credentials out of browser code.
 
 ### Environment Variables (Node.js only)
 
@@ -1036,7 +1034,6 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Provider | Environment Variable(s) |
 |----------|------------------------|
 | OpenAI | `OPENAI_API_KEY` |
-| Prime Inference | `PRIME_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com` and `*.cognitiveservices.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
 | Anthropic | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
@@ -1059,7 +1056,9 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
 | Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |
 | Xiaomi MiMo Token Plan (Singapore) | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` |
-| GitHub Copilot | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN` |
+| GitHub Copilot (inherited adapter) | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN` |
+
+These variables describe library credential lookup, not built-in subscription sign-in. `ANTHROPIC_OAUTH_TOKEN` takes precedence over `ANTHROPIC_API_KEY`; it and the Copilot token inputs remain subject to the [OAuth availability limits](#oauth-availability-and-adapters).
 
 When set, the library automatically uses these keys:
 
@@ -1083,17 +1082,7 @@ import { getEnvApiKey } from '@ponythewhite/base-context-ai';
 const key = getEnvApiKey('openai');  // checks OPENAI_API_KEY
 ```
 
-## OAuth Providers
-
-Several providers require OAuth authentication instead of static API keys:
-
-- **Anthropic** (Claude Pro/Max subscription)
-- **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
-- **GitHub Copilot** (Copilot subscription)
-
-For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
-
-### Vertex AI
+## Vertex AI
 
 Vertex AI models support either a Google Cloud API key or Application Default Credentials (ADC):
 
@@ -1134,98 +1123,45 @@ import { getModel, complete } from '@ponythewhite/base-context-ai';
 
 Official docs: [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
 
-### CLI Login
+## OAuth Availability and Adapters
 
-The quickest way to authenticate:
+Subscription OAuth is supported for Anthropic (Claude Pro/Max), OpenAI Codex (ChatGPT), and GitHub Copilot. Each provider uses its browser authorization flow; account access and usage limits remain provider-controlled. Prime integrations are disabled. An OpenAI API key belongs to `openai`, not `openai-codex`; Claude subscription login is separate from Anthropic API-key authentication.
+
+For the Base Context application, use `/login` to choose the provider and authenticate, then `/model` to select a model. See [Base Context authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/providers.md#authentication-availability).
+
+### CLI Availability
+
+The library CLI lists its supported OAuth adapters and can log in to a selected provider:
 
 ```bash
-npx @ponythewhite/base-context-ai login              # interactive provider selection
-npx @ponythewhite/base-context-ai login anthropic    # login to specific provider
-npx @ponythewhite/base-context-ai list               # list available providers
+npx @ponythewhite/base-context-ai list
+npx @ponythewhite/base-context-ai login openai-codex
 ```
 
-Credentials are saved to `auth.json` in the current directory.
+Follow the displayed browser link and authorization prompts. The library CLI saves credentials in `auth.json` in the current directory. This is separate from the Base Context application's default `~/.base-context/auth.json`; use the application's `/login` for its normal setup.
 
-### Programmatic OAuth
+### Low-Level OAuth API
 
-The library provides login and token refresh functions via the `@ponythewhite/base-context-ai/oauth` entry point. Credential storage is the caller's responsibility.
+The Node.js entry point `@ponythewhite/base-context-ai/oauth` exports caller-managed APIs:
 
-```typescript
-import {
-  // Login functions (return credentials, do not store)
-  loginAnthropic,
-  loginOpenAICodex,
-  loginGitHubCopilot,
-  loginGeminiCli,
+- `loginAnthropic`, `loginOpenAICodex`, and `loginGitHubCopilot` return credentials to the caller; they do not store them.
+- `getOAuthProvider` and `getOAuthProviders` expose the registered adapter implementations.
+- `refreshOAuthToken(providerId, credentials)` returns refreshed credentials. It is deprecated in favor of `getOAuthProvider(providerId).refreshToken(credentials)`.
+- `getOAuthApiKey(providerId, credentialsMap)` returns `{ newCredentials, apiKey }`, or `null` when the caller supplied no credentials for that provider. It refreshes expired credentials and can fail if refresh fails; it is not a read-only credential lookup.
+- `OAuthProviderId`, `OAuthCredentials`, and `OAuthLoginCallbacks` are exported types.
 
-  // Token management
-  refreshOAuthToken,   // (provider, credentials) => new credentials
-  getOAuthApiKey,      // (provider, credentialsMap) => { newCredentials, apiKey } | null
+Credential storage and persistence of refreshed credentials are the caller's responsibility. This entry point does not create or load `auth.json` for you.
 
-  // Types
-  type OAuthProvider,
-  type OAuthCredentials,
-} from '@ponythewhite/base-context-ai/oauth';
-```
+### Optional Read-Only Codex SDK Mode
 
-### Login Flow Example
+The separate Base Context coding-agent SDK can use an explicitly injected read-only OpenAI Codex backend with existing credentials. Only this mode disables login, refresh, credential writes, and API-key fallback. Normal writable OAuth storage supports interactive subscription login and refresh. See [SDK authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sdk.md#api-keys-and-oauth).
 
-```typescript
-import { loginGitHubCopilot } from '@ponythewhite/base-context-ai/oauth';
-import { writeFileSync } from 'fs';
+## Provider Notes
 
-const credentials = await loginGitHubCopilot({
-  onAuth: (url, instructions) => {
-    console.log(`Open: ${url}`);
-    if (instructions) console.log(instructions);
-  },
-  onPrompt: async (prompt) => {
-    return await getUserInput(prompt.message);
-  },
-  onProgress: (message) => console.log(message)
-});
+**OpenAI Codex (ChatGPT subscription)**: The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
 
-// Store credentials yourself
-const auth = { 'github-copilot': { type: 'oauth', ...credentials } };
-writeFileSync('auth.json', JSON.stringify(auth, null, 2));
-```
-
-### Using OAuth Tokens
-
-Use `getOAuthApiKey()` to get an API key, automatically refreshing if expired:
-
-```typescript
-import { getModel, complete } from '@ponythewhite/base-context-ai';
-import { getOAuthApiKey } from '@ponythewhite/base-context-ai/oauth';
-import { readFileSync, writeFileSync } from 'fs';
-
-// Load your stored credentials
-const auth = JSON.parse(readFileSync('auth.json', 'utf-8'));
-
-// Get API key (refreshes if expired)
-const result = await getOAuthApiKey('github-copilot', auth);
-if (!result) throw new Error('Not logged in');
-
-// Save refreshed credentials
-auth['github-copilot'] = { type: 'oauth', ...result.newCredentials };
-writeFileSync('auth.json', JSON.stringify(auth, null, 2));
-
-// Use the API key
-const model = getModel('github-copilot', 'gpt-4o');
-const response = await complete(model, {
-  messages: [{ role: 'user', content: 'Hello!' }]
-}, { apiKey: result.apiKey });
-```
-
-### Provider Notes
-
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
-
-**Prime Inference**: Uses the OpenAI-compatible API at `https://api.pinference.ai/api/v1`. Set `PRIME_API_KEY` or pass an API key explicitly.
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
-
-**GitHub Copilot**: If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
 
 ## Development
 

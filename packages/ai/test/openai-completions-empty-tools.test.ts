@@ -11,7 +11,10 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
-		constructor(options: unknown) {
+		static APIConnectionTimeoutError = class extends Error {};
+		baseURL: string;
+		constructor(options: { baseURL: string }) {
+			this.baseURL = options.baseURL;
 			mockState.lastClientOptions = options;
 		}
 
@@ -133,13 +136,13 @@ describe("openai-completions empty tools handling", () => {
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer test");
 	});
 
-	it("uses OpenAI reasoning fields for an explicitly configured private Prime Inference route", async () => {
+	it("uses OpenAI reasoning fields for an explicitly configured compatible route", async () => {
 		const model: Model<"openai-completions"> = {
-			id: "internal/glm-5.2-fast",
-			name: "GLM 5.2 Fast",
+			id: "custom-reasoning-model",
+			name: "Custom Reasoning Model",
 			api: "openai-completions",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
+			provider: "custom-provider",
+			baseUrl: "https://custom-provider.test/v1",
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

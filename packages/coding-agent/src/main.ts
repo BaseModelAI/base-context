@@ -71,7 +71,6 @@ import {
 import { canonicalSessionPath, SessionAlreadyActiveError } from "./core/session-lease.js";
 import { findMostRecentSessionForCwd, getDefaultSessionDir, SessionManager } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
-import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -552,23 +551,20 @@ function buildSessionOptions(
 	}
 
 	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
+		// A model scope constrains choices; only restore an explicit saved selection.
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
 		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
+		const savedInScope =
+			savedModel && (!config.provider || config.provider === savedModel.provider)
+				? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel))
+				: undefined;
 
 		if (savedInScope) {
 			options.model = savedInScope.model;
 			// Use thinking level from scoped model config if explicitly set
 			if (!config.thinking && savedInScope.thinkingLevel) {
 				options.thinkingLevel = savedInScope.thinkingLevel;
-			}
-		} else {
-			options.model = scopedModels[0].model;
-			// Use thinking level from first scoped model if explicitly set
-			if (!config.thinking && scopedModels[0].thinkingLevel) {
-				options.thinkingLevel = scopedModels[0].thinkingLevel;
 			}
 		}
 	}
@@ -650,7 +646,6 @@ function runtimeConfigFromArgs(
 	agentDir: string,
 	sessionDir: string | undefined,
 	appMode: AppMode,
-	telemetryDisabled?: true,
 ): AgentSessionRuntimeConfig {
 	return {
 		cwd,
@@ -678,7 +673,6 @@ function runtimeConfigFromArgs(
 		autonomous: runtimeAutonomousConfigFromArgs(parsed),
 		extensionFlagValues: parsed.unknownFlags.size > 0 ? Object.fromEntries(parsed.unknownFlags.entries()) : undefined,
 		executionMode: appMode === "daemon" ? undefined : appMode,
-		telemetryDisabled,
 		// Serialized refine for print/json/rpc: the client's appMode is NOT
 		// "daemon" here — it's "print", "json", or "rpc". The daemon worker
 		// receives this flag via AgentSessionRuntimeConfig and uses it
@@ -692,6 +686,7 @@ interface PreparedRuntimeServices {
 	services: AgentSessionServices;
 	scopedModels: ScopedModel[];
 	sessionOptions: CreateAgentSessionOptions;
+	cliProvider?: string;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 }
@@ -707,7 +702,7 @@ export function resolveRuntimeSessionOptions(
 	return {
 		requestTokenBudget: runtimeSessionOptions?.requestTokenBudget ?? sessionOptions.requestTokenBudget,
 		contextMode: runtimeSessionOptions?.contextMode ?? sessionOptions.contextMode,
-		model: runtimeSessionOptions?.model ?? sessionOptions.model,
+		model: runtimeSessionOptions?.model !== undefined ? runtimeSessionOptions.model : sessionOptions.model,
 		thinkingLevel: runtimeSessionOptions?.thinkingLevel ?? sessionOptions.thinkingLevel,
 		serviceTier: runtimeSessionOptions?.serviceTier ?? sessionOptions.serviceTier,
 		scopedModels: runtimeSessionOptions?.scopedModels ?? sessionOptions.scopedModels,
@@ -731,6 +726,8 @@ export function resolveRuntimeSessionOptions(
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
 		rlmChildAdmission: runtimeSessionOptions?.rlmChildAdmission,
+		rlmSubagentCapacity: runtimeSessionOptions?.rlmSubagentCapacity,
+		rlmRootAdmission: runtimeSessionOptions?.rlmRootAdmission,
 		semanticParentSessionId: runtimeSessionOptions?.semanticParentSessionId,
 		semanticSpawnedByRequestId: runtimeSessionOptions?.semanticSpawnedByRequestId,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
@@ -769,6 +766,12 @@ export function createDefaultRuntimeFactory(
 		});
 		const { services, sessionOptions, diagnostics } = prepared;
 		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
+		let modelFallbackMessage: string | undefined;
+		if (resolvedSessionOptions.model === undefined) {
+			const startupModel = await resolvePreparedStartupModel({ prepared, sessionManager });
+			resolvedSessionOptions.model = startupModel.model ?? null;
+			modelFallbackMessage = startupModel.modelFallbackMessage;
+		}
 
 		const created = await createAgentSessionFromServices({
 			services,
@@ -783,7 +786,6 @@ export function createDefaultRuntimeFactory(
 			// so it survives the daemon worker's appMode="daemon" context.
 			serializedRefine: config.serializedRefine ?? false,
 			executionMode: config.executionMode,
-			telemetryDisabled: config.telemetryDisabled,
 			// Only seed initial goal for top-level sessions (rlmDepth 0).
 			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
 		});
@@ -799,6 +801,7 @@ export function createDefaultRuntimeFactory(
 
 		return {
 			...created,
+			modelFallbackMessage: modelFallbackMessage ?? created.modelFallbackMessage,
 			services,
 			diagnostics,
 		};
@@ -815,9 +818,7 @@ async function prepareRuntimeServices(options: {
 }): Promise<PreparedRuntimeServices> {
 	const { config, sessionManager } = options;
 	const effectiveAgentDir = config.agentDir ?? options.agentDir;
-	const authStorage = AuthStorage.create(join(effectiveAgentDir, "auth.json"), {
-		usePrimeCliConfig: effectiveAgentDir === options.agentDir,
-	});
+	const authStorage = AuthStorage.create(join(effectiveAgentDir, "auth.json"));
 	const services = await createAgentSessionServices({
 		cwd: options.cwd,
 		agentDir: effectiveAgentDir,
@@ -826,7 +827,6 @@ async function prepareRuntimeServices(options: {
 		// Subagents share the parent's Herdr pane; their own reporter would race
 		// the parent's and a subagent quit would release the still-active pane.
 		noBuiltinHerdrReporter: (options.sessionOptionsOverride?.rlmDepth ?? 0) > 0,
-		telemetryDisabled: config.telemetryDisabled,
 		resourceLoaderOptions: {
 			additionalExtensionPaths: config.extensions,
 			additionalSkillPaths: config.skills,
@@ -874,7 +874,7 @@ async function prepareRuntimeServices(options: {
 		if (!effectiveSessionModel) {
 			diagnostics.push({
 				type: "error",
-				message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
+				message: "--api-key requires an explicit model via --model or --provider/--model",
 			});
 		} else {
 			authStorage.setRuntimeApiKey(effectiveSessionModel.provider, config.apiKey);
@@ -885,6 +885,7 @@ async function prepareRuntimeServices(options: {
 		services,
 		scopedModels,
 		sessionOptions,
+		cliProvider: config.provider,
 		cliThinkingFromModel,
 		diagnostics,
 	};
@@ -902,21 +903,29 @@ async function resolvePreparedStartupModel(options: {
 		{ includeMessages: false },
 	);
 
-	let model = prepared.sessionOptions.model;
+	let model = prepared.sessionOptions.model ?? undefined;
+	const cliProvider = prepared.cliProvider;
 	let modelFallbackMessage: string | undefined;
 
 	if (!model && hasExistingSession && existingSession.model) {
-		const restoredModel = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
-		if (restoredModel && modelRegistry.hasConfiguredAuth(restoredModel)) {
-			model = restoredModel;
+		if (cliProvider && existingSession.model.provider !== cliProvider) {
+			return {
+				model: undefined,
+				modelFallbackMessage: `Saved model ${existingSession.model.provider}/${existingSession.model.modelId} does not match provider ${cliProvider}. Select a model.`,
+			};
 		}
+		model = modelRegistry.find(existingSession.model.provider, existingSession.model.modelId);
 		if (!model) {
-			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}`;
+			modelFallbackMessage = `Could not restore model ${existingSession.model.provider}/${existingSession.model.modelId}. Select a provider and model.`;
+		} else if (!modelRegistry.hasConfiguredAuth(model)) {
+			modelFallbackMessage = `Model ${model.provider}/${model.id} needs authentication. Run /login.`;
 		}
+		return { model, modelFallbackMessage };
 	}
 
 	if (!model) {
 		const result = await findInitialModel({
+			cliProvider,
 			scopedModels: prepared.scopedModels,
 			isContinuing: hasExistingSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
@@ -926,9 +935,12 @@ async function resolvePreparedStartupModel(options: {
 		});
 		model = result.model;
 		if (!model) {
-			modelFallbackMessage = formatNoModelsAvailableMessage();
-		} else if (modelFallbackMessage) {
-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+			const savedProvider = settingsManager.getDefaultProvider();
+			const savedModelId = settingsManager.getDefaultModel();
+			modelFallbackMessage =
+				savedProvider && savedModelId
+					? `Could not restore model ${savedProvider}/${savedModelId}. Select a provider and model.`
+					: formatNoModelsAvailableMessage();
 		}
 	}
 
@@ -1063,7 +1075,6 @@ async function createDaemonClientConnection(options: {
 				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
-				telemetryDisabled: options.config.telemetryDisabled,
 			});
 			return { connection, summary };
 		};
@@ -1350,19 +1361,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const telemetrySettingsManager =
-		sessionManager.getCwd() === cwd
-			? startupSettingsManager
-			: SettingsManager.create(sessionManager.getCwd(), agentDir);
-	const telemetryDisabled = isTelemetryEnabled(telemetrySettingsManager) ? undefined : true;
-	const defaultSessionConfig = runtimeConfigFromArgs(
-		parsed,
-		sessionManager.getCwd(),
-		agentDir,
-		sessionDir,
-		appMode,
-		telemetryDisabled,
-	);
+	const defaultSessionConfig = runtimeConfigFromArgs(parsed, sessionManager.getCwd(), agentDir, sessionDir, appMode);
 	// Verifier/headless clients pass initialGoal in each create request. The long-lived
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);

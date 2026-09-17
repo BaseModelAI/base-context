@@ -124,10 +124,10 @@ function serializeCommand(command: DaemonCommand & { id: string }): string {
 	return JSON.stringify(createDaemonCommandEnvelope(command, command.id));
 }
 
-function hasArchivedState(harness: Harness): boolean {
-	return harness.sessionManager
-		.getEntries()
-		.some((entry) => entry.type === "session_state" && entry.state.status === "archived");
+async function hasArchivedState(harness: Harness): Promise<boolean> {
+	return (await harness.sessionManager.readEntries()).some(
+		(entry) => entry.type === "session_state" && entry.state.status === "archived",
+	);
 }
 
 async function waitForCondition(predicate: () => boolean): Promise<void> {
@@ -182,93 +182,98 @@ describe("issue #4257 update restart resume", () => {
 	});
 
 	it("waits for the admitted prompt event checkpoint before preparing restart", async () => {
-		let releaseAssistantMessageEnd: (() => void) | undefined;
-		const assistantMessageEndBlocked = new Promise<void>((resolve) => {
-			releaseAssistantMessageEnd = resolve;
+		let releaseAgentEnd: (() => void) | undefined;
+		const agentEndBlocked = new Promise<void>((resolve) => {
+			releaseAgentEnd = resolve;
 		});
+		const agentEndEntered = createDeferred<void>();
 		const harness = await createHarness({
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
-					pi.on("message_end", async (event) => {
-						if (event.message.role === "assistant") {
-							await assistantMessageEndBlocked;
-						}
+					pi.on("agent_end", async () => {
+						agentEndEntered.resolve();
+						await agentEndBlocked;
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("restart response")]);
-		let promptAdmitted = false;
-		const originalPrompt = harness.session.agent.prompt.bind(harness.session.agent);
-		vi.spyOn(harness.session.agent, "prompt").mockImplementation((...args) => {
-			promptAdmitted = true;
-			return originalPrompt(...args);
-		});
-		await harness.session.restoreFollowUpMessage("admitted restart input");
-		expect(harness.session.resumeQueuedWork()).toBe(true);
-		await vi.waitFor(() => expect(promptAdmitted).toBe(true));
+		let prepare: Promise<DaemonUpdateRestartManifest> | undefined;
+		try {
+			harness.setResponses([fauxAssistantMessage("restart response")]);
+			let promptAdmitted = false;
+			const originalPrompt = harness.session.agent.prompt.bind(harness.session.agent);
+			vi.spyOn(harness.session.agent, "prompt").mockImplementation((...args) => {
+				promptAdmitted = true;
+				return originalPrompt(...args);
+			});
+			await harness.session.restoreFollowUpMessage("admitted restart input");
+			expect(harness.session.resumeQueuedWork()).toBe(true);
+			await vi.waitFor(() => expect(promptAdmitted).toBe(true));
+			// Hold terminal session events after the native agent has genuinely settled.
+			await agentEndEntered.promise;
+			await harness.session.agent.waitForIdle();
 
-		const internals = createDaemonInternals(harness);
-		internals.sessions.set(
-			"active-1",
-			createState(harness, "active-1", { kind: "top-level", createdAt: Date.now() }),
-		);
-		let checkpointWaitEntered = false;
-		const originalCheckpointWait = harness.session.waitForSessionInputCheckpoint.bind(harness.session);
-		vi.spyOn(harness.session, "waitForSessionInputCheckpoint").mockImplementation((signal) => {
-			checkpointWaitEntered = true;
-			return originalCheckpointWait(signal);
-		});
-		let prepareSettled = false;
-		const prepare = internals.prepareUpdateRestart().then((manifest) => {
-			prepareSettled = true;
-			return manifest;
-		});
-		await vi.waitFor(() => expect(checkpointWaitEntered).toBe(true));
-		await harness.session.restoreFollowUpMessage("paused restart input");
-		await vi.waitFor(() =>
-			expect(
-				harness.sessionManager
-					.getEntries()
-					.some(
+			const internals = createDaemonInternals(harness);
+			internals.sessions.set(
+				"active-1",
+				createState(harness, "active-1", { kind: "top-level", createdAt: Date.now() }),
+			);
+			let checkpointWaitEntered = false;
+			const originalCheckpointWait = harness.session.waitForSessionInputCheckpoint.bind(harness.session);
+			vi.spyOn(harness.session, "waitForSessionInputCheckpoint").mockImplementation((signal) => {
+				checkpointWaitEntered = true;
+				return originalCheckpointWait(signal);
+			});
+			let prepareSettled = false;
+			prepare = internals.prepareUpdateRestart().then((manifest) => {
+				prepareSettled = true;
+				return manifest;
+			});
+			await vi.waitFor(() => expect(checkpointWaitEntered).toBe(true));
+			await harness.session.restoreFollowUpMessage("paused restart input");
+			await vi.waitFor(async () =>
+				expect(
+					(await harness.sessionManager.readEntries()).some(
 						(entry) =>
 							entry.type === "message" &&
 							entry.message.role === "user" &&
 							getMessageText(entry.message) === "admitted restart input",
 					),
-			).toBe(true),
-		);
-		expect(prepareSettled).toBe(false);
+				).toBe(true),
+			);
+			expect(prepareSettled).toBe(false);
 
-		releaseAssistantMessageEnd?.();
-		const manifest = await prepare;
+			releaseAgentEnd?.();
+			const manifest = await prepare;
 
-		expect(manifest.sessions).toHaveLength(1);
-		expect(manifest.sessions[0]).toMatchObject({
-			queue: { nextTurn: [], actions: { formatVersion: 1 } },
-			shouldResume: true,
-			wasStreaming: false,
-			wasRetrying: false,
-			hadAcceptedPromptInFlight: false,
-		});
-		expect(manifest.sessions[0]?.queue.actions.actions).toEqual([
-			expect.objectContaining({
-				delivery: "when_run_idle",
-				payload: expect.objectContaining({ kind: "turn", text: "paused restart input" }),
-			}),
-		]);
-		expect(
-			harness.sessionManager
-				.getEntries()
-				.some(
+			expect(manifest.sessions).toHaveLength(1);
+			expect(manifest.sessions[0]).toMatchObject({
+				queue: { nextTurn: [], actions: { formatVersion: 1 } },
+				shouldResume: true,
+				wasStreaming: false,
+				wasRetrying: false,
+				hadAcceptedPromptInFlight: false,
+			});
+			expect(manifest.sessions[0]?.queue.actions.actions).toEqual([
+				expect.objectContaining({
+					delivery: "when_run_idle",
+					payload: expect.objectContaining({ kind: "turn", text: "paused restart input" }),
+				}),
+			]);
+			expect(
+				(await harness.sessionManager.readEntries()).some(
 					(entry) =>
 						entry.type === "message" &&
 						entry.message.role === "assistant" &&
 						getMessageText(entry.message) === "restart response",
 				),
-		).toBe(true);
+			).toBe(true);
+		} finally {
+			releaseAgentEnd?.();
+			await prepare;
+		}
 	});
 
 	it.each([
@@ -636,11 +641,11 @@ describe("issue #4257 update restart resume", () => {
 			manifest,
 		);
 		await expect(prepareDaemonUpdateRestart(`${harness.tempDir}/unrelated.sock`, harness.tempDir)).rejects.toThrow();
-		expect(hasArchivedState(harness)).toBe(false);
+		expect(await hasArchivedState(harness)).toBe(false);
 		expect(
-			harness.sessionManager
-				.getEntries()
-				.some((entry) => entry.type === "custom_message" && entry.customType === "prime-agent.update_restart"),
+			(await harness.sessionManager.readEntries()).some(
+				(entry) => entry.type === "custom_message" && entry.customType === "prime-agent.update_restart",
+			),
 		).toBe(true);
 		abortSpy.mockRestore();
 		agentAbortSpy.mockRestore();
@@ -862,8 +867,8 @@ describe("issue #4257 update restart resume", () => {
 			queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 			shouldResume: false,
 		});
-		expect(hasArchivedState(parentHarness)).toBe(false);
-		expect(hasArchivedState(childHarness)).toBe(false);
+		expect(await hasArchivedState(parentHarness)).toBe(false);
+		expect(await hasArchivedState(childHarness)).toBe(false);
 	});
 
 	it("captures next-turn context and full queued actions in the restart manifest", async () => {
@@ -989,10 +994,10 @@ describe("issue #4257 update restart resume", () => {
 		expect(target.session.getFollowUpMessages()).toEqual(["follow-up one"]);
 		await expect(
 			target.session.restoreSessionActions({
-				formatVersion: 2,
+				formatVersion: -1,
 				actions: [],
 			} as unknown as SessionActionRecoverySnapshot),
-		).rejects.toThrow("Unsupported session action recovery format version: 2");
+		).rejects.toThrow("Unsupported session action recovery format version: -1");
 	});
 
 	it("rejects duplicate recovered action ids without partial admission", async () => {

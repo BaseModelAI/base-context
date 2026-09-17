@@ -18,20 +18,57 @@ import { CompactionCommittedError } from "../../src/core/agent-session.js";
 import { CanonicalContextCompiler, getCanonicalViewUnits } from "../../src/core/canonical-context.js";
 import { readContextEpoch } from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
+import { DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES } from "../../src/core/kernel/state-snapshot.js";
+import type { RefinementProposal } from "../../src/core/refinement/index.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
+import type { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
+
+// Read-only observations of records created by the native session, never fixture-owned admissions.
+type CapturedCompactionOwner = {
+	manager: Harness["sessionManager"];
+	agent: Harness["session"]["agent"];
+	sessionId: string;
+	isSourceCurrent(): boolean;
+};
+
+type CapturedCheckpointAction = {
+	action: { id: string; lifecycle: { state: string } };
+	ticket: { id: string; delivered: Promise<unknown>; completed: Promise<unknown> };
+};
+
+type CapturedCheckpointResume = {
+	owner: CapturedCompactionOwner;
+	boundary?: { kind: "tool" | "overflow" | "request"; state: "pending" | "consumed" };
+	actions: CapturedCheckpointAction[];
+};
+
+type ContinuationObservations = {
+	_schedulePostCompactionContinue(resume: CapturedCheckpointResume): void;
+	_postCompactionContinuationScheduled: boolean;
+	_postCompactionContinuations: CapturedCheckpointAction[];
+	_postCompactionContinuationSettlement?: { resume: CapturedCheckpointResume; promise: Promise<void> };
+	_runScheduledPostCompactionContinue(settlement: unknown): Promise<void>;
+	_waitForIdleOrSettlement(settlement?: unknown): Promise<void>;
+	_sessionInputCheckpointWaiters: Set<() => void>;
+};
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (
 		assistantMessage: AssistantMessage,
 		skipAbortedCheck?: boolean,
 		queueAutonomousContinuation?: boolean,
-	) => Promise<void>;
-	_runAutoCompaction: (reason: "overflow" | "threshold" | "requested", willRetry: boolean) => Promise<void>;
+	) => Promise<boolean>;
+	_runAutoCompaction: (
+		reason: "overflow" | "threshold" | "requested",
+		willRetry: boolean,
+		owner?: CapturedCompactionOwner,
+		resumeInPlace?: boolean,
+	) => Promise<boolean>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 	_thresholdCompactionNeeded: (context: ShouldStopAfterTurnContext) => Promise<boolean>;
 	_persistCompactionOutcome: (
@@ -106,6 +143,172 @@ describe("AgentSession compaction characterization", () => {
 			await harnesses.pop()?.cleanup();
 		}
 	});
+
+	// A real tool turn requests its checkpoint. Only its result is gated; native admission,
+	// compaction, owner capture, action tickets and agent settlement are never replaced.
+	async function prepareNativeCheckpoint(
+		options: {
+			persistSession?: boolean;
+			autonomous?: NonNullable<Parameters<typeof createHarness>[0]>["autonomous"];
+			beforeCompact?: (entries: readonly { id: string }[]) => Promise<void>;
+			beforePrompt?: (prompt: string) => Promise<void>;
+			refineProposal?: RefinementProposal;
+			failFirstCompaction?: boolean;
+		} = {},
+	) {
+		const toolStarted = createDeferred();
+		const releaseTool = createDeferred();
+		const compacted = createDeferred();
+		let compactionHooks = 0;
+		const initialSummaryFailure = "Native fixture initial summary failure";
+		const harness: Harness = await createHarness({
+			persistSession: options.persistSession,
+			autonomous: options.autonomous ? { ...options.autonomous, enabled: false } : undefined,
+			settings: {
+				compaction: { enabled: false, keepRecentTokens: 1 },
+				autoRefine: { enabled: false },
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => {
+						await options.beforePrompt?.(event.prompt);
+					});
+					pi.on("session_before_refine", () =>
+						options.refineProposal ? { proposal: options.refineProposal } : undefined,
+					);
+					pi.registerTool({
+						name: "compaction_checkpoint",
+						label: "Compaction checkpoint",
+						description: "Hold a native tool turn at its compaction checkpoint.",
+						parameters: Type.Object({}),
+						execute: async (_id, _params, signal) => {
+							toolStarted.resolve();
+							const abort = () => releaseTool.resolve();
+							signal?.addEventListener("abort", abort, { once: true });
+							try {
+								await releaseTool.promise;
+								signal?.throwIfAborted();
+								return { content: [{ type: "text", text: "Native checkpoint result" }], details: {} };
+							} finally {
+								signal?.removeEventListener("abort", abort);
+							}
+						},
+					});
+					pi.on("session_before_compact", async (event) => {
+						if (options.failFirstCompaction && compactionHooks++ === 0) {
+							// Hook exceptions are caught by ExtensionRunner. Fail the real summary instead.
+							const failed = fauxAssistantMessage("", {
+								stopReason: "error",
+								errorMessage: initialSummaryFailure,
+							});
+							harness.setResponses([failed, failed]); // History and optional turn-prefix summary.
+							return;
+						}
+						await options.beforeCompact?.(event.branchEntries);
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const originalCompactionSettings = harness.settingsManager.getCompactionSettings();
+		harness.session.setActiveToolsByName(["compaction_checkpoint"]);
+		harness.setResponses([fauxAssistantMessage("seed one"), fauxAssistantMessage("seed two")]);
+		await harness.session.prompt("first seed");
+		await harness.session.prompt("second seed");
+		if (options.autonomous) await harness.session.prompt("/autonomous on");
+		const internals = harness.session as unknown as ContinuationObservations;
+		const scheduled = vi.spyOn(internals, "_schedulePostCompactionContinue");
+		const continued = vi.spyOn(harness.session.agent, "continue");
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type !== "compaction_end") return;
+			unsubscribe();
+			if (options.autonomous) {
+				harness.settingsManager.applyOverrides({ compaction: originalCompactionSettings });
+				if (event.reason !== "threshold") {
+					compacted.reject(new Error(`Expected native threshold compaction, received ${event.reason}`));
+					return;
+				}
+			}
+			if (options.failFirstCompaction) {
+				const expected = [
+					`Requested compaction failed: Summarization failed: ${initialSummaryFailure}`,
+					`Requested compaction failed: Turn prefix summarization failed: ${initialSummaryFailure}`,
+				];
+				if (
+					event.reason !== "requested" ||
+					event.aborted !== false ||
+					event.result !== undefined ||
+					!expected.includes(event.errorMessage ?? "")
+				) {
+					compacted.reject(new Error(`Unexpected initial compaction outcome: ${JSON.stringify(event)}`));
+					return;
+				}
+				harness.setResponses([fauxAssistantMessage("checkpoint continued")]);
+				compacted.resolve();
+			} else if (event.result) compacted.resolve();
+			else compacted.reject(new Error(event.errorMessage ?? "Native checkpoint did not compact"));
+		});
+		void compacted.promise.catch(() => undefined);
+		if (!options.autonomous) {
+			const unsubscribeRequest = harness.session.agent.subscribe(async (event) => {
+				if (event.type === "agent_end") {
+					unsubscribeRequest();
+					return;
+				}
+				if (event.type !== "turn_end") return;
+				const result = event.toolResults.find(
+					(value) => value.toolCallId === "native-checkpoint" && value.toolName === "compaction_checkpoint",
+				);
+				if (!result) return;
+				try {
+					expect(result.isError).toBe(false);
+					// Public Agent listeners backpressure this finalized boundary before getTurnOutcome.
+					expect(await harness.session.handleCompactHostRequest("compact.run")).toMatchObject({
+						scheduled: true,
+					});
+				} catch (error) {
+					compacted.reject(error instanceof Error ? error : new Error(String(error)));
+					throw error;
+				} finally {
+					unsubscribeRequest();
+				}
+			});
+		}
+		const call = fauxAssistantMessage(
+			{ type: "toolCall", id: "native-checkpoint", name: "compaction_checkpoint", arguments: {} },
+			{ stopReason: "toolUse" },
+		);
+		harness.setResponses([call, fauxAssistantMessage("checkpoint continued")]);
+		const running = harness.session.prompt("Reach the native checkpoint.");
+		void running.catch(() => undefined);
+		await toolStarted.promise;
+		const pause = harness.session.acquireQueuedWorkPause();
+		if (options.autonomous) {
+			const usage = await harness.session.getContextUsage();
+			if (
+				!usage ||
+				usage.tokens === null ||
+				!Number.isFinite(usage.tokens) ||
+				usage.tokens <= 0 ||
+				usage.tokens >= usage.contextWindow
+			) {
+				throw new Error("Expected finite positive native context usage below the model window");
+			}
+			// Use the real provider/trailing estimate, not synthetic usage or an exact-tokenizer claim.
+			harness.settingsManager.applyOverrides({
+				compaction: { enabled: true, reserveTokens: usage.contextWindow - usage.tokens + 1 },
+			});
+		}
+		return { harness, internals, scheduled, continued, running, pause, releaseTool, compacted };
+	}
 
 	it("starts accepted next prompts after short manual compaction at the real agent-end boundary", async () => {
 		const harness = await createHarness({
@@ -295,6 +498,7 @@ describe("AgentSession compaction characterization", () => {
 
 	it("manually compacts using an extension-provided summary", async () => {
 		const harness = await createHarness({
+			persistSession: true,
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
@@ -311,25 +515,44 @@ describe("AgentSession compaction characterization", () => {
 		});
 		harnesses.push(harness);
 
+		harness.session.setActiveToolsByName(["ipython"]);
+		harness.setResponses([
+			fauxAssistantMessage("one response"),
+			fauxAssistantMessage(
+				{
+					type: "toolCall",
+					id: "native-kernel-variables",
+					name: "ipython",
+					arguments: {
+						code: `import sys
+assert sys.version_info[:2] == (3, 13)
+small_value = 42
+large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
+					},
+				},
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("native variables ready"),
+		]);
 		await harness.session.prompt("one");
-		await harness.session.prompt("two");
-
-		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
-		const listNamespaceNames = vi.fn(async () => ["small_value"]);
-		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
-		const previousProvisioner = internals._ipythonKernelProvisioner;
-		internals._ipythonKernelProvisioner = {
-			hasRunningKernel: true,
-			pruneOversizedVariables,
-			listNamespaceNames,
-		};
-		let result!: Awaited<ReturnType<typeof harness.session.compact>>;
-		try {
-			result = await harness.session.compact();
-		} finally {
-			internals._ipythonKernelProvisioner = previousProvisioner;
-		}
-		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
+		await harness.session.prompt("Create the compaction variables with ipython.");
+		const toolResult = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolCallId === "native-kernel-variables",
+		);
+		expect(toolResult).toMatchObject({ isError: false });
+		const provisioner = (harness.session as unknown as { _ipythonKernelProvisioner: IpythonKernelProvisioner })
+			._ipythonKernelProvisioner;
+		expect(provisioner.hasRunningKernel).toBe(true);
+		const pruneOversizedVariables = vi.spyOn(provisioner, "pruneOversizedVariables");
+		const listNamespaceNames = vi.spyOn(provisioner, "listNamespaceNames");
+		const result = await harness.session.compact();
+		expect(await pruneOversizedVariables.mock.results[0].value).toContain("large_text");
+		const names = await listNamespaceNames.mock.results[0].value;
+		expect(names).toContain("small_value");
+		expect(names).not.toContain("large_text");
+		const compactionEntries = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "compaction",
+		);
 
 		expect(pruneOversizedVariables).toHaveBeenCalledOnce();
 		expect(listNamespaceNames).toHaveBeenCalledOnce();
@@ -345,7 +568,11 @@ describe("AgentSession compaction characterization", () => {
 		);
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
-		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
+		expect(harness.session.messages[0]).toMatchObject({ role: "custom", customType: TASK_FRAME_CUSTOM_TYPE });
+		const literalMessages = harness.session.messages.filter(
+			(message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE,
+		);
+		expect(literalMessages[0]).toMatchObject({ role: "compactionSummary", summary: "summary from extension" });
 	});
 
 	async function createRecoveryCompactionFixture() {
@@ -581,200 +808,224 @@ describe("AgentSession compaction characterization", () => {
 		]);
 	});
 
-	it("continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload", async () => {
-		const model = getModel("deepseek", "deepseek-flash");
-		const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
-		let executions = 0;
-		const harness = await createHarness({
-			persistSession: true,
-			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
-			tools: [
-				{
-					name: "deepseek_probe",
-					label: "DeepSeek probe",
-					description: "Return the fixture result.",
-					parameters: Type.Object({}),
-					execute: async () => {
-						executions++;
-						return { content: [{ type: "text", text: "TOOL_RESULT_PRESERVED" }], details: {} };
-					},
-				},
-			],
-			requestTokenBudget: {
-				mode: "enforce",
-				profiles: [
+	it.each(["tool_calls", "length"] as const)(
+		"continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload (%s)",
+		async (finishReason) => {
+			const model = getModel("deepseek", "deepseek-flash");
+			const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
+			const lengthLimited = finishReason === "length";
+			const expectedExecutions = lengthLimited ? 0 : 1;
+			const expectedResult = lengthLimited ? "Validation failed for tool" : "TOOL_RESULT_PRESERVED";
+			let executions = 0;
+			const harness = await createHarness({
+				persistSession: true,
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+				tools: [
 					{
-						id: "offline-deepseek-native",
-						revision: "1",
-						api: model.api,
-						provider: model.provider,
-						url: "https://api.deepseek.com/chat/completions",
-						model: model.id,
-						authMode: "fixture-api-key",
-						templateRevision: "deepseek-text-tools-fixture-v1",
-						replayFamily: "deepseek-completions",
-						contextTokens: 120000,
-						outputCeilingTokens: 393216,
-						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+						name: "deepseek_probe",
+						label: "DeepSeek probe",
+						description: "Return the fixture result.",
+						parameters: lengthLimited ? Type.Object({ command: Type.String() }) : Type.Object({}),
+						execute: async () => {
+							executions++;
+							return { content: [{ type: "text", text: "TOOL_RESULT_PRESERVED" }], details: {} };
+						},
 					},
 				],
-			},
-		});
-		harnesses.push(harness);
-		harness.session.modelRegistry.registerProvider(model.provider, {
-			api: model.api,
-			baseUrl: model.baseUrl,
-			apiKey: "offline-deepseek-key",
-			models: [model],
-		});
-		harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
-		await harness.session.setModel(model);
-		await harness.session.setThinkingLevel("low");
-		harness.session.setActiveToolsByName(["deepseek_probe"]);
-		harness.settingsManager.applyOverrides({
-			compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
-		});
-		type Body = {
-			model: string;
-			messages: Array<Record<string, unknown>>;
-			max_tokens: number;
-			reasoning_effort?: string;
-			tools?: unknown[];
-		};
-		const mainBodies: Body[] = [];
-		const summaryBodies: Body[] = [];
-		const epochsAtSend: string[] = [];
-		const rawBodies: string[] = [];
-		let altered = false;
-		harness.session.agent.onPayload = (payload) => {
-			rawBodies.push(JSON.stringify(payload));
-			if (altered) {
-				const body = payload as Body;
-				return { ...body, messages: [...body.messages, { role: "user", content: "UNOWNED_PAYLOAD_CHANGE" }] };
-			}
-		};
-		// Only HTTP is offline. The real adapter, selected tool, journal and epoch owner run normally.
-		const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
-			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
-			const body = JSON.parse(String(init?.body)) as Body;
-			expect(body.model).toBe(model.id);
-			expect(body.max_tokens).toBeGreaterThan(0);
-			expect(body).not.toHaveProperty("max_completion_tokens");
-			expect(body).not.toHaveProperty("input");
-			const entries = await harness.sessionManager.readEntries();
-			const admitted = entries
-				.flatMap((entry) =>
-					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
-				)
-				.at(-1)!;
-			const summarizing = admitted.purpose === "summary";
-			if (summarizing) summaryBodies.push(body);
-			else {
-				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
-				const checkpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024)!;
-				expect(checkpoint.replayContract).toBe("message-groups");
-				expect(admitted.contextEpoch).toEqual({
-					sessionId: harness.sessionManager.getSessionId(),
-					entryId: epoch.id,
-				});
-				// Admission and HTTP follow the existing canonical append ACK, not a predicted epoch ID.
-				epochsAtSend.push(epoch.id);
-				mainBodies.push(body);
-			}
-			const toolCall = !summarizing && mainBodies.length === 1;
-			const delta = toolCall
-				? {
-						role: "assistant",
-						reasoning_content: privateThinking,
-						tool_calls: [
-							{
-								index: 0,
-								id: "deepseek_call",
-								type: "function",
-								function: { name: "deepseek_probe", arguments: "{}" },
-							},
-						],
-					}
-				: {
-						role: "assistant",
-						reasoning_content: "Retain the result.",
-						content: summarizing ? "DeepSeek compacted summary." : "DeepSeek continuation complete.",
-					};
-			const chunk = {
-				id: `deepseek_reply_${mainBodies.length}_${summaryBodies.length}`,
-				object: "chat.completion.chunk",
-				model: model.id,
-				choices: [{ index: 0, delta, finish_reason: toolCall ? "tool_calls" : "stop" }],
-				usage: {
-					prompt_tokens: 10,
-					completion_tokens: 10,
-					total_tokens: 20,
-					prompt_cache_hit_tokens: 2,
-					prompt_cache_miss_tokens: 8,
+				requestTokenBudget: {
+					mode: "enforce",
+					profiles: [
+						{
+							id: "offline-deepseek-native",
+							revision: "1",
+							api: model.api,
+							provider: model.provider,
+							url: "https://api.deepseek.com/chat/completions",
+							model: model.id,
+							authMode: "fixture-api-key",
+							templateRevision: "deepseek-text-tools-fixture-v1",
+							replayFamily: "deepseek-completions",
+							contextTokens: 120000,
+							outputCeilingTokens: 393216,
+							estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+						},
+					],
 				},
-			};
-			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
 			});
-		});
+			harnesses.push(harness);
+			harness.session.modelRegistry.registerProvider(model.provider, {
+				api: model.api,
+				baseUrl: model.baseUrl,
+				apiKey: "offline-deepseek-key",
+				models: [model],
+			});
+			harness.authStorage.setRuntimeApiKey(model.provider, "offline-deepseek-key");
+			await harness.session.setModel(model);
+			await harness.session.setThinkingLevel("low");
+			harness.session.setActiveToolsByName(["deepseek_probe"]);
+			harness.settingsManager.applyOverrides({
+				compaction: { model: { provider: model.provider, modelId: model.id, thinkingLevel: "low" } },
+			});
+			type Body = {
+				model: string;
+				messages: Array<Record<string, unknown>>;
+				max_tokens: number;
+				reasoning_effort?: string;
+				tools?: unknown[];
+			};
+			const mainBodies: Body[] = [];
+			const summaryBodies: Body[] = [];
+			const epochsAtSend: string[] = [];
+			const rawBodies: string[] = [];
+			let altered = false;
+			harness.session.agent.onPayload = (payload) => {
+				rawBodies.push(JSON.stringify(payload));
+				if (altered) {
+					const body = payload as Body;
+					return { ...body, messages: [...body.messages, { role: "user", content: "UNOWNED_PAYLOAD_CHANGE" }] };
+				}
+			};
+			// Only HTTP is offline. The real adapter, selected tool, journal and epoch owner run normally.
+			const offlineFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+				expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+				const body = JSON.parse(String(init?.body)) as Body;
+				expect(body.model).toBe(model.id);
+				expect(body.max_tokens).toBeGreaterThan(0);
+				expect(body).not.toHaveProperty("max_completion_tokens");
+				expect(body).not.toHaveProperty("input");
+				const entries = await harness.sessionManager.readEntries();
+				const admitted = entries
+					.flatMap((entry) =>
+						entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+					)
+					.at(-1)!;
+				const summarizing = admitted.purpose === "summary";
+				if (summarizing) summaryBodies.push(body);
+				else {
+					const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+					const checkpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024)!;
+					expect(checkpoint.replayContract).toBe("message-groups");
+					expect(admitted.contextEpoch).toEqual({
+						sessionId: harness.sessionManager.getSessionId(),
+						entryId: epoch.id,
+					});
+					// Admission and HTTP follow the existing canonical append ACK, not a predicted epoch ID.
+					epochsAtSend.push(epoch.id);
+					mainBodies.push(body);
+				}
+				const toolCall = !summarizing && mainBodies.length === 1;
+				const delta = toolCall
+					? {
+							role: "assistant",
+							reasoning_content: privateThinking,
+							tool_calls: [
+								{
+									index: 0,
+									id: "deepseek_call",
+									type: "function",
+									function: { name: "deepseek_probe", arguments: "{}" },
+								},
+							],
+						}
+					: {
+							role: "assistant",
+							reasoning_content: "Retain the result.",
+							content: summarizing ? "DeepSeek compacted summary." : "DeepSeek continuation complete.",
+						};
+				const chunk = {
+					id: `deepseek_reply_${mainBodies.length}_${summaryBodies.length}`,
+					object: "chat.completion.chunk",
+					model: model.id,
+					choices: [{ index: 0, delta, finish_reason: toolCall ? finishReason : "stop" }],
+					usage: {
+						prompt_tokens: 10,
+						completion_tokens: 10,
+						total_tokens: 20,
+						prompt_cache_hit_tokens: 2,
+						prompt_cache_miss_tokens: 8,
+					},
+				};
+				return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			});
 
-		await harness.session.prompt("Run deepseek_probe and retain its result.");
-		expect(executions).toBe(1);
-		expect(mainBodies).toHaveLength(2);
-		expect(rawBodies).toHaveLength(2); // The public candidate does not convert or call onPayload again.
-		expect(rawBodies[1]).toContain(privateThinking);
-		expect(rawBodies[1]).toContain('"reasoning_content"');
-		expect(rawBodies[1]).toContain('"tool_calls"');
-		expect(JSON.stringify(mainBodies[1])).not.toContain("PRIVATE_DEEPSEEK_REASONING");
-		expect(JSON.stringify(mainBodies[1])).not.toContain('"tool_calls"');
-		expect(mainBodies[1].messages.some((message) => message.role === "tool")).toBe(false);
-		expect(JSON.stringify(mainBodies[1])).toContain("TOOL_RESULT_PRESERVED");
-		expect(mainBodies[1].tools).toEqual(mainBodies[0].tools);
-		expect(mainBodies.map((body) => body.reasoning_effort)).toEqual(["low", "low"]);
-		expect(epochsAtSend[1]).not.toBe(epochsAtSend[0]);
-		const qualifiedTool = await harness.sessionManager.readBranchHistory(async (history) => {
-			for await (const item of history.iterateEntries({ maxEntries: 128, maxSourceBytes: 2 * 1024 * 1024 }))
-				if (item.source.qualification === "native-tool-execution") return true;
-			return false;
-		});
-		expect(qualifiedTool).toBe(true);
-		const beforeCompaction = await harness.sessionManager.readEntries();
-		const toolAssistant = beforeCompaction.find(
-			(entry) =>
-				entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "toolUse",
-		);
-		expect(toolAssistant).toMatchObject({
-			requestOutput: {
-				attemptIds: [expect.any(String)],
-				source: { sessionId: harness.sessionManager.getSessionId() },
-			},
-		});
+			await harness.session.prompt("Run deepseek_probe and retain its result.");
+			expect(executions).toBe(expectedExecutions);
+			expect(mainBodies).toHaveLength(2);
+			expect(rawBodies).toHaveLength(2); // The public candidate does not convert or call onPayload again.
+			expect(rawBodies[1]).toContain(privateThinking);
+			expect(rawBodies[1]).toContain('"reasoning_content"');
+			expect(rawBodies[1]).toContain('"tool_calls"');
+			expect(JSON.stringify(mainBodies[1])).not.toContain("PRIVATE_DEEPSEEK_REASONING");
+			expect(JSON.stringify(mainBodies[1])).not.toContain('"tool_calls"');
+			expect(mainBodies[1].messages.some((message) => message.role === "tool")).toBe(false);
+			expect(JSON.stringify(mainBodies[1])).toContain(expectedResult);
+			expect(mainBodies[1].tools).toEqual(mainBodies[0].tools);
+			expect(mainBodies.map((body) => body.reasoning_effort)).toEqual(["low", "low"]);
+			expect(epochsAtSend[1]).not.toBe(epochsAtSend[0]);
+			const qualifiedTool = await harness.sessionManager.readBranchHistory(async (history) => {
+				for await (const item of history.iterateEntries({ maxEntries: 128, maxSourceBytes: 2 * 1024 * 1024 }))
+					if (item.source.qualification === "native-tool-execution") return true;
+				return false;
+			});
+			expect(qualifiedTool).toBe(!lengthLimited);
+			const beforeCompaction = await harness.sessionManager.readEntries();
+			const toolAssistant = beforeCompaction.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.message.stopReason === (lengthLimited ? "length" : "toolUse"),
+			);
+			expect(toolAssistant).toMatchObject({
+				requestOutput: {
+					attemptIds: [expect.any(String)],
+					source: { sessionId: harness.sessionManager.getSessionId() },
+				},
+			});
 
-		const compacted = await harness.session.compact();
-		expect(compacted.summary).toContain("DeepSeek compacted summary.");
-		expect(summaryBodies.length).toBeGreaterThan(0);
-		const saved = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction").at(-1)!;
-		expect(saved.requestOutputs?.length).toBe(summaryBodies.length);
-		expect(readContextEpoch(saved.details, 2 * 1024 * 1024)).toBeDefined();
-		await harness.session.setThinkingLevel("medium");
-		await harness.session.prompt("Continue after the committed summary.");
-		expect(mainBodies).toHaveLength(3);
-		expect(mainBodies[2].reasoning_effort).toBe("high");
-		expect(JSON.stringify(mainBodies[2])).toContain("DeepSeek compacted summary.");
-		expect(rawBodies).toHaveLength(3);
-		expect(executions).toBe(1);
+			if (lengthLimited) {
+				expect(
+					beforeCompaction.find(
+						(entry) =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === "deepseek_call",
+					),
+				).toMatchObject({
+					message: { isError: true },
+					execution: { executionOutcome: "not_started", originalInput: {} },
+				});
+			}
 
-		const sent = offlineFetch.mock.calls.length;
-		const accepted = epochsAtSend.at(-1)!;
-		altered = true;
-		await expect(harness.session.prompt("Do not accept a changed projection.")).rejects.toThrow(
-			"compatible final provider projection",
-		);
-		expect(rawBodies).toHaveLength(4);
-		expect(offlineFetch).toHaveBeenCalledTimes(sent);
-		expect((await harness.sessionManager.readEntries()).some((entry) => entry.id === accepted)).toBe(true);
-	});
+			const compacted = await harness.session.compact();
+			expect(compacted.summary).toContain("DeepSeek compacted summary.");
+			expect(summaryBodies.length).toBeGreaterThan(0);
+			const saved = (await harness.sessionManager.readEntries())
+				.filter((entry) => entry.type === "compaction")
+				.at(-1)!;
+			expect(saved.requestOutputs?.length).toBe(summaryBodies.length);
+			expect(readContextEpoch(saved.details, 2 * 1024 * 1024)).toBeDefined();
+			await harness.session.setThinkingLevel("medium");
+			await harness.session.prompt("Continue after the committed summary.");
+			expect(mainBodies).toHaveLength(3);
+			expect(mainBodies[2].reasoning_effort).toBe("high");
+			expect(JSON.stringify(mainBodies[2])).toContain("DeepSeek compacted summary.");
+			expect(rawBodies).toHaveLength(3);
+			expect(executions).toBe(expectedExecutions);
+
+			const sent = offlineFetch.mock.calls.length;
+			const accepted = epochsAtSend.at(-1)!;
+			altered = true;
+			await expect(harness.session.prompt("Do not accept a changed projection.")).rejects.toThrow(
+				"compatible final provider projection",
+			);
+			expect(rawBodies).toHaveLength(4);
+			expect(offlineFetch).toHaveBeenCalledTimes(sent);
+			expect((await harness.sessionManager.readEntries()).some((entry) => entry.id === accepted)).toBe(true);
+		},
+	);
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
 		let postAckSummary = false;
@@ -1171,138 +1422,110 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("reschedules a pending post-compaction continuation after successful manual compaction", async () => {
-		vi.useFakeTimers();
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => ({
-						compaction: {
-							summary: "summary from extension",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: { source: "extension" },
-						},
-					}));
-				},
-			],
-		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationScheduled: boolean;
-		};
+		const fixture = await prepareNativeCheckpoint({ failFirstCompaction: true });
+		const { harness, internals, scheduled, pause, running } = fixture;
 		try {
-			await harness.session.prompt("one");
-			await harness.session.prompt("two");
-			internals._schedulePostCompactionContinue();
+			fixture.releaseTool.resolve();
+			await fixture.compacted.promise;
+			await harness.session.agent.waitForIdle();
+			await vi.waitFor(() => expect(scheduled).toHaveBeenCalledOnce());
+			const original = scheduled.mock.calls[0][0];
+			expect(original.boundary?.state).toBe("pending");
 
 			await harness.session.compact();
 
 			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(scheduled).toHaveBeenCalledTimes(2);
+			const replacement = scheduled.mock.calls[1][0];
+			expect(replacement.owner.manager === harness.sessionManager).toBe(true);
+			expect(replacement.owner.agent === harness.session.agent).toBe(true);
+			expect(replacement.owner.isSourceCurrent()).toBe(true);
+			expect(replacement.boundary === original.boundary).toBe(true);
 		} finally {
-			internals._cancelPostCompactionContinue();
+			pause.release();
 		}
+		await running;
+		await harness.session.waitForHeadlessIdle();
 	});
 
 	it("waits for active manual compaction before continuing", async () => {
 		const compactionStarted = createDeferred();
 		const compactionRelease = createDeferred();
-		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => {
-						compactionStarted.resolve();
-						await compactionRelease.promise;
-						return {
-							compaction: {
-								summary: "summary from extension",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-								details: { source: "extension" },
-							},
-						};
-					});
-				},
-			],
+		let hold = false;
+		const fixture = await prepareNativeCheckpoint({
+			failFirstCompaction: true,
+			beforeCompact: async () => {
+				if (!hold) return;
+				compactionStarted.resolve();
+				await compactionRelease.promise;
+			},
 		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-		};
-		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
-		await harness.session.prompt("first");
-		await harness.session.prompt("second");
-		const pause = harness.session.acquireQueuedWorkPause();
-		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
-		internals._schedulePostCompactionContinue();
-
+		const { harness, pause, continued, running } = fixture;
+		fixture.releaseTool.resolve();
+		await fixture.compacted.promise;
+		await harness.session.agent.waitForIdle();
+		await vi.waitFor(() => expect(fixture.scheduled).toHaveBeenCalledOnce());
+		hold = true;
 		const compaction = harness.session.compact(undefined, { skipAbort: true });
-		await compactionStarted.promise;
-		pause.release();
-		await new Promise<void>(setImmediate);
-		expect(continueAgent).not.toHaveBeenCalled();
-
-		compactionRelease.resolve();
+		try {
+			await compactionStarted.promise;
+			pause.release();
+			await new Promise<void>(setImmediate);
+			expect(continued).not.toHaveBeenCalled();
+		} finally {
+			compactionRelease.resolve();
+			pause.release();
+		}
 		await compaction;
+		await running;
 		await harness.session.waitForHeadlessIdle();
-		expect(continueAgent).toHaveBeenCalledTimes(1);
+		expect(continued).toHaveBeenCalledTimes(1);
 	});
 
 	it("waits for active auto-compaction before continuing", async () => {
 		const compactionStarted = createDeferred();
 		const compactionRelease = createDeferred();
+		let hold = false;
 		let staleCompactionStarted: (() => void) | undefined;
 		let staleCompactionRelease: Promise<void> | undefined;
 		let staleBranchIds: string[] = [];
-		const harness = await createHarness({
+		const fixture = await prepareNativeCheckpoint({
+			failFirstCompaction: true,
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
-			extensionFactories: [
-				(pi) => {
-					pi.on("session_before_compact", async (event) => {
-						compactionStarted.resolve();
-						await compactionRelease.promise;
-						if (staleCompactionStarted) {
-							staleBranchIds = event.branchEntries.map((entry) => entry.id);
-							staleCompactionStarted();
-							await staleCompactionRelease;
-						}
-						return {
-							compaction: {
-								summary: "summary from extension",
-								firstKeptEntryId: event.preparation.firstKeptEntryId,
-								tokensBefore: event.preparation.tokensBefore,
-								details: { source: "extension" },
-							},
-						};
-					});
-				},
-			],
+			beforeCompact: async (entries) => {
+				if (!hold) return;
+				compactionStarted.resolve();
+				await compactionRelease.promise;
+				if (staleCompactionStarted) {
+					staleBranchIds = entries.map((entry) => entry.id);
+					staleCompactionStarted();
+					await staleCompactionRelease;
+				}
+			},
 		});
-		harnesses.push(harness);
-		const internals = harness.session as unknown as SessionWithCompactionInternals & {
-			_schedulePostCompactionContinue(): void;
-		};
-		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
-		await harness.session.prompt("first");
-		await harness.session.prompt("second");
-		const pause = harness.session.acquireQueuedWorkPause();
-		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
-		internals._schedulePostCompactionContinue();
-
+		const { harness, pause, continued, running } = fixture;
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		fixture.releaseTool.resolve();
+		await fixture.compacted.promise;
+		await harness.session.agent.waitForIdle();
+		await vi.waitFor(() => expect(fixture.scheduled).toHaveBeenCalledOnce());
+		hold = true;
+		// The existing native auto-compaction entry captures the already-owned checkpoint.
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
 		const compaction = internals._runAutoCompaction("threshold", false);
-		await compactionStarted.promise;
-		pause.release();
-		await new Promise<void>(setImmediate);
-		expect(continueAgent).not.toHaveBeenCalled();
-
-		compactionRelease.resolve();
+		try {
+			await compactionStarted.promise;
+			pause.release();
+			await new Promise<void>(setImmediate);
+			expect(continued).not.toHaveBeenCalled();
+		} finally {
+			compactionRelease.resolve();
+			pause.release();
+		}
 		await compaction;
+		await running;
 		await harness.session.waitForHeadlessIdle();
-		expect(continueAgent).toHaveBeenCalledTimes(1);
+		expect(continued).toHaveBeenCalledTimes(1);
 
 		// Extend the existing held-hook case without another provider/summary response.
 		const before = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction");
@@ -1438,46 +1661,68 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("releases the runner's suspended idle wait when the continuation is cancelled", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const session = harness.session;
-		const internals = session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-			_sessionInputCheckpointWaiters: Set<() => void>;
-			_sessionInputPumpSuspended: boolean;
-		};
-		// A queued follow-up held back by a pause, then a pump suspension (the
-		// requestAbort teardown state): the queue stays populated but undispatchable.
-		const pause = session.acquireQueuedWorkPause();
-		await session.followUp("queued across abort");
-		expect(session.queuedActionCount).toBe(1);
-		session.requestAbort();
-		pause.release();
-		expect(internals._sessionInputPumpSuspended).toBe(true);
-		expect(session.queuedActionCount).toBe(1);
-
-		// The runner passes its pre-dispatch guards (no pauses, agent idle) and
-		// parks in the session idle wait on a checkpoint waiter.
-		internals._schedulePostCompactionContinue();
-		await vi.waitFor(() => {
-			expect(internals._sessionInputCheckpointWaiters.size).toBeGreaterThan(0);
+		const preparing = createDeferred();
+		const releasePreparation = createDeferred();
+		const fixture = await prepareNativeCheckpoint({
+			beforePrompt: async (prompt) => {
+				if (prompt !== "queued across abort") return;
+				preparing.resolve();
+				await releasePreparation.promise;
+			},
 		});
-		expect(session.hasPendingAdmissionWaiters).toBe(true);
-
-		// Cancelling the continuation must release that waiter: a stuck waiter
-		// keeps hasPendingAdmissionWaiters true and blocks daemon passivation.
-		// The settle's own notify empties the set for a moment; a leaked runner
-		// re-parks within a microtask, so settle real time before asserting.
-		internals._cancelPostCompactionContinue();
-		await new Promise((resolve) => setTimeout(resolve, 100));
+		const { harness, internals, pause, running } = fixture;
+		const session = harness.session;
+		const idle = vi.spyOn(internals, "_waitForIdleOrSettlement");
+		let rollbackPause: ReturnType<typeof session.acquireQueuedWorkPause> | undefined;
+		let cleared: ReturnType<typeof session.clearQueue> | undefined;
 		try {
-			expect(internals._sessionInputCheckpointWaiters.size).toBe(0);
-			expect(session.hasPendingAdmissionWaiters).toBe(false);
+			await session.followUp("queued across abort", undefined, { resumeIfIdle: true });
+			fixture.releaseTool.resolve();
+			await fixture.compacted.promise;
+			await session.agent.waitForIdle();
+			const settlement = internals._postCompactionContinuationSettlement!;
+			expect(settlement).toBeDefined();
+			expect(settlement.resume.actions).toHaveLength(1);
+			const ownedAction = settlement.resume.actions[0];
+			pause.release();
+			await preparing.promise;
+			await vi.waitFor(() => expect(idle.mock.calls.some(([value]) => value === settlement)).toBe(true));
+			const idleCall = idle.mock.calls.findIndex(([value]) => value === settlement);
+			expect(idle.mock.results[idleCall].type).toBe("return");
+			const runnerIdle = idle.mock.results[idleCall].value as Promise<void>;
+
+			// Let the actual pump roll this undelivered preparation back behind a new public pause.
+			rollbackPause = session.acquireQueuedWorkPause();
+			releasePreparation.resolve();
+			await vi.waitFor(() => expect(internals._sessionInputCheckpointWaiters.size).toBeGreaterThan(0));
+			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(internals._postCompactionContinuationSettlement === settlement).toBe(true);
+			expect(settlement.resume.actions[0] === ownedAction).toBe(true);
+			expect(ownedAction.action.lifecycle.state).toBe("queued");
+			expect(session.getFollowUpMessages()).toContain("queued across abort");
+			expect(session.hasPendingAdmissionWaiters).toBe(true);
+			const parked = [...internals._sessionInputCheckpointWaiters];
+
+			// Cancel while the pump is still blocked; the real idle helper must release its waiter.
+			session.requestAbort();
+			await runnerIdle;
+			expect(internals._postCompactionContinuationScheduled).toBe(false);
+			expect(internals._postCompactionContinuationSettlement).toBeUndefined();
+			expect(parked.every((waiter) => !internals._sessionInputCheckpointWaiters.has(waiter))).toBe(true);
+			expect(ownedAction.action.lifecycle.state).toBe("queued");
+			expect(session.getFollowUpMessages()).toContain("queued across abort");
 		} finally {
-			session.clearQueue();
+			releasePreparation.resolve();
+			cleared = session.clearQueue();
+			rollbackPause?.release();
+			pause.release();
 			session.resumeQueuedWork();
 		}
+		expect(cleared?.followUp).toEqual(["queued across abort"]);
+		await running;
+		await session.waitForHeadlessIdle();
+		expect(internals._sessionInputCheckpointWaiters.size).toBe(0);
+		expect(session.hasPendingAdmissionWaiters).toBe(false);
 	});
 
 	it("defers post-compaction refine behind a preparing session action", async () => {
@@ -1672,12 +1917,12 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as {
 			_queueAutonomousContinuationForThresholdCompaction(
 				message: AssistantMessage,
-			): Promise<AgentMessage | undefined>;
+			): Promise<CapturedCheckpointAction | undefined>;
 			_clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(
 				shouldContinueAfterThreshold: boolean,
-				queuedMessages: AgentMessage[],
+				continuations: CapturedCheckpointAction[],
 			): void;
-			_postCompactionContinuationMessages: AgentMessage[];
+			_postCompactionContinuations: CapturedCheckpointAction[];
 		};
 		const firstAssistant = createAssistant(harness, { stopReason: "toolUse", totalTokens: 10_000 });
 		const secondAssistant = createAssistant(harness, { stopReason: "toolUse", totalTokens: 10_000 });
@@ -1688,10 +1933,15 @@ describe("AgentSession compaction characterization", () => {
 		expect(firstQueued).toBeDefined();
 		expect(secondQueued).toBeDefined();
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(2);
+		const firstText = harness.session.getFollowUpMessages()[0];
 		sessionInternals._clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction(true, [secondQueued!]);
 
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([firstQueued]);
+		expect(sessionInternals._postCompactionContinuations).toHaveLength(1);
+		expect(sessionInternals._postCompactionContinuations[0] === firstQueued).toBe(true);
+		expect(firstQueued!.action.lifecycle.state).toBe("queued");
+		expect(secondQueued!.action.lifecycle.state).toBe("cancelled");
+		expect(harness.session.getFollowUpMessages()[0]).toBe(firstText);
 		expect(harness.session.getFollowUpMessages()).toHaveLength(1);
 	});
 
@@ -1787,7 +2037,7 @@ describe("AgentSession compaction characterization", () => {
 			errorMessage: "prompt is too long",
 			timestamp: Date.now(),
 		});
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 		const compactionErrors: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "compaction_end" && event.errorMessage) {
@@ -1847,7 +2097,7 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now(),
 		});
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(staleAssistant, false);
 
@@ -1885,11 +2135,17 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy.mock.calls).toHaveLength(1);
+		const [reason, retry, owner] = runAutoCompactionSpy.mock.calls[0];
+		expect([reason, retry]).toEqual(["threshold", false]);
+		expect(owner?.manager === harness.sessionManager).toBe(true);
+		expect(owner?.agent === harness.session.agent).toBe(true);
+		expect(owner?.sessionId).toBe(harness.sessionManager.getSessionId());
+		expect(owner?.isSourceCurrent()).toBe(true);
 	});
 
 	it("triggers threshold compaction when trailing context exceeds the model window", async () => {
@@ -1916,11 +2172,17 @@ describe("AgentSession compaction characterization", () => {
 			},
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(successfulAssistant, false);
 
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runAutoCompactionSpy.mock.calls).toHaveLength(1);
+		const [reason, retry, owner] = runAutoCompactionSpy.mock.calls[0];
+		expect([reason, retry]).toEqual(["threshold", false]);
+		expect(owner?.manager === harness.sessionManager).toBe(true);
+		expect(owner?.agent === harness.session.agent).toBe(true);
+		expect(owner?.sessionId).toBe(harness.sessionManager.getSessionId());
+		expect(owner?.isSourceCurrent()).toBe(true);
 	});
 
 	it("stops a tool loop for threshold compaction before the next model call", async () => {
@@ -2049,54 +2311,52 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("keeps autonomous continuation bookkeeping when only steering queue is drained", async () => {
-		vi.useFakeTimers();
-		const harness = await createHarness({
+		const fixture = await prepareNativeCheckpoint({
 			autonomous: {
 				enabled: true,
-				maxContinuations: 2,
+				maxContinuations: 1,
 				maxTurns: 100,
 				gates: { commands: [failingGateCommand()], maxRetries: 5 },
 			},
-			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 200_000 }],
 		});
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-		};
-		const steeringMessage = {
-			role: "user",
-			content: [{ type: "text", text: "steer first" }],
-			timestamp: Date.now(),
-		} satisfies AgentMessage;
-		const autonomousMessage = {
-			role: "user",
-			content: [{ type: "text", text: "autonomous follow-up" }],
-			timestamp: Date.now(),
-		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [autonomousMessage];
-		harness.session.agent.state.messages = [{ ...fauxAssistantMessage("done"), timestamp: Date.now() - 1000 }];
-		harness.session.agent.steer(steeringMessage);
-		harness.session.agent.followUp(autonomousMessage);
-		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
-		const followUpSpy = vi.spyOn(harness.session.agent, "followUp");
-
-		sessionInternals._schedulePostCompactionContinue();
-		await vi.advanceTimersByTimeAsync(100);
-
-		expect(continueSpy).toHaveBeenCalledTimes(1);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([autonomousMessage]);
-		expect(followUpSpy).toHaveBeenCalledWith(autonomousMessage);
+		const { harness, internals, pause, running } = fixture;
+		const steeringStarted = createDeferred();
+		const releaseSteering = createDeferred();
+		try {
+			fixture.releaseTool.resolve();
+			await fixture.compacted.promise;
+			await harness.session.agent.waitForIdle();
+			expect(internals._postCompactionContinuations).toHaveLength(1);
+			const continuation = internals._postCompactionContinuations[0];
+			const queuedText = harness.session.getFollowUpMessages()[0];
+			await harness.session.steer("steer first", undefined, { resumeIfIdle: true });
+			harness.setResponses([
+				async () => {
+					steeringStarted.resolve();
+					await releaseSteering.promise;
+					return fauxAssistantMessage("steering handled");
+				},
+				fauxAssistantMessage("autonomous follow-up handled"),
+			]);
+			pause.release();
+			await steeringStarted.promise;
+			expect(internals._postCompactionContinuations.includes(continuation)).toBe(true);
+			expect(continuation.action.lifecycle.state).toBe("queued");
+			expect(harness.session.getFollowUpMessages()).toContain(queuedText);
+		} finally {
+			releaseSteering.resolve();
+			pause.release();
+		}
+		await running;
+		await harness.session.waitForHeadlessIdle();
+		expect(internals._postCompactionContinuations).toHaveLength(0);
+		expect(
+			harness.session.messages.some((message) => getMessageText(message) === "autonomous follow-up handled"),
+		).toBe(true);
 	});
 
 	it.each([
-		{
-			name: "untracked queued input",
-			text: "queued input",
-			response: "queued input handled",
-			tracked: false,
-		},
+		{ name: "untracked queued input", text: "queued input", response: "queued input handled", tracked: false },
 		{
 			name: "post-compaction continuation",
 			text: "session-owned continuation",
@@ -2111,151 +2371,238 @@ describe("AgentSession compaction characterization", () => {
 			continueAfterSessionInput: true,
 		},
 	])("settles $name after the session pump runs", async ({ text, response, tracked, continueAfterSessionInput }) => {
-		vi.useFakeTimers();
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-			_postCompactionContinuationScheduled: boolean;
-			_createPreparedTurnAction(
-				schedule: "followUp",
-				text: string,
-				images: undefined,
-				options: { message?: AgentMessage; resumeIfIdle: boolean },
-			): unknown;
-			_admitSessionInput(action: unknown, options?: { wake?: boolean }): { accepted: boolean };
-		};
-		const continuation = {
-			role: "user",
-			content: [{ type: "text", text }],
-			timestamp: Date.now(),
-		} satisfies AgentMessage;
-		if (tracked) sessionInternals._postCompactionContinuationMessages = [continuation];
-		harness.setResponses([fauxAssistantMessage(response)]);
-		sessionInternals._admitSessionInput(
-			sessionInternals._createPreparedTurnAction("followUp", text, undefined, {
-				...(tracked && { message: continuation }),
-				resumeIfIdle: tracked,
-			}),
-		);
-		const continueSpy = vi.spyOn(harness.session.agent, "continue");
-
-		sessionInternals._schedulePostCompactionContinue(continueAfterSessionInput);
-		await vi.advanceTimersByTimeAsync(200);
-
-		expect(continueSpy).toHaveBeenCalledTimes(continueAfterSessionInput ? 1 : 0);
-		expect(sessionInternals._postCompactionContinuationScheduled).toBe(false);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+		const fixture = await prepareNativeCheckpoint({
+			autonomous: tracked
+				? {
+						enabled: true,
+						maxContinuations: 1,
+						maxTurns: 100,
+						gates: { commands: [failingGateCommand()], maxRetries: 5 },
+					}
+				: undefined,
+		});
+		const { harness, internals, pause, continued, running } = fixture;
+		const responseStarted = createDeferred();
+		const releaseResponse = createDeferred();
+		let finished = false;
+		let completion!: Promise<void>;
+		try {
+			if (!tracked && !continueAfterSessionInput) await harness.session.followUp(text);
+			fixture.releaseTool.resolve();
+			await fixture.compacted.promise;
+			await harness.session.agent.waitForIdle();
+			await vi.waitFor(() => expect(fixture.scheduled).toHaveBeenCalledOnce());
+			const resume = fixture.scheduled.mock.calls[0][0];
+			const settlement = internals._postCompactionContinuationSettlement!;
+			expect(settlement?.resume === resume).toBe(true);
+			completion = settlement.promise.then(() => {
+				finished = true;
+			});
+			void completion.catch(() => undefined);
+			expect(resume.owner.manager === harness.sessionManager).toBe(true);
+			expect(resume.owner.isSourceCurrent()).toBe(true);
+			expect(resume.actions).toHaveLength(continueAfterSessionInput ? 0 : 1);
+			expect(resume.boundary?.state).toBe("pending");
+			harness.setResponses([
+				async () => {
+					responseStarted.resolve();
+					await releaseResponse.promise;
+					return fauxAssistantMessage(continueAfterSessionInput ? "empty boundary resumed" : response);
+				},
+				...(continueAfterSessionInput ? [fauxAssistantMessage(response)] : []),
+			]);
+			pause.release();
+			await responseStarted.promise;
+			expect(finished).toBe(false); // Delivery/dequeue is not completion.
+			if (continueAfterSessionInput) {
+				// This later input is separate work, not part of the earlier captured empty resume.
+				await harness.session.followUp(text, undefined, { resumeIfIdle: true });
+				expect(resume.actions).toHaveLength(0);
+				expect(resume.boundary?.state).toBe("consumed");
+			} else {
+				expect(resume.actions[0].action.lifecycle.state).not.toBe("completed");
+			}
+		} finally {
+			releaseResponse.resolve();
+			pause.release();
+		}
+		await completion;
+		await running;
+		await harness.session.waitForHeadlessIdle();
+		expect(continued).toHaveBeenCalledTimes(continueAfterSessionInput ? 1 : 0);
+		expect(internals._postCompactionContinuationScheduled).toBe(false);
+		expect(internals._postCompactionContinuations).toHaveLength(0);
 		expect(harness.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			content: [{ type: "text", text: response }],
 		});
 	});
 
-	it("keeps autonomous threshold continuations when post-compaction continue must retry", async () => {
-		const harness = await createHarness({
+	it("keeps the owned autonomous action after a native busy refusal and completes it once", async () => {
+		const fixture = await prepareNativeCheckpoint({
 			autonomous: {
 				enabled: true,
-				maxContinuations: 2,
+				maxContinuations: 1,
 				maxTurns: 100,
 				gates: { commands: [failingGateCommand()], maxRetries: 5 },
 			},
-			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 200_000 }],
 		});
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-			_postCompactionContinuationScheduled: boolean;
-		};
-		const queuedMessage = {
-			role: "user",
-			content: [{ type: "text", text: "autonomous follow-up" }],
-			timestamp: Date.now(),
-		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
-		harness.session.agent.state.messages = [
-			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
-		];
-		const activeRunSettled = createDeferred();
-		const continueSpy = vi
-			.spyOn(harness.session.agent, "continue")
-			.mockRejectedValueOnce(new AgentContinueError("busy", "already processing"));
-		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(() =>
-			continueSpy.mock.calls.length === 0 ? Promise.resolve() : activeRunSettled.promise,
-		);
-
-		sessionInternals._schedulePostCompactionContinue();
-		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));
-
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
-		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
-		sessionInternals._cancelPostCompactionContinue();
-		activeRunSettled.resolve();
+		const { harness, internals, pause, continued, running } = fixture;
+		fixture.releaseTool.resolve();
+		await fixture.compacted.promise;
+		await harness.session.agent.waitForIdle();
+		await vi.waitFor(() => expect(fixture.scheduled).toHaveBeenCalledOnce());
+		expect(internals._postCompactionContinuations).toHaveLength(1);
+		const continuation = internals._postCompactionContinuations[0];
+		const queuedText = harness.session.getFollowUpMessages()[0];
+		const competingStarted = createDeferred();
+		const releaseCompeting = createDeferred();
+		harness.setResponses([
+			async () => {
+				competingStarted.resolve();
+				await releaseCompeting.promise;
+				return fauxAssistantMessage("competing native turn finished");
+			},
+			fauxAssistantMessage("owned autonomous action completed"),
+		]);
+		const competing = harness.session.agent.prompt("Real competing native turn");
+		void competing.catch(() => undefined);
+		try {
+			await competingStarted.promise;
+			expect(continued).not.toHaveBeenCalled();
+			const refused = harness.session.agent.continue();
+			await expect(refused).rejects.toBeInstanceOf(AgentContinueError);
+			await expect(refused).rejects.toMatchObject({ code: "busy" });
+			expect(internals._postCompactionContinuations.includes(continuation)).toBe(true);
+			expect(continuation.action.lifecycle.state).toBe("queued");
+			expect(harness.session.getFollowUpMessages()).toContain(queuedText);
+			pause.release();
+			await new Promise<void>(setImmediate);
+			expect(continuation.action.lifecycle.state).not.toBe("completed");
+		} finally {
+			releaseCompeting.resolve();
+			pause.release();
+		}
+		await competing;
+		await running;
+		await harness.session.waitForHeadlessIdle();
+		await continuation.ticket.completed;
+		expect(await continuation.ticket.delivered).toMatchObject({ status: "delivered" });
+		expect(continuation.action.lifecycle.state).toBe("completed");
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "user" && getMessageText(message) === queuedText,
+			),
+		).toHaveLength(1);
+		expect(internals._postCompactionContinuations).toHaveLength(0);
+		// The only continue call is the real refused call above; owned input uses the session pump.
+		expect(continued).toHaveBeenCalledTimes(1);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "owned autonomous action completed" }],
+		});
 	});
 
 	it("keeps replacement continuation messages when a cancelled continue settles late", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_cancelPostCompactionContinue(): void;
-			_postCompactionContinuationMessages: AgentMessage[];
-		};
-		const queuedMessage = {
-			role: "user",
-			content: [{ type: "text", text: "autonomous follow-up" }],
-			timestamp: Date.now(),
-		} satisfies AgentMessage;
-		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
-		const staleRun = createDeferred();
-		const replacementRun = createDeferred();
-		const continueSpy = vi
-			.spyOn(harness.session.agent, "continue")
-			.mockReturnValueOnce(staleRun.promise)
-			.mockReturnValueOnce(replacementRun.promise);
+		const fixture = await prepareNativeCheckpoint({ failFirstCompaction: true });
+		const { harness, internals, pause, running } = fixture;
+		const runners = vi.spyOn(internals, "_runScheduledPostCompactionContinue");
+		const responseStarted = createDeferred();
+		const releaseResponse = createDeferred();
+		try {
+			await harness.session.followUp("replacement continuation", undefined, { resumeIfIdle: true });
+			fixture.releaseTool.resolve();
+			await fixture.compacted.promise;
+			await harness.session.agent.waitForIdle();
+			await vi.waitFor(() => expect(runners).toHaveBeenCalledOnce());
+			const original = internals._postCompactionContinuationSettlement!;
+			const originalRunner = runners.mock.results[0].value;
+			const action = original.resume.actions[0];
+			expect(action.action.lifecycle.state).toBe("queued");
 
-		sessionInternals._schedulePostCompactionContinue();
-		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));
-		sessionInternals._cancelPostCompactionContinue();
-		sessionInternals._schedulePostCompactionContinue();
-		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(2));
+			// Manual success cancels the real old settlement without suspending the input pump.
+			await harness.session.compact(undefined, { skipAbort: true });
+			expect(runners).toHaveBeenCalledTimes(2);
+			const replacement = internals._postCompactionContinuationSettlement!;
+			expect(replacement === original).toBe(false);
+			expect(replacement.resume.actions[0] === action).toBe(true);
+			await originalRunner;
+			await new Promise<void>(setImmediate);
+			expect(internals._postCompactionContinuationSettlement === replacement).toBe(true);
+			expect(internals._postCompactionContinuationScheduled).toBe(true);
+			expect(harness.session.getFollowUpMessages()).toContain("replacement continuation");
 
-		staleRun.resolve();
-		await new Promise<void>(setImmediate);
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
-
-		replacementRun.resolve();
+			harness.setResponses([
+				async () => {
+					responseStarted.resolve();
+					await releaseResponse.promise;
+					return fauxAssistantMessage("replacement completed");
+				},
+			]);
+			pause.release();
+			await responseStarted.promise;
+			expect(action.action.lifecycle.state).not.toBe("completed");
+		} finally {
+			releaseResponse.resolve();
+			pause.release();
+			runners.mockRestore();
+		}
+		await running;
 		await harness.session.waitForHeadlessIdle();
-		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+		expect(internals._postCompactionContinuationScheduled).toBe(false);
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "replacement completed" }],
+		});
 	});
 
 	it("waits for an in-flight refine application before continuing", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
-			_refineInFlight: Promise<void> | undefined;
-		};
-		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
-		const pause = harness.session.acquireQueuedWorkPause();
-		sessionInternals._schedulePostCompactionContinue();
-		await new Promise<void>(setImmediate);
-
-		// Refine enters its apply phase while the runner waits out the pause.
-		const refineApply = createDeferred();
-		sessionInternals._refineInFlight = refineApply.promise;
-		pause.release();
-		await new Promise<void>(setImmediate);
-		expect(continueSpy).not.toHaveBeenCalled();
-
-		sessionInternals._refineInFlight = undefined;
-		refineApply.resolve();
+		const fixture = await prepareNativeCheckpoint({
+			persistSession: true,
+			refineProposal: {
+				summary: "Native refine ordering",
+				rationale: "Exercise the real application boundary.",
+				edits: [],
+				expectedOutcome: "Continuation waits until application completes.",
+			},
+		});
+		const { harness, pause, continued, running } = fixture;
+		fixture.releaseTool.resolve();
+		await fixture.compacted.promise;
+		await harness.session.agent.waitForIdle();
+		await vi.waitFor(() => expect(fixture.scheduled).toHaveBeenCalledOnce());
+		const applicationStarted = createDeferred();
+		const releaseApplication = createDeferred();
+		const append = harness.sessionManager.appendCustomEntry.bind(harness.sessionManager);
+		// Hold only the return of an actual acknowledged application write, not the lifecycle flag.
+		const applicationWrite = vi
+			.spyOn(harness.sessionManager, "appendCustomEntry")
+			.mockImplementation(async (...args) => {
+				const entryId = await append(...args);
+				if (args[0] === "prime-agent.refinement") {
+					applicationStarted.resolve();
+					await releaseApplication.promise;
+				}
+				return entryId;
+			});
+		const refinement = harness.session.refine({ instructions: "Exercise native application ordering." });
+		void refinement.catch(() => undefined);
+		try {
+			await applicationStarted.promise;
+			pause.release();
+			await new Promise<void>(setImmediate);
+			expect(continued).not.toHaveBeenCalled();
+		} finally {
+			releaseApplication.resolve();
+			pause.release();
+			applicationWrite.mockRestore();
+		}
+		await refinement;
+		await running;
 		await harness.session.waitForHeadlessIdle();
-		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(continued).toHaveBeenCalledTimes(1);
+		expect(harness.eventsOfType("refine_complete")).toHaveLength(1);
 	});
 
 	it("clears queued autonomous threshold continuations when autonomous mode is disabled", async () => {
@@ -2373,12 +2720,18 @@ describe("AgentSession compaction characterization", () => {
 			largeToolResult,
 		];
 
-		const runCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 		const followUpSpy = vi.spyOn(harness.session.agent, "followUp");
 
 		await sessionInternals._checkCompaction(successfulAssistant, false);
 
-		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runCompactionSpy.mock.calls).toHaveLength(1);
+		const [reason, retry, owner] = runCompactionSpy.mock.calls[0];
+		expect([reason, retry]).toEqual(["threshold", false]);
+		expect(owner?.manager === harness.sessionManager).toBe(true);
+		expect(owner?.agent === harness.session.agent).toBe(true);
+		expect(owner?.sessionId).toBe(harness.sessionManager.getSessionId());
+		expect(owner?.isSourceCurrent()).toBe(true);
 		expect(followUpSpy).not.toHaveBeenCalled();
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
 		const queuedText = harness.session.getFollowUpMessages()[0] ?? "";
@@ -2419,12 +2772,18 @@ describe("AgentSession compaction characterization", () => {
 			largeToolResult,
 		];
 
-		const runCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 		const followUpSpy = vi.spyOn(harness.session.agent, "followUp");
 
 		await sessionInternals._checkCompaction(successfulAssistant, false, false);
 
-		expect(runCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(runCompactionSpy.mock.calls).toHaveLength(1);
+		const [reason, retry, owner] = runCompactionSpy.mock.calls[0];
+		expect([reason, retry]).toEqual(["threshold", false]);
+		expect(owner?.manager === harness.sessionManager).toBe(true);
+		expect(owner?.agent === harness.session.agent).toBe(true);
+		expect(owner?.sessionId).toBe(harness.sessionManager.getSessionId());
+		expect(owner?.isSourceCurrent()).toBe(true);
 		expect(followUpSpy).not.toHaveBeenCalled();
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(0);
 	});
@@ -2473,7 +2832,7 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(errorAssistant);
 
@@ -2505,7 +2864,7 @@ describe("AgentSession compaction characterization", () => {
 			false,
 		);
 
-		const compactionTimestamp = new Date(harness.sessionManager.getEntry(compactionId)!.timestamp).getTime();
+		const compactionTimestamp = new Date((await harness.sessionManager.readEntry(compactionId))!.timestamp).getTime();
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
 			errorMessage: "529 overloaded",
@@ -2518,7 +2877,7 @@ describe("AgentSession compaction characterization", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue();
+		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await sessionInternals._checkCompaction(errorAssistant);
 		expect(
@@ -2548,8 +2907,8 @@ describe("AgentSession compaction characterization", () => {
 
 		const belowThresholdInternals = belowThresholdHarness.session as unknown as SessionWithCompactionInternals;
 		const disabledInternals = disabledHarness.session as unknown as SessionWithCompactionInternals;
-		const belowThresholdSpy = vi.spyOn(belowThresholdInternals, "_runAutoCompaction").mockResolvedValue();
-		const disabledSpy = vi.spyOn(disabledInternals, "_runAutoCompaction").mockResolvedValue();
+		const belowThresholdSpy = vi.spyOn(belowThresholdInternals, "_runAutoCompaction").mockResolvedValue(false);
+		const disabledSpy = vi.spyOn(disabledInternals, "_runAutoCompaction").mockResolvedValue(false);
 
 		await belowThresholdInternals._checkCompaction(
 			createAssistant(belowThresholdHarness, { stopReason: "stop", totalTokens: 1_000, timestamp: Date.now() }),
@@ -2571,7 +2930,7 @@ describe("AgentSession compaction characterization", () => {
 		const internals = harness.session as unknown as SessionWithCompactionInternals;
 		const sessionFile = harness.sessionManager.getSessionFile()!;
 		const persistedLeafId = harness.sessionManager.getLeafId();
-		const persistedEntries = harness.sessionManager.getEntries();
+		const persistedEntries = await harness.sessionManager.readEntries();
 		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockImplementationOnce(async () => {
 			appendFileSync(sessionFile, '{"type":"custom_message"');
 			throw new Error("injected append acknowledgement failure");
@@ -2587,21 +2946,23 @@ describe("AgentSession compaction characterization", () => {
 			content: expect.stringContaining("could not be saved to session history"),
 			details: { reason: "requested", outcome: "failed" },
 		});
-		// No unacknowledged outcome is published: same leaf and entries.
+		// The leaf is unchanged; fresh reads refuse the uncertain source until explicit recovery.
 		expect(harness.sessionManager.getLeafId()).toBe(persistedLeafId);
-		expect(harness.sessionManager.getEntries()).toEqual(persistedEntries);
+		await expect(harness.sessionManager.readEntries()).rejects.toThrow("outcome may be unknown");
 
 		await expect(harness.sessionManager.appendCustomEntry("blocked_before_recovery")).rejects.toThrow(
 			"outcome may be unknown",
 		);
 		await harness.sessionManager.recover();
+		expect(harness.sessionManager.getLeafId()).toBe(persistedLeafId);
+		expect(await harness.sessionManager.readEntries()).toEqual(persistedEntries);
 		const nextId = await harness.sessionManager.appendCustomEntry("after_failed_outcome");
 		const reloaded = await SessionManager.openReadOnly(sessionFile);
-		expect(reloaded.getEntry(nextId)?.parentId).toBe(persistedLeafId);
-		expect(reloaded.getBranch().map((entry) => entry.id)).toEqual(
-			harness.sessionManager.getBranch().map((entry) => entry.id),
+		expect((await reloaded.readEntry(nextId))?.parentId).toBe(persistedLeafId);
+		expect((await reloaded.readBranch()).map((entry) => entry.id)).toEqual(
+			(await harness.sessionManager.readBranch()).map((entry) => entry.id),
 		);
-		expect(reloaded.getEntries()).not.toContainEqual(
+		expect(await reloaded.readEntries()).not.toContainEqual(
 			expect.objectContaining({ type: "custom_message", customType: "compaction_outcome" }),
 		);
 		// The unpersisted disclosure survives context rebuilds (e.g. thinking toggle).

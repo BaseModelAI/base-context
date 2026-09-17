@@ -19,12 +19,14 @@ The sections below cover user-facing settings. Onboarding flags, recent-model hi
 
 ### Model & Thinking
 
+There is no built-in default provider or model. The `defaultProvider` and `defaultModel` keys store your explicit selection for later launches. Authentication is stored separately. A missing or unavailable choice does not select a fallback.
+
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
-| `defaultModel` | string | - | Default model ID |
+| `defaultProvider` | string | - | Saved explicitly selected provider (e.g., `"anthropic"`, `"openai"`) |
+| `defaultModel` | string | - | Saved explicitly selected model ID |
 | `defaultServiceTier` | string or null | `"default"` | Provider service-tier preference: `"auto"`, `"default"`, `"flex"`, `"scale"`, `"priority"`, or null; actual support and billing depend on the provider |
-| `defaultThinkingLevel` | string | `"xhigh"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `defaultThinkingLevel` | string | `"medium"` | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
 | `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
 | `thinkingBudgets` | object | - | Custom token budgets per thinking level |
 
@@ -70,44 +72,6 @@ The stable `latest.json` and beta `beta.json` manifests use the same JSON shape:
 ```
 
 Private download manifests require `version` and `package` (or `packageName`) set to the active package name. Version-only manifests and manifests naming another product are refused. `tarball` is optional; when present, Base Context installs that tarball instead of the package name. Relative tarball paths resolve against `BASE_CONTEXT_DOWNLOAD_BASE_URL`. The default owned npm registry lookup is unchanged.
-
-### Pseudonymous usage analytics
-
-Analytics are off by default. Remote analytics require explicit opt-in, `BASE_CONTEXT_TELEMETRY_ENDPOINT`, and a dedicated `BASE_CONTEXT_TELEMETRY_API_KEY`. There is no inherited endpoint or inference-key fallback. When enabled, events include aggregate usage and performance data such as execution mode, token usage, tool counts, retries, and compactions.
-
-Base Context does not send prompts, responses, thinking, tool arguments or results, command text, filenames, paths, repository information, environment variables, credentials, raw error messages, hostnames, usernames, emails, or hardware identifiers. A random installation ID is stored as `telemetry.json` in the configured agent directory (normally `~/.base-context/`).
-
-Telemetry can be disabled globally or for an individual project. Project settings can only further restrict telemetry: they cannot re-enable a global opt-out or suppress the global one-time disclosure.
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `telemetry.enabled` | boolean | `false` | Opt in to aggregate events at an explicitly configured destination |
-
-Disable analytics with any of:
-
-```json
-{
-  "telemetry": {
-    "enabled": false
-  }
-}
-```
-
-```bash
-BASE_CONTEXT_TELEMETRY=0 base-context
-DO_NOT_TRACK=1 base-context
-base-context --offline
-```
-
-Opt-in alone does not send events without both the explicit endpoint and dedicated key.
-
-### Trace sharing
-
-| Setting | Type | Default | Description |
-| --- | --- | --- | --- |
-| `agentTraces.enabled` | boolean | `false` | Opt in to automatic trace sharing at an explicitly configured destination |
-
-Trace sharing is separate from aggregate telemetry. It requires an explicit `BASE_CONTEXT_TRACES_BASE_URL` and a dedicated credential such as `BASE_CONTEXT_TRACES_API_KEY`; `PRIME_API_KEY` is not a trace credential. Use `/traces status` and `/traces preview` before opting in. Trace exports can contain conversation and tool content. Do not assume that turning on aggregate analytics also enables traces, or that retained work is safe to upload without review.
 
 ### Warnings
 
@@ -315,8 +279,11 @@ Normally the package manager's global modules location is queried using `root -g
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `rlmMaxDepth` | number | Falls through to `BASE_CONTEXT_RLM_MAX_DEPTH`, then `2` | Global default recursion-depth limit for new sessions |
+| `rlmMaxSubagents` | number | `4` | Maximum live subagents in a root-agent family; non-negative safe integer |
 
-This is a global setting, not a project override. Session-local and inherited limits can differ from the creation default. See [RLM programming](rlm.md) and [long-running agents](long-running-agents.md).
+These are global settings, not project overrides. Session-local and inherited depth limits can differ from the creation default. See [RLM programming](rlm.md) and [long-running agents](long-running-agents.md).
+
+Use [`/agents N`](usage.md#limit-concurrent-subagents) to apply and save `rlmMaxSubagents`; `/agents` reports the current family limit. This preference survives restarts. Running and idle descendants count, but the main agent and inactive saved sessions do not. `0` disables new spawns. Lowering the limit only blocks new admissions; it never kills or passivates existing agents.
 
 ### Daemon
 

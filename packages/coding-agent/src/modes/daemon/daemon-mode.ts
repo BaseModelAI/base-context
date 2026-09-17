@@ -65,7 +65,7 @@ import {
 	normalizeObserveMaxChars,
 } from "../../core/agent-observe.js";
 import { normalizeAgentResultSummary, stageAgentResult } from "../../core/agent-results.js";
-import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
+import { type AgentSession, type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
@@ -91,6 +91,7 @@ import {
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { RlmJournalOwner } from "../../core/rlm-journal-owner.js";
+import type { RlmRootAdmission } from "../../core/rlm-max-subagents.js";
 import type {
 	CreateRlmSubagentRuntimeOptions,
 	RlmChildAdmission,
@@ -178,6 +179,7 @@ import {
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
 } from "./daemon-protocol.js";
+import { DaemonRlmCapacityClient } from "./daemon-rlm-capacity.js";
 import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import {
 	buildRlmChildSnapshots,
@@ -358,7 +360,9 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"export_jsonl",
 	"set_session_name",
 	"get_rlm_max_depth_status",
+	"get_rlm_max_subagents_status",
 	"set_rlm_max_depth",
+	"set_rlm_max_subagents",
 	"rename_saved_session",
 	"delete_saved_session",
 	"get_session_context",
@@ -601,6 +605,7 @@ export class AgentDaemon {
 	private rosterFlushPending = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
+	private rlmCapacityClient?: DaemonRlmCapacityClient;
 	private rlmJournalOwner?: RlmJournalOwner;
 	private rlmJournalAdmissionClosed = false;
 	private rlmJournalClosePromise?: Promise<void>;
@@ -1046,6 +1051,21 @@ export class AgentDaemon {
 		} finally {
 			client.close();
 		}
+	}
+
+	private workerRlmCapacityClient(): DaemonRlmCapacityClient | undefined {
+		const worker = this.options.worker;
+		if (!worker) return undefined;
+		const socketPath = this.supervisorSocketPathFromEnv();
+		if (!socketPath || !worker.workerInstanceId) {
+			throw new Error("RLM capacity requires the current worker incarnation and its supervisor");
+		}
+		this.rlmCapacityClient ??= new DaemonRlmCapacityClient({
+			socketPath,
+			workerToken: worker.authenticationToken,
+			workerInstanceId: worker.workerInstanceId,
+		});
+		return this.rlmCapacityClient;
 	}
 
 	private rlmSpawnLedger(): RlmSpawnLedger {
@@ -1639,6 +1659,58 @@ export class AgentDaemon {
 		}
 	}
 
+	private createRuntimeWithRlmCapacity: CreateAgentSessionRuntimeFactory = async (options) => {
+		const authority = this.workerRlmCapacityClient();
+		if (!authority || options.sessionOptions?.rlmChildAdmission) return this.options.createRuntime(options);
+		const origin = {
+			sessionFile: options.sessionManager.getSessionFile(),
+			sessionId: options.sessionManager.getSessionId(),
+		};
+		const reservation = await authority.reserveRoot(origin);
+		let admitted: AgentSession | undefined;
+		let created: AgentSession | undefined;
+		const admission: RlmRootAdmission = {
+			get session() {
+				return admitted;
+			},
+			bind: (session) => {
+				if (admitted && admitted !== session) throw new Error("RLM root admission already owns another session");
+				admitted = session;
+			},
+			release: () => reservation.release(),
+		};
+		try {
+			const result = await this.options.createRuntime({
+				...options,
+				sessionOptions: {
+					...options.sessionOptions,
+					rlmSubagentCapacity: authority.forSession(origin),
+					rlmRootAdmission: admission,
+				},
+			});
+			created = result.session;
+			if (admission.session !== result.session)
+				throw new Error("Runtime factory did not bind its RLM root admission");
+			return result;
+		} catch (error) {
+			try {
+				const failed = admission.session ?? created;
+				if (failed) {
+					await failed.disposeAsync();
+					if (!admission.session) await reservation.release();
+				} else {
+					await options.sessionManager.close();
+					await reservation.release();
+				}
+			} catch (cleanupError) {
+				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
+					throw error;
+				throw new AggregateError([error, cleanupError], "Root runtime creation and capacity cleanup failed");
+			}
+			throw error;
+		}
+	};
+
 	private async createRuntime(
 		command: Extract<DaemonCommand, { type: "create" }>,
 		runtimeOpenGuard?: RuntimeOpenGuard,
@@ -1823,7 +1895,7 @@ export class AgentDaemon {
 				// while the runtime loads them, so it must be in process.env for the
 				// duration; withClientEnv restores it after.
 				const runtime = await withClientEnv(clientEnv, () =>
-					createAgentSessionRuntime(this.options.createRuntime, {
+					createAgentSessionRuntime(this.createRuntimeWithRlmCapacity, {
 						cwd: sessionManager.getCwd(),
 						agentDir,
 						sessionManager,
@@ -2611,7 +2683,7 @@ export class AgentDaemon {
 				? options.parentSession.requests.getRequestTokenBudgetOptions()
 				: structuredClone(options.requestTokenBudget);
 		if (requestTokenBudget !== undefined) options = { ...options, requestTokenBudget };
-		const admission = options.admission ?? options.parentSession.reserveRlmChildAdmission();
+		const admission = options.admission ?? (await options.parentSession.reserveRlmChildAdmission());
 		try {
 			if (
 				admission.parent !== options.parentSession ||
@@ -2624,7 +2696,7 @@ export class AgentDaemon {
 			admission.claimFactory();
 			return await this.createAdmittedRlmSubagentRuntime(parentState, { ...options, admission });
 		} finally {
-			if (!options.admission) admission.settle();
+			if (!options.admission) await admission.settle();
 		}
 	}
 
@@ -2652,7 +2724,7 @@ export class AgentDaemon {
 			factoryStarted = true;
 			// Subagents inherit the parent's client env (e.g. herdr pane identity).
 			runtime = await withClientEnv(parentState.clientEnv, () =>
-				createAgentSessionRuntime(this.options.createRuntime, {
+				createAgentSessionRuntime(this.createRuntimeWithRlmCapacity, {
 					cwd: sessionManager.getCwd(),
 					agentDir: parentState.runtime.services.agentDir,
 					sessionManager,
@@ -2726,7 +2798,7 @@ export class AgentDaemon {
 		} catch (error) {
 			try {
 				await sessionManager.close();
-				if (!factoryStarted) options.admission.confirmUnboundCleanup();
+				if (!factoryStarted) await options.admission.confirmUnboundCleanup();
 			} catch (cleanupError) {
 				if (cleanupError === error || (error instanceof AggregateError && error.errors.includes(cleanupError)))
 					throw error;
@@ -3054,8 +3126,8 @@ export class AgentDaemon {
 		) {
 			throw new RuntimeOpenCancelledError();
 		}
-		const admission = parentState.runtime.session.reserveRlmChildAdmission();
 		const hydration = (async () => {
+			const admission = await parentState.runtime.session.reserveRlmChildAdmission();
 			try {
 				if (existing) await this.closeSession(existing, "replaced");
 				return await this.rehydrateCompletedRlmSubagentOnce(
@@ -3066,7 +3138,7 @@ export class AgentDaemon {
 					clientEnv,
 				);
 			} finally {
-				admission.settle();
+				await admission.settle();
 			}
 		})();
 		// Explicit opens and all lazy triggers share this path-keyed publication,
@@ -3139,7 +3211,7 @@ export class AgentDaemon {
 			admission.claimFactory();
 			factoryStarted = true;
 			runtime = await withClientEnv(hydrationEnv, () =>
-				createAgentSessionRuntime(this.options.createRuntime, {
+				createAgentSessionRuntime(this.createRuntimeWithRlmCapacity, {
 					cwd: openedManager.getCwd(),
 					agentDir: parentState.runtime.services.agentDir,
 					sessionManager: openedManager,
@@ -3264,7 +3336,7 @@ export class AgentDaemon {
 			}
 			await drain(() => sessionManager?.close());
 			await drain(() => sessionLease?.release());
-			if (!factoryStarted && errors.length === initialErrorCount) admission.confirmUnboundCleanup();
+			if (!factoryStarted && errors.length === initialErrorCount) await admission.confirmUnboundCleanup();
 			if (errors.length === initialErrorCount) throw error;
 			throw new AggregateError(errors, "RLM hydration and cleanup failed");
 		}
@@ -3938,6 +4010,10 @@ export class AgentDaemon {
 					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
+					return;
+				}
+				case "worker_get_rlm_capacity": {
+					this.writeWorkerSuccess(client, command, this.rlmCapacityClient?.snapshot() ?? { reservations: [] });
 					return;
 				}
 				case "worker_passivate_idle_children": {
@@ -5212,6 +5288,20 @@ export class AgentDaemon {
 				return success(command.id, "set_session_name");
 			}
 
+			case "get_rlm_max_subagents_status": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(command.id, command.type, await state.runtime.session.getRlmMaxSubagentsStatus());
+			}
+
+			case "set_rlm_max_subagents": {
+				const state = this.getSessionState(command.activeSessionId);
+				return success(
+					command.id,
+					command.type,
+					await state.runtime.session.setRlmMaxSubagents(command.maxSubagents),
+				);
+			}
+
 			case "get_rlm_max_depth_status": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_rlm_max_depth_status", state.runtime.session.getRlmMaxDepthStatus());
@@ -6332,17 +6422,29 @@ Use prime_context read/search with selected lines or a query.`;
 			// runs, in which case the draft is no longer abandoned and must be kept.
 			queueMicrotask(() => {
 				if (this.sessions.has(state.activeSessionId) && this.isDiscardableDraft(state)) {
-					void this.closeSession(state, "killed");
+					this.discardAbandonedDraft(state);
 				}
 			});
 		}
+	}
+
+	/** Best-effort discard: a teardown rejection must not stop other hosted sessions. */
+	private discardAbandonedDraft(state: ActiveSessionState): void {
+		void this.closeSession(state, "killed").catch((error) => {
+			this.log(
+				`failed to discard abandoned empty draft ${state.activeSessionId}: ${
+					error instanceof Error ? (error.stack ?? error.message) : String(error)
+				}`,
+			);
+		});
 	}
 
 	private isDiscardableDraft(state: ActiveSessionState): boolean {
 		if (this.options.worker) {
 			return false;
 		}
-		if (state.clients.size > 0) {
+		// An attaching client is not in state.clients yet, but still owns the draft.
+		if (state.clients.size > 0 || state.pendingAttaches > 0) {
 			return false;
 		}
 		if (state.runtime.metadata.kind === "subagent") {
@@ -6951,7 +7053,7 @@ Use prime_context read/search with selected lines or a query.`;
 				(eventType === "turn_end" || eventType === "compaction_end" || eventType === "bash_end") &&
 				this.isDiscardableDraft(state)
 			) {
-				void this.closeSession(state, "killed");
+				this.discardAbandonedDraft(state);
 			}
 			if (RECOVERY_CHECKPOINT_EVENTS.has(eventType)) {
 				this.recordWorkerRecoveryState(state, eventType);

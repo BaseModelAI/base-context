@@ -431,7 +431,7 @@ describe("ACP mode end to end", () => {
 		await harness.cleanup();
 	}, 30_000);
 
-	it("treats unused autonomous capacity as terminal lifecycle telemetry", async () => {
+	it("treats unused autonomous capacity as terminal lifecycle status", async () => {
 		const connection = fakeAcpConnection({
 			headlessStatus: {
 				enabled: true,

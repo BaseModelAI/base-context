@@ -3,7 +3,6 @@ import {
 	type ImageContent,
 	isLocalRequestPreparationError,
 	type Message,
-	type Model,
 	RequestTokenBudgetError,
 	type SimpleStreamOptions,
 	streamSimple,
@@ -62,19 +61,6 @@ const EMPTY_USAGE = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const DEFAULT_MODEL = {
-	id: "unknown",
-	name: "unknown",
-	api: "unknown",
-	provider: "unknown",
-	baseUrl: "",
-	reasoning: false,
-	input: [],
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-	contextWindow: 0,
-	maxTokens: 0,
-} satisfies Model<any>;
-
 type QueueMode = "all" | "one-at-a-time";
 
 type MutableAgentState = Omit<AgentState, "isStreaming" | "streamingMessage" | "pendingToolCalls" | "errorMessage"> & {
@@ -92,7 +78,7 @@ function createMutableAgentState(
 
 	return {
 		systemPrompt: initialState?.systemPrompt ?? "",
-		model: initialState?.model ?? DEFAULT_MODEL,
+		model: initialState?.model,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
 		serviceTier: initialState?.serviceTier ?? "default",
 		get tools() {
@@ -579,6 +565,8 @@ export class Agent {
 	}
 
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+		if (!this._state.model)
+			throw new Error("No model selected. Select a provider and model before starting the agent.");
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const onToolInvocationStarting = this.onToolInvocationStarting;
 		const onToolExchangeFinalized = this.onToolExchangeFinalized;
@@ -643,6 +631,8 @@ export class Agent {
 		if (this.activeRun) {
 			throw new Error("Agent is already processing.");
 		}
+		if (!this._state.model)
+			throw new Error("No model selected. Select a provider and model before starting the agent.");
 
 		const abortController = new AbortController();
 		let resolvePromise = () => {};
@@ -686,6 +676,7 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		if (!this._state.model) throw error;
 		const failureMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: "" }],

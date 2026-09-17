@@ -586,6 +586,14 @@ export class InProcessAgentConnection implements AgentConnection {
 		await this.session.setSessionName(trimmedName);
 	}
 
+	async getRlmMaxSubagentsStatus() {
+		return this.session.getRlmMaxSubagentsStatus();
+	}
+
+	async setRlmMaxSubagents(maxSubagents: number) {
+		return this.session.setRlmMaxSubagents(maxSubagents);
+	}
+
 	async getRlmMaxDepthStatus() {
 		return this.session.getRlmMaxDepthStatus();
 	}

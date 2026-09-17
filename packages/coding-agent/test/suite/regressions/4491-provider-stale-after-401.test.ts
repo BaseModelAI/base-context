@@ -1,260 +1,149 @@
-import type { AgentEvent } from "@ponythewhite/base-context-agent";
 import { type AssistantMessage, fauxAssistantMessage } from "@ponythewhite/base-context-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AuthSourceToken } from "../../../src/core/auth-storage.js";
+import { createNativeInferenceStream } from "../../../src/core/inference-coordinator.js";
 import { createHarness, type Harness } from "../harness.js";
+import { createDeferred } from "../scheduling.js";
 
-function provider401Message(): AssistantMessage {
+function provider401Message(structured = true): AssistantMessage {
 	return {
 		...fauxAssistantMessage("", {
 			stopReason: "error",
-			errorMessage: "401 Unauthorized: invalid API key",
+			errorMessage: structured ? "401 Unauthorized: invalid API key" : "401 status code (no body)",
 		}),
-		diagnostics: [
-			{
-				type: "provider_stream_failure",
-				timestamp: Date.now(),
-				details: { kind: "auth", status: 401 },
-			},
-		],
+		diagnostics: structured
+			? [{ type: "provider_stream_failure", timestamp: Date.now(), details: { kind: "auth", status: 401 } }]
+			: undefined,
 	};
 }
 
-function bareProvider401Message(): AssistantMessage {
-	return fauxAssistantMessage("", {
-		stopReason: "error",
-		errorMessage: "401 status code (no body)",
-	});
-}
-
-function provider500Message(): AssistantMessage {
-	return {
-		...fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage: "500 Internal Server Error",
-		}),
-		diagnostics: [
-			{
-				type: "provider_stream_failure",
-				timestamp: Date.now(),
-				details: { kind: "server_error", status: 500 },
-			},
-		],
-	};
-}
-
-describe("issue #4491 provider stale after repeated 401", () => {
+describe("issue #4491 provider stale after 401", () => {
 	const harnesses: Harness[] = [];
 
 	afterEach(async () => {
-		while (harnesses.length > 0) {
-			await harnesses.pop()?.cleanup();
-		}
+		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
 	});
 
-	it("retries structured provider auth failures once, then marks current auth stale", async () => {
+	async function createAuthHarness(retryEnabled = true) {
 		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
+			provider: "openai",
+			settings: { retry: { enabled: retryEnabled, maxRetries: 2, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		harness.setResponses([provider401Message(), provider401Message(), provider401Message()]);
-
-		await harness.session.prompt("hello");
-
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1]);
-		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([false]);
-		expect(harness.eventsOfType("auth_stale")).toHaveLength(1);
-
-		const provider = harness.getModel().provider;
-		expect(harness.authStorage.hasAuth(provider)).toBe(false);
-		expect(harness.authStorage.getAuthStatus(provider)).toEqual({
-			configured: false,
-			source: "stale",
-			label: "expired",
+		// Use the SDK native auth/options dispatcher, not a manual preflight lookup.
+		// The final transport remains the registered local simulation.
+		const sources: AuthSourceToken[] = [];
+		harness.session.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => {
+			const registry = harness.session.modelRegistry;
+			const auth = await registry.getApiKeyAndHeaders(harness.getModel());
+			if (!auth.ok) throw new Error(auth.error);
+			if (auth.sourceToken) sources.push(auth.sourceToken);
+			return { ...options, apiKey: auth.apiKey, authSourceToken: auth.sourceToken };
 		});
+		return { harness, sources };
+	}
 
-		const assistantMessages = harness.session.messages.filter(
-			(message): message is AssistantMessage => message.role === "assistant",
-		);
-		const finalAssistant = assistantMessages[assistantMessages.length - 1];
-		expect(finalAssistant?.errorMessage).toContain("401 Unauthorized");
-		expect(finalAssistant?.errorMessage).toContain("Run /login to update credentials.");
-	});
-
-	it("emits stale auth source tokens for daemon clients after bare 401 auth failures", async () => {
-		const harness = await createHarness({
-			provider: "prime-inference",
-			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		harness.setResponses([bareProvider401Message()]);
-
-		await harness.session.prompt("hello");
-
-		const authStaleEvents = harness.eventsOfType("auth_stale");
-		expect(authStaleEvents).toHaveLength(1);
-		expect(authStaleEvents[0]?.provider).toBe("prime-inference");
-		expect(authStaleEvents[0]?.sourceTokens).toMatchObject([
-			{
-				provider: "prime-inference",
-				source: "runtime",
-			},
+	it.each([
+		{ structured: true, retryEnabled: true },
+		{ structured: false, retryEnabled: true },
+		{ structured: true, retryEnabled: false },
+	])("settles auth failure without retrying ($structured/$retryEnabled)", async ({ structured, retryEnabled }) => {
+		const { harness, sources } = await createAuthHarness(retryEnabled);
+		harness.setResponses([
+			provider401Message(structured),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "500 Internal Server Error" }),
+			provider401Message(),
 		]);
-		expect(harness.authStorage.getAuthStatus("prime-inference")).toEqual({
-			configured: false,
-			source: "stale",
-			label: "expired",
-		});
-	});
 
-	it("classifies bare status-code auth failures before login guidance is appended", async () => {
-		const harness = await createHarness({
-			provider: "prime-inference",
-			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		const message = bareProvider401Message();
-		const event = { type: "agent_end", messages: [message] } as AgentEvent;
-		const session = harness.session as unknown as {
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
-		};
-
-		session._createRetryPromiseForAgentEnd(event);
-
-		expect(harness.session.isRetrying).toBe(true);
-		harness.session.abortRetry();
-	});
-
-	it("creates retry promises for exhausted structured auth failures so cleanup is awaited", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		const event = { type: "agent_end", messages: [provider401Message()] } as AgentEvent;
-		const session = harness.session as unknown as {
-			_retryAttempt: number;
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
-		};
-		session._retryAttempt = 1;
-
-		session._createRetryPromiseForAgentEnd(event);
-
-		expect(harness.session.isRetrying).toBe(true);
-		harness.session.abortRetry();
-	});
-
-	it("marks captured auth failures stale when retry backoff is cancelled", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 100 } },
-		});
-		harnesses.push(harness);
-		harness.setResponses([provider401Message(), provider401Message()]);
-
-		const sawRetryStart = new Promise<void>((resolve) => {
-			const unsubscribe = harness.session.subscribe((event) => {
-				if (event.type === "auto_retry_start") {
-					unsubscribe();
-					resolve();
-				}
-			});
-		});
-
-		const promptPromise = harness.session.prompt("hello");
-		await sawRetryStart;
-		harness.session.abortRetry();
-		await promptPromise;
+		await harness.session.prompt("hello");
+		await harness.session.waitForIdle();
 
 		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.eventsOfType("auth_stale")).toHaveLength(1);
-		expect(harness.eventsOfType("auto_retry_end").map((event) => event.finalError)).toContain("Retry cancelled");
-		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
-		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
+		expect(harness.getPendingResponseCount()).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+		expect(harness.eventsOfType("auto_retry_end")).toEqual([]);
+		expect(sources).toMatchObject([{ provider: "openai", source: "runtime" }]);
+		expect(harness.eventsOfType("auth_stale")).toEqual([
+			{ type: "auth_stale", provider: "openai", sourceTokens: sources },
+		]);
+		expect(harness.authStorage.hasAuth("openai")).toBe(false);
+		await expect(harness.authStorage.getApiKey("openai")).resolves.toBeUndefined();
+		expect(harness.authStorage.getAuthStatus("openai")).toEqual({
+			configured: false,
+			source: "stale",
+			label: "expired",
+		});
+		expect(harness.session.isRetrying).toBe(false);
+		expect(harness.session.agent.state.isStreaming).toBe(false);
+		expect(harness.session.agent.state.pendingToolCalls.size).toBe(0);
+		expect(harness.eventsOfType("agent_end")).toHaveLength(1);
+		const assistants = harness.session.messages.filter(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0].stopReason).toBe("error");
+		expect(assistants[0].errorMessage).toContain("401");
+		expect(assistants[0].errorMessage).toContain("Run /login to update credentials.");
 	});
 
-	it("marks each failed auth source stale when credentials change during retry backoff", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 5 } },
-		});
-		harnesses.push(harness);
-		harness.setResponses([provider401Message(), provider401Message()]);
-
-		let changedCredentials = false;
-		harness.session.subscribe((event) => {
-			if (event.type === "auto_retry_start" && !changedCredentials) {
-				changedCredentials = true;
-				harness.authStorage.setRuntimeApiKey(harness.getModel().provider, "fresh-key");
+	it("joins cancelled terminal work and marks only its captured auth source stale", async () => {
+		const { harness, sources } = await createAuthHarness();
+		const requestStarted = createDeferred();
+		const responseReady = createDeferred();
+		harness.setResponses([
+			async () => {
+				requestStarted.resolve();
+				await responseReady.promise;
+				return provider401Message();
+			},
+			provider401Message(),
+		]);
+		const markSource = vi.spyOn(harness.authStorage, "markAuthSourceStale");
+		const reached = createDeferred();
+		const release = createDeferred();
+		const unsubscribe = harness.session.agent.subscribe(async (event) => {
+			if (event.type === "message_end" && event.message.role === "assistant") {
+				reached.resolve();
+				await release.promise;
 			}
 		});
+		let prompt: Promise<void> | undefined;
+		let abort: Promise<void> | undefined;
+		try {
+			prompt = harness.session.prompt("hello");
+			await requestStarted.promise;
+			harness.authStorage.setRuntimeApiKey("openai", "fresh-key");
+			responseReady.resolve();
+			await reached.promise;
+			expect(sources).toMatchObject([{ provider: "openai", source: "runtime" }]);
+			expect(harness.session.isRetrying).toBe(false);
+			let idleSettled = false;
+			const idle = harness.session.waitForIdle().then(() => {
+				idleSettled = true;
+			});
+			abort = harness.session.abort();
+			await Promise.resolve();
+			expect(idleSettled).toBe(false);
+			release.resolve();
+			await Promise.all([prompt, abort, idle]);
 
-		await harness.session.prompt("hello");
-
-		expect(changedCredentials).toBe(true);
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
-		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
-		expect(harness.authStorage.getAuthStatus(harness.getModel().provider)).toEqual({
-			configured: false,
-			source: "stale",
-			label: "expired",
-		});
-	});
-
-	it("marks captured auth failures stale when the final retryable error is not auth", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		harness.setResponses([provider401Message(), provider500Message(), provider500Message()]);
-
-		await harness.session.prompt("hello");
-
-		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.eventsOfType("auto_retry_start").map((event) => event.attempt)).toEqual([1, 2]);
-		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toEqual([false]);
-		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
-		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
-
-		const assistantMessages = harness.session.messages.filter(
-			(message): message is AssistantMessage => message.role === "assistant",
-		);
-		const finalAssistant = assistantMessages[assistantMessages.length - 1];
-		expect(finalAssistant?.errorMessage).toContain("500 Internal Server Error");
-		expect(finalAssistant?.errorMessage).toContain("Run /login to update credentials.");
-	});
-
-	it("marks concrete auth failures stale when retry is disabled", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: false } },
-		});
-		harnesses.push(harness);
-		harness.setResponses([provider401Message()]);
-
-		await harness.session.prompt("hello");
-
-		expect(harness.faux.state.callCount).toBe(1);
-		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
-		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
-		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
-	});
-
-	it("resolves retry state for auth failures surfaced only on agent_end", async () => {
-		const harness = await createHarness({
-			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		const message = provider401Message();
-		const event = { type: "agent_end", messages: [message] } as AgentEvent;
-		const session = harness.session as unknown as {
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
-			_processAgentEvent(event: AgentEvent): Promise<void>;
-		};
-
-		session._createRetryPromiseForAgentEnd(event);
-		await session._processAgentEvent(event);
-
-		expect(harness.session.isRetrying).toBe(false);
-		expect(harness.eventsOfType("auto_retry_end").map((retryEvent) => retryEvent.success)).toEqual([false]);
-		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
-		expect(message.errorMessage).toContain("Run /login to update credentials.");
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+			expect(harness.eventsOfType("auto_retry_end")).toEqual([]);
+			expect(harness.eventsOfType("auth_stale")).toEqual([
+				{ type: "auth_stale", provider: "openai", sourceTokens: sources },
+			]);
+			await expect(harness.authStorage.getApiKey("openai")).resolves.toBe("fresh-key");
+			expect(markSource).toHaveBeenCalledExactlyOnceWith(sources[0]);
+			expect(harness.session.isRetrying).toBe(false);
+			expect(harness.session.agent.state.isStreaming).toBe(false);
+			expect(harness.session.agent.state.pendingToolCalls.size).toBe(0);
+		} finally {
+			responseReady.resolve();
+			release.resolve();
+			await Promise.allSettled([prompt, abort].filter((value) => value !== undefined));
+			unsubscribe();
+		}
 	});
 });

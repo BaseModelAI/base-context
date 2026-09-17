@@ -9,9 +9,6 @@ const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 
-const SUMMARY_MODEL_PROVIDER = "prime-inference";
-const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
-
 const SUMMARY_CONTEXT_MESSAGES = 8;
 const SUMMARY_MAX_CHARS_PER_MESSAGE = 600;
 // Generous so a chatty model still closes the tags before truncation.
@@ -35,15 +32,6 @@ Example:
 export interface AgentStatusResult {
 	summary: string;
 	taskState?: AgentTaskState;
-}
-
-/** Resolve the cheap summary model, or undefined when it has no configured auth. */
-export function resolveSummaryModel(registry: ModelRegistry): Model<Api> | undefined {
-	const model = registry.find(SUMMARY_MODEL_PROVIDER, SUMMARY_MODEL_ID);
-	if (model && registry.hasConfiguredAuth(model)) {
-		return model;
-	}
-	return undefined;
 }
 
 function messageText(content: unknown): { text: string; tools: string[] } {
@@ -142,19 +130,19 @@ export function parseAgentStatusResponse(text: string, isWorking: boolean): Agen
 
 export interface GenerateAgentStatusParams {
 	registry: ModelRegistry;
+	model?: Model<Api>;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
 	signal?: AbortSignal;
 	requests?: InferenceCoordinator;
 }
 
-/** One cheap model call for a fresh status, or undefined if unavailable/empty/failed. */
+/** Use the session's selected model, or keep the local status when unavailable. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal, requests } = params;
+	const { registry, messages, isWorking, signal, requests, model: selectedModel } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
-	const selectedModel = resolveSummaryModel(registry);
 	if (!selectedModel) {
 		return undefined;
 	}
@@ -198,6 +186,18 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 function isSessionWorking(state: ActiveSessionState): boolean {
 	const session = state.runtime.session;
 	return session.isSessionActive;
+}
+
+/** Use the last assistant turn's real failure instead of asking a classifier to invent completed work. */
+function terminalTurnError(messages: readonly AgentMessage[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		if (message.stopReason !== "error") return undefined;
+		const detail = message.errorMessage?.trim();
+		return detail ? `Model request failed: ${clamp(detail, 160)}` : "Model request failed";
+	}
+	return undefined;
 }
 
 /**
@@ -331,7 +331,8 @@ export class DaemonSessionSummarizer {
 		const messageCount = messages.length;
 		const isWorking = isSessionWorking(state);
 		const previous = state.summaryState;
-		// Idle sessions with a current verdict need no refresh; working sessions
+		// Idle sessions with a current verdict need no refresh unless a terminal
+		// error must replace a previously fabricated verdict. Working sessions
 		// always refresh so the recap keeps up with the in-progress turn.
 		const contentUnchanged = previous?.basedOnMessageCount === messageCount;
 		const owesIdleVerdict = !isWorking && previous?.taskState === undefined;
@@ -339,7 +340,10 @@ export class DaemonSessionSummarizer {
 		// needs_input fallback fired on a transient failure); keep retrying until a
 		// real summary lands so the recap isn't left permanently empty.
 		const owesSummary = !isWorking && !previous?.summary;
-		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
+		const turnError = !isWorking ? terminalTurnError(messages) : undefined;
+		const owesErrorVerdict =
+			turnError !== undefined && (previous?.taskState !== "needs_input" || previous?.summary !== turnError);
+		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary && !owesErrorVerdict) {
 			return;
 		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
@@ -360,14 +364,18 @@ export class DaemonSessionSummarizer {
 		let status: AgentStatus | undefined;
 		let changed = false;
 		try {
-			requests = this.getRequests?.(session);
-			const generated = await this.generate({
-				registry: session.modelRegistry,
-				messages: contextMessages,
-				isWorking,
-				signal: controller.signal,
-				requests,
-			});
+			if (turnError === undefined) requests = this.getRequests?.(session);
+			const generated: AgentStatusResult | undefined =
+				turnError !== undefined
+					? { summary: turnError, taskState: "needs_input" }
+					: await this.generate({
+							registry: session.modelRegistry,
+							model: session.model,
+							messages: contextMessages,
+							isWorking,
+							signal: controller.signal,
+							requests,
+						});
 			// An unused capture otherwise counts this idle subject as working.
 			await requests?.dispose();
 			// A failed classification on an idle session would spin at "working"
