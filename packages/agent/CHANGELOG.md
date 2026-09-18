@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.5] - 2026-09-18
+
+- Updated lockstep packaging for the Synerise-branded Base Context 1.0.5 release.
+
 ## [1.0.4] - 2026-09-17
 
 - Updated internal package dependencies to 1.0.4.

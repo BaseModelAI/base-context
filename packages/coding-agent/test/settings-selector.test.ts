@@ -83,6 +83,60 @@ describe("SettingsSelectorComponent", () => {
 		}
 	});
 
+	test("labels the built-in theme Synerise while keeping preview and selection IDs", () => {
+		const onThemeChange = vi.fn();
+		const onThemePreview = vi.fn();
+		const component = new SettingsSelectorComponent(
+			{ ...config, currentTheme: "prime", availableThemes: ["prime", "dark"] },
+			{ ...callbacks, onThemeChange, onThemePreview },
+		);
+		const list = component.getSettingsList();
+		for (const character of "theme") list.handleInput(character);
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Synerise");
+
+		list.handleInput("\r");
+		const submenu = stripAnsi(component.render(120).join("\n"));
+		expect(submenu).toContain("Synerise");
+		expect(submenu).not.toContain("prime");
+		list.handleInput("\u001b[B");
+		expect(onThemePreview).toHaveBeenLastCalledWith("dark");
+		list.handleInput("\u001b");
+		expect(onThemePreview).toHaveBeenLastCalledWith("prime");
+		expect(onThemeChange).not.toHaveBeenCalled();
+
+		list.handleInput("\r");
+		list.handleInput("\r");
+		expect(onThemeChange).toHaveBeenLastCalledWith("prime");
+		expect(stripAnsi(component.render(120).join("\n"))).toContain("Synerise");
+	});
+
+	test("keeps a custom Synerise theme distinct from the built-in theme label", () => {
+		const onThemeChange = vi.fn();
+		const onThemePreview = vi.fn();
+		const component = new SettingsSelectorComponent(
+			{ ...config, currentTheme: "Synerise", availableThemes: ["prime", "Synerise"] },
+			{ ...callbacks, onThemeChange, onThemePreview },
+		);
+		const list = component.getSettingsList();
+		for (const character of "theme") list.handleInput(character);
+		list.handleInput("\r");
+		list.handleInput("\u001b[A");
+		expect(onThemePreview).toHaveBeenLastCalledWith("prime");
+		list.handleInput("\u001b");
+		expect(onThemePreview).toHaveBeenLastCalledWith("Synerise");
+
+		list.handleInput("\r");
+		list.handleInput("\r");
+		expect(onThemeChange).toHaveBeenLastCalledWith("Synerise");
+		list.handleInput("\r");
+		list.handleInput("\u001b[A");
+		list.handleInput("\r");
+		expect(onThemeChange).toHaveBeenLastCalledWith("prime");
+		list.handleInput("\r");
+		list.handleInput("\r");
+		expect(onThemeChange).toHaveBeenLastCalledWith("prime");
+	});
+
 	test("cycles a custom idle eviction value to the next numeric option", () => {
 		const onIdleEvictionMinutesChange = vi.fn();
 		const component = new SettingsSelectorComponent(

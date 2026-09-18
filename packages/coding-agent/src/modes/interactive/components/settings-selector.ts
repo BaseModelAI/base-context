@@ -193,6 +193,8 @@ export class SettingsSelectorComponent extends Container {
 		super();
 
 		let currentWarnings = { ...config.warnings };
+		let currentTheme = config.currentTheme;
+		const themeLabel = (name: string) => (name === "prime" ? "Synerise" : name);
 		const idleEvictionValues = [30, 60, 90, 180, 360];
 		if (typeof config.idleEvictionMinutes === "number" && !idleEvictionValues.includes(config.idleEvictionMinutes)) {
 			idleEvictionValues.push(config.idleEvictionMinutes);
@@ -306,23 +308,24 @@ export class SettingsSelectorComponent extends Container {
 				id: "theme",
 				label: "Theme",
 				description: "Color theme for the interface",
-				currentValue: config.currentTheme,
-				submenu: (currentValue, done) =>
+				currentValue: themeLabel(currentTheme),
+				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
 						"Theme",
 						"Select color theme",
 						config.availableThemes.map((t) => ({
 							value: t,
-							label: t,
+							label: themeLabel(t),
 						})),
-						currentValue,
+						currentTheme,
 						(value) => {
+							currentTheme = value;
 							callbacks.onThemeChange(value);
-							done(value);
+							done(themeLabel(value));
 						},
 						() => {
 							// Restore original theme on cancel
-							callbacks.onThemePreview?.(currentValue);
+							callbacks.onThemePreview?.(currentTheme);
 							done();
 						},
 						(value) => {

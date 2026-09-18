@@ -1,7 +1,8 @@
-import { Container, setKeybindings } from "@ponythewhite/base-context-tui";
+import { Container, setKeybindings, visibleWidth } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { BrandAnnouncementComponent } from "../src/modes/interactive/components/brand-announcement.js";
 import {
 	BrandSplashHeader,
 	getRandomStartHint,
@@ -10,6 +11,7 @@ import {
 } from "../src/modes/interactive/interactive-mode.js";
 import type { PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
+import { SYNERISE_LOGO } from "../src/themes/synerise-logo.js";
 
 describe("InteractiveMode startup hints", () => {
 	beforeAll(() => {
@@ -51,6 +53,14 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
+		for (const line of SYNERISE_LOGO.split("\n").filter(Boolean)) {
+			expect(output).toContain(line);
+		}
+		expect(output).toContain("Synerise base-context");
+		expect(output).not.toMatch(/prime|[▀▄█]/i);
+		const announcement = stripAnsi(new BrandAnnouncementComponent().render(120).join("\n"));
+		expect(announcement).toContain("Synerise base-context");
+		expect(announcement).not.toMatch(/prime|earendil|pi has joined|https:\/\//i);
 		expect(output).toContain("version  v0.0.0");
 		expect(output).toContain("model    test-model");
 		expect(output).toContain("cwd      /tmp/project");
@@ -65,6 +75,17 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 		expect(unpadded.render(120)[0]).not.toBe("");
+	});
+
+	it("keeps the Synerise base-context label visible in a narrow terminal", () => {
+		const header = new BrandSplashHeader(
+			"0.0.0",
+			() => "test-model",
+			() => "/tmp/project",
+		);
+		const lines = header.render(24);
+		expect(stripAnsi(lines.join("\n"))).toContain("Synerise base-context");
+		expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
 	});
 
 	it("randomly selects from five concise filepath prompts", () => {

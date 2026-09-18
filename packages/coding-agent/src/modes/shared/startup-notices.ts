@@ -102,7 +102,7 @@ export async function checkTmuxKeyboardSetup(): Promise<string | undefined> {
 	}
 
 	if (extendedKeysFormat === "xterm") {
-		return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+		return "tmux extended-keys-format is xterm. base-context works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
 	}
 
 	return undefined;

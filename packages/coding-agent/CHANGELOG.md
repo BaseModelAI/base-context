@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.5] - 2026-09-18
+
+- Displayed the built-in theme as Synerise without changing saved theme IDs, and branded the tmux startup notice as base-context.
+- Replaced the upstream startup artwork with a Synerise ASCII wordmark and base-context label.
+
 ## [1.0.4] - 2026-09-17
 
 - Fixed first-time Python setup failing to find its newly installed uv when XDG data paths are configured.
