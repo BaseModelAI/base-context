@@ -69,6 +69,56 @@ node packages/coding-agent/dist/bundle/cli.js
 
 To work in another repository, change to that directory and invoke the built CLI by its absolute path. See [installation, updates, and rollback](packages/coding-agent/docs/installation.md) for source, npm, and owned-installer routes. Prime Agent installers install Prime Agent, not Base Context.
 
+## Uninstall
+
+There is no `base-context uninstall` command. Save your work and close Base Context terminals, then stop its agents and background services **before removing the CLI**:
+
+```bash
+base-context shutdown
+```
+
+Confirm the shutdown prompt. If you use a custom `BASE_CONTEXT_HOME`, run shutdown with that same value; repeat for any other state roots you use.
+
+### One-line installer (macOS/Linux)
+
+Remove the owned installation, including retained CLI versions and their release-local Python environments:
+
+```bash
+rm -rf -- "${XDG_DATA_HOME:-$HOME/.local/share}/base-context"
+```
+
+This is the default location. If you set `BASE_CONTEXT_INSTALL_ROOT`, remove that installation directory instead. Use the paths from your installation if your environment has changed.
+
+Remove the installer's `# Synerise base-context` comment and associated `export PATH=...` line from the shell profile it updated (`~/.bashrc`, `~/.zshrc`, or `~/.profile`; Zsh may use `$ZDOTDIR/.zshrc`). If you still use its managed Node.js, edit that line to remove only the `base-context/bin` entry and keep the Node.js entry. If you declined profile changes, skip this step. Open a new terminal afterward.
+
+If the installer supplied Node.js and you do **not** use that copy for other programs, you can also remove it:
+
+```bash
+rm -rf -- "${XDG_DATA_HOME:-$HOME/.local/share}/base-context-node"
+```
+
+Shared `uv` and Python installations are left in place; other tools may use them.
+
+### npm installation
+
+Use the same npm installation/global prefix that you used to install the CLI:
+
+```bash
+npm uninstall -g @ponythewhite/base-context
+```
+
+If you installed through both npm and the one-line installer, remove both copies. For a source installation, remove your checkout after saving any local changes.
+
+### Optional: delete saved data
+
+By default, these steps keep your Base Context settings, saved credentials, and session history in `~/.base-context`. To **permanently delete** the default global state and its runtime cache, back up anything you need first. On macOS/Linux, run:
+
+```bash
+rm -rf -- "$HOME/.base-context"
+```
+
+For a custom `BASE_CONTEXT_HOME`, use that directory instead. Project-local `.base-context` directories and sessions stored through `BASE_CONTEXT_SESSION_DIR` or `--session-dir` are separate; remove them only if you also want to delete that data. Do not remove another application's credential store.
+
 ## Start useful work
 
 Ask for a concrete outcome:
