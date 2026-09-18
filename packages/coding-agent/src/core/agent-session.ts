@@ -5837,7 +5837,10 @@ export class AgentSession {
 		}
 		const limits = this.settingsManager.getCanonicalContextLimits();
 		const outcomes = structuredClone(this._unpersistedOutcomes);
-		const { context } = await readSessionBootstrap(this.sessionManager, limits);
+		const { context } = await readSessionBootstrap(this.sessionManager, limits, {
+			initialContextMode: this._initialContextMode,
+			purpose: "read",
+		});
 		this._mergeUnpersistedOutcomes(context.messages, outcomes);
 		if (context.messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 		return context;
@@ -9412,7 +9415,16 @@ export class AgentSession {
 				maxSourceBytes: limits.maxSourceBytes,
 			};
 		return requests.readHistory(async (view) => {
-			const messages = await new CanonicalContextCompiler().compile(view, limits, undefined, {}, resource);
+			const messages = await new CanonicalContextCompiler().compile(
+				view,
+				limits,
+				undefined,
+				{},
+				resource,
+				this._initialContextMode,
+				false,
+				"read",
+			);
 			this._assertCompactionOwner(owner);
 			const context = getCanonicalEpochContext(messages)!;
 			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
@@ -9652,7 +9664,10 @@ export class AgentSession {
 		}
 		try {
 			this._assertCompactionOwner(owner);
-			const bootstrap = await readSessionBootstrap(owner.manager, this.settingsManager.getCanonicalContextLimits());
+			const bootstrap = await readSessionBootstrap(owner.manager, this.settingsManager.getCanonicalContextLimits(), {
+				allowPendingToolPublic: this._contextEpochsEnabled,
+				initialContextMode: this._initialContextMode,
+			});
 			this._assertCompactionOwner(owner);
 			owner.agent.state.messages = bootstrap.context.messages;
 			this._contextOmissions = undefined;

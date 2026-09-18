@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.6] - 2026-09-18
+
+- Fixed automatic and manual compaction failing after native tool continuations.
+- Kept pending-tool context reads available without granting provider-request permission.
+- Preserved public tool facts and exact source references through summaries and subsequent requests.
+
 ## [1.0.5] - 2026-09-18
 
 - Displayed the built-in theme as Synerise without changing saved theme IDs, and branded the tmux startup notice as base-context.

@@ -88,7 +88,7 @@ export async function rebuildCopiedContextEpoch(
 	if (origin?.qualification !== "native-context-epoch" || hydrated.source.qualification !== "native-context-epoch")
 		throw new Error("Copied context epoch has no qualified source");
 	const checkpoint = readContextEpoch(entry.details, limits.maxSourceBytes);
-	if (checkpoint?.version === 6)
+	if (checkpoint?.version === 6 || checkpoint?.version === 8)
 		throw new Error("Tool continuation recipes require their original native execution source");
 	if (!checkpoint || checkpoint.literalTailId !== entry.firstKeptEntryId || !view.atSnapshot)
 		throw new Error("Copied context epoch boundary is unavailable");

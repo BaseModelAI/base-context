@@ -26,7 +26,12 @@ function restoreBootstrapSetting(context: SessionContext, entry: SessionEntry): 
 export async function readSessionBootstrap(
 	sessionManager: SessionManager,
 	limits: CanonicalContextLimits,
-	options: { includeMessages?: boolean; allowPendingToolPublic?: boolean; initialContextMode?: ContextMode } = {},
+	options: {
+		includeMessages?: boolean;
+		allowPendingToolPublic?: boolean;
+		initialContextMode?: ContextMode;
+		purpose?: "request" | "read";
+	} = {},
 ) {
 	limits = { ...limits };
 	const includeMessages = options.includeMessages ?? true;
@@ -84,6 +89,7 @@ export async function readSessionBootstrap(
 				undefined,
 				options.initialContextMode ?? "on",
 				options.allowPendingToolPublic,
+				options.purpose,
 			);
 		return {
 			context,

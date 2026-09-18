@@ -1,6 +1,6 @@
 {
 	"name": "@ponythewhite/base-context",
-	"version": "1.0.5",
+	"version": "1.0.6",
 	"description": "Synerise base-context: a coding and research agent with durable context and a persistent Python REPL",
 	"type": "module",
 	"bin": {
@@ -42,9 +42,9 @@
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
-		"@ponythewhite/base-context-agent": "1.0.5",
-		"@ponythewhite/base-context-ai": "1.0.5",
-		"@ponythewhite/base-context-tui": "1.0.5",
+		"@ponythewhite/base-context-agent": "1.0.6",
+		"@ponythewhite/base-context-ai": "1.0.6",
+		"@ponythewhite/base-context-tui": "1.0.6",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",

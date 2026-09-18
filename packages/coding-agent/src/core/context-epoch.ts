@@ -15,6 +15,8 @@ export const CONTEXT_POLICY_EPOCH_RENDERER = "native-canonical-epoch/5";
 export const CONTEXT_TOOL_EPOCH_RENDERER = "native-canonical-epoch/6";
 /** Selection-bearing v4/v5/v6 variants; older readers must refuse rather than drop these refs. */
 export const CONTEXT_SKILL_EPOCH_RENDERER = "native-canonical-epoch/7";
+/** Source-backed summary with retained public tool groups, not a measured MAIN request. */
+export const CONTEXT_TOOL_SUMMARY_RENDERER = "native-canonical-epoch/8";
 
 /** Descriptive, source-backed outcomes in the existing accepted epoch, not an execution store. */
 export interface ToolContinuationGroup {
@@ -65,7 +67,8 @@ interface ContextEpochFields {
 		| typeof CONTEXT_EPOCH_RENDERER
 		| typeof CONTEXT_POLICY_EPOCH_RENDERER
 		| typeof CONTEXT_TOOL_EPOCH_RENDERER
-		| typeof CONTEXT_SKILL_EPOCH_RENDERER;
+		| typeof CONTEXT_SKILL_EPOCH_RENDERER
+		| typeof CONTEXT_TOOL_SUMMARY_RENDERER;
 	readonly source: SourceSnapshotRef;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
@@ -80,7 +83,7 @@ interface ContextEpochFields {
 	readonly views: readonly EpochViewReference[];
 	/** Captured versions, not a body cache or authority inferred from transcript markup. */
 	readonly selectedSkills?: readonly SelectedSkillReference[];
-	/** Only v6 records this whole-group public representation and its exact outcome refs. */
+	/** v6 requests and v8 summaries retain whole public groups and their exact outcome refs. */
 	readonly toolContinuations?: readonly ToolContinuationGroup[];
 	/** Derived display only. The task reducer remains the authority for later changes. */
 	readonly taskFrame?: CompiledTaskFrame;
@@ -101,6 +104,15 @@ export type ContextEpochCheckpoint = ContextEpochFields &
 				readonly pendingRequestContract?: never;
 		  }
 		| {
+				readonly version: 8;
+				readonly mode: ContextMode;
+				readonly representation: null;
+				readonly includeSummary: true;
+				readonly policyOnly?: never;
+				readonly requestContract?: never;
+				readonly pendingRequestContract?: never;
+		  }
+		| {
 				readonly version: 5;
 				readonly mode: ContextMode;
 				readonly representation: null;
@@ -115,7 +127,7 @@ export function contextEpochMode(
 	checkpoint: ContextEpochCheckpoint | undefined,
 	initial: ContextMode = "on",
 ): ContextMode {
-	return checkpoint ? (checkpoint.version === 5 ? checkpoint.mode : "on") : initial;
+	return checkpoint ? (checkpoint.version === 5 || checkpoint.version === 8 ? checkpoint.mode : "on") : initial;
 }
 
 function isRequestContract(value: unknown): value is ContextEpochRequestContract {
@@ -207,9 +219,10 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(value.version === 4 && value.renderer === "native-canonical-epoch/4") ||
 			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER) ||
 			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER) ||
+			(value.version === 8 && value.renderer === CONTEXT_TOOL_SUMMARY_RENDERER) ||
 			([4, 5, 6].includes(value.version as number) && value.renderer === CONTEXT_SKILL_EPOCH_RENDERER)
 		) ||
-		(value.renderer === CONTEXT_SKILL_EPOCH_RENDERER
+		(value.renderer === CONTEXT_SKILL_EPOCH_RENDERER || (value.version === 8 && "selectedSkills" in value)
 			? !("selectedSkills" in value) ||
 				!Array.isArray(value.selectedSkills) ||
 				value.selectedSkills.length === 0 ||
@@ -230,7 +243,11 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!("literalTailId" in value) ||
 		typeof value.literalTailId !== "string" ||
 		!("representation" in value) ||
-		(value.version === 5 ? !("mode" in value) || (value.mode !== "on" && value.mode !== "off") : "mode" in value) ||
+		(value.version === 5 || value.version === 8
+			? !("mode" in value) || (value.mode !== "on" && value.mode !== "off")
+			: "mode" in value) ||
+		(value.version === 8 &&
+			(value.representation !== null || !("includeSummary" in value) || value.includeSummary !== true)) ||
 		(value.version === 5 &&
 			(value.representation !== null || !("policyOnly" in value) || value.policyOnly !== true)) ||
 		("policyOnly" in value &&
@@ -248,13 +265,13 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		!(
 			typeof value.representation === "string" ||
 			(value.version === 5 && value.representation === null && "policyOnly" in value && value.policyOnly === true) ||
-			((value.version === 2 || value.version === 3 || value.version === 4) &&
+			((value.version === 2 || value.version === 3 || value.version === 4 || value.version === 8) &&
 				value.representation === null &&
 				"includeSummary" in value &&
 				value.includeSummary === true)
 		) ||
 		("includeSummary" in value &&
-			((value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+			((value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 8) ||
 				value.includeSummary !== true ||
 				value.representation !== null)) ||
 		("replayContract" in value &&
@@ -264,19 +281,28 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(typeof value.resourceRevision !== "string" ||
 				Buffer.byteLength(value.resourceRevision, "utf8") > MAX_RESOURCE_REVISION_BYTES)) ||
 		("publicWindow" in value &&
-			((value.version !== 3 && value.version !== 4 && value.version !== 5 && value.version !== 6) ||
+			((value.version !== 3 &&
+				value.version !== 4 &&
+				value.version !== 5 &&
+				value.version !== 6 &&
+				value.version !== 8) ||
 				value.publicWindow !== true)) ||
-		("toolContinuations" in value && value.version !== 6) ||
-		(value.version === 6 &&
+		("toolContinuations" in value && value.version !== 6 && value.version !== 8) ||
+		((value.version === 6 || value.version === 8) &&
 			(!("toolContinuations" in value) ||
 				!Array.isArray(value.toolContinuations) ||
 				!value.toolContinuations.length ||
-				!("publicWindow" in value) ||
-				value.publicWindow !== true ||
 				!("replayContract" in value) ||
-				value.replayContract !== "message-groups")) ||
+				(value.version === 6 &&
+					(!("publicWindow" in value) ||
+						value.publicWindow !== true ||
+						value.replayContract !== "message-groups")))) ||
 		("continuation" in value &&
-			((value.version !== 3 && value.version !== 4 && value.version !== 5 && value.version !== 6) ||
+			((value.version !== 3 &&
+				value.version !== 4 &&
+				value.version !== 5 &&
+				value.version !== 6 &&
+				value.version !== 8) ||
 				!value.continuation ||
 				typeof value.continuation !== "object" ||
 				!("kind" in value.continuation) ||

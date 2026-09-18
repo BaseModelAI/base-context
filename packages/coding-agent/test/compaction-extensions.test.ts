@@ -210,7 +210,7 @@ describe("Compaction extensions (local simulation)", () => {
 
 		const originalLeafId = session.sessionManager.getLeafId()!;
 		const earlierCompactionId = await session.sessionManager.appendCompaction(customSummary, originalLeafId, 0);
-		await session.sessionManager.branch(originalLeafId);
+		await session.sessionManager.branchTo(originalLeafId);
 		expect(session.sessionManager.getCompactionCount()).toBe(1);
 
 		const result = await session.compact();
@@ -251,7 +251,7 @@ describe("Compaction extensions (local simulation)", () => {
 		const afterEvent = compactEvents[0];
 		if (afterEvent.type === "session_compact") {
 			// sessionManager is now on ctx, use session.sessionManager directly
-			const entries = session.sessionManager.getEntries();
+			const entries = await session.sessionManager.readEntries();
 			const hasCompactionEntry = entries.some((e: { type: string }) => e.type === "compaction");
 			expect(hasCompactionEntry).toBe(true);
 		}
@@ -410,10 +410,10 @@ describe("Compaction extensions (local simulation)", () => {
 
 		// sessionManager, modelRegistry, and model are now on ctx, not event
 		// Verify they're accessible via session
-		expect(typeof session.sessionManager.getEntries).toBe("function");
+		expect(typeof session.sessionManager.readEntries).toBe("function");
 		expect(typeof session.modelRegistry.getApiKeyAndHeaders).toBe("function");
 
-		const entries = session.sessionManager.getEntries();
+		const entries = await session.sessionManager.readEntries();
 		expect(Array.isArray(entries)).toBe(true);
 		expect(entries.length).toBeGreaterThan(0);
 	}, 120000);

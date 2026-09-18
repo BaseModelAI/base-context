@@ -790,6 +790,7 @@ describe("createAgentSessionFromServices", () => {
 			let executions = 0;
 			let executionId: string | undefined;
 			let assistantEntryId: string | undefined;
+			let pendingContextRead: ReturnType<NonNullable<typeof epochSession>["buildSessionContext"]> | undefined;
 			const pendingOptions: typeof epochOptions = {
 				...epochOptions,
 				tools: ["pending_effect"],
@@ -835,11 +836,23 @@ describe("createAgentSessionFromServices", () => {
 					sessionFile: epochManager.getSessionFile(),
 					entryId: expect.any(String),
 				});
+				// A read during the admitted intent must not require a provider request boundary.
+				const pendingLeaf = epochManager.getLeafId();
+				const pendingSends = bodies.length;
+				pendingContextRead = epochSession!.buildSessionContext();
+				// Assert this read outside the hook so a read error cannot replace the controlled stop.
+				await pendingContextRead.catch(() => {});
+				expect(epochManager.getLeafId()).toBe(pendingLeaf);
+				expect(bodies).toHaveLength(pendingSends);
+				expect(await epochManager.readEntry(invocation.executionId)).toBeUndefined();
+				expect(executions).toBe(0);
 				throw afterAckStop;
 			};
 			await expect(epochSession.prompt("Request the fixture tool. Preserve EXACT_USER_CONTENT.")).rejects.toBe(
 				afterAckStop,
 			);
+			if (!pendingContextRead) throw new Error("Expected a read during the original intent");
+			expect((await pendingContextRead).messages.length).toBeGreaterThan(0);
 			expect(executions).toBe(0);
 			if (!executionId || !assistantEntryId) throw new Error("Expected captured original execution references");
 			const stoppedAssistant = await epochManager.readEntry(assistantEntryId);
@@ -939,6 +952,15 @@ describe("createAgentSessionFromServices", () => {
 					(part) => part.type === "input_text" && part.text?.startsWith("Recorded tool continuation data."),
 				)?.text;
 			expect(typeof firstToolLiteral).toBe("string");
+			const acceptedLeaf = epochManager.getLeafId();
+			const acceptedContext = await epochSession.buildSessionContext();
+			expect(
+				acceptedContext.messages.some(
+					(message) => message.role === "custom" && message.content === firstToolLiteral,
+				),
+			).toBe(true);
+			expect(epochManager.getLeafId()).toBe(acceptedLeaf);
+			expect(bodies).toHaveLength(12);
 			// One ordinary continuation changes the tail/receipts, not the unchanged tool fact.
 			await epochSession.prompt("Continue normally. Preserve EXACT_RESUMED_CONTENT.");
 			expect(payloadCalls).toBe(2);
@@ -967,6 +989,37 @@ describe("createAgentSessionFromServices", () => {
 			expect(await epochManager.readEntry(executionId)).toBeUndefined();
 			expect(executions).toBe(0);
 			expect(bodies).toHaveLength(13);
+
+			// Manual compaction must retain the accepted public tool facts, not revive native calls.
+			summarizing = true;
+			await epochSession.compact();
+			summarizing = false;
+			expect(summaryBodies).toHaveLength(2);
+			expect(summaryBodies.at(-1)).toContain("outcome_unknown");
+			expect(summaryBodies.at(-1)).toContain(executionId);
+			const compactedContext = await epochSession.buildSessionContext();
+			expect(
+				compactedContext.messages.some(
+					(message) => message.role === "custom" && message.content === firstToolLiteral,
+				),
+			).toBe(true);
+			await epochSession.prompt("Continue after compaction. Preserve EXACT_RESUMED_CONTENT.");
+			const compactedBody = bodies.at(-1)!;
+			expect(compactedBody).toContain("outcome_unknown");
+			expect(compactedBody).toContain(executionId);
+			expect(compactedBody).toContain("EXACT_RESUMED_CONTENT");
+			for (const privateOrNative of [
+				"PRIVATE_EXECUTED_ARGUMENT",
+				"MODEL_ARGUMENT",
+				"OPAQUE_TAIL_CANONICAL_ONLY",
+				'"function_call"',
+				"No result provided",
+			]) {
+				expect(summaryBodies.at(-1)).not.toContain(privateOrNative);
+				expect(compactedBody).not.toContain(privateOrNative);
+			}
+			expect(await epochManager.readEntry(executionId)).toBeUndefined();
+			expect(executions).toBe(0);
 
 			// Same native fake-SSE fixture: advertised selection -> real producer -> source -> epoch ACK.
 			await epochSession.disposeAsync({ kernelSnapshot: false });

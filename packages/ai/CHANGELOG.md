@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.6] - 2026-09-18
+
+- Updated lockstep packaging for the Base Context 1.0.6 compaction fix.
+
 ## [1.0.5] - 2026-09-18
 
 - Updated lockstep packaging for the Synerise-branded Base Context 1.0.5 release.

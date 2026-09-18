@@ -539,7 +539,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		const toolResult = harness.session.messages.find(
 			(message) => message.role === "toolResult" && message.toolCallId === "native-kernel-variables",
 		);
-		expect(toolResult).toMatchObject({ isError: false });
+		expect(toolResult, JSON.stringify(toolResult)).toMatchObject({ isError: false });
 		const provisioner = (harness.session as unknown as { _ipythonKernelProvisioner: IpythonKernelProvisioner })
 			._ipythonKernelProvisioner;
 		expect(provisioner.hasRunningKernel).toBe(true);

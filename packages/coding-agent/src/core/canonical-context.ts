@@ -6,6 +6,7 @@ import {
 	CONTEXT_POLICY_EPOCH_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
+	CONTEXT_TOOL_SUMMARY_RENDERER,
 	type ContextEpochCheckpoint,
 	type ContextMode,
 	type ContextReplayContract,
@@ -95,6 +96,8 @@ export function getCanonicalMessageSource(message: AgentMessage): CanonicalMessa
 }
 
 interface CompiledEpochContext {
+	/** A captured observation or summary input never authorizes a MAIN epoch. */
+	readonly readOnly?: true;
 	readonly mode: ContextMode;
 	readonly source: SourceSnapshotRef;
 	readonly checkpoint?: ContextEpochCheckpoint;
@@ -135,6 +138,16 @@ export function prepareToolContinuationWindow(messages: readonly AgentMessage[])
 	messages: AgentMessage[];
 	replacements: readonly { messageIndex: number; text: string }[];
 } {
+	if (compiledEpochContexts.get(messages)?.readOnly)
+		throw new Error("Read-only context cannot authorize a provider epoch");
+	return renderToolContinuationWindow(messages);
+}
+
+/** Source-backed public facts shared by observations, summaries, and measured request candidates. */
+function renderToolContinuationWindow(messages: readonly AgentMessage[]): {
+	messages: AgentMessage[];
+	replacements: readonly { messageIndex: number; text: string }[];
+} {
 	const captured = captureCanonicalRequestMessages(messages);
 	const views = compiledViewUnits.get(captured)!;
 	const epoch = compiledEpochContexts.get(captured)!;
@@ -164,7 +177,11 @@ export function prepareToolContinuationWindow(messages: readonly AgentMessage[])
 		}
 	}
 	stringifyBoundedJson(captured, maxBytes);
-	const publicUnits = views.units.map(
+	// Reads need whole tool groups, not the unadmittable request's whole-context dependency star.
+	const units = epoch.readOnly
+		? bindMessageReplayUnits(captured, views.selection.units, views.selection.limits, "message-groups", groups)
+		: views.units;
+	const publicUnits = units.map(
 		(unit, index): ViewUnit => ({
 			...unit,
 			sourceRevision: renderedGroups.has(index)
@@ -328,6 +345,7 @@ export function prepareCanonicalEpoch(
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units || units.length !== messages.length || context.references.length !== messages.length)
 		throw new Error("Context epoch requires its captured compiler output");
+	if (context.readOnly) throw new Error("Read-only context cannot authorize a provider epoch");
 	if (compiledViewUnits.get(messages)?.selection.pendingPublicMessageGroups?.length)
 		throw new Error("Tool continuation requires its accepted public representation");
 	if (context.toolContinuations?.length && (!publicWindow || replayContract !== "message-groups"))
@@ -388,8 +406,8 @@ export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): st
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units) throw new Error("Recovery compaction requires captured canonical views");
-	if (context.toolContinuations?.length)
-		throw new Error("Tool continuation cannot enter an older recovery summary recipe");
+	if (context.toolContinuations?.length && !context.readOnly)
+		throw new Error("Tool continuation summary requires its captured public read view");
 	const recoveries = units.flatMap((unit, index) => (unit.kind === "recovery" ? [context.references[index]] : []));
 	if (!recoveries.length) return;
 	const checkpoint = context.checkpoint;
@@ -412,7 +430,7 @@ export function prepareRecoveryCompaction(
 	const context = compiledEpochContexts.get(messages);
 	const publicWindow =
 		context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
-	if (!boundary && !publicWindow && !context?.selectedSkills?.length) return;
+	if (!boundary && !publicWindow && !context?.selectedSkills?.length && !context?.toolContinuations?.length) return;
 	if (!context) throw new Error("Recovery compaction requires captured canonical views");
 	const selection = getCanonicalViewSelectionSource(messages)!;
 	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
@@ -428,7 +446,10 @@ export function prepareRecoveryCompaction(
 		units.map((unit) => unit.id),
 		selection.limits,
 	);
-	const roots = units.filter((unit) => unit.kind === "recovery").map((unit) => unit.id);
+	const toolGroups = new Set(context.toolContinuations?.map((group) => group.assistantEntryId));
+	const roots = units
+		.filter((unit, index) => unit.kind === "recovery" || toolGroups.has(context.references[index]?.ref.entryId ?? ""))
+		.map((unit) => unit.id);
 	const closed = new Set(closeViewSelection(units, roots, selection.limits).map((unit) => unit.id));
 	let renderedBytes = 0;
 	const views = context.references.flatMap((reference, index): EpochViewReference[] => {
@@ -448,15 +469,21 @@ export function prepareRecoveryCompaction(
 				]
 			: [];
 	});
-	if (!views.length && !publicWindow && !context.selectedSkills?.length) return;
+	if (!views.length && !publicWindow && !context.selectedSkills?.length && !toolGroups.size) return;
 	return snapshotContextEpoch(
 		{
-			version: 4,
-			renderer: context.selectedSkills?.length ? CONTEXT_SKILL_EPOCH_RENDERER : CONTEXT_EPOCH_RENDERER,
+			...(toolGroups.size ? { version: 8 as const, mode: context.mode } : { version: 4 as const }),
+			renderer: toolGroups.size
+				? CONTEXT_TOOL_SUMMARY_RENDERER
+				: context.selectedSkills?.length
+					? CONTEXT_SKILL_EPOCH_RENDERER
+					: CONTEXT_EPOCH_RENDERER,
+			...(toolGroups.size ? { toolContinuations: context.toolContinuations } : {}),
 			...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 			source: context.source,
 			representation: null,
 			includeSummary: true,
+			...(toolGroups.size && publicWindow ? { publicWindow: true as const } : {}),
 			replayContract:
 				boundary || publicWindow ? "message-groups" : (context.checkpoint?.replayContract ?? "complete-context"),
 			...(publicWindow
@@ -504,6 +531,7 @@ export class CanonicalContextCompiler {
 		resourceCapture?: OwnedResourceCapture,
 		initialContextMode: ContextMode = "on",
 		allowPendingToolPublic = false,
+		purpose: "request" | "read" = "request",
 	): Promise<AgentMessage[]> {
 		const frameLimits = taskFrameLimits(frameOptions);
 		const previousSource = this.source;
@@ -650,6 +678,12 @@ export class CanonicalContextCompiler {
 			)
 				throw new Error("Selected skill epoch source is unavailable");
 		}
+		const toolSourceIds = new Set(
+			checkpoint?.toolContinuations?.flatMap((group) => [
+				group.assistantEntryId,
+				...group.calls.flatMap((call) => (call.result ? [call.result.id] : [])),
+			]),
+		);
 		const publicTail = checkpoint?.continuation?.publicTailThrough;
 		if (publicTail) {
 			if (!view.atSnapshot) throw new Error("Public summary transition requires its captured source");
@@ -841,8 +875,9 @@ export class CanonicalContextCompiler {
 				}
 			}
 			const publicHistory =
-				pinned?.rendering === PUBLIC_CONTEXT_RENDERER ||
-				(!pinned && publicTail !== undefined && ref.sequence <= publicTail.sourceSequence);
+				!toolSourceIds.has(ref.entryId) &&
+				(pinned?.rendering === PUBLIC_CONTEXT_RENDERER ||
+					(!pinned && publicTail !== undefined && ref.sequence <= publicTail.sourceSequence));
 			const rendered = publicHistory ? renderPublicHistory(message, ref.entryId, maxSourceBytes) : message;
 			if (publicHistory) {
 				publicBytes += Buffer.byteLength(JSON.stringify(rendered), "utf8");
@@ -893,12 +928,13 @@ export class CanonicalContextCompiler {
 				if (
 					pinned.rendering !== undefined &&
 					((pinned.rendering === PUBLIC_TOOL_CONTINUATION_RENDERER
-						? checkpoint.version !== 6
+						? checkpoint.version !== 6 && checkpoint.version !== 8
 						: pinned.rendering !== PUBLIC_CONTEXT_RENDERER ||
 							(checkpoint.version !== 3 &&
 								checkpoint.version !== 4 &&
 								checkpoint.version !== 5 &&
-								checkpoint.version !== 6)) ||
+								checkpoint.version !== 6 &&
+								checkpoint.version !== 8)) ||
 						pinned.ref.kind === "compaction")
 				)
 					throw new Error("Unsupported context epoch view rendering");
@@ -1073,7 +1109,7 @@ export class CanonicalContextCompiler {
 		});
 		if (frozenGroups.length !== candidates.filter((candidate) => candidate.prior).length)
 			throw new Error("Committed tool continuation lost its original group");
-		if (candidates.length && (!allowPendingToolPublic || mode === "off"))
+		if (purpose === "request" && candidates.length && (!allowPendingToolPublic || mode === "off"))
 			throw new Error("Tool continuation requires an enabled native public request boundary");
 		const readToolEvidence = async (metadata: IndexedSourceEvent) => {
 			const cached = next.get(metadata.id);
@@ -1268,6 +1304,7 @@ export class CanonicalContextCompiler {
 			},
 		});
 		compiledEpochContexts.set(closedMessages, {
+			...(purpose === "read" ? { readOnly: true as const } : {}),
 			mode,
 			source: { ...view.source },
 			checkpoint,
@@ -1287,6 +1324,8 @@ export class CanonicalContextCompiler {
 		this.source = view.source;
 		this.sourceBytes = sourceBytes;
 		this.messageCount = messageCount;
-		return closedMessages;
+		return purpose === "read" && pendingPublicMessageGroups.length
+			? renderToolContinuationWindow(closedMessages).messages
+			: closedMessages;
 	}
 }
