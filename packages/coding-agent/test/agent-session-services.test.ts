@@ -961,6 +961,32 @@ describe("createAgentSessionFromServices", () => {
 			).toBe(true);
 			expect(epochManager.getLeafId()).toBe(acceptedLeaf);
 			expect(bodies).toHaveLength(12);
+			const reopenAcceptedContext = async () => {
+				const leaf = epochManager.getLeafId();
+				const sends = bodies.length;
+				const onPayload = epochSession!.agent.onPayload;
+				await epochSession!.disposeAsync({ kernelSnapshot: false });
+				await epochManager.close();
+				epochManager = await SessionManager.open(pendingFile);
+				({ session: epochSession } = await createAgentSessionFromServices({
+					...pendingOptions,
+					sessionManager: epochManager,
+					requestTokenBudget: undefined,
+				}));
+				expect(getCanonicalEpochContext((await epochSession.buildSessionContext()).messages)?.readOnly).toBe(true);
+				expect(
+					epochSession.messages.some(
+						(message) => message.role === "custom" && message.content === firstToolLiteral,
+					),
+				).toBe(true);
+				expect(epochManager.getLeafId()).toBe(leaf);
+				expect(bodies).toHaveLength(sends);
+				expect(await epochManager.readEntry(executionId!)).toBeUndefined();
+				expect(executions).toBe(0);
+				epochSession.agent.onPayload = onPayload;
+			};
+			// Cold startup only reads the accepted v6 facts; the next MAIN owns request admission.
+			await reopenAcceptedContext();
 			// One ordinary continuation changes the tail/receipts, not the unchanged tool fact.
 			await epochSession.prompt("Continue normally. Preserve EXACT_RESUMED_CONTENT.");
 			expect(payloadCalls).toBe(2);
@@ -998,11 +1024,14 @@ describe("createAgentSessionFromServices", () => {
 			expect(summaryBodies.at(-1)).toContain("outcome_unknown");
 			expect(summaryBodies.at(-1)).toContain(executionId);
 			const compactedContext = await epochSession.buildSessionContext();
+			expect(getCanonicalEpochContext(compactedContext.messages)?.checkpoint?.version).toBe(8);
 			expect(
 				compactedContext.messages.some(
 					(message) => message.role === "custom" && message.content === firstToolLiteral,
 				),
 			).toBe(true);
+			// The manual v8 summary must also reopen without a request boundary.
+			await reopenAcceptedContext();
 			await epochSession.prompt("Continue after compaction. Preserve EXACT_RESUMED_CONTENT.");
 			const compactedBody = bodies.at(-1)!;
 			expect(compactedBody).toContain("outcome_unknown");

@@ -39,8 +39,9 @@ export interface RequestViewCandidate {
 	readonly selectedUnitIds: readonly string[];
 	readonly request: ProviderRequestRepresentation;
 	readonly projection: ProviderRequestProjection;
-	readonly assessment: RequestTokenAssessment;
-	readonly originalAssessment: RequestTokenAssessment;
+	// Absent only for mandatory full-view admission without a configured token budget.
+	readonly assessment: RequestTokenAssessment | undefined;
+	readonly originalAssessment: RequestTokenAssessment | undefined;
 	/** Exact public messages represented by the accepted candidate, with captured source recipes. */
 	readonly publicMessages?: readonly AgentMessage[];
 }
@@ -235,13 +236,14 @@ export async function selectRequestView(
 	boundary: CapturedRequestViewBoundary,
 	request: ProviderRequestRepresentation,
 	projection: ProviderRequestProjection,
-	budget: RequestTokenBudgetEvaluator,
+	budget: RequestTokenBudgetEvaluator | undefined,
 	allowShrink: boolean,
 ): Promise<string | undefined> {
 	projection = canonicalRequestProjection(boundary, projection);
-	const full = budget.measure(request);
+	const full = budget?.measure(request);
 	const inputKey = requestInputKey(request, projection);
-	if (full.limitSource !== "explicit-profile" || !inputKey) return;
+	if ((budget && full?.limitSource !== "explicit-profile") || !inputKey) return;
+	if (!budget && !boundary.pendingPublicMessageGroups?.length) return;
 	const payload = JSON.parse(request.body!) as Record<string, unknown>;
 	const input = payload[inputKey];
 	if (!Array.isArray(input) || input.length !== projection.messageIndices.length) return;
@@ -268,7 +270,7 @@ export async function selectRequestView(
 		selectedUnitIds: readonly string[],
 		candidateRequest: ProviderRequestRepresentation,
 		candidateProjection: ProviderRequestProjection,
-		assessment: RequestTokenAssessment,
+		assessment: RequestTokenAssessment | undefined,
 		publicMessages?: readonly AgentMessage[],
 	) =>
 		boundary.commit(
@@ -320,10 +322,12 @@ export async function selectRequestView(
 			publicUnits.map((unit) => unit.id),
 			boundary.limits,
 		);
-		const assessment = budget.measure(encoded.request);
-		if (assessment.status === "over-budget") throw new PublicContextBudgetError(boundary.source, assessment, full);
-		if (assessment.status !== "within-estimate")
-			throw new Error("Tool continuation public request exceeds its token budget");
+		const assessment = budget?.measure(encoded.request);
+		if (assessment && full) {
+			if (assessment.status === "over-budget") throw new PublicContextBudgetError(boundary.source, assessment, full);
+			if (assessment.status !== "within-estimate")
+				throw new Error("Tool continuation public request exceeds its token budget");
+		}
 		await offer(
 			closed.map((unit) => unit.id),
 			encoded.request,
@@ -335,6 +339,8 @@ export async function selectRequestView(
 	}
 	if (projection.pendingPublicMessageGroups?.length)
 		throw new Error("Adapter pending group has no original owned source plan");
+	// Unbudgeted admission above retains every source unit; it never selects a smaller view.
+	if (!budget || !full) return;
 	const offerPublicWindow = async (): Promise<string | undefined> => {
 		if (
 			!allowShrink ||

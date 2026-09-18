@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.7] - 2026-09-18
+
+- Fixed reopening saved sessions with native tool continuation history.
+- Allowed subsequent native requests to retain the full public tool view when no token budget is configured, without changing configured budget checks.
+- Kept startup, compaction reloads, and tree navigation read-only until a fresh native request is admitted.
+
 ## [1.0.6] - 2026-09-18
 
 - Fixed automatic and manual compaction failing after native tool continuations.

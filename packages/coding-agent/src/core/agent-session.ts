@@ -1585,7 +1585,8 @@ export class AgentSession {
 						{},
 						resource,
 						this._initialContextMode,
-						contextEpochsEnabled,
+						// This MAIN owner binds public admission below, independently of optional token budgets.
+						true,
 					);
 					if (sameSource && this._contextOmissions === controls) {
 						// Only prune this captured set. A newer control or source switch must survive this read.
@@ -1598,7 +1599,8 @@ export class AgentSession {
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 				const epochContext = getCanonicalEpochContext(messages);
 				if (epochContext) this._contextMode = epochContext.mode;
-				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint);
+				const unbudgetedPublic = !contextEpochsEnabled && Boolean(epochContext?.toolContinuations?.length);
+				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint || unbudgetedPublic);
 				const skillPolicy = nativeSkills ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined;
 				if (this._baseSystemPromptOptions.nativeSkillSelection !== skillPolicy) {
 					const previousBase = this._baseSystemPrompt;
@@ -1613,16 +1615,21 @@ export class AgentSession {
 					getCanonicalViewUnits(messages)?.length !== messages.length
 				)
 					throw new Error("Current resource view requires tracked canonical context");
-				if (epochContext?.checkpoint && getCanonicalViewUnits(messages)?.length !== messages.length)
+				if (
+					(epochContext?.checkpoint || unbudgetedPublic) &&
+					getCanonicalViewUnits(messages)?.length !== messages.length
+				)
 					throw new Error("Committed context epoch cannot admit untracked transient messages");
 				if (
 					epochContext &&
-					(contextEpochsEnabled || epochContext.checkpoint) &&
+					(contextEpochsEnabled || epochContext.checkpoint || unbudgetedPublic) &&
 					getCanonicalViewUnits(messages)?.length === messages.length
 				) {
 					let committed = epochContext.checkpoint;
 					let committedEntry = epochContext.checkpointEntry;
-					const fixed = epochContext.mode === "off" || (committed?.policyOnly === true && !contextEpochsEnabled);
+					const fixed =
+						epochContext.mode === "off" ||
+						(committed?.policyOnly === true && !contextEpochsEnabled && !unbudgetedPublic);
 					let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
 					const nativeTail = messages.some(
 						(message) =>
@@ -1657,6 +1664,7 @@ export class AgentSession {
 								candidate.request,
 								candidate.assessment,
 								limits.maxSourceBytes,
+								unbudgetedPublic,
 							);
 							const replayContract =
 								"replayContract" in candidate.projection &&
@@ -1710,7 +1718,7 @@ export class AgentSession {
 							);
 							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
 								throw new Error("Context epoch candidate does not match its captured source");
-							const tokensBefore = candidate.originalAssessment.estimatedInputTokens;
+							const tokensBefore = candidate.originalAssessment?.estimatedInputTokens ?? null;
 							const result: CompactionResult = {
 								summary: "",
 								firstKeptEntryId: prepared.checkpoint.literalTailId,
@@ -1758,7 +1766,7 @@ export class AgentSession {
 								if (acceptedBody === undefined || request.body !== acceptedBody)
 									throw new Error("Committed context epoch requires a compatible final provider projection");
 								if (
-									contextEpochRepresentation(request, assessment, limits.maxSourceBytes) !==
+									contextEpochRepresentation(request, assessment, limits.maxSourceBytes, unbudgetedPublic) !==
 									committed.representation
 								)
 									throw new Error("Context epoch representation changed without a committed boundary");
@@ -9665,7 +9673,7 @@ export class AgentSession {
 		try {
 			this._assertCompactionOwner(owner);
 			const bootstrap = await readSessionBootstrap(owner.manager, this.settingsManager.getCanonicalContextLimits(), {
-				allowPendingToolPublic: this._contextEpochsEnabled,
+				purpose: "read",
 				initialContextMode: this._initialContextMode,
 			});
 			this._assertCompactionOwner(owner);
@@ -14342,7 +14350,7 @@ export class AgentSession {
 			const { context: sessionContext } = await readSessionBootstrap(
 				this.sessionManager,
 				this.settingsManager.getCanonicalContextLimits(),
-				{ allowPendingToolPublic: this._contextEpochsEnabled, initialContextMode: this._initialContextMode },
+				{ purpose: "read", initialContextMode: this._initialContextMode },
 			);
 			this.agent.state.messages = sessionContext.messages;
 			this._contextOmissions = undefined;

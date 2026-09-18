@@ -845,9 +845,9 @@ describe("native inference coordination", () => {
 				leafId: selecting.inputAcks[0],
 				persistent: true,
 			});
-			expect(candidate.originalAssessment.status).toBe("over-budget");
-			expect(candidate.assessment.status).toBe("within-estimate");
-			expect(candidate.assessment.profile).toEqual(candidate.originalAssessment.profile);
+			expect(candidate.originalAssessment!.status).toBe("over-budget");
+			expect(candidate.assessment!.status).toBe("within-estimate");
+			expect(candidate.assessment!.profile).toEqual(candidate.originalAssessment!.profile);
 			const fullUnits = getCanonicalViewUnits(selecting.viewMessages)!;
 			expect(candidate.selectedUnitIds).not.toContain(
 				fullUnits.find((unit) => unit.exactSources.includes(history.olderId))!.id,
@@ -1013,7 +1013,7 @@ describe("native inference coordination", () => {
 			expect(codexOffers[0].projection.publicWindow).toBe(true);
 			expect(codexOffers[1].projection.publicWindow).toBe(true);
 			expect(codexOffers[1].request.retainedPrefix).toMatchObject({ inputTokens: 5, outputTokens: 3 });
-			expect(codexOffers[1].assessment.retainedInputTokens).toBe(8);
+			expect(codexOffers[1].assessment!.retainedInputTokens).toBe(8);
 			const logical = JSON.parse(codexOffers[1].request.body!);
 			expect(logical.previous_response_id).toBeUndefined();
 			expect(logical.input).toEqual(
@@ -1047,7 +1047,7 @@ describe("native inference coordination", () => {
 
 			// This public canonical fixture tests transport reset, not Root's summary renderer or epoch permission check.
 			const publicReply = firstCodexReply.content.find((block) => block.type === "text");
-			const tokensBefore = codexOffers[1].originalAssessment.estimatedInputTokens;
+			const tokensBefore = codexOffers[1].originalAssessment!.estimatedInputTokens;
 			if (!publicReply || publicReply.type !== "text" || tokensBefore === null) {
 				throw new Error("Expected actual public reply and measured full context");
 			}
@@ -1066,7 +1066,7 @@ describe("native inference coordination", () => {
 			expect(codexOffers).toHaveLength(3);
 			expect(codexOffers[2].projection.publicWindow).toBe(true);
 			expect(codexOffers[2].request.retainedPrefix).toBeUndefined();
-			expect(codexOffers[2].assessment.retainedInputTokens).toBe(0);
+			expect(codexOffers[2].assessment!.retainedInputTokens).toBe(0);
 			const fresh = JSON.parse(codexOffers[2].request.body!);
 			expect(socket.sent).toHaveLength(3);
 			expect(socket.sent[2]).toEqual({ type: "response.create", ...fresh });
@@ -1227,8 +1227,8 @@ describe("native inference coordination", () => {
 		try {
 			await codexSubset.agent.prompt("Codex subset current input");
 			expect(codexSubsetPayload).toHaveBeenCalledTimes(1);
-			expect(codexCandidates[0].originalAssessment.status).toBe("over-budget");
-			expect(codexCandidates[0].assessment.status).toBe("within-estimate");
+			expect(codexCandidates[0].originalAssessment!.status).toBe("over-budget");
+			expect(codexCandidates[0].assessment!.status).toBe("within-estimate");
 			expect(codexCandidates[0].projection.publicWindow).toBe(true);
 			const codexUnits = getCanonicalViewUnits(codexSubset.viewMessages)!;
 			expect(codexCandidates[0].selectedUnitIds).not.toContain(
@@ -1673,7 +1673,7 @@ describe("native inference coordination", () => {
 		const checkpointCleanupError = new Error("fixture checkpoint cleanup failed");
 		const checkpointFailure = new AggregateError([primaryError, checkpointCleanupError], "local checkpoint refusal");
 		const rejectView = vi.fn(async (candidate: RequestViewCandidate) => {
-			expect(candidate.originalAssessment.status).toBe("within-estimate");
+			expect(candidate.originalAssessment!.status).toBe("within-estimate");
 			expect(candidate.assessment).toBe(candidate.originalAssessment);
 			expect(candidate.request.body).toContain("msg_legacy");
 			expect(candidate.projection.publicWindow).toBe(true);
@@ -1749,14 +1749,14 @@ describe("native inference coordination", () => {
 			// This route is official. Permission does not bypass a local checkpoint refusal.
 			expect(candidate.projection.replayContract).toBe("message-groups");
 			expect(candidate.projection.publicWindow).toBe(true);
-			if (candidate.originalAssessment.status === "unknown") {
+			if (candidate.originalAssessment!.status === "unknown") {
 				expect(candidate.originalAssessment).toMatchObject({ estimatedInputTokens: null, retainedInputTokens: 0 });
 				expect(candidate.assessment).toMatchObject({ status: "within-estimate", retainedInputTokens: 0 });
 				expect(candidate.projection.encodePublicWindow).toBeUndefined();
 				expect(candidate.request.body).toContain("retained final item");
 				expect(candidate.request.body).not.toContain("unobserved-opaque");
 			} else {
-				expect(candidate.originalAssessment.status).toBe("within-estimate");
+				expect(candidate.originalAssessment!.status).toBe("within-estimate");
 				expect(candidate.projection.encodePublicWindow).toBeTypeOf("function");
 				const group = candidate.projection.publicMessageGroups!.find((indices) => indices.length > 1)!;
 				expect(group).toHaveLength(2);
@@ -1820,7 +1820,7 @@ describe("native inference coordination", () => {
 			expect(opaqueRefusal).toBe(codexSentinel);
 			await expect(codexEdge.events.result()).rejects.toBe(opaqueRefusal);
 			expect(rejectCodex).toHaveBeenCalledTimes(2);
-			expect(rejectCodex.mock.calls[1][0].originalAssessment.status).toBe("unknown");
+			expect(rejectCodex.mock.calls[1][0].originalAssessment!.status).toBe("unknown");
 			expect(codexEdgePayload).toHaveBeenCalledTimes(2);
 			expect(codexEdge.inputAcks).toHaveLength(2);
 			expect(codexEdge.facts).toEqual([]);

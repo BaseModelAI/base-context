@@ -700,9 +700,11 @@ export class InferenceCoordinator {
 							}
 						}
 					: undefined;
-			const canSelect =
-				(budget || boundary?.fixedPrepare) && boundary && matchesRequestView(boundary, source, context);
 			const requiredPublic = Boolean(boundary?.pendingPublicMessageGroups?.length);
+			const canSelect =
+				(budget || boundary?.fixedPrepare || requiredPublic) &&
+				boundary &&
+				matchesRequestView(boundary, source, context);
 			if (requiredPublic && (!canSelect || boundary?.fixedPrepare))
 				throw new Error("Tool continuation requires a selectable native public request boundary");
 			let publicAccepted = false;
@@ -752,7 +754,7 @@ export class InferenceCoordinator {
 										},
 										representation,
 										projection,
-										budget!,
+										budget,
 										this.work.budgetMode === "enforce",
 									);
 								} catch (error) {

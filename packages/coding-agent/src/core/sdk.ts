@@ -210,7 +210,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			hasThinkingEntry,
 			hasServiceTierEntry,
 		} = await readSessionBootstrap(sessionManager, settingsManager.getCanonicalContextLimits(), {
-			allowPendingToolPublic: options.requestTokenBudget !== undefined,
+			purpose: "read",
 			initialContextMode: contextMode ?? settingsManager.getContextMode(),
 		});
 

@@ -321,15 +321,19 @@ export function contextEpochRepresentation(
 	request: ProviderRequestRepresentation,
 	assessment: RequestTokenAssessment | undefined,
 	maxBytes: number,
+	unbudgetedPublic = false,
 ): string {
 	if (
-		!assessment?.profile ||
-		assessment.limitSource !== "explicit-profile" ||
-		!assessment.route ||
-		!assessment.model ||
+		(!assessment && !unbudgetedPublic) ||
+		(assessment &&
+			(!assessment.profile ||
+				assessment.limitSource !== "explicit-profile" ||
+				!assessment.route ||
+				!assessment.model)) ||
 		request.body === undefined
 	)
 		throw new Error("Committed context epoch requires its explicit request profile");
+	const identity = assessment ?? contextRequestContract(request, "message-groups");
 	const body: unknown = JSON.parse(request.body);
 	if (!body || typeof body !== "object" || Array.isArray(body))
 		throw new Error("Context epoch request representation is unavailable");
@@ -359,10 +363,10 @@ export function contextEpochRepresentation(
 		request.api === "openai-completions" &&
 		request.provider === "deepseek" &&
 		request.url === "https://api.deepseek.com/chat/completions" &&
-		assessment.route === request.url &&
+		identity.route === request.url &&
 		"model" in body &&
 		body.model === "deepseek-flash" &&
-		assessment.model === body.model
+		identity.model === body.model
 	) {
 		fields.add("thinking");
 		fields.add("reasoning_effort");
@@ -384,11 +388,15 @@ export function contextEpochRepresentation(
 			renderer: CONTEXT_EPOCH_RENDERER,
 			api: request.api,
 			provider: request.provider,
-			route: assessment.route,
-			model: assessment.model,
-			profile: assessment.profile,
-			contextTokens: assessment.contextTokens,
-			outputReserveTokens: assessment.outputReserveTokens,
+			route: identity.route,
+			model: identity.model,
+			...(assessment
+				? {
+						profile: assessment.profile,
+						contextTokens: assessment.contextTokens,
+						outputReserveTokens: assessment.outputReserveTokens,
+					}
+				: { budget: "unbudgeted" }),
 			configuration,
 			policy,
 		},
