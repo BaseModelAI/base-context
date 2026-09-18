@@ -454,6 +454,51 @@ records its first actual native compatibility contract once before sending. This
 does not select a new view or authorize missing contracts in legacy history. Off
 is not the independent upstream H benchmark control.
 
+### Scoped error-fix notes
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `learning.enabled` | boolean | `false` | Let the active agent save and retrieve small scoped problem/fix notes |
+
+This opt-in is separate from automatic refinement. It adds no reviewer or model
+call. After a useful recurring repair reaches normal task success, or after an
+explicit user correction, the agent can upsert a memory with an `error-fix:` key.
+Notes are advice, not policy. The current task and observations take precedence.
+
+Workspace notes use the selected project root's `.base-context/harness-state.json`.
+They are not retrieved in a different workspace. Existing session/global paths
+and `harness_state.json` filenames stay unchanged. Explicit CRUD stays available
+when learning is off:
+
+```python
+notes = rlm.get_harness_state(scope="workspace")
+notes.upsert("memory", "Project tests", "Problem: dependency missing. Fix: use .venv/bin/python.",
+             id="error-fix:project-tests",
+             metadata={"tool": "ipython", "operation": "project tests", "condition": "Dependencies are in this project's .venv"})
+notes.get("memory", "error-fix:project-tests")
+# After the note becomes obsolete:
+notes.delete_memory("error-fix:project-tests")
+```
+
+Use local scope for session-only notes. Global writes require an explicit global
+action. Workspace resolution uses the session owner's selected root, never a
+changed REPL working directory. Missing workspace support does not redirect a
+write to another project. Scope-prefixed IDs such as
+`workspace:error-fix:project-tests` work with ordinary inspect/edit/delete calls.
+
+Retrieval requires an exact available-tool name when specified and positive word
+overlap with the current operation or task goal. Known conflicting environment
+versions omit a note; retrieval never probes the environment. At most three
+whole notes fit a 512-unit local text allowance, including their advice wrapper.
+The default conservative request-meter estimate charges one unit per UTF-8 byte;
+it is not an exact provider chat/template token count. No remote count call is
+made for notes. Unchanged advice omits version/timestamp/use bookkeeping.
+
+Do not record cancellation, deliberately failing tests, transient rate limits,
+secrets, tracebacks, or permanent command bans. Correct old notes with ordinary
+edit/delete. The existing file owner and atomic save apply; independently running
+writers do not gain lossless multi-process transactions.
+
 ### Automatic refinement
 
 | Setting | Type | Default | Description |

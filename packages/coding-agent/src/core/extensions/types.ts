@@ -662,8 +662,8 @@ export interface RefineCompleteEvent {
 	summary: string;
 	/** Number of edits applied. */
 	appliedEdits: number;
-	/** Whether the refinement was applied to the global or local harness. */
-	scope: "global" | "local";
+	/** Harness scope receiving the applied refinement. */
+	scope: "global" | "local" | "workspace";
 }
 
 /** Fired at the start of each turn */

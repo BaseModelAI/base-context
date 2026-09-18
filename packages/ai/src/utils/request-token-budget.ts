@@ -1,3 +1,4 @@
+import { estimateOpenAIInput, openAIVisibleInput, textInput } from "../providers/openai-input-tokens.js";
 import type { Api, Provider, ProviderAttemptReceipt } from "../types.js";
 
 export type BudgetApi = "openai-codex-responses" | "openai-responses" | "openai-completions";
@@ -22,6 +23,8 @@ export interface RequestTokenProfile {
 	readonly estimate: {
 		/** Conservative text estimate, not a tokenizer or a proven upper bound. Never bytes/4. */
 		readonly tokensPerUtf8Byte: number;
+		/** Opt in only for an exact deployment using this encoding. Unsupported forms retain the byte policy. */
+		readonly tokenizer?: "o200k_base";
 		readonly templateTokens: number;
 		readonly marginTokens: number;
 	};
@@ -139,7 +142,7 @@ export interface RequestTokenAssessment {
 	readonly model: string | null;
 	readonly route: string | null;
 	readonly limitSource: "explicit-profile" | "unknown";
-	readonly counter: "conservative-profile-estimate";
+	readonly counter: "conservative-profile-estimate" | "openai-o200k-base-estimate" | "openai-responses-input-count";
 	readonly status: "within-estimate" | "over-budget" | "unknown";
 	readonly unknown: readonly string[];
 	readonly serializedBytes: number | null;
@@ -173,6 +176,14 @@ const unknownCalibration = (): RequestTokenCalibration => ({
 });
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
+
+/**
+ * Conservative unprofiled plaintext cost: one unit per UTF-8 byte.
+ * Use for small advisory text allowances, not an exact chat/template count or a MAIN assessment.
+ */
+export function conservativeTextTokenCost(text: string): number {
+	return bytes(text);
+}
 const record = (value: unknown): value is Record<string, unknown> =>
 	value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -188,47 +199,16 @@ export function requestTokenRouteIdentity(raw: string): string | null {
 	}
 }
 
-/** Only typed text/call/result replay is estimable locally. Media, encrypted state and references are unknown. */
-function textContent(value: unknown): boolean {
-	return (
-		value === null ||
-		typeof value === "string" ||
-		(Array.isArray(value) &&
-			value.every(
-				(part) =>
-					record(part) &&
-					["text", "input_text", "output_text", "refusal", "summary_text"].includes(String(part.type)) &&
-					(typeof part.text === "string" || typeof part.refusal === "string"),
-			))
-	);
+/** Provider-reported total input, not a delta or output allowance. */
+export interface ProviderInputTokenCount {
+	readonly inputTokens: number;
+	readonly method: "openai-responses-input-count";
 }
 
-function textInput(api: Api, input: unknown): boolean {
-	if (typeof input === "string") return api !== "openai-completions";
-	if (!Array.isArray(input)) return false;
-	return input.every((item) => {
-		if (!record(item)) return false;
-		if (api === "openai-completions") {
-			return (
-				["system", "developer", "user", "assistant", "tool"].includes(String(item.role)) &&
-				!item.audio &&
-				!item.reasoning_details &&
-				textContent(item.content ?? null)
-			);
-		}
-		if (item.type === "function_call") return typeof item.arguments === "string";
-		if (item.type === "function_call_output") return textContent(item.output);
-		if (item.type === "reasoning") return false;
-		return (
-			(item.type === undefined || item.type === "message") &&
-			["system", "developer", "user", "assistant"].includes(String(item.role)) &&
-			textContent(item.content)
-		);
-	});
-}
+export type ProviderInputTokenCounter = (request: ProviderRequestRepresentation) => Promise<number>;
 
 export interface RequestTokenBudgetEvaluator {
-	measure(request: ProviderRequestRepresentation): RequestTokenAssessment;
+	measure(request: ProviderRequestRepresentation, inputCount?: ProviderInputTokenCount): RequestTokenAssessment;
 	assert(assessment: RequestTokenAssessment): void;
 }
 
@@ -273,6 +253,7 @@ export class RequestTokenBudget {
 				profile.outputCeilingTokens < 1 ||
 				!Number.isFinite(profile.estimate.tokensPerUtf8Byte) ||
 				profile.estimate.tokensPerUtf8Byte < 1 ||
+				(profile.estimate.tokenizer !== undefined && profile.estimate.tokenizer !== "o200k_base") ||
 				!count(profile.estimate.templateTokens) ||
 				!count(profile.estimate.marginTokens)
 			)
@@ -289,24 +270,25 @@ export class RequestTokenBudget {
 	capture(): RequestTokenBudgetEvaluator {
 		let captured: CapturedRequestCalibration | undefined;
 		return {
-			measure: (request) => {
+			measure: (request, inputCount) => {
 				if (!captured) {
-					const assessment = this.measure(request);
+					const assessment = this.measure(request, inputCount);
 					captured = { key: this.key, calibration: { ...this.calibration }, identity: this.calibrationIdentity };
 					return assessment;
 				}
-				return this.measureUsing(request, captured);
+				return this.measureUsing(request, inputCount, captured);
 			},
 			assert: (assessment) => this.assert(assessment),
 		};
 	}
 
-	measure(request: ProviderRequestRepresentation): RequestTokenAssessment {
-		return this.measureUsing(request);
+	measure(request: ProviderRequestRepresentation, inputCount?: ProviderInputTokenCount): RequestTokenAssessment {
+		return this.measureUsing(request, inputCount);
 	}
 
 	private measureUsing(
 		request: ProviderRequestRepresentation,
+		inputCount?: ProviderInputTokenCount,
 		captured?: CapturedRequestCalibration,
 	): RequestTokenAssessment {
 		const unknown: string[] = [];
@@ -387,11 +369,36 @@ export class RequestTokenBudget {
 			calibrationIdentity = this.calibrationIdentity;
 		}
 		const measuredBody = request.retainedPrefix ? { ...body, [inputKey]: input } : body;
+		const visible =
+			profile?.estimate.tokenizer === "o200k_base"
+				? openAIVisibleInput(request.api, request.provider, measuredBody)
+				: undefined;
+		if (
+			inputCount &&
+			(!count(inputCount.inputTokens) ||
+				inputCount.method !== "openai-responses-input-count" ||
+				!visible ||
+				request.api !== "openai-responses" ||
+				request.provider !== "openai" ||
+				route !== "https://api.openai.com/v1/responses" ||
+				request.retainedPrefix ||
+				body.previous_response_id ||
+				body.conversation)
+		)
+			unknown.push("provider input count unavailable for this request");
+		const counter: RequestTokenAssessment["counter"] = inputCount
+			? "openai-responses-input-count"
+			: visible
+				? "openai-o200k-base-estimate"
+				: "conservative-profile-estimate";
 		const estimate =
 			profile && unknown.length === 0
-				? Math.ceil(bytes(JSON.stringify(measuredBody)) * profile.estimate.tokensPerUtf8Byte) +
-					profile.estimate.templateTokens +
-					retained
+				? (inputCount?.inputTokens ??
+					(visible
+						? estimateOpenAIInput(visible)
+						: Math.ceil(bytes(JSON.stringify(measuredBody)) * profile.estimate.tokensPerUtf8Byte)) +
+						profile.estimate.templateTokens +
+						retained)
 				: null;
 		const margin = profile ? profile.estimate.marginTokens + (calibration.maxUnderestimateTokens ?? 0) : null;
 		const available = profile && count(output) && margin !== null ? profile.contextTokens - output - margin : null;
@@ -416,7 +423,7 @@ export class RequestTokenBudget {
 			model,
 			route,
 			limitSource: profile ? "explicit-profile" : "unknown",
-			counter: "conservative-profile-estimate",
+			counter,
 			status,
 			unknown: Object.freeze(unknown),
 			serializedBytes: request.body === undefined ? null : bytes(request.body),

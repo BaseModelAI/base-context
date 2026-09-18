@@ -30,6 +30,8 @@ const SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT = [
 const REPL_CONTROL_PROMPT = [
 	"The `ipython` tool is a persistent Python REPL — the agent's long-lived control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Top-level `await` works directly. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. Compaction removes individual variables whose serialized form exceeds 16 MiB; keep large source data on disk and reload it when needed.",
 	"",
+	"Reuse a named Python function for repeated multi-step work; keep one-off operations inline. Pass changing inputs explicitly and read current data each call. Save cross-task helpers as editable .py files with short project-skill instructions, without packaging them. After editing loaded code, execute its updated definition or invoke the saved file afresh.",
+	"",
 	"Python is the orchestration language: use Python for loops, conditionals, parsing, and state. Use `bash()` to invoke programs, not to write shell programs — no shell loops or heredocs; do those in Python.",
 	"",
 	"Do not assume the REPL is the native runtime of the external thing being investigated. A repository, package, service, dataset, paper, website, benchmark, or API may have its own environment and normal interface. Evaluate external systems through their own interface, then use the REPL to coordinate the process and analyze what comes back.",
@@ -95,8 +97,6 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		...(depth === 0 ? [USER_PROGRESS_PROMPT, ""] : []),
 		SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT,
 		"",
-		`Working directory: ${cwd}`,
-		`Conversation log: ${messagesPath}`,
 		`Recursive agent depth: ${depth}`,
 		`Pre-installed Python packages: ${DEFAULT_RLM_EXTRA_IMPORT_LABELS.join(", ")}.`,
 		"Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module).",
@@ -183,6 +183,8 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		}
 	}
 
+	// Runtime coordinates follow the fixed harness guidance without moving user/project instructions.
+	parts.push("", `Working directory: ${cwd}`, `Conversation log: ${messagesPath}`);
 	return parts.join("\n");
 }
 

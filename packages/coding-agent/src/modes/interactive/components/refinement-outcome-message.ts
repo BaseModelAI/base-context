@@ -1,6 +1,6 @@
 import { type Component, Spacer, Text, truncateToWidth, visibleWidth } from "@ponythewhite/base-context-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
-import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
+import type { AppliedRefinementEdit, HarnessEntry, HarnessScope } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
 import { renderDiff } from "./diff.js";
@@ -39,11 +39,11 @@ function editDiff(edit: AppliedRefinementEdit): string {
 	return generateDiffString(entryText(before), entryText(after), 4).diff;
 }
 
-function editScope(edit: AppliedRefinementEdit, fallback: "local" | "global"): "local" | "global" {
+function editScope(edit: AppliedRefinementEdit, fallback: HarnessScope): HarnessScope {
 	return edit.after?.scope ?? edit.before?.scope ?? fallback;
 }
 
-function editLabel(edit: AppliedRefinementEdit, fallbackScope: "local" | "global"): string {
+function editLabel(edit: AppliedRefinementEdit, fallbackScope: HarnessScope): string {
 	const scope = editScope(edit, fallbackScope);
 	if (!edit.applied) {
 		const error = edit.error ? `: ${edit.error}` : "";

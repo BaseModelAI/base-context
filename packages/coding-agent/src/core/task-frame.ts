@@ -140,7 +140,7 @@ function message(value: unknown, maxBytes: number): CustomMessage {
 }
 
 /** Prepare without changing the previous render cache. Commit only with a successful context build. */
-export function compileTaskFrame(
+function compileTaskFrameRevision(
 	view: TaskStateView,
 	limits: Readonly<TaskFrameLimits>,
 	previous?: CompiledTaskFrame,
@@ -239,4 +239,26 @@ export function compileTaskFrame(
 		origins: [...(previous?.origins ?? []), { ...view.source }],
 		anchors: previous ? [...previous.anchors, null] : [],
 	};
+}
+
+/** Rebase once when the accumulated render is full; the caller still owns the epoch ACK. */
+export function compileTaskFrame(
+	view: TaskStateView,
+	limits: Readonly<TaskFrameLimits>,
+	previous?: CompiledTaskFrame,
+): CompiledTaskFrame | undefined {
+	try {
+		return compileTaskFrameRevision(view, limits, previous);
+	} catch (error) {
+		if (!(error instanceof Error) || error.message !== "Task frame byte budget exceeded") throw error;
+		if (previous) {
+			try {
+				return compileTaskFrameRevision(view, limits);
+			} catch (baseError) {
+				if (!(baseError instanceof Error) || baseError.message !== "Task frame byte budget exceeded")
+					throw baseError;
+			}
+		}
+		throw new Error("Task frame byte budget exceeded: current base cannot fit", { cause: error });
+	}
 }

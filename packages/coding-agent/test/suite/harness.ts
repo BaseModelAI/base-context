@@ -70,6 +70,7 @@ export function getAssistantTexts(harness: Harness): string[] {
 }
 
 export interface HarnessOptions {
+	cwd?: string;
 	api?: string;
 	provider?: string;
 	models?: FauxModelDefinition[];
@@ -122,6 +123,7 @@ function createTempDir(): string {
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tempDir = createTempDir();
+	const cwd = options.cwd ?? tempDir;
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		api: options.api,
 		provider: options.provider,
@@ -197,7 +199,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 	});
 	const extensionsResult = options.extensionFactories
-		? await createTestExtensionsResult(options.extensionFactories, tempDir)
+		? await createTestExtensionsResult(options.extensionFactories, cwd)
 		: undefined;
 	const resourceLoader =
 		options.resourceLoader ?? createTestResourceLoader(extensionsResult ? { extensionsResult } : undefined);
@@ -206,7 +208,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		agent,
 		sessionManager,
 		settingsManager,
-		cwd: tempDir,
+		cwd,
 		modelRegistry,
 		resourceLoader,
 		agentObserveController: options.agentObserveController,

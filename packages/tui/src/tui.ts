@@ -617,8 +617,10 @@ export class TUI extends Container {
 	stop(options: TuiStopOptions = {}): void {
 		const preserveAltScreen = options.preserveAltScreen === true && this.terminal.altScreenActive;
 		const flushFullscreen = options.flushFullscreen ?? !preserveAltScreen;
+		if (!this.fullscreen && !preserveAltScreen && this.renderRequested) this.flushRender();
 		this.exitFullscreen({ flush: flushFullscreen, leaveAltScreen: !preserveAltScreen });
 		this.stopped = true;
+		this.renderRequested = false;
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
@@ -643,7 +645,20 @@ export class TUI extends Container {
 		this.terminal.stop({ preserveAltScreen });
 	}
 
+	/** Paint a completion/error now using the same differential renderer, not a forced full redraw. */
+	flushRender(): void {
+		if (this.stopped) return;
+		if (this.renderTimer) {
+			clearTimeout(this.renderTimer);
+			this.renderTimer = undefined;
+		}
+		this.renderRequested = false;
+		this.lastRenderAt = performance.now();
+		this.doRender();
+	}
+
 	requestRender(force = false): void {
+		if (this.stopped) return;
 		if (force) {
 			this.fullscreen?.viewport.reset();
 			// Keep the previous frame metadata so the forced full repaint can
@@ -661,9 +676,7 @@ export class TUI extends Container {
 				if (this.stopped || !this.renderRequested) {
 					return;
 				}
-				this.renderRequested = false;
-				this.lastRenderAt = performance.now();
-				this.doRender();
+				this.flushRender();
 			});
 			return;
 		}

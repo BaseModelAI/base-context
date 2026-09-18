@@ -23,6 +23,12 @@ import {
 	ReplKernelManager,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import {
+	outputExcerpt,
+	type RetainedToolOutput,
+	retainToolOutput,
+	TOOL_OUTPUT_PREVIEW_BYTES,
+} from "../retained-tool-output.js";
 import { nativeRecoveryMetadata, stringifyNativeRecoveryResponse } from "../selective-recovery.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { admitNativeRecoveryToolResult, nativeRecoveryToolResult } from "./prime-context.js";
@@ -257,6 +263,8 @@ function setWorkingMessage(ctx: ExtensionContext | undefined, message?: string):
 export type IpythonToolInput = Static<typeof ipythonSchema>;
 
 export interface IpythonToolDetails {
+	/** Large finalized channels are excerpts; this descriptor identifies the full captured public text. */
+	retainedOutput?: RetainedToolOutput;
 	/** Descriptive selectors only; the exact selected body is in this tool result's content. */
 	nativeRecoveries?: ReturnType<typeof nativeRecoveryMetadata>[];
 	durationMs?: number;
@@ -333,6 +341,11 @@ export class IpythonKernelProvisioner {
 		private readonly cwd: string,
 		private readonly options?: Omit<IpythonToolOptions, "provisioner">,
 	) {}
+
+	/** The same persistent owner directory used on cold resume; absent for in-memory sessions. */
+	get artifactDir(): string | undefined {
+		return this.options?.snapshotDir;
+	}
 
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
@@ -695,18 +708,56 @@ export function createIpythonToolDefinition(
 					ctx,
 				);
 
-				let text = r.stdout;
-				if (r.stderr) text += (text ? "\n" : "") + r.stderr;
-				if (r.result) text += (text ? "\n" : "") + r.result;
-				if (r.status === "error" && r.error) {
-					text += (text ? "\n" : "") + r.error.traceback.join("\n");
-				}
+				const parts: string[] = [];
+				const add = (value: string | undefined) => {
+					if (value) {
+						if (parts.length) parts.push("\n");
+						parts.push(value);
+					}
+				};
+				if (kernelRestarted) add(`${KERNEL_RESTART_NOTICE}\n`);
+				add(r.stdout);
+				add(r.stderr);
+				add(r.result);
+				const errorText =
+					r.status === "error" && r.error
+						? r.error.traceback.length
+							? r.error.traceback.join("\n")
+							: `${r.error.ename}: ${r.error.evalue}`
+						: undefined;
+				add(errorText);
 				if (r.backgroundOutput) {
-					text += `${text ? "\n" : ""}[background output (unattributed)]\n${r.backgroundOutput}`;
+					add("[background output (unattributed)]");
+					add(r.backgroundOutput);
 				}
-				if (kernelRestarted) {
-					text = text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE;
-				}
+				const byteLength = parts.reduce((size, part) => size + Buffer.byteLength(part), 0);
+				let retainedOutput: RetainedToolOutput | undefined;
+				let text: string;
+				if (provisioner.artifactDir && byteLength > TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
+					retainedOutput = await retainToolOutput(provisioner.artifactDir, parts, r.outputComplete === true);
+					const wrapper = `ipython ${r.status}; retained output ${retainedOutput.artifactId} (${byteLength} UTF-8 bytes; ${retainedOutput.captureComplete ? "capture complete" : "partial/unknown capture; discarded bytes unavailable"}).\n[Output omitted. Public history supplies prime_context ref + field ${retainedOutput.field}.]\n`;
+					let excerptBytes = 1024;
+					do {
+						const priority = errorText || r.stderr;
+						text =
+							wrapper +
+							(priority ? `Error/stderr:\n${outputExcerpt(priority, excerptBytes)}\n` : "") +
+							`Output head/tail:\n${outputExcerpt(parts[0], excerptBytes)}\n${parts.length > 1 ? outputExcerpt(parts[parts.length - 1], excerptBytes) : ""}`;
+						excerptBytes = Math.floor(excerptBytes / 2);
+					} while (
+						Buffer.byteLength(JSON.stringify(text)) > TOOL_OUTPUT_PREVIEW_BYTES - 4096 &&
+						excerptBytes >= 64
+					);
+				} else text = parts.join("");
+				const excerpt = (value: string | undefined) => (retainedOutput ? outputExcerpt(value, 512) : value);
+				const error =
+					r.error && retainedOutput
+						? {
+								ename: outputExcerpt(r.error.ename, 512)!,
+								evalue: outputExcerpt(r.error.evalue, 1024)!,
+								traceback: outputExcerpt(errorText ?? r.error.traceback.join("\n"), 1024)!.split("\n"),
+							}
+						: r.error;
 
 				const imageBlocks = imageBlocksFromAttachments(r.attachments);
 				const content: (TextContent | ImageContent)[] = [{ type: "text", text: text || "" }, ...imageBlocks];
@@ -720,17 +771,18 @@ export function createIpythonToolDefinition(
 					details: {
 						durationMs: r.durationMs,
 						status: r.status,
-						errorEname: r.error?.ename,
-						stdout: r.stdout,
-						stderr: r.stderr,
-						result: r.result,
-						backgroundOutput: r.backgroundOutput,
+						errorEname: error?.ename,
+						retainedOutput,
+						stdout: excerpt(r.stdout),
+						stderr: excerpt(r.stderr),
+						result: excerpt(r.result),
+						backgroundOutput: excerpt(r.backgroundOutput),
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
 						nativeRecoveries: r.nativeRecoveries?.map(nativeRecoveryMetadata),
 						kernelRestarted,
-						error: r.error,
+						error,
 					},
 					isError: r.status === "error" || r.status === "aborted",
 				};

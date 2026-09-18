@@ -365,6 +365,212 @@ describe("physical provider attempts", () => {
 		}
 	});
 
+	it("admits supported text with the opted-in tokenizer and keeps unsupported byte policy", async () => {
+		const profile = {
+			...requestProfile(),
+			contextTokens: 600,
+			estimate: { ...requestProfile().estimate, tokenizer: "o200k_base" as const },
+		};
+		const budget = new RequestTokenBudget({ mode: "enforce", profiles: [profile] });
+		const payload = {
+			model: model.id,
+			stream: true,
+			input: "hello ".repeat(200),
+			instructions: "Preserve <|endoftext|> as literal text.",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					parameters: { type: "object", properties: { path: { type: "string" } } },
+				},
+			],
+			text: {
+				format: {
+					type: "json_schema",
+					name: "answer",
+					schema: { type: "object", properties: { answer: { type: "string" } } },
+				},
+			},
+			max_output_tokens: 64,
+		};
+		const request = { api: model.api, provider: model.provider, url: profile.url, body: JSON.stringify(payload) };
+		const measured = budget.measure(request);
+		expect(measured).toMatchObject({
+			counter: "openai-o200k-base-estimate",
+			status: "within-estimate",
+			outputReserveTokens: 64,
+			marginTokens: 17,
+		});
+		expect(
+			new RequestTokenBudget({
+				mode: "enforce",
+				profiles: [{ ...profile, estimate: requestProfile().estimate }],
+			}).measure(request).status,
+		).toBe("over-budget");
+		for (const field of ["instructions", "tools", "text"] as const) {
+			const without = { ...payload, [field]: undefined };
+			expect(budget.measure({ ...request, body: JSON.stringify(without) }).estimatedInputTokens).toBeLessThan(
+				measured.estimatedInputTokens!,
+			);
+		}
+		expect(
+			budget.measure({ ...request, body: JSON.stringify({ ...payload, tools: [{ type: "web_search" }] }) }).counter,
+		).toBe("conservative-profile-estimate");
+		expect(
+			budget.measure({
+				...request,
+				body: JSON.stringify({
+					...payload,
+					input: [{ role: "user", content: [{ type: "input_image", image_url: "fixture" }] }],
+				}),
+			}).status,
+		).toBe("unknown");
+		const fetch = vi.fn(async (_url: unknown, init?: RequestInit) => {
+			expect(JSON.parse(init!.body as string)).toEqual(payload);
+			return response();
+		});
+		vi.stubGlobal("fetch", fetch);
+		const onPayload = vi.fn(() => payload);
+		const result = await streamOpenAIResponses(
+			model,
+			{ messages: [] },
+			{
+				apiKey: "fixture",
+				maxRetries: 0,
+				onPayload,
+				attempts: {
+					measureRequest(value) {
+						const assessment = budget.measure(value);
+						budget.assert(assessment);
+						return assessment;
+					},
+					async admit(info) {
+						expect(info.kind).toBe("initial");
+						return "generation";
+					},
+					async settle() {},
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(onPayload).toHaveBeenCalledOnce();
+	});
+
+	it.each([false, true])("counts one final near-limit body before generation; over capacity=%s", async (over) => {
+		const directModel = { ...model, baseUrl: "https://api.openai.com/v1" };
+		const payload = {
+			model: model.id,
+			stream: true,
+			store: false,
+			instructions: "Final hook instructions",
+			input: [{ role: "user", content: [{ type: "input_text", text: "measured text ".repeat(100) }] }],
+			tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+			text: { format: { type: "json_schema", name: "answer", schema: { type: "object", properties: {} } } },
+			max_output_tokens: 64,
+		};
+		const profile = {
+			...requestProfile(),
+			url: "https://api.openai.com/v1/responses",
+			estimate: { ...requestProfile().estimate, tokenizer: "o200k_base" as const },
+		};
+		const representation = {
+			api: model.api,
+			provider: model.provider,
+			url: profile.url,
+			body: JSON.stringify(payload),
+		};
+		const local = new RequestTokenBudget({ mode: "enforce", profiles: [profile] }).measure(representation);
+		profile.contextTokens = Math.ceil(local.estimatedInputTokens! / 0.95) + 64 + 17;
+		const budget = new RequestTokenBudget({ mode: "enforce", profiles: [profile] });
+		const available = budget.measure(representation).availableInputTokens!;
+		const numericCount = over ? available + 1 : local.estimatedInputTokens!;
+		const receipts: ProviderAttemptReceipt[] = [];
+		const order: string[] = [];
+		const fetch = vi.fn(async (url: unknown, init?: RequestInit) => {
+			if (String(url).endsWith("/input_tokens")) {
+				order.push("count-send");
+				const { stream: _stream, store: _store, max_output_tokens: _output, ...countBody } = payload;
+				expect(JSON.parse(init!.body as string)).toEqual(countBody);
+				return new Response(JSON.stringify({ object: "response.input_tokens", input_tokens: numericCount }), {
+					headers: { "content-type": "application/json" },
+				});
+			}
+			order.push("generation-send");
+			expect(JSON.parse(init!.body as string)).toEqual(payload);
+			return response();
+		});
+		vi.stubGlobal("fetch", fetch);
+		let final: RequestTokenAssessment | undefined;
+		const onPayload = vi.fn(() => payload);
+		const result = await streamOpenAIResponses(
+			directModel,
+			{ messages: [] },
+			{
+				apiKey: "fixture",
+				maxRetries: 2,
+				onPayload,
+				attempts: {
+					async prepareRequest(request, projection, countInput) {
+						expect(projection).toBeUndefined(); // Hook replacement removed the native projection, not final preparation.
+						const estimate = budget.measure(request);
+						expect(estimate.estimatedInputTokens!).toBeGreaterThanOrEqual(estimate.availableInputTokens! * 0.9);
+						expect(estimate.estimatedInputTokens!).toBeLessThanOrEqual(estimate.availableInputTokens!);
+						final = budget.measure(request, {
+							inputTokens: await countInput!(request),
+							method: "openai-responses-input-count",
+						});
+						budget.assert(final);
+						return request.body;
+					},
+					measureRequest(request) {
+						expect(request).toEqual(representation);
+						return final;
+					},
+					async admit(info) {
+						order.push(`admit:${info.kind}`);
+						return `attempt-${info.ordinal}`;
+					},
+					async settle(receipt) {
+						order.push(`settle:${receipt.kind}`);
+						receipts.push(receipt);
+					},
+				},
+			},
+		).result();
+		expect(final).toMatchObject({
+			counter: "openai-responses-input-count",
+			estimatedInputTokens: numericCount,
+			marginTokens: 17,
+			outputReserveTokens: 64,
+			status: over ? "over-budget" : "within-estimate",
+		});
+		expect(receipts[0]).toMatchObject({
+			kind: "input-count",
+			outcome: "completed",
+			usage: {},
+			rawUsage: [],
+			usageCompleteness: "none",
+		});
+		expect(receipts[0].requestBudget).toBeUndefined();
+		expect(order).toEqual(
+			over
+				? ["admit:input-count", "count-send", "settle:input-count"]
+				: [
+						"admit:input-count",
+						"count-send",
+						"settle:input-count",
+						"admit:initial",
+						"generation-send",
+						"settle:initial",
+					],
+		);
+		expect(result.stopReason).toBe(over ? "error" : "stop");
+		if (over) expect(result.errorMessage).toContain("Request token budget over-budget");
+		expect(fetch).toHaveBeenCalledTimes(over ? 1 : 2);
+		expect(onPayload).toHaveBeenCalledOnce();
+	});
+
 	it("terminates the assistant stream when physical settlement rejects", async () => {
 		vi.stubGlobal(
 			"fetch",

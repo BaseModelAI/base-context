@@ -99,10 +99,38 @@ function getFirstTool(body: Record<string, unknown>): Record<string, unknown> {
 }
 
 describe("Anthropic eager tool input streaming compatibility", () => {
+	it("preserves root constraints and references without changing the caller schema", async () => {
+		const parameters = Type.Object(
+			{ value: Type.Ref("#/$defs/value") },
+			{
+				additionalProperties: false,
+				$defs: { value: { type: "string", minLength: 2 } },
+				description: "A constrained lookup",
+				allOf: [{ minProperties: 1 }],
+			},
+		);
+		const original = structuredClone(parameters);
+		const context = createContext([{ ...tool, parameters }]);
+		const request = await captureAnthropicRequest(undefined, context);
+		expect(getFirstTool(request.body).input_schema).toEqual(original);
+		expect(parameters).toEqual(original);
+
+		await streamAnthropic(createModel("http://unused.invalid"), context, {
+			apiKey: "test-key",
+			onPayload(payload) {
+				const body = payload as { tools: { input_schema: { properties: { value: { $ref: string } } } }[] };
+				body.tools[0].input_schema.properties.value.$ref = "#/$defs/changed";
+				throw new Error("Stop before sending");
+			},
+		}).result();
+		expect(parameters).toEqual(original);
+	});
+
 	it("sends per-tool eager_input_streaming by default", async () => {
 		const request = await captureAnthropicRequest(undefined, createContext());
 
 		expect(getFirstTool(request.body).eager_input_streaming).toBe(true);
+		expect(getFirstTool(request.body).input_schema).toEqual(tool.parameters);
 		expect(request.headers["anthropic-beta"]).toBeUndefined();
 	});
 

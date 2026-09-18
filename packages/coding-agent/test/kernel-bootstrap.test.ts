@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -20,6 +21,8 @@ import {
 	type KernelPythonSkill,
 	resolveRuntimeIdentity,
 } from "../src/core/kernel/bootstrap.js";
+
+vi.mock("node:fs", { spy: true });
 
 let tempDir = "";
 let originalEnv: NodeJS.ProcessEnv;
@@ -170,6 +173,7 @@ describe("kernel bootstrap", () => {
 	});
 
 	afterEach(() => {
+		vi.clearAllMocks();
 		for (const key of Object.keys(process.env)) {
 			if (!(key in originalEnv)) delete process.env[key];
 		}
@@ -307,9 +311,18 @@ describe("kernel bootstrap", () => {
 		const dependentSkill = createPythonSkillWithDependency("orchestration-heartbeat", "agent-observe");
 		process.env.BASE_CONTEXT_KERNEL_VENV = venv;
 
+		vi.mocked(readFileSync).mockClear();
+		vi.mocked(readdirSync).mockClear();
 		await expect(ensureKernelPython({ pythonSkills: [dependentSkill] })).resolves.toBe(join(venv, "bin", "python"));
 
+		for (const skill of [dependencySkill, dependentSkill]) {
+			expect(vi.mocked(readFileSync).mock.calls.filter(([file]) => file === skill.pyprojectPath)).toHaveLength(1);
+		}
+		expect(vi.mocked(readdirSync).mock.calls.filter(([dir]) => dir === join(tempDir, "skills"))).toHaveLength(1);
 		const log = readFileSync(logPath, "utf8");
+		expect(log.indexOf(`--editable ${dependencySkill.packagePath}`)).toBeLessThan(
+			log.indexOf(`--editable ${dependentSkill.packagePath}`),
+		);
 		expect(log).toContain(`--editable ${dependencySkill.packagePath}`);
 		expect(log).toContain(`--editable ${dependentSkill.packagePath}`);
 		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
@@ -372,9 +385,12 @@ version = "0.1.0"
 		const venv = join(tempDir, "kernel-venv");
 		const python = join(venv, "bin", "python");
 		const pythonSkill = createPythonSkill();
+		const dependencySkill = createPythonSkill("httpx");
 		mkdirSync(join(venv, "bin"), { recursive: true });
 		writeFakePython(python, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
 		writeBootstrapVersion(venv, [pythonSkill]);
+		process.env.BASE_CONTEXT_KERNEL_VENV = venv;
+		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(python);
 		writeFileSync(
 			pythonSkill.pyprojectPath,
 			`[project]
@@ -383,15 +399,21 @@ version = "0.1.0"
 dependencies = ["httpx"]
 `,
 		);
-		process.env.BASE_CONTEXT_KERNEL_VENV = venv;
-
+		vi.mocked(readFileSync).mockClear();
 		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(python);
 
+		for (const skill of [pythonSkill, dependencySkill]) {
+			expect(vi.mocked(readFileSync).mock.calls.filter(([file]) => file === skill.pyprojectPath)).toHaveLength(1);
+		}
 		const log = readFileSync(logPath, "utf8");
+		expect(log).toContain(`--editable ${dependencySkill.packagePath}`);
 		expect(log).not.toContain(`venv ${venv} --python 3.13 --seed`);
 		expect(log).toContain(`--editable ${pythonSkill.packagePath}`);
 		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(pythonSkill.pyprojectPath));
+		expect(
+			version.pythonSkills.find((skill: { importName: string }) => skill.importName === pythonSkill.importName)
+				?.pyprojectHash,
+		).toBe(pyprojectHash(pythonSkill.pyprojectPath));
 	});
 
 	it("continues when a Python skill editable install fails and retries it next startup", async () => {

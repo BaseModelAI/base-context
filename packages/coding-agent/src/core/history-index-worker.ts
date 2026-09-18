@@ -287,6 +287,10 @@ function terms(text: string): string[] {
 		),
 	];
 }
+const insertSourceEvent = db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?,?)");
+const insertSourcePayload = db.prepare("INSERT INTO source_payload VALUES (?,?,?)");
+const insertTaskImportLoss = db.prepare("INSERT INTO task_import_loss VALUES (?,?,?)");
+const insertTaskEvidence = db.prepare("INSERT INTO task_evidence VALUES (?,?,?,?,?,?,?)");
 const insertTerm = db.prepare("INSERT INTO source_term VALUES (?,?,?)");
 const countTerm = db.prepare(
 	"INSERT INTO term_count VALUES (?,?,1) ON CONFLICT(session,term) DO UPDATE SET count=count+1",
@@ -345,7 +349,7 @@ function insertEvent(sessionId: string, item: IndexedSourceEvent): void {
 		item.qualification !== "native-tool-execution"
 	)
 		throw new Error("Unsupported indexed source qualification");
-	db.prepare("INSERT INTO source_event VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run(
+	insertSourceEvent.run(
 		sessionId,
 		item.id,
 		item.sequence,
@@ -664,6 +668,8 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 				source_content_prefix: 0,
 				source_has_user_content: 0,
 			};
+	// The session owner coalesces queued ACK snapshots; this whole ready suffix shares one transaction.
+	// Coverage and the source cursor become visible only with that transaction's COMMIT.
 	let usageChanged = !previous;
 	const catalog: SessionCatalogProjection = previous
 		? decodeSessionCatalog(JSON.parse(String(row?.catalog_summary)))
@@ -696,15 +702,10 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 				const depth = insertAncestry(sessionId, item);
 				insertContext(sessionId, item, entry, depth);
 				insertContextUpdates(sessionId, item, entry);
-				db.prepare("INSERT INTO source_payload VALUES (?,?,?)").run(sessionId, sequence, JSON.stringify(parts));
+				insertSourcePayload.run(sessionId, sequence, JSON.stringify(parts));
 				const source = { sessionId, sequence, entry, locator, revision, retention, qualification };
 				const imported = getTaskStateImportCoverage(source);
-				if (imported)
-					db.prepare("INSERT INTO task_import_loss VALUES (?,?,?)").run(
-						sessionId,
-						sequence,
-						imported.taskKey ?? null,
-					);
+				if (imported) insertTaskImportLoss.run(sessionId, sequence, imported.taskKey ?? null);
 				let ordinal = 0;
 				for (const projection of projectTaskStateSource(source)) {
 					let payload: string | null;
@@ -715,7 +716,7 @@ async function syncSource(sessionId: string, snapshot: SessionJournalState) {
 						// The original canonical field is recoverable; never clip its item or text.
 						payload = null;
 					}
-					db.prepare("INSERT INTO task_evidence VALUES (?,?,?,?,?,?,?)").run(
+					insertTaskEvidence.run(
 						sessionId,
 						sequence,
 						ordinal++,
@@ -942,6 +943,7 @@ function query(request: Extract<HistoryIndexRequest, { action: "page" | "search"
 	);
 	const branch = branchFilter(request.sessionId, request.through, request.scope);
 	let rows: QueryCandidate[];
+	let scanNext: number | null = null;
 	if (request.action === "page") {
 		const candidates = branch.empty
 			? []
@@ -949,8 +951,19 @@ function query(request: Extract<HistoryIndexRequest, { action: "page" | "search"
 					.prepare(
 						"SELECT id,parent_id,kind,sequence FROM source_event INDEXED BY sqlite_autoindex_source_event_2 WHERE session=? AND sequence>? AND sequence<=? ORDER BY sequence LIMIT ?",
 					)
-					.all(request.sessionId, request.after, request.through, MAX_QUERY_CANDIDATES + 1) as QueryCandidate[]);
-		rows = selectCandidates(candidates, branch.matches, request.limit, "History page selection");
+					.all(
+						request.sessionId,
+						request.after,
+						request.through,
+						request.scan ? request.limit + 1 : MAX_QUERY_CANDIDATES + 1,
+					) as QueryCandidate[]);
+		if (request.scan) {
+			const examined = candidates.slice(0, request.limit);
+			rows = examined.filter(branch.matches);
+			if (candidates.length > examined.length) scanNext = examined[examined.length - 1].sequence;
+		} else {
+			rows = selectCandidates(candidates, branch.matches, request.limit, "History page selection");
+		}
 	} else {
 		if (Buffer.byteLength(request.query) > 8192) throw new Error("Index query limit exceeded");
 		const queryTerms = terms(request.query);
@@ -1003,13 +1016,18 @@ function query(request: Extract<HistoryIndexRequest, { action: "page" | "search"
 		if (bytes > 1024 * 1024) break;
 		events.push(indexed);
 	}
-	const truncated = events.length < rows.length;
+	const truncated = events.length < rows.length || scanNext !== null;
 	return {
 		events,
 		indexedThrough,
 		coverage: indexedThrough < request.through || incompleteText ? "partial" : "complete",
 		truncated,
-		nextAfter: request.action === "page" && truncated ? (events[events.length - 1]?.sequence ?? request.after) : null,
+		nextAfter:
+			request.action !== "page"
+				? null
+				: events.length < rows.length
+					? (events[events.length - 1]?.sequence ?? request.after)
+					: scanNext,
 	};
 }
 function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evidence" }>): TaskEvidencePage {
@@ -1039,6 +1057,8 @@ function taskEvidence(request: Extract<HistoryIndexRequest, { action: "task_evid
 		nextAfter: null,
 	};
 	if (!cursor) return page;
+	const frontier = JSON.parse(String(cursor.frontier)) as SessionJournalState;
+	page.sourceIdentity = { journalPath: frontier.journalPath, dev: frontier.dev, ino: frontier.ino };
 	const branch = branchFilter(sessionId, scope.through, scope);
 	const coverageBudget = { remaining: MAX_QUERY_CANDIDATES };
 	const lossKeys = options.taskKey === undefined ? [undefined] : [null, options.taskKey];

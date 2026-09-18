@@ -1,10 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { CanonicalContextCompiler, getCanonicalEpochContext } from "../src/core/canonical-context.js";
+import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
+import type { SessionHistoryReadView } from "../src/core/session-history-index.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import type { TaskStateProjection } from "../src/core/task-state.js";
 import { TASK_STATE_CUSTOM_TYPE, TASK_STATE_SCHEMA } from "../src/core/task-state.js";
+import { TaskStateReadCache } from "../src/core/task-state-reader.js";
 import { TaskStateReducer } from "../src/core/task-state-reducer.js";
 
 const managers: SessionManager[] = [];
@@ -134,5 +138,153 @@ describe("bounded explicit task-state reduction", () => {
 			"Task-state source byte budget exceeded",
 		);
 		await expect(manager.readTaskState({ maxViewBytes: 1 })).rejects.toThrow("JSON byte limit exceeded");
+	});
+	it("reuses unchanged task reductions and processes only appended evidence during preparation", async () => {
+		const add = vi.spyOn(TaskStateReducer.prototype, "add");
+		try {
+			for (const size of [32, 128]) {
+				const manager = await nativeManager();
+				const writer = manager[bindNativeEntryWriter]();
+				const goal = (index: number, operation: "create" | "complete") =>
+					writer.captureGoalOperation({
+						version: 1,
+						kind: "goal_operation",
+						operation,
+						actor: "interactive",
+						actionId: `${operation}-${index}`,
+						submittedText: `/goal ${index}`,
+						...(operation === "complete" ? { previousGoalId: `goal-${index}` } : {}),
+					})({
+						goalId: `goal-${index}`,
+						objective: `Keep requirement ${index}`,
+						active: operation === "create",
+						status: operation === "create" ? "active" : "complete",
+						tokensUsed: 0,
+						timeUsedSeconds: 0,
+						continuationsUsed: 0,
+					});
+				for (let index = 0; index < size; index++) await goal(index, "create");
+				const compiler = new CanonicalContextCompiler();
+				const limits = { maxMessages: 512, maxSourceBytes: 4 * 1024 * 1024 };
+				const prepare = (purpose: "read" | "request" = "request") =>
+					manager.readBranchHistory((history) =>
+						compiler.compile(
+							history.branchContext,
+							limits,
+							undefined,
+							undefined,
+							undefined,
+							"on",
+							false,
+							purpose,
+						),
+					);
+				add.mockClear();
+				await prepare();
+				expect(add).toHaveBeenCalledTimes(size);
+				add.mockClear();
+				const warmStart = performance.now();
+				await prepare();
+				const warmMs = performance.now() - warmStart;
+				expect(add).not.toHaveBeenCalled();
+				await goal(size - 1, "complete");
+				const appendStart = performance.now();
+				const appended = await prepare();
+				const appendMs = performance.now() - appendStart;
+				expect(add).toHaveBeenCalledTimes(1);
+				console.info("task preparation", {
+					size,
+					warmRecords: 0,
+					appendRecords: add.mock.calls.length,
+					warmMs,
+					appendMs,
+				});
+				expect(
+					(await manager.readTaskState()).items.find((item) => item.event.itemId === `goal-${size - 1}`)?.state,
+				).toBe("completed");
+				// Under the ordinary frame limit, an explicit request rebase is still deferred until ACK.
+				expect(getCanonicalEpochContext(appended)?.taskFrame?.messages.length).toBeGreaterThan(1);
+				compiler.requestTaskFrameRebase();
+				expect(getCanonicalEpochContext(await prepare("read"))?.taskFrameRebased).toBeUndefined();
+				for (let retry = 0; retry < 2; retry++) {
+					const candidate = getCanonicalEpochContext(await prepare());
+					expect(candidate?.taskFrame?.messages).toHaveLength(1);
+					expect(candidate?.taskFrameRebased).toBe(true);
+				}
+				compiler.clear();
+				add.mockClear();
+				expect(getCanonicalEpochContext(await prepare())?.taskFrameRebased).toBeUndefined();
+				expect(add).toHaveBeenCalledTimes(size + 1);
+			}
+		} finally {
+			add.mockRestore();
+		}
+	});
+
+	it("rebuilds cached evidence on branch navigation, source replacement and failed append reduction", async () => {
+		const projections = [requirement(1, "a", "A"), requirement(2, "b", "B")].map((event) => ({
+			...event,
+			source: { ...event.source, locator: { path: "/capture", offset: event.source.sequence * 10, length: 10 } },
+		}));
+		const capture = (events: TaskStateProjection[], sequence = 2, ino = 1): SessionHistoryReadView =>
+			({
+				source: {
+					sessionId: "test",
+					sessionFile: "/capture",
+					leafId: events.at(-1)!.source.entryId,
+					sourceSequence: sequence,
+					persistent: true,
+				},
+				get: async (id: string) => events.find((event) => event.source.entryId === id)?.source,
+				taskEvidence: async ({ after }: { after?: { sequence: number } | null } = {}) => ({
+					sourceIdentity: { journalPath: "/capture", dev: 1, ino },
+					indexedThrough: sequence,
+					coverage: "complete",
+					structuredOnly: true,
+					selective: true,
+					truncated: false,
+					nextAfter: null,
+					entries: events
+						.filter((event) => event.source.sequence > (after?.sequence ?? 0))
+						.map((projection) => ({
+							sequence: projection.source.sequence,
+							ordinal: 0,
+							truncated: false,
+							projection,
+						})),
+				}),
+			}) as unknown as SessionHistoryReadView;
+		const cache = new TaskStateReadCache();
+		const limits = { maxItems: 5, maxSourceBytes: 65536, maxViewBytes: 65536 };
+		const add = vi.spyOn(TaskStateReducer.prototype, "add");
+		try {
+			const initial = await cache.read(capture(projections), limits);
+			add.mockClear();
+			expect(await cache.read(capture(projections), limits)).toBe(initial);
+			expect(add).not.toHaveBeenCalled();
+			const completion = {
+				...requirement(3, "done", "Done A"),
+				relations: [{ kind: "completes" as const, itemId: "a" }],
+			};
+			const appended = [completion, requirement(4, "c", "C"), requirement(5, "d", "D")].map((event) => ({
+				...event,
+				source: { ...event.source, locator: { path: "/capture", offset: event.source.sequence * 10, length: 10 } },
+			}));
+			await expect(cache.read(capture([...projections, ...appended], 5), limits)).rejects.toThrow("item budget");
+			const rewind = await cache.read(capture(projections.slice(0, 1), 5), limits);
+			expect(rewind.items).toHaveLength(1);
+			expect(rewind.items[0].state).toBe("active");
+			add.mockClear();
+			// Forward navigation to an old descendant must not skip already-existing evidence.
+			expect((await cache.read(capture(projections, 5), limits)).items).toHaveLength(2);
+			expect(add).toHaveBeenCalledTimes(2);
+			add.mockClear();
+			const replacement = projections.map((event) => ({ ...event, text: `replacement ${event.text}` }));
+			expect((await cache.read(capture(replacement, 5, 2), limits)).items[0].event.text).toBe("replacement A");
+			expect(add).toHaveBeenCalledTimes(2);
+			cache.clear();
+		} finally {
+			add.mockRestore();
+		}
 	});
 });

@@ -21,7 +21,7 @@
  *   - --goal "Process proof goal" --goal-token-budget 1 seeds an initial
  *     goal that is persisted to the session JSONL before the first message,
  *     then becomes budget_limited from the first assistant response usage
- *     (withUsageEstimate produces positive input/output) so the agent does
+ *     (the local SSE replies report positive input/output) so the agent does
  *     not auto-continue.
  */
 
@@ -32,7 +32,9 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../src/core/orphan-process-journal.js";
+import { readSessionJournalHeader } from "../../src/core/session-journal-reader.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../src/core/session-lease.js";
+import { loadEntriesFromFileAsync } from "../../src/core/session-manager.js";
 import { DaemonClient } from "../../src/modes/daemon/daemon-client.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
@@ -182,7 +184,8 @@ describe("Real-process serializedRefine — JSON mode", () => {
 				fauxRefineExtensionPath,
 				"--extension",
 				eventOrderExtensionPath,
-				"--no-tools",
+				// Disable executable tools, not the host goal requested below.
+				"--no-builtin-tools",
 				"--no-skills",
 				"--no-prompt-templates",
 				"--no-themes",
@@ -204,7 +207,13 @@ describe("Real-process serializedRefine — JSON mode", () => {
 
 		// Clean exit — the production env scrub allowed the supervisor
 		// to start correctly despite the inherited worker role env var.
-		expect(result).toMatchObject({ code: 0, signal: null });
+		expect(
+			result,
+			`CLI stderr:
+${result.stderr}
+CLI stdout:
+${result.stdout}`,
+		).toMatchObject({ code: 0, signal: null });
 		expect(result.stderr).not.toContain("Timed out waiting for daemon");
 
 		// Daemon socket exists — the daemon path was used.
@@ -212,7 +221,10 @@ describe("Real-process serializedRefine — JSON mode", () => {
 
 		// Read the event log recorded by the extension in the real worker.
 		const events = readEventLog(eventLogPath);
-		expect(events.length).toBeGreaterThanOrEqual(3);
+		expect(
+			events.length,
+			`Events: ${JSON.stringify(events)}\nCLI stderr: ${result.stderr}\nCLI stdout: ${result.stdout}`,
+		).toBeGreaterThanOrEqual(3);
 
 		// agent_start fired with the exact model from --model.
 		const agentStart = events.find((e) => e.type === "agent_start");
@@ -259,11 +271,8 @@ describe("Real-process serializedRefine — JSON mode", () => {
 					// or orphan journal: the first non-empty line must have
 					// type === "session".
 					try {
-						const raw = readFileSync(fullPath, "utf8").trim().split("\n")[0];
-						if (raw) {
-							const first = JSON.parse(raw) as { type?: string };
-							if (first.type === "session") return fullPath;
-						}
+						const first = readSessionJournalHeader(fullPath) as { type?: string } | undefined;
+						if (first?.type === "session") return fullPath;
 					} catch {
 						// not valid JSON, skip
 					}
@@ -283,12 +292,8 @@ describe("Real-process serializedRefine — JSON mode", () => {
 		const sessionJsonlPath = findSessionJsonl(join(agentDir, "sessions"));
 		expect(sessionJsonlPath).toBeDefined();
 
-		const jsonlContent = readFileSync(sessionJsonlPath!, "utf8");
-		const jsonlEntries: JsonlEntry[] = jsonlContent
-			.trim()
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => JSON.parse(line) as JsonlEntry);
+		// Native source frames require the existing read-only decoder, not raw JSON payload guesses.
+		const jsonlEntries = (await loadEntriesFromFileAsync(sessionJsonlPath!)) as JsonlEntry[];
 
 		// Find the first thread_goal_state custom entry.
 		const goalEntries = jsonlEntries.filter((e) => e.type === "custom" && e.customType === "thread_goal_state");
@@ -311,7 +316,7 @@ describe("Real-process serializedRefine — JSON mode", () => {
 		expect(firstGoalIndex).toBeLessThan(firstMessageIndex);
 
 		// The first assistant message must have positive usage (input > 0
-		// and output > 0) produced by withUsageEstimate, which means the
+		// and output > 0) reported by the local SSE fixture, which means the
 		// goal accounting will consume real tokens and reach the budget.
 		const assistantMessages = jsonlEntries.filter((e) => e.type === "message" && e.message?.role === "assistant");
 		expect(assistantMessages.length).toBeGreaterThanOrEqual(1);

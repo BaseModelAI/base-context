@@ -985,6 +985,11 @@ describe("createAgentSessionFromServices", () => {
 				expect(executions).toBe(0);
 				epochSession.agent.onPayload = onPayload;
 			};
+			// Losing the session-local Responses ID map requires a new provider representation on MAIN.
+			const priorResponsesIdentity = JSON.parse(
+				readContextEpoch(toolEpoch.details, 2 * 1024 * 1024)!.representation!,
+			).responseItemIdentity;
+			expect(typeof priorResponsesIdentity).toBe("string");
 			// Cold startup only reads the accepted v6 facts; the next MAIN owns request admission.
 			await reopenAcceptedContext();
 			// One ordinary continuation changes the tail/receipts, not the unchanged tool fact.
@@ -999,6 +1004,13 @@ describe("createAgentSessionFromServices", () => {
 			expect(followingToolLiteral).toBe(firstToolLiteral);
 			const followingEpochId = epochsAtSend.at(-1)!;
 			expect(followingEpochId).not.toBe(toolEpochId);
+			const followingEpoch = await epochManager.readEntry(followingEpochId);
+			if (followingEpoch?.type !== "compaction") throw new Error("Expected a fresh native epoch");
+			const followingResponsesIdentity = JSON.parse(
+				readContextEpoch(followingEpoch.details, 2 * 1024 * 1024)!.representation!,
+			).responseItemIdentity;
+			expect(typeof followingResponsesIdentity).toBe("string");
+			expect(followingResponsesIdentity).not.toBe(priorResponsesIdentity);
 			const followingRequests = (await epochManager.readEntries())
 				.filter((entry) => entry.type === "request")
 				.map((entry) => entry.request);

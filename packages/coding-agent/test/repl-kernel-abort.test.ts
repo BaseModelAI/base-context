@@ -552,6 +552,7 @@ describe("ReplKernelManager abort handling", () => {
 		const result = await executePromise;
 		expect(result.stdout).toBe("");
 		expect(result.backgroundOutput).toBe("between-cells\n");
+		expect(result.outputComplete).toBe(true);
 		manager.disposeSync();
 	});
 
@@ -594,6 +595,24 @@ describe("ReplKernelManager abort handling", () => {
 
 		const result = await executePromise;
 		expect(result.backgroundOutput).toBeUndefined();
+		manager.disposeSync();
+	});
+
+	it("reports incomplete capture for a nonempty chunk after reaching the exact output limit", async () => {
+		const writeLine = vi.fn(async (_request: Record<string, unknown>) => {});
+		const { manager, internals } = runningManagerWith(writeLine);
+		const pending = manager.execute("print()", { maxOutputChars: 4 });
+		await waitForCalls(writeLine, 1);
+		const id = internals.activeExecution!.requestId;
+		for (const event of ["stdout", "stderr"]) {
+			internals.handleEvent({ event, id, text: "1234" });
+			internals.handleEvent({ event, id, text: "discarded" });
+		}
+		internals.handleEvent({ event: "done", id, status: "ok" });
+		const result = await pending;
+		expect(result.outputComplete).toBe(false);
+		expect(result.stdout).toContain("output truncated at 4 chars");
+		expect(result.stderr).toContain("output truncated at 4 chars");
 		manager.disposeSync();
 	});
 

@@ -13,6 +13,7 @@ import type {
 import type { AssistantMessageEventStream } from "./event-stream.js";
 import {
 	type ContextTokenObservation,
+	type ProviderInputTokenCounter,
 	type ProviderRequestProjection,
 	type ProviderRequestRepresentation,
 	type RequestTokenAssessment,
@@ -82,6 +83,7 @@ type ResponseDetails = Pick<
 /** Per-stream transport state only. Admission and durable settlement belong to the embedding runtime. */
 export class ProviderAttemptTracker {
 	private ordinal = 0;
+	private generationOrdinal = 0;
 	private active?: ActiveAttempt;
 	private persistenceError?: unknown;
 	private details: AttemptDetails = {};
@@ -108,15 +110,16 @@ export class ProviderAttemptTracker {
 	async prepareRequest(
 		request: Omit<ProviderRequestRepresentation, "api" | "provider">,
 		projection?: ProviderRequestProjection,
+		countInput?: ProviderInputTokenCounter,
 	): Promise<string | undefined> {
 		if (this.budgetError !== undefined) throw this.budgetError;
 		const observer = this.options?.attempts;
 		const prepare = observer?.prepareRequest;
 		let selectedBody: string | undefined;
-		if (projection && prepare) {
+		if (prepare) {
 			const representation = { ...request, api: this.model.api, provider: this.model.provider };
 			try {
-				selectedBody = await prepare.call(observer, representation, projection);
+				selectedBody = await prepare.call(observer, representation, projection, countInput);
 			} catch (error) {
 				this.budgetError = error;
 				markLocalRequestPreparationError(error);
@@ -159,15 +162,20 @@ export class ProviderAttemptTracker {
 		// An SDK may retry after headers but before handing the body to its caller.
 		if (this.active) await this.settle("interrupted");
 		const queuedAt = Date.now();
+		const control = details.kind === "input-count";
+		if (!control) this.generationOrdinal++;
 		const info: ProviderAttemptInfo = {
 			api: this.model.api,
 			provider: this.model.provider,
 			model: this.model.id,
 			transport,
 			ordinal: ++this.ordinal,
-			kind: this.ordinal === 1 ? "initial" : "retry",
+			kind: this.generationOrdinal === 1 ? "initial" : "retry",
 			...this.details,
 			...details,
+			...(control
+				? { requestBudget: undefined, previousResponseId: undefined, effort: undefined, serviceTier: undefined }
+				: {}),
 		};
 		let id: string;
 		try {
@@ -297,10 +305,12 @@ export class ProviderAttemptTracker {
 	/** Wrap an SDK's single-send method, below its retry loop. */
 	wrapHttp<TArgs extends unknown[]>(
 		send: (...args: TArgs) => Promise<Response>,
+		operation?: "input-count",
 	): (...args: TArgs) => Promise<Response> {
 		if (!this.enabled) return send;
 		return async (...args) => {
-			if (this.hasRequestBudget) {
+			if (operation === "input-count") this.options?.signal?.throwIfAborted();
+			if (this.hasRequestBudget && operation !== "input-count") {
 				const target = args[0];
 				const init = args[1] as { body?: unknown } | undefined;
 				const body = typeof init?.body === "string" ? init.body : undefined;
@@ -316,10 +326,11 @@ export class ProviderAttemptTracker {
 				if (init && body !== undefined) args[1] = { ...init, body };
 				await this.measureRequest({ url, body });
 			}
-			await this.begin("http");
-			this.sent();
+			await this.begin("http", operation === "input-count" ? { kind: "input-count" } : {});
 			let response: Response;
 			try {
+				if (operation === "input-count") this.options?.signal?.throwIfAborted();
+				this.sent();
 				response = await send(...args);
 			} catch (error) {
 				await this.settle(this.options?.signal?.aborted ? "cancelled" : "failed");

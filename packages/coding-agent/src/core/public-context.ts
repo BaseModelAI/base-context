@@ -3,6 +3,20 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 import type { ToolContinuationGroup } from "./context-epoch.js";
 import type { CustomMessage } from "./messages.js";
 import type { SourceSnapshotRef } from "./request-events.js";
+import { retainedToolOutput } from "./retained-tool-output.js";
+
+function retainedRecovery(message: AgentMessage, entryId: string) {
+	if (message.role !== "toolResult") return undefined;
+	const retained = retainedToolOutput((message.details as { retainedOutput?: unknown } | undefined)?.retainedOutput);
+	return retained
+		? {
+				ref: entryId,
+				field: retained.field,
+				byteLength: retained.byteLength,
+				captureComplete: retained.captureComplete,
+			}
+		: undefined;
+}
 
 export const PUBLIC_CONTEXT_RENDERER = "public-history/1";
 export const PUBLIC_TOOL_CONTINUATION_RENDERER = "public-tool-continuation/1";
@@ -27,6 +41,7 @@ export function renderToolContinuation(
 		{
 			source: { sessionId: source.sessionId },
 			entryId,
+			...(retainedRecovery(message, entryId) ? { recovery: retainedRecovery(message, entryId) } : {}),
 			role: message.role,
 			content,
 			...(message.role === "assistant"
@@ -77,6 +92,7 @@ export function renderPublicHistory(message: AgentMessage, entryId: string, maxB
 	const data = stringifyBoundedJson(
 		{
 			entryId,
+			...(retainedRecovery(message, entryId) ? { recovery: retainedRecovery(message, entryId) } : {}),
 			role: message.role,
 			...(message.role === "toolResult"
 				? { toolCallId: message.toolCallId, toolName: message.toolName, isError: message.isError }

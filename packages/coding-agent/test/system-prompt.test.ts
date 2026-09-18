@@ -1,3 +1,4 @@
+import { conservativeTextTokenCost } from "@ponythewhite/base-context-ai";
 import { describe, expect, test } from "vitest";
 import { buildRlmPrompt } from "../src/core/prompts/index.js";
 import type { HarnessState } from "../src/core/refinement/index.js";
@@ -36,6 +37,26 @@ function pythonSkill(name: string, importName = name.replaceAll("-", "_")): Skil
 }
 
 describe("buildRlmPrompt", () => {
+	test("keeps fixed guidance before changing runtime coordinates without freezing selected tools", () => {
+		const options = {
+			cwd: "/repo",
+			messagesPath: "/session/one",
+			installedSkills: ["zebra", "alpha"],
+			activeTools: ["ipython"],
+		};
+		const first = buildRlmPrompt(options);
+		expect(buildRlmPrompt(options)).toBe(first);
+		const next = buildRlmPrompt({ ...options, cwd: "/other", messagesPath: "/session/two" });
+		const prefix = (prompt: string) => prompt.slice(0, prompt.indexOf("\n\nWorking directory:"));
+		expect(prefix(next)).toBe(prefix(first));
+		expect(prefix(first)).toContain("RLM-native call contract");
+		expect(first).toContain("`zebra`, `alpha`");
+		expect(next.endsWith("Working directory: /other\nConversation log: /session/two")).toBe(true);
+		const changed = buildRlmPrompt({ ...options, activeTools: ["bash"] });
+		expect(prefix(changed)).not.toBe(prefix(first));
+		expect(changed).not.toContain("persistent Python REPL");
+		expect(changed).not.toContain("Reuse a named Python function");
+	});
 	test("defaults omitted activeTools to ipython guidance", () => {
 		const prompt = buildRlmPrompt({
 			cwd: "/repo",
@@ -47,6 +68,9 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("A callable `rlm` is already in your global namespace");
 		expect(prompt).toContain("persistent Python REPL");
 		expect(prompt).toContain("Python is the orchestration language");
+		expect(prompt).toContain("Reuse a named Python function for repeated multi-step work");
+		expect(prompt).toContain("read current data each call");
+		expect(prompt).toContain("execute its updated definition or invoke the saved file afresh");
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
@@ -379,13 +403,36 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("a durable fact/preference should become a memory");
 		expect(prompt).toContain("a narrow behavioral policy should become a prompt addendum");
 		expect(prompt).toContain("validation shows a continual harness entry is wrong");
-		expect(prompt).toContain("[global:focused_edits] Focused edits (policy, v1)");
-		expect(prompt).toContain("[global:validation] Validation (repo/prime-agent, v2): Run `npm run check`");
-		expect(prompt).toContain("[global:review_refinement] Review refinement (quality, v1)");
-		expect(prompt).toContain("[global:refinement_reviewer] Refinement reviewer (review, v1)");
-		expect(prompt).toContain("recent refinements: 1");
-		expect(prompt).toContain("[refine_1] Observed validation miss: create memory:validation");
+		expect(prompt).toContain("[global:focused_edits] Focused edits (policy)");
+		expect(prompt).toContain("[global:validation] Validation (repo/prime-agent): Run `npm run check`");
+		expect(prompt).toContain("[global:review_refinement] Review refinement (quality)");
+		expect(prompt).toContain("[global:refinement_reviewer] Refinement reviewer (review)");
+		expect(prompt).not.toContain("recent refinements:");
+		expect(prompt).not.toContain("[refine_1] Observed validation miss: create memory:validation");
 		expect(prompt.indexOf("# Continual Harness State")).toBeGreaterThan(prompt.indexOf("Conversation log:"));
+		harnessState.entries.memory["error-fix:tests"] = {
+			...harnessState.entries.memory.validation,
+			id: "error-fix:tests",
+			scope: "workspace",
+			title: "Tests",
+			content: "Problem: dependency missing. Fix: use project Python.",
+			metadata: { tool: "ipython", condition: "project tests" },
+		};
+		for (const customPrompt of [undefined, "Custom body"]) {
+			const options = { cwd: "/repo", selectedTools: ["ipython"], harnessState, customPrompt };
+			expect(buildSystemPrompt(options)).not.toContain("Problem: dependency missing.");
+			const enabled = buildSystemPrompt({
+				...options,
+				errorFixSelection: {
+					enabled: true,
+					tools: ["ipython"],
+					goal: "project tests",
+					countTokens: conservativeTextTokenCost,
+				},
+			});
+			expect(enabled.split("Problem: dependency missing.")).toHaveLength(2);
+			expect(enabled).toContain('rlm.get_harness_state(scope="workspace").upsert');
+		}
 	});
 
 	test("keeps injected harness context compact", () => {
@@ -594,7 +641,7 @@ describe("buildSystemPrompt", () => {
 			"Violation of this rule is considered a failure. Re-plan and ship the real feature instead.",
 		);
 		expect(prompt).toContain("# Continual Harness State");
-		expect(prompt).toContain("[global:custom_memory] Custom memory (custom, v1)");
+		expect(prompt).toContain("[global:custom_memory] Custom memory (custom)");
 		expect(prompt).not.toContain("# IPython Kernel Guidance");
 		expect(prompt).not.toContain("You are a general purpose agent that uses code to solve tasks.");
 		expect(prompt.indexOf("Current working directory: /repo")).toBeLessThan(

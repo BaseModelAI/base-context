@@ -366,7 +366,7 @@ afterEach(async () => {
 	}
 });
 
-function auxiliaryResponse(): Response {
+function auxiliaryResponse(inputTokens = 10): Response {
 	const item = {
 		type: "message",
 		id: "msg_auxiliary",
@@ -383,7 +383,12 @@ function auxiliaryResponse(): Response {
 				id: "resp_auxiliary",
 				model: model.id,
 				status: "completed",
-				usage: { input_tokens: 10, output_tokens: 1, total_tokens: 11, input_tokens_details: { cached_tokens: 0 } },
+				usage: {
+					input_tokens: inputTokens,
+					output_tokens: 1,
+					total_tokens: inputTokens + 1,
+					input_tokens_details: { cached_tokens: 0 },
+				},
 			},
 		},
 	];
@@ -393,16 +398,100 @@ function auxiliaryResponse(): Response {
 	});
 }
 
-async function auxiliaryFixture() {
+async function auxiliaryFixture(budget?: ai.RequestTokenBudgetOptions) {
 	const dir = mkdtempSync(join(tmpdir(), "base-context-auxiliary-caps-"));
 	fixtureDirs.push(dir);
 	const manager = await SessionManager.create(dir, dir);
 	managers.push(manager);
 	await manager.appendMessage(context.messages[0]!);
-	return { manager, requests: new InferenceCoordinator(() => manager.bindRequestSink()) };
+	return { manager, requests: new InferenceCoordinator(() => manager.bindRequestSink(), undefined, budget) };
 }
 
 describe("native inference coordination", () => {
+	it.each([930, 1000])(
+		"counts a near-limit prepared request under native control ownership (%i tokens)",
+		async (inputTokens) => {
+			const countedModel = { ...model, baseUrl: "https://api.openai.com/v1", contextWindow: 1000 };
+			const { manager, requests } = await auxiliaryFixture({
+				mode: "enforce",
+				profiles: [
+					{
+						id: "offline-input-count",
+						revision: "1",
+						api: model.api,
+						provider: model.provider,
+						url: "https://api.openai.com/v1/responses",
+						model: model.id,
+						authMode: "fixture-api-key",
+						templateRevision: "fixture-1",
+						replayFamily: "responses",
+						contextTokens: 1000,
+						outputCeilingTokens: 20,
+						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 7, tokenizer: "o200k_base" },
+					},
+				],
+			});
+			const sent: string[] = [];
+			vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+				const url = input instanceof Request ? input.url : String(input);
+				sent.push(url);
+				return url.endsWith("/input_tokens")
+					? Response.json({ input_tokens: inputTokens, object: "response.input_tokens" })
+					: auxiliaryResponse(inputTokens);
+			});
+			try {
+				const run = await requests.start(
+					countedModel,
+					{
+						messages: [{ role: "user", content: "word ".repeat(900), timestamp: 1 }],
+					},
+					{ apiKey: "offline-count-key", maxTokens: 20, maxRetries: 0 },
+					{ purpose: "main" },
+				);
+				if (inputTokens > 973) {
+					await expect(run.settled).rejects.toBeInstanceOf(ai.RequestTokenBudgetError);
+					expect(sent).toEqual(["https://api.openai.com/v1/responses/input_tokens"]);
+				} else {
+					const result = await run.settled;
+					expect(result.message.stopReason).toBe("stop");
+					expect(result.attemptIds).toHaveLength(1);
+					expect(sent).toEqual([
+						"https://api.openai.com/v1/responses/input_tokens",
+						"https://api.openai.com/v1/responses",
+					]);
+				}
+				const facts = (await manager.readEntries()).flatMap((entry) =>
+					entry.type === "request" ? [entry.request] : [],
+				);
+				const control = facts.filter((fact) => fact.purpose === "native-control");
+				expect(control).toHaveLength(2);
+				expect(control.every((fact) => fact.purposeDetail === "input-token-count" && !fact.contextEpoch)).toBe(
+					true,
+				);
+				expect(control[0]).toMatchObject({ type: "attempt_admitted", descriptor: { kind: "input-count" } });
+				expect(control[1]).toMatchObject({ type: "attempt_settled", receipt: { outcome: "completed" } });
+				const generation = facts.filter((fact) => fact.purpose === "main" && fact.type === "attempt_admitted");
+				if (inputTokens <= 973)
+					expect(generation[0]).toMatchObject({
+						descriptor: {
+							kind: "initial",
+							ordinal: 2,
+							requestBudget: {
+								counter: "openai-responses-input-count",
+								estimatedInputTokens: inputTokens,
+								outputReserveTokens: 20,
+								marginTokens: 7,
+								availableInputTokens: 973,
+							},
+						},
+					});
+				else expect(generation).toHaveLength(0);
+			} finally {
+				await requests.dispose();
+			}
+		},
+	);
+
 	it("recovers an auxiliary completion on its retained source and original inputs", async () => {
 		const facts: NativeRequestEvent[] = [];
 		const releaseSink = vi.fn(async () => {});
@@ -934,11 +1023,11 @@ describe("native inference coordination", () => {
 			{ model: publicCodexModel, apiKey: codexFixtureKey(), tools: replayTools },
 		);
 		const codexSession = codexManager.getSessionId();
-		codex.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
-			...options,
-			transport: "websocket-cached",
-			sessionId: codexSession,
-		}));
+		const codexSourceIds: (readonly (number | undefined)[] | undefined)[] = [];
+		codex.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => {
+			codexSourceIds.push(options?.attempts?.responsesMessageIds);
+			return { ...options, transport: "websocket-cached", sessionId: codexSession };
+		});
 		const codexPayload = vi.fn();
 		codex.agent.onPayload = codexPayload;
 		let codexReplies = 0;
@@ -1008,6 +1097,10 @@ describe("native inference coordination", () => {
 			expect(codexPayload).toHaveBeenCalledTimes(2);
 			expect(socket.sent).toHaveLength(2);
 			expect(offlineFetch).toHaveBeenCalledTimes(sendsBeforeSelection + 1);
+			expect(codexSourceIds[0]?.length).toBeGreaterThan(0);
+			expect(codexSourceIds[1]?.slice(0, codexSourceIds[0]!.length)).toEqual(codexSourceIds[0]);
+			expect(typeof codexOffers[0].responseItemIdentity).toBe("string");
+			expect(codexOffers[1].responseItemIdentity).toBe(codexOffers[0].responseItemIdentity);
 			expect(codexOffers[0].request.api).toBe("openai-codex-responses");
 			expect(codexOffers[1].projection.replayContract).toBe("message-groups");
 			expect(codexOffers[0].projection.publicWindow).toBe(true);
@@ -1103,6 +1196,7 @@ describe("native inference coordination", () => {
 				publicMeasurements = meter.mock.calls;
 				restorePublicMeter = () => meter.mockRestore();
 				observer.prepareRequest = async (request, projection) => {
+					if (!projection) throw new Error("Expected native public projection");
 					expect(request.retainedPrefix).toMatchObject({ inputTokens: 5, outputTokens: 3 });
 					expect(projection.publicWindow).toBe(true);
 					const messages = codex.viewMessages!;

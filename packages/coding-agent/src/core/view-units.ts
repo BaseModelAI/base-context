@@ -45,25 +45,41 @@ function admit(units: readonly ViewUnit[], limits: ViewUnitLimits): Map<string, 
 	return byId;
 }
 
+/** Prepare admission and adjacency once for one captured immutable graph. */
+export function prepareViewSelection(
+	units: readonly ViewUnit[],
+	limits: ViewUnitLimits,
+): {
+	close(selectedIds: readonly string[]): readonly ViewUnit[];
+} {
+	const byId = admit(units, limits);
+	const maxUnits = limits.maxUnits;
+	return {
+		close(selectedIds) {
+			if (selectedIds.length > maxUnits) throw new Error("View-unit selection budget exceeded");
+			const selected = new Set<string>();
+			const visit = (id: string): void => {
+				const unit = byId.get(id);
+				if (!unit) throw new Error("Required visible view unit is unavailable");
+				if (unit.unavailableDependencies?.length) throw new Error("View-unit replay group is incomplete");
+				selected.add(id);
+			};
+			for (const id of selectedIds) visit(id);
+			// Set iteration includes newly inserted entries and handles mutual replay edges.
+			for (const id of selected)
+				for (const dependency of byId.get(id)!.requiredVisibleDependencies) visit(dependency);
+			return units.filter((unit) => selected.has(unit.id));
+		},
+	};
+}
+
 /** Resolve the full closure, then restore source order. No partial prefix is returned. */
 export function closeViewSelection(
 	units: readonly ViewUnit[],
 	selectedIds: readonly string[],
 	limits: ViewUnitLimits,
 ): readonly ViewUnit[] {
-	const byId = admit(units, limits);
-	if (selectedIds.length > limits.maxUnits) throw new Error("View-unit selection budget exceeded");
-	const selected = new Set<string>();
-	const visit = (id: string): void => {
-		const unit = byId.get(id);
-		if (!unit) throw new Error("Required visible view unit is unavailable");
-		if (unit.unavailableDependencies?.length) throw new Error("View-unit replay group is incomplete");
-		selected.add(id);
-	};
-	for (const id of selectedIds) visit(id);
-	// Set iteration includes newly inserted entries and handles mutual replay edges.
-	for (const id of selected) for (const dependency of byId.get(id)!.requiredVisibleDependencies) visit(dependency);
-	return units.filter((unit) => selected.has(unit.id));
+	return prepareViewSelection(units, limits).close(selectedIds);
 }
 
 /**

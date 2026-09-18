@@ -2,9 +2,11 @@ import type { AgentTool } from "@ponythewhite/base-context-agent";
 import { fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { emptyGoalState, type GoalState } from "../../src/core/goals.js";
 import { createHarness, type Harness } from "./harness.js";
 
 type SerializedInternals = {
+	_setGoalState(state: GoalState): Promise<GoalState>;
 	_shouldStopAfterTurn(context: {
 		message: { stopReason?: string; content: unknown[]; role: string; usage?: unknown; timestamp?: number };
 		toolResults: unknown[];
@@ -118,6 +120,58 @@ describe("Serialized auto-refine checkpoint", () => {
 		} finally {
 			vi.restoreAllMocks();
 		}
+	});
+
+	it("skips unchanged automatic evidence but reviews a newly appended task message", async () => {
+		const reviewer = vi.fn(async () => ({ shouldRefine: false, rationale: "Nothing useful to change." }));
+		const harness = await createHarness({ persistSession: true, autoRefineReviewer: reviewer });
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SerializedInternals;
+		await harness.sessionManager.appendMessage({ role: "user", content: "Inspect the project tests.", timestamp: 1 });
+		const review = { reason: "turn_interval", turnsSinceLastReview: 1 };
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(1);
+		// A UI outcome is not new task evidence, nor a reason to buy another review.
+		await harness.sessionManager.appendCustomMessageEntry("refinement_outcome", "No change needed.", true, {});
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(1);
+		await harness.sessionManager.appendMessage({
+			role: "user",
+			content: "The repaired project test now passes.",
+			timestamp: 2,
+		});
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(2);
+	});
+
+	it("ignores goal accounting snapshots but reviews a changed goal objective", async () => {
+		const reviewer = vi.fn(async () => ({ shouldRefine: false, rationale: "Nothing useful to change." }));
+		const harness = await createHarness({ persistSession: true, autoRefineReviewer: reviewer });
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SerializedInternals;
+		const goal = await internals._setGoalState({
+			...emptyGoalState(),
+			active: true,
+			status: "active",
+			goalId: "review-goal",
+			objective: "Repair the project tests.",
+			tokenBudget: 10000,
+		});
+		await harness.sessionManager.appendMessage({ role: "user", content: "Inspect the project tests.", timestamp: 1 });
+		const review = { reason: "turn_interval", turnsSinceLastReview: 1 };
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(1);
+		const accounted = await internals._setGoalState({
+			...goal,
+			tokensUsed: 20,
+			timeUsedSeconds: 1,
+			continuationsUsed: 1,
+		});
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(1);
+		await internals._setGoalState({ ...accounted, objective: "Repair the project packaging." });
+		await internals._reviewAutoRefine(review);
+		expect(reviewer).toHaveBeenCalledTimes(2);
 	});
 
 	it("refines exactly once when >25 tool turns run in one loop", async () => {
@@ -406,6 +460,8 @@ describe("Serialized agent-callable refine", () => {
 		harnesses.push(harness);
 
 		const internals = harness.session as unknown as SerializedInternals;
+		const planSpy = vi.spyOn(internals, "_planRefine");
+		const applySpy = vi.spyOn(internals, "_applyRefine");
 
 		(harness.session.agent.state as { isStreaming: boolean }).isStreaming = true;
 		harness.session.handleRefineHostRequest("refine.run", { instructions: "test" });
@@ -415,7 +471,13 @@ describe("Serialized agent-callable refine", () => {
 		// by background planning, NOT left for fire-and-forget at agent_end.
 		expect(internals._pendingRequestedRefine).toBeUndefined();
 		expect(internals._serializedPlanInFlight).toBeDefined();
-		await expect(harness.cleanup()).rejects.toThrow("Refinement failed: No more faux responses queued");
+		await expect(internals._serializedPlanInFlight).resolves.toMatchObject({ status: "failure", explicit: true });
+		// Existing disposal consumes an already-recorded background failure without retrying or rethrowing it.
+		await expect(harness.cleanup()).resolves.toBeUndefined();
+		expect(internals._serializedPlanInFlight).toBeUndefined();
+		expect(internals._lastAutoRefineReviewAt).toBeGreaterThan(0);
+		expect(planSpy).toHaveBeenCalledTimes(1);
+		expect(applySpy).not.toHaveBeenCalled();
 		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
@@ -1953,7 +2015,10 @@ describe("P0 concurrency regressions", () => {
 		await harness.session.prompt("Continue without optimization.");
 		expect(reviewer).not.toHaveBeenCalled();
 		expect(planSpy).toHaveBeenCalledTimes(1);
-		expect(rebuildSpy).toHaveBeenCalledTimes(1);
+		// The first MAIN after the off checkpoint captures its existing native skill policy;
+		// this second rebuild is not another refinement and leaves the prompt text unchanged.
+		expect(rebuildSpy).toHaveBeenCalledTimes(2);
+		expect(rebuildSpy).toHaveBeenLastCalledWith(harness.session.getActiveToolNames(), true);
 		expect(harness.session.agent.state.systemPrompt).toBe(acceptedPrompt);
 		await expect(harness.session.refine()).rejects.toThrow("explicitly re-enable context.mode");
 		await expect(harness.session.compact()).rejects.toThrow("explicitly re-enable context.mode");

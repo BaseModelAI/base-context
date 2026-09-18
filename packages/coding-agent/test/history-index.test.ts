@@ -10,9 +10,12 @@ import {
 	type ParentPathCursor,
 } from "../src/core/history-index.js";
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
+import { renderPublicHistory } from "../src/core/public-context.js";
+import { retainToolOutput } from "../src/core/retained-tool-output.js";
 import {
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
 	NativeRecoveryBudgetRefusal,
+	NativeRecoveryCursorStore,
 	nativeRecoveryMetadata,
 	recoverCapturedHistory,
 	stringifyNativeRecoveryResponse,
@@ -20,9 +23,11 @@ import {
 import { createBranchHistoryReadView } from "../src/core/session-history-index.js";
 import {
 	APPEND_NATIVE_ADMISSION,
+	APPEND_NATIVE_TOOL_EXECUTION,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
 } from "../src/core/session-journal-owner.js";
+import { getSessionArtifactPathForFile } from "../src/core/session-manager.js";
 import { TASK_STATE_SCHEMA } from "../src/core/task-state.js";
 
 let dir: string;
@@ -119,6 +124,9 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		expect(child.exitCode).toBe(0);
 		index = await HistoryIndex.open(join(dir, "index.sqlite"));
 		expect(await index.get("canonical", "sibling")).toBeUndefined();
+		const ahead = await index.page("canonical", 0, first.nextSequence, 64);
+		expect(ahead).toMatchObject({ coverage: "partial", indexedThrough: first.nextSequence - 1 });
+		expect(ahead.events.map((item) => item.id)).toEqual(["root"]);
 		const indexed = await index.get("canonical", "root");
 		expect(indexed?.retention).toBe("retained-import");
 		expect(indexed?.qualification).toBe("native-admission");
@@ -269,7 +277,7 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		});
 		// The same original-subject field is unavailable on the retained-import root.
 		expect(recovery.results[4].records).toEqual([]);
-		expect(recovery.sources).toEqual([
+		expect(recovery.sources).toMatchObject([
 			{
 				sourceSessionId: "canonical",
 				entryId: "root",
@@ -1485,6 +1493,266 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 	}
 });
 
+it("scans case-sensitive public substrings rather than whole index terms", async () => {
+	const journalPath = join(dir, "literal.jsonl");
+	const owner = await SessionJournalOwner.open({ journalPath, create: true });
+	try {
+		await owner.appendJson(JSON.stringify({ type: "session", version: 3, id: "literal", cwd: dir }));
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "first",
+				parentId: null,
+				message: { role: "user", content: "parse_config :: punctuation" },
+			}),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "last",
+				parentId: "first",
+				message: { role: "user", content: "Parse_config" },
+			}),
+		);
+		await index.syncSource("literal", owner.getSnapshot());
+		const view = createBranchHistoryReadView(
+			index,
+			{ sessionId: "literal", sessionFile: journalPath, leafId: "last", sourceSequence: 2, persistent: true },
+			(query) => query(),
+		);
+		const matched = await recoverCapturedHistory(view, {
+			action: "search",
+			query: "parse",
+			field: "/message/content",
+		});
+		expect(matched.results[0]).toMatchObject({
+			status: "found",
+			coverage: "complete",
+			exhausted: true,
+			records: [{ ref: "first", text: "parse_config :: punctuation" }],
+		});
+		expect((await recoverCapturedHistory(view, { action: "search", query: "::" })).results[0].records).toHaveLength(
+			1,
+		);
+		expect((await recoverCapturedHistory(view, { action: "search", query: "PARSE" })).results[0]).toMatchObject({
+			status: "complete-miss",
+			exhausted: true,
+		});
+	} finally {
+		await owner.close();
+	}
+});
+
+it("continues across retained windows on a fixed capture and expires session cursors", async () => {
+	const journalPath = join(dir, "window.jsonl");
+	const owner = await SessionJournalOwner.open({ journalPath, create: true });
+	try {
+		await owner.appendJson(JSON.stringify({ type: "session", version: 3, id: "window", cwd: dir }));
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "first",
+				parentId: null,
+				message: { role: "user", content: "Earlier nonmatch" },
+			}),
+		);
+		const retained = await retainToolOutput(
+			getSessionArtifactPathForFile(journalPath, "window"),
+			[`${"é".repeat(63)}parse_config${"z".repeat(80)}\nTail`],
+			true,
+		);
+		await owner[APPEND_NATIVE_TOOL_EXECUTION](
+			JSON.stringify({
+				type: "message",
+				id: "output",
+				parentId: "first",
+				message: {
+					role: "toolResult",
+					toolCallId: "tool",
+					toolName: "ipython",
+					isError: false,
+					content: [{ type: "text", text: "Bounded preview" }],
+					details: { retainedOutput: retained },
+				},
+			}),
+		);
+		await index.syncSource("window", owner.getSnapshot());
+		const metadata = (await index.get("window", "output"))!;
+		const source = {
+			sessionId: "window",
+			sessionFile: journalPath,
+			leafId: "output",
+			sourceSequence: 2,
+			persistent: true,
+		};
+		const view = createBranchHistoryReadView(index, source, (query) => query());
+		const cursors = new NativeRecoveryCursorStore();
+		const limits = {
+			...DEFAULT_NATIVE_RECOVERY_LIMITS,
+			maxItems: 1,
+			maxSourceBytes: metadata.locator.length + 128 + 4,
+		};
+		const first = await recoverCapturedHistory(
+			view,
+			{ action: "search", query: "parse" },
+			limits,
+			undefined,
+			cursors,
+		);
+		expect(first.results[0]).toMatchObject({
+			status: "partial",
+			exhausted: false,
+			records: [],
+			cursor: expect.any(String),
+		});
+		const second = await recoverCapturedHistory(
+			view,
+			{ action: "search", cursor: first.results[0].cursor },
+			limits,
+			undefined,
+			cursors,
+		);
+		expect(second.results[0]).toMatchObject({
+			status: "partial",
+			exhausted: false,
+			records: [],
+			cursor: expect.any(String),
+		});
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "later",
+				parentId: "output",
+				message: { role: "user", content: "parse appeared after capture" },
+			}),
+		);
+		await index.syncSource("window", owner.getSnapshot());
+		const newer = createBranchHistoryReadView(index, { ...source, leafId: "later", sourceSequence: 3 }, (query) =>
+			query(),
+		);
+		const third = await recoverCapturedHistory(
+			newer,
+			{ action: "search", cursor: second.results[0].cursor },
+			limits,
+			undefined,
+			cursors,
+		);
+		expect(third.scope).toMatchObject({ leafId: "output", sourceSequence: 2 });
+		expect(third.results[0].records).toHaveLength(1);
+		expect(third.results[0].records[0]).toMatchObject({
+			ref: "output",
+			field: retained.field,
+			text: expect.stringContaining("parse_config"),
+		});
+		expect(third.results[0].records[0].text).not.toContain("Earlier nonmatch");
+		const exhausted = await recoverCapturedHistory(
+			newer,
+			{ action: "search", cursor: third.results[0].cursor },
+			limits,
+			undefined,
+			cursors,
+		);
+		expect(exhausted.results[0]).toMatchObject({
+			status: "found",
+			coverage: "complete",
+			exhausted: true,
+			records: [],
+		});
+		const canonical = JSON.parse((await newer.readPayload(metadata.id))!.text);
+		const rendered = renderPublicHistory(canonical.message, metadata.id, 8192);
+		if (!("content" in rendered)) throw new Error("Expected public recovery content");
+		expect(typeof rendered.content).toBe("string");
+		const published = JSON.parse((rendered.content as string).split("\n").slice(1).join("\n"));
+		expect(published.recovery).toMatchObject({ ref: metadata.id, field: retained.field, captureComplete: true });
+		const window = await recoverCapturedHistory(newer, {
+			action: "read",
+			ref: published.recovery.ref,
+			field: published.recovery.field,
+			startByte: 1,
+			endByte: 5,
+		});
+		expect(window.results[0].records[0]).toMatchObject({
+			text: "é",
+			startByte: 2,
+			endByte: 4,
+			prefixOmitted: true,
+			suffixOmitted: true,
+		});
+		const evicted = await recoverCapturedHistory(
+			view,
+			{ action: "search", query: "missing" },
+			limits,
+			undefined,
+			cursors,
+		);
+		for (let n = 0; n < 16; n++)
+			await recoverCapturedHistory(view, { action: "search", query: "missing" }, limits, undefined, cursors);
+		expect(
+			(
+				await recoverCapturedHistory(
+					view,
+					{ action: "search", cursor: evicted.results[0].cursor },
+					limits,
+					undefined,
+					cursors,
+				)
+			).results[0].reason,
+		).toBe("expired_cursor");
+		const active = await recoverCapturedHistory(
+			view,
+			{ action: "search", query: "missing" },
+			limits,
+			undefined,
+			cursors,
+		);
+		cursors.clear();
+		expect(
+			(
+				await recoverCapturedHistory(
+					view,
+					{ action: "search", cursor: active.results[0].cursor },
+					limits,
+					undefined,
+					cursors,
+				)
+			).results[0].reason,
+		).toBe("expired_cursor");
+		await owner.appendJson(
+			JSON.stringify({ type: "message", id: "unqualified-output", parentId: "later", message: canonical.message }),
+		);
+		await index.syncSource("window", owner.getSnapshot());
+		const unqualified = createBranchHistoryReadView(
+			index,
+			{ ...source, leafId: "unqualified-output", sourceSequence: 4 },
+			(query) => query(),
+		);
+		expect(
+			(await recoverCapturedHistory(unqualified, { action: "search", ref: "unqualified-output", query: "missing" }))
+				.results[0],
+		).toMatchObject({ status: "partial", coverage: "partial", reason: "retained_output_unavailable" });
+		await index.close();
+		index = await HistoryIndex.open(join(dir, "index.sqlite"));
+		const resumedView = createBranchHistoryReadView(index, source, (query) => query());
+		expect(
+			(
+				await recoverCapturedHistory(resumedView, {
+					action: "read",
+					ref: "output",
+					field: retained.field,
+					startByte: 126,
+					endByte: 138,
+				})
+			).results[0].records[0].text,
+		).toBe("parse_config");
+		rmSync(join(getSessionArtifactPathForFile(journalPath, "window"), retained.artifactId));
+		expect(
+			(await recoverCapturedHistory(resumedView, { action: "search", query: "missing" })).results[0],
+		).toMatchObject({ status: "partial", coverage: "partial", exhausted: true });
+	} finally {
+		await owner.close();
+	}
+});
+
 it("does not advance coverage across a missing source sequence and qualifies incomplete text", async () => {
 	await expect(index.apply("session", [source("missing", 2, "lost")], 2)).rejects.toThrow("Missing source sequence");
 	expect(await index.get("session", "missing")).toBeUndefined();
@@ -1543,6 +1811,21 @@ it("does not advance coverage across a missing source sequence and qualifies inc
 		expect(last).toMatchObject({ coverage: "complete", truncated: false, nextAfter: null });
 		await expect(select(258)).rejects.toThrow("candidate budget");
 	}
+	expect(await index.page("bounded", 1, 258, 128, { leafId: "Item" }, { scan: true })).toMatchObject({
+		events: [],
+		nextAfter: 129,
+		truncated: true,
+	});
+	expect(await index.page("bounded", 129, 258, 128, { leafId: "Item" }, { scan: true })).toMatchObject({
+		events: [],
+		nextAfter: 257,
+		truncated: true,
+	});
+	expect(await index.page("bounded", 257, 258, 128, { leafId: "Item" }, { scan: true })).toMatchObject({
+		events: [],
+		nextAfter: null,
+		truncated: false,
+	});
 	expect(await index.page("bounded", 1, 258, 1)).toMatchObject({
 		events: [siblings[0]],
 		truncated: true,

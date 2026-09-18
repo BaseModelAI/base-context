@@ -12,6 +12,9 @@ import {
 	isTransientProviderFailure,
 	type Model,
 	type ProviderAttemptObserver,
+	type ProviderInputTokenCounter,
+	type ProviderRequestRepresentation,
+	type RequestTokenAssessment,
 	RequestTokenBudget,
 	type RequestTokenBudgetOptions,
 	type SimpleStreamOptions,
@@ -201,6 +204,8 @@ export class InferenceCoordinator {
 	private disposal?: Promise<void>;
 	private work = {
 		pending: new Set<Promise<void>>(),
+		responsesMessageIds: new Map<string, number>(),
+		responsesIdentity: randomUUID(),
 		sinks: new WeakMap<BoundRequestSink, SinkUse>(),
 		mainOutputs: new WeakMap<AssistantMessage, NativeRequestOutputWriter>(),
 		compactionSettlements: new WeakMap<InferenceSettlement, NativeCompactionOutputBinding>(),
@@ -572,6 +577,7 @@ export class InferenceCoordinator {
 			this.notifyActivity();
 		};
 		const admittedAttempts: Array<{ attemptId: string; contextEpoch?: ContextEpochEntryRef }> = [];
+		const inputCountAttempts = new Map<string, NativeRequestMetadata>();
 		const receiptWrites: Promise<void>[] = [];
 		let activeUser = false;
 		let localSimulation = false;
@@ -685,11 +691,65 @@ export class InferenceCoordinator {
 			const boundary = operation.metadata.purpose === "main" ? this.requestViewBoundary : undefined;
 			const budget = boundary ? parentBudget?.capture() : parentBudget;
 			let measuredForAdmission = false;
+			let countingInput = false;
+			let countedInput: { request: ProviderRequestRepresentation; tokens: number } | undefined;
+			const measure = (request: ProviderRequestRepresentation) => {
+				const same =
+					countedInput &&
+					!request.retainedPrefix &&
+					countedInput.request.api === request.api &&
+					countedInput.request.provider === request.provider &&
+					countedInput.request.url === request.url &&
+					countedInput.request.body === request.body;
+				return budget?.measure(
+					request,
+					same
+						? {
+								inputTokens: countedInput!.tokens,
+								method: "openai-responses-input-count",
+							}
+						: undefined,
+				);
+			};
+			const finalizeMeasurement = async (
+				request: ProviderRequestRepresentation,
+				countInput?: ProviderInputTokenCounter,
+				preparedAssessment?: RequestTokenAssessment,
+			) => {
+				let assessment = countedInput ? measure(request) : (preparedAssessment ?? measure(request));
+				const estimated = assessment?.estimatedInputTokens;
+				const available = assessment?.availableInputTokens;
+				if (
+					countInput &&
+					assessment?.counter === "openai-o200k-base-estimate" &&
+					assessment.status !== "unknown" &&
+					estimated !== null &&
+					estimated !== undefined &&
+					available !== null &&
+					available !== undefined &&
+					available > 0 &&
+					estimated >= available * 0.9 &&
+					estimated <= available * 1.1
+				) {
+					this.assertAdmission();
+					options?.signal?.throwIfAborted();
+					this.work.cancellation.signal.throwIfAborted();
+					countingInput = true;
+					try {
+						const tokens = await countInput(request);
+						countedInput = { request: Object.freeze({ ...request }), tokens };
+						assessment = measure(request);
+					} finally {
+						countingInput = false;
+					}
+				}
+				return assessment;
+			};
 			const measureRequest: ProviderAttemptObserver["measureRequest"] =
 				budget || boundary?.validate
 					? (representation) => {
 							try {
-								const assessment = budget?.measure(representation);
+								const assessment = measure(representation);
 								boundary?.validate?.(representation, assessment);
 								if (budget && assessment) budget.assert(assessment);
 								measuredForAdmission = true;
@@ -701,15 +761,37 @@ export class InferenceCoordinator {
 						}
 					: undefined;
 			const requiredPublic = Boolean(boundary?.pendingPublicMessageGroups?.length);
+			const requiredEpoch = boundary?.requiresEpoch === true;
 			const canSelect =
-				(budget || boundary?.fixedPrepare || requiredPublic) &&
+				(budget || boundary?.fixedPrepare || requiredPublic || requiredEpoch) &&
 				boundary &&
 				matchesRequestView(boundary, source, context);
 			if (requiredPublic && (!canSelect || boundary?.fixedPrepare))
 				throw new Error("Tool continuation requires a selectable native public request boundary");
+			const responsesMessageIds =
+				canSelect &&
+				!boundary.fixedPrepare &&
+				(model.api === "openai-responses" || model.api === "openai-codex-responses")
+					? boundary.providerMessageIndices.map((index) => {
+							const unit = boundary.units[index];
+							const key = JSON.stringify([
+								boundary.source.sessionId,
+								boundary.source.sessionFile,
+								unit.id,
+								unit.sourceRevision,
+							]);
+							let id = this.work.responsesMessageIds.get(key);
+							if (id === undefined) {
+								id = this.work.responsesMessageIds.size;
+								this.work.responsesMessageIds.set(key, id);
+							}
+							return id;
+						})
+					: undefined;
 			let publicAccepted = false;
 			let selectedContextEpoch: ContextEpochEntryRef | undefined;
 			const attempts: ProviderAttemptObserver = {
+				...(responsesMessageIds ? { responsesMessageIds } : {}),
 				...(requiredPublic
 					? {
 							pendingPublicMessageGroups: boundary!.providerPendingPublicMessageGroups!.map((group) => [
@@ -718,15 +800,23 @@ export class InferenceCoordinator {
 						}
 					: {}),
 				...(measureRequest ? { measureRequest } : {}),
-				...(canSelect
+				...(budget || canSelect
 					? ({
-							prepareRequest: async (representation, projection) => {
+							prepareRequest: async (representation, projection, countInput) => {
 								try {
 									selectedContextEpoch = undefined;
 									publicAccepted = false;
 									if (JSON.parse(representation.body!).model !== model.id) return;
+									if (!canSelect) {
+										const assessment = await finalizeMeasurement(representation, countInput);
+										if (budget && assessment) budget.assert(assessment);
+										return;
+									}
+									// An unmapped native body must pass the existing final boundary
+									// validator before any provider call, including an input count.
+									if (!projection) return;
 									if (boundary!.fixedPrepare) {
-										const assessment = budget?.measure(representation);
+										const assessment = await finalizeMeasurement(representation, countInput);
 										if (budget && assessment) budget.assert(assessment);
 										const accepted = await prepareFixedRequestView(
 											boundary!,
@@ -740,6 +830,7 @@ export class InferenceCoordinator {
 									return await selectRequestView(
 										{
 											...boundary!,
+											...(responsesMessageIds ? { responseItemIdentity: this.work.responsesIdentity } : {}),
 											commit: async (candidate) => {
 												const accepted = await boundary!.commit(candidate);
 												if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
@@ -756,6 +847,7 @@ export class InferenceCoordinator {
 										projection,
 										budget,
 										this.work.budgetMode === "enforce",
+										(request, assessment) => finalizeMeasurement(request, countInput, assessment),
 									);
 								} catch (error) {
 									budgetFailure = error;
@@ -765,11 +857,17 @@ export class InferenceCoordinator {
 						} satisfies Pick<ProviderAttemptObserver, "prepareRequest">)
 					: {}),
 				admit: async (descriptor) => {
-					if (requiredPublic && !publicAccepted)
+					const inputCount = descriptor.kind === "input-count";
+					if (inputCount && !countingInput) throw new Error("Input count requires its owned prepared request");
+					options?.signal?.throwIfAborted();
+					this.work.cancellation.signal.throwIfAborted();
+					if (!inputCount && requiredEpoch && !selectedContextEpoch)
+						throw new Error("Context transition requires an acknowledged native epoch");
+					if (!inputCount && requiredPublic && !publicAccepted)
 						throw new Error("Unaccepted tool continuation cannot enter native transport");
 					if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
 					// An adapter without a serializer meter must not bypass an enforced budget.
-					if (measureRequest && !descriptor.requestBudget && (budget || !measuredForAdmission)) {
+					if (!inputCount && measureRequest && !descriptor.requestBudget && (budget || !measuredForAdmission)) {
 						const assessment = invokeRequestMeasurement(attempts, {
 							api: descriptor.api,
 							provider: descriptor.provider,
@@ -788,9 +886,13 @@ export class InferenceCoordinator {
 						this.#auxiliaryAttempts.remaining--;
 					}
 					const attemptId = randomUUID();
-					const contextEpoch = selectedContextEpoch ? Object.freeze({ ...selectedContextEpoch }) : undefined;
+					const contextEpoch =
+						!inputCount && selectedContextEpoch ? Object.freeze({ ...selectedContextEpoch }) : undefined;
+					const attemptMetadata: NativeRequestMetadata = inputCount
+						? { ...metadata, purpose: "native-control", purposeDetail: "input-token-count" }
+						: metadata;
 					const write = operation.binding.sink.persist({
-						...metadata,
+						...attemptMetadata,
 						...(contextEpoch ? { contextEpoch } : {}),
 						type: "attempt_admitted",
 						attemptId,
@@ -799,15 +901,17 @@ export class InferenceCoordinator {
 					});
 					receiptWrites.push(write);
 					await write;
-					admittedAttempts.push({ attemptId, contextEpoch });
+					if (inputCount) inputCountAttempts.set(attemptId, attemptMetadata);
+					else admittedAttempts.push({ attemptId, contextEpoch });
 					return attemptId;
 				},
 				settle: async (receipt) => {
 					const contextEpoch = admittedAttempts.find(
 						(attempt) => attempt.attemptId === receipt.attemptId,
 					)?.contextEpoch;
+					const inputCountMetadata = inputCountAttempts.get(receipt.attemptId);
 					const write = operation.binding.sink.persist({
-						...metadata,
+						...(inputCountMetadata ?? metadata),
 						...(contextEpoch ? { contextEpoch } : {}),
 						type: "attempt_settled",
 						attemptId: receipt.attemptId,
@@ -816,7 +920,7 @@ export class InferenceCoordinator {
 					});
 					receiptWrites.push(write);
 					await write;
-					parentBudget?.observe(receipt);
+					if (!inputCountMetadata) parentBudget?.observe(receipt);
 				},
 			};
 			const signal = options?.signal

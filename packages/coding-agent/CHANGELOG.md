@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.8] - 2026-09-18
+
+- Fixed harness-state saves to replace files atomically, preserve failed mutations, and report corrupt state without overwriting it.
+- Changed Python kernel bootstrap to reuse package metadata and dependency planning within each startup operation.
+- Fixed accumulated TaskFrame overflow by preparing one bounded base and requiring an acknowledged context epoch before sending it.
+- Fixed literal public-history recovery to scan exact substrings and resume bounded searches against the original captured branch.
+- Added decoded UTF-8 byte windows for public fields and retained tool output, with actual offsets and omission flags.
+- Changed large IPython results to publish bounded error-first previews and finalized detail-channel excerpts. Full captured text is retained in session output logs and is available through source-qualified recovery references. Live output streaming and structured result fields are preserved; bytes discarded upstream remain unavailable.
+- Fixed kernel capture completeness when output arrives after a stream reaches its exact output limit.
+- Reused reduced task evidence for unchanged captured sources and process only appended evidence; rebuild on branch/source changes while retaining relation updates and complete-view budget checks.
+- Reused prepared dependency closure data within request selection and prepare the fixed history INSERT once per SQLite connection.
+- Allowed request-budget recovery to propose a fresh TaskFrame base without publishing it before the native epoch ACK.
+- Kept session paths after stable harness guidance and flush completed/error stream presentation before shutdown.
+- Changed automatic recovery to try bounded TaskFrame rebasing and legal public-view reduction before summary recovery; reject oversized mandatory context and size summaries against retained context and output allowance.
+- Reused prepared history-index inserts and guide repeated Python work toward small editable helpers with fresh inputs.
+- Fixed resuming overflowed sessions using canonical source order and restored assistant identities; filter failed replies before provider mapping and re-acknowledge unbudgeted summary checkpoints before sending.
+- Skipped automatic refinement when task and goal content are unchanged, and kept refinement history and version-only bookkeeping out of the main prompt.
+- Added opt-in scoped error-fix advice with explicit workspace memory CRUD and bounded deterministic retrieval.
+
 ## [1.0.7] - 2026-09-18
 
 - Fixed reopening saved sessions with native tool continuation history.

@@ -1491,3 +1491,101 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 		}
 	}
 });
+
+it("rebases a full TaskFrame only through an acknowledged full-view epoch", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "base-context-task-rebase-"));
+	const manager = await SessionManager.create(dir, dir);
+	const requests = new InferenceCoordinator(() => manager.bindRequestSink());
+	const compiler = new CanonicalContextCompiler();
+	const limits = { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 };
+	const frameLimits = { maxBytes: 4_096, maxReferences: 1, maxTextBytes: 128 };
+	try {
+		await manager.appendMessage({ role: "user", content: "Retain the current goal", timestamp: 0 });
+		const writer = manager[bindNativeEntryWriter]();
+		let rebased = false;
+		for (let index = 0; index < 8 && !rebased; index++) {
+			await writer.captureGoalOperation({
+				version: 1,
+				kind: "goal_operation",
+				operation: "create",
+				actor: "interactive",
+				actionId: `rebase-${index}`,
+				submittedText: `/goal Current goal ${index}`,
+			})({
+				goalId: `goal-${index}`,
+				objective: `Current goal ${index}`,
+				active: true,
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				continuationsUsed: 0,
+			});
+			const sink = manager.bindCompactionSink();
+			const captured = requests.capture(sink);
+			try {
+				const messages = await captured.readHistory((view) =>
+					compiler.compile(view, limits, undefined, frameLimits),
+				);
+				const context = getCanonicalEpochContext(messages)!;
+				if (!context.taskFrameRebased) continue;
+				rebased = true;
+				const sourceLeaf = manager.getLeafId();
+				expect(context.taskFrame!.messages).toHaveLength(1);
+				expect(context.taskFrame!.anchors).toEqual([]);
+				expect(context.taskFrame!.messages[0].content).toContain(`Current goal ${index}`);
+				expect(Buffer.byteLength(JSON.stringify(context.taskFrame!.messages))).toBeLessThanOrEqual(
+					frameLimits.maxBytes,
+				);
+				// Preparing or abandoning the candidate never publishes it into the old prefix.
+				const retry = await captured.readHistory((view) => compiler.compile(view, limits, undefined, frameLimits));
+				expect(getCanonicalEpochContext(retry)?.taskFrameRebased).toBe(true);
+				expect(manager.getLeafId()).toBe(sourceLeaf);
+				const boundary = captureRequestViewBoundary(messages, async (candidate) => {
+					expect(candidate.assessment).toBeUndefined();
+					expect(candidate.selectedUnitIds).toHaveLength(messages.length);
+					const prepared = prepareCanonicalEpoch(
+						messages,
+						candidate.selectedUnitIds,
+						"fixture-native-rebase/1",
+						limits.maxSourceBytes,
+					);
+					const entryId = await sink[appendContextEpoch](prepared.checkpoint, null);
+					return { sessionId: manager.getSessionId(), entryId };
+				});
+				expect(boundary.requiresEpoch).toBe(true);
+				const request: ProviderRequestRepresentation = {
+					api: "openai-completions",
+					provider: "deepseek",
+					url: "https://api.deepseek.com/chat/completions",
+					body: JSON.stringify({ model: "deepseek-flash", messages: convertToLlm(messages) }),
+				};
+				await selectRequestView(
+					boundary,
+					request,
+					{
+						kind: "deepseek-completions-text-tools-v1",
+						messageIndices: messages.map((_, position) => position),
+					},
+					undefined,
+					false,
+				);
+				expect(manager.getLeafId()).not.toBe(sourceLeaf);
+			} finally {
+				await captured.dispose();
+			}
+		}
+		expect(rebased).toBe(true);
+		const rebuilt = requests.capture();
+		try {
+			const messages = await rebuilt.readHistory((view) => compiler.compile(view, limits, undefined, frameLimits));
+			expect(getCanonicalEpochContext(messages)?.taskFrameRebased).toBeUndefined();
+			expect(getCanonicalEpochContext(messages)?.taskFrame?.messages).toHaveLength(1);
+		} finally {
+			await rebuilt.dispose();
+		}
+	} finally {
+		await requests.dispose();
+		await manager.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

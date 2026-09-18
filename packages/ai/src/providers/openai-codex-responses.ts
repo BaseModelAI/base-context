@@ -33,6 +33,7 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.js";
+import { abortableDelay } from "../utils/abortable-delay.js";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -126,20 +127,6 @@ function codexTransportError(error: unknown): Error {
 		{ ...info, kind: info.kind === "transport" || info.status !== undefined ? info.kind : "unknown" },
 		{ cause: error },
 	);
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(new Error("Request was aborted"));
-			return;
-		}
-		const timeout = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
-			clearTimeout(timeout);
-			reject(new Error("Request was aborted"));
-		});
-	});
 }
 
 export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
@@ -383,8 +370,14 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 				if (!(attempt < MAX_RETRIES && isRetryableError(lastError))) throw lastError;
 				await attempts.settle("failed");
-				const delayMs = BASE_DELAY_MS * 2 ** attempt;
-				await sleep(delayMs, options?.signal);
+				const retryAfter = response?.headers.get("retry-after");
+				const retryAfterMs = retryAfter
+					? /^\d+(\.\d+)?$/.test(retryAfter)
+						? Number(retryAfter) * 1000
+						: Date.parse(retryAfter) - Date.now()
+					: NaN;
+				const delayMs = Number.isFinite(retryAfterMs) ? Math.max(0, retryAfterMs) : BASE_DELAY_MS * 2 ** attempt;
+				await abortableDelay(delayMs, options?.signal);
 			}
 
 			if (!response?.ok) {
@@ -453,6 +446,7 @@ function buildRequestBody(
 		includeSystemPrompt: false,
 		onProjection,
 		pendingPublicMessageGroups: options?.attempts?.pendingPublicMessageGroups,
+		responsesMessageIds: options?.attempts?.responsesMessageIds,
 	});
 
 	const body: RequestBody = {
@@ -463,7 +457,7 @@ function buildRequestBody(
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
-		prompt_cache_key: options?.sessionId,
+		prompt_cache_key: options?.cacheRetention === "none" ? undefined : options?.sessionId,
 		tool_choice: "auto",
 		parallel_tool_calls: true,
 	};
@@ -702,6 +696,13 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
 const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
+const WEBSOCKET_AUTH_HEADERS = [
+	"authorization",
+	"chatgpt-account-id",
+	"openai-organization",
+	"openai-project",
+	"x-api-key",
+] as const;
 
 type WebSocketEventType = "open" | "message" | "error" | "close";
 type WebSocketListener = (event: unknown) => void;
@@ -723,6 +724,7 @@ interface CachedWebSocketContinuationState {
 interface CachedWebSocketConnection {
 	socket: WebSocketLike;
 	url: string;
+	headers: Headers;
 	busy: boolean;
 	idleTimer?: ReturnType<typeof setTimeout>;
 	continuation?: CachedWebSocketContinuationState;
@@ -886,7 +888,9 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 	entry.idleTimer = setTimeout(() => {
 		if (entry.busy) return;
 		closeWebSocketSilently(entry.socket, 1000, "idle_timeout");
-		websocketSessionCache.delete(sessionId);
+		if (websocketSessionCache.get(sessionId) === entry) {
+			websocketSessionCache.delete(sessionId);
+		}
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
 
@@ -1005,16 +1009,20 @@ async function acquireWebSocket(
 			clearTimeout(cached.idleTimer);
 			cached.idleTimer = undefined;
 		}
-		if (!cached.busy && isWebSocketReusable(cached.socket)) {
+		const matchesConnection =
+			cached.url === url && WEBSOCKET_AUTH_HEADERS.every((name) => cached.headers.get(name) === headers.get(name));
+		if (!cached.busy && matchesConnection && isWebSocketReusable(cached.socket)) {
 			cached.busy = true;
 			return {
 				socket: cached.socket,
 				entry: cached,
 				reused: true,
 				release: ({ keep } = {}) => {
-					if (!keep || !isWebSocketReusable(cached.socket)) {
+					if (!keep || !isWebSocketReusable(cached.socket) || websocketSessionCache.get(sessionId) !== cached) {
 						closeWebSocketSilently(cached.socket);
-						websocketSessionCache.delete(sessionId);
+						if (websocketSessionCache.get(sessionId) === cached) {
+							websocketSessionCache.delete(sessionId);
+						}
 						return;
 					}
 					cached.busy = false;
@@ -1032,21 +1040,22 @@ async function acquireWebSocket(
 				},
 			};
 		}
-		if (!isWebSocketReusable(cached.socket)) {
-			closeWebSocketSilently(cached.socket);
+		cached.continuation = undefined;
+		closeWebSocketSilently(cached.socket);
+		if (websocketSessionCache.get(sessionId) === cached) {
 			websocketSessionCache.delete(sessionId);
 		}
 	}
 
 	const socket = await connectWebSocket(url, headers, signal, timeoutMs);
-	const entry: CachedWebSocketConnection = { socket, url, busy: true };
+	const entry: CachedWebSocketConnection = { socket, url, headers: new Headers(headers), busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
 		socket,
 		entry,
 		reused: false,
 		release: ({ keep } = {}) => {
-			if (!keep || !isWebSocketReusable(entry.socket)) {
+			if (!keep || !isWebSocketReusable(entry.socket) || websocketSessionCache.get(sessionId) !== entry) {
 				closeWebSocketSilently(entry.socket);
 				if (entry.idleTimer) clearTimeout(entry.idleTimer);
 				if (websocketSessionCache.get(sessionId) === entry) {

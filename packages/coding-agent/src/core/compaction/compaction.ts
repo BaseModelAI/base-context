@@ -13,6 +13,8 @@ import {
 	type NativeCompactionOutputBinding,
 } from "../inference-coordinator.js";
 import {
+	COMPACTION_SUMMARY_PREFIX,
+	COMPACTION_SUMMARY_SUFFIX,
 	convertToLlm,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -578,8 +580,9 @@ export async function generateSummary(
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
+	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
-	const maxTokens = Math.floor(0.8 * reserveTokens);
+	const maxTokens = outputTokenLimit ?? Math.floor(0.8 * reserveTokens);
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
@@ -902,6 +905,7 @@ export async function compact(
 	thinkingLevel?: ThinkingLevel,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
 	requests?: InferenceCoordinator,
+	summaryCapacity?: (wrapper: string) => number | undefined,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -915,8 +919,35 @@ export async function compact(
 	} = preparation;
 	let summary: string;
 	const slices: SummarySlice[] = [];
+	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+	const fileSummary = formatFileOperations(readFiles, modifiedFiles);
+	const split = isSplitTurn && turnPrefixMessages.length > 0;
+	const splitSeparator = "\n\n---\n\n**Turn Context (split turn):**\n\n";
+	const wrapper =
+		COMPACTION_SUMMARY_PREFIX +
+		(split ? (messagesToSummarize.length ? "" : "No prior history.") + splitSeparator : "") +
+		fileSummary +
+		COMPACTION_SUMMARY_SUFFIX;
+	const capacity = summaryCapacity?.(wrapper);
+	const historyNeeded = !split || messagesToSummarize.length > 0;
+	const calls = Number(historyNeeded) + Number(split);
+	if (capacity !== undefined && capacity < calls)
+		throw new Error(
+			"Context capacity exceeded: required evidence, retained tail and summary wrapper leave no room for a summary.",
+		);
+	const historyLimit =
+		capacity === undefined
+			? undefined
+			: Math.min(
+					Math.floor(0.8 * settings.reserveTokens),
+					split && historyNeeded ? Math.max(1, Math.floor(capacity * 0.6)) : capacity,
+				);
+	const turnLimit =
+		capacity === undefined
+			? undefined
+			: Math.min(Math.floor(0.5 * settings.reserveTokens), capacity - (historyNeeded ? historyLimit! : 0));
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
+	if (split) {
 		// Split turns make two wire calls with different bodies; each needs its own identity.
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
@@ -932,6 +963,7 @@ export async function compact(
 							previousSummary,
 							thinkingLevel,
 							requests,
+							historyLimit,
 						),
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
@@ -945,11 +977,12 @@ export async function compact(
 					signal,
 					thinkingLevel,
 					requests,
+					turnLimit,
 				),
 			),
 		]);
 		slices.push(historyResult, turnPrefixResult);
-		summary = `${historyResult.summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.summary}`;
+		summary = `${historyResult.summary}${splitSeparator}${turnPrefixResult.summary}`;
 	} else {
 		const result = await summaryCall((callHeaders) =>
 			generateSummary(
@@ -963,13 +996,13 @@ export async function compact(
 				previousSummary,
 				thinkingLevel,
 				requests,
+				historyLimit,
 			),
 		);
 		slices.push(result);
 		summary = result.summary;
 	}
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
+	summary += fileSummary;
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
@@ -1009,8 +1042,9 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	requests?: InferenceCoordinator,
+	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
-	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
+	const maxTokens = outputTokenLimit ?? Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;

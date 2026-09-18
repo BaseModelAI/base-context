@@ -11,6 +11,7 @@ Base Context implements the [Agent Skills standard](https://agentskills.io/speci
 - [Locations](#locations)
 - [Built-in Skills](#built-in-skills)
 - [How Skills Work](#how-skills-work)
+- [Reusable Helpers Without Packaging](#reusable-helpers-without-packaging)
 - [Python-Backed Skills](#python-backed-skills)
 - [Creating Skills with Base Context](#creating-skills-with-base-context)
 - [Skill Commands](#skill-commands)
@@ -152,6 +153,80 @@ Generic non-native behavior is unchanged.
 
 Skills with `disable-model-invocation: true` are hidden from the startup skill list. They can still be invoked explicitly with `/skill:name`.
 
+## Reusable Helpers Without Packaging
+
+For repeated multi-step work, start with an ordinary named Python function in
+`ipython`. Keep one-off operations inline and prefer an existing project command
+when it already does the work. Give changing paths, selectors, output paths and
+options explicit parameters. Reuse the code, not its previous answer: read current
+inputs on every call. Do not capture an open handle or hidden mutable REPL state.
+
+After two useful occurrences across tasks, or an explicit request for reuse, save
+the function in an editable `.py` file with a short project markdown skill. This
+is a practical heuristic, not a repetition detector. A small helper needs no
+`pyproject.toml`, package installation, manifest or promotion step. Use the standard
+library and dependencies already available in the selected environment.
+
+For example, save `scripts/matching_lines.py` in
+`.base-context/skills/matching-lines/`:
+
+```python
+from pathlib import Path
+
+
+def matching_lines(path: str, needle: str, limit: int = 20) -> list[tuple[int, str]]:
+    """Read a current UTF-8 file; return literal matches with one-based lines."""
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    matches = []
+    with Path(path).open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, start=1):
+            if needle in line:
+                matches.append((line_number, line.rstrip("\r\n")))
+                if len(matches) == limit:
+                    break
+    return matches
+```
+
+Add the ordinary `SKILL.md` next to `scripts/`:
+
+```markdown
+---
+name: matching-lines
+description: Read current UTF-8 files for repeated literal line lookups. Inputs are path, needle and limit; output is a list of one-based line numbers and text.
+---
+Load scripts/matching_lines.py afresh with runpy.run_path, then call
+matching_lines(path, needle, limit=20). Resolve the script path against this
+skill directory. No matches returns an empty list; ordinary errors propagate.
+```
+
+Only the short skill description enters discovery. Load the instructions and code
+when the active task needs them. For this standard-library helper, a fresh load
+and call in `ipython` can be:
+
+```python
+from runpy import run_path
+
+matching_lines = run_path("/repo/.base-context/skills/matching-lines/scripts/matching_lines.py")["matching_lines"]
+matches = matching_lines("/repo/current.txt", "needle", limit=20)
+```
+
+After editing a loaded helper, execute its updated definition before calling it
+again, or load the saved script afresh as above. For project imports or commands,
+use the project's own environment instead of installing them into the kernel.
+Fresh execution of editable code does not replace the captured instruction body
+of an active native skill epoch.
+
+Saving a helper does not schedule or authorize execution. Invocation still needs
+the normal model/tool decision or an explicit user workflow, under the existing
+permissions. Do not add an import manager, dependency snapshots or per-call setup.
+
+For a useful comparison, include construction and failed attempts, then compare
+1, 2 and 5 uses with the direct path. Record construction time/tokens, later
+model/tool calls and total sequence cost; report time and money separately. A
+first use is not free warmup. Keep the direct path when saving and finding the
+helper costs more than it saves.
+
 ## Python-Backed Skills
 
 A Python-backed skill uses the same `SKILL.md` metadata and invocation behavior as a markdown skill, but also provides a Python package for the Python kernel.
@@ -242,7 +317,7 @@ To force the creation workflow explicitly, invoke the built-in skill command:
 Tell the agent three things:
 
 1. **Scope:** use `.base-context/skills/<name>/` for a project skill committed with the repository, or `~/.base-context/skills/<name>/` for a personal skill.
-2. **Kind:** ask for a markdown skill when the capability is primarily instructions; ask for a Python-backed skill when the agent should call reusable functionality from the Python REPL.
+2. **Kind:** use a markdown skill with editable scripts for small reusable helpers. Ask for a Python-backed skill when an installed module and its package dependencies are needed.
 3. **Contract:** describe the intended Python call, inputs, output, dependencies, credentials, and verification behavior.
 
 The agent should create `SKILL.md` in both cases. For a Python-backed skill it should also create `pyproject.toml` and `src/<import_name>/__init__.py`, expose a documented callable, and verify that the package imports in the kernel.
@@ -251,7 +326,7 @@ Use `/reload` to rediscover new or edited skill metadata. Start a fresh Base Con
 
 ### Installed Skills and Continual Harness Skills
 
-An installed Python-backed skill is a real package on disk that adds executable functionality to the kernel. A continual harness skill entry is a persisted description of a reusable Python call, including its reference and argument contract. `/refine` can create or update the latter after a repeated procedure emerges, but it does not replace packaging new functionality with `skill-creator`.
+An installed Python-backed skill is a real package on disk that adds executable functionality to the kernel. A continual harness skill entry is a persisted description of a reusable Python call, including its reference and argument contract. `/refine` can create or update the latter after a repeated procedure emerges, but a description does not create executable code. Small helpers can use the editable script and markdown-skill path above; an installed package is optional.
 
 ## Skill Commands
 

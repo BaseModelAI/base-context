@@ -6,7 +6,7 @@ import { HistoryIndex } from "../src/core/history-index.js";
 import { SessionManager } from "../src/core/session-manager.js";
 
 describe("canonical session history binding", () => {
-	it("indexes ACKed source lazily and restricts exact lookup and pages to the captured branch", async () => {
+	it("indexes ACKed source and restricts exact lookup and pages to the captured branch", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "base-context-history-"));
 		const session = await SessionManager.create(dir, dir);
 		try {
@@ -17,7 +17,8 @@ describe("canonical session history binding", () => {
 				);
 			}
 			const indexPath = join(session.getSessionArtifactDir()!, "history.sqlite");
-			expect(existsSync(indexPath)).toBe(false);
+			// Existing indexed-owner startup initializes the derived index before explicit history reads.
+			expect(existsSync(indexPath)).toBe(true);
 			const all = await session.pageHistory(0, 128);
 			expect(all.events.map((event) => event.id)).toEqual(ids);
 			expect(all.coverage).toBe("complete");
@@ -29,7 +30,7 @@ describe("canonical session history binding", () => {
 			expect(
 				bytes.subarray(entry!.locator.offset, entry!.locator.offset + entry!.locator.length).toString(),
 			).toContain("needle Foo.txt requirement 12");
-			session.branch(ids[0]);
+			await session.branchTo(ids[0]);
 			const alternative = await session.appendMessage({
 				role: "user",
 				content: "needle foo.txt alternative",
@@ -63,7 +64,7 @@ describe("canonical session history binding", () => {
 			const missing = await session.taskEvidence({ taskKey, itemId: "missing" });
 			expect(missing.entries).toEqual([]);
 			expect(missing.coverage).toBe("partial");
-			session.branch(ids[12]);
+			await session.branchTo(ids[12]);
 			expect((await session.taskEvidence({ taskKey })).entries).toEqual([]);
 			const native = await session.appendMessage(
 				{ role: "user", content: "Expanded request view", timestamp: 30 },
@@ -80,10 +81,13 @@ describe("canonical session history binding", () => {
 			expect((await session.getHistoryEntry(native))?.authority).toBe("unrecorded");
 			const originals = await session.taskEvidence();
 			expect(originals.entries).toHaveLength(1);
+			// Raw nativeOrigin fields cannot mint native-admission authority.
 			expect(originals.entries[0]).toMatchObject({
 				projection: {
 					text: "Preserve Foo.txt exactly",
-					authority: "user",
+					authority: "unrecorded",
+					attribution: "proposal",
+					claimedAuthority: "user",
 					source: { entryId: native, field: "/nativeOrigin/submitted/text" },
 				},
 			});
@@ -109,7 +113,7 @@ describe("canonical session history binding", () => {
 		}
 	});
 
-	it("keeps canonical writes usable during index failure and rebuilds a deleted derived index", async () => {
+	it("refuses unavailable indexed planning without poisoning the writer and rebuilds a deleted index", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "base-context-history-failure-"));
 		let session = await SessionManager.create(dir, dir);
 		const file = session.getSessionFile()!;
@@ -120,6 +124,13 @@ describe("canonical session history binding", () => {
 		try {
 			const first = await session.appendMessage({ role: "user", content: "literal must remain", timestamp: 0 });
 			await expect(session.getHistoryEntry(first)).rejects.toThrow("index unavailable");
+			const before = readFileSync(file, "utf8");
+			await expect(
+				session.appendMessage({ role: "user", content: "unverified append", timestamp: 1 }),
+			).rejects.toThrow("index unavailable");
+			expect(readFileSync(file, "utf8")).toBe(before);
+			expect(session.getLeafId()).toBe(first);
+			failedSync.mockRestore();
 			const second = await session.appendMessage({ role: "user", content: "later canonical fact", timestamp: 1 });
 			expect(session.getLeafId()).toBe(second);
 			expect(readFileSync(file, "utf8")).toContain("literal must remain");

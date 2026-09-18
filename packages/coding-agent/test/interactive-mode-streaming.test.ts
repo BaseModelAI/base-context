@@ -80,7 +80,7 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		toolOutputExpanded: false,
 		footer: { invalidate: vi.fn() },
 		activityTracker: new AgentActivityTracker(),
-		ui: { requestRender: vi.fn() } as unknown as TUI,
+		ui: { requestRender: vi.fn(), flushRender: vi.fn() } as unknown as TUI,
 		chatContainer: new Container(),
 		recapContainer: new Container(),
 		sessionRecap: "Updated files",
@@ -147,6 +147,8 @@ describe("InteractiveMode streaming events", () => {
 		});
 
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
+		expect(fakeThis.ui.requestRender).toHaveBeenCalled();
+		expect(fakeThis.ui.flushRender).not.toHaveBeenCalled();
 
 		await handleEvent.call(fakeThis, {
 			type: "message_end",
@@ -154,6 +156,7 @@ describe("InteractiveMode streaming events", () => {
 		});
 
 		expect(renderChat(fakeThis.chatContainer)).toContain("final response");
+		expect(fakeThis.ui.flushRender).toHaveBeenCalledOnce();
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
@@ -205,6 +208,10 @@ describe("InteractiveMode streaming events", () => {
 		await handleEvent.call(fakeThis, { type: "agent_end", messages: [] });
 
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
+		expect(fakeThis.ui.flushRender).toHaveBeenCalledOnce();
+		expect(vi.mocked(fakeThis.ui.flushRender).mock.invocationCallOrder[0]).toBeLessThan(
+			vi.mocked(fakeThis.checkShutdownRequested).mock.invocationCallOrder[0],
+		);
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});

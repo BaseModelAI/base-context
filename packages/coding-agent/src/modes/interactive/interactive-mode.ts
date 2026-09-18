@@ -5423,7 +5423,7 @@ export class InteractiveMode {
 					// already cleared it for any other run that claimed the slot.
 					this.sideQuestionBashDiscarded = undefined;
 					this.activeBashComponent = undefined;
-					this.ui.requestRender();
+					this.ui.flushRender();
 					break;
 				}
 				const component = this.activeBashComponent;
@@ -5448,7 +5448,7 @@ export class InteractiveMode {
 					this.sideQuestionBashComponent = undefined;
 					this.finishSideQuestionBash(event, component.getOutput());
 				}
-				this.ui.requestRender();
+				this.ui.flushRender();
 				break;
 			}
 
@@ -5538,7 +5538,7 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 					this.footer.invalidate();
 				}
-				this.ui.requestRender();
+				this.ui.flushRender();
 				break;
 
 			case "tool_execution_start": {
@@ -5573,7 +5573,7 @@ export class InteractiveMode {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
 					this.startedToolCalls.delete(event.toolCallId);
-					this.ui.requestRender();
+					this.ui.flushRender();
 				}
 				break;
 			}
@@ -5618,9 +5618,8 @@ export class InteractiveMode {
 				// Do not hold its start event behind a stats RPC; stale refreshes are discarded.
 				void this.refreshConnectionContextUsage();
 
+				this.ui.flushRender();
 				await this.checkShutdownRequested();
-
-				this.ui.requestRender();
 				break;
 
 			case "compaction_start": {

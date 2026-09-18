@@ -597,6 +597,7 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 	allowRecovery = true,
+	allowReprepare = true,
 ): Promise<AssistantMessage> {
 	const build: { projection: AgentContextBuildResult } = { projection: undefined };
 	let addedPartial = false;
@@ -767,7 +768,7 @@ async function streamAssistantResponse(
 			isLocalRequestPreparationError(outcome.error) &&
 			config.recoverRequestPreparation
 		) {
-			let recovered: boolean;
+			let recovered: boolean | "reprepare";
 			try {
 				recovered = await config.recoverRequestPreparation(outcome.error, signal);
 			} catch (error) {
@@ -775,10 +776,14 @@ async function streamAssistantResponse(
 				markLocalRequestPreparationError(error);
 				throw error;
 			}
-			if (recovered) {
-				// Rebuild/adopt the committed owner view. Keep this invocation's output collector,
-				// completed tools and emitted messages; only this unsent request gets one reprepare.
-				return streamAssistantResponse(context, config, signal, emit, streamFn, false);
+			if (recovered === "reprepare" && allowReprepare) {
+				// A bounded deterministic change (for example, rebasing a TaskFrame) must
+				// not consume the one recovery available if the new request still cannot fit.
+				return streamAssistantResponse(context, config, signal, emit, streamFn, true, false);
+			}
+			if (recovered === true) {
+				// Keep this invocation's output collector, completed tools and emitted messages.
+				return streamAssistantResponse(context, config, signal, emit, streamFn, false, false);
 			}
 		}
 		throw outcome.error;

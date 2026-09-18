@@ -77,6 +77,76 @@ function getCellBg(terminal: VirtualTerminal, row: number, col: number): { mode:
 	return { mode: cell.getBgColorMode(), color: cell.getBgColor() };
 }
 
+describe("TUI render coalescing", () => {
+	it("delivers a burst of updates and flushes its final text with one differential paint", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		component.lines = ["initial"];
+		let paints = 0;
+		component.render = () => {
+			paints++;
+			return component.lines;
+		};
+		tui.addChild(component);
+		tui.start();
+		tui.flushRender();
+		await terminal.flush();
+		paints = 0;
+		terminal.clearWrites();
+		const chunks = Array.from({ length: 100 }, (_, index) => `chunk ${index}`);
+		const delivered: string[] = [];
+		const cpuStart = process.cpuUsage();
+		try {
+			for (const chunk of chunks) {
+				delivered.push(chunk);
+				component.lines = [chunk];
+				tui.requestRender();
+			}
+			assert.deepStrictEqual(delivered, chunks);
+			assert.strictEqual(paints, 0);
+			tui.flushRender();
+			const cpu = process.cpuUsage(cpuStart);
+			assert.strictEqual(paints, 1);
+			console.info("terminal burst", {
+				callbacks: delivered.length,
+				paints,
+				bytes: Buffer.byteLength(terminal.getWrites()),
+				presentationCpuMicros: cpu.user + cpu.system,
+			});
+			await terminal.waitForRender();
+			assert.strictEqual(paints, 1, "Final flush cancels the pending scheduled paint");
+			assert.ok(terminal.getViewport().includes("chunk 99"));
+			assert.ok(!terminal.getWrites().includes("\x1b[2J"), "Completion does not force a full repaint");
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("flushes pending error text before inline stop and can restart rendering", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		component.lines = ["running"];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+		component.lines = ["Error: final captured output"];
+		tui.requestRender();
+		tui.stop();
+		await terminal.flush();
+		assert.ok(terminal.getScrollBuffer().includes("Error: final captured output"));
+		component.lines = ["restarted"];
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			assert.ok(terminal.getScrollBuffer().includes("restarted"));
+		} finally {
+			tui.stop();
+		}
+	});
+});
+
 describe("TUI diagnostics", () => {
 	for (const suppliedDirectory of [true, false]) {
 		it(`writes diagnostics to ${suppliedDirectory ? "the supplied directory" : "a private temporary directory by default"}`, async () => {

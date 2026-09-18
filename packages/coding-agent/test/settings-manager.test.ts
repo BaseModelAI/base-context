@@ -27,6 +27,17 @@ describe("SettingsManager", () => {
 		}
 	});
 
+	it("defaults automatic error-fix learning off and honors the project setting", () => {
+		expect(SettingsManager.create(projectDir, agentDir).getLearningEnabled()).toBe(false);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ learning: { enabled: true } }));
+		expect(SettingsManager.create(projectDir, agentDir).getLearningEnabled()).toBe(true);
+		writeFileSync(
+			join(projectDir, ".base-context", "settings.json"),
+			JSON.stringify({ learning: { enabled: false } }),
+		);
+		expect(SettingsManager.create(projectDir, agentDir).getLearningEnabled()).toBe(false);
+	});
+
 	describe("transport selection", () => {
 		async function captureSdkTransport(settingsManager: SettingsManager) {
 			const faux = registerFauxProvider();

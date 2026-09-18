@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import type * as PiAi from "@ponythewhite/base-context-ai";
-import type { AssistantMessage, Model } from "@ponythewhite/base-context-ai";
+import { type AssistantMessage, conservativeTextTokenCost, type Model } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	appendGlobalRefinement,
@@ -23,6 +23,7 @@ import {
 	getLocalHarnessStateDir,
 	getRefinementHistory,
 	getRefinementHistoryPath,
+	getWorkspaceHarnessStateDir,
 	type HarnessState,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -36,6 +37,7 @@ import {
 	type RefinementResult,
 	refineHarness,
 	saveHarnessState,
+	selectErrorFixAdvice,
 } from "../src/core/refinement/index.js";
 import type { CustomEntry } from "../src/core/session-manager.js";
 
@@ -148,6 +150,112 @@ function seedEntry(state: HarnessState, kind: RefinementKind, id = `${kind}_entr
 }
 
 describe("harness refinement", () => {
+	it("keeps refinement bookkeeping out of the main prompt until selected content changes", () => {
+		const state = loadHarnessState(makeTempDir());
+		seedEntry(state, "memory", "stable");
+		const before = formatHarnessStateForPrompt(state);
+		state.entries.memory.stable.version++;
+		state.entries.memory.stable.updated_at = "later";
+		state.refinements.push({ ...state.refinements[0]!, id: "no-applied-edits", changes: [] });
+		expect(formatHarnessStateForPrompt(state)).toBe(before);
+		expect(before).not.toContain("recent refinements:");
+		state.entries.memory.stable.content = "A changed selected lesson.";
+		expect(formatHarnessStateForPrompt(state)).toContain("A changed selected lesson.");
+		expect(formatHarnessStateForPrompt(state)).not.toBe(before);
+	});
+
+	it("retrieves persisted workspace repair advice in a later session without repeating bookkeeping", () => {
+		const root = makeTempDir();
+		const workspaceDir = getWorkspaceHarnessStateDir(join(root, "project"));
+		const state = loadHarnessState(workspaceDir, "workspace");
+		seedEntry(state, "memory", "error-fix:project-tests");
+		Object.assign(state.entries.memory["error-fix:project-tests"], {
+			scope: "workspace",
+			title: "Project tests",
+			content: "Problem: missing dependency. Fix: run .venv/bin/python.",
+			metadata: {
+				tool: "ipython",
+				operation: "project tests",
+				condition: "project .venv dependencies",
+				environment: { python: "3.12" },
+			},
+		});
+		state.refinements = [];
+		expect(saveHarnessState(workspaceDir, state, undefined, "workspace")).toBe(
+			join(workspaceDir, "harness-state.json"),
+		);
+		const global = loadHarnessState(join(root, "global"));
+		const laterSession = loadHarnessState(join(root, "another-session"), "local");
+		seedEntry(laterSession, "memory", "ordinary-note");
+		const captured = mergeHarnessStates(global, laterSession, loadHarnessState(workspaceDir, "workspace"));
+		const selection = {
+			enabled: true,
+			tools: ["ipython"],
+			goal: "Run PROJECT tests",
+			environment: { python: "3.12" },
+			countTokens: conservativeTextTokenCost,
+		};
+		const advice = selectErrorFixAdvice(captured, selection);
+		expect(advice).toContain("Problem: missing dependency. Fix: run .venv/bin/python.");
+		expect(conservativeTextTokenCost(advice)).toBeLessThanOrEqual(512);
+		expect(conservativeTextTokenCost("é🙂")).toBe(6); // Unprofiled UTF-8 byte bound, not chars/4 or exact chat tokens.
+		const prompt = formatHarnessStateForPrompt(captured, { errorFixSelection: selection });
+		expect(prompt.split("Problem: missing dependency.")).toHaveLength(2);
+		expect(prompt).toContain("[local:ordinary-note]");
+		expect(formatHarnessStateForPrompt(captured)).not.toContain("missing dependency");
+		captured.entries.memory["error-fix:project-tests"].version++;
+		captured.entries.memory["error-fix:project-tests"].updated_at = "later";
+		expect(formatHarnessStateForPrompt(captured, { errorFixSelection: selection })).toBe(prompt);
+		const otherProject = mergeHarnessStates(
+			global,
+			laterSession,
+			loadHarnessState(getWorkspaceHarnessStateDir(join(root, "other")), "workspace"),
+		);
+		expect(selectErrorFixAdvice(otherProject, selection)).toBe("");
+		for (const overrides of [
+			{ enabled: false },
+			{ tools: ["IPYTHON"] },
+			{ goal: "unrelated" },
+			{ environment: { python: "3.13" } },
+		])
+			expect(selectErrorFixAdvice(captured, { ...selection, ...overrides })).toBe("");
+	});
+
+	it("selects at most three ranked whole notes inside the complete advisory budget", () => {
+		const state = loadHarnessState(makeTempDir(), "local");
+		for (const id of ["large", "d", "b", "a", "c"]) {
+			seedEntry(state, "memory", `error-fix:${id}`);
+			Object.assign(state.entries.memory[`error-fix:${id}`], {
+				title: id,
+				content: id === "large" ? "x".repeat(600) : "Problem: x. Fix: y.",
+				metadata: { operation: id === "large" ? "project tests" : "tests" },
+			});
+		}
+		const options = {
+			enabled: true,
+			tools: ["ipython"],
+			operation: "project tests",
+			countTokens: conservativeTextTokenCost,
+		};
+		const advice = selectErrorFixAdvice(state, options);
+		expect(advice.match(/\[local:error-fix:[a-z]+\]/g)).toEqual([
+			"[local:error-fix:a]",
+			"[local:error-fix:b]",
+			"[local:error-fix:c]",
+		]);
+		expect(conservativeTextTokenCost(advice)).toBeLessThanOrEqual(512);
+		const measured: string[] = [];
+		const none = selectErrorFixAdvice(state, {
+			...options,
+			countTokens: (text) => {
+				measured.push(text);
+				return 513;
+			},
+		});
+		expect(none).toBe("");
+		expect(measured.every((text) => text.startsWith("\n\n## Error-fix advice\nPast advice only;"))).toBe(true);
+	});
+
 	it("rejects an edit when the target entry changed after planning", () => {
 		const harnessStateDir = makeTempDir();
 		const baselineState = loadHarnessState(harnessStateDir);

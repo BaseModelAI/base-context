@@ -1,6 +1,7 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.js";
 import type { AssistantMessageEventStream } from "./utils/event-stream.js";
 import type {
+	ProviderInputTokenCounter,
 	ProviderRequestProjection,
 	ProviderRequestRepresentation,
 	RequestTokenAssessment,
@@ -79,7 +80,7 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
-export type ProviderAttemptKind = "initial" | "retry" | "transport-fallback" | "transport-continuation";
+export type ProviderAttemptKind = "initial" | "retry" | "transport-fallback" | "transport-continuation" | "input-count";
 export type ProviderAttemptOutcome = "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
 /** Partial includes incomplete or inconsistent token reports. Complete does not imply known pricing or every cache breakdown. */
 export type ProviderUsageCompleteness = "none" | "partial" | "complete";
@@ -146,6 +147,8 @@ export interface ProviderAttemptReceipt extends ProviderAttemptInfo {
 
 /** Optional for SDK embeddings. Built-in adapters await both callbacks in their producer lifecycle. */
 export interface ProviderAttemptObserver {
+	/** Session-owned source ordinals aligned to Context.messages; absent entries keep positional Responses IDs. */
+	readonly responsesMessageIds?: readonly (number | undefined)[];
 	/** Owned source plan only. These original groups require actual public conversion before admission. */
 	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
 	/** Optional native pre-send budget gate. It does not admit a physical attempt. */
@@ -153,7 +156,8 @@ export interface ProviderAttemptObserver {
 	/** Optional native epoch-boundary selection; resolution means the owner accepted the candidate. */
 	prepareRequest?(
 		request: ProviderRequestRepresentation,
-		projection: ProviderRequestProjection,
+		projection?: ProviderRequestProjection,
+		countInput?: ProviderInputTokenCounter,
 	): Promise<string | undefined>;
 	/** Persist admission and return its local ID before the physical transport sends. */
 	admit(info: ProviderAttemptInfo): Promise<string>;

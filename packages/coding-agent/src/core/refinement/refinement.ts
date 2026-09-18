@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
 import type { Model } from "@ponythewhite/base-context-ai";
-import { getAgentDir } from "../../config.js";
+import { CONFIG_DIR_NAME, getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { readSessionHistoryImage } from "../export-html/history.js";
 import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
@@ -42,12 +42,11 @@ let pendingGlobalRefinementAppends = 0;
 let pendingGlobalRefinementBytes = 0;
 
 const DEFAULT_OVERVIEW_ENTRY_LIMIT = 6;
-const DEFAULT_OVERVIEW_REFINEMENT_LIMIT = 5;
 const DEFAULT_OVERVIEW_CONTENT_LIMIT = 180;
 
 export type RefinementKind = "prompt" | "memory" | "skill" | "subagent";
 export type RefinementAction = "create" | "update" | "delete";
-export type HarnessScope = "local" | "global";
+export type HarnessScope = "local" | "global" | "workspace";
 
 export interface HarnessEntry {
 	id: string;
@@ -264,7 +263,7 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
-	return value === "global" || value === "local" ? value : fallback;
+	return value === "global" || value === "local" || value === "workspace" ? value : fallback;
 }
 
 export function inferRefinementResultScope(result: RefinementResult): HarnessScope | undefined {
@@ -295,8 +294,15 @@ export function getLocalHarnessStateDir(sessionArtifactDir: string | undefined):
 	return sessionArtifactDir ? join(sessionArtifactDir, HARNESS_STATE_DIR_NAME) : undefined;
 }
 
-export function getHarnessStatePath(harnessStateDir: string = getGlobalHarnessStateDir()): string {
-	return join(harnessStateDir, "harness_state.json");
+export function getWorkspaceHarnessStateDir(projectRoot: string): string {
+	return join(projectRoot, CONFIG_DIR_NAME);
+}
+
+export function getHarnessStatePath(
+	harnessStateDir: string = getGlobalHarnessStateDir(),
+	scope: HarnessScope = "global",
+): string {
+	return join(harnessStateDir, scope === "workspace" ? "harness-state.json" : "harness_state.json");
 }
 
 const HARNESS_STATE_LIMITS: SessionHistoryReadLimits = {
@@ -367,7 +373,7 @@ export function loadHarnessState(
 	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
 ): HarnessState {
 	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
-	const statePath = getHarnessStatePath(harnessStateDir);
+	const statePath = getHarnessStatePath(harnessStateDir, scope);
 	if (!existsSync(statePath)) {
 		return emptyHarnessState();
 	}
@@ -416,22 +422,30 @@ export function loadHarnessState(
 	return state;
 }
 
-export function mergeHarnessStates(globalState: HarnessState, localState?: HarnessState): HarnessState {
+export function mergeHarnessStates(
+	globalState: HarnessState,
+	localState?: HarnessState,
+	workspaceState?: HarnessState,
+): HarnessState {
 	const merged = emptyHarnessState();
-	merged.schema = Math.max(globalState.schema, localState?.schema ?? 1);
-	for (const kind of Object.keys(merged.entries) as RefinementKind[]) {
-		for (const [id, entry] of Object.entries(globalState.entries[kind])) {
-			const cloned = cloneEntry(entry)!;
-			merged.entries[kind][id] = { ...cloned, scope: normalizeHarnessScope(cloned.scope, "global") };
+	const sources: [HarnessScope, HarnessState | undefined][] = [
+		["global", globalState],
+		["local", localState],
+		["workspace", workspaceState],
+	];
+	for (const [scope, state] of sources) {
+		if (!state) continue;
+		merged.schema = Math.max(merged.schema, state.schema);
+		for (const kind of Object.keys(merged.entries) as RefinementKind[]) {
+			for (const [id, entry] of Object.entries(state.entries[kind])) {
+				const cloned = cloneEntry(entry)!;
+				const scopedEntry = { ...cloned, scope: normalizeHarnessScope(cloned.scope, scope) };
+				const mergedId = merged.entries[kind][id] ? `${scopedEntry.scope}:${id}` : id;
+				merged.entries[kind][mergedId] = scopedEntry;
+			}
 		}
-		for (const [id, entry] of Object.entries(localState?.entries[kind] ?? {})) {
-			const cloned = cloneEntry(entry)!;
-			const scopedEntry = { ...cloned, scope: normalizeHarnessScope(cloned.scope, "local") };
-			const mergedId = merged.entries[kind][id] ? `${scopedEntry.scope}:${id}` : id;
-			merged.entries[kind][mergedId] = scopedEntry;
-		}
+		merged.refinements.push(...state.refinements);
 	}
-	merged.refinements = [...globalState.refinements, ...(localState?.refinements ?? [])];
 	return merged;
 }
 
@@ -439,6 +453,7 @@ export function saveHarnessState(
 	harnessStateDir: string,
 	state: HarnessState,
 	limits: SessionHistoryReadLimits = HARNESS_STATE_LIMITS,
+	scope: HarnessScope = "global",
 ): string {
 	const { maxEntries, maxSourceBytes } = harnessStateLimits(limits);
 	assertHarnessStateItemLimit(state, maxEntries);
@@ -446,7 +461,7 @@ export function saveHarnessState(
 	if (Buffer.byteLength(serialized) > maxSourceBytes) {
 		throw new HarnessStateLimitError("Harness state source byte limit exceeded");
 	}
-	const statePath = getHarnessStatePath(harnessStateDir);
+	const statePath = getHarnessStatePath(harnessStateDir, scope);
 	const tempPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
 	mkdirSync(harnessStateDir, { recursive: true });
 	try {
@@ -578,26 +593,96 @@ function compactText(text: string, maxLength: number): string {
 	return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
+export interface ErrorFixSelectionOptions {
+	enabled: boolean;
+	/** Captured available tool names; this does not predict the next tool call. */
+	tools: readonly string[];
+	operation?: string;
+	goal?: string;
+	/** Only values already known to the owner; retrieval never probes the environment. */
+	environment?: Readonly<Record<string, string>>;
+	/** Local request-meter text cost, including the complete rendered advice wrapper. */
+	countTokens: (text: string) => number;
+}
+
+function isErrorFixMemory(entry: HarnessEntry): boolean {
+	return entry.kind === "memory" && entry.id.startsWith("error-fix:");
+}
+
+function lessonWords(text: string): Set<string> {
+	return new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+}
+
+/** Optional contextual advice, never a replacement for current task evidence or policy. */
+export function selectErrorFixAdvice(state: HarnessState, options: ErrorFixSelectionOptions): string {
+	if (!options.enabled) return "";
+	const query = lessonWords(`${options.operation ?? ""} ${options.goal ?? ""}`);
+	if (query.size === 0) return "";
+	const ranked = Object.entries(state.entries.memory)
+		.filter(([, entry]) => isErrorFixMemory(entry))
+		.map(([key, entry]) => {
+			const metadata = entry.metadata;
+			if (typeof metadata.tool === "string" && !options.tools.includes(metadata.tool)) return undefined;
+			const environment = objectRecord(metadata.environment);
+			if (
+				environment &&
+				Object.entries(environment).some(
+					([name, value]) =>
+						typeof value === "string" &&
+						options.environment?.[name] !== undefined &&
+						options.environment[name] !== value,
+				)
+			)
+				return undefined;
+			const words = lessonWords(
+				[metadata.operation, metadata.condition].filter((value) => typeof value === "string").join(" "),
+			);
+			const score = [...words].filter((word) => query.has(word)).length;
+			return score > 0 ? { key, entry, score } : undefined;
+		})
+		.filter((candidate) => candidate !== undefined)
+		.sort(
+			(a, b) =>
+				b.score - a.score ||
+				(a.entry.id < b.entry.id ? -1 : a.entry.id > b.entry.id ? 1 : a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+		);
+	const header = "## Error-fix advice\nPast advice only; the active task and current observations take precedence.";
+	let advice = "";
+	let selected = 0;
+	for (const { entry } of ranked) {
+		const condition = typeof entry.metadata.condition === "string" ? `\nCondition: ${entry.metadata.condition}` : "";
+		const note = `- [${entry.scope ?? "global"}:${entry.id}] ${entry.title}${condition}\n${entry.content}`;
+		const candidate = `${advice || header}\n${note}`;
+		// Include the formatter's separating blank line in the local allowance.
+		const tokens = options.countTokens(`\n\n${candidate}`);
+		if (!Number.isFinite(tokens) || tokens < 0 || tokens > 512) continue;
+		advice = candidate;
+		if (++selected === 3) break;
+	}
+	return advice;
+}
+
+const ERROR_FIX_CREATION_GUIDANCE = `When learning is enabled, after repairing a useful recurring mistake and reaching the task's normal success condition, or after an explicit user correction, save a short problem/fix note with \`rlm.get_harness_state(scope="workspace").upsert("memory", title, "Problem: ...\\nFix: ...", id="error-fix:readable-key", metadata={"tool": "ipython", "operation": "...", "condition": "..."})\`. Update the matching key, not copies. Use local scope for session-only notes; global scope requires an explicit global action. Metadata may also contain an environment mapping of already-known versions. Do not copy secrets, tracebacks, source files, or history. Do not record cancellation, intentionally failing tests, or transient rate limits, and never ban a command permanently. Correct obsolete notes with ordinary edit/delete. Do not add a model call or test just to record a note. Missing optional memory support must not block the task.`;
+
 export function formatHarnessStateForPrompt(
 	state: HarnessState,
 	options: {
 		maxEntriesPerKind?: number;
-		maxRefinements?: number;
 		maxContentLength?: number;
 		includeIpythonExamples?: boolean;
 		includeShellExamples?: boolean;
 		includeRefineExamples?: boolean;
+		errorFixSelection?: ErrorFixSelectionOptions;
 	} = {},
 ): string {
 	const maxEntriesPerKind = options.maxEntriesPerKind ?? DEFAULT_OVERVIEW_ENTRY_LIMIT;
-	const maxRefinements = options.maxRefinements ?? DEFAULT_OVERVIEW_REFINEMENT_LIMIT;
 	const maxContentLength = options.maxContentLength ?? DEFAULT_OVERVIEW_CONTENT_LIMIT;
 	const includeIpythonExamples = options.includeIpythonExamples ?? true;
 	const includeRefineExamples = options.includeRefineExamples ?? includeIpythonExamples;
 	const lines = [
 		"# Continual Harness State",
 		"",
-		"Local continual harness entries belong to this Base Context session. Global continual harness entries persist across Base Context sessions.",
+		"Local continual harness entries belong to this Base Context session. Global continual harness entries persist across Base Context sessions. Workspace entries belong only to the selected project.",
 		"The continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.",
 		"Default to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.",
 		"Use these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.",
@@ -616,9 +701,9 @@ export function formatHarnessStateForPrompt(
 
 	let totalEntries = 0;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const entries = Object.values(state.entries[kind]).sort((a, b) =>
-			[a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")),
-		);
+		const entries = Object.values(state.entries[kind])
+			.filter((entry) => !isErrorFixMemory(entry))
+			.sort((a, b) => [a.path, a.title, a.id].join("\0").localeCompare([b.path, b.title, b.id].join("\0")));
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
 		// analogue of Claude Code's agent-type menu — rather than a bare count. In
@@ -640,7 +725,7 @@ export function formatHarnessStateForPrompt(
 					? ` ref=${compactText(JSON.stringify(entry.reference), maxContentLength)}`
 					: "";
 			lines.push(
-				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path}, v${entry.version})${referenceText}${argumentsText}: ${compactText(
+				`- [${entry.scope ?? "global"}:${entry.id}] ${entry.title} (${entry.path})${referenceText}${argumentsText}: ${compactText(
 					entry.content,
 					maxContentLength,
 				)}`,
@@ -657,24 +742,18 @@ export function formatHarnessStateForPrompt(
 		lines.push("No saved harness entries yet.", "");
 	}
 
-	lines.push(`recent refinements: ${state.refinements.length}`);
-	for (const event of state.refinements.slice(-maxRefinements)) {
-		const changes = event.changes.length > 0 ? event.changes.join(", ") : "no applied edits";
-		const outcome = event.outcome ? `; outcome: ${compactText(event.outcome, maxContentLength)}` : "";
-		lines.push(`- [${event.id}] ${compactText(event.trigger, maxContentLength)}: ${changes}${outcome}`);
+	if (options.errorFixSelection?.enabled) {
+		if (includeIpythonExamples) lines.push("", ERROR_FIX_CREATION_GUIDANCE);
+		const advice = selectErrorFixAdvice(state, options.errorFixSelection);
+		if (advice) lines.push("", advice);
 	}
-	const refinementOverflow = state.refinements.length - Math.min(state.refinements.length, maxRefinements);
-	if (refinementOverflow > 0) {
-		lines.push(`- +${refinementOverflow} older refinement events`);
-	}
-
 	return lines.join("\n").trim();
 }
 
 function overviewForPrompt(state: HarnessState): string {
 	const lines: string[] = [];
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
-		const entries = Object.values(state.entries[kind]);
+		const entries = Object.values(state.entries[kind]).filter((entry) => !isErrorFixMemory(entry));
 		lines.push(`${kind}: ${entries.length}`);
 		for (const entry of entries.slice(0, 40)) {
 			const content = entry.content.replace(/\s+/g, " ").slice(0, 240);

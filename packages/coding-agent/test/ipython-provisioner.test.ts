@@ -86,7 +86,7 @@ function writeFakeReplRuntime(
 const fs = require("node:fs");
 const readline = require("node:readline");
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
-emit({ event: "ready", protocol: 3, python: process.version });
+emit({ event: "ready", protocol: 4, python: process.version });
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
 	const request = JSON.parse(line);
@@ -327,6 +327,39 @@ describe("IpythonKernelProvisioner", () => {
 			startupListeners: Set<KernelBootstrapProgressHandler>;
 		};
 		expect(internals.startupListeners.has(onProgress)).toBe(false);
+	});
+
+	it("retains large captured output before publishing bounded channel excerpts", async () => {
+		const stdout = `HEAD\n${"filler\n".repeat(2000)}DECISIVE_MIDDLE\n${"more\n".repeat(2000)}TAIL`;
+		const traceback = `ValueError: important failure\n${"trace detail\n".repeat(1000)}`;
+		const execute = vi.fn<KernelClient["execute"]>().mockResolvedValue({
+			stdout,
+			stderr: "warning",
+			result: "result",
+			status: "error",
+			durationMs: 1,
+			outputComplete: false,
+			error: { ename: "ValueError", evalue: "e".repeat(12000), traceback: [traceback] },
+		});
+		const provisioner = {
+			ensure: async () => ({ execute }),
+			artifactDir: join(tempDir, "artifacts"),
+		} as unknown as IpythonKernelProvisioner;
+		const tool = createIpythonToolDefinition(tempDir, { provisioner });
+		const result = await tool.execute("tool-call", { code: "run()" }, undefined, undefined, {} as ExtensionContext);
+		const descriptor = result.details.retainedOutput!;
+		expect(descriptor).toMatchObject({ field: "/message/content/0/text", captureComplete: false });
+		const retained = readFileSync(join(provisioner.artifactDir!, descriptor.artifactId), "utf8");
+		expect(retained).toBe(`${stdout}\nwarning\nresult\n${traceback}`);
+		expect(Buffer.byteLength(retained)).toBe(descriptor.byteLength);
+		const preview = (result.content[0] as { text: string }).text;
+		expect(Buffer.byteLength(preview)).toBeLessThanOrEqual(8192);
+		expect(preview).toContain("ValueError: important failure");
+		expect(preview).not.toContain("DECISIVE_MIDDLE");
+		expect(preview).toContain("discarded bytes unavailable");
+		expect(Buffer.byteLength(JSON.stringify(result.details))).toBeLessThan(8192);
+		expect(result.details.stdout).toContain("omitted");
+		expect(result.details.error?.ename).toBe("ValueError");
 	});
 
 	it("surfaces backgroundOutput in details without changing model content", async () => {

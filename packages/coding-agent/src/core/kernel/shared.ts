@@ -141,6 +141,8 @@ export interface KernelSentAgentMessage {
 }
 
 export interface ExecuteResult {
+	/** Whether the finalized textual output was captured without host truncation or interruption. */
+	outputComplete?: boolean;
 	/** Host-selected public data transferred once to the normal finalized ipython result. */
 	nativeRecoveries?: NativeRecoveryResponse[];
 	stdout: string;

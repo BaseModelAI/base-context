@@ -38,7 +38,7 @@ export interface SessionHistoryReadView {
 		options?: HistoryPayloadReadOptions,
 	): Promise<CanonicalPayloadFragment | undefined>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
-	page(after?: number, limit?: number): Promise<HistoryIndexPage>;
+	page(after?: number, limit?: number, options?: { scan?: boolean }): Promise<HistoryIndexPage>;
 	search(query: string, limit?: number): Promise<HistoryIndexPage>;
 	taskEvidence(options?: TaskEvidenceOptions): Promise<TaskEvidencePage>;
 	readPayload(id: string, options?: HistoryPayloadReadOptions): Promise<CanonicalPayloadFragment | undefined>;
@@ -140,7 +140,8 @@ export function createBranchHistoryReadView(
 		readContextUpdatePayload: (id: string, target: ContextUpdateTarget, options: HistoryPayloadReadOptions = {}) =>
 			query(() => index.readContextUpdatePayload(sessionId, id, scope, target, options)),
 		get: (id: string) => query(() => index.get(sessionId, id, scope)),
-		page: (after = 0, limit = 64) => query(() => index.page(sessionId, after, scope.through, limit, scope)),
+		page: (after = 0, limit = 64, options: { scan?: boolean } = {}) =>
+			query(() => index.page(sessionId, after, scope.through, limit, scope, options)),
 		search: (text: string, limit = 16) => query(() => index.search(sessionId, text, scope.through, limit, scope)),
 		taskEvidence: (options: TaskEvidenceOptions = {}) => query(() => index.taskEvidence(sessionId, scope, options)),
 		readPayload: (id: string, options: HistoryPayloadReadOptions = {}) =>

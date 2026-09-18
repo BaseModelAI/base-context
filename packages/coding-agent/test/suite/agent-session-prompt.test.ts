@@ -7,6 +7,12 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
+import {
+	applyRefinementProposal,
+	getWorkspaceHarnessStateDir,
+	loadHarnessState,
+	saveHarnessState,
+} from "../../src/core/refinement/index.js";
 import { loadSkillsFromDir, SKILL_FILE_MAX_BYTES } from "../../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
@@ -46,6 +52,64 @@ describe("AgentSession prompt characterization", () => {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		}
+	});
+
+	it("captures opt-in workspace advice at task boundaries and routes kernel CRUD to the selected project", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { learning: { enabled: true } },
+			tools: [
+				{
+					name: "project_test",
+					label: "Project tests",
+					description: "Run project tests",
+					parameters: Type.Object({}),
+					execute: async () => ({ content: [{ type: "text", text: "passed" }], details: {} }),
+				},
+			],
+		});
+		harnesses.push(harness);
+		const workspaceDir = getWorkspaceHarnessStateDir(harness.tempDir);
+		const state = loadHarnessState(workspaceDir, "workspace");
+		const fix = "Use the project interpreter for project tests.";
+		applyRefinementProposal(
+			state,
+			{
+				summary: "Remember a repaired test invocation",
+				rationale: "Normal project tests passed",
+				expectedOutcome: "Use the correct interpreter",
+				edits: [
+					{
+						action: "create",
+						kind: "memory",
+						id: "error-fix:project-tests",
+						title: "Project test invocation",
+						content: fix,
+						metadata: { tool: "project_test", operation: "project tests", condition: "project test invocation" },
+					},
+				],
+			},
+			{ id: "repaired-project-tests" },
+		);
+		saveHarnessState(workspaceDir, state, undefined, "workspace");
+		const kernelEnv = (harness.session as unknown as { _rlmKernelEnv(): Record<string, string> })._rlmKernelEnv();
+		expect(kernelEnv.BASE_CONTEXT_WORKSPACE_HARNESS_STATE_DIR).toBe(workspaceDir);
+		expect(kernelEnv.BASE_CONTEXT_HARNESS_STATE_DIR).not.toBe(workspaceDir);
+		expect(kernelEnv.BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR).not.toBe(workspaceDir);
+		const prompts: string[] = [];
+		harness.setResponses(
+			[1, 2].map(() => (context) => {
+				prompts.push(context.systemPrompt ?? "");
+				return fauxAssistantMessage("done");
+			}),
+		);
+		await harness.session.prompt("Run project tests.");
+		expect(prompts[0]).toContain(fix);
+		expect(prompts[0].split(fix)).toHaveLength(2);
+		harness.settingsManager.applyOverrides({ learning: { enabled: false } });
+		await harness.session.prompt("Run project tests again.");
+		expect(prompts[1]).not.toContain(fix);
+		expect(loadHarnessState(workspaceDir, "workspace").entries.memory["error-fix:project-tests"].content).toBe(fix);
 	});
 
 	it("releases action admission when ownership commit throws", async () => {
@@ -1566,9 +1630,9 @@ stale post-hook extension instructions`,
 		harness.session.resumeQueuedWork();
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["/review keep literal", "/testcmd keep literal"]);
-		const primaryEntries = harness.sessionManager
-			.getEntries()
-			.filter((entry) => entry.type === "message" && entry.message.role === "user");
+		const primaryEntries = (await harness.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "message" && entry.message.role === "user",
+		);
 		expect(primaryEntries).toHaveLength(2);
 		for (const entry of primaryEntries) {
 			expect(entry).toMatchObject({
@@ -1644,7 +1708,10 @@ stale post-hook extension instructions`,
 		harnesses.push(harness);
 		const commandStarted = createDeferred();
 		const commandGate = createDeferred();
-		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
+		vi.spyOn(
+			harness.session as unknown as { _refineAccepted: Harness["session"]["refine"] },
+			"_refineAccepted",
+		).mockImplementation(async () => {
 			commandStarted.resolve();
 			await commandGate.promise;
 			return {
@@ -1670,7 +1737,10 @@ stale post-hook extension instructions`,
 		harnesses.push(harness);
 		const commandStarted = createDeferred();
 		const commandGate = createDeferred();
-		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
+		vi.spyOn(
+			harness.session as unknown as { _refineAccepted: Harness["session"]["refine"] },
+			"_refineAccepted",
+		).mockImplementation(async () => {
 			commandStarted.resolve();
 			await commandGate.promise;
 			return {

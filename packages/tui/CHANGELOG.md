@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.8] - 2026-09-18
+
+- Flushed final pending terminal output through the existing coalesced differential renderer.
+
 ## [1.0.7] - 2026-09-18
 
 - Updated lockstep packaging for the Base Context 1.0.7 session-resume fix.

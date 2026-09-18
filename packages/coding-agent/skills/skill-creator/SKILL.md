@@ -14,9 +14,26 @@ A skill is a directory with a `SKILL.md` file (YAML frontmatter + markdown instr
 
 Before writing a Python-backed skill, read [references/python-skills.md](references/python-skills.md) for the package contract.
 
+## Small Reusable Helpers
+
+Keep a one-off operation inline. For repeated multi-step work, first write an
+ordinary named function with explicit inputs and a result docstring. Read current
+data on each call; do not capture old answers, open handles or hidden REPL state.
+After two useful occurrences across tasks, or an explicit reuse request, save an
+editable `scripts/<name>.py` and a short project `SKILL.md` with the existing name,
+description and invocation conventions. A small helper does not need a Python
+package, `pyproject.toml`, installation or promotion workflow.
+
+After edits, execute the updated definition or invoke the saved script afresh
+(for example with `runpy.run_path` in the selected environment). Discover through
+the short description and load code only when needed. Prefer the standard library
+and existing dependencies; no per-call installation or automatic scheduling.
+Ordinary errors remain ordinary tool results. Existing execution permissions and
+native instruction-epoch rules still apply.
+
 ## Creating a Skill
 
-1. **Pick the kind.** Default to markdown. Go Python only when the agent should *call* the capability (`await my_skill(...)`) instead of following instructions.
+1. **Pick the kind.** Default to markdown, including small editable Python scripts. Use a Python-backed package when the capability needs an installed module such as `await my_skill(...)`, not just an ordinary helper function.
 2. **Pick the location.** Ask the user when it is not obvious from context:
    - Project skill, shared via the repo: `.base-context/skills/<name>/`
    - Personal global skill: `~/.base-context/skills/<name>/`, or `$BASE_CONTEXT_HOME/skills/<name>/` when configured

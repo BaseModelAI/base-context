@@ -528,8 +528,11 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						],
 						timestamp: m.timestamp,
 					};
-				case "user":
 				case "assistant":
+					// Providers omit failed/aborted replies. Apply that same omission
+					// before capturing the canonical-to-provider positions on resume.
+					return m.stopReason === "error" || m.stopReason === "aborted" ? undefined : m;
+				case "user":
 				case "toolResult":
 					return m;
 				default:

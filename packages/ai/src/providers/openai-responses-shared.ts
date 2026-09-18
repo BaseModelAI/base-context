@@ -124,6 +124,8 @@ export interface OpenAIResponsesStreamOptions {
 
 export interface ConvertResponsesMessagesOptions {
 	includeSystemPrompt?: boolean;
+	/** Session-owned source ordinals aligned to the original context, never transformed positions. */
+	responsesMessageIds?: readonly (number | undefined)[];
 	/** Internal native projection capture during this conversion, never a second conversion. */
 	onProjection?: (projection: ProviderRequestProjection) => void;
 	pendingPublicMessageGroups?: readonly (readonly number[])[];
@@ -136,7 +138,8 @@ export interface ConvertResponsesToolsOptions {
 function captureResponsesProjection<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
-	transformed: Context["messages"],
+	unchangedSource: boolean,
+	positionDependentMessageIndices: ReadonlySet<number>,
 	input: ResponseInput,
 	messageIndices: readonly (number | null)[],
 	pendingPublicMessageGroups: readonly (readonly number[])[],
@@ -149,11 +152,7 @@ function captureResponsesProjection<TApi extends Api>(
 	)
 		return;
 	// No speculative conversion: these are the messages and items from the one normal converter pass.
-	if (
-		transformed.length !== context.messages.length ||
-		transformed.some((message, index) => JSON.stringify(message) !== JSON.stringify(context.messages[index]))
-	)
-		return;
+	if (!unchangedSource) return;
 	const items = context.messages.map((): ResponseInput => []);
 	for (const [index, sourceIndex] of messageIndices.entries()) {
 		if (sourceIndex !== null) items[sourceIndex].push(input[index]);
@@ -219,7 +218,7 @@ function captureResponsesProjection<TApi extends Api>(
 				const item = rendered[blockIndex];
 				if (block.type === "text") {
 					if (!matchesResponsesTextSignature(block.textSignature, item)) return;
-					if (block.textSignature === undefined && !generatedMessageIndices.includes(index))
+					if (positionDependentMessageIndices.has(index) && !generatedMessageIndices.includes(index))
 						generatedMessageIndices.push(index);
 				} else if (block.type === "thinking") {
 					if (!block.thinkingSignature || item.type !== "reasoning") return;
@@ -389,6 +388,23 @@ export function convertResponsesMessages<TApi extends Api>(
 		pendingPublicMessageGroups,
 	);
 
+	const unchangedSource =
+		(options?.onProjection !== undefined || options?.responsesMessageIds !== undefined) &&
+		transformedMessages.length === context.messages.length &&
+		transformedMessages.every(
+			(message, index) => JSON.stringify(message) === JSON.stringify(context.messages[index]),
+		);
+	const sourceIds = options?.responsesMessageIds;
+	const assignedIds = sourceIds?.filter((id) => id !== undefined);
+	const responsesMessageIds =
+		unchangedSource &&
+		sourceIds?.length === context.messages.length &&
+		assignedIds?.every((id) => Number.isSafeInteger(id) && id >= 0) &&
+		new Set(assignedIds).size === assignedIds.length
+			? sourceIds
+			: undefined;
+	const positionDependentMessageIndices = new Set<number>();
+
 	const includeSystemPrompt = options?.includeSystemPrompt ?? true;
 	if (includeSystemPrompt && context.systemPrompt) {
 		const role = model.reasoning ? "developer" : "system";
@@ -438,7 +454,7 @@ export function convertResponsesMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api;
 
-			for (const block of msg.content) {
+			for (const [blockIndex, block] of msg.content.entries()) {
 				if (block.type === "thinking") {
 					if (block.thinkingSignature) {
 						const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
@@ -450,7 +466,13 @@ export function convertResponsesMessages<TApi extends Api>(
 					// OpenAI requires id to be max 64 characters
 					let msgId = parsedSignature?.id;
 					if (!msgId) {
-						msgId = `msg_${msgIndex}`;
+						const sourceId = responsesMessageIds?.[sourceIndex];
+						if (sourceId !== undefined) {
+							msgId = `msg_src_${sourceId}_${blockIndex}`;
+						} else {
+							msgId = `msg_${msgIndex}_${blockIndex}`;
+							positionDependentMessageIndices.add(sourceIndex);
+						}
 					} else if (msgId.length > 64) {
 						msgId = `msg_${shortHash(msgId)}`;
 					}
@@ -535,7 +557,8 @@ export function convertResponsesMessages<TApi extends Api>(
 		const projection = captureResponsesProjection(
 			model,
 			context,
-			transformedMessages,
+			unchangedSource,
+			positionDependentMessageIndices,
 			messages,
 			messageIndices,
 			pendingPublicMessageGroups,

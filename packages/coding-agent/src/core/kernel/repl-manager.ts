@@ -876,6 +876,8 @@ export class ReplKernelManager {
 						execution.stdout = execution.stdout.slice(0, execution.maxChars);
 						execution.stdoutTruncated = true;
 					}
+				} else if (text.length > 0) {
+					execution.stdoutTruncated = true;
 				}
 			} else {
 				if (execution.stderr.length < execution.maxChars) {
@@ -884,6 +886,8 @@ export class ReplKernelManager {
 						execution.stderr = execution.stderr.slice(0, execution.maxChars);
 						execution.stderrTruncated = true;
 					}
+				} else if (text.length > 0) {
+					execution.stderrTruncated = true;
 				}
 			}
 			execution.opts.onStream?.(text, type);
@@ -1173,6 +1177,12 @@ export class ReplKernelManager {
 			}
 
 			execution.resolve({
+				outputComplete:
+					status !== "aborted" &&
+					!execution.stdoutTruncated &&
+					!execution.stderrTruncated &&
+					!execution.backgroundOutputTruncated &&
+					(execution.result?.length ?? 0) <= execution.maxChars,
 				stdout,
 				stderr,
 				result,

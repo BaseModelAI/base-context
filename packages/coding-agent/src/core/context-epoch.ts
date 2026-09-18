@@ -322,6 +322,7 @@ export function contextEpochRepresentation(
 	assessment: RequestTokenAssessment | undefined,
 	maxBytes: number,
 	unbudgetedPublic = false,
+	responseItemIdentity?: string,
 ): string {
 	if (
 		(!assessment && !unbudgetedPublic) ||
@@ -386,6 +387,7 @@ export function contextEpochRepresentation(
 	return stringifyBoundedJson(
 		{
 			renderer: CONTEXT_EPOCH_RENDERER,
+			...(responseItemIdentity ? { responseItemIdentity } : {}),
 			api: request.api,
 			provider: request.provider,
 			route: identity.route,

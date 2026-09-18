@@ -36,6 +36,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	conservativeTextTokenCost,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isTransientProviderFailure,
@@ -249,6 +250,7 @@ import {
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
 	getRefinementHistory,
+	getWorkspaceHarnessStateDir,
 	type HarnessState,
 	inferRefinementResultScope,
 	loadGlobalRefinementHistory,
@@ -305,6 +307,7 @@ import {
 	createNativeRecoveryRefusal,
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
 	NativeRecoveryBudgetRefusal,
+	NativeRecoveryCursorStore,
 	type NativeRecoveryInput,
 	type NativeRecoveryResponse,
 	parseNativeRecoveryInput,
@@ -1235,6 +1238,12 @@ export class AgentSession {
 	readonly requests: InferenceCoordinator;
 	readonly runtimeServices: SessionRuntimeServices;
 	private readonly _contextCompiler = new CanonicalContextCompiler();
+	private _failedAutomaticCompaction?: {
+		key: string;
+		systemPrompt: string;
+		tools: Agent["state"]["tools"];
+		settings: string;
+	};
 	private readonly _contextEpochsEnabled: boolean;
 	private readonly _initialContextMode: ContextMode;
 	private _contextMode: ContextMode;
@@ -1428,6 +1437,8 @@ export class AgentSession {
 
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _nativeRecoveryTools = new WeakMap<AgentTool, AgentTool["execute"]>();
+	private _nativeRecoveryCursors = new NativeRecoveryCursorStore();
+	private _nativeRecoveryCursorSource?: string;
 	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean; skillOwner?: NativeSkillSelectionOwner }>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
@@ -1437,6 +1448,7 @@ export class AgentSession {
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 	private _assistantTurnsSinceAutoRefine = 0;
 	private _lastAutoRefineReviewAt = 0;
+	private _lastAutoRefineEvidence?: Awaited<ReturnType<AgentSession["_autoRefineEvidence"]>>;
 	private _autoRefineInProgress = false;
 	private _autoRefineAdmissionClosed = false;
 	private readonly _autoRefineOperations = new Set<Promise<void>>();
@@ -1599,7 +1611,11 @@ export class AgentSession {
 				if (messages.length > limits.maxMessages) throw new Error("Canonical context message budget exceeded");
 				const epochContext = getCanonicalEpochContext(messages);
 				if (epochContext) this._contextMode = epochContext.mode;
-				const unbudgetedPublic = !contextEpochsEnabled && Boolean(epochContext?.toolContinuations?.length);
+				const unbudgetedPublic =
+					!contextEpochsEnabled &&
+					Boolean(
+						epochContext?.toolContinuations?.length || epochContext?.taskFrameRebased || epochContext?.checkpoint,
+					);
 				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint || unbudgetedPublic);
 				const skillPolicy = nativeSkills ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined;
 				if (this._baseSystemPromptOptions.nativeSkillSelection !== skillPolicy) {
@@ -1639,6 +1655,7 @@ export class AgentSession {
 					);
 					let accepted: string | undefined;
 					let acceptedBody: string | undefined;
+					let acceptedResponseIdentity: string | undefined;
 					let acceptedReplayContract: ContextReplayContract | undefined;
 					let acknowledged: CompactionCommit | undefined;
 					const commitFailure = (cause: unknown) => {
@@ -1665,6 +1682,7 @@ export class AgentSession {
 								candidate.assessment,
 								limits.maxSourceBytes,
 								unbudgetedPublic,
+								candidate.responseItemIdentity,
 							);
 							const replayContract =
 								"replayContract" in candidate.projection &&
@@ -1680,6 +1698,7 @@ export class AgentSession {
 								candidate.publicMessages !== undefined,
 								candidate.selectedUnitIds,
 							]);
+							acceptedResponseIdentity = candidate.responseItemIdentity;
 							if (accepted !== undefined) {
 								if (accepted !== selection)
 									throw new Error("Captured epoch request selection changed after acceptance");
@@ -1762,12 +1781,19 @@ export class AgentSession {
 									}
 									return;
 								}
+								if (epochContext.taskFrameRebased && acceptedBody === undefined)
+									throw new Error("Task frame rebase requires a committed epoch boundary");
 								if (!committed) return;
 								if (acceptedBody === undefined || request.body !== acceptedBody)
 									throw new Error("Committed context epoch requires a compatible final provider projection");
 								if (
-									contextEpochRepresentation(request, assessment, limits.maxSourceBytes, unbudgetedPublic) !==
-									committed.representation
+									contextEpochRepresentation(
+										request,
+										assessment,
+										limits.maxSourceBytes,
+										unbudgetedPublic,
+										acceptedResponseIdentity,
+									) !== committed.representation
 								)
 									throw new Error("Context epoch representation changed without a committed boundary");
 								if (committed.resourceRevision !== epochContext.resourceRevision)
@@ -1886,9 +1912,41 @@ export class AgentSession {
 				error.source.leafId !== owner.manager.getLeafId()
 			)
 				return false;
+			// Rebase this captured frame before paying for a summary. The replacement still
+			// needs the normal full provider projection and epoch ACK before MAIN can send.
+			if (error.taskFrameRebaseAvailable) {
+				this._contextCompiler.requestTaskFrameRebase();
+				return "reprepare";
+			}
+			if (error.mandatoryAssessment?.status === "over-budget") return false;
 			// The loop released its unsent inference and captured projection before this handoff.
 			// Continue in-place only after the real summary ACK and canonical owner adoption.
-			return this._runAutoCompaction("threshold", false, owner, true);
+			const key = error.getCompactionKey();
+			const current = {
+				key: key ?? "",
+				systemPrompt: this.agent.state.systemPrompt,
+				tools: this.agent.state.tools,
+				settings: JSON.stringify(this.settingsManager.getCompactionSettings()),
+			};
+			const failed = this._failedAutomaticCompaction;
+			if (
+				key &&
+				failed &&
+				failed.key === key &&
+				failed.systemPrompt === current.systemPrompt &&
+				failed.tools === current.tools &&
+				failed.settings === current.settings
+			)
+				return false;
+			this._failedAutomaticCompaction = undefined;
+			let succeeded = false;
+			try {
+				succeeded = await this._runAutoCompaction("threshold", false, owner, true, error);
+				return succeeded;
+			} finally {
+				if (!succeeded && key && this._isCompactionSourceOwnerCurrent(owner))
+					this._failedAutomaticCompaction = current;
+			}
 		});
 		this.agent.bindProviderFailureRecoveryOwner({
 			recover: (message, signal) => this._handleRetryableError(message, signal),
@@ -5487,6 +5545,9 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
+		this._failedAutomaticCompaction = undefined;
+		this._contextCompiler.clear();
+		this._nativeRecoveryCursors.clear();
 		for (const admission of this._rlmChildAdmissions) admission.cancel("Parent session disposed");
 		if (this._disposeAsyncPromise) return this._disposeAsyncPromise;
 		this.closeAutoRefineAdmission();
@@ -5689,6 +5750,9 @@ export class AgentSession {
 	}
 
 	dispose(): void {
+		this._failedAutomaticCompaction = undefined;
+		this._contextCompiler.clear();
+		this._nativeRecoveryCursors.clear();
 		if (this._disposed) {
 			return;
 		}
@@ -5972,6 +6036,7 @@ export class AgentSession {
 	private _rebuildSystemPrompt(
 		toolNames: string[],
 		nativeEpoch = this.sessionManager.isPersisted() && this._contextEpochsEnabled,
+		operation = this._baseSystemPromptOptions?.errorFixSelection?.operation,
 	): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
@@ -6010,6 +6075,14 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
+			errorFixSelection: {
+				enabled: this.settingsManager.getLearningEnabled(),
+				tools: validToolNames,
+				operation,
+				goal: this._goalState.objective,
+				environment: { cwd: this._cwd, platform: process.platform },
+				countTokens: conservativeTextTokenCost,
+			},
 			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
@@ -7705,6 +7778,18 @@ export class AgentSession {
 						}
 						const preparationAction = activeTurns().at(-1);
 						if (!preparationAction) return undefined;
+						if (
+							this.settingsManager.getLearningEnabled() ||
+							this._baseSystemPromptOptions.errorFixSelection?.enabled
+						) {
+							// Capture advice for this task before extensions and provider preparation.
+							// Tool continuations keep the same prompt until the next task boundary.
+							this._baseSystemPrompt = this._rebuildSystemPrompt(
+								this.getActiveToolNames(),
+								this._baseSystemPromptOptions.nativeSkillSelection !== undefined,
+								preparationAction.payload.text,
+							);
+						}
 						const basePromptSnapshot = this._baseSystemPrompt;
 						const result = await this._extensionRunner.emitBeforeAgentStart(
 							preparationAction.payload.text,
@@ -9481,6 +9566,7 @@ export class AgentSession {
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
 		allowShortSession?: boolean;
 		budgetPressure?: boolean;
+		capacity?: PublicContextBudgetError;
 	}): Promise<CompactionCommit> {
 		const {
 			model,
@@ -9597,6 +9683,17 @@ export class AgentSession {
 						thinkingLevel,
 						summaryCall,
 						summaryRequests,
+						options.capacity
+							? (wrapper) =>
+									options.capacity!.remainingSummaryTokens(
+										new Set(
+											pathEntries
+												.slice(pathEntries.findIndex((entry) => entry.id === preparation.firstKeptEntryId))
+												.map((entry) => entry.id),
+										),
+										wrapper,
+									)
+							: undefined,
 					);
 					({ summary, firstKeptEntryId, tokensBefore, details, usage } = nativeCompaction);
 				} catch (error) {
@@ -10190,9 +10287,9 @@ export class AgentSession {
 				this._compactAutoRefinePending = false;
 			}
 		} catch (error) {
-			// Auto-refine is opportunistic; manual /refine remains available.
-			// Stamp the cooldown so a persistently failing refine doesn't retry
-			// (via a retained pending review) on every agent end.
+			// Consume this exact automatic proposal after failure. New evidence can
+			// request a new review; manual /refine remains independent.
+			this._pendingAutoRefineReview = undefined;
 			this._lastAutoRefineReviewAt = Date.now();
 			if (error instanceof RefineSkippedError) {
 				// A skipped round is consumed like a reviewer decline, not retained for retry.
@@ -10237,13 +10334,91 @@ export class AgentSession {
 		return { model: { ...model, cost: { ...model.cost } }, thinkingLevel: selection.thinkingLevel, explicit: true };
 	}
 
+	private async _autoRefineEvidence(harnessState: HarnessState) {
+		const manager = this.sessionManager;
+		const goalEvidence = ({ active, status, goalId, objective, tokenBudget, lastError }: GoalState) => ({
+			active,
+			status,
+			goalId,
+			objective,
+			tokenBudget,
+			lastError,
+		});
+		const frontier = manager.supportsCapturedHistoryReads()
+			? await manager.readBranchHistory(async (history) => {
+					const goal = (await history.branchBootstrap()).goalState;
+					const limits = this.settingsManager.getCanonicalContextLimits();
+					let goalState = emptyGoalState();
+					if (goal) {
+						const hydrated = await history.hydrateEntry(goal.id, limits.maxSourceBytes);
+						if (
+							!hydrated ||
+							hydrated.source.retention === "retained-import" ||
+							hydrated.entry.type !== "custom" ||
+							hydrated.entry.customType !== GOAL_STATE_CUSTOM_TYPE ||
+							!isPersistedGoalState(hydrated.entry.data)
+						)
+							throw new RefineSkippedError("Automatic refinement goal source is unavailable or ineligible");
+						goalState = normalizeGoalState(hydrated.entry.data);
+					}
+					let id = history.source.leafId;
+					const maxEntries = limits.maxMessages;
+					for (let scanned = 0; scanned < maxEntries; scanned++) {
+						const entry = id ? await history.get(id) : undefined;
+						if (id && !entry) throw new RefineSkippedError("Automatic refinement task frontier is unavailable");
+						const message = entry?.kind === "message" ? entry : undefined;
+						if (message || !entry)
+							return {
+								sessionId: history.source.sessionId,
+								sessionFile: history.source.sessionFile,
+								message: message ? ([message.id, message.revision] as const) : undefined,
+								goal: goalEvidence(goalState),
+							};
+						id = entry.parentId;
+					}
+					throw new RefineSkippedError("Automatic refinement task frontier exceeds the context read limit");
+				})
+			: (() => {
+					const branch = manager.getBranch().slice().reverse();
+					const message = branch.find((entry) => entry.type === "message");
+					return {
+						sessionId: manager.getSessionId(),
+						sessionFile: manager.getSessionFile(),
+						message: message ? ([message.id, message.timestamp] as const) : undefined,
+						goal: goalEvidence(this._loadPersistedGoalState()),
+					};
+				})();
+		return {
+			...frontier,
+			systemPrompt: this.agent.state.systemPrompt,
+			model: JSON.stringify([this.model?.provider, this.model?.id, this.settingsManager.getAutoRefineModel()]),
+			harnessEntries: Object.fromEntries(
+				Object.entries(harnessState.entries).map(([kind, entries]) => [
+					kind,
+					Object.fromEntries(
+						Object.entries(entries).map(
+							([id, { version: _version, created_at: _created, updated_at: _updated, ...entry }]) => [id, entry],
+						),
+					),
+				]),
+			),
+		};
+	}
+
 	private async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
+		const harnessState = this._loadMergedHarnessState();
+		const evidence = await this._autoRefineEvidence(harnessState);
+		signal?.throwIfAborted();
+		if (isDeepStrictEqual(evidence, this._lastAutoRefineEvidence))
+			return { shouldRefine: false, rationale: "No new task evidence since the previous automatic review." };
+		// Reserve before any inference wait. Equivalent running, declined or failed
+		// automatic reviews do not buy another call; explicit /refine stays independent.
+		this._lastAutoRefineEvidence = evidence;
 		if (this._autoRefineReviewer) return this._autoRefineReviewer(context, signal);
 		const selected = this._resolveRefinementModel();
 		if (!selected) return { shouldRefine: false, rationale: "No model selected." };
 		const { model, thinkingLevel, explicit } = selected;
 		const messages = structuredClone(this.agent.state.messages);
-		const harnessState = this._loadMergedHarnessState();
 		const reviewContext = { ...context };
 		const requests = this.requests[captureNativeReviewerRequests]();
 		try {
@@ -10267,12 +10442,13 @@ export class AgentSession {
 		}
 	}
 
-	/** Global harness state overlaid with this session's local state, when persisted. */
+	/** Merge existing session/global memory with the selected project's workspace memory. */
 	private _loadMergedHarnessState(): HarnessState {
 		const localHarnessStateDir = this._localHarnessStateDir();
 		return mergeHarnessStates(
 			loadHarnessState(getGlobalHarnessStateDir(), "global"),
 			localHarnessStateDir ? loadHarnessState(localHarnessStateDir, "local") : undefined,
+			loadHarnessState(getWorkspaceHarnessStateDir(this._cwd), "workspace"),
 		);
 	}
 
@@ -10779,8 +10955,20 @@ export class AgentSession {
 			throw error;
 		}
 		if (!this._isCompactionOwnerCurrent(owner)) return false;
-		const assistantIsFromBeforeCompaction =
+		let assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
+		const assistantEntryId = this._findAssistantEntryIdForMessage(assistantMessage);
+		if (assistantEntryId && owner.manager.supportsCapturedHistoryReads()) {
+			const ordered = await owner.manager.readBranchHistory(async (history) => {
+				const assistant = await history.get(assistantEntryId);
+				const boundary = (await history.branchBootstrap()).latestCompaction;
+				return assistant && boundary ? assistant.sequence <= boundary.sequence : undefined;
+			});
+			if (!this._isCompactionOwnerCurrent(owner)) return false;
+			// Provider messages are timestamped before request preparation, which may
+			// commit an epoch. Canonical append order, not that start time, owns staleness.
+			if (ordered !== undefined) assistantIsFromBeforeCompaction = ordered;
+		}
 
 		// Case 1: Overflow - takes priority over a pending model request so the error
 		// strip + retry still happen; the compaction it runs consumes the request.
@@ -10911,6 +11099,7 @@ export class AgentSession {
 		willRetry: boolean,
 		capturedOwner?: CompactionOwner,
 		resumeInPlace = false,
+		capacity?: PublicContextBudgetError,
 	): Promise<boolean> {
 		const checkpoint = this._pendingCheckpoint;
 		const pending = this._pendingRequestedCompaction;
@@ -10999,6 +11188,7 @@ export class AgentSession {
 				signal: abort.signal,
 				// Only confirmed public-budget recovery resumes within the same invocation.
 				budgetPressure: resumeInPlace,
+				capacity,
 			});
 			const result = committed.result;
 			// Release this captured source before arming success. A later release failure still carries the ACK.
@@ -11713,12 +11903,18 @@ export class AgentSession {
 			const manager = producer?.skillOwner?.manager ?? this.sessionManager;
 			producer?.skillOwner?.writer.assertCurrent();
 			if (this.sessionManager !== manager) throw new Error("Native recovery source changed");
+			const cursorSource = JSON.stringify([manager.getSessionId(), manager.getSessionFile()]);
+			if (this._nativeRecoveryCursorSource !== cursorSource) {
+				this._nativeRecoveryCursors.clear();
+				this._nativeRecoveryCursorSource = cursorSource;
+			}
 			return await manager.readBranchHistory((history) =>
 				recoverCapturedHistory(
 					history.branchContext,
 					request,
 					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
 					signal,
+					this._nativeRecoveryCursors,
 				),
 			);
 		} catch (error) {
@@ -11885,6 +12081,7 @@ export class AgentSession {
 			BASE_CONTEXT_RLM_DEPTH: String(this._rlmDepth),
 			BASE_CONTEXT_RLM_MAX_DEPTH: String(this._rlmMaxDepth),
 			BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
+			BASE_CONTEXT_WORKSPACE_HARNESS_STATE_DIR: getWorkspaceHarnessStateDir(this._cwd),
 		};
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
@@ -11986,19 +12183,14 @@ export class AgentSession {
 		const message = messages.at(-1);
 		if (message?.role !== "assistant") return;
 		if (this.sessionManager.isPersisted()) {
-			const acknowledged = this._assistantEntryIds.get(message);
-			if (
-				!acknowledged ||
-				acknowledged.sessionId !== this.sessionId ||
-				acknowledged.sessionFile !== this.sessionFile
-			)
-				throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
+			const entryId = this._findAssistantEntryIdForMessage(message);
+			if (!entryId) throw new Error("Cannot identify the acknowledged assistant response removed by retry control");
 			if (
 				this._contextOmissions?.sessionId !== this.sessionId ||
 				this._contextOmissions?.sessionFile !== this.sessionFile
 			)
 				this._contextOmissions = { sessionId: this.sessionId, sessionFile: this.sessionFile, ids: new Set() };
-			this._contextOmissions.ids.add(acknowledged.entryId);
+			this._contextOmissions.ids.add(entryId);
 		}
 		this.agent.state.messages = messages.slice(0, -1);
 	}

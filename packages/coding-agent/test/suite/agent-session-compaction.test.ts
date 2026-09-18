@@ -8,6 +8,7 @@ import {
 	type AssistantMessage,
 	fauxAssistantMessage,
 	getModel,
+	isContextOverflow,
 	type Model,
 	type ToolResultMessage,
 	type Usage,
@@ -20,6 +21,7 @@ import { readContextEpoch } from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES } from "../../src/core/kernel/state-snapshot.js";
 import type { RefinementProposal } from "../../src/core/refinement/index.js";
+import { PublicContextBudgetError } from "../../src/core/request-view-selection.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
@@ -575,10 +577,14 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(literalMessages[0]).toMatchObject({ role: "compactionSummary", summary: "summary from extension" });
 	});
 
-	async function createRecoveryCompactionFixture() {
+	async function createRecoveryCompactionFixture(
+		options: { unbudgeted?: boolean; sessionManager?: SessionManager } = {},
+	) {
 		const model = getModel("deepseek", "deepseek-flash");
 		const harness = await createHarness({
 			persistSession: true,
+			sessionManager: options.sessionManager,
+			cwd: options.sessionManager?.getCwd(),
 			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			// Keep the built-in prime_context identity; an override would not produce native recovery.
 			extensionFactories: [
@@ -592,25 +598,27 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 					});
 				},
 			],
-			requestTokenBudget: {
-				mode: "enforce",
-				profiles: [
-					{
-						id: "offline-recovery-compaction",
-						revision: "1",
-						api: model.api,
-						provider: model.provider,
-						url: "https://api.deepseek.com/chat/completions",
-						model: model.id,
-						authMode: "fixture-api-key",
-						templateRevision: "deepseek-text-tools-fixture-v1",
-						replayFamily: "deepseek-completions",
-						contextTokens: 120000,
-						outputCeilingTokens: 393216,
-						estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+			requestTokenBudget: options.unbudgeted
+				? undefined
+				: {
+						mode: "enforce",
+						profiles: [
+							{
+								id: "offline-recovery-compaction",
+								revision: "1",
+								api: model.api,
+								provider: model.provider,
+								url: "https://api.deepseek.com/chat/completions",
+								model: model.id,
+								authMode: "fixture-api-key",
+								templateRevision: "deepseek-text-tools-fixture-v1",
+								replayFamily: "deepseek-completions",
+								contextTokens: 120000,
+								outputCeilingTokens: 393216,
+								estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
+							},
+						],
 					},
-				],
-			},
 		});
 		harnesses.push(harness);
 		harness.session.modelRegistry.registerProvider(model.provider, {
@@ -649,17 +657,18 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 				});
 				main.push({ epoch, request: admitted });
 			}
-			const call = summarizing
-				? undefined
-				: main.length === 1
-					? {
-							id: "recovery_call",
-							name: "prime_context",
-							arguments: '{"action":"search","query":"RECOVERY_EVIDENCE"}',
-						}
-					: main.length === 2
-						? { id: "ordinary_call", name: "ordinary_tail", arguments: "{}" }
-						: undefined;
+			const call =
+				summarizing || options.sessionManager
+					? undefined
+					: main.length === 1
+						? {
+								id: "recovery_call",
+								name: "prime_context",
+								arguments: '{"action":"search","query":"RECOVERY_EVIDENCE"}',
+							}
+						: main.length === 2
+							? { id: "ordinary_call", name: "ordinary_tail", arguments: "{}" }
+							: undefined;
 			const delta = call
 				? {
 						role: "assistant",
@@ -706,6 +715,89 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		return { harness, main, summaries, readRecovery };
 	}
 
+	it("cold-resumes an uncompacted overflowed native-tool session without a budget profile", async () => {
+		// Seed a genuine admitted native-tool history; the reopened CLI-style owner
+		// deliberately has no request-budget profile.
+		const first = await createRecoveryCompactionFixture();
+		await first.harness.session.prompt(
+			`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(2000)}`,
+		);
+		expect(first.main).toHaveLength(3);
+		const page = await first.harness.session.recoverNativeHistory({
+			action: "search",
+			query: "RECOVERY_EVIDENCE",
+			maxBytes: 2048,
+		});
+		const cursor = page.results[0].cursor;
+		expect(cursor).toBeTypeOf("string");
+		vi.mocked(globalThis.fetch).mockImplementationOnce(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							message:
+								"This model's maximum context length is 1048576 tokens. The requested input exceeds this limit.",
+							type: "invalid_request_error",
+							code: "context_length_exceeded",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				),
+		);
+		await first.harness.session.prompt("RECOVERY_EVIDENCE appended after cursor: continue the current task.");
+		const overflow = first.harness.session.messages.at(-1);
+		expect(overflow).toMatchObject({ role: "assistant", stopReason: "error" });
+		if (overflow?.role !== "assistant") throw new Error("Expected persisted provider overflow");
+		expect(isContextOverflow(overflow)).toBe(true);
+		expect(first.summaries).toHaveLength(0);
+		const continued = await first.harness.session.recoverNativeHistory({
+			action: "search",
+			cursor: cursor!,
+			maxBytes: 2048,
+		});
+		expect(continued.scope).toEqual(page.scope);
+		expect(continued.results[0].reason).not.toBe("expired_cursor");
+		expect(
+			continued.results
+				.flatMap((result) => result.records)
+				.map((record) => record.text)
+				.join("\n"),
+		).not.toContain("appended after cursor");
+		const file = first.harness.sessionManager.getSessionFile()!;
+		const before = await first.harness.sessionManager.readEntries();
+		const toolIds = before
+			.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")
+			.map((entry) => entry.id);
+		await first.harness.session.disposeAsync();
+		const reopened = await SessionManager.open(file);
+		const next = await createRecoveryCompactionFixture({ unbudgeted: true, sessionManager: reopened });
+		// The SDK restores the read-only session context before accepting new input;
+		// this low-level AgentSession harness must perform that same public read.
+		next.harness.session.agent.state.messages = (await next.harness.session.buildSessionContext()).messages;
+		const expired = await next.harness.session.recoverNativeHistory({
+			action: "search",
+			cursor: cursor!,
+			maxBytes: 2048,
+		});
+		expect(expired.results[0]).toMatchObject({ status: "unavailable", reason: "expired_cursor" });
+		next.harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
+		await next.harness.session.prompt("Continue after reopening the overflowed session.");
+
+		expect(next.summaries.length).toBeGreaterThan(0);
+		expect(next.main).toHaveLength(1);
+		expect(next.harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		const admitted = next.main[0].request;
+		if (admitted.type !== "attempt_admitted") throw new Error("Expected actual MAIN admission");
+		expect(admitted.descriptor.requestBudget).toBeUndefined();
+		const after = await reopened.readEntries();
+		expect(
+			after
+				.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")
+				.map((entry) => entry.id),
+		).toEqual(toolIds);
+		expect(next.harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(true);
+	});
+
 	it("accepts refinement_outcome after an existing DeepSeek epoch without sending the UI message", async () => {
 		const { harness, main } = await createRecoveryCompactionFixture();
 		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
@@ -733,6 +825,62 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		const body = String(vi.mocked(globalThis.fetch).mock.calls.at(-1)![1]?.body);
 		expect(body).not.toContain("UI_ONLY_REFINEMENT_OUTCOME");
 		expect(body).toContain("Apply the SLA update.");
+	});
+
+	it("compacts an overfull public history into a fitting request", async () => {
+		const { harness, main, summaries } = await createRecoveryCompactionFixture();
+		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Older context. ".repeat(2000)}`);
+		expect(main).toHaveLength(3);
+		const previous = main.at(-1)!.request;
+		if (previous.type !== "attempt_admitted") throw new Error("Expected native main admission");
+		const budget = previous.descriptor.requestBudget!;
+		expect(budget.status).toBe("within-estimate");
+		// This fixture explicitly meters one token per byte. Exceed its observed remaining
+		// space while leaving enough room after the removable 30 KiB source prefix.
+		const addedBytes = budget.availableInputTokens! - budget.estimatedInputTokens! + 20000;
+		const recover = vi.spyOn(
+			harness.session.agent as unknown as {
+				requestPreparationRecoveryOwner(error: unknown, signal?: AbortSignal): Promise<boolean | "reprepare">;
+			},
+			"requestPreparationRecoveryOwner",
+		);
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
+		await harness.session.prompt(`Current required facts. ${"New ".repeat(Math.ceil(addedBytes / 4))}`);
+		expect(recover).toHaveBeenCalledTimes(2);
+		expect(await recover.mock.results[0].value).toBe("reprepare");
+		expect(await recover.mock.results[1].value).toBe(true);
+		const refused = recover.mock.calls[1][0];
+		if (!(refused instanceof PublicContextBudgetError)) throw new Error("Expected captured public capacity");
+		const remaining =
+			refused.mandatoryAssessment!.availableInputTokens! - refused.mandatoryAssessment!.estimatedInputTokens!;
+		const requested = summaries.reduce<number>(
+			(total, body) => total + (body as { max_tokens: number }).max_tokens,
+			0,
+		);
+		expect(summaries.length).toBeGreaterThan(0);
+		expect(requested).toBeLessThanOrEqual(remaining);
+		expect(main).toHaveLength(4);
+		const admitted = main.at(-1)!.request;
+		if (admitted.type !== "attempt_admitted") throw new Error("Expected native main admission");
+		expect(admitted.descriptor.requestBudget?.status).toBe("within-estimate");
+		expect(harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(true);
+	});
+
+	it("refuses an oversized mandatory public request without paying for a summary", async () => {
+		const { harness, main, summaries } = await createRecoveryCompactionFixture();
+		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
+		expect(main).toHaveLength(3);
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
+		const requiredPrompt = vi
+			.spyOn(harness.session.resourceLoader, "getSystemPrompt")
+			.mockReturnValue("Required instruction. ".repeat(8000));
+		harness.session.setActiveToolsByName(harness.session.getActiveToolNames());
+		await expect(harness.session.prompt("Continue with the same required evidence.")).rejects.toThrow(
+			"Context capacity exceeded",
+		);
+		expect(requiredPrompt).toHaveBeenCalled();
+		expect(main).toHaveLength(3);
+		expect(summaries).toHaveLength(0);
 	});
 
 	it("renews recovery coverage at accepted ACK, reuses an ordinary tail, and manually compacts", async () => {

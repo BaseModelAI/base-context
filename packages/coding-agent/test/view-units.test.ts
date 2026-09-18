@@ -1,6 +1,11 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { expect, it } from "vitest";
-import { bindMessageReplayUnits, closeViewSelection, type ViewUnit } from "../src/core/view-units.js";
+import {
+	bindMessageReplayUnits,
+	closeViewSelection,
+	prepareViewSelection,
+	type ViewUnit,
+} from "../src/core/view-units.js";
 
 const limits = { maxUnits: 16, maxDependencies: 32, maxMetadataBytes: 8192 };
 function unit(id: string, dependencies: string[] = []): ViewUnit {
@@ -72,6 +77,9 @@ it("closes whole-message tool and delta dependencies without rewriting source co
 		"a",
 		"delta",
 	]);
+	const prepared = prepareViewSelection(grouped, limits);
+	for (const selected of [["a"], ["a", "delta"], ["base"]])
+		expect(prepared.close(selected)).toEqual(closeViewSelection(grouped, selected, limits));
 	const conservative = bindMessageReplayUnits(source, units, limits);
 	expect(closeViewSelection(conservative, ["delta"], limits)).toHaveLength(5);
 	expect(source).toEqual(before);
@@ -86,6 +94,10 @@ it("refuses missing replay or delta sources and bounded-closure overflow", () =>
 	const units = [unit("base"), unit("call"), unit("b")];
 	const open = bindMessageReplayUnits(messages().slice(0, 3), units, limits, "message-groups");
 	expect(() => closeViewSelection(open, ["b"], limits)).toThrow("replay group is incomplete");
+	const prepared = prepareViewSelection(open, limits);
+	expect(() => prepared.close(["b"])).toThrow("replay group is incomplete");
+	expect(() => prepared.close(["missing"])).toThrow("unavailable");
+	expect(() => prepared.close(Array(17).fill("base"))).toThrow("selection budget");
 	expect(() => closeViewSelection([unit("delta", ["missing"])], ["delta"], limits)).toThrow("unavailable");
 	expect(() => closeViewSelection([unit("same"), unit("same")], ["same"], limits)).toThrow("Duplicate");
 	expect(() => closeViewSelection(units, ["base"], { ...limits, maxUnits: 1 })).toThrow("item budget");

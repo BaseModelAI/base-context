@@ -114,67 +114,107 @@ async function isExecutable(filePath: string): Promise<boolean> {
 	}
 }
 
-function fileContentHash(filePath: string): string {
-	try {
-		return `sha256:${createHash("sha256").update(readFileSync(filePath)).digest("hex")}`;
-	} catch {
-		return "unreadable";
-	}
+interface PythonSkillMetadata {
+	projectName?: string;
+	dependencyNames: Set<string>;
+	pyprojectHash: string;
 }
 
-function normalizePythonSkills(pythonSkills: readonly KernelPythonSkill[] | undefined): BootstrapPythonSkill[] {
+interface PythonSkillPlan {
+	skills: BootstrapPythonSkill[];
+	installOrder: BootstrapPythonSkill[];
+	dependencies: Map<BootstrapPythonSkill, BootstrapPythonSkill[]>;
+}
+
+function planPythonSkills(pythonSkills: readonly KernelPythonSkill[] | undefined): PythonSkillPlan {
+	const metadata = new Map<string, PythonSkillMetadata>();
+	const siblings = new Map<string, Map<string, BootstrapPythonSkill>>();
 	const byKey = new Map<string, BootstrapPythonSkill>();
+	const readMetadata = (pyprojectPath: string): PythonSkillMetadata => {
+		let parsed = metadata.get(pyprojectPath);
+		if (parsed) return parsed;
+		let text = "";
+		let pyprojectHash = "unreadable";
+		try {
+			const bytes = readFileSync(pyprojectPath);
+			text = bytes.toString("utf8");
+			pyprojectHash = `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+		} catch {
+			// Preserve the existing unreadable-metadata readiness behavior.
+		}
+		const projectSection = parseTomlProjectSection(text);
+		parsed = {
+			projectName: projectSection?.match(/^\s*name\s*=\s*["']([^"']+)["']/m)?.[1]?.trim(),
+			dependencyNames: parsePythonSkillDependencyNames(projectSection),
+			pyprojectHash,
+		};
+		metadata.set(pyprojectPath, parsed);
+		return parsed;
+	};
+	const projectName = (skill: BootstrapPythonSkill): string =>
+		(readMetadata(skill.pyprojectPath).projectName || skill.importName).replaceAll("_", "-").toLowerCase();
+	const siblingPackages = (packagePath: string): Map<string, BootstrapPythonSkill> => {
+		const siblingsDir = path.dirname(packagePath);
+		let packages = siblings.get(siblingsDir);
+		if (packages) return packages;
+		packages = new Map();
+		for (const entry of readdirSync(siblingsDir, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			const siblingPath = path.join(siblingsDir, entry.name);
+			const pyprojectPath = path.join(siblingPath, "pyproject.toml");
+			if (!existsSync(pyprojectPath)) continue;
+			const skill = {
+				importName: entry.name.replaceAll("-", "_"),
+				packagePath: siblingPath,
+				pyprojectPath,
+				pyprojectHash: readMetadata(pyprojectPath).pyprojectHash,
+			};
+			const name = projectName(skill);
+			if (!packages.has(name)) packages.set(name, skill);
+		}
+		siblings.set(siblingsDir, packages);
+		return packages;
+	};
 	const addSkill = (skill: Pick<KernelPythonSkill, "importName" | "packagePath" | "pyprojectPath">): void => {
 		const packagePath = path.resolve(skill.packagePath);
 		const pyprojectPath = path.resolve(skill.pyprojectPath);
 		const key = `${skill.importName}\0${packagePath}`;
-		if (byKey.has(key)) {
-			return;
-		}
+		if (byKey.has(key)) return;
+		const parsed = readMetadata(pyprojectPath);
 		const bootstrapSkill: BootstrapPythonSkill = {
 			importName: skill.importName,
 			packagePath,
 			pyprojectPath,
-			pyprojectHash: fileContentHash(pyprojectPath),
+			pyprojectHash: parsed.pyprojectHash,
 		};
 		byKey.set(key, bootstrapSkill);
-		for (const dependencyName of readPythonSkillDependencyNames(bootstrapSkill)) {
-			const siblingDependency = resolveSiblingPythonSkillDependency(bootstrapSkill, dependencyName);
-			if (siblingDependency) {
-				addSkill(siblingDependency);
-			}
+		for (const name of parsed.dependencyNames) {
+			const dependency = siblingPackages(packagePath).get(name);
+			if (dependency) addSkill(dependency);
 		}
 	};
-	for (const skill of pythonSkills ?? []) {
-		addSkill(skill);
-	}
-	return [...byKey.values()].sort((a, b) => {
-		const packageCompare = a.packagePath.localeCompare(b.packagePath);
-		if (packageCompare !== 0) return packageCompare;
-		return a.importName.localeCompare(b.importName);
-	});
+	for (const skill of pythonSkills ?? []) addSkill(skill);
+	const skills = [...byKey.values()].sort(
+		(a, b) => a.packagePath.localeCompare(b.packagePath) || a.importName.localeCompare(b.importName),
+	);
+	const byProjectName = new Map(skills.map((skill) => [projectName(skill), skill]));
+	const dependencies = new Map(
+		skills.map((skill) => [
+			skill,
+			[...readMetadata(skill.pyprojectPath).dependencyNames]
+				.map((name) => byProjectName.get(name))
+				.filter((dependency): dependency is BootstrapPythonSkill => dependency !== undefined),
+		]),
+	);
+	return { skills, dependencies, installOrder: sortPythonSkillsForInstall(skills, dependencies) };
 }
 
-function readTomlProjectSection(pyprojectPath: string): string | undefined {
-	try {
-		const text = readFileSync(pyprojectPath, "utf-8");
-		const match = text.match(/^\s*\[project\]\s*$/m);
-		if (!match || match.index === undefined) {
-			return undefined;
-		}
-		const sectionStart = match.index + match[0].length;
-		const rest = text.slice(sectionStart);
-		const nextSection = rest.search(/^\s*\[/m);
-		return nextSection >= 0 ? rest.slice(0, nextSection) : rest;
-	} catch {
-		return undefined;
-	}
-}
-
-function readPythonSkillProjectName(skill: BootstrapPythonSkill): string {
-	const projectSection = readTomlProjectSection(skill.pyprojectPath);
-	const name = projectSection?.match(/^\s*name\s*=\s*["']([^"']+)["']/m)?.[1];
-	return name?.trim() || skill.importName.replaceAll("_", "-");
+function parseTomlProjectSection(text: string): string | undefined {
+	const match = text.match(/^\s*\[project\]\s*$/m);
+	if (!match || match.index === undefined) return;
+	const rest = text.slice(match.index + match[0].length);
+	const nextSection = rest.search(/^\s*\[/m);
+	return nextSection >= 0 ? rest.slice(0, nextSection) : rest;
 }
 
 function parseDependencyPackageName(dependency: string): string | undefined {
@@ -216,8 +256,7 @@ function findTomlArrayEnd(text: string, startIndex: number): number {
 	return -1;
 }
 
-function readPythonSkillDependencyNames(skill: BootstrapPythonSkill): Set<string> {
-	const projectSection = readTomlProjectSection(skill.pyprojectPath);
+function parsePythonSkillDependencyNames(projectSection: string | undefined): Set<string> {
 	if (!projectSection) {
 		return new Set();
 	}
@@ -246,53 +285,11 @@ function readPythonSkillDependencyNames(skill: BootstrapPythonSkill): Set<string
 	return dependencies;
 }
 
-function resolveSiblingPythonSkillDependency(
-	skill: BootstrapPythonSkill,
-	dependencyName: string,
-): BootstrapPythonSkill | undefined {
-	const siblingsDir = path.dirname(skill.packagePath);
-	for (const entry of readdirSync(siblingsDir, { withFileTypes: true })) {
-		if (!entry.isDirectory()) {
-			continue;
-		}
-		const packagePath = path.join(siblingsDir, entry.name);
-		const pyprojectPath = path.join(packagePath, "pyproject.toml");
-		if (!existsSync(pyprojectPath)) {
-			continue;
-		}
-		const dependency: BootstrapPythonSkill = {
-			importName: entry.name.replaceAll("-", "_"),
-			packagePath,
-			pyprojectPath,
-			pyprojectHash: fileContentHash(pyprojectPath),
-		};
-		if (readPythonSkillProjectName(dependency).replaceAll("_", "-").toLowerCase() === dependencyName) {
-			return dependency;
-		}
-	}
-	return undefined;
-}
-
-function sortPythonSkillsForInstall(pythonSkills: readonly BootstrapPythonSkill[]): BootstrapPythonSkill[] {
-	const byProjectName = new Map<string, BootstrapPythonSkill>();
-	const originalIndex = new Map<BootstrapPythonSkill, number>();
-	for (const [index, skill] of pythonSkills.entries()) {
-		originalIndex.set(skill, index);
-		byProjectName.set(readPythonSkillProjectName(skill).replaceAll("_", "-").toLowerCase(), skill);
-	}
-
-	const dependenciesBySkill = new Map<BootstrapPythonSkill, BootstrapPythonSkill[]>();
-	for (const skill of pythonSkills) {
-		dependenciesBySkill.set(
-			skill,
-			[...readPythonSkillDependencyNames(skill)]
-				.map(
-					(dependencyName) =>
-						byProjectName.get(dependencyName) ?? resolveSiblingPythonSkillDependency(skill, dependencyName),
-				)
-				.filter((dependency): dependency is BootstrapPythonSkill => Boolean(dependency)),
-		);
-	}
+function sortPythonSkillsForInstall(
+	pythonSkills: readonly BootstrapPythonSkill[],
+	dependenciesBySkill: ReadonlyMap<BootstrapPythonSkill, readonly BootstrapPythonSkill[]>,
+): BootstrapPythonSkill[] {
+	const originalIndex = new Map(pythonSkills.map((skill, index) => [skill, index]));
 
 	const pending = new Set(pythonSkills);
 	const sorted: BootstrapPythonSkill[] = [];
@@ -680,15 +677,15 @@ async function hashRuntimeSource(sourceDir: string): Promise<string> {
 
 async function bootstrapVenv(
 	venv: string,
-	pythonSkills: readonly BootstrapPythonSkill[],
+	plan: PythonSkillPlan,
 	options: EnsureKernelPythonOptions,
+	sourceDir: string,
+	runtimeIdentity: string,
 ): Promise<void> {
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
 	const python = path.join(venv, "bin", "python");
-	const sourceDir = await resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir;
-	const runtimeIdentity = await resolveRuntimeIdentity();
 
 	await run(uv, ["python", "install", PYTHON_VERSION]);
 	await run(uv, ["venv", venv, "--python", PYTHON_VERSION, "--seed"]);
@@ -701,7 +698,7 @@ async function bootstrapVenv(
 		STATE_SNAPSHOT_REQUIREMENT,
 		...DEFAULT_RLM_EXTRA_UV_ARGS,
 	]);
-	await syncPythonSkills(uv, venv, python, runtimeIdentity, pythonSkills, options);
+	await syncPythonSkills(uv, venv, python, runtimeIdentity, plan, options);
 }
 
 async function syncPythonSkills(
@@ -709,7 +706,7 @@ async function syncPythonSkills(
 	venv: string,
 	python: string,
 	runtimeIdentity: string,
-	pythonSkills: readonly BootstrapPythonSkill[],
+	plan: PythonSkillPlan,
 	options: EnsureKernelPythonOptions,
 ): Promise<void> {
 	const version = await readBootstrapVersion(venv);
@@ -717,30 +714,15 @@ async function syncPythonSkills(
 	const currentPythonSkills = new Map(
 		(version?.pythonSkills ?? []).map((skill) => [`${skill.importName}\0${skill.packagePath}`, skill]),
 	);
-	const pythonSkillsByProjectName = new Map(
-		pythonSkills.map((skill) => [readPythonSkillProjectName(skill).replaceAll("_", "-").toLowerCase(), skill]),
-	);
-	const dependenciesBySkill = new Map(
-		pythonSkills.map((skill) => [
-			skill,
-			[...readPythonSkillDependencyNames(skill)]
-				.map(
-					(dependencyName) =>
-						pythonSkillsByProjectName.get(dependencyName) ??
-						resolveSiblingPythonSkillDependency(skill, dependencyName),
-				)
-				.filter((dependency): dependency is BootstrapPythonSkill => Boolean(dependency)),
-		]),
-	);
 
-	for (const skill of sortPythonSkillsForInstall(pythonSkills)) {
+	for (const skill of plan.installOrder) {
 		const existingSkill = currentPythonSkills.get(`${skill.importName}\0${skill.packagePath}`);
 		if (existingSkill?.pyprojectPath === skill.pyprojectPath && existingSkill.pyprojectHash === skill.pyprojectHash) {
 			installedPythonSkills.push(skill);
 			continue;
 		}
 
-		const localDependencies = dependenciesBySkill.get(skill) ?? [];
+		const localDependencies = plan.dependencies.get(skill) ?? [];
 		const localDependencyArgs = localDependencies
 			.filter((dependency) => {
 				const installedDependency = currentPythonSkills.get(`${dependency.importName}\0${dependency.packagePath}`);
@@ -809,10 +791,8 @@ function formatBootstrapFailure(error: unknown): Error {
 	);
 }
 
-async function ensureKernelPythonUncached(
-	options: EnsureKernelPythonOptions,
-	pythonSkills: readonly BootstrapPythonSkill[],
-): Promise<string> {
+async function ensureKernelPythonUncached(options: EnsureKernelPythonOptions, plan: PythonSkillPlan): Promise<string> {
+	const pythonSkills = plan.skills;
 	const override = readAbsolutePathEnv(PRODUCT_ENV.kernelPython);
 	if (override) {
 		const python = override;
@@ -843,14 +823,15 @@ async function ensureKernelPythonUncached(
 
 	const venv = await resolveWritableKernelVenvDir();
 	const python = path.join(venv, "bin", "python");
-	const runtimeIdentity = await resolveRuntimeIdentity();
+	const sourceDir = await resolveRuntimeSourceDir();
+	const runtimeIdentity = await hashRuntimeSource(sourceDir);
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 
 	const releaseLock = await acquireBootstrapLock(venv);
 	try {
 		if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 		if (await kernelBaseReady(python, venv, runtimeIdentity)) {
-			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, pythonSkills, options);
+			await syncPythonSkills(await ensureUv(options), venv, python, runtimeIdentity, plan, options);
 			return python;
 		}
 
@@ -867,7 +848,7 @@ async function ensureKernelPythonUncached(
 			await rm(venv, { recursive: true, force: true });
 		}
 
-		await bootstrapVenv(venv, pythonSkills, options);
+		await bootstrapVenv(venv, plan, options, sourceDir, runtimeIdentity);
 	} catch (error) {
 		throw formatBootstrapFailure(error);
 	} finally {
@@ -879,11 +860,11 @@ async function ensureKernelPythonUncached(
 }
 
 export function ensureKernelPython(options: EnsureKernelPythonOptions = {}): Promise<string> {
-	const pythonSkills = normalizePythonSkills(options.pythonSkills);
-	const key = ensureKernelPythonKey(pythonSkills);
+	const plan = planPythonSkills(options.pythonSkills);
+	const key = ensureKernelPythonKey(plan.skills);
 	if (inFlightEnsureKernelPython?.key === key) return inFlightEnsureKernelPython.promise;
 
-	const promise = ensureKernelPythonUncached(options, pythonSkills).finally(() => {
+	const promise = ensureKernelPythonUncached(options, plan).finally(() => {
 		if (inFlightEnsureKernelPython?.promise === promise) inFlightEnsureKernelPython = null;
 	});
 	inFlightEnsureKernelPython = { key, promise };
@@ -901,8 +882,9 @@ export async function prepareOwnedKernelPython(): Promise<string> {
 	}
 	const python = path.join(ownedRuntime.runtimeDir, "bin", "python");
 	const options: EnsureKernelPythonOptions = { onProgress: (message) => console.error(message) };
-	await bootstrapVenv(ownedRuntime.runtimeDir, [], options);
-	const runtimeIdentity = await resolveRuntimeIdentity();
+	const sourceDir = await resolveRuntimeSourceDir();
+	const runtimeIdentity = await hashRuntimeSource(sourceDir);
+	await bootstrapVenv(ownedRuntime.runtimeDir, planPythonSkills([]), options, sourceDir, runtimeIdentity);
 	if (
 		!(await kernelReady(python, ownedRuntime.runtimeDir, runtimeIdentity, [])) ||
 		(await missingRlmExtraImportLabels(python)).length > 0

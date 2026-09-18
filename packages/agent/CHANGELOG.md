@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.8] - 2026-09-18
+
+- Allowed one deterministic context reprepare before the existing single request-recovery attempt, without restarting the invocation or completed tools.
+
 ## [1.0.7] - 2026-09-18
 
 - Updated lockstep packaging for the Base Context 1.0.7 session-resume fix.

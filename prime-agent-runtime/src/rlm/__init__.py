@@ -89,6 +89,9 @@ async def prime_context(request: object) -> dict[str, object]:
     attached intact to this active cell's finalized ipython tool result. The
     returned value alone is not a model-context update. Freshness is unknown.
     Detached requests and sessions without the native tool are not authorized.
+    Resume search/recover with its cursor until exhausted; cursors are ephemeral.
+    Read accepts one-based lines or zero-based, end-exclusive UTF-8 byte windows.
+    Returned offsets delimit complete decoded characters; omission flags mark gaps.
     """
     return await host_request("prime_context", {"request": request})
 

@@ -101,6 +101,8 @@ export type IndexedTaskEvidence =
 	| (TaskEvidenceCursor & { projection: TaskStateProjection; truncated: false })
 	| (TaskEvidenceCursor & { source: TaskStateSourceRef; itemId?: string; itemIdOmitted?: true; truncated: true });
 export interface TaskEvidencePage {
+	/** Existing journal incarnation; absent for unbacked synthetic index rows. */
+	sourceIdentity?: { journalPath: string; dev: number; ino: number };
 	entries: IndexedTaskEvidence[];
 	indexedThrough: number;
 	coverage: "complete" | "partial";
@@ -307,6 +309,8 @@ export type HistoryIndexRequest =
 	| {
 			id: number;
 			action: "page";
+			/** Bound examined rows and advance over nonmatches instead of requiring an exact filled page. */
+			scan?: boolean;
 			sessionId: string;
 			after: number;
 			limit: number;
@@ -628,10 +632,12 @@ export class HistoryIndex {
 		through: number,
 		limit = 64,
 		scope?: HistoryIndexScope,
+		options: { scan?: boolean } = {},
 	): Promise<HistoryIndexPage> {
 		return (await this.request({
 			id: this.nextId++,
 			action: "page",
+			scan: options.scan,
 			sessionId,
 			after,
 			through,

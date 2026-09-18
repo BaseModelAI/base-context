@@ -178,6 +178,8 @@ export interface Settings {
 	/** Creation default; an existing session changes policy through its canonical owner. */
 	context?: { mode?: "on" | "off" };
 	autoRefine?: AutoRefineSettings;
+	/** Automatic scoped error-fix notes; explicit memory CRUD remains independent. */
+	learning?: { enabled?: boolean };
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -940,6 +942,10 @@ export class SettingsManager {
 	getAutoRefineModel(): AutoRefineModelSettings | undefined {
 		const model = this.settings.autoRefine?.model;
 		return model === undefined ? undefined : structuredClone(model);
+	}
+
+	getLearningEnabled(): boolean {
+		return this.settings.learning?.enabled === true;
 	}
 
 	getAutoRefineSettings(): { enabled: boolean; turnInterval: number; compact: boolean; cooldownMs: number } {

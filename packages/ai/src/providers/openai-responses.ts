@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import type { InputTokenCountParams } from "openai/resources/responses/input-tokens.js";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { clampThinkingLevel } from "../models.js";
@@ -17,7 +18,7 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
 import { ProviderAttemptTracker } from "../utils/provider-attempts.js";
-import type { ProviderRequestProjection } from "../utils/request-token-budget.js";
+import type { ProviderInputTokenCounter, ProviderRequestProjection } from "../utils/request-token-budget.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -25,6 +26,7 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
+import { openAIVisibleInput } from "./openai-input-tokens.js";
 import {
 	bindResponsesPublicWindow,
 	convertResponsesMessages,
@@ -102,6 +104,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const preparationClient = client;
 			if (attempts.enabled) {
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
@@ -134,7 +137,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
 			attempts.configure({ effort: params.reasoning?.effort ?? undefined, serviceTier: params.service_tier });
-			if (attempts.hasRequestBudget) {
+			if (attempts.hasRequestBudget || options?.attempts?.prepareRequest) {
 				let pendingPublicBody: string | undefined;
 				const body = JSON.stringify(params);
 				const serialized = JSON.parse(body) as ResponseCreateParamsStreaming;
@@ -157,7 +160,67 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 						},
 					);
 				}
-				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection);
+				const canCount =
+					model.provider === "openai" &&
+					requestUrl === "https://api.openai.com/v1/responses" &&
+					serialized.model === model.id &&
+					!serialized.previous_response_id &&
+					!serialized.conversation &&
+					openAIVisibleInput(model.api, model.provider, JSON.parse(body)) !== undefined;
+				const countInput: ProviderInputTokenCounter | undefined = canCount
+					? async (request) => {
+							const candidate = JSON.parse(request.body!) as Record<string, unknown>;
+							if (
+								request.api !== model.api ||
+								request.provider !== model.provider ||
+								request.url !== requestUrl ||
+								request.retainedPrefix ||
+								candidate.model !== model.id ||
+								candidate.previous_response_id ||
+								candidate.conversation ||
+								!openAIVisibleInput(model.api, model.provider, candidate)
+							)
+								throw new Error("Input count requires the supported prepared stateless OpenAI request");
+							const countBody = Object.fromEntries(
+								[
+									"model",
+									"input",
+									"instructions",
+									"tools",
+									"text",
+									"tool_choice",
+									"parallel_tool_calls",
+									"personality",
+									"reasoning",
+									"truncation",
+								]
+									.filter((key) => candidate[key] !== undefined)
+									.map((key) => [key, candidate[key]]),
+							) as InputTokenCountParams;
+							// Construct the control client only when the owner requests its one final count.
+							const countClient = preparationClient.withOptions({ maxRetries: 0 });
+							countClient.fetchWithTimeout = attempts.wrapHttp(
+								countClient.fetchWithTimeout.bind(countClient),
+								"input-count",
+							);
+							try {
+								const result = await countClient.responses.inputTokens.count(countBody, {
+									signal: options?.signal,
+									...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+									maxRetries: 0,
+								});
+								if (!Number.isSafeInteger(result.input_tokens) || result.input_tokens < 0)
+									throw new Error("Invalid provider input token count");
+								await attempts.settle("completed");
+								options?.signal?.throwIfAborted();
+								return result.input_tokens;
+							} catch (error) {
+								await attempts.settle(options?.signal?.aborted ? "cancelled" : "failed");
+								throw error;
+							}
+						}
+					: undefined;
+				const selected = await attempts.prepareRequest({ url: requestUrl, body }, requestProjection, countInput);
 				if (
 					options?.attempts?.pendingPublicMessageGroups?.length &&
 					(pendingPublicBody === undefined || selected !== pendingPublicBody)
@@ -295,6 +358,7 @@ function buildParams(
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
 		onProjection,
 		pendingPublicMessageGroups: options?.attempts?.pendingPublicMessageGroups,
+		responsesMessageIds: options?.attempts?.responsesMessageIds,
 	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);

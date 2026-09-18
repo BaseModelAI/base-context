@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.8] - 2026-09-18
+
+- Fixed Codex socket reuse after authentication or endpoint changes without interrupting active requests.
+- Fixed Anthropic tool schemas losing root constraints and definitions or sharing mutable schema data with callers.
+- Fixed Codex retry waits retaining abort listeners and ignoring the provider retry delay.
+- Fixed duplicate fallback item IDs when a Responses assistant message contains multiple unsigned text blocks.
+- Kept generated Responses item IDs stable for source-backed requests, with a fresh context epoch after restarting the session owner.
+- Respected disabled Codex prompt-cache affinity without changing account routing or connection reuse.
+- Added opt-in OpenAI token estimation and near-limit Responses input counting while preserving output reserves and control-call accounting.
+- Exposed conservative plaintext sizing through the existing request token meter.
+
 ## [1.0.7] - 2026-09-18
 
 - Updated lockstep packaging for the Base Context 1.0.7 session-resume fix.

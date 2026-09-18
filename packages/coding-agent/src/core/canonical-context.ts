@@ -43,7 +43,7 @@ import {
 import { hydrateCapturedHistoryEntry, type SessionHistoryReadView } from "./session-history-index.js";
 import type { SessionEntry } from "./session-manager.js";
 import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
-import { readTaskStateFromView } from "./task-state-reader.js";
+import { TaskStateReadCache } from "./task-state-reader.js";
 import { cloneUsage } from "./usage.js";
 import { bindMessageReplayUnits, closeViewSelection, type ViewUnit, type ViewUnitLimits } from "./view-units.js";
 
@@ -65,6 +65,8 @@ export interface CanonicalViewSelectionSource {
 	readonly units: readonly ViewUnit[];
 	readonly limits: ViewUnitLimits;
 	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
+	/** A new base or retained epoch must be ACKed before native transport, even without a token budget. */
+	readonly requiresEpoch?: true;
 }
 
 const compiledViewUnits = new WeakMap<
@@ -104,6 +106,7 @@ interface CompiledEpochContext {
 	readonly checkpointEntry?: ContextEpochEntryRef;
 	readonly selectedSkills?: readonly SelectedSkillReference[];
 	readonly taskFrame?: CompiledTaskFrame;
+	readonly taskFrameRebased?: true;
 	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
 	/** Uncommitted public candidate plan; never a fabricated accepted checkpoint. */
@@ -517,6 +520,25 @@ export class CanonicalContextCompiler {
 	private messageCount = 0;
 	private taskFrame?: CompiledTaskFrame;
 	private taskBoundary?: string;
+	private readonly taskState = new TaskStateReadCache();
+	private generation = 0;
+	private forceTaskFrameRebase = false;
+
+	requestTaskFrameRebase(): void {
+		this.forceTaskFrameRebase = true;
+	}
+
+	clear(): void {
+		this.generation++;
+		this.taskState.clear();
+		this.forceTaskFrameRebase = false;
+		this.entries.clear();
+		this.source = undefined;
+		this.sourceBytes = 0;
+		this.messageCount = 0;
+		this.taskFrame = undefined;
+		this.taskBoundary = undefined;
+	}
 
 	/** Membership in the last successful active-source cache, including explicitly omitted responses. */
 	hasActiveEntry(entryId: string): boolean {
@@ -533,6 +555,7 @@ export class CanonicalContextCompiler {
 		allowPendingToolPublic = false,
 		purpose: "request" | "read" = "request",
 	): Promise<AgentMessage[]> {
+		const generation = this.generation;
 		const frameLimits = taskFrameLimits(frameOptions);
 		const previousSource = this.source;
 		const previousFrame = this.taskFrame;
@@ -701,7 +724,7 @@ export class CanonicalContextCompiler {
 		const tasks =
 			mode === "off"
 				? undefined
-				: await readTaskStateFromView(view, {
+				: await this.taskState.read(view, {
 						maxItems: maxMessages,
 						maxSourceBytes,
 						maxViewBytes: maxSourceBytes,
@@ -714,7 +737,17 @@ export class CanonicalContextCompiler {
 			countBytes({ locator: event.source.locator! });
 		}
 		const referenceFrame = resetFrame ? checkpoint?.taskFrame : previousFrame;
-		let taskFrame = tasks ? compileTaskFrame(tasks, frameLimits, referenceFrame) : undefined;
+		if (resetFrame || (referenceFrame && referenceFrame.messages.length <= 1)) this.forceTaskFrameRebase = false;
+		const forceRebase = purpose === "request" && this.forceTaskFrameRebase;
+		let taskFrame = tasks
+			? compileTaskFrame(tasks, frameLimits, forceRebase ? undefined : referenceFrame)
+			: undefined;
+		const taskFrameRebased = Boolean(
+			mode === "on" &&
+				referenceFrame &&
+				taskFrame !== referenceFrame &&
+				(!taskFrame || taskFrame.messages.length === 1),
+		);
 		const resource =
 			mode === "on" && resourceCapture && (resourceCapture.enabled || checkpoint)
 				? renderResourceView(resourceCapture)
@@ -969,7 +1002,7 @@ export class CanonicalContextCompiler {
 		orderContextToolResults(messages);
 		for (const [index, message] of messages.entries()) messages[index] = renderedMessages.get(message) ?? message;
 		if (taskFrame) {
-			if (referenceFrame && taskFrame !== referenceFrame) {
+			if (referenceFrame && taskFrame !== referenceFrame && !taskFrameRebased) {
 				const last = messages.at(-1);
 				const anchor = last
 					? {
@@ -1300,6 +1333,7 @@ export class CanonicalContextCompiler {
 				source: { ...view.source },
 				units: selectionUnits,
 				limits: unitLimits,
+				...(mode === "on" && (taskFrameRebased || checkpoint) ? { requiresEpoch: true as const } : {}),
 				...(pendingPublicMessageGroups.length ? { pendingPublicMessageGroups } : {}),
 			},
 		});
@@ -1313,13 +1347,16 @@ export class CanonicalContextCompiler {
 					? { sessionId: view.source.sessionId, entryId: first.summaryRef.entryId }
 					: undefined,
 			taskFrame,
+			...(taskFrameRebased ? { taskFrameRebased: true as const } : {}),
 			resourceRevision: resource?.revision,
 			references: closedMessages.map((message) => epochReferences.get(message) ?? null),
 			...(selectedSkills.size ? { selectedSkills: [...selectedSkills.values()] } : {}),
 			...(toolContinuations.length ? { toolContinuations } : {}),
 		});
+		if (generation !== this.generation) throw new Error("Canonical context owner changed during compilation");
 		this.entries = next;
-		this.taskFrame = taskFrame;
+		// A rebased candidate is not the committed prefix. Adopt it from the next ACKed checkpoint.
+		this.taskFrame = taskFrameRebased ? referenceFrame : taskFrame;
 		this.taskBoundary = boundary;
 		this.source = view.source;
 		this.sourceBytes = sourceBytes;

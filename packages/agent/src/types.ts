@@ -210,8 +210,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/** Internal state mirror for adopted working sets. Awaited and excluded from provider options. */
 	onContextAdopted?: (messages: AgentMessage[]) => void | Promise<void>;
 
-	/** Native owner recovery after an unsent request's projection has been released. */
-	recoverRequestPreparation?: (error: unknown, signal?: AbortSignal) => Promise<boolean>;
+	/** Native owner recovery after release. One deterministic reprepare may precede one recovery. */
+	recoverRequestPreparation?: (error: unknown, signal?: AbortSignal) => Promise<boolean | "reprepare">;
 
 	/** Retry a settled provider failure within this invocation and its output allowance. */
 	recoverProviderFailure?: (message: AssistantMessage, signal?: AbortSignal) => Promise<boolean>;
