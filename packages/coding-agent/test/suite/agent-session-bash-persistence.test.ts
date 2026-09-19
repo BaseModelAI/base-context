@@ -1,8 +1,16 @@
 import { Buffer } from "node:buffer";
-import type { AgentTool } from "@ponythewhite/base-context-agent";
-import { fauxAssistantMessage, fauxToolCall } from "@ponythewhite/base-context-ai";
+import { AgentOutputLimitError, type AgentTool } from "@ponythewhite/base-context-agent";
+import { fauxAssistantMessage, fauxToolCall, type Model } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	getCanonicalEpochContext,
+	getCanonicalViewUnits,
+	prepareCanonicalEpoch,
+} from "../../src/core/canonical-context.js";
+import { readContextEpoch } from "../../src/core/context-epoch.js";
+import { readSessionBootstrap } from "../../src/core/session-bootstrap.js";
+import { SessionManager } from "../../src/core/session-manager.js";
 import type { BashOperations } from "../../src/core/tools/bash.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
 
@@ -18,6 +26,231 @@ describe("AgentSession bash and persistence characterization", () => {
 			await harnesses.pop()?.cleanup();
 		}
 	});
+
+	it.each(["before-intent", "mixed"] as const)(
+		"cold-resumes an interrupted native tool group as public history (%s)",
+		async (boundary) => {
+			const model: Model<"openai-responses"> = {
+				id: "offline-interrupted-tools",
+				name: "Offline interrupted tools",
+				api: "openai-responses",
+				provider: "openai",
+				baseUrl: "https://api.openai.com/v1",
+				reasoning: false,
+				input: ["text"],
+				contextWindow: 300_000,
+				maxTokens: 16,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			};
+			const execute = vi.fn(async () => ({
+				content: [{ type: "text" as const, text: "must not execute" }],
+				details: {},
+			}));
+			const tools: AgentTool[] = [
+				{
+					name: "interrupted_fixture",
+					label: "Interrupted fixture",
+					description: "Offline fixture",
+					parameters: Type.Object({}),
+					execute,
+				},
+			];
+			const requestTokenBudget =
+				boundary === "before-intent"
+					? {
+							mode: "enforce" as const,
+							profiles: [
+								{
+									id: "offline-interrupted-tools",
+									revision: "1",
+									api: model.api,
+									provider: model.provider,
+									url: `${model.baseUrl}/responses`,
+									model: model.id,
+									authMode: "offline-fixture",
+									templateRevision: "responses-text-v1",
+									replayFamily: "responses",
+									contextTokens: 300_000,
+									outputCeilingTokens: 16,
+									estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 16 },
+								},
+							],
+						}
+					: undefined;
+			const configure = async (sessionManager?: SessionManager) => {
+				const harness = await createHarness({
+					persistSession: true,
+					sessionManager,
+					tools,
+					requestTokenBudget,
+					settings: { compaction: { enabled: false }, autoRefine: { enabled: false }, retry: { enabled: false } },
+				});
+				harnesses.push(harness);
+				harness.session.modelRegistry.registerProvider(model.provider, {
+					api: model.api,
+					baseUrl: model.baseUrl,
+					apiKey: "offline-fixture-key",
+					models: [model],
+				});
+				harness.authStorage.setRuntimeApiKey(model.provider, "offline-fixture-key");
+				await harness.session.setModel(model);
+				harness.session.agent.getApiKey = () => "offline-fixture-key";
+				harness.session.agent.toolExecution = "sequential";
+				return harness;
+			};
+			let active = await configure();
+			let resumed = false;
+			let acceptedCheckpoint: ReturnType<typeof readContextEpoch>;
+			const bodies: string[] = [];
+			const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+				const body = String(init?.body);
+				bodies.push(body);
+				if (resumed) {
+					const entries = await active.sessionManager.readEntries();
+					const epoch = entries.filter((entry) => entry.type === "compaction").at(-1)!;
+					const request = entries
+						.flatMap((entry) =>
+							entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+						)
+						.at(-1)!;
+					expect(request.contextEpoch).toEqual({
+						sessionId: active.sessionManager.getSessionId(),
+						entryId: epoch.id,
+					});
+					acceptedCheckpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024);
+					expect(acceptedCheckpoint?.renderer).toBe("native-canonical-epoch/9");
+					expect(body).toContain("not_recorded");
+					expect(body).toContain("the outcome is unknown");
+					expect(body).not.toContain('"type":"function_call"');
+					expect(body).not.toContain('"type":"function_call_output"');
+				}
+				const items = resumed
+					? [
+							{
+								type: "message",
+								id: "msg_resumed",
+								role: "assistant",
+								status: "completed",
+								content: [
+									{
+										type: "output_text",
+										text: "Continue without rerunning historical calls.",
+										annotations: [],
+									},
+								],
+							},
+						]
+					: Array.from({ length: boundary === "mixed" ? 2 : 1 }, (_, index) => ({
+							type: "function_call",
+							id: `fc_interrupted_${index}`,
+							call_id: `call_interrupted_${index}`,
+							name: "interrupted_fixture",
+							arguments: "{}",
+							status: "completed",
+						}));
+				const events = [
+					...items.flatMap((item, output_index) => [
+						{ type: "response.output_item.added", output_index, item },
+						{ type: "response.output_item.done", output_index, item },
+					]),
+					{
+						type: "response.completed",
+						response: {
+							id: `resp_${bodies.length}`,
+							model: model.id,
+							status: "completed",
+							usage: {
+								input_tokens: 10,
+								output_tokens: 1,
+								total_tokens: 11,
+								input_tokens_details: { cached_tokens: 0 },
+							},
+						},
+					},
+				];
+				return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			});
+			try {
+				const stop = new AgentOutputLimitError({
+					kind: "output_limit",
+					limit: "messages",
+					maxMessages: 1,
+					maxSourceBytes: 1,
+				});
+				if (boundary === "before-intent") {
+					// AgentSession's awaited listener has already ACKed this native assistant output.
+					const unsubscribe = active.session.agent.subscribe((event) => {
+						if (
+							event.type === "message_end" &&
+							event.message.role === "assistant" &&
+							event.message.stopReason === "toolUse"
+						) {
+							unsubscribe();
+							throw stop;
+						}
+					});
+				} else {
+					// The native owner runs before this hook. Only the first call has an intent ACK.
+					active.session.agent.onToolInvocationStarting = async (invocation) => {
+						expect(invocation.sourceOrder).toBe(0);
+						throw stop;
+					};
+				}
+				await expect(active.session.prompt("Request the offline tool calls.")).rejects.toBe(stop);
+				const before = await active.sessionManager.readEntries();
+				expect(before.filter((entry) => entry.type === "tool_intent")).toHaveLength(boundary === "mixed" ? 1 : 0);
+				expect(before.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")).toEqual(
+					[],
+				);
+				expect(execute).not.toHaveBeenCalled();
+				const file = active.sessionManager.getSessionFile()!;
+				await active.session.disposeAsync({ kernelSnapshot: false });
+				const reopened = await SessionManager.open(file);
+				const limits = active.settingsManager.getCanonicalContextLimits();
+				const read = (await readSessionBootstrap(reopened, limits, { purpose: "read" })).context.messages;
+				const group = getCanonicalEpochContext(read)!.toolContinuations![0];
+				expect(group.calls.at(-1)).toMatchObject({ admission: "absent" });
+				expect(group.calls.at(-1)?.executionId).toBeUndefined();
+				expect(group.calls.at(-1)?.outcome).toBeUndefined();
+				if (boundary === "mixed")
+					expect(group.calls[0]).toMatchObject({ intent: { id: expect.any(String) }, outcome: "outcome_unknown" });
+				expect(() =>
+					prepareCanonicalEpoch(
+						read,
+						getCanonicalViewUnits(read)!.map((unit) => unit.id),
+						"fixture",
+						limits.maxSourceBytes,
+					),
+				).toThrow("Read-only context cannot authorize a provider epoch");
+				expect(await reopened.readEntries()).toEqual(before);
+				active = await configure(reopened);
+				active.session.agent.state.messages = read;
+				resumed = true;
+				await active.session.prompt("Continue using only the recorded public history.");
+				expect(bodies).toHaveLength(2);
+				expect(execute).not.toHaveBeenCalled();
+				const after = await reopened.readEntries();
+				expect(after.filter((entry) => entry.type === "message" && entry.message.role === "toolResult")).toEqual(
+					[],
+				);
+				await active.session.disposeAsync({ kernelSnapshot: false });
+				const again = await SessionManager.open(file);
+				try {
+					const rebuilt = (await readSessionBootstrap(again, limits, { purpose: "read" })).context.messages;
+					expect(getCanonicalEpochContext(rebuilt)?.toolContinuations).toEqual(
+						acceptedCheckpoint?.toolContinuations,
+					);
+				} finally {
+					await again.close();
+				}
+			} finally {
+				fetch.mockRestore();
+			}
+		},
+	);
 
 	it("records bash results after persistence while idle", async () => {
 		const harness = await createHarness();

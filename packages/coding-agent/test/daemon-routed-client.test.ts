@@ -130,6 +130,51 @@ describe("DaemonWorkerClient direct decoding", () => {
 		return { client, internals, destroyed };
 	}
 
+	it.each(["timeout", "close"] as const)(
+		"settles a request on %s while its socket write is blocked",
+		async (termination) => {
+			vi.useFakeTimers();
+			const { client, internals } = makeDirectClient();
+			let finishWrite!: () => void;
+			const write = new Promise<void>((resolve) => {
+				finishWrite = resolve;
+			});
+			const send = vi.fn(() => write);
+			Object.assign(internals, { channel: { send, close() {} } });
+			internals.handleFrame({
+				header: { kind: "outbound", outboundType: "daemon_hello" },
+				payload: Buffer.from(JSON.stringify(HELLO)),
+			});
+			const settled = vi.fn();
+			const request = client.request({ type: "get_state", activeSessionId: "active-1" }, 50).then(
+				(response) => settled(response),
+				(error: unknown) => settled(error),
+			);
+			try {
+				await vi.advanceTimersByTimeAsync(0);
+				expect(send).toHaveBeenCalledOnce();
+				if (termination === "timeout") await vi.advanceTimersByTimeAsync(50);
+				else {
+					client.close();
+					await vi.advanceTimersByTimeAsync(0);
+				}
+				expect(settled).toHaveBeenCalledWith(
+					expect.objectContaining({
+						message:
+							termination === "timeout"
+								? "Timed out waiting for daemon worker response to get_state"
+								: "Daemon worker client closed",
+					}),
+				);
+			} finally {
+				finishWrite();
+				await request;
+				client.close();
+				vi.useRealTimers();
+			}
+		},
+	);
+
 	it("emits decoded outbound frames to message listeners", () => {
 		const { client, internals } = makeDirectClient();
 		const messages: DaemonOutbound[] = [];

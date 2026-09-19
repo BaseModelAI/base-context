@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.10] - 2026-09-19
+
+- Fixed session attachment disconnecting during concurrent transcript updates.
+- Fixed worker request timeouts and connection closure hanging behind blocked socket writes.
+- Fixed daemon shutdown waiting indefinitely for half-open client connections.
+- Fixed idle eviction blocking the release of an existing session input pause.
+- Fixed cold resume after an interruption before tool admission, preserving incomplete tool calls as historical data without rerunning them.
+
 ## [1.0.9] - 2026-09-19
 
 - Fixed compaction and context checkpoint adoption rejecting concurrent child usage and session bookkeeping updates as branch changes. Real conversation, source, and branch changes still invalidate stale summaries.

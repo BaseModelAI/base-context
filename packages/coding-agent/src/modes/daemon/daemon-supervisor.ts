@@ -128,6 +128,7 @@ import {
 import {
 	acquireDaemonSocketPathLease,
 	cleanupDaemonSocketPath,
+	closeDaemonServer,
 	type DaemonSocketIdentity,
 	type DaemonSocketPathLease,
 	defaultDaemonSocketDir,
@@ -1890,7 +1891,12 @@ export class DaemonSupervisor {
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;
 		}
-		if (mutation && !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) {
+		// Releasing an existing pause can unblock a mutation that eviction is draining.
+		if (
+			mutation &&
+			command.type !== "release_session_input_pause" &&
+			!UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)
+		) {
 			const idleEvictionFence = this.idleEvictionFence;
 			if (idleEvictionFence) {
 				await idleEvictionFence;
@@ -7284,11 +7290,7 @@ export class DaemonSupervisor {
 			}
 		}
 		await this.catalog.stop();
-		for (const client of this.clients) {
-			client.detachInput();
-			client.socket.end();
-		}
-		await new Promise<void>((resolveClose) => this.server?.close(() => resolveClose()) ?? resolveClose());
+		await closeDaemonServer(this.server, this.clients);
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());
 		await this.runCleanupStep("supervisor cache", () => {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });

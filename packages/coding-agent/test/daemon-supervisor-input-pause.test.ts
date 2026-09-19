@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DaemonCommand, DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
+import type { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-journal.js";
+import {
+	createDaemonCommandEnvelope,
+	type DaemonCommand,
+	type DaemonResponse,
+} from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 
 type ClientFixture = {
@@ -20,6 +25,13 @@ type WorkerFixture = {
 type PauseEntry = { owner: ClientFixture; worker: WorkerFixture; pauseId: string };
 
 type SupervisorInternals = {
+	ready: Promise<void>;
+	mutationDrain: { readonly active: number };
+	idleEvictionFence?: Promise<void>;
+	commandJournal: Pick<CommandRecoveryJournal, "lookup" | "begin" | "recordResult">;
+	assertCurrentOwnership: ReturnType<typeof vi.fn>;
+	withEvictionFence(message: string, action: () => Promise<void>): Promise<void>;
+	handleLine(client: ClientFixture, line: string): Promise<void>;
 	clients: Set<ClientFixture>;
 	workers: Map<string, WorkerFixture>;
 	connectionIds: WeakMap<ClientFixture, string>;
@@ -28,7 +40,9 @@ type SupervisorInternals = {
 	detachingInputPauseSessions: WeakMap<ClientFixture, Set<string>>;
 	sessionInputPauses: Map<string, PauseEntry>;
 	findWorkerForClient: ReturnType<typeof vi.fn>;
-	forwardToWorker: ReturnType<typeof vi.fn>;
+	forwardToWorker: ReturnType<
+		typeof vi.fn<(worker: WorkerFixture, command: DaemonCommand, timeoutMs?: number) => Promise<DaemonResponse>>
+	>;
 	attachClient: ReturnType<typeof vi.fn>;
 	reserveSnapshotStream: ReturnType<typeof vi.fn>;
 	write: ReturnType<typeof vi.fn>;
@@ -100,11 +114,83 @@ function addClient(supervisor: SupervisorInternals, socketId: string, protocolId
 	return client;
 }
 
-function acquireCommand(id: string): DaemonCommand {
+function acquireCommand(id: string): DaemonCommand & { id: string } {
 	return { id, type: "acquire_session_input_pause", activeSessionId: "active-1", leaseKey: "shared-key" };
 }
 
 describe("daemon supervisor session input pause ownership", () => {
+	it("releases a paused prompt through the eviction fence without admitting a new pause", async () => {
+		const { supervisor } = createHarness();
+		const client = addClient(supervisor, "socket-a", "protocol-a");
+		supervisor.ready = Promise.resolve();
+		supervisor.assertCurrentOwnership = vi.fn(async () => {});
+		supervisor.commandJournal = {
+			lookup: vi.fn(() => undefined),
+			begin: vi.fn(() => ({ status: "new" as const })),
+			recordResult: vi.fn(),
+		};
+		const dispatch = (command: DaemonCommand & { id: string }) =>
+			supervisor.handleLine(client, JSON.stringify(createDaemonCommandEnvelope(command, command.id, client.id)));
+		await dispatch(acquireCommand("acquire"));
+		let promptEntered!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			promptEntered = resolve;
+		});
+		let releasePrompt!: () => void;
+		const paused = new Promise<void>((resolve) => {
+			releasePrompt = resolve;
+		});
+		let releaseForwarded = false;
+		const forward = supervisor.forwardToWorker.getMockImplementation()!;
+		supervisor.forwardToWorker.mockImplementation(async (worker: WorkerFixture, command: DaemonCommand) => {
+			if (command.type === "prompt") {
+				promptEntered();
+				await paused;
+			} else if (command.type === "release_session_input_pause") {
+				releaseForwarded = true;
+				releasePrompt();
+			}
+			return forward(worker, command);
+		});
+		const prompt = dispatch({
+			id: "prompt",
+			type: "prompt",
+			activeSessionId: "active-1",
+			admissionId: "admission-1",
+			message: "paused prompt",
+		});
+		await entered;
+		expect(supervisor.mutationDrain.active).toBe(1);
+		const evict = vi.fn(async () => {});
+		const eviction = supervisor.withEvictionFence("input pause blocked eviction drain", evict);
+		await Promise.resolve();
+		const acquire = dispatch(acquireCommand("late-acquire"));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(supervisor.forwardToWorker.mock.calls.map((call) => (call[1] as DaemonCommand).type)).toEqual([
+			"acquire_session_input_pause",
+			"prompt",
+		]);
+		const release = dispatch({
+			id: "release",
+			type: "release_session_input_pause",
+			activeSessionId: "active-1",
+			pauseId: "pause-1",
+		});
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(releaseForwarded).toBe(true);
+			await Promise.all([prompt, release, eviction, acquire]);
+			expect(evict).toHaveBeenCalledOnce();
+			expect(supervisor.mutationDrain.active).toBe(0);
+			expect(supervisor.idleEvictionFence).toBeUndefined();
+			expect(supervisor.sessionInputPauses.has("pause-1")).toBe(false);
+			expect(supervisor.write.mock.calls.every((call) => (call[1] as DaemonResponse).success)).toBe(true);
+		} finally {
+			releasePrompt();
+			await Promise.allSettled([prompt, release, eviction, acquire]);
+		}
+	});
+
 	it("keeps identical public lease keys independent across client sockets", async () => {
 		const { supervisor } = createHarness();
 		const first = addClient(supervisor, "socket-a", "protocol-a");

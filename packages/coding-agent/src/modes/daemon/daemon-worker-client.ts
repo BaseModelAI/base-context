@@ -256,19 +256,20 @@ export class DaemonWorkerClient {
 			}, timeoutMs);
 			this.pending.set(id, { resolve, reject, timeout });
 		});
-		try {
-			await this.channel.send(
+		// A blocked socket write must not postpone the response timeout or connection-close rejection.
+		void this.channel
+			.send(
 				{ kind: "command", requestId: id, commandType: command.type },
 				Buffer.from(serializeJsonLine(fullCommand)),
-			);
-		} catch (error) {
-			const pending = this.pending.get(id);
-			if (pending) {
-				clearTimeout(pending.timeout);
-				this.pending.delete(id);
-				pending.reject(error instanceof Error ? error : new Error(String(error)));
-			}
-		}
+			)
+			.catch((error: unknown) => {
+				const pending = this.pending.get(id);
+				if (pending) {
+					clearTimeout(pending.timeout);
+					this.pending.delete(id);
+					pending.reject(error instanceof Error ? error : new Error(String(error)));
+				}
+			});
 		return response;
 	}
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -62,6 +62,27 @@ export class DaemonSocketPathLease {
 		} catch {
 			// A lease callback must not rethrow from proper-lockfile's refresh callback.
 		}
+	}
+}
+
+export async function closeDaemonServer(
+	server: Server | undefined,
+	clients: Iterable<{ socket: Socket; detachInput(): void }>,
+): Promise<void> {
+	const closingClients = [...clients];
+	for (const client of closingClients) {
+		client.detachInput();
+		client.socket.end();
+	}
+	// Allow final replies to flush, but do not wait indefinitely for a peer's FIN.
+	const timeout = setTimeout(() => {
+		for (const client of closingClients) client.socket.destroy();
+	}, 1000);
+	timeout.unref();
+	try {
+		await new Promise<void>((resolveClose) => server?.close(() => resolveClose()) ?? resolveClose());
+	} finally {
+		clearTimeout(timeout);
 	}
 }
 

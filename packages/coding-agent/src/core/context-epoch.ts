@@ -17,16 +17,30 @@ export const CONTEXT_TOOL_EPOCH_RENDERER = "native-canonical-epoch/6";
 export const CONTEXT_SKILL_EPOCH_RENDERER = "native-canonical-epoch/7";
 /** Source-backed summary with retained public tool groups, not a measured MAIN request. */
 export const CONTEXT_TOOL_SUMMARY_RENDERER = "native-canonical-epoch/8";
+/** Public recipes may record absent admission, never a fabricated execution outcome. */
+export const CONTEXT_INTERRUPTED_TOOL_RENDERER = "native-canonical-epoch/9";
 
 /** Descriptive, source-backed outcomes in the existing accepted epoch, not an execution store. */
 export interface ToolContinuationGroup {
 	readonly assistantEntryId: string;
-	readonly calls: readonly {
-		readonly executionId: string;
-		readonly intent: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
-		readonly outcome: "outcome_unknown" | "not_started" | "completed" | "failed";
-		readonly result?: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
-	}[];
+	readonly calls: readonly (
+		| {
+				readonly admission?: never;
+				readonly executionId: string;
+				readonly intent: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
+				readonly outcome: "outcome_unknown" | "not_started" | "completed" | "failed";
+				readonly result?: Pick<IndexedSourceEvent, "id" | "sequence" | "revision">;
+		  }
+		| {
+				readonly admission: "absent";
+				/** Absence is scoped to this exact captured branch prefix, not external effects. */
+				readonly source: SourceSnapshotRef;
+				readonly executionId?: never;
+				readonly intent?: never;
+				readonly outcome?: never;
+				readonly result?: never;
+		  }
+	)[];
 }
 export type ContextMode = "on" | "off";
 
@@ -68,7 +82,8 @@ interface ContextEpochFields {
 		| typeof CONTEXT_POLICY_EPOCH_RENDERER
 		| typeof CONTEXT_TOOL_EPOCH_RENDERER
 		| typeof CONTEXT_SKILL_EPOCH_RENDERER
-		| typeof CONTEXT_TOOL_SUMMARY_RENDERER;
+		| typeof CONTEXT_TOOL_SUMMARY_RENDERER
+		| typeof CONTEXT_INTERRUPTED_TOOL_RENDERER;
 	readonly source: SourceSnapshotRef;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
@@ -220,9 +235,11 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER) ||
 			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER) ||
 			(value.version === 8 && value.renderer === CONTEXT_TOOL_SUMMARY_RENDERER) ||
+			([6, 8].includes(value.version as number) && value.renderer === CONTEXT_INTERRUPTED_TOOL_RENDERER) ||
 			([4, 5, 6].includes(value.version as number) && value.renderer === CONTEXT_SKILL_EPOCH_RENDERER)
 		) ||
-		(value.renderer === CONTEXT_SKILL_EPOCH_RENDERER || (value.version === 8 && "selectedSkills" in value)
+		(value.renderer === CONTEXT_SKILL_EPOCH_RENDERER ||
+		((value.version === 8 || value.renderer === CONTEXT_INTERRUPTED_TOOL_RENDERER) && "selectedSkills" in value)
 			? !("selectedSkills" in value) ||
 				!Array.isArray(value.selectedSkills) ||
 				value.selectedSkills.length === 0 ||

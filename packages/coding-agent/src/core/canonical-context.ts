@@ -3,6 +3,7 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
+	CONTEXT_INTERRUPTED_TOOL_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
@@ -379,11 +380,15 @@ export function prepareCanonicalEpoch(
 		checkpoint: snapshotContextEpoch(
 			{
 				version: context.toolContinuations?.length ? 6 : 4,
-				renderer: context.selectedSkills?.length
-					? CONTEXT_SKILL_EPOCH_RENDERER
-					: context.toolContinuations?.length
-						? CONTEXT_TOOL_EPOCH_RENDERER
-						: CONTEXT_EPOCH_RENDERER,
+				renderer: context.toolContinuations?.some((group) =>
+					group.calls.some((call) => call.admission === "absent"),
+				)
+					? CONTEXT_INTERRUPTED_TOOL_RENDERER
+					: context.selectedSkills?.length
+						? CONTEXT_SKILL_EPOCH_RENDERER
+						: context.toolContinuations?.length
+							? CONTEXT_TOOL_EPOCH_RENDERER
+							: CONTEXT_EPOCH_RENDERER,
 				...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 				...(context.toolContinuations?.length ? { toolContinuations: context.toolContinuations } : {}),
 				source: context.source,
@@ -476,11 +481,13 @@ export function prepareRecoveryCompaction(
 	return snapshotContextEpoch(
 		{
 			...(toolGroups.size ? { version: 8 as const, mode: context.mode } : { version: 4 as const }),
-			renderer: toolGroups.size
-				? CONTEXT_TOOL_SUMMARY_RENDERER
-				: context.selectedSkills?.length
-					? CONTEXT_SKILL_EPOCH_RENDERER
-					: CONTEXT_EPOCH_RENDERER,
+			renderer: context.toolContinuations?.some((group) => group.calls.some((call) => call.admission === "absent"))
+				? CONTEXT_INTERRUPTED_TOOL_RENDERER
+				: toolGroups.size
+					? CONTEXT_TOOL_SUMMARY_RENDERER
+					: context.selectedSkills?.length
+						? CONTEXT_SKILL_EPOCH_RENDERER
+						: CONTEXT_EPOCH_RENDERER,
 			...(toolGroups.size ? { toolContinuations: context.toolContinuations } : {}),
 			...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 			source: context.source,
@@ -1122,6 +1129,12 @@ export class CanonicalContextCompiler {
 		}
 		const replayUnits = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
 		const frozenGroups = checkpoint?.toolContinuations ?? [];
+		const assistantSequences = messages
+			.flatMap((message) => {
+				const reference = epochReferences.get(message);
+				return message.role === "assistant" && reference ? [reference.ref.sequence] : [];
+			})
+			.sort((left, right) => left - right);
 		const candidates = messages.flatMap((message, index) => {
 			if (message.role !== "assistant") return [];
 			const reference = epochReferences.get(message);
@@ -1136,6 +1149,9 @@ export class CanonicalContextCompiler {
 					index,
 					reference,
 					prior,
+					nextAssistantSequence:
+						assistantSequences.find((sequence) => sequence > reference.ref.sequence) ?? Infinity,
+					unqualifiedIntent: false,
 					intents: new Map<number, Awaited<ReturnType<typeof hydrateCapturedHistoryEntry>>>(),
 				},
 			];
@@ -1150,24 +1166,38 @@ export class CanonicalContextCompiler {
 			countBytes(metadata);
 			return hydrateCapturedHistoryEntry(metadata, maxSourceBytes, view.readPayload);
 		};
-		const acceptIntent = async (metadata: IndexedSourceEvent) => {
-			if (
-				metadata.kind !== "tool_intent" ||
-				metadata.qualification !== "native-tool-execution" ||
-				metadata.retention === "retained-import"
-			)
-				return;
+		const acceptIntent = async (metadata: IndexedSourceEvent, selected = candidates) => {
+			if (metadata.kind !== "tool_intent") return;
 			const hydrated = await readToolEvidence(metadata);
 			const entry = hydrated.entry;
-			if (
-				entry.type !== "tool_intent" ||
-				entry.assistant?.sessionId !== view.source.sessionId ||
-				entry.assistant.sessionFile !== view.source.sessionFile
-			)
-				return;
-			const candidate = candidates.find((item) => item.reference.ref.entryId === entry.assistant?.entryId);
-			if (!candidate) return;
+			if (entry.type !== "tool_intent") return;
 			const invocation = entry.invocation;
+			const ownerMatch = selected.find((item) => item.reference.ref.entryId === entry.assistant?.entryId);
+			const candidate =
+				ownerMatch ??
+				selected.find(
+					(item) =>
+						metadata.sequence > item.reference.ref.sequence &&
+						metadata.sequence < item.nextAssistantSequence &&
+						item.message.content.some(
+							(part) =>
+								part.type === "toolCall" &&
+								part.id === invocation.toolCallId &&
+								part.name === invocation.toolName,
+						),
+				);
+			if (!candidate) return;
+			// A present but unqualified/copied intent is not an absence of admission.
+			if (
+				metadata.qualification !== "native-tool-execution" ||
+				metadata.retention === "retained-import" ||
+				entry.assistant?.sessionId !== view.source.sessionId ||
+				entry.assistant.sessionFile !== view.source.sessionFile ||
+				entry.assistant.entryId !== candidate.reference.ref.entryId
+			) {
+				candidate.unqualifiedIntent = true;
+				return;
+			}
 			const call = candidate.message.content.filter((part) => part.type === "toolCall")[invocation.sourceOrder];
 			if (
 				!Number.isSafeInteger(invocation.sourceOrder) ||
@@ -1182,61 +1212,128 @@ export class CanonicalContextCompiler {
 				throw new Error("Tool continuation has ambiguous original intent");
 			candidate.intents.set(invocation.sourceOrder, hydrated);
 		};
+		const absentPrefixes = new Map<string, { source: SourceSnapshotRef; candidates: typeof candidates }>();
 		for (const candidate of candidates) {
 			if (!candidate.prior) continue;
 			if (!Array.isArray(candidate.prior.calls)) throw new Error("Invalid committed tool continuation");
 			for (const call of candidate.prior.calls) {
+				if (call.admission === "absent") {
+					if (
+						checkpoint?.renderer !== CONTEXT_INTERRUPTED_TOOL_RENDERER ||
+						!call.source ||
+						call.source.sourceSequence < candidate.reference.ref.sequence ||
+						call.intent !== undefined ||
+						call.executionId !== undefined ||
+						call.outcome !== undefined ||
+						call.result !== undefined
+					)
+						throw new Error("Invalid committed absent tool admission");
+					const key = JSON.stringify(call.source);
+					const prefix = absentPrefixes.get(key) ?? { source: call.source, candidates: [] as typeof candidates };
+					if (!prefix.candidates.includes(candidate)) prefix.candidates.push(candidate);
+					absentPrefixes.set(key, prefix);
+					continue;
+				}
 				const actual = await view.get(call.intent.id);
 				if (!actual || actual.revision !== call.intent.revision || actual.sequence !== call.intent.sequence)
 					throw new Error("Committed tool intent is unavailable on this captured branch");
-				await acceptIntent(actual);
+				await acceptIntent(actual, [candidate]);
 			}
 		}
-		const newGroups = candidates.filter((candidate) => !candidate.prior);
-		if (newGroups.length) {
-			let after = Math.min(...newGroups.map((candidate) => candidate.reference.ref.sequence));
+		const scanIntents = async (readView: SessionHistoryReadView, selected: typeof candidates) => {
+			let after = Math.min(...selected.map((candidate) => candidate.reference.ref.sequence));
 			let scanned = 0;
 			for (;;) {
-				const page = await view.page(after, Math.min(128, maxMessages - scanned + 1));
+				const page = await readView.page(after, Math.min(128, maxMessages - scanned + 1));
 				scanned += page.events.length;
 				if (scanned > maxMessages) throw new Error("Tool continuation source item budget exceeded");
 				if (page.coverage !== "complete") throw new Error("Tool continuation source coverage is incomplete");
 				for (const metadata of page.events) {
-					// Frozen intent refs were already read exactly; do not count them twice as another execution.
+					// Frozen qualified refs were already checked exactly, not another execution.
 					if (
-						!candidates.some((candidate) => candidate.prior?.calls.some((call) => call.intent.id === metadata.id))
+						!selected.some((candidate) =>
+							[...candidate.intents.values()].some((intent) => intent.source.id === metadata.id),
+						)
 					)
-						await acceptIntent(metadata);
+						await acceptIntent(metadata, selected);
 				}
 				if (page.nextAfter === null) break;
 				if (page.nextAfter <= after) throw new Error("Tool continuation source page did not advance");
 				after = page.nextAfter;
 			}
+		};
+		const newGroups = candidates.filter((candidate) => !candidate.prior);
+		if (newGroups.length) await scanIntents(view, newGroups);
+		for (const prefix of absentPrefixes.values()) {
+			if (!view.atSnapshot) throw new Error("Absent tool admission requires its captured source");
+			await scanIntents(await view.atSnapshot(prefix.source), prefix.candidates);
 		}
+		const checkAbsentScope = async (candidate: (typeof candidates)[number]) => {
+			const entry = next.get(candidate.reference.ref.entryId)?.entry;
+			const output = entry?.type === "message" ? entry.requestOutput : undefined;
+			// This correlation limits the public-history scope. It never qualifies a tool owner or outcome.
+			if (
+				!output ||
+				typeof output.operationId !== "string" ||
+				!output.operationId ||
+				!Array.isArray(output.attemptIds) ||
+				output.attemptIds.some((id) => typeof id !== "string") ||
+				!output.source ||
+				output.source.sessionId !== view.source.sessionId ||
+				output.source.sessionFile !== view.source.sessionFile ||
+				!output.source.persistent ||
+				!Number.isSafeInteger(output.source.sourceSequence) ||
+				output.source.sourceSequence >= candidate.reference.ref.sequence ||
+				!view.atSnapshot
+			)
+				throw new Error("View-unit replay group is incomplete: original tool owner is unqualified");
+			await view.atSnapshot(output.source);
+		};
 		const toolContinuations: ToolContinuationGroup[] = [];
 		const pendingPublicMessageGroups: number[][] = [];
 		for (const candidate of candidates) {
 			const toolCalls = candidate.message.content.filter((part) => part.type === "toolCall");
 			if (
 				!toolCalls.length ||
-				candidate.intents.size !== toolCalls.length ||
+				candidate.unqualifiedIntent ||
 				(candidate.prior && candidate.prior.calls.length !== toolCalls.length)
 			)
 				throw new Error("View-unit replay group is incomplete: original tool owner is unqualified");
+			if (candidate.intents.size !== toolCalls.length) await checkAbsentScope(candidate);
 			const members = [candidate.index];
 			const calls: ToolContinuationGroup["calls"][number][] = [];
 			for (let order = 0; order < toolCalls.length; order++) {
-				const intent = candidate.intents.get(order)!;
+				const intent = candidate.intents.get(order);
+				const original = candidate.prior?.calls[order];
+				if (!intent) {
+					if (original && original.admission !== "absent")
+						throw new Error("Committed tool intent is unavailable on this captured branch");
+					if (
+						messages.some((message) => {
+							const sequence = epochReferences.get(message)?.ref.sequence;
+							return (
+								message.role === "toolResult" &&
+								message.toolCallId === toolCalls[order].id &&
+								sequence !== undefined &&
+								sequence > candidate.reference.ref.sequence &&
+								sequence < candidate.nextAssistantSequence
+							);
+						})
+					)
+						throw new Error("Tool outcome lacks its original finalized owner");
+					calls.push(original ?? { admission: "absent", source: { ...view.source } });
+					continue;
+				}
+				if (original?.admission === "absent") throw new Error("Committed absent tool admission changed");
 				if (intent.entry.type !== "tool_intent") throw new Error("Invalid native tool intent");
 				const invocation = intent.entry.invocation;
-				const original = candidate.prior?.calls[order];
 				if (
 					original &&
 					(original.executionId !== invocation.executionId || original.intent.id !== intent.source.id)
 				)
 					throw new Error("Committed tool execution identity changed");
 				const actual = await view.get(invocation.executionId);
-				let outcome: ToolContinuationGroup["calls"][number]["outcome"] = "outcome_unknown";
+				let outcome: Exclude<ToolContinuationGroup["calls"][number]["outcome"], undefined> = "outcome_unknown";
 				if (actual) {
 					if (
 						actual.kind !== "message" ||

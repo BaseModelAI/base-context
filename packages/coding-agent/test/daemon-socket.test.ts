@@ -1,18 +1,56 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
-import { createConnection, createServer } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
 import {
 	cleanupDaemonSocketPath,
+	closeDaemonServer,
 	DaemonSocketPathLease,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+
+describe("closeDaemonServer", () => {
+	it.each([false, true])("flushes final replies and closes an allowHalfOpen=%s client", async (allowHalfOpen) => {
+		const server = createServer();
+		const accepted = new Promise<Socket>((resolve) => server.once("connection", resolve));
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Expected a loopback server");
+		const peer = createConnection({ port: address.port, host: "127.0.0.1", allowHalfOpen });
+		let reply = "";
+		peer.on("data", (data: Buffer) => {
+			reply += data.toString("utf8");
+		});
+		const socket = await accepted;
+		let detached = false;
+		try {
+			socket.write("final reply\n");
+			await closeDaemonServer(server, [
+				{
+					socket,
+					detachInput: () => {
+						detached = true;
+					},
+				},
+			]);
+			expect(detached).toBe(true);
+			expect(reply).toBe("final reply\n");
+			expect(socket.destroyed).toBe(true);
+			expect(server.listening).toBe(false);
+			if (allowHalfOpen) expect(peer.writableEnded).toBe(false);
+		} finally {
+			peer.destroy();
+			socket.destroy();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+});
 
 describe("normalizeSocketPath", () => {
 	it("normalizes equivalent Unix spellings", () => {
@@ -27,7 +65,7 @@ describe("defaultDaemonSocketPath", () => {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		expect(defaultDaemonSocketPath()).toMatch(/^\\\\\.\\pipe\\base-context-[0-9a-f]{12}$/);
 	});
 
 	it("uses a per-user Unix socket directory", () => {
@@ -38,7 +76,8 @@ describe("defaultDaemonSocketPath", () => {
 		const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
 		const socketPath = defaultDaemonSocketPath();
 
-		expect(dirname(socketPath)).toBe(join(tmpdir(), `prime-agent-${suffix}`));
+		expect(dirname(dirname(socketPath))).toBe(tmpdir());
+		expect(basename(dirname(socketPath))).toMatch(new RegExp(`^bc-${suffix}-[0-9a-f]{8}$`));
 		expect(basename(socketPath)).toBe("daemon.sock");
 	});
 

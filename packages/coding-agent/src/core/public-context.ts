@@ -46,13 +46,25 @@ export function renderToolContinuation(
 			content,
 			...(message.role === "assistant"
 				? {
-						calls: group.calls.map((call) => ({
-							executionId: call.executionId,
-							intentEntryId: call.intent.id,
-							intent: "recorded",
-							outcome: call.outcome,
-							...(call.result ? { resultEntryId: call.result.id } : {}),
-						})),
+						calls: group.calls.map((call, sourceOrder) =>
+							call.admission === "absent"
+								? {
+										sourceOrder,
+										admission: "not_recorded",
+										capturedHistory: {
+											sessionId: call.source.sessionId,
+											leafId: call.source.leafId,
+											sourceSequence: call.source.sourceSequence,
+										},
+									}
+								: {
+										executionId: call.executionId,
+										intentEntryId: call.intent.id,
+										intent: "recorded",
+										outcome: call.outcome,
+										...(call.result ? { resultEntryId: call.result.id } : {}),
+									},
+						),
 					}
 				: {}),
 		},
@@ -61,7 +73,11 @@ export function renderToolContinuation(
 	const rendered: CustomMessage & { content: string } = {
 		role: "custom",
 		customType: PUBLIC_TOOL_CONTINUATION_RENDERER,
-		content: `Recorded tool continuation data. Intent acknowledgment records intent only; an absent finalized result leaves the outcome unknown.
+		content: `Recorded tool continuation data. Intent acknowledgment records intent only; an absent finalized result leaves the outcome unknown.${
+			group.calls.some((call) => call.admission === "absent")
+				? " For calls marked admission not recorded, no qualified admission or finalized result is recorded in that captured history; the outcome is unknown. This historical view does not authorize tool execution."
+				: ""
+		}
 ${data}`,
 		display: false,
 		timestamp: message.timestamp,

@@ -195,6 +195,7 @@ import {
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
 import {
 	cleanupDaemonSocketPath,
+	closeDaemonServer,
 	type DaemonSocketIdentity,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
@@ -4238,7 +4239,7 @@ export class AgentDaemon {
 					});
 				}
 				if (streamsSnapshot) {
-					const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = `${result.activeSessionId}-${result.lastEventCursor?.generation}-${result.lastEventSequence}`;
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
 						transcript = createSnapshotTranscriptChunks({
@@ -5406,6 +5407,7 @@ export class AgentDaemon {
 		command: Extract<DaemonCommand, { type: "attach" }>,
 	): Promise<DaemonAttachResult> {
 		const snapshot = await this.createSessionSnapshot(state);
+		const { lastEventSequence, lastEventCursor } = snapshot;
 		const replay =
 			command.resumeCursor?.activeSessionId && command.resumeCursor.activeSessionId !== state.activeSessionId
 				? {
@@ -5414,14 +5416,11 @@ export class AgentDaemon {
 							"sequence" in command.resumeCursor
 								? command.resumeCursor.sequence
 								: command.resumeCursor.eventSequence,
-						toSequence: state.lastEventSequence,
-						toCursor: {
-							generation: state.eventGeneration,
-							sequence: state.lastEventSequence,
-						},
+						toSequence: lastEventSequence,
+						toCursor: lastEventCursor,
 						reason: "resume_cursor_session_mismatch",
 					}
-				: createDaemonReplayInfo(command.resumeCursor, state.lastEventSequence, state.eventGeneration);
+				: createDaemonReplayInfo(command.resumeCursor, lastEventSequence, lastEventCursor?.generation);
 		// Slim clients read summary/messages from the snapshot; duplicating them at
 		// the top level would serialize the full history twice more per attach.
 		const capabilities = daemonClientCapabilitiesForSession(client, state.activeSessionId);
@@ -5432,11 +5431,8 @@ export class AgentDaemon {
 			...(slim ? {} : { state: snapshot.summary, messages: snapshot.messages }),
 			snapshot,
 			replay,
-			lastEventSequence: state.lastEventSequence,
-			lastEventCursor: {
-				generation: state.eventGeneration,
-				sequence: state.lastEventSequence,
-			},
+			lastEventSequence,
+			lastEventCursor,
 			client: {
 				id: client.id,
 				capabilities: [...capabilities],
@@ -7111,10 +7107,9 @@ Use prime_context read/search with selected lines or a query.`;
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
 	): void {
-		const snapshotId = `${state.activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
 		// Mark before the registry read so later events queue behind this snapshot.
 		const snapshotSignal = markClientSnapshotStreaming(client, state.activeSessionId);
-		void this.prepareReplacementSnapshot(client, state, message, snapshotId, snapshotSignal).catch((error) => {
+		void this.prepareReplacementSnapshot(client, state, message, snapshotSignal).catch((error) => {
 			finishClientSnapshotStreaming(client, state.activeSessionId);
 			this.log(`could not prepare replacement snapshot: ${String(error)}`);
 			if (!client.socket.destroyed && this.sessions.get(state.activeSessionId) === state) {
@@ -7132,7 +7127,6 @@ Use prime_context read/search with selected lines or a query.`;
 		client: DaemonSocketClient,
 		state: ActiveSessionState,
 		message: Extract<DaemonOutbound, { type: "session_replaced" }>,
-		snapshotId: string,
 		snapshotSignal: AbortSignal,
 	): Promise<void> {
 		const result = await this.createAttachResult(client, state, {
@@ -7148,6 +7142,7 @@ Use prime_context read/search with selected lines or a query.`;
 			}
 			return;
 		}
+		const snapshotId = `${result.activeSessionId}-${result.lastEventCursor?.generation}-${result.lastEventSequence}`;
 		const transcript = createSnapshotTranscriptChunks({
 			activeSessionId: state.activeSessionId,
 			snapshotId,
@@ -7540,13 +7535,13 @@ Use prime_context read/search with selected lines or a query.`;
 							snapshotFollows: true,
 							meta: createDaemonEventMeta(
 								activeSessionId,
-								state.lastEventSequence,
+								result.lastEventSequence,
 								undefined,
-								state.eventGeneration,
+								result.lastEventCursor?.generation,
 							),
 						});
 					}
-					const snapshotId = `${activeSessionId}-${state.eventGeneration}-${state.lastEventSequence}`;
+					const snapshotId = `${result.activeSessionId}-${result.lastEventCursor?.generation}-${result.lastEventSequence}`;
 					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
 					let transcript: SnapshotTranscriptChunkSource;
 					try {
@@ -7582,9 +7577,9 @@ Use prime_context read/search with selected lines or a query.`;
 				}
 				const meta = createDaemonEventMeta(
 					activeSessionId,
-					state.lastEventSequence,
+					result.lastEventSequence,
 					undefined,
-					state.eventGeneration,
+					result.lastEventCursor?.generation,
 				);
 				const catchup: DaemonOutbound =
 					purpose === "replacement"
@@ -7799,17 +7794,7 @@ Use prime_context read/search with selected lines or a query.`;
 			shutdownFailure = true;
 			this.log(`RLM journal shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		for (const client of this.clients) {
-			client.detachInput();
-			client.socket.end();
-		}
-		await new Promise<void>((resolveClose) => {
-			if (!this.server) {
-				resolveClose();
-				return;
-			}
-			this.server.close(() => resolveClose());
-		});
+		await closeDaemonServer(this.server, this.clients);
 		this.cleanupSocketPath();
 		process.exit(exitCode || (shutdownFailure ? 1 : 0));
 	}
