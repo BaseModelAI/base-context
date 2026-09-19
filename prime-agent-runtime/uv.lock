@@ -367,7 +367,7 @@ wheels = [
 
 [[package]]
 name = "base-context-runtime"
-version = "1.0.8"
+version = "1.0.9"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

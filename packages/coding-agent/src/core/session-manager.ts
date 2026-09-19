@@ -51,7 +51,12 @@ import {
 	type JournalFrameRetention,
 	type NativeEntryQualification,
 } from "./journal-frame.js";
-import { type BashExecutionMessage, type CustomMessage, createCompactionSummaryMessage } from "./messages.js";
+import {
+	type BashExecutionMessage,
+	COMPACTION_OUTCOME_CUSTOM_TYPE,
+	type CustomMessage,
+	createCompactionSummaryMessage,
+} from "./messages.js";
 import type {
 	ContextEpochEntryRef,
 	NativeBranchRequestOutputSource,
@@ -132,6 +137,21 @@ import {
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_ASYNC_PARSE_YIELD_BYTES = 4 * 1024 * 1024;
 
+// These records advance the journal leaf without changing the captured compaction input.
+const COMPACTION_BOOKKEEPING_ENTRY_TYPES = new Set<SessionEntry["type"]>([
+	"session_state",
+	"agent_status",
+	"git_state",
+	"child_usage_attributed",
+]);
+
+function isCompactionBookkeeping(entry: SessionEntry): boolean {
+	return (
+		COMPACTION_BOOKKEEPING_ENTRY_TYPES.has(entry.type) ||
+		(entry.type === "custom_message" && entry.customType === COMPACTION_OUTCOME_CUSTOM_TYPE)
+	);
+}
+
 // Entry types that can represent user intent (vs. daemon bookkeeping like
 // session_state/agent_status/git_state/child_usage_attributed). Used by
 // hasUserContent to decide whether a message-less draft is safe to discard.
@@ -205,6 +225,8 @@ export interface SessionHeader {
 
 /** One captured branch for summary input, physical requests, and the queued compaction commit. */
 export interface BoundCompactionSink extends BoundSessionRequestSink {
+	/** Original ownership and compaction input, including this sink's own acknowledged checkpoint. */
+	isCurrent(): boolean;
 	/** Internal explicit-copy read on this same held source, never a provider-view capability. */
 	[readCopiedEpochSource]<T>(read: (history: SessionHistoryReadScope) => Promise<T>): Promise<T>;
 	readBranch(): Promise<SessionEntry[]>;
@@ -1537,6 +1559,7 @@ interface SessionWriteState {
 	reservedLeaf: string | null;
 	leafId: string | null;
 	branchSelectionRevision: number;
+	compactionRevision: number;
 	pins: number;
 	retired: boolean;
 	closed: boolean;
@@ -1566,6 +1589,7 @@ function newSessionWriteState(): SessionWriteState {
 		reservedLeaf: null,
 		leafId: null,
 		branchSelectionRevision: 0,
+		compactionRevision: 0,
 		pins: 0,
 		retired: false,
 		closed: false,
@@ -2406,7 +2430,10 @@ export class SessionManager {
 				}
 				Object.assign(state, metadata);
 				state.metadataRefs = undefined;
-				if (advanceLeaf) state.leafId = snapshot.id;
+				if (advanceLeaf) {
+					state.leafId = snapshot.id;
+					if (!isCompactionBookkeeping(snapshot)) state.compactionRevision++;
+				}
 				state.reservedLeaf = state.leafId;
 				if (this.writeState === state) this.leafId = state.leafId;
 				this._publishHistory(state);
@@ -2499,6 +2526,7 @@ export class SessionManager {
 						target.message.usage = cloneUsage(snapshot.aggregateUsage);
 				}
 				state.leafId = snapshot.id;
+				if (!isCompactionBookkeeping(snapshot)) state.compactionRevision++;
 				if (this.writeState === state) {
 					this.leafId = snapshot.id;
 					this._notifyPersistListeners();
@@ -2577,10 +2605,24 @@ export class SessionManager {
 		let capturedSource: SourceSnapshotRef | undefined;
 		let captureFailure: unknown;
 		let selectionRevision: number;
+		let compactionRevision: number;
+		let currentRevision: number;
+		const isCurrent = (revision: number) =>
+			capturedSource !== undefined &&
+			this.writeState === state &&
+			state.owner === owner &&
+			!state.retired &&
+			!state.closed &&
+			this.sessionId === sessionId &&
+			this.sessionFile === sessionFile &&
+			state.branchSelectionRevision === selectionRevision &&
+			state.compactionRevision === revision;
 		const sink = this._bindHistorySource(
 			(index, source, query) => createSessionHistoryReadScope(index, source, query, "source"),
 			(source) => {
 				selectionRevision = state.branchSelectionRevision;
+				compactionRevision = state.compactionRevision;
+				currentRevision = compactionRevision;
 				if (!indexed)
 					residentBranch = this._readResidentBranches([source.leafId], capturedLimits, byId).branches[0];
 				capturedSource = source;
@@ -2622,18 +2664,7 @@ export class SessionManager {
 					if (JSON.stringify(epoch.source) !== JSON.stringify(capturedSource))
 						throw new Error("Context epoch does not match the bound source capture");
 				}
-				if (
-					!capturedSource ||
-					this.writeState !== state ||
-					state.owner !== owner ||
-					state.retired ||
-					state.closed ||
-					this.sessionId !== sessionId ||
-					this.sessionFile !== sessionFile ||
-					state.branchSelectionRevision !== selectionRevision ||
-					state.leafId !== capturedSource.leafId
-				)
-					throw new Error("Compaction source or branch changed");
+				if (!isCurrent(compactionRevision)) throw new Error("Compaction source or branch changed");
 			};
 			// Admission is synchronous; this append queues behind the capture before release can drain it.
 			const args = [
@@ -2646,12 +2677,15 @@ export class SessionManager {
 				snapshot.usage,
 				assertCurrent,
 			] as const;
-			return qualification || snapshot.requestOutputs
+			const entryId = await (qualification || snapshot.requestOutputs
 				? this._appendCompaction(...args, qualification, snapshot.requestOutputs)
-				: this.appendCompaction(...args);
+				: this.appendCompaction(...args));
+			currentRevision = compactionRevision + 1;
+			return entryId;
 		};
 		const bound: BoundCompactionSink = {
 			...sink,
+			isCurrent: () => isCurrent(currentRevision),
 			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
 			[readCopiedEpochSource]: (read) => sink.readHistory(read),
 			readBranch: async () => {

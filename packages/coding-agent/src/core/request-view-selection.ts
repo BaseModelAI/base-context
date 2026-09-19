@@ -43,6 +43,7 @@ export class PublicContextBudgetError extends RequestTokenBudgetError {
 		readonly taskFrameRebaseAvailable = false,
 		compactionKey?: string,
 		summaryCapacity?: (retained: ReadonlySet<string>, wrapper: string) => number | undefined,
+		readonly isSourceCurrent?: () => boolean,
 	) {
 		super(assessment);
 		this.name = "PublicContextBudgetError";
@@ -93,6 +94,7 @@ export interface CapturedRequestViewBoundary extends CanonicalViewSelectionSourc
 	readonly commit: RequestViewCommit;
 	readonly validate?: RequestViewValidate;
 	readonly fixedPrepare?: RequestViewFixedPrepare;
+	readonly isSourceCurrent?: () => boolean;
 }
 
 export function captureRequestViewBoundary(
@@ -100,6 +102,7 @@ export function captureRequestViewBoundary(
 	commit: RequestViewCommit,
 	validate?: RequestViewValidate,
 	fixedPrepare?: RequestViewFixedPrepare,
+	isSourceCurrent?: () => boolean,
 ): CapturedRequestViewBoundary {
 	const source = getCanonicalViewSelectionSource(messages);
 	if (!source) throw new Error("Request view boundary requires compiled canonical messages");
@@ -118,6 +121,7 @@ export function captureRequestViewBoundary(
 		commit,
 		validate,
 		fixedPrepare,
+		isSourceCurrent,
 	};
 }
 
@@ -255,7 +259,16 @@ function publicBudgetFailure(
 	const body = JSON.parse(request.body!) as Record<string, unknown>;
 	const input = body[inputKey];
 	if (!Array.isArray(input) || input.length !== projection.messageIndices.length)
-		return new PublicContextBudgetError(boundary.source, assessment, original);
+		return new PublicContextBudgetError(
+			boundary.source,
+			assessment,
+			original,
+			undefined,
+			false,
+			undefined,
+			undefined,
+			boundary.isSourceCurrent,
+		);
 	const graph = prepareViewSelection(source.units, boundary.limits);
 	const retainedInput = (retained: ReadonlySet<string>) => {
 		const roots = source.units
@@ -302,6 +315,7 @@ function publicBudgetFailure(
 				? undefined
 				: Math.floor(measured.availableInputTokens - measured.estimatedInputTokens);
 		},
+		boundary.isSourceCurrent,
 	);
 }
 

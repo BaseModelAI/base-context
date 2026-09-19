@@ -1244,6 +1244,12 @@ export class AgentSession {
 		tools: Agent["state"]["tools"];
 		settings: string;
 	};
+	private _failedThresholdCompaction?: {
+		isCurrent: BoundCompactionSink["isCurrent"];
+		configuration: string;
+		systemPrompt: string;
+		tools: Agent["state"]["tools"];
+	};
 	private readonly _contextEpochsEnabled: boolean;
 	private readonly _initialContextMode: ContextMode;
 	private _contextMode: ContextMode;
@@ -1748,7 +1754,7 @@ export class AgentSession {
 							acknowledged = { entryId, result };
 							try {
 								assertResourceCurrent(resource);
-								if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+								if (this.sessionManager !== epochManager || !compaction.isCurrent())
 									throw new Error("Context epoch source changed before adoption");
 								this.agent.state.messages = prepared.messages;
 								committed = prepared.checkpoint;
@@ -1864,7 +1870,7 @@ export class AgentSession {
 											committedEntry = { sessionId: epochContext.source.sessionId, entryId };
 											requestContract = nextContract;
 											assertResourceCurrent(resource);
-											if (this.sessionManager !== epochManager || epochManager.getLeafId() !== entryId)
+											if (this.sessionManager !== epochManager || !compaction.isCurrent())
 												throw new Error("Context contract source changed before acceptance");
 										}
 										if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
@@ -1881,6 +1887,7 @@ export class AgentSession {
 									}
 								}
 							: undefined,
+						compaction.isCurrent,
 					);
 				}
 				this._compactionSetupFailure = undefined;
@@ -1909,7 +1916,7 @@ export class AgentSession {
 				!error.source.persistent ||
 				error.source.sessionId !== owner.sessionId ||
 				error.source.sessionFile !== owner.sessionFile ||
-				error.source.leafId !== owner.manager.getLeafId()
+				!(error.isSourceCurrent?.() ?? error.source.leafId === owner.manager.getLeafId())
 			)
 				return false;
 			// Rebase this captured frame before paying for a summary. The replacement still
@@ -2258,7 +2265,7 @@ export class AgentSession {
 				};
 				// ACK is authoritative even if later setup or release fails.
 				this._contextMode = mode;
-				if (this.sessionManager !== manager || manager.getLeafId() !== entryId)
+				if (this.sessionManager !== manager || !compaction.isCurrent())
 					throw new Error("Context mode source changed before adoption");
 				assertResourceCurrent(resource);
 				this.agent.state.messages = prepared.messages;
@@ -4149,6 +4156,28 @@ export class AgentSession {
 		});
 	}
 
+	private _thresholdCompactionConfiguration(): string {
+		return JSON.stringify({
+			model: this.model,
+			thinkingLevel: this.thinkingLevel,
+			settings: this.settingsManager.getCompactionSettings(),
+		});
+	}
+
+	private _hasFailedThresholdCompaction(): boolean {
+		const failed = this._failedThresholdCompaction;
+		if (!failed) return false;
+		if (
+			failed.isCurrent() &&
+			failed.configuration === this._thresholdCompactionConfiguration() &&
+			failed.systemPrompt === this.agent.state.systemPrompt &&
+			failed.tools === this.agent.state.tools
+		)
+			return true;
+		this._failedThresholdCompaction = undefined;
+		return false;
+	}
+
 	private async _thresholdCompactionNeeded(
 		context: ShouldStopAfterTurnContext,
 		owner = this._captureCompactionOwner(),
@@ -4167,6 +4196,7 @@ export class AgentSession {
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) return false;
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
 		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) return false;
+		if (this._hasFailedThresholdCompaction()) return false;
 		// Keep the existing threshold-specific goal winner; do not import W74's natural wait policy here.
 		if (!this._isGoalContinuationOwnerCurrent(goalOwner)) return true;
 		if (!(await this._queueGoalContinuationForThresholdCompaction(context.message, goalOwner))) {
@@ -5546,6 +5576,7 @@ export class AgentSession {
 	 */
 	async disposeAsync(options?: { kernelSnapshot?: boolean }): Promise<void> {
 		this._failedAutomaticCompaction = undefined;
+		this._failedThresholdCompaction = undefined;
 		this._contextCompiler.clear();
 		this._nativeRecoveryCursors.clear();
 		for (const admission of this._rlmChildAdmissions) admission.cancel("Parent session disposed");
@@ -5751,6 +5782,7 @@ export class AgentSession {
 
 	dispose(): void {
 		this._failedAutomaticCompaction = undefined;
+		this._failedThresholdCompaction = undefined;
 		this._contextCompiler.clear();
 		this._nativeRecoveryCursors.clear();
 		if (this._disposed) {
@@ -11015,6 +11047,7 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
+			if (this._hasFailedThresholdCompaction()) return false;
 			if (!this._pendingCheckpoint && queueAutonomousContinuation) {
 				if (
 					!(await this._queueGoalContinuationForThresholdCompaction(assistantMessage, goalOwner)) &&
@@ -11146,6 +11179,24 @@ export class AgentSession {
 		let compaction: BoundCompactionSink | undefined;
 		let committed: CompactionCommit | undefined;
 		let failure: unknown;
+		const thresholdConfiguration =
+			reason === "threshold" && !resumeInPlace
+				? {
+						configuration: this._thresholdCompactionConfiguration(),
+						systemPrompt: this.agent.state.systemPrompt,
+						tools: this.agent.state.tools,
+					}
+				: undefined;
+		const rememberThresholdFailure = () => {
+			if (
+				thresholdConfiguration &&
+				!abort.signal.aborted &&
+				this._isCompactionOwnerCurrent(owner) &&
+				compaction?.isCurrent()
+			) {
+				this._failedThresholdCompaction = { ...thresholdConfiguration, isCurrent: compaction.isCurrent };
+			}
+		};
 		try {
 			const selected = this._resolveCompactionModel();
 			const model = selected?.model;
@@ -11170,6 +11221,7 @@ export class AgentSession {
 					reason === "threshold" && shouldContinueAfterCompaction,
 					queuedAutonomousContinuationsForThisCompaction,
 				);
+				rememberThresholdFailure();
 				resumeAfterFailure();
 				return false;
 			}
@@ -11262,6 +11314,7 @@ export class AgentSession {
 					{ customInstructions, owner },
 				);
 			}
+			rememberThresholdFailure();
 			resumeAfterFailure();
 			return false;
 		} finally {

@@ -397,11 +397,12 @@ export class InferenceCoordinator {
 		commit: RequestViewCommit,
 		validate?: RequestViewValidate,
 		fixedPrepare?: RequestViewFixedPrepare,
+		isSourceCurrent?: () => boolean,
 	): void {
 		this.assertAdmission();
 		if (!this.capturedSink) throw new Error("Request view boundary requires a captured inference owner");
 		if (this.requestViewBoundary) throw new Error("Request view boundary is already bound");
-		this.requestViewBoundary = captureRequestViewBoundary(messages, commit, validate, fixedPrepare);
+		this.requestViewBoundary = captureRequestViewBoundary(messages, commit, validate, fixedPrepare, isSourceCurrent);
 	}
 
 	/** Read through an explicit capture, never by recapturing the mutable current session. */

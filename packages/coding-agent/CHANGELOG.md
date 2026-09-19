@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.9] - 2026-09-19
+
+- Fixed compaction and context checkpoint adoption rejecting concurrent child usage and session bookkeeping updates as branch changes. Real conversation, source, and branch changes still invalidate stale summaries.
+- Fixed repeated automatic summary attempts on unchanged context after a failed threshold compaction. Manual retries and new input remain available.
+
 ## [1.0.8] - 2026-09-18
 
 - Fixed harness-state saves to replace files atomically, preserve failed mutations, and report corrupt state without overwriting it.

@@ -17,7 +17,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompactionCommittedError } from "../../src/core/agent-session.js";
 import { CanonicalContextCompiler, getCanonicalViewUnits } from "../../src/core/canonical-context.js";
-import { readContextEpoch } from "../../src/core/context-epoch.js";
+import { appendContextEpoch, readContextEpoch } from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES } from "../../src/core/kernel/state-snapshot.js";
 import type { RefinementProposal } from "../../src/core/refinement/index.js";
@@ -27,7 +27,7 @@ import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import type { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
-import { createHarness, getMessageText, type Harness } from "./harness.js";
+import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
 // Read-only observations of records created by the native session, never fixture-owned admissions.
@@ -311,6 +311,72 @@ describe("AgentSession compaction characterization", () => {
 		}
 		return { harness, internals, scheduled, continued, running, pause, releaseTool, compacted };
 	}
+
+	it.each(["manual", "requested", "threshold"] as const)(
+		"commits %s compaction despite concurrent child accounting and continues",
+		async (mode) => {
+			const summarize = createDeferred();
+			const releaseSummary = createDeferred();
+			let harness: Harness;
+			let running: Promise<unknown>;
+			let releasePause: (() => void) | undefined;
+			if (mode === "manual") {
+				harness = await createHarness({
+					persistSession: true,
+					settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+				});
+				harnesses.push(harness);
+				harness.setResponses([fauxAssistantMessage("first response"), fauxAssistantMessage("second response")]);
+				await harness.session.prompt("first request");
+				await harness.session.prompt("second request");
+				const summary = async () => {
+					summarize.resolve();
+					await releaseSummary.promise;
+					return fauxAssistantMessage("model summary with concurrent accounting");
+				};
+				harness.setResponses([summary, summary]);
+				running = harness.session.compact();
+			} else {
+				const fixture = await prepareNativeCheckpoint({
+					persistSession: true,
+					...(mode === "threshold" ? { autonomous: { enabled: true } } : {}),
+					beforeCompact: async () => {
+						summarize.resolve();
+						await releaseSummary.promise;
+					},
+				});
+				harness = fixture.harness;
+				running = fixture.running;
+				releasePause = () => fixture.pause.release();
+				fixture.releaseTool.resolve();
+			}
+			void running.catch(() => undefined);
+			try {
+				await summarize.promise;
+				const entries = await harness.sessionManager.readBranch();
+				const target = entries.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+				if (!target) throw new Error("Expected an assistant for late child accounting");
+				const sourceLeaf = harness.sessionManager.getLeafId();
+				await harness.sessionManager.appendChildUsageAttributionWithAggregate(target.id, createUsage(10));
+				await harness.sessionManager.appendChildUsageAttributionWithAggregate(target.id, createUsage(20));
+				expect(harness.sessionManager.getLeafId()).not.toBe(sourceLeaf);
+			} finally {
+				releaseSummary.resolve();
+				releasePause?.();
+			}
+			await running;
+			await harness.session.waitForHeadlessIdle();
+			expect(harness.eventsOfType("compaction_end")).toContainEqual(
+				expect.objectContaining({ reason: mode, result: expect.any(Object), aborted: false }),
+			);
+			expect(harness.eventsOfType("compaction_end").filter((event) => event.errorMessage)).toEqual([]);
+			expect(harness.session.isCompacting).toBe(false);
+			harness.setResponses([fauxAssistantMessage("continued after accounting race")]);
+			await harness.session.prompt("continue after the checkpoint");
+			expect(getAssistantTexts(harness)).toContain("continued after accounting race");
+		},
+		30_000,
+	);
 
 	it("starts accepted next prompts after short manual compaction at the real agent-end boundary", async () => {
 		const harness = await createHarness({
@@ -827,6 +893,38 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(body).toContain("Apply the SLA update.");
 	});
 
+	it("adopts native epochs and mode changes when bookkeeping arrives after their ACK", async () => {
+		const original = SessionManager.prototype.bindCompactionSink;
+		let acknowledgements = 0;
+		vi.spyOn(SessionManager.prototype, "bindCompactionSink").mockImplementation(function (
+			this: SessionManager,
+			...args
+		) {
+			const sink = original.apply(this, args);
+			const append = sink[appendContextEpoch];
+			sink[appendContextEpoch] = async (...params) => {
+				const entryId = await append(...params);
+				await this.appendAgentStatus({ summary: "late status", basedOnMessageCount: 0 });
+				expect(this.getLeafId()).not.toBe(entryId);
+				expect(sink.isCurrent()).toBe(true);
+				acknowledgements++;
+				return entryId;
+			};
+			return sink;
+		});
+		const { harness, main } = await createRecoveryCompactionFixture();
+		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
+		expect(main).toHaveLength(3);
+		await harness.session.setContextMode("off");
+		await harness.session.prompt("Continue with fixed context.");
+		await harness.session.setContextMode("on");
+		await harness.session.prompt("Continue after status bookkeeping.");
+		expect(main).toHaveLength(5);
+		expect(acknowledgements).toBeGreaterThanOrEqual(4);
+		expect(harness.session.isCompacting).toBe(false);
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.errorMessage)).toEqual([]);
+	});
+
 	it("compacts an overfull public history into a fitting request", async () => {
 		const { harness, main, summaries } = await createRecoveryCompactionFixture();
 		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Older context. ".repeat(2000)}`);
@@ -838,12 +936,23 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		// This fixture explicitly meters one token per byte. Exceed its observed remaining
 		// space while leaving enough room after the removable 30 KiB source prefix.
 		const addedBytes = budget.availableInputTokens! - budget.estimatedInputTokens! + 20000;
-		const recover = vi.spyOn(
-			harness.session.agent as unknown as {
-				requestPreparationRecoveryOwner(error: unknown, signal?: AbortSignal): Promise<boolean | "reprepare">;
-			},
-			"requestPreparationRecoveryOwner",
-		);
+		const recoveryOwner = harness.session.agent as unknown as {
+			requestPreparationRecoveryOwner(error: unknown, signal?: AbortSignal): Promise<boolean | "reprepare">;
+		};
+		const recoverOriginal = recoveryOwner.requestPreparationRecoveryOwner.bind(recoveryOwner);
+		const target = (await harness.sessionManager.readBranch()).find(
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		)!;
+		const recover = vi
+			.spyOn(recoveryOwner, "requestPreparationRecoveryOwner")
+			.mockImplementation(async (error, signal) => {
+				if (error instanceof PublicContextBudgetError) {
+					await harness.sessionManager.appendChildUsageAttributionWithAggregate(target.id, createUsage(10));
+					expect(harness.sessionManager.getLeafId()).not.toBe(error.source.leafId);
+					expect(error.isSourceCurrent?.()).toBe(true);
+				}
+				return recoverOriginal(error, signal);
+			});
 		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
 		await harness.session.prompt(`Current required facts. ${"New ".repeat(Math.ceil(addedBytes / 4))}`);
 		expect(recover).toHaveBeenCalledTimes(2);
@@ -2174,6 +2283,64 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			details: { reason: "threshold", outcome: "skipped" },
 		});
 		expect(harness.session.agent.convertToLlm([outcome!])).toEqual([]);
+	});
+
+	it("does not repeat failed threshold summaries for bookkeeping, but accepts manual retries and new input", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			models: [{ id: "faux-1", contextWindow: 200_000 }],
+			settings: {
+				compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 199_999 },
+				autoRefine: { enabled: false },
+			},
+		});
+		harnesses.push(harness);
+		const largeReply = () => fauxAssistantMessage("large context reply");
+		harness.setResponses([fauxAssistantMessage("earlier reply"), largeReply()]);
+		await harness.session.prompt("earlier request");
+		await harness.session.prompt("current request");
+		const lastAssistant = [...harness.session.messages]
+			.reverse()
+			.find((message) => message.role === "assistant") as AssistantMessage;
+		const target = (await harness.sessionManager.readBranch())
+			.reverse()
+			.find((entry) => entry.type === "message" && entry.message.role === "assistant")!;
+		let summaryCalls = 0;
+		const failSummary = () => {
+			summaryCalls++;
+			throw new Error("summary service unavailable");
+		};
+		harness.setResponses([failSummary, failSummary]);
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
+		const internals = harness.session as unknown as SessionWithCompactionInternals;
+		await internals._checkCompaction(lastAssistant, false, false);
+		const firstSummaryCalls = summaryCalls;
+		expect(firstSummaryCalls).toBeGreaterThan(0);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		await harness.sessionManager.appendChildUsageAttributionWithAggregate(target.id, createUsage(10));
+		await harness.sessionManager.appendAgentStatus({ summary: "child accounting arrived", basedOnMessageCount: 4 });
+		await internals._checkCompaction(lastAssistant, false, false);
+		expect(
+			await internals._thresholdCompactionNeeded({
+				message: lastAssistant,
+				toolResults: [],
+				context: { systemPrompt: harness.session.systemPrompt, messages: harness.session.messages, tools: [] },
+				newMessages: [lastAssistant],
+			}),
+		).toBe(false);
+		expect(summaryCalls).toBe(firstSummaryCalls);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		harness.setResponses([failSummary, failSummary]);
+		await expect(harness.session.compact()).rejects.toThrow("summary service unavailable");
+		expect(summaryCalls).toBeGreaterThan(firstSummaryCalls);
+		const beforeNewInput = summaryCalls;
+		harness.setResponses([largeReply(), failSummary, failSummary]);
+		await harness.session.prompt("new public input permits a fresh automatic attempt");
+		await harness.session.waitForHeadlessIdle();
+		expect(summaryCalls).toBeGreaterThan(beforeNewInput);
+		expect(harness.eventsOfType("compaction_end").filter((event) => event.reason === "threshold")).toHaveLength(2);
+		expect(harness.session.isCompacting).toBe(false);
+		expect(getAssistantTexts(harness)).toContain("large context reply");
 	});
 
 	it("does not retry overflow recovery more than once", async () => {

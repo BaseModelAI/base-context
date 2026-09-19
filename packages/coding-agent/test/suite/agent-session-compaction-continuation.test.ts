@@ -16,7 +16,6 @@ import {
 	fauxToolCall,
 	getModel,
 	type Model,
-	RequestTokenBudgetError,
 	type ToolResultMessage,
 	type Usage,
 } from "@ponythewhite/base-context-ai";
@@ -583,16 +582,16 @@ describe("compaction continuation", () => {
 		expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(0);
 	});
 
-	it("reports the original measured budget refusal when the acknowledged public tail still exceeds the limit", async () => {
+	it("refuses an oversized mandatory public tail without paying for a summary", async () => {
 		const { harness, prompt, execute, failures, sends, toolText } = await createPublicPressureFixture(true, 140_000);
 		const continueAgent = vi.spyOn(harness.session.agent, "continue");
 		const error: unknown = await harness.session.promptAndWait(prompt).then(
 			() => undefined,
 			(failure: unknown) => failure,
 		);
-		expect(error).toBeInstanceOf(RequestTokenBudgetError);
-		expect(error).not.toBeInstanceOf(PublicContextBudgetError);
-		if (!(error instanceof RequestTokenBudgetError)) throw new Error("Expected the original request budget refusal");
+		expect(error).toBeInstanceOf(PublicContextBudgetError);
+		if (!(error instanceof PublicContextBudgetError)) throw new Error("Expected the original public budget refusal");
+		expect(error.mandatoryAssessment).toMatchObject({ status: "over-budget" });
 		expect(error.assessment).toMatchObject({
 			status: "over-budget",
 			unknown: [],
@@ -602,16 +601,16 @@ describe("compaction continuation", () => {
 		});
 		await harness.session.waitForIdle();
 		expect(failures).toHaveLength(1);
-		expect(failures[0]).toBeInstanceOf(PublicContextBudgetError);
+		expect(failures[0]).toBe(error);
 		expect(sends.filter((send) => send.request.purpose === "main")).toHaveLength(1);
-		expect(sends.some((send) => send.request.purpose === "summary")).toBe(true);
+		expect(sends.some((send) => send.request.purpose === "summary")).toBe(false);
 		const entries = await harness.sessionManager.readEntries();
-		expect(entries.filter((entry) => entry.type === "compaction" && entry.summary)).toHaveLength(1);
+		expect(entries.filter((entry) => entry.type === "compaction" && entry.summary)).toHaveLength(0);
 		expect(entries.some((entry) => entry.type === "message" && getMessageText(entry.message) === toolText)).toBe(
 			true,
 		);
-		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
+		expect(harness.eventsOfType("compaction_start")).toHaveLength(0);
+		expect(harness.eventsOfType("compaction_end")).toHaveLength(0);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
 		expect(harness.eventsOfType("agent_end")).toHaveLength(0);
 		expect(execute).toHaveBeenCalledOnce();
@@ -780,7 +779,7 @@ ${"input ".repeat(128)}`);
 			tools: [bigTool],
 			// Retain the 10k-token tool result plus its call; the earlier completed turn is summarized.
 			settings: { compaction: { enabled: true, reserveTokens: 500, keepRecentTokens: 10_001 } },
-			models: [{ id: "faux-1", contextWindow: 12_000 }],
+			models: [{ id: "faux-1", contextWindow: 20_000 }],
 			persistSession: true,
 			extensionFactories: [
 				(pi) => {
@@ -799,7 +798,7 @@ ${"input ".repeat(128)}`);
 		// A prior completed turn gives the first threshold checkpoint a whole group to summarize.
 		const earlierUser = {
 			role: "user" as const,
-			content: "Earlier context to retain.\n".repeat(600),
+			content: "Earlier context to retain.\n".repeat(1200),
 			timestamp: Date.now() - 2_000,
 		};
 		const earlierAssistant = createAssistant(harness, { stopReason: "stop", timestamp: Date.now() - 1_000 });
