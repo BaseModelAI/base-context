@@ -158,5 +158,80 @@ describe("SessionInfo.modified", () => {
 		expect(wholeSource.usage).toEqual({ inputTokens: 6, outputTokens: 8, cost: 0.375 });
 		expect(wholeSource.modified.getTime()).toBe(msgTime + 1);
 		expect(scans.mock.calls.filter(([path]) => path === filePath)).toHaveLength(0);
+
+		const ownUsageBeforeAppend = mgr.readOwnUsageSummary();
+		const compaction = mgr.appendCompaction(
+			"summary",
+			mgr.getLeafId()!,
+			100,
+			undefined,
+			false,
+			undefined,
+			usage(2, 3, 0.125),
+		);
+		expect(await ownUsageBeforeAppend).toEqual(wholeSource.usage);
+		await compaction;
+		await mgr.branchWithSummary(null, "branch summary", undefined, false, usage(3, 4, 0.25));
+		await mgr.appendCustomEntry("usage-shaped-control", { usage: usage(100, 100, 100) });
+		const sink = mgr.bindRequestSink();
+		try {
+			await sink.persist({
+				type: "attempt_settled",
+				operationId: "catalog-duplicate-receipt",
+				attemptId: "catalog-attempt",
+				timestamp: msgTime,
+				source: await sink.source,
+				owner: { sessionId: mgr.getSessionId() },
+				purpose: "main",
+				modelContract: {
+					api: "openai-completions",
+					provider: "openai",
+					model: "test",
+					profile: { id: "test", status: "unvalidated" },
+					pricing: { status: "unavailable" },
+				},
+				receipt: {
+					api: "openai-completions",
+					provider: "openai",
+					model: "test",
+					transport: "http",
+					ordinal: 1,
+					kind: "initial",
+					attemptId: "catalog-attempt",
+					outcome: "completed",
+					rawUsage: [],
+					usage: { input: 1, output: 1, totalTokens: 2 },
+					usageCompleteness: "complete",
+					timing: { queuedAt: msgTime, admittedAt: msgTime, settledAt: msgTime },
+				},
+			});
+		} finally {
+			await sink.release();
+		}
+		const beforeOwnPayloads = payloadsForSession();
+		const ownUsage = await mgr.readOwnUsageSummary();
+		expect(ownUsage).toEqual({ inputTokens: 11, outputTokens: 15, cost: 0.75 });
+		ownUsage!.cost = -1;
+		expect(await mgr.readOwnUsageSummary()).toEqual({ inputTokens: 11, outputTokens: 15, cost: 0.75 });
+		expect(payloadsForSession()).toBe(beforeOwnPayloads);
 	});
+
+	it("reads own usage above the source byte limit without hydrating the archive", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "base-context-own-usage-"));
+		tempDirs.push(dir);
+		const filePath = join(dir, "session.jsonl");
+		await createSessionFile(filePath);
+		const mgr = await SessionManager.open(filePath);
+		managers.push(mgr);
+		const padding = "x".repeat(8 * 1024 * 1024);
+		for (let index = 0; index < 9; index++) await mgr.appendCustomEntry("large-control", padding);
+		expect((await stat(filePath)).size).toBeGreaterThan(64 * 1024 * 1024);
+		const pages = vi.spyOn(HistoryIndex.prototype, "page");
+		const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+		const entries = vi.spyOn(mgr, "readEntries");
+		expect(await mgr.readOwnUsageSummary()).toEqual({ inputTokens: 1, outputTokens: 1, cost: 0 });
+		expect(pages).not.toHaveBeenCalled();
+		expect(payloads).not.toHaveBeenCalled();
+		expect(entries).not.toHaveBeenCalled();
+	}, 30_000);
 });

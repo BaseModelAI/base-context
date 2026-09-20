@@ -11,6 +11,7 @@ import type { JournalFrameRetention, NativeEntryQualification } from "./journal-
 import type { SessionCatalogProjection } from "./session-info-projection.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import type { TaskStateProjection, TaskStateSourceRef } from "./task-state.js";
+import type { SessionUsageSummary } from "./usage.js";
 
 /** Derived metadata only. Exact evidence remains at the canonical source locator. */
 export interface IndexedSourceEvent {
@@ -235,6 +236,7 @@ export type HistoryIndexRequest =
 			options: IpythonSentMessagesOptions;
 	  }
 	| { id: number; action: "current_source_bootstrap"; sessionId: string; snapshot: SessionJournalState }
+	| { id: number; action: "current_source_usage"; sessionId: string; snapshot: SessionJournalState }
 	| { id: number; action: "catalog"; sessionId: string; source: CatalogSourceIdentity }
 	| {
 			id: number;
@@ -242,6 +244,14 @@ export type HistoryIndexRequest =
 			sessionId: string;
 			targetId: string;
 			through: number;
+	  }
+	| {
+			id: number;
+			action: "source_context_updates";
+			sessionId: string;
+			target: ContextUpdateTarget;
+			through: number;
+			after: number;
 	  }
 	| {
 			id: number;
@@ -582,6 +592,19 @@ export class HistoryIndex {
 			snapshot: target,
 		})) as SourceBootstrapState;
 	}
+	/** Whole-source own usage for exactly the current acknowledged owner snapshot. */
+	async currentSourceUsage(
+		sessionId: string,
+		snapshot: SessionJournalState,
+	): Promise<SessionUsageSummary | undefined> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "current_source_usage",
+			sessionId,
+			snapshot,
+		})) as SessionUsageSummary | undefined;
+	}
+
 	/** Latest label control for this source target, including a clear. */
 	async sourceLabel(sessionId: string, targetId: string, through: number): Promise<IndexedSourceEvent | undefined> {
 		return (await this.request({ id: this.nextId++, action: "source_label", sessionId, targetId, through })) as
@@ -601,6 +624,25 @@ export class HistoryIndex {
 			targetId,
 			through,
 		})) as IndexedSourceEvent | undefined;
+	}
+	/** All matching source update refs, including off-branch and older revisions. */
+	async sourceContextUpdates(
+		sessionId: string,
+		target: ContextUpdateTarget,
+		through: number,
+		after = 0,
+	): Promise<HistoryIndexPage> {
+		return (await this.request({
+			id: this.nextId++,
+			action: "source_context_updates",
+			sessionId,
+			target:
+				target.kind === "assistant-usage"
+					? { kind: target.kind, targetId: target.targetId }
+					: { kind: target.kind, toolCallId: target.toolCallId },
+			through,
+			after,
+		})) as HistoryIndexPage;
 	}
 	async get(
 		sessionId: string,

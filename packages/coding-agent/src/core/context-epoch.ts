@@ -333,6 +333,14 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 	return snapshotContextEpoch(value as ContextEpochCheckpoint, maxBytes);
 }
 
+/** This configuration cannot be persisted as an epoch; it may still be valid full-native input. */
+export class UnsupportedContextEpochConfigurationError extends Error {
+	constructor() {
+		super("Unsupported context epoch request configuration");
+		this.name = "UnsupportedContextEpochConfigurationError";
+	}
+}
+
 /** Stable representation, not the changing input, an auth envelope, or a cache-hit claim. */
 export function contextEpochRepresentation(
 	request: ProviderRequestRepresentation,
@@ -392,7 +400,7 @@ export function contextEpochRepresentation(
 	for (const [key, value] of Object.entries(body)) {
 		if (["input", "messages", "previous_response_id", "prompt_cache_key"].includes(key)) continue;
 		// Unknown payload extensions may contain private data or change the representation.
-		if (!fields.has(key)) throw new Error("Unsupported context epoch request configuration");
+		if (!fields.has(key)) throw new UnsupportedContextEpochConfigurationError();
 		configuration[key] = value;
 	}
 	const input: unknown = "input" in body ? body.input : "messages" in body ? body.messages : undefined;

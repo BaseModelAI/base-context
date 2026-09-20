@@ -1,15 +1,16 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { getModel } from "@ponythewhite/base-context-ai";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, mkdtempSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener, PromptOptions } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { emptyGoalState } from "../src/core/goals.js";
+import { HistoryIndex } from "../src/core/history-index.js";
 import { DEFAULT_FORK_MESSAGE_LIMITS, readUserMessagesForForking } from "../src/core/session-fork-messages.js";
 import { SessionManager } from "../src/core/session-manager.js";
-import { DEFAULT_SESSION_TREE_LIMITS, readSessionTree } from "../src/core/session-tree.js";
+import { DEFAULT_SESSION_TREE_LIMITS, readSessionTree, readVisibleSessionTree } from "../src/core/session-tree.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type { AgentConnectionEvent, AgentConnectionState } from "../src/modes/agent-connection/types.js";
 
@@ -213,6 +214,78 @@ describe("InProcessAgentConnection", () => {
 		);
 	});
 
+	it("projects a complete UI tree without hydrating large private tool intents", async () => {
+		const root = mkdtempSync(join(tmpdir(), "bc-visible-tree-"));
+		const manager = await SessionManager.create(root, join(root, "sessions"));
+		const privateIds: string[] = [];
+		let connection: InProcessAgentConnection | undefined;
+		try {
+			const usage = (input: number, output: number, cost: number) => ({
+				input,
+				output,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: input + output,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+			});
+			const first = await manager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "root reply" }],
+				api: "openai-completions",
+				provider: "openai",
+				model: "test",
+				stopReason: "stop",
+				timestamp: 1,
+				usage: usage(1, 2, 0.125),
+			});
+			const attribution = await manager.appendChildUsageAttribution(first, usage(3, 4, 0.25));
+			const padding = "x".repeat(4 * 1024 * 1024);
+			for (let index = 0; index < 9; index++) {
+				privateIds.push(
+					await manager.appendToolInvocation({
+						executionId: `private-${index}`,
+						sourceOrder: index,
+						toolCallId: `call-${index}`,
+						toolName: "ipython",
+						originalInput: { code: padding },
+						executedInput: { code: padding },
+						toolExecution: "sequential",
+					}),
+				);
+			}
+			const last = await manager.appendMessage({ role: "user", content: "after hidden parents", timestamp: 2 });
+			const label = await manager.appendLabelChange(first, "root label");
+			expect(statSync(manager.getSessionFile()!).size).toBeGreaterThan(DEFAULT_SESSION_TREE_LIMITS.maxSourceBytes);
+			const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+			const fake = createFakeSession("large-private-tree", []);
+			Object.assign(fake.session, { sessionManager: manager });
+			connection = new InProcessAgentConnection(asRuntime(new FakeRuntime(fake.session)));
+			const { tree, leafId } = await connection.getSessionTree();
+			expect(leafId).toBe(label);
+			expect(tree).toHaveLength(1);
+			expect(tree[0]).toMatchObject({
+				entry: { id: first, message: { usage: { ...usage(4, 6, 0.375), totalTokens: 3 } } },
+				label: "root label",
+			});
+			expect(tree[0].children[0]).toMatchObject({ entry: { id: attribution } });
+			expect(tree[0].children[0].children[0]).toMatchObject({ entry: { id: last, parentId: attribution } });
+			payloads.mockClear();
+			await expect(connection.getUserMessagesForForking()).resolves.toEqual([
+				{ entryId: last, text: "after hidden parents" },
+			]);
+			expect(payloads.mock.calls.some(([, id]) => privateIds.includes(id) || id === first)).toBe(false);
+			await expect(
+				readVisibleSessionTree(manager, { ...DEFAULT_SESSION_TREE_LIMITS, maxEntries: 1 }),
+			).rejects.toThrow("History entry budget exceeded");
+			await expect(readSessionTree(manager)).rejects.toThrow("History source byte budget exceeded");
+		} finally {
+			await connection?.dispose();
+			vi.restoreAllMocks();
+			await manager.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 30_000);
+
 	it("loads the full model catalog through the connection boundary", async () => {
 		const session = createFakeSession("models", []);
 		const runtime = new FakeRuntime(session.session);
@@ -371,11 +444,11 @@ describe("InProcessAgentConnection", () => {
 		try {
 			const first = await manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
 			const branchA = await manager.appendMessage({ role: "user", content: "branch A", timestamp: 2 });
-			manager.branch(first);
+			await manager.branchTo(first);
 			const branchB = await manager.appendMessage({ role: "user", content: "branch B", timestamp: 3 });
 			await manager.appendLabelChange(first, "root label");
-			manager.branch(branchA);
-			const expected = structuredClone(manager.getTree());
+			await manager.branchTo(branchA);
+			const expected = (await readSessionTree(manager)).tree;
 			vi.spyOn(manager, "getEntries").mockImplementation(() => {
 				throw new Error("uncapped entries");
 			});
@@ -394,7 +467,7 @@ describe("InProcessAgentConnection", () => {
 			expect(captured).toEqual({ tree: expected, leafId: branchA });
 			const copied = captured.tree[0].entry;
 			if (copied.type === "message" && copied.message.role === "user") copied.message.content = "changed copy";
-			expect(manager.getEntry(first)).toMatchObject({ message: { content: "root" } });
+			expect(await manager.readEntry(first)).toMatchObject({ message: { content: "root" } });
 			await expect(readSessionTree(manager, { ...DEFAULT_SESSION_TREE_LIMITS, maxEntries: 1 })).rejects.toThrow(
 				"History entry budget exceeded",
 			);
@@ -420,7 +493,7 @@ describe("InProcessAgentConnection", () => {
 				isError: false,
 				timestamp: 0,
 			});
-			manager.branch(branchA);
+			await manager.branchTo(branchA);
 			const expectedFork = [
 				{ entryId: first, text: "root" },
 				{ entryId: branchA, text: "branch A" },
@@ -435,7 +508,7 @@ describe("InProcessAgentConnection", () => {
 			const pendingFork = nativeConnection.getUserMessagesForForking();
 			const future = await manager.appendMessage({ role: "user", content: "future fork", timestamp: 5 });
 			await expect(pendingFork).resolves.toEqual(expectedFork);
-			expect(sourceRead).toHaveBeenCalledWith(DEFAULT_FORK_MESSAGE_LIMITS);
+			expect(sourceRead).not.toHaveBeenCalled();
 			expect(residentRead).not.toHaveBeenCalled();
 			await manager.appendCustomEntry("filtered tail", { text: "still charged to the limits" });
 			const complete = await manager.materializeSourceHistory(DEFAULT_FORK_MESSAGE_LIMITS);

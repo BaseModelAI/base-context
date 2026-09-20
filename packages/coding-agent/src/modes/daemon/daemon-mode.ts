@@ -103,7 +103,7 @@ import {
 	type SessionPassivationSnapshot,
 } from "../../core/session-action-store.js";
 import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-file-actions.js";
-import { readUserMessagesForForking } from "../../core/session-fork-messages.js";
+import { readVisibleUserMessagesForForking } from "../../core/session-fork-messages.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
 	findMostRecentSessionForCwd,
@@ -116,7 +116,7 @@ import {
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { readSessionTreeFlatNodes } from "../../core/session-tree.js";
+import { readVisibleSessionTreeFlatNodes } from "../../core/session-tree.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
@@ -5326,14 +5326,14 @@ export class AgentDaemon {
 				return success(
 					command.id,
 					"get_session_tree",
-					await readSessionTreeFlatNodes(state.runtime.session.sessionManager),
+					await readVisibleSessionTreeFlatNodes(state.runtime.session.sessionManager),
 				);
 			}
 
 			case "get_user_messages_for_forking": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_user_messages_for_forking", {
-					messages: await readUserMessagesForForking(state.runtime.session.sessionManager),
+					messages: await readVisibleUserMessagesForForking(state.runtime.session.sessionManager),
 				});
 			}
 

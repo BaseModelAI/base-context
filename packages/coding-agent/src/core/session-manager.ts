@@ -1502,6 +1502,8 @@ const DEFAULT_MANAGER_HISTORY_LIMITS: SessionHistoryReadLimits = {
 	maxEntries: 16_384,
 	maxSourceBytes: 64 * 1024 * 1024,
 };
+// Selected forks bound compact original-reference metadata separately from selected payload/output limits.
+const FORK_SOURCE_METADATA_MAX_BYTES = 64 * 1024 * 1024;
 
 async function readOwnedSessionHeader(snapshot: SessionJournalState): Promise<SessionHeader> {
 	const handle = await openFile(snapshot.journalPath, "r");
@@ -2138,6 +2140,20 @@ export class SessionManager {
 			),
 			read,
 		);
+	}
+
+	/** Read the owner-maintained own-spend projection without hydrating the source. */
+	async readOwnUsageSummary(): Promise<SessionUsageSummary | undefined> {
+		this._assertMutable();
+		if (!this.supportsCapturedHistoryReads()) throw new Error("Own usage projection requires an owned native source");
+		const state = this.writeState;
+		return this._enqueue(state, 0, async () => {
+			await state.owner!.flush();
+			const snapshot = state.owner!.getSnapshot();
+			await this._acknowledgedHistory(state, snapshot);
+			// Keep later appends queued: the catalog holds current totals, not historical versions.
+			return state.history!.currentSourceUsage(snapshot);
+		});
 	}
 
 	/** Complete bounded structured task reduction on one captured native branch. */
@@ -4337,6 +4353,13 @@ export class SessionManager {
 		options: { persist?: boolean; sessionDir?: string; rlmDepth?: number; limits?: SessionHistoryReadLimits },
 	): Promise<CapturedForkInput> {
 		const limits = { ...(options.limits ?? DEFAULT_MANAGER_HISTORY_LIMITS) };
+		if (
+			!Number.isSafeInteger(limits.maxEntries) ||
+			limits.maxEntries <= 0 ||
+			!Number.isSafeInteger(limits.maxSourceBytes) ||
+			limits.maxSourceBytes <= 0
+		)
+			throw new Error("Invalid fork source limits");
 		const sourceFile = this.sessionFile;
 		const header = JSON.parse(stringifyBoundedJson(this.getHeader(), limits.maxSourceBytes)) as SessionHeader | null;
 		const settings = {
@@ -4461,35 +4484,137 @@ export class SessionManager {
 		const headerBytes = Buffer.byteLength(stringifyBoundedJson(header, limits.maxSourceBytes));
 		if (headerBytes >= limits.maxSourceBytes) throw new Error("Fork source byte budget exceeded");
 		return this.readSourceHistory(async (history) => {
-			const materialized = await history.materialize({
-				...limits,
-				maxSourceBytes: limits.maxSourceBytes - headerBytes,
-			});
-			const entries = materialized.entries.map(({ entry, source }) =>
-				withEntryRetention(entry, source.retention, source.qualification),
-			);
-			const sourceEntries = materialized.entries.map(({ entry, source }) => captureEpochCopyEntry(entry, source));
-			const hasEpoch = sourceEntries.some(
+			const metadata = new Map<string, CopiedEpochEntry>();
+			let metadataBytes = 0;
+			let after = 0;
+			for (;;) {
+				const page = await history.page(after, 128);
+				if (page.indexedThrough < history.source.sourceSequence)
+					throw new Error("Captured fork history has incomplete index coverage");
+				for (const reference of page.events) {
+					// Prefix/revision remapping needs original refs, not text previews or unselected bodies.
+					const source: CopiedEpochEntry = {
+						id: reference.id,
+						parentId: reference.parentId,
+						kind: reference.kind,
+						sequence: reference.sequence,
+						revision: reference.revision,
+						locator: { ...reference.locator },
+						retention: reference.retention,
+						qualification: reference.qualification,
+					};
+					metadataBytes += Buffer.byteLength(JSON.stringify(source)) + 1;
+					if (metadataBytes > FORK_SOURCE_METADATA_MAX_BYTES)
+						throw new Error("Fork source metadata byte budget exceeded");
+					metadata.set(source.id, source);
+				}
+				if (page.nextAfter === null) break;
+				after = page.nextAfter;
+			}
+			const hasEpoch = [...metadata.values()].some(
 				(entry) => entry.kind === "compaction" && entry.qualification === "native-context-epoch",
 			);
-			if (!hasEpoch) applyChildUsageAttributions(entries);
-			return finish(
-				entries,
-				history,
-				hasEpoch
-					? {
-							sessionId: history.source.sessionId,
-							sessionFile: history.source.sessionFile,
-							through: history.source.sourceSequence,
-							entries: sourceEntries,
-							retained: false,
-						}
-					: undefined,
+			const loaded = new Map<string, SessionEntry>();
+			let sourceBytes = headerBytes;
+			const load = async (id: string): Promise<SessionEntry> => {
+				const existing = loaded.get(id);
+				if (existing) return existing;
+				const reference = metadata.get(id);
+				if (!reference) throw new Error("Fork selected source is unavailable");
+				if (loaded.size >= limits.maxEntries) throw new Error("Fork entry budget exceeded");
+				const remaining = limits.maxSourceBytes - sourceBytes;
+				if (reference.locator.length > remaining) throw new Error("Fork source byte budget exceeded");
+				const hydrated = await history.hydrateEntry(id, remaining);
+				if (!hydrated) throw new Error("Fork selected source is unavailable");
+				const entry = withEntryRetention(hydrated.entry, hydrated.source.retention, hydrated.source.qualification);
+				loaded.set(id, entry);
+				metadata.set(id, captureEpochCopyEntry(entry, hydrated.source));
+				sourceBytes += reference.locator.length;
+				return entry;
+			};
+			if ("entryId" in target && !metadata.has(target.entryId)) throw new Error("Invalid entry ID for forking");
+			const selected = "entryId" in target ? await load(target.entryId) : undefined;
+			if (
+				"entryId" in target &&
+				target.position === "before" &&
+				(selected?.type !== "message" || selected.message.role !== "user")
+			)
+				throw new Error("Invalid entry ID for forking");
+			const leafId =
+				"entryId" in target ? (target.position === "at" ? selected!.id : selected!.parentId) : target.leafId;
+			const path: SessionEntry[] = [];
+			let page = await history.parentPathFrom(leafId);
+			for (;;) {
+				if (page.totalEntries > limits.maxEntries) throw new Error("Fork entry budget exceeded");
+				for (const reference of page.events) path.push(await load(reference.id));
+				if (!page.nextCursor) break;
+				page = await history.parentPathFrom(leafId, { cursor: page.nextCursor });
+			}
+			const copied = path.filter((entry) => entry.type !== "label");
+			const ids = new Set(copied.map((entry) => entry.id));
+			if (hasEpoch) {
+				for (const entry of copied) {
+					if (entry.type !== "message") continue;
+					if (entry.execution && "invocationId" in entry.execution) ids.add(entry.execution.invocationId);
+					const updateTarget =
+						entry.message.role === "assistant"
+							? { kind: "assistant-usage" as const, targetId: entry.id }
+							: entry.message.role === "toolResult"
+								? { kind: "ipython-sent-message" as const, toolCallId: entry.message.toolCallId }
+								: undefined;
+					if (!updateTarget) continue;
+					let after = 0;
+					for (;;) {
+						const updates = await history.sourceContextUpdates(updateTarget, after);
+						if (updates.indexedThrough < history.source.sourceSequence)
+							throw new Error("Captured fork updates have incomplete index coverage");
+						for (const reference of updates.events) ids.add(reference.id);
+						if (updates.nextAfter === null) break;
+						after = updates.nextAfter;
+					}
+				}
+				// Keep every actual related ancestor, including private intent/request rows when necessary.
+				for (const id of ids) {
+					const reference = metadata.get(id);
+					if (!reference) throw new Error("Fork related source is unavailable");
+					if (reference.parentId !== null) ids.add(reference.parentId);
+				}
+				for (const id of ids) await load(id);
+			} else {
+				// Preserve the existing non-epoch copy's resolved whole-source assistant usage overlay.
+				for (const entry of copied) {
+					if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+					const latest = await history.sourceAssistantUsage(entry.id);
+					if (latest) await load(latest.id);
+				}
+			}
+			for (const id of ids) {
+				const label = await history.sourceLabel(id);
+				if (label) await load(label.id);
+			}
+			const entries = [...loaded.values()].sort(
+				(left, right) => metadata.get(left.id)!.sequence - metadata.get(right.id)!.sequence,
 			);
+			if (!hasEpoch) applyChildUsageAttributions(entries);
+			const epochCopy: CapturedEpochCopy | undefined = hasEpoch
+				? {
+						sessionId: history.source.sessionId,
+						sessionFile: history.source.sessionFile,
+						through: history.source.sourceSequence,
+						entries: [...metadata.values()],
+						retained: false,
+					}
+				: undefined;
+			if (epochCopy) stringifyBoundedJson(epochCopy, FORK_SOURCE_METADATA_MAX_BYTES);
+			return finish(entries, history, epochCopy);
 		});
 	}
 
-	private async _rebuildCopiedEpoch(copied: CapturedEpochCopy, limits: SessionHistoryReadLimits): Promise<void> {
+	private async _rebuildCopiedEpoch(
+		copied: CapturedEpochCopy,
+		limits: SessionHistoryReadLimits,
+		metadataMaxBytes = limits.maxSourceBytes,
+	): Promise<void> {
 		if (
 			!copied.entries.some((entry) => entry.kind === "compaction" && entry.qualification === "native-context-epoch")
 		)
@@ -4500,7 +4625,7 @@ export class SessionManager {
 		await this._runHistoryRead(
 			{ ...sink, readHistory: (read) => sink[readCopiedEpochSource](read) },
 			async (history: SessionHistoryReadScope) => {
-				const rebuilt = await rebuildCopiedContextEpoch(history, copied, limits);
+				const rebuilt = await rebuildCopiedContextEpoch(history, copied, limits, metadataMaxBytes);
 				if (rebuilt) await sink[appendContextEpoch](rebuilt.checkpoint, rebuilt.tokensBefore, rebuilt.summary);
 			},
 		);
@@ -4542,7 +4667,7 @@ export class SessionManager {
 		if (input.epochCopy) {
 			try {
 				await next.branchTo(input.leafId ?? null);
-				await next._rebuildCopiedEpoch(input.epochCopy, input.limits);
+				await next._rebuildCopiedEpoch(input.epochCopy, input.limits, FORK_SOURCE_METADATA_MAX_BYTES);
 			} catch (error) {
 				try {
 					await next.close();

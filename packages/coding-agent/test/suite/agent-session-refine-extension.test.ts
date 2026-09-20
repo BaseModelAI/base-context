@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import {
 	type FauxResponseFactory,
 	fauxAssistantMessage,
@@ -7,6 +8,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
+import { HistoryIndex } from "../../src/core/history-index.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import {
 	type AutoRefineReview,
@@ -93,6 +95,47 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(records[0]).not.toHaveProperty("plannerRequest");
 		expect(result).not.toHaveProperty("plannerRequest");
 	});
+
+	it("reads refinement records without hydrating an oversized ordinary-message archive", async () => {
+		const events: SessionBeforeRefineEvent[] = [];
+		const harness = await createHarness({
+			persistSession: true,
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_refine", async (event) => {
+						events.push(event);
+						return {
+							proposal: {
+								summary: "Source-backed refinement",
+								rationale: "Keep recorded lessons",
+								expectedOutcome: "Read only refinement history",
+								edits: [],
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const first = await harness.session.refine();
+		const padding = "x".repeat(8 * 1024 * 1024);
+		const ordinaryIds = new Set<string>();
+		for (let index = 0; index < 9; index++) {
+			ordinaryIds.add(
+				await harness.sessionManager.appendCustomMessageEntry("ordinary-large-output", padding, false),
+			);
+		}
+		expect(statSync(harness.sessionManager.getSessionFile()!).size).toBeGreaterThan(64 * 1024 * 1024);
+		const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+		const second = await harness.session.refine();
+		expect(second.summary).toBe("Source-backed refinement");
+		expect(events.at(-1)?.preparation.history).toContainEqual(expect.objectContaining({ id: first.id }));
+		expect(payloads.mock.calls.some(([, id]) => ordinaryIds.has(id))).toBe(false);
+		// A selective read still propagates source failures instead of treating them as empty history.
+		const failure = new Error("injected captured history failure");
+		vi.spyOn(harness.sessionManager, "readSourceHistory").mockRejectedValueOnce(failure);
+		await expect(harness.session.refine()).rejects.toBe(failure);
+	}, 30000);
 
 	it("rejects invalid extension edits at apply time", async () => {
 		const harness = await createHarness({

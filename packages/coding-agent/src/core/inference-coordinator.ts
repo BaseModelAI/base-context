@@ -764,7 +764,11 @@ export class InferenceCoordinator {
 			const requiredPublic = Boolean(boundary?.pendingPublicMessageGroups?.length);
 			const requiredEpoch = boundary?.requiresEpoch === true;
 			const canSelect =
-				(budget || boundary?.fixedPrepare || requiredPublic || requiredEpoch) &&
+				(budget ||
+					boundary?.fixedPrepare ||
+					requiredPublic ||
+					requiredEpoch ||
+					boundary?.recoveryContractRequested) &&
 				boundary &&
 				matchesRequestView(boundary, source, context);
 			if (requiredPublic && (!canSelect || boundary?.fixedPrepare))

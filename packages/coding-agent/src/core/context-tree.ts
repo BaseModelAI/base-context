@@ -4,14 +4,16 @@ import type { AssistantMessage, Usage } from "@ponythewhite/base-context-ai";
 import type { RlmChildAgentStatus } from "./agent-session.js";
 import { stringifyBoundedJson } from "./bounded-json.js";
 import { calculateContextTokens, estimateContextTokens } from "./compaction/index.js";
-import { exportHistoryLimits, readSessionHistoryFile } from "./export-html/history.js";
+import { exportHistoryLimits } from "./export-html/history.js";
 import type { ContextUsage } from "./extensions/index.js";
-import type { ParentPathCursor } from "./history-index.js";
+import type { IndexedSourceEvent, ParentPathCursor } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
 import type { SessionHistoryReadLimits } from "./session-history-index.js";
+import { readCapturedSessionJournal } from "./session-journal-reader.js";
 import {
 	applyChildUsageAttributions,
 	buildSessionContext,
+	type FileEntry,
 	type SessionEntry,
 	type SessionManager,
 } from "./session-manager.js";
@@ -45,7 +47,7 @@ export interface ContextTreeRequestLimits extends SessionHistoryReadLimits {
 
 class ContextTreeLimitError extends Error {}
 
-/** Small request-local counters and one full-history reduction tail. */
+/** Small request-local counters and one history-projection reduction tail. */
 export class ContextTreeRequest {
 	readonly limits: Readonly<ContextTreeRequestLimits>;
 	private nodes = 0;
@@ -203,6 +205,15 @@ export function readResidentContextTreeUsage(
 	};
 }
 
+function isContextTreeUsageReference(reference: IndexedSourceEvent): boolean {
+	return (
+		(reference.kind === "message" && reference.authority === "assistant") ||
+		reference.kind === "compaction" ||
+		reference.kind === "branch_summary" ||
+		reference.kind === "child_usage_attributed"
+	);
+}
+
 /** Detached, complete source usage and its exact captured parent branch. */
 export async function readContextTreeUsage(
 	manager: SessionManager,
@@ -215,12 +226,32 @@ export async function readContextTreeUsage(
 	if (!manager.supportsCapturedHistoryReads()) return undefined;
 	const sourceLimits = request?.limits ?? limits;
 	const capturedLimits = { maxEntries: sourceLimits.maxEntries, maxSourceBytes: sourceLimits.maxSourceBytes };
+	if (!Object.values(capturedLimits).every((value) => Number.isSafeInteger(value) && value > 0))
+		throw new Error("Invalid history materialization limits");
 	// The actual source frontier binds NOW, never after waiting for the reduction slot.
 	return manager.readSourceHistory((history) => {
 		request?.retainMetadata(history.source);
 		const reduce = async () => {
-			const materialized = await history.materialize(capturedLimits);
-			const allEntries = materialized.entries.map(({ entry }) => entry);
+			const allEntries: SessionEntry[] = [];
+			let sourceBytes = 0;
+			let after = 0;
+			for (;;) {
+				const page = await history.page(after);
+				if (page.indexedThrough < history.source.sourceSequence)
+					throw new Error("Captured history has incomplete index coverage");
+				for (const reference of page.events) {
+					if (!isContextTreeUsageReference(reference)) continue;
+					if (allEntries.length >= capturedLimits.maxEntries) throw new Error("History entry budget exceeded");
+					if (sourceBytes + reference.locator.length > capturedLimits.maxSourceBytes)
+						throw new Error("History source byte budget exceeded");
+					const hydrated = await history.hydrateEntry(reference.id, capturedLimits.maxSourceBytes - sourceBytes);
+					if (!hydrated) throw new Error("Context-tree usage entry source is unavailable");
+					allEntries.push(hydrated.entry);
+					sourceBytes += reference.locator.length;
+				}
+				if (page.nextAfter === null) break;
+				after = page.nextAfter;
+			}
 			applyChildUsageAttributions(allEntries);
 			const byId = new Map(allEntries.map((entry) => [entry.id, entry]));
 			const branch: SessionEntry[] = [];
@@ -228,6 +259,7 @@ export async function readContextTreeUsage(
 			do {
 				const page = await history.parentPath({ cursor });
 				for (const reference of page.events) {
+					if (!isContextTreeUsageReference(reference)) continue;
 					const entry = byId.get(reference.id);
 					if (!entry) throw new Error("Context-tree parent-path entry source is unavailable");
 					branch.push(entry);
@@ -303,7 +335,7 @@ function computeContextUsageFromEntries(
 		return { tokens: null, contextWindow, percent: null };
 	}
 
-	const estimate = estimateContextTokens(buildSessionContext(allEntries).messages);
+	const estimate = estimateContextTokens(buildSessionContext(allEntries, branch.at(-1)?.id ?? null).messages);
 	if (estimate.tokens <= 0) {
 		return undefined;
 	}
@@ -441,6 +473,62 @@ function listChildSessionDirs(rlmSessionDir: string, request: ContextTreeRequest
 	return { paths, bytes };
 }
 
+/** Read a fixed disk prefix without retaining private request or tool-intent bodies. */
+async function readContextTreeProjectionFromDisk(
+	sessionFile: string,
+	request: ContextTreeRequest,
+): Promise<{ entries: SessionEntry[]; leafId: string | null; hasSourceLeaf: boolean }> {
+	const entries: SessionEntry[] = [];
+	const hiddenParents = new Map<string, string | null>();
+	let leafId: string | null = null;
+	let hasHeader = false;
+	let sourceBytes = 0;
+	let metadataBytes = 0;
+	try {
+		await readCapturedSessionJournal(sessionFile, (record) => {
+			const value = record.entry;
+			if (!value || typeof value !== "object" || !("type" in value) || typeof value.type !== "string")
+				throw new Error("Invalid session journal entry");
+			const entry = value as FileEntry;
+			if (!hasHeader) {
+				if (entry.type !== "session" || typeof entry.id !== "string")
+					throw new Error("Session source has no valid header");
+				hasHeader = true;
+			}
+			if (entry.type !== "session") leafId = entry.id;
+			if (entry.type === "request" || entry.type === "tool_intent") {
+				metadataBytes += request.retainMetadata([entry.id, entry.parentId]);
+				hiddenParents.set(entry.id, entry.parentId);
+				return;
+			}
+			const bytes = record.source?.locator.length ?? Buffer.byteLength(record.json) + 1;
+			if (sourceBytes + bytes > request.limits.maxSourceBytes)
+				throw new ContextTreeLimitError("Context tree source byte budget exceeded");
+			sourceBytes += bytes;
+			if (entry.type === "session") return;
+			if (entries.length >= request.limits.maxEntries)
+				throw new ContextTreeLimitError("Context tree entry budget exceeded");
+			entries.push(entry);
+		});
+		const visibleParent = (id: string | null): string | null => {
+			let remaining = hiddenParents.size;
+			while (id !== null && hiddenParents.has(id)) {
+				if (remaining-- === 0) throw new Error("Parent path lineage is unresolved");
+				id = hiddenParents.get(id)!;
+			}
+			return id;
+		};
+		for (const entry of entries) entry.parentId = visibleParent(entry.parentId);
+		// A trailing private record can select an older branch, not the last visible entry.
+		const hasSourceLeaf = leafId !== null;
+		leafId = visibleParent(leafId);
+		applyChildUsageAttributions(entries);
+		return { entries, leafId, hasSourceLeaf };
+	} finally {
+		request.releaseMetadata(metadataBytes);
+	}
+}
+
 /**
  * Build a context node for a completed RLM child from its persisted session
  * dir (sub-xxxx/). Children that already attributed grandchild usage carry the
@@ -455,11 +543,9 @@ async function readContextTreeChildNodeFromDisk(
 	request: ContextTreeRequest,
 	identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
 ): Promise<ContextTreeNode | undefined> {
-	const allEntries = (await readSessionHistoryFile(sessionFile, request.limits)).filter(
-		(entry): entry is SessionEntry => entry.type !== "session",
-	);
-	const branch = branchEntries(allEntries);
-	if (branch.length === 0) {
+	const { entries: allEntries, leafId, hasSourceLeaf } = await readContextTreeProjectionFromDisk(sessionFile, request);
+	const branch = branchEntries(allEntries, leafId);
+	if (branch.length === 0 && !hasSourceLeaf) {
 		return undefined;
 	}
 

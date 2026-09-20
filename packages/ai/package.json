@@ -1,6 +1,6 @@
 {
 	"name": "@ponythewhite/base-context-ai",
-	"version": "1.0.10",
+	"version": "1.0.11",
 	"description": "Synerise base-context unified LLM API and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",

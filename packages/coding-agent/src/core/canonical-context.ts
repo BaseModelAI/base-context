@@ -68,6 +68,8 @@ export interface CanonicalViewSelectionSource {
 	readonly pendingPublicMessageGroups?: readonly (readonly number[])[];
 	/** A new base or retained epoch must be ACKed before native transport, even without a token budget. */
 	readonly requiresEpoch?: true;
+	/** Ask the actual adapter to record replay permission; unsupported full replay remains unchanged. */
+	readonly recoveryContractRequested?: true;
 }
 
 const compiledViewUnits = new WeakMap<
@@ -110,6 +112,8 @@ interface CompiledEpochContext {
 	readonly taskFrameRebased?: true;
 	readonly resourceRevision?: string;
 	readonly references: readonly (EpochViewReference | null)[];
+	/** Exact retained recovery members of a qualified summary's frozen source, not a sequence interval. */
+	readonly inheritedRecoveryCoverage?: readonly EpochViewReference[];
 	/** Uncommitted public candidate plan; never a fabricated accepted checkpoint. */
 	readonly continuation?: ContextEpochCheckpoint["continuation"];
 	readonly toolContinuations?: readonly ToolContinuationGroup[];
@@ -409,8 +413,50 @@ export function prepareCanonicalEpoch(
 	};
 }
 
-/** Use only a replay contract granted to these recovery results by an actual accepted request. */
-export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): string | undefined {
+/** Missing prerequisite only; source, closure and projection failures remain ordinary errors. */
+export class MissingRecoveryReplayContractError extends Error {
+	constructor() {
+		super("Recovery compaction requires an accepted replay contract for its selected results");
+		this.name = "MissingRecoveryReplayContractError";
+	}
+}
+
+/** Compaction-only permission captured from a validated native candidate, never a send admission. */
+export interface RecoveryCompactionAuthorization {
+	readonly source: SourceSnapshotRef;
+	readonly recoveries: readonly EpochViewReference[];
+	readonly resourceRevision?: string;
+	readonly publicWindow: boolean;
+	readonly isSourceCurrent?: () => boolean;
+}
+
+function sameRecoverySource(left: SourceSnapshotRef, right: SourceSnapshotRef, ownerStillCurrent = false): boolean {
+	return (
+		JSON.stringify(left) === JSON.stringify(right) ||
+		(ownerStillCurrent &&
+			left.sessionId === right.sessionId &&
+			left.sessionFile === right.sessionFile &&
+			left.persistent === right.persistent)
+	);
+}
+
+function sameRecoveryReference(
+	left: EpochViewReference,
+	right: EpochViewReference,
+	ownerStillCurrent = false,
+): boolean {
+	return (
+		sameRecoverySource(left.source, right.source, ownerStillCurrent) &&
+		JSON.stringify(left.ref) === JSON.stringify(right.ref) &&
+		left.sourceRevision === right.sourceRevision
+	);
+}
+
+/** Use accepted coverage, or the exact actual-projection permit of a rejected oversized candidate. */
+export function canonicalRecoveryBoundary(
+	messages: readonly AgentMessage[],
+	authorization?: RecoveryCompactionAuthorization,
+): string | undefined {
 	const context = compiledEpochContexts.get(messages);
 	const units = getCanonicalViewUnits(messages);
 	if (!context || !units) throw new Error("Recovery compaction requires captured canonical views");
@@ -418,13 +464,39 @@ export function canonicalRecoveryBoundary(messages: readonly AgentMessage[]): st
 		throw new Error("Tool continuation summary requires its captured public read view");
 	const recoveries = units.flatMap((unit, index) => (unit.kind === "recovery" ? [context.references[index]] : []));
 	if (!recoveries.length) return;
+	if (authorization) {
+		// The captured native owner may certify bookkeeping-only appends, never new context or a branch change.
+		const ownerStillCurrent = authorization.isSourceCurrent?.();
+		if (
+			ownerStillCurrent === false ||
+			!sameRecoverySource(context.source, authorization.source, ownerStillCurrent === true) ||
+			context.resourceRevision !== authorization.resourceRevision ||
+			recoveries.length !== authorization.recoveries.length ||
+			recoveries.some(
+				(reference) =>
+					!reference ||
+					!authorization.recoveries.some((covered) =>
+						sameRecoveryReference(reference, covered, ownerStillCurrent === true),
+					),
+			)
+		)
+			throw new Error("Recovery compaction authorization no longer matches its captured source");
+		return latestLiteralReference(context.references)?.ref.entryId;
+	}
 	const checkpoint = context.checkpoint;
+	const inherited = checkpoint?.includeSummary === true && checkpoint.replayContract === "message-groups";
 	if (
-		!checkpoint?.representation ||
-		checkpoint.replayContract !== "message-groups" ||
-		recoveries.some((reference) => !reference || reference.ref.sequence > checkpoint.source.sourceSequence)
+		checkpoint?.replayContract !== "message-groups" ||
+		recoveries.some(
+			(reference) =>
+				!reference ||
+				(checkpoint.representation
+					? reference.ref.sequence > checkpoint.source.sourceSequence
+					: !inherited ||
+						!context.inheritedRecoveryCoverage?.some((covered) => sameRecoveryReference(reference, covered))),
+		)
 	)
-		throw new Error("Recovery compaction requires an accepted replay contract for its selected results");
+		throw new MissingRecoveryReplayContractError();
 	return checkpoint.literalTailId;
 }
 
@@ -433,11 +505,13 @@ export function prepareRecoveryCompaction(
 	messages: readonly AgentMessage[],
 	firstKeptEntryId: string,
 	maxBytes: number,
+	authorization?: RecoveryCompactionAuthorization,
 ): ContextEpochCheckpoint | undefined {
-	const boundary = canonicalRecoveryBoundary(messages);
+	const boundary = canonicalRecoveryBoundary(messages, authorization);
 	const context = compiledEpochContexts.get(messages);
-	const publicWindow =
-		context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
+	const publicWindow = authorization
+		? authorization.publicWindow
+		: context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
 	if (!boundary && !publicWindow && !context?.selectedSkills?.length && !context?.toolContinuations?.length) return;
 	if (!context) throw new Error("Recovery compaction requires captured canonical views");
 	const selection = getCanonicalViewSelectionSource(messages)!;
@@ -1431,10 +1505,89 @@ export class CanonicalContextCompiler {
 				units: selectionUnits,
 				limits: unitLimits,
 				...(mode === "on" && (taskFrameRebased || checkpoint) ? { requiresEpoch: true as const } : {}),
+				...(mode === "on" && sourceUnits.some((unit) => unit.kind === "recovery")
+					? { recoveryContractRequested: true as const }
+					: {}),
 				...(pendingPublicMessageGroups.length ? { pendingPublicMessageGroups } : {}),
 			},
 		});
+		const inheritedRecoveryCoverage: EpochViewReference[] = [];
+		if (
+			checkpoint?.includeSummary &&
+			checkpoint.replayContract === "message-groups" &&
+			closedUnits.some((unit) => unit.kind === "recovery")
+		) {
+			const prefix = await view.atSnapshot!(checkpoint.source);
+			const suffix = new Map<string, ContextRef>();
+			const frozenViews = new Map<string, EpochViewReference>();
+			let capturedMessages = 0;
+			let retained = false;
+			let cursor: ContextManifestCursor | undefined;
+			for (;;) {
+				const page = await prefix.contextManifest({ cursor, limit: 128 });
+				if (page.selection !== "known") throw new Error("Summary recovery source is unavailable");
+				if (!cursor && page.summaryRef) {
+					// The frozen source may itself have pinned views before its literal manifest.
+					const entry = await hydrate(page.summaryRef, undefined, prefix);
+					const metadata = await prefix.get(page.summaryRef.entryId);
+					const prior =
+						entry.type === "compaction" &&
+						metadata?.qualification === "native-context-epoch" &&
+						metadata.retention !== "retained-import"
+							? readContextEpoch(entry.details, maxSourceBytes)
+							: undefined;
+					if ((!prior || prior.includeSummary) && page.summaryRef.entryId === checkpoint.literalTailId)
+						retained = true;
+					capturedMessages += prior?.views.length ?? 0;
+					for (const pinned of prior?.views ?? []) {
+						if (pinned.ref.entryId === checkpoint.literalTailId) retained = true;
+						if (retained) {
+							suffix.set(pinned.ref.entryId, pinned.ref);
+							frozenViews.set(pinned.ref.entryId, pinned);
+						}
+					}
+				}
+				for (const ref of page.refs) {
+					if (ref.entryId === checkpoint.literalTailId) retained = true;
+					if (retained) suffix.set(ref.entryId, ref);
+				}
+				capturedMessages += page.refs.length;
+				if (capturedMessages > maxMessages) throw new Error("Summary recovery source exceeds its message budget");
+				if (!page.nextCursor) break;
+				cursor = page.nextCursor;
+			}
+			for (const [index, message] of closedMessages.entries()) {
+				if (closedUnits[index].kind !== "recovery") continue;
+				const reference = epochReferences.get(message)!;
+				if (checkpoint.views.some((covered) => sameRecoveryReference(reference, covered))) {
+					inheritedRecoveryCoverage.push(reference);
+					continue;
+				}
+				const frozen = suffix.get(reference.ref.entryId);
+				if (!frozen || JSON.stringify(frozen) !== JSON.stringify(reference.ref)) continue;
+				const pinned = frozenViews.get(frozen.entryId);
+				if (pinned) {
+					if (reference.sourceRevision === pinned.sourceRevision) inheritedRecoveryCoverage.push(reference);
+					continue;
+				}
+				const revisions = [frozen.revision];
+				const entry = next.get(frozen.entryId)?.entry;
+				if (
+					entry?.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "ipython"
+				) {
+					const updates = await prefix.contextUpdates({
+						kind: "ipython-sent-message",
+						toolCallId: entry.message.toolCallId,
+					});
+					revisions.push(...updates.refs.map((update) => update.revision));
+				}
+				if (reference.sourceRevision === JSON.stringify(revisions)) inheritedRecoveryCoverage.push(reference);
+			}
+		}
 		compiledEpochContexts.set(closedMessages, {
+			...(inheritedRecoveryCoverage.length ? { inheritedRecoveryCoverage } : {}),
 			...(purpose === "read" ? { readOnly: true as const } : {}),
 			mode,
 			source: { ...view.source },

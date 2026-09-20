@@ -68,6 +68,7 @@ export async function rebuildCopiedContextEpoch(
 	history: SessionHistoryReadScope,
 	copied: CapturedEpochCopy,
 	limits: SessionHistoryReadLimits,
+	metadataMaxBytes = limits.maxSourceBytes,
 ): Promise<
 	{ checkpoint: ContextEpochCheckpoint; tokensBefore: number | null; summary?: ContextEpochSummary } | undefined
 > {
@@ -92,14 +93,22 @@ export async function rebuildCopiedContextEpoch(
 		throw new Error("Tool continuation recipes require their original native execution source");
 	if (!checkpoint || checkpoint.literalTailId !== entry.firstKeptEntryId || !view.atSnapshot)
 		throw new Error("Copied context epoch boundary is unavailable");
-	if (copied.entries.length > limits.maxEntries || checkpoint.views.length > limits.maxEntries)
-		throw new Error("Copied context epoch item budget exceeded");
-	stringifyBoundedJson(copied, limits.maxSourceBytes);
+	if (checkpoint.views.length > limits.maxEntries) throw new Error("Copied context epoch item budget exceeded");
+	stringifyBoundedJson(copied, metadataMaxBytes);
 	const oldByRevision = new Map([...oldById.values()].map((source) => [source.revision, source]));
 	const destination = new Map<string, IndexedSourceEvent>();
-	for (const source of oldById.values()) {
-		const actual = await history.get(source.id);
-		if (actual) destination.set(source.id, actual);
+	let after = 0;
+	for (;;) {
+		const page = await history.page(after, 128);
+		if (page.indexedThrough < history.source.sourceSequence)
+			throw new Error("Copied context destination has incomplete index coverage");
+		for (const actual of page.events) {
+			if (!oldById.has(actual.id)) continue;
+			if (destination.size >= limits.maxEntries) throw new Error("Copied context epoch item budget exceeded");
+			destination.set(actual.id, actual);
+		}
+		if (page.nextAfter === null) break;
+		after = page.nextAfter;
 	}
 	const prefixViews = new Map<string, SessionHistoryReadView>();
 	const prefix = async (source: SourceSnapshotRef): Promise<SessionHistoryReadView> => {

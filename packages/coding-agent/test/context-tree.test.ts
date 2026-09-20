@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@ponythewhite/base-context-agent";
@@ -14,8 +14,8 @@ import {
 	loadContextTreeChildrenFromDisk,
 	readContextTreeUsage,
 } from "../src/core/context-tree.js";
-import * as contextTreeHistory from "../src/core/export-html/history.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import * as sessionJournalReader from "../src/core/session-journal-reader.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { addAssistantUsage, cloneUsage, emptyUsage } from "../src/core/usage.js";
@@ -180,13 +180,13 @@ describe("loadContextTreeChildrenFromDisk", () => {
 				maxEntries: 1,
 				maxSourceBytes: 64 * 1024 * 1024,
 			}),
-		).rejects.toThrow("HTML export entry budget exceeded");
+		).rejects.toThrow("Context tree entry budget exceeded");
 		await expect(
 			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, {
 				maxEntries: 16_384,
 				maxSourceBytes: 1,
 			}),
-		).rejects.toThrow("HTML export source byte budget exceeded");
+		).rejects.toThrow("Context tree source byte budget exceeded");
 		await expect(
 			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, { maxNodes: 1 }),
 		).rejects.toThrow("Context tree node budget exceeded");
@@ -197,6 +197,69 @@ describe("loadContextTreeChildrenFromDisk", () => {
 			loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow, undefined, { maxDirectoryEntries: 1 }),
 		).rejects.toThrow("Context tree directory entry budget exceeded");
 	});
+
+	it("projects active and disk context usage past large private history without changing branch totals", async () => {
+		const rlmDir = makeTempDir();
+		const own = { ...createUsage(1000, 200, 0.1), cacheRead: 50, cacheWrite: 25, totalTokens: 1275 };
+		const child = await writeChildSession(join(rlmDir, "sub-private0001"), "retained branch", own);
+		const attributed = createUsage(400, 50, 0.04);
+		const aggregate = cloneUsage(own);
+		addAssistantUsage(aggregate, attributed);
+		const branchLeaf = await child.sessionManager.appendChildUsageAttribution(
+			child.assistantEntryId,
+			attributed,
+			aggregate,
+		);
+		const baseline = await readContextTreeUsage(child.sessionManager);
+		const diskBaseline = await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
+		await child.sessionManager.appendMessage({
+			...createAssistantMessage("abandoned branch", createUsage(9000, 100, 0.9)),
+			stopReason: "error",
+		});
+		await child.sessionManager.branchTo(branchLeaf);
+		const padding = "x".repeat(4 * 1024 * 1024);
+		for (let index = 0; index < 9; index++) {
+			await child.sessionManager.appendToolInvocation({
+				executionId: `private-${index}`,
+				sourceOrder: index,
+				toolCallId: `call-${index}`,
+				toolName: "ipython",
+				originalInput: { code: padding },
+				executedInput: { code: padding },
+				toolExecution: "sequential",
+			});
+		}
+		expect(statSync(child.sessionManager.getSessionFile()!).size).toBeGreaterThan(64 * 1024 * 1024);
+		const active = await readContextTreeUsage(child.sessionManager);
+		expect(active?.ownUsage).toEqual(baseline?.ownUsage);
+		expect(active?.totalUsage).toEqual(baseline?.totalUsage);
+		// The final hidden entry selects the old branch, not the last visible assistant.
+		expect(await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow)).toEqual(diskBaseline);
+		await child.sessionManager.branchTo(null);
+		await child.sessionManager.appendToolInvocation({
+			executionId: "private-empty-branch",
+			sourceOrder: 9,
+			toolCallId: "empty-branch",
+			toolName: "ipython",
+			originalInput: { code: "pass" },
+			executedInput: { code: "pass" },
+			toolExecution: "sequential",
+		});
+		await child.sessionManager.close();
+		// A private-only branch still represents a child, even though its usage is zero.
+		expect(await loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow)).toEqual([
+			{
+				id: "sub-private0001",
+				label: "child agent",
+				status: "done",
+				model: undefined,
+				ownUsage: emptyUsage(),
+				totalUsage: emptyUsage(),
+				contextUsage: undefined,
+				children: [],
+			},
+		]);
+	}, 30_000);
 
 	it("reports context usage from the last assistant message and the model context window", async () => {
 		const rlmDir = makeTempDir();
@@ -536,7 +599,7 @@ describe("AgentSession.getContextTree", () => {
 		const readError = new Error("gated context-tree parent path failed");
 		let acceptedReads = 0;
 		let capturedReads = 0;
-		let materializations = 0;
+		let projections = 0;
 		let finishedReads = 0;
 		const originalRead = sessionManager.readSourceHistory.bind(sessionManager);
 		const schedulingReadSource = vi.spyOn(sessionManager, "readSourceHistory").mockImplementation((read) => {
@@ -545,9 +608,9 @@ describe("AgentSession.getContextTree", () => {
 				try {
 					const reading = read({
 						...history,
-						materialize: async (limits) => {
-							materializations++;
-							return history.materialize(limits);
+						page: async (after, limit) => {
+							if (after === 0) projections++;
+							return history.page(after, limit);
 						},
 						parentPath: async (options) => {
 							const page = await history.parentPath(options);
@@ -572,13 +635,13 @@ describe("AgentSession.getContextTree", () => {
 		]);
 		try {
 			await Promise.all([bothCaptured.promise, decodedHeld.promise]);
-			expect(materializations).toBe(1);
+			expect(projections).toBe(1);
 			releaseRead.resolve();
 			const results = await reading;
 			expect(results[0].status).toBe("rejected");
 			if (results[0].status === "rejected") expect(results[0].reason).toBe(readError);
 			expect(results[1]).toMatchObject({ status: "fulfilled", value: { ownUsage: { input: 5200 } } });
-			expect(materializations).toBe(2);
+			expect(projections).toBe(2);
 			expect(finishedReads).toBe(2);
 		} finally {
 			releaseRead.resolve();
@@ -593,9 +656,9 @@ describe("AgentSession.getContextTree", () => {
 		const drainError = new Error("context-tree root source failed");
 		let diskFinished = false;
 		let treeSettled = false;
-		const originalDiskRead = contextTreeHistory.readSessionHistoryFile;
+		const originalDiskRead = sessionJournalReader.readCapturedSessionJournal;
 		const drainDiskRead = vi
-			.spyOn(contextTreeHistory, "readSessionHistoryFile")
+			.spyOn(sessionJournalReader, "readCapturedSessionJournal")
 			.mockImplementation(async (...args) => {
 				diskEntered.resolve();
 				try {

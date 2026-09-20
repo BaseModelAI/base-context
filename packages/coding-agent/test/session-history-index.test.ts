@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { HistoryIndex } from "../src/core/history-index.js";
+import { IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY } from "../src/core/session-context-updates.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { emptyUsage } from "../src/core/usage.js";
 
 describe("canonical session history binding", () => {
 	it("indexes ACKed source and restricts exact lookup and pages to the captured branch", async () => {
@@ -107,6 +109,75 @@ describe("canonical session history binding", () => {
 				message: { content: "Expanded request view" },
 			});
 			expect(await session.readHistoryPayload(alternative)).toBeUndefined();
+		} finally {
+			await session.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("pages all source update revisions, including off-branch records, through one captured prefix", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "base-context-source-updates-"));
+		const session = await SessionManager.create(dir, dir);
+		try {
+			const assistant = await session.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "ipython", arguments: { code: "pass" } }],
+				api: "openai-completions",
+				provider: "openai",
+				model: "test",
+				usage: emptyUsage(),
+				stopReason: "toolUse",
+				timestamp: 0,
+			});
+			const updates: string[] = [];
+			for (let index = 0; index < 65; index++)
+				updates.push(await session.appendChildUsageAttribution(assistant, emptyUsage()));
+			const sentData = {
+				toolCallId: "tool-1",
+				message: {
+					id: "sent-1",
+					message: "sent off branch",
+					deliveryStatus: "delivered",
+					target: { activeSessionId: "peer", sessionId: "peer-session" },
+				},
+			};
+			const sent = await session.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, sentData);
+			await session.branchTo(assistant);
+			const usageTarget = { kind: "assistant-usage" as const, targetId: assistant };
+			const sentTarget = { kind: "ipython-sent-message" as const, toolCallId: "tool-1" };
+			let lateSent: string;
+			await session.readSourceHistory(async (history) => {
+				await session.appendChildUsageAttribution(assistant, emptyUsage());
+				lateSent = await session.appendCustomEntry(IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY, {
+					...sentData,
+					message: { ...sentData.message, id: "sent-late" },
+				});
+				const payloadRead = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+				try {
+					const first = await history.sourceContextUpdates(usageTarget);
+					expect(first.events.map((event) => event.id)).toEqual(updates.slice(0, 64));
+					expect(first.coverage).toBe("complete");
+					expect(first.indexedThrough).toBeGreaterThanOrEqual(history.source.sourceSequence);
+					expect(first.truncated).toBe(true);
+					expect(first.nextAfter).toBe(first.events.at(-1)?.sequence);
+					const second = await history.sourceContextUpdates(usageTarget, first.nextAfter!);
+					expect(second.events.map((event) => event.id)).toEqual(updates.slice(64));
+					expect(second).toMatchObject({ coverage: "complete", truncated: false, nextAfter: null });
+					expect((await history.sourceContextUpdates(sentTarget)).events.map((event) => event.id)).toEqual([sent]);
+					expect((await history.branchContext.contextUpdates(sentTarget)).refs).toEqual([]);
+					await expect(history.sourceContextUpdates(usageTarget, -1)).rejects.toThrow(
+						"Invalid history query source range",
+					);
+					expect(payloadRead).not.toHaveBeenCalled();
+				} finally {
+					payloadRead.mockRestore();
+				}
+			});
+			expect(
+				await session.readSourceHistory(async (history) =>
+					(await history.sourceContextUpdates(sentTarget)).events.map((event) => event.id),
+				),
+			).toEqual([sent, lateSent!]);
 		} finally {
 			await session.close();
 			rmSync(dir, { recursive: true, force: true });

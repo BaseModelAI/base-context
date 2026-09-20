@@ -1384,10 +1384,7 @@ function ipythonSentMessages(
 		page.nextCursor = { ...anchor, after };
 	return page;
 }
-function currentSourceBootstrap(
-	request: Extract<HistoryIndexRequest, { action: "current_source_bootstrap" }>,
-): SourceBootstrapState {
-	const { sessionId, snapshot } = request;
+function currentSourceCursor(sessionId: string, snapshot: SessionJournalState) {
 	const saved = db.prepare("SELECT * FROM source_cursor WHERE session=?").get(sessionId);
 	if (!saved) throw new Error("Current source bootstrap is unavailable; synchronize the source first");
 	const current = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
@@ -1403,6 +1400,19 @@ function currentSourceBootstrap(
 		current.indexedThrough !== snapshot.nextSequence - 1
 	)
 		throw new Error("Current source bootstrap snapshot mismatch");
+	return { saved, current };
+}
+function currentSourceUsage(request: Extract<HistoryIndexRequest, { action: "current_source_usage" }>) {
+	const { saved } = currentSourceCursor(request.sessionId, request.snapshot);
+	const catalog = decodeSessionCatalog(JSON.parse(String(saved.catalog_summary)));
+	if (catalog.unsupported) throw new CatalogProjectionUnsupportedError(catalog.unsupported);
+	return catalog.usage;
+}
+function currentSourceBootstrap(
+	request: Extract<HistoryIndexRequest, { action: "current_source_bootstrap" }>,
+): SourceBootstrapState {
+	const { sessionId, snapshot } = request;
+	const { saved, current } = currentSourceCursor(sessionId, snapshot);
 	const reference = (id: unknown): IndexedSourceEvent | null => {
 		if (id === null) return null;
 		const row = db
@@ -1420,17 +1430,21 @@ function currentSourceBootstrap(
 		hasUserContent: saved.source_has_user_content === 1,
 	};
 }
-function sourceRelation(
-	request: Extract<HistoryIndexRequest, { action: "source_label" | "source_assistant_usage" }>,
-): IndexedSourceEvent | undefined {
-	const { sessionId, targetId, through } = request;
-	if (typeof targetId !== "string" || targetId.length > 512) throw new Error("Source relation target limit exceeded");
+function sourceRelationSnapshot(sessionId: string, through: number) {
 	if (!Number.isSafeInteger(through) || through < 0) throw new Error("Invalid history source prefix");
 	const saved = db.prepare("SELECT frontier FROM source_cursor WHERE session=?").get(sessionId);
 	if (!saved) throw new Error("Canonical source index is unavailable; synchronize the source first");
 	const snapshot = JSON.parse(String(saved.frontier)) as SessionJournalState & { indexedThrough: number };
 	if (snapshot.format !== "framed" || snapshot.indexedThrough < through)
 		throw new Error("Canonical source index has not reached the requested source prefix");
+	return snapshot;
+}
+function sourceRelation(
+	request: Extract<HistoryIndexRequest, { action: "source_label" | "source_assistant_usage" }>,
+): IndexedSourceEvent | undefined {
+	const { sessionId, targetId, through } = request;
+	if (typeof targetId !== "string" || targetId.length > 512) throw new Error("Source relation target limit exceeded");
+	sourceRelationSnapshot(sessionId, through);
 	const kind = request.action === "source_label" ? "label" : "assistant-usage";
 	const row = db
 		.prepare(`SELECT e.* FROM context_update u JOIN source_event e
@@ -1439,6 +1453,38 @@ function sourceRelation(
  ORDER BY u.sequence DESC LIMIT 1`)
 		.get(sessionId, kind, targetId, through) as Row | undefined;
 	return row ? event(row) : undefined;
+}
+function sourceContextUpdates(request: Extract<HistoryIndexRequest, { action: "source_context_updates" }>) {
+	const { sessionId, target, through, after } = request;
+	if (!Number.isSafeInteger(after) || after < 0) throw new Error("Invalid history query source range");
+	if (target.kind !== "assistant-usage" && target.kind !== "ipython-sent-message")
+		throw new Error("Invalid context update target");
+	const key = target.kind === "assistant-usage" ? target.targetId : target.toolCallId;
+	if (typeof key !== "string" || key.length > (target.kind === "assistant-usage" ? 512 : MAX_CONTEXT_UPDATE_KEY))
+		throw new Error("Context update target key limit exceeded");
+	const snapshot = sourceRelationSnapshot(sessionId, through);
+	const rows = db
+		.prepare(`SELECT e.* FROM context_update u JOIN source_event e
+ ON e.session=u.session AND e.id=u.event_id
+ WHERE u.session=? AND u.update_kind=? AND u.target_key=? AND u.sequence>? AND u.sequence<=?
+ ORDER BY u.sequence LIMIT 65`)
+		.all(sessionId, target.kind, key, after, through) as Row[];
+	const events: IndexedSourceEvent[] = [];
+	let bytes = 0;
+	for (const row of rows.slice(0, 64)) {
+		const indexed = event(row);
+		bytes += Buffer.byteLength(JSON.stringify(indexed));
+		if (bytes > 1024 * 1024) break;
+		events.push(indexed);
+	}
+	const truncated = events.length < rows.length;
+	return {
+		events,
+		indexedThrough: snapshot.indexedThrough,
+		coverage: "complete" as const,
+		truncated,
+		nextAfter: truncated ? (events.at(-1)?.sequence ?? after) : null,
+	};
 }
 function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch_bootstrap" }>): BranchBootstrapState {
 	const { sessionId, scope } = request;
@@ -1847,9 +1893,13 @@ async function dispatch(request: HistoryIndexRequest): Promise<unknown> {
 			return ipythonSentMessages(request);
 		case "current_source_bootstrap":
 			return currentSourceBootstrap(request);
+		case "current_source_usage":
+			return currentSourceUsage(request);
 		case "source_label":
 		case "source_assistant_usage":
 			return sourceRelation(request);
+		case "source_context_updates":
+			return sourceContextUpdates(request);
 		case "task_evidence":
 			return taskEvidence(request);
 		case "read_payload":

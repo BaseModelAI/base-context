@@ -109,7 +109,9 @@ import {
 	canonicalRecoveryBoundary,
 	getCanonicalEpochContext,
 	getCanonicalMessageSource,
+	getCanonicalViewSelectionSource,
 	getCanonicalViewUnits,
+	MissingRecoveryReplayContractError,
 	prepareCanonicalEpoch,
 	prepareContextModeEpoch,
 	prepareRecoveryCompaction,
@@ -143,6 +145,7 @@ import {
 	contextRequestContract,
 	retainedContextRequestContract,
 	snapshotContextEpoch,
+	UnsupportedContextEpochConfigurationError,
 } from "./context-epoch.js";
 import {
 	type ContextTreeNode,
@@ -268,7 +271,7 @@ import {
 	takeNativePlannerRequestWrite,
 	withRefinementBaseline,
 } from "./refinement/index.js";
-import { PublicContextBudgetError } from "./request-view-selection.js";
+import { getRecoveryCompactionAuthorization, PublicContextBudgetError } from "./request-view-selection.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import { assertResourceCurrent, type OwnedResourceCapture } from "./resource-view.js";
@@ -353,10 +356,9 @@ import {
 	type NativeSubmittedInput,
 } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
-import type { SessionHistoryReadLimits } from "./session-history-index.js";
+import { hydrateCapturedHistoryEntry, type SessionHistoryReadLimits } from "./session-history-index.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import {
-	applyChildUsageAttributions,
 	type BoundCompactionSink,
 	type BranchSummaryEntry,
 	getLatestCompactionEntry,
@@ -1620,7 +1622,10 @@ export class AgentSession {
 				const unbudgetedPublic =
 					!contextEpochsEnabled &&
 					Boolean(
-						epochContext?.toolContinuations?.length || epochContext?.taskFrameRebased || epochContext?.checkpoint,
+						epochContext?.toolContinuations?.length ||
+							epochContext?.taskFrameRebased ||
+							epochContext?.checkpoint ||
+							getCanonicalViewSelectionSource(messages)?.recoveryContractRequested,
 					);
 				const nativeSkills = Boolean(contextEpochsEnabled || epochContext?.checkpoint || unbudgetedPublic);
 				const skillPolicy = nativeSkills ? (this._nativeRecoveryEnabled() ? "enabled" : "unavailable") : undefined;
@@ -1683,13 +1688,46 @@ export class AgentSession {
 							)
 								throw new Error("Tool continuation requires its exact public candidate before epoch ACK");
 							assertResourceCurrent(resource);
-							const representation = contextEpochRepresentation(
-								candidate.request,
-								candidate.assessment,
-								limits.maxSourceBytes,
-								unbudgetedPublic,
-								candidate.responseItemIdentity,
-							);
+							let representation: string;
+							try {
+								representation = contextEpochRepresentation(
+									candidate.request,
+									candidate.assessment,
+									limits.maxSourceBytes,
+									unbudgetedPublic,
+									candidate.responseItemIdentity,
+								);
+							} catch (error) {
+								if (
+									error instanceof UnsupportedContextEpochConfigurationError &&
+									!contextEpochsEnabled &&
+									!candidate.assessment &&
+									!committed &&
+									!acknowledged &&
+									!epochContext.taskFrameRebased &&
+									!epochContext.selectedSkills?.length &&
+									!epochContext.toolContinuations?.length &&
+									!candidate.publicMessages
+								) {
+									const source = getCanonicalViewSelectionSource(messages)!;
+									const selected = new Set(candidate.selectedUnitIds);
+									if (
+										source.recoveryContractRequested &&
+										!source.requiresEpoch &&
+										!source.pendingPublicMessageGroups?.length &&
+										this.sessionManager === epochManager &&
+										compaction.isCurrent() &&
+										JSON.stringify(candidate.source) === JSON.stringify(source.source) &&
+										candidate.selectedUnitIds.length === source.units.length &&
+										selected.size === source.units.length &&
+										source.units.every((unit) => selected.has(unit.id))
+									) {
+										// Optional capture only. Keep the unchanged full-native offer; grant no epoch or omission.
+										return;
+									}
+								}
+								throw error;
+							}
 							const replayContract =
 								"replayContract" in candidate.projection &&
 								candidate.projection.replayContract === "message-groups"
@@ -6186,7 +6224,7 @@ export class AgentSession {
 
 	private async _runPreTurnCompaction(): Promise<void> {
 		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false);
+		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false, undefined, true);
 	}
 
 	private async _prepareForCommit<TPrepared, TCommitted>(
@@ -9523,6 +9561,7 @@ export class AgentSession {
 		owner = this._captureCompactionOwner(),
 		allowShortSession = false,
 		budgetPressure = false,
+		capacity?: PublicContextBudgetError,
 	): Promise<{
 		preparation: CompactionPreparation | undefined;
 		messages?: readonly AgentMessage[];
@@ -9554,7 +9593,8 @@ export class AgentSession {
 			const context = getCanonicalEpochContext(messages)!;
 			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
 				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
-			const boundary = canonicalRecoveryBoundary(messages);
+			const authorization = getRecoveryCompactionAuthorization(capacity);
+			const boundary = canonicalRecoveryBoundary(messages, authorization);
 			const preparation =
 				budgetPressure || context.checkpoint || boundary
 					? prepareViewCompaction(
@@ -9568,7 +9608,8 @@ export class AgentSession {
 						)
 					: prepareCompaction(pathEntries, settings, allowShortSession);
 			// Refuse unsupported public data or open groups before starting the summary model call.
-			if (preparation) prepareRecoveryCompaction(messages, preparation.firstKeptEntryId, limits.maxSourceBytes);
+			if (preparation)
+				prepareRecoveryCompaction(messages, preparation.firstKeptEntryId, limits.maxSourceBytes, authorization);
 			return {
 				preparation,
 				messages,
@@ -9625,6 +9666,7 @@ export class AgentSession {
 			owner,
 			allowShortSession,
 			budgetPressure,
+			options.capacity,
 		);
 		this._assertCompactionOwner(owner);
 		if (prepared.resource) assertResourceCurrent(prepared.resource);
@@ -9745,7 +9787,12 @@ export class AgentSession {
 				JSON.stringify({ summary, firstKeptEntryId, tokensBefore, details }),
 			);
 			const recovery = prepared.messages
-				? prepareRecoveryCompaction(prepared.messages, firstKeptEntryId, prepared.maxSourceBytes)
+				? prepareRecoveryCompaction(
+						prepared.messages,
+						firstKeptEntryId,
+						prepared.maxSourceBytes,
+						getRecoveryCompactionAuthorization(options.capacity),
+					)
 				: undefined;
 			if (prepared.resource) assertResourceCurrent(prepared.resource);
 			if (recovery) {
@@ -10495,7 +10542,32 @@ export class AgentSession {
 		const globalHistory = loadGlobalRefinementHistory(getGlobalHarnessStateDir(), limits);
 		const sessionHistory = (async () => {
 			if (residentEntries !== undefined) return residentEntries;
-			return (await this.sessionManager.materializeSourceHistory(limits)).entries.map(({ entry }) => entry);
+			return this.sessionManager.readSourceHistory(async (history) => {
+				const entries: SessionEntry[] = [];
+				let sourceBytes = 0;
+				let after = 0;
+				for (;;) {
+					const page = await history.page(after, 128);
+					if (page.indexedThrough < history.source.sourceSequence)
+						throw new Error("Captured refinement history has incomplete index coverage");
+					for (const reference of page.events) {
+						if (reference.kind !== "custom") continue;
+						// Refinement consumes custom records, not archived conversation or request bodies.
+						if (entries.length >= limits.maxEntries) throw new Error("Refinement history entry budget exceeded");
+						if (sourceBytes + reference.locator.length > limits.maxSourceBytes)
+							throw new Error("Refinement history source byte budget exceeded");
+						const hydrated = await hydrateCapturedHistoryEntry(
+							reference,
+							limits.maxSourceBytes - sourceBytes,
+							history.readPayload,
+						);
+						entries.push(hydrated.entry);
+						sourceBytes += reference.locator.length;
+					}
+					if (page.nextAfter === null) return entries;
+					after = page.nextAfter;
+				}
+			});
 		})();
 		const [globalResult, sessionResult] = await Promise.allSettled([globalHistory, sessionHistory]);
 		if (globalResult.status === "rejected") {
@@ -10926,6 +10998,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
 		invocationOwner?: CompactionOwner,
+		beforeNextTurn = false,
 	): Promise<boolean> {
 		if (this._compactionSetupFailure) return false;
 		if (invocationOwner && !this._isCompactionSourceOwnerCurrent(invocationOwner)) return false;
@@ -11030,7 +11103,7 @@ export class AgentSession {
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this._removeLastAssistantFromContext();
 			}
-			return await this._runAutoCompaction("overflow", true, owner);
+			return await this._runAutoCompaction("overflow", true, owner, false, undefined, beforeNextTurn);
 		}
 
 		if (this._pendingRequestedCompaction !== undefined) {
@@ -11057,7 +11130,7 @@ export class AgentSession {
 				}
 			}
 			if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
-			return await this._runAutoCompaction("threshold", false, owner);
+			return await this._runAutoCompaction("threshold", false, owner, false, undefined, beforeNextTurn);
 		}
 		return false;
 	}
@@ -11133,6 +11206,7 @@ export class AgentSession {
 		capturedOwner?: CompactionOwner,
 		resumeInPlace = false,
 		capacity?: PublicContextBudgetError,
+		beforeNextTurn = false,
 	): Promise<boolean> {
 		const checkpoint = this._pendingCheckpoint;
 		const pending = this._pendingRequestedCompaction;
@@ -11276,6 +11350,17 @@ export class AgentSession {
 				reason === "threshold" && shouldContinueAfterCompaction,
 				queuedAutonomousContinuationsForThisCompaction,
 			);
+			if (beforeNextTurn && error instanceof MissingRecoveryReplayContractError) {
+				// Let the imminent MAIN obtain its own actual projection/ACK. This was not a recovery attempt.
+				if (reason === "overflow") this._overflowRecovery = "idle";
+				await this._endCompactionUnsuccessfully(
+					reason,
+					"skipped",
+					"Compaction deferred until the next native request establishes recovery replay coverage.",
+					{ errorSeverity: "warning", customInstructions, owner },
+				);
+				return false;
+			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const aborted =
 				errorMessage === "Compaction cancelled" ||
@@ -14709,49 +14794,13 @@ export class AgentSession {
 		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
 	}
 
-	private _ownUsageMemo?: {
-		sessionId: string;
-		sessionFile: string | undefined;
-		sourceSequence: number;
-		count: number;
-		sourceBytes: number;
-		usage: SessionUsageSummary | undefined;
-	};
-
 	// Whole-source own spend, identical to the catalog reduction at passivation.
 	async getOwnUsageSummary(): Promise<SessionUsageSummary | undefined> {
 		if (!this.sessionManager.supportsCapturedHistoryReads()) {
-			const entries = await this.sessionManager.readEntries();
+			const entries = this.sessionManager.getEntries();
 			return sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 		}
-		const limits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 };
-		return this.sessionManager.readSourceHistory(async (history) => {
-			const { sessionId, sessionFile, sourceSequence } = history.source;
-			const memo = this._ownUsageMemo;
-			if (
-				memo &&
-				memo.sessionId === sessionId &&
-				memo.sessionFile === sessionFile &&
-				memo.sourceSequence === sourceSequence &&
-				memo.count <= limits.maxEntries &&
-				memo.sourceBytes <= limits.maxSourceBytes
-			) {
-				return memo.usage ? { ...memo.usage } : undefined;
-			}
-			const materialized = await history.materialize(limits);
-			const entries = materialized.entries.map(({ entry }) => entry);
-			applyChildUsageAttributions(entries);
-			const usage = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
-			this._ownUsageMemo = {
-				sessionId,
-				sessionFile,
-				sourceSequence,
-				count: entries.length,
-				sourceBytes: materialized.sourceBytes,
-				usage,
-			};
-			return usage ? { ...usage } : undefined;
-		});
+		return this.sessionManager.readOwnUsageSummary();
 	}
 
 	/**

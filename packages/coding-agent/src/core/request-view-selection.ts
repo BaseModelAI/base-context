@@ -16,6 +16,7 @@ import {
 	getCanonicalViewSelectionSource,
 	preparePublicContextWindow,
 	prepareToolContinuationWindow,
+	type RecoveryCompactionAuthorization,
 } from "./canonical-context.js";
 import { convertToLlm } from "./messages.js";
 import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
@@ -54,6 +55,16 @@ export class PublicContextBudgetError extends RequestTokenBudgetError {
 		this.#compactionKey = compactionKey;
 		this.#summaryCapacity = summaryCapacity;
 	}
+}
+
+// Only publicBudgetFailure can grant this authority to the exact error it creates.
+// Constructing a public error or copying its descriptive fields grants nothing.
+const recoveryCompactionAuthorizations = new WeakMap<PublicContextBudgetError, RecoveryCompactionAuthorization>();
+
+export function getRecoveryCompactionAuthorization(
+	error: PublicContextBudgetError | undefined,
+): RecoveryCompactionAuthorization | undefined {
+	return error ? recoveryCompactionAuthorizations.get(error) : undefined;
 }
 
 export interface RequestViewCandidate {
@@ -281,7 +292,7 @@ function publicBudgetFailure(
 		});
 	};
 	const minimum = withRequestBody(request, JSON.stringify({ ...body, [inputKey]: retainedInput(new Set()) }));
-	return new PublicContextBudgetError(
+	const error = new PublicContextBudgetError(
 		boundary.source,
 		assessment,
 		original,
@@ -317,6 +328,30 @@ function publicBudgetFailure(
 		},
 		boundary.isSourceCurrent,
 	);
+	if (projection.replayContract === "message-groups") {
+		const originalContext = getCanonicalEpochContext(boundary.messages)!;
+		const recoveries = boundary.units.flatMap((unit, index) =>
+			unit.kind === "recovery" && originalContext.references[index] ? [originalContext.references[index]!] : [],
+		);
+		if (recoveries.length) {
+			recoveryCompactionAuthorizations.set(error, {
+				source: originalContext.source,
+				recoveries,
+				resourceRevision: originalContext.resourceRevision,
+				// Do not extend a partial public conversion to native groups the encoder did not replace.
+				publicWindow:
+					messages !== boundary.messages &&
+					projection.publicWindow === true &&
+					boundary.units.every(
+						(unit, index) =>
+							!["recovery", "replay-group"].includes(unit.kind) ||
+							context.references[index]?.rendering !== undefined,
+					),
+				isSourceCurrent: boundary.isSourceCurrent,
+			});
+		}
+	}
+	return error;
 }
 
 /** Check the actual final mapping without selecting, converting, or committing another view. */
@@ -466,7 +501,13 @@ export async function selectRequestView(
 	let full = budget?.measure(request);
 	const inputKey = requestInputKey(request, projection);
 	if ((budget && full?.limitSource !== "explicit-profile") || !inputKey) return;
-	if (!budget && !boundary.requiresEpoch && !boundary.pendingPublicMessageGroups?.length) return;
+	if (
+		!budget &&
+		!boundary.requiresEpoch &&
+		!boundary.recoveryContractRequested &&
+		!boundary.pendingPublicMessageGroups?.length
+	)
+		return;
 	const payload = JSON.parse(request.body!) as Record<string, unknown>;
 	const input = payload[inputKey];
 	if (!Array.isArray(input) || input.length !== projection.messageIndices.length) return;

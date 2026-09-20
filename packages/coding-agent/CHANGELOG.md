@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.11] - 2026-09-20
+
+- Fixed recovery compaction in long-running sessions that use `prime_context` without a request-budget profile.
+- Fixed automatic recovery after reopening a session without a saved replay contract.
+- Fixed recovery summaries after an over-budget request or a previous compaction while preserving native replay checks.
+- Fixed opening large sessions from the session tree, listing sessions, and loading snapshots when a journal exceeds 64 MiB.
+- Fixed optional replay-contract capture rejecting otherwise valid full-native requests with payload-hook metadata.
+- Fixed `/tree`, `/context`, and the fork-message picker reading unrelated private request bodies from large session journals.
+- Fixed refinement history loading failing on large unrelated session archives.
+- Fixed small selected forks failing because unrelated history exceeded the source-read limit, while preserving required copy dependencies and output limits.
+
 ## [1.0.10] - 2026-09-19
 
 - Fixed session attachment disconnecting during concurrent transcript updates.

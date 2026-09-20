@@ -24,6 +24,7 @@ import {
 import type { BoundRequestSink, SourceSnapshotRef } from "./request-events.js";
 import type { SessionJournalState } from "./session-journal-owner.js";
 import type { SessionEntry } from "./session-manager.js";
+import type { SessionUsageSummary } from "./usage.js";
 
 /** One source/branch frontier shared by every operation in a captured request. */
 export interface SessionHistoryReadView {
@@ -93,6 +94,8 @@ export interface SessionHistoryReadScope {
 	/** Explicit whole-source relations, clipped to this captured prefix. */
 	sourceLabel(targetId: string): Promise<IndexedSourceEvent | undefined>;
 	sourceAssistantUsage(targetId: string): Promise<IndexedSourceEvent | undefined>;
+	/** All source update revisions for a target, including off-branch records, in bounded pages. */
+	sourceContextUpdates(target: ContextUpdateTarget, after?: number): Promise<HistoryIndexPage>;
 	/** Exact sent-message refs on the original captured parent branch, even before a tool result. */
 	ipythonSentMessages(toolCallId: string, options?: IpythonSentMessagesOptions): Promise<IpythonSentMessagesPage>;
 	get(id: string): Promise<IndexedSourceEvent | undefined>;
@@ -253,6 +256,8 @@ export function createSessionHistoryReadScope(
 		sourceLabel: (targetId: string) => query(() => index.sourceLabel(sessionId, targetId, source.sourceSequence)),
 		sourceAssistantUsage: (targetId: string) =>
 			query(() => index.sourceAssistantUsage(sessionId, targetId, source.sourceSequence)),
+		sourceContextUpdates: (target: ContextUpdateTarget, after = 0) =>
+			query(() => index.sourceContextUpdates(sessionId, target, source.sourceSequence, after)),
 		ipythonSentMessages: (toolCallId: string, options: IpythonSentMessagesOptions = {}) =>
 			query(() => index.ipythonSentMessages(sessionId, branch, toolCallId, options)),
 		get,
@@ -348,6 +353,13 @@ export class SessionHistoryIndex {
 		const captured = { ...snapshot };
 		const index = await this.synchronize(captured);
 		return index.currentSourceBootstrap(this.sessionId, captured);
+	}
+
+	/** Caller holds the owner queue until the exact current projection is read. */
+	async currentSourceUsage(snapshot: SessionJournalState): Promise<SessionUsageSummary | undefined> {
+		const captured = { ...snapshot };
+		const index = await this.synchronize(captured);
+		return index.currentSourceUsage(this.sessionId, captured);
 	}
 
 	/** Finish accepted indexing, then wait for the external worker to close. */

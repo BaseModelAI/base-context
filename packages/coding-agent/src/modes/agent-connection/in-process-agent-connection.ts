@@ -17,10 +17,10 @@ import type { ExtensionUIContext } from "../../core/extensions/types.js";
 import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
-import { readUserMessagesForForking } from "../../core/session-fork-messages.js";
+import { readVisibleUserMessagesForForking } from "../../core/session-fork-messages.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { readSessionTree } from "../../core/session-tree.js";
+import { readVisibleSessionTree } from "../../core/session-tree.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import {
@@ -190,7 +190,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getSessionTree(): Promise<{ tree: AgentConnectionSessionTreeNode[]; leafId: string | null }> {
-		return readSessionTree(this.session.sessionManager);
+		return readVisibleSessionTree(this.session.sessionManager);
 	}
 
 	async listSavedSessions(
@@ -310,7 +310,7 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async getUserMessagesForForking(): Promise<AgentConnectionUserMessage[]> {
-		return readUserMessagesForForking(this.session.sessionManager);
+		return readVisibleUserMessagesForForking(this.session.sessionManager);
 	}
 
 	async getLastAssistantText(): Promise<string | undefined> {

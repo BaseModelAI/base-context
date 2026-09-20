@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
+import { HistoryIndex } from "../../src/core/history-index.js";
 import {
 	findMostRecentSession,
 	loadEntriesFromFile,
@@ -214,6 +215,54 @@ describe("loadEntriesFromFile", () => {
 });
 
 describe("session tree metadata", () => {
+	it("forks a small selected path without hydrating unrelated archive bodies", async () => {
+		const tempDir = join(tmpdir(), `selected-fork-source-test-${Date.now()}-${Math.random()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const source = await createSession(tempDir, tempDir);
+			const first = await source.appendMessage({ role: "user", content: "Selected early task", timestamp: 1 });
+			const ignored = new Set<string>();
+			const padding = "x".repeat(8 * 1024 * 1024);
+			for (let index = 0; index < 9; index++)
+				ignored.add(await source.appendCustomEntry("unrelated-archive", padding));
+			await source.appendLabelChange(first, "preserved-label");
+			const file = source.getSessionFile()!;
+			const sourceBytes = statSync(file).size;
+			expect(sourceBytes).toBeGreaterThan(64 * 1024 * 1024);
+			const payloads = vi.spyOn(HistoryIndex.prototype, "readSourcePayload");
+			const prepared = await source.prepareFork(first, {
+				position: "at",
+				persist: false,
+				limits: { maxEntries: 3, maxSourceBytes: 2 * 1024 * 1024 },
+			});
+			const fork = await prepared.create();
+			managers.add(fork);
+			expect((await fork.readEntries()).filter((entry) => entry.type === "message")).toEqual([
+				expect.objectContaining({
+					id: first,
+					message: { role: "user", content: "Selected early task", timestamp: 1 },
+				}),
+			]);
+			expect(await fork.readLabel(first)).toBe("preserved-label");
+			expect(payloads.mock.calls.some(([, id]) => ignored.has(id))).toBe(false);
+			expect(statSync(file).size).toBe(sourceBytes);
+			// The selected user plus its preserved label still exceed a one-entry output budget.
+			await expect(
+				source
+					.prepareFork(first, {
+						position: "at",
+						persist: false,
+						limits: { maxEntries: 1, maxSourceBytes: 2 * 1024 * 1024 },
+					})
+					.then((captured) => captured.create()),
+			).rejects.toThrow(/entry budget exceeded/i);
+		} finally {
+			vi.restoreAllMocks();
+			await closeManagers();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	}, 30000);
+
 	it.each(["2.5", "2oops", "9007199254740993"])("rejects invalid BASE_CONTEXT_RLM_DEPTH value %s", async (value) => {
 		const tempDir = join(tmpdir(), `invalid-root-depth-test-${Date.now()}-${Math.random()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -603,7 +652,7 @@ describe("SessionManager source opening", () => {
 	it("does not replace an existing empty source with an invented header", async () => {
 		const path = join(tempDir, "empty.jsonl");
 		writeFileSync(path, "");
-		await expect(openSession(path, tempDir)).rejects.toThrow("valid header");
+		await expect(openSession(path, tempDir)).rejects.toThrow("Owned session header is incomplete");
 		expect(readFileSync(path, "utf8")).toBe("");
 	});
 
@@ -692,7 +741,7 @@ describe("session info usage totals", () => {
 			expect(resident).toEqual(scanned);
 
 			await manager.migrateLegacy();
-			const parent = manager.getEntry("m3");
+			const parent = await manager.readEntry("m3");
 			if (parent?.type !== "message" || parent.message.role !== "assistant")
 				throw new Error("fixture parent missing");
 			const before = structuredClone(parent.message.usage);
@@ -700,10 +749,13 @@ describe("session info usage totals", () => {
 			const second = manager.appendChildUsageAttribution("m3", usage(20, 3, 0.02));
 			expect(parent.message.usage).toEqual(before); // The queued projection is not yet acknowledged.
 			await Promise.all([first, second]);
-			expect(parent.message.usage.input).toBe(before.input + 30);
-			expect(parent.message.usage.output).toBe(before.output + 5);
-			expect(parent.message.usage.totalTokens).toBe(before.totalTokens);
-			expect(parent.message.usage.cost.total).toBeCloseTo(before.cost.total + 0.03);
+			const updated = await manager.readEntry("m3");
+			if (updated?.type !== "message" || updated.message.role !== "assistant")
+				throw new Error("fixture parent missing after acknowledgement");
+			expect(updated.message.usage.input).toBe(before.input + 30);
+			expect(updated.message.usage.output).toBe(before.output + 5);
+			expect(updated.message.usage.totalTokens).toBe(before.totalTokens);
+			expect(updated.message.usage.cost.total).toBeCloseTo(before.cost.total + 0.03);
 			expect((await readSessionInfo(file))?.usage?.cost).toBeCloseTo(scanned!.cost);
 		} finally {
 			await closeManagers();
