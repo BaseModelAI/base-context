@@ -94,7 +94,8 @@ Private download manifests require `version` and `package` (or `packageName`) se
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
-| `compaction.targetTokens` | positive integer or `"model-limit"` | Model-aware soft target | Override the soft compaction target, still capped by the model window minus reserve |
+| `compaction.targetTokens` | positive integer or `"model-limit"` | 90% of the model context window | Override the soft compaction target, still capped by the model window minus reserve |
+| `compaction.agentCallable` | boolean | `true` | Expose the `compact` skill so the agent can request compaction before the automatic threshold |
 | `compaction.model` | object | Current main model and effort | Explicit summary model: `provider`, `modelId`, and `thinkingLevel` are all required |
 
 ```json
@@ -108,16 +109,24 @@ Private download manifests require `version` and `package` (or `packageName`) se
 ```
 
 
-Without `targetTokens`, the soft target is
-`max(4 * keepRecentTokens, min(96000, contextWindow / 2))`. The trigger also leaves
-`4 * keepRecentTokens` above an estimate of current fixed instructions, tool
-schemas, TaskFrame and latest harness snapshot. It is capped at
-`contextWindow - reserveTokens`. With small fixed context, default settings use
-96000 for a 272000-token model. A positive safe integer replaces the soft target,
-but required-context headroom can raise it; `"model-limit"` uses exactly the
-full-window threshold. This is a summary heuristic,
-not strict provider-request admission. See [compaction](compaction.md#when-it-triggers)
-and [model-aware budgets](context-management.md#model-aware-budgets).
+Without `targetTokens`, the soft target is 90% of the model context window:
+`floor(0.9 * contextWindow)`. The trigger also leaves `4 * keepRecentTokens` above
+an estimate of current fixed instructions, tool schemas, TaskFrame and latest
+harness snapshot. It is capped at `contextWindow - reserveTokens`. With small
+fixed context, default thresholds are 244800 for a 272000-token model, 111616 for a
+128000-token model, and 47616 for a 64000-token model. The model-window reserve can
+therefore trigger compaction before 90%. A positive safe integer replaces the
+soft target, but required-context headroom can raise it; `"model-limit"` uses
+exactly `contextWindow - reserveTokens`. This is a summary heuristic, not strict
+provider-request admission. See [compaction](compaction.md#when-it-triggers) and
+[model-aware budgets](context-management.md#model-aware-budgets).
+
+With the default `compaction.agentCallable: true`, the agent can use
+`await compact.status()` and `await compact.run(instructions=None)` in the Python
+REPL. This model-independent path includes Astra and can request compaction before
+the automatic threshold. It also works with `compaction.enabled: false`, but new
+requests require `context.mode: "on"`. Requests run at a turn boundary, not
+mid-cell. See [agent-requested compaction](compaction.md#agent-requested-compaction).
 
 Set `compaction.model` to choose the model and effort for manual, automatic and
 model-requested compaction summaries. For example, when this exact model/route is

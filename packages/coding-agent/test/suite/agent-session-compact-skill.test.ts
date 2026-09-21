@@ -7,6 +7,8 @@ type SessionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
 	_shouldStopAfterTurn: (context: ShouldStopAfterTurnContext) => Promise<boolean>;
 	_createKernelHostHandlers: () => Record<string, unknown>;
+	_captureCompactionOwner: () => object;
+	_pendingRequestedCompaction?: { owner: object };
 };
 
 function createAssistant(
@@ -215,7 +217,8 @@ describe("AgentSession compact skill host requests", () => {
 		harnesses.push(harness);
 		await harness.session.prompt("one");
 
-		(harness.session as unknown as { _pendingRequestedCompaction?: object })._pendingRequestedCompaction = {};
+		const internals = harness.session as unknown as SessionInternals;
+		internals._pendingRequestedCompaction = { owner: internals._captureCompactionOwner() };
 		harness.session.agent.followUp({
 			role: "custom",
 			customType: "test",
@@ -225,7 +228,6 @@ describe("AgentSession compact skill host requests", () => {
 		});
 		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
 
-		const internals = harness.session as unknown as SessionInternals;
 		const compacted = await internals._checkCompaction(createAssistant(harness));
 		await vi.advanceTimersByTimeAsync(100);
 		vi.useRealTimers();

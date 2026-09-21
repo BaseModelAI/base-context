@@ -84,21 +84,27 @@ In supported native Responses/Codex selection paths, historical assistant litera
 
 See [SDK request-token profiles](sdk.md#explicit-request-token-budget-profiles) for the exact scope and configuration.
 
-Ordinary [compaction](compaction.md) uses a separate model-aware soft target:
-`max(4 * keepRecentTokens, min(96000, contextWindow / 2))`. The actual trigger also
-leaves `4 * keepRecentTokens` above estimated fixed context, then caps the result
-at `contextWindow - reserveTokens`. Fixed context includes current system
+Ordinary [compaction](compaction.md) uses a separate soft target of 90% of the
+model context window: `floor(0.9 * contextWindow)`. The actual trigger also leaves
+`4 * keepRecentTokens` above estimated fixed context, then caps the result at
+`contextWindow - reserveTokens`. Fixed context includes current system
 instructions, tool schemas, the current TaskFrame and latest harness snapshot,
 not every historical message. This avoids repeated ineffective summaries of
 noncompactable instructions.
 
-With small fixed context, default settings trigger earlier at 96000 estimated
-tokens for a 272000-token model. Set `compaction.targetTokens` to a positive safe
-integer to replace the soft target (still subject to fixed-context headroom), or
-`"model-limit"` to use exactly the full-window threshold.
-This policy reduces repeated large-history requests without clipping required
-replay groups. It can add summary calls and rereads; it is not a strict request
+With small fixed context, default thresholds are 244800 estimated tokens for a
+272000-token model, 111616 for a 128000-token model, and 47616 for a 64000-token
+model. The model-window reserve can trigger compaction before 90%. Set
+`compaction.targetTokens` to a positive safe integer to replace the soft target
+(still subject to fixed-context headroom), or `"model-limit"` to use exactly
+`contextWindow - reserveTokens`. Required replay groups are not clipped to meet
+this target. Summaries can add calls and rereads; this is not a strict request
 cap, an optimality guarantee, or evidence of a deployment's actual limit.
+
+The agent can request an earlier checkpoint from the Python REPL with
+`await compact.run()`, independently of the automatic threshold. It can inspect
+usage with `await compact.status()`. This is enabled by default for all models,
+including Astra; see [agent-requested compaction](compaction.md#agent-requested-compaction).
 
 ## Stable context epochs
 

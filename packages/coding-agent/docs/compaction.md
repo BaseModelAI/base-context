@@ -35,18 +35,19 @@ or loss from a summary alone.
 
 ### When It Triggers
 
-Auto-compaction uses an earlier, model-aware soft target by default:
+Auto-compaction uses 90% of the model context window as its default soft target:
 
 ```
-softTarget = max(4 * keepRecentTokens, min(96000, contextWindow / 2))
+softTarget = floor(0.9 * contextWindow)
 threshold = min(contextWindow - reserveTokens, max(softTarget, fixedContextTokens + 4 * keepRecentTokens))
 contextTokens > threshold
 ```
 
 With default `keepRecentTokens` of 20000 and `reserveTokens` of 16384, before
-fixed-context headroom raises the target, the thresholds are 96000 for a
-272000-token model, 80000 for a 128000-token model, and 47616 for a 64000-token
-model. The model-window ceiling always applies.
+fixed-context headroom raises the target, the thresholds are 244800 for a
+272000-token model, 111616 for a 128000-token model, and 47616 for a 64000-token
+model. The model-window reserve can therefore trigger compaction before 90%.
+The model-window ceiling always applies.
 
 `fixedContextTokens` estimates current system instructions, tool schemas, the
 current TaskFrame and latest harness snapshot. It does not count all historical
@@ -67,6 +68,33 @@ dependencies are not clipped to meet this target. Explicit SDK request-token
 budgets remain separate; see [context management](context-management.md#model-aware-budgets).
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary — for example `/compact focus on the auth refactor, remember the exact migration command`. The instructions are passed to the summarization prompt with high priority, persisted on the `CompactionEntry`, and shown on the `[compaction]` message in the TUI.
+
+### Agent-Requested Compaction
+
+The agent can request compaction before the automatic threshold, including when
+using Astra. The bundled `compact` skill is enabled by default and runs from the
+Python REPL:
+
+```python
+await compact.status()
+await compact.run("keep the remaining plan and exact test names")
+```
+
+`status()` reports `tokens`, `context_window`, `percent`, and `scheduled`. Usage
+can be unknown immediately after compaction. `run()` schedules compaction at the
+next turn boundary, not in the middle of the Python cell. It returns
+`{"scheduled": True}` when accepted, or `{"scheduled": False, "reason": ...}`
+when no turn is active or there is nothing to compact yet. Optional instructions
+focus the summary. Repeating the request before the boundary updates them.
+Interrupted tool work can continue after the checkpoint; this does not start new
+work after an otherwise completed turn.
+
+This request does not depend on the automatic threshold or `compaction.enabled`.
+It requires context optimization to be on. `compaction.agentCallable: false`
+disables the skill, and disabling Python or bundled skills can remove its normal
+entry point. Each recursive agent uses its own session's compaction path; children
+inherit the parent's compact-skill availability. There is no Astra-specific gate.
+A request compacts the requesting session, not the whole agent tree.
 
 ### How It Works
 
@@ -455,10 +483,11 @@ Configure compaction in `~/.base-context/settings.json` or `<project-dir>/.base-
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Headroom used by the compaction threshold |
 | `keepRecentTokens` | `20000` | Estimated recent-token target for the retained tail |
-| `targetTokens` | Model-aware soft target | Positive safe integer to override the soft target, or `"model-limit"` for the model-window threshold |
+| `targetTokens` | 90% of the model context window | Positive safe integer to override the soft target, or `"model-limit"` for the model-window threshold; fixed-context headroom and the model reserve still apply as described above |
+| `agentCallable` | `true` | Expose the `compact` skill so the agent can request earlier compaction |
 
 Disable automatic compaction with `"compaction": { "enabled": false }`. Manual
-`/compact` remains available while `context.mode` is `"on"`. Setting `context.mode`
+`/compact` and agent-requested compaction remain available while `context.mode` is `"on"`. Setting `context.mode`
 to `"off"` disables context optimization, including manual compaction; logging,
 recovery, limits and other non-optimization ownership remain active.
 

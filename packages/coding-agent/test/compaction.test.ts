@@ -264,13 +264,18 @@ describe("getLastAssistantUsage", () => {
 });
 
 describe("shouldCompact", () => {
-	it("uses a model-aware working target while preserving the model ceiling and recent-context headroom", () => {
+	it("defaults to 90% of the model window while preserving the reserved-token ceiling", () => {
 		const settings = SettingsManager.inMemory().getCompactionSettings();
-		expect(shouldCompact(96_000, 272_000, settings)).toBe(false);
-		expect(shouldCompact(96_001, 272_000, settings)).toBe(true);
-		expect(shouldCompact(80_000, 128_000, settings)).toBe(false);
-		expect(shouldCompact(80_001, 128_000, settings)).toBe(true);
-		expect(shouldCompact(47_617, 64_000, settings)).toBe(true);
+		for (const [contextWindow, threshold] of [
+			[272_000, 244_800],
+			[200_000, 180_000],
+			[128_000, 111_616],
+			[64_000, 47_616],
+		]) {
+			expect(shouldCompact(threshold, contextWindow, settings)).toBe(false);
+			expect(shouldCompact(threshold + 1, contextWindow, settings)).toBe(true);
+		}
+		expect(shouldCompact(96_001, 272_000, settings)).toBe(false);
 		const configured = SettingsManager.inMemory({ compaction: { targetTokens: 120_000 } }).getCompactionSettings();
 		expect(shouldCompact(100_000, 272_000, configured)).toBe(false);
 		expect(shouldCompact(120_001, 272_000, configured)).toBe(true);
@@ -281,7 +286,7 @@ describe("shouldCompact", () => {
 	});
 
 	it("leaves working room above fixed instructions but never raises the model ceiling", () => {
-		const settings = SettingsManager.inMemory().getCompactionSettings();
+		const settings = SettingsManager.inMemory({ compaction: { targetTokens: 96_000 } }).getCompactionSettings();
 		expect(shouldCompact(200_000, 272_000, settings, 120_000)).toBe(false);
 		expect(shouldCompact(200_001, 272_000, settings, 120_000)).toBe(true);
 		expect(shouldCompact(255_617, 272_000, settings, 300_000)).toBe(true);

@@ -271,7 +271,7 @@ export function shouldCompact(
 		settings.targetTokens === "model-limit"
 			? modelLimit
 			: Math.max(
-					settings.targetTokens ?? Math.min(96_000, contextWindow / 2),
+					settings.targetTokens ?? Math.floor(contextWindow * 0.9),
 					fixedContextTokens + 4 * settings.keepRecentTokens,
 				);
 	return contextTokens > Math.min(target, modelLimit);
