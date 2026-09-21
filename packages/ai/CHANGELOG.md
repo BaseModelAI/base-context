@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.12] - 2026-09-21
+
+- Fixed retained SDK abort listeners while preserving caller cancellation across requests.
+- Fixed Azure Responses requests losing their configured API version during attempt tracking.
+
 ## [1.0.8] - 2026-09-18
 
 - Fixed Codex socket reuse after authentication or endpoint changes without interrupting active requests.

@@ -1,2 +1,0 @@
-- Fixed retained SDK abort listeners while preserving caller cancellation across requests.
-- Fixed Azure Responses requests losing their configured API version during attempt tracking.
