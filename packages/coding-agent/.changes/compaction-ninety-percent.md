@@ -1,1 +1,0 @@
-- Changed the default automatic compaction target to 90% of the model context window, retaining required-context headroom, the output reserve, and earlier agent-requested compaction.

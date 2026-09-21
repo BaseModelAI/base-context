@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.13] - 2026-09-21
+
+- Changed the default automatic compaction target to 90% of the model context window, retaining required-context headroom, the output reserve, and earlier agent-requested compaction.
+
 ## [1.0.12] - 2026-09-21
 
 - Fixed compaction and recovery for primary RLM child requests.
