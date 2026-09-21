@@ -126,6 +126,7 @@ import {
 	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
+	estimateFixedCompactionTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	prepareViewCompaction,
@@ -143,6 +144,7 @@ import {
 	contextEpochMode,
 	contextEpochRepresentation,
 	contextRequestContract,
+	readContextEpoch,
 	retainedContextRequestContract,
 	snapshotContextEpoch,
 	UnsupportedContextEpochConfigurationError,
@@ -207,7 +209,7 @@ import {
 	validateGoalBudget,
 	validateGoalObjective,
 } from "./goals.js";
-import type { IpythonSentMessagesCursor } from "./history-index.js";
+import type { ContextManifestCursor, ContextRef, IpythonSentMessagesCursor } from "./history-index.js";
 import {
 	captureNativeBranchRequests,
 	captureNativeCompactionRequests,
@@ -234,6 +236,7 @@ import {
 	createRlmChildTerminalNoticeMessage,
 	createSessionSlashCommandMessage,
 	createSessionSlashCommandResultMessage,
+	HARNESS_SNAPSHOT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_CUSTOM_TYPE,
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
@@ -249,6 +252,7 @@ import {
 	type AutoRefineReview,
 	appendGlobalRefinement,
 	applyRefinementProposal,
+	formatHarnessStateForPrompt,
 	generateRefinementId,
 	getGlobalHarnessStateDir,
 	getLocalHarnessStateDir,
@@ -356,7 +360,11 @@ import {
 	type NativeSubmittedInput,
 } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
-import { hydrateCapturedHistoryEntry, type SessionHistoryReadLimits } from "./session-history-index.js";
+import {
+	hydrateCapturedHistoryEntry,
+	type SessionHistoryReadLimits,
+	type SessionHistoryReadView,
+} from "./session-history-index.js";
 import { exportSessionBranchToJsonl } from "./session-jsonl-export.js";
 import {
 	type BoundCompactionSink,
@@ -1090,6 +1098,7 @@ interface RlmChildRun {
 	sessionDir: string;
 	model: Model<Api>;
 	status: RlmChildAgentStatus;
+	terminalAssistantOutcome?: Pick<AssistantMessage, "stopReason" | "errorMessage">;
 	durationMs?: number;
 	answerPreview?: string;
 	toolUseCount: number;
@@ -1123,6 +1132,16 @@ interface RlmChildRun {
 	lastEmittedUpdate?: string;
 	unsubscribe?: () => void;
 }
+
+interface RlmChildUsageSource {
+	sessionId: string;
+	sessionFile?: string;
+	entryId: string;
+}
+
+const RLM_PARENT_USAGE_CUSTOM_TYPE = "rlm_parent_usage";
+
+type RlmChildUsageOrigin = "spawn_task" | "agent_message" | "direct_user";
 
 interface RetainedRlmChild {
 	session: AgentSession;
@@ -1429,6 +1448,8 @@ export class AgentSession {
 	// Kept alive for retained children so nested updates (e.g. a grandchild cancel)
 	// still forward to root; torn down when the retained child is disposed.
 	private _rlmChildUnsubscribes = new Map<string, () => void>();
+	private _rlmChildUsageSources = new Map<string, RlmChildUsageSource>();
+	private _rlmParentUsageAttribution?: (usage: Usage, origin: RlmChildUsageOrigin) => Promise<void>;
 	/** Latest recap for this session, written by the daemon summarizer; read by a parent to label its child snapshots. */
 	private _currentRecap?: string;
 	private readonly _initialGoal: AgentSessionConfig["initialGoal"];
@@ -1557,10 +1578,12 @@ export class AgentSession {
 			await this._goalResumeOperation;
 			await this._waitForAgentEventsBeforeContext();
 			await this._waitForChildUsageWrites();
+			const assertHarnessSourceCurrent = await this._appendHarnessSnapshotIfChanged();
 			await this.sessionManager.flushNow();
+			assertHarnessSourceCurrent();
 			// In-memory sessions have no canonical archive. This is an explicit mode, not an index-error fallback.
 			if (!this.sessionManager.isPersisted()) {
-				if (!this._compactionSetupFailure) return;
+				if (!this._compactionSetupFailure) return { messages: this.agent.state.messages, adoptMessages: true };
 				const rebuilt = await readSessionBootstrap(
 					this.sessionManager,
 					this.settingsManager.getCanonicalContextLimits(),
@@ -4233,7 +4256,16 @@ export class AgentSession {
 		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return false;
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) return false;
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
-		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) return false;
+		if (
+			contextTokens === undefined ||
+			!shouldCompact(
+				contextTokens,
+				contextWindow,
+				settings,
+				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
+			)
+		)
+			return false;
 		if (this._hasFailedThresholdCompaction()) return false;
 		// Keep the existing threshold-specific goal winner; do not import W74's natural wait policy here.
 		if (!this._isGoalContinuationOwnerCurrent(goalOwner)) return true;
@@ -4625,7 +4657,7 @@ export class AgentSession {
 				}
 				return {
 					scheduled: true,
-					note: "Refinement runs when the current turn ends; the harness rebuilds the system prompt and resumes you automatically. Continue working normally.",
+					note: "Refinement runs when the current turn ends; fresh harness advice is added to the next request and you resume automatically. Continue working normally.",
 				};
 			}
 			default:
@@ -5770,6 +5802,7 @@ export class AgentSession {
 			this._rlmChildUnsubscribes.clear();
 			for (const { session } of this._rlmChildSessions.values()) await drain(() => session.disposeAsync());
 			this._rlmChildSessions.clear();
+			this._rlmChildUsageSources.clear();
 			this._rlmChildCleanupFailures.clear();
 			this._deletedRlmChildIds.clear();
 			// Stop kernel-backed tools before waiting for their terminal agent events.
@@ -5854,6 +5887,7 @@ export class AgentSession {
 				session.dispose();
 			}
 			this._rlmChildSessions.clear();
+			this._rlmChildUsageSources.clear();
 			this._rlmChildCleanupFailures.clear();
 			this._deletedRlmChildIds.clear();
 			this._pendingNextTurnMessages = [];
@@ -6145,6 +6179,7 @@ export class AgentSession {
 			rlmDepth: this._rlmDepth,
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
+			harnessSection: "instructions",
 			errorFixSelection: {
 				enabled: this.settingsManager.getLearningEnabled(),
 				tools: validToolNames,
@@ -6156,6 +6191,110 @@ export class AgentSession {
 			genericMcpServers: this._mcpManager?.getEnabledPersistentGenericServers(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
+	}
+
+	/** Read only snapshot candidates in the active literal tail and accepted epoch recipes. */
+	private async _readHarnessSnapshot(view: SessionHistoryReadView): Promise<string | undefined> {
+		const { maxMessages, maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
+		const refs: ContextRef[] = [];
+		let summary: ContextRef | null = null;
+		let cursor: ContextManifestCursor | undefined;
+		let count = 0;
+		let bytes = 0;
+		do {
+			const page = await view.contextManifest({ cursor, limit: 128 });
+			if (page.selection !== "known") throw new Error(`Harness snapshot context selection is ${page.selection}`);
+			summary = page.summaryRef;
+			count += page.refs.length;
+			if (count + (summary ? 1 : 0) > maxMessages)
+				throw new Error("Harness snapshot context message budget exceeded");
+			refs.push(...page.refs.filter((ref) => ref.kind === "custom_message"));
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		const read = async (ref: ContextRef, source = view): Promise<SessionEntry> => {
+			bytes += ref.locator.length;
+			if (bytes > maxSourceBytes) throw new Error("Harness snapshot source byte budget exceeded");
+			const metadata = await source.get(ref.entryId);
+			if (!metadata || metadata.revision !== ref.revision) throw new Error("Harness snapshot source is unavailable");
+			const hydrated = await hydrateCapturedHistoryEntry(metadata, ref.locator.length, source.readPayload);
+			if (!hydrated) throw new Error("Harness snapshot payload is unavailable");
+			return hydrated.entry;
+		};
+		const content = (entry: SessionEntry) =>
+			entry.type === "custom_message" &&
+			entry.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE &&
+			typeof entry.content === "string"
+				? entry.content
+				: undefined;
+		for (const ref of refs.reverse()) {
+			const snapshot = content(await read(ref));
+			if (snapshot !== undefined) return snapshot;
+		}
+		if (!summary) return;
+		const entry = await read(summary);
+		if (
+			entry.type !== "compaction" ||
+			summary.qualification !== "native-context-epoch" ||
+			summary.retention === "retained-import"
+		)
+			return;
+		const checkpoint = readContextEpoch(entry.details, maxSourceBytes);
+		if (!checkpoint) return;
+		if (count + checkpoint.views.length > maxMessages)
+			throw new Error("Harness snapshot context message budget exceeded");
+		for (const pinned of [...checkpoint.views].reverse()) {
+			if (pinned.ref.kind !== "custom_message") continue;
+			if (!view.atSnapshot) throw new Error("Harness snapshot epoch requires its captured source");
+			const snapshot = content(await read(pinned.ref, await view.atSnapshot(pinned.source)));
+			if (snapshot !== undefined) return snapshot;
+		}
+	}
+
+	/** Persist mutable advice before the request owner captures its source and epoch ACK boundary. */
+	private async _appendHarnessSnapshotIfChanged(): Promise<() => void> {
+		const manager = this.sessionManager;
+		let leafId = manager.getLeafId();
+		const sourceIsCurrent = manager.captureCompactionSourceOwner();
+		const assertCurrent = () => {
+			if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent() || manager.getLeafId() !== leafId)
+				throw new Error("Harness snapshot source changed before request ownership");
+		};
+		let previous: CustomMessage["content"] | undefined;
+		if (manager.isPersisted()) {
+			previous = await manager.readBranchHistory((view) => this._readHarnessSnapshot(view.branchContext));
+		} else {
+			const snapshot = manager
+				.buildSessionContext()
+				.messages.reverse()
+				.find((message) => message.role === "custom" && message.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE);
+			if (snapshot?.role === "custom") previous = snapshot.content;
+		}
+		assertCurrent();
+		const options = this._baseSystemPromptOptions;
+		const tools = options.selectedTools ?? [];
+		const hasIpython = tools.includes("ipython");
+		const content = formatHarnessStateForPrompt(this._loadMergedHarnessState(), {
+			section: "entries",
+			includeIpythonExamples: hasIpython,
+			includeShellExamples: tools.includes("bash"),
+			errorFixSelection: options.errorFixSelection
+				? { ...options.errorFixSelection, enabled: this.settingsManager.getLearningEnabled() }
+				: undefined,
+		});
+		if (previous === content) return assertCurrent;
+		const entryId = await manager.appendCustomMessageEntryWithRollback(HARNESS_SNAPSHOT_CUSTOM_TYPE, content, false);
+		if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent() || manager.getLeafId() !== entryId)
+			throw new Error("Harness snapshot source changed during append");
+		if (!manager.isPersisted())
+			this.agent.state.messages.push({
+				role: "custom",
+				customType: HARNESS_SNAPSHOT_CUSTOM_TYPE,
+				content,
+				display: false,
+				timestamp: Date.now(),
+			});
+		leafId = entryId;
+		return assertCurrent;
 	}
 
 	private _refreshExtensionSystemPrompt(extensionPrompt: string, baseSnapshot: string): string {
@@ -10923,8 +11062,12 @@ export class AgentSession {
 				if (!refinementAuditAppendError) throw error;
 			}
 			if (refinementAuditAppendError) throw refinementAuditAppendError.error;
-			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
-			this.agent.state.systemPrompt = this._baseSystemPrompt;
+			// Keep extension-facing state fresh, but do not rewrite the cached system prefix.
+			this._baseSystemPromptOptions = {
+				...this._baseSystemPromptOptions,
+				harnessState: this._loadMergedHarnessState(),
+			};
+			// The next owned request appends the new advice before capturing its source.
 			try {
 				this._emit({ type: "refine_complete", result });
 			} catch {
@@ -11119,7 +11262,14 @@ export class AgentSession {
 		// assistant usage are included, matching the /usage context display.
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
+		if (
+			shouldCompact(
+				contextTokens,
+				contextWindow,
+				settings,
+				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
+			)
+		) {
 			if (this._hasFailedThresholdCompaction()) return false;
 			if (!this._pendingCheckpoint && queueAutonomousContinuation) {
 				if (
@@ -12964,6 +13114,7 @@ export class AgentSession {
 		this._rlmChildUnsubscribes.get(childId)?.();
 		this._rlmChildUnsubscribes.delete(childId);
 		this._rlmChildSessions.delete(childId);
+		this._rlmChildUsageSources.delete(childId);
 		this._rlmChildCleanupFailures.delete(childId);
 		this._abandonedRlmQuiescenceChildIds.delete(childId);
 		if (!run || this._activeRlmChildRuns.get(childId) === run) {
@@ -13050,6 +13201,163 @@ export class AgentSession {
 		return { subagent };
 	}
 
+	private async _restoreRlmChildUsageSource(childId: string, child: AgentSession): Promise<void> {
+		if (this._rlmChildUsageSources.has(childId)) return;
+		const readSource = (entry: SessionEntry): RlmChildUsageSource | undefined => {
+			if (entry.type !== "custom" || entry.customType !== RLM_PARENT_USAGE_CUSTOM_TYPE) return;
+			const data = entry.data as Partial<RlmChildUsageSource> | undefined;
+			if (
+				!data ||
+				data.sessionId !== this.sessionId ||
+				data.sessionFile !== this.sessionFile ||
+				typeof data.entryId !== "string"
+			)
+				return;
+			return { sessionId: data.sessionId, sessionFile: data.sessionFile, entryId: data.entryId };
+		};
+		const source = child.sessionManager.supportsCapturedHistoryReads()
+			? await child.sessionManager.readBranchHistory(async (history) => {
+					let after = 0;
+					while (true) {
+						const page = await history.page(after, 64);
+						for (const ref of page.events) {
+							if (ref.kind !== "custom" || ref.locator.length > 16 * 1024) continue;
+							const record = await history.hydrateEntry(ref.id, 16 * 1024);
+							const source = record && readSource(record.entry);
+							if (source) return source;
+						}
+						if (page.nextAfter === null) return;
+						after = page.nextAfter;
+					}
+				})
+			: child.sessionManager
+					.getBranch()
+					.map(readSource)
+					.find((source) => source !== undefined);
+		if (!source || source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile) return;
+		const target = await this.sessionManager.readEntry(source.entryId);
+		if (target?.type !== "message" || target.message.role !== "assistant") return;
+		if (source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile) return;
+		this._rlmChildUsageSources.set(childId, source);
+	}
+
+	private _subscribeRlmChildEvents(
+		childId: string,
+		child: AgentSession,
+		run?: RlmChildRun,
+		onUsageWrite?: (write: Promise<void>) => void,
+	): () => void {
+		let runningToolCount = 0;
+		const emitChildUpdate = () => {
+			if (run) run.emitUpdate?.();
+			else this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForSession(childId, child) });
+		};
+		const attributeUsage = (usage: Usage, origin: RlmChildUsageOrigin): Promise<void> => {
+			const source = this._rlmChildUsageSources.get(childId);
+			if (!source || source.sessionId !== this.sessionId || source.sessionFile !== this.sessionFile)
+				return Promise.resolve();
+			const delta = structuredClone(usage);
+			const target = this.messages.find(
+				(message): message is AssistantMessage =>
+					message.role === "assistant" && this._findAssistantEntryIdForMessage(message) === source.entryId,
+			);
+			const refreshOutput = this._refreshInvocationOutput;
+			const forwardUsage = this._rlmParentUsageAttribution;
+			const write = this.sessionManager
+				.appendChildUsageAttributionWithAggregate(source.entryId, delta, undefined, origin)
+				.then(async ({ aggregateUsage }) => {
+					if (target) {
+						target.usage = structuredClone(aggregateUsage);
+						refreshOutput?.(target);
+					}
+					// Ancestors receive only this newly acknowledged delta, never the aggregate again.
+					await forwardUsage?.(delta, origin);
+				});
+			this._childUsageWrites.add(write);
+			onUsageWrite?.(write);
+			void write.then(
+				() => this._childUsageWrites.delete(write),
+				(error) => {
+					this._childUsageWrites.delete(write);
+					if (run) run.error = `Child usage attribution was not acknowledged: ${this._asError(error).message}`;
+					this._surfaceSessionInputError(error);
+				},
+			);
+			return write;
+		};
+		child._rlmParentUsageAttribution = attributeUsage;
+		const unsubscribe = child.subscribe((event) => {
+			if (event.type === "rlm_child_update") {
+				this._emit(event);
+				return;
+			}
+			if (event.type === "agent_start") {
+				if (run) run.activity = { kind: "waiting" };
+				emitChildUpdate();
+			} else if (event.type === "agent_end") {
+				if (run) run.activity = undefined;
+				emitChildUpdate();
+			} else if (event.type === "message_end" && event.message.role === "assistant") {
+				const assistant = event.message;
+				if (run) {
+					run.terminalAssistantOutcome = {
+						stopReason: assistant.stopReason,
+						errorMessage: assistant.errorMessage,
+					};
+				}
+				const update = () => {
+					const text = compactRlmText(readAssistantText(assistant));
+					if (run && text) run.answerPreview = text;
+					emitChildUpdate();
+				};
+				if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+					const messages = child.messages;
+					const precedingPrompt = messages
+						.slice(0, messages.lastIndexOf(assistant))
+						.reverse()
+						.find(
+							(message) =>
+								message.role === "user" ||
+								(message.role === "custom" && message.customType !== HARNESS_SNAPSHOT_CUSTOM_TYPE),
+						);
+					const origin =
+						precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
+							? precedingPrompt.details.id.startsWith("spawn:")
+								? "spawn_task"
+								: "agent_message"
+							: "direct_user";
+					void attributeUsage(assistant.usage, origin).then(update, () => {});
+				} else update();
+			} else if (event.type === "message_start" || event.type === "message_update") {
+				if (event.message.role === "assistant") {
+					if (run) {
+						const text = compactRlmText(readAssistantText(event.message));
+						if (text) run.answerPreview = text;
+						run.activity = { kind: "writing" };
+					}
+					emitChildUpdate();
+				}
+			} else if (event.type === "tool_execution_start") {
+				if (run) {
+					run.toolUseCount++;
+					runningToolCount++;
+					run.activity = { kind: "executing", toolName: event.toolName };
+				}
+				emitChildUpdate();
+			} else if (event.type === "tool_execution_end") {
+				if (run) {
+					runningToolCount = Math.max(0, runningToolCount - 1);
+					if (runningToolCount === 0) run.activity = { kind: "waiting" };
+				}
+				emitChildUpdate();
+			} else if (event.type === "session_info_changed" || event.type === "recap_update") emitChildUpdate();
+		});
+		return () => {
+			unsubscribe();
+			if (child._rlmParentUsageAttribution === attributeUsage) child._rlmParentUsageAttribution = undefined;
+		};
+	}
+
 	/**
 	 * Retain a finished child session for the parent lifetime so inspectors and
 	 * daemon-hosted agent messaging can keep addressing it. Returns false (and disposes
@@ -13080,10 +13388,23 @@ export class AgentSession {
 				}
 			}
 		}
-		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
-		if (unsubscribe) {
-			this._rlmChildUnsubscribes.set(childId, unsubscribe);
+		await this._restoreRlmChildUsageSource(childId, session);
+		if (this._disposed || this._disposing) {
+			await session.disposeAsync();
+			return false;
 		}
+		if (this._deletingRlmChildren.has(childId) || this._deletedRlmChildIds.has(childId)) return false;
+		const retained = this._rlmChildSessions.get(childId);
+		const run = this._activeRlmChildRuns.get(childId);
+		if (!run?.unsubscribe && (retained?.session !== session || !this._rlmChildUnsubscribes.has(childId))) {
+			this._rlmChildUnsubscribes.get(childId)?.();
+			const ownedUnsubscribe = this._subscribeRlmChildEvents(childId, session);
+			this._rlmChildUnsubscribes.set(childId, () => {
+				ownedUnsubscribe();
+				unsubscribe?.();
+			});
+		}
+		this._rlmChildSessions.set(childId, { session, run });
 		return true;
 	}
 
@@ -13092,16 +13413,21 @@ export class AgentSession {
 		if (run?.session === session && run.status === "done") {
 			const unsubscribe = run.unsubscribe ?? noopRlmChildEventUnsubscribe;
 			return () => {
-				run.unsubscribe = undefined;
-				this._activeRlmChildRuns.delete(childId);
+				if (run.unsubscribe === unsubscribe) run.unsubscribe = undefined;
+				if (this._activeRlmChildRuns.get(childId) === run) this._activeRlmChildRuns.delete(childId);
 				unsubscribe();
 			};
 		}
 		if (this._rlmChildSessions.get(childId)?.session !== session) return false;
 		const unsubscribe = this._rlmChildUnsubscribes.get(childId) ?? noopRlmChildEventUnsubscribe;
 		return () => {
-			this._rlmChildUnsubscribes.delete(childId);
-			this._rlmChildSessions.delete(childId);
+			if (
+				this._rlmChildSessions.get(childId)?.session === session &&
+				this._rlmChildUnsubscribes.get(childId) === unsubscribe
+			) {
+				this._rlmChildUnsubscribes.delete(childId);
+				this._rlmChildSessions.delete(childId);
+			}
 			unsubscribe();
 		};
 	}
@@ -13232,7 +13558,7 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
-		if (this.requests.hasPending) return true;
+		if (this.requests.hasPending || this._childUsageWrites.size > 0) return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
@@ -13273,6 +13599,7 @@ export class AgentSession {
 				await wait(
 					Promise.all([
 						...unsettledRuns.map((run) => run.settlement.promise),
+						...this._childUsageWrites,
 						...childSessions.map((child) => child.waitForRlmQuiescence(cancellation.signal)),
 					]),
 				);
@@ -13458,6 +13785,14 @@ export class AgentSession {
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
 		const parentAssistantForUsage = this._findLastAssistantMessage();
+		const parentEntryId = parentAssistantForUsage && this._findAssistantEntryIdForMessage(parentAssistantForUsage);
+		const usageSource: RlmChildUsageSource | undefined = parentEntryId
+			? {
+					sessionId: this.sessionId,
+					sessionFile: this.sessionFile,
+					entryId: parentEntryId,
+				}
+			: undefined;
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -13502,7 +13837,6 @@ export class AgentSession {
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		admission.assertCurrent();
 		const startedAt = Date.now();
-		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
 		let usageSettlement: Promise<void> = Promise.resolve();
 		const run: RlmChildRun = {
@@ -13523,6 +13857,7 @@ export class AgentSession {
 			if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 		};
 		this._activeRlmChildRuns.set(run.id, run);
+		if (usageSource) this._rlmChildUsageSources.set(run.id, usageSource);
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
 			const child = this._rlmChildSnapshotForRun(run);
@@ -13614,87 +13949,12 @@ export class AgentSession {
 				throwIfCancelled();
 				run.status = "running";
 				emitChildUpdate();
-				const unsubscribeChildEvents = child.subscribe((event) => {
-					if (event.type === "rlm_child_update") {
-						this._emit(event);
-						return;
-					}
-					if (event.type === "agent_start") {
-						run.activity = { kind: "waiting" };
-						emitChildUpdate();
-					} else if (event.type === "agent_end") {
-						run.activity = undefined;
-						emitChildUpdate();
-					} else if (event.type === "message_end" && event.message.role === "assistant") {
-						const assistant = event.message as AssistantMessage;
-						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
-							if (parentAssistantForUsage) {
-								const parentEntryId = this._findAssistantEntryIdForMessage(parentAssistantForUsage);
-								if (parentEntryId) {
-									const messages = child.messages;
-									const assistantIndex = messages.lastIndexOf(assistant);
-									const precedingPrompt = messages
-										.slice(0, assistantIndex)
-										.reverse()
-										.find((message) => message.role === "user" || message.role === "custom");
-									const origin =
-										precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
-											? precedingPrompt.details.id.startsWith("spawn:")
-												? "spawn_task"
-												: "agent_message"
-											: "direct_user";
-									const text = compactRlmText(readAssistantText(assistant));
-									const refreshOutput = this._refreshInvocationOutput;
-									const write = this.sessionManager
-										.appendChildUsageAttributionWithAggregate(
-											parentEntryId,
-											assistant.usage,
-											undefined,
-											origin,
-										)
-										.then(({ aggregateUsage }) => {
-											parentAssistantForUsage.usage = structuredClone(aggregateUsage);
-											refreshOutput?.(parentAssistantForUsage);
-											if (text) run.answerPreview = text;
-											emitChildUpdate();
-										});
-									this._childUsageWrites.add(write);
-									usageSettlement = Promise.all([usageSettlement, write]).then(() => undefined);
-									void usageSettlement.catch(() => undefined);
-									void write.then(
-										() => this._childUsageWrites.delete(write),
-										(error) => {
-											this._childUsageWrites.delete(write);
-											run.error = `Child usage attribution was not acknowledged: ${this._asError(error).message}`;
-											this._surfaceSessionInputError(error);
-										},
-									);
-									return;
-								}
-							}
-						}
-						const text = compactRlmText(readAssistantText(assistant));
-						if (text) run.answerPreview = text;
-						emitChildUpdate();
-					} else if (event.type === "message_start" || event.type === "message_update") {
-						if (event.message.role === "assistant") {
-							const text = compactRlmText(readAssistantText(event.message as AssistantMessage));
-							if (text) run.answerPreview = text;
-							run.activity = { kind: "writing" };
-							emitChildUpdate();
-						}
-					} else if (event.type === "tool_execution_start") {
-						run.toolUseCount += 1;
-						runningToolCount += 1;
-						run.activity = { kind: "executing", toolName: event.toolName };
-						emitChildUpdate();
-					} else if (event.type === "tool_execution_end") {
-						runningToolCount = Math.max(0, runningToolCount - 1);
-						if (runningToolCount === 0) run.activity = { kind: "waiting" };
-						emitChildUpdate();
-					} else if (event.type === "session_info_changed" || event.type === "recap_update") {
-						emitChildUpdate();
-					}
+				if (usageSource) {
+					await child.sessionManager.appendCustomEntry(RLM_PARENT_USAGE_CUSTOM_TYPE, usageSource);
+				}
+				const unsubscribeChildEvents = this._subscribeRlmChildEvents(run.id, child, run, (write) => {
+					usageSettlement = Promise.all([usageSettlement, write]).then(() => undefined);
+					void usageSettlement.catch(() => undefined);
 				});
 				run.unsubscribe = unsubscribeChildEvents;
 				const content = `[task from parent]\n\n${prompt}`;
@@ -13722,8 +13982,19 @@ export class AgentSession {
 					source: "extension",
 					customMessage: spawnMessage,
 				});
+				// promptAndWait can resolve after a provider error or abort. Only outcomes
+				// emitted during this run count; a recovered intermediate error is not terminal.
+				const terminal = run.terminalAssistantOutcome;
+				if (terminal?.stopReason === "aborted") {
+					run.status = "cancelled";
+					run.error ??= terminal.errorMessage || "RLM child aborted";
+				}
+				throwIfCancelled();
+				if (terminal?.stopReason === "error")
+					throw new Error(terminal.errorMessage || "RLM child inference failed");
 				await child.waitForRlmQuiescence();
 				await usageSettlement;
+				throwIfCancelled();
 				if (run.error) throw new Error(run.error);
 				run.status = "done";
 				// Only successful completions return; the edge lands on the parent's next commit.
@@ -14871,7 +15142,12 @@ export class AgentSession {
 				? { tokens: estimate.tokens, contextWindow, percent: (estimate.tokens / contextWindow) * 100 }
 				: { tokens: null, contextWindow, percent: null }
 			: undefined;
-		const usageMetadata = { ownUsage: usage.ownUsage, totalUsage: usage.totalUsage, contextUsage };
+		const usageMetadata = {
+			ownUsage: usage.ownUsage,
+			totalUsage: usage.totalUsage,
+			...(usage.ownRequestUsage ? { ownRequestUsage: usage.ownRequestUsage } : {}),
+			contextUsage,
+		};
 		request.retainMetadata({ contextUsage });
 		return {
 			...rootNode,

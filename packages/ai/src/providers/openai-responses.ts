@@ -105,7 +105,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
 			const preparationClient = client;
-			if (attempts.enabled) {
+			if (attempts.enabled || options?.signal) {
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}

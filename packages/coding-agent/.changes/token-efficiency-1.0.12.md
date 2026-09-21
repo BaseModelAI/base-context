@@ -1,0 +1,8 @@
+- Fixed compaction and recovery for primary RLM child requests.
+- Fixed usage forwarding when retained children resumed, preserved new child attribution across restarts, and prevented nested usage from being counted twice.
+- Added receipt-based per-purpose and captured-family token totals to `/context`, with explicit unknown usage and catalog-cost labels.
+- Reduced repeated dashboard requests with unchanged-input reuse and one-minute refresh coalescing.
+- Kept refinement advice current without rewriting the system prefix, and added stable cache identities for auxiliary requests.
+- Added earlier model-aware compaction targets with headroom for required context and an explicit `model-limit` opt-out.
+- Fixed child run status after terminal provider errors or cancellation.
+- Added guidance to page long output and batch nonurgent agent updates.

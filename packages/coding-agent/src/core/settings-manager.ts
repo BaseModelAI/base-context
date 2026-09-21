@@ -20,6 +20,8 @@ export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	/** Soft target; absent uses a model-aware working set, "model-limit" waits for the full window. */
+	targetTokens?: number | "model-limit";
 	agentCallable?: boolean; // default: true - expose the compact skill so the model can request compaction
 	/** Absent: inherit the main session model and its current thinking level. */
 	model?: CompactionModelSettings;
@@ -930,11 +932,25 @@ export class SettingsManager {
 		return model === undefined ? undefined : structuredClone(model);
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		targetTokens?: number | "model-limit";
+	} {
+		const targetTokens = this.settings.compaction?.targetTokens;
+		if (
+			targetTokens !== undefined &&
+			targetTokens !== "model-limit" &&
+			(!Number.isSafeInteger(targetTokens) || targetTokens <= 0)
+		) {
+			throw new Error('compaction.targetTokens must be a positive safe integer or "model-limit"');
+		}
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			...(targetTokens === undefined ? {} : { targetTokens }),
 		};
 	}
 

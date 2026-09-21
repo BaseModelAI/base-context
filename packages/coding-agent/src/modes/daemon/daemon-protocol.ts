@@ -101,8 +101,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 47 adds capability-gated agent result capsules backed by native session archives.
 // Revision 48 removes remote data export policy from session commands and worker state.
 // Revision 49 requires shared root-family subagent capacity and adds its get/set commands.
-export const DAEMON_SCHEMA_REVISION = 49;
-export const DAEMON_SCHEMA_ID = "protocol-13-schema-49-subagent-capacity";
+// Revision 50 adds optional captured request usage to context-tree responses.
+export const DAEMON_SCHEMA_REVISION = 50;
+export const DAEMON_SCHEMA_ID = "protocol-13-schema-50-context-request-usage";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -133,6 +134,7 @@ export type DaemonServerCapability =
 	| "cron_resume"
 	| "agent_results"
 	| "model_catalog"
+	| "context_request_usage"
 	// The daemon honors previousTurns on start_side_question (multi-turn side
 	// conversations). Clients must check before sending follow-up transcripts.
 	| "side_question_transcript"
@@ -191,6 +193,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"cron_resume",
 	"agent_results",
 	"model_catalog",
+	"context_request_usage",
 	"side_question_transcript",
 	"transient_bash",
 	"session_input_admission",
@@ -1338,6 +1341,13 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	extension_ui_request: LEGACY_DAEMON_COMMAND,
 	extension_error: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonOutbound["type"], DaemonCommandCompatibility>;
+
+/** Optional response metadata; the existing command remains available without this capability. */
+export const DAEMON_RESPONSE_FIELD_COMPATIBILITY = {
+	get_context_tree: {
+		ownRequestUsage: { minProtocol: 13, minSchemaRevision: 50, capability: "context_request_usage" },
+	},
+} as const;
 
 /** Additive evidence fields: older observer events keep absence, never fabricated identities. */
 export const DAEMON_SESSION_EVENT_FIELD_COMPATIBILITY = {

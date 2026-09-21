@@ -11,12 +11,15 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateFixedCompactionTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
 	prepareViewCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.js";
+import { HARNESS_SNAPSHOT_CUSTOM_TYPE } from "../src/core/messages.js";
+import { renderPublicHistory } from "../src/core/public-context.js";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -27,6 +30,8 @@ import {
 	type SessionMessageEntry,
 	type ThinkingLevelChangeEntry,
 } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../src/core/task-frame.js";
 
 // ============================================================================
 // Test fixtures
@@ -259,6 +264,76 @@ describe("getLastAssistantUsage", () => {
 });
 
 describe("shouldCompact", () => {
+	it("uses a model-aware working target while preserving the model ceiling and recent-context headroom", () => {
+		const settings = SettingsManager.inMemory().getCompactionSettings();
+		expect(shouldCompact(96_000, 272_000, settings)).toBe(false);
+		expect(shouldCompact(96_001, 272_000, settings)).toBe(true);
+		expect(shouldCompact(80_000, 128_000, settings)).toBe(false);
+		expect(shouldCompact(80_001, 128_000, settings)).toBe(true);
+		expect(shouldCompact(47_617, 64_000, settings)).toBe(true);
+		const configured = SettingsManager.inMemory({ compaction: { targetTokens: 120_000 } }).getCompactionSettings();
+		expect(shouldCompact(100_000, 272_000, configured)).toBe(false);
+		expect(shouldCompact(120_001, 272_000, configured)).toBe(true);
+		expect(shouldCompact(47_617, 64_000, configured)).toBe(true);
+		const full = SettingsManager.inMemory({ compaction: { targetTokens: "model-limit" } }).getCompactionSettings();
+		expect(shouldCompact(255_616, 272_000, full)).toBe(false);
+		expect(shouldCompact(255_617, 272_000, full)).toBe(true);
+	});
+
+	it("leaves working room above fixed instructions but never raises the model ceiling", () => {
+		const settings = SettingsManager.inMemory().getCompactionSettings();
+		expect(shouldCompact(200_000, 272_000, settings, 120_000)).toBe(false);
+		expect(shouldCompact(200_001, 272_000, settings, 120_000)).toBe(true);
+		expect(shouldCompact(255_617, 272_000, settings, 300_000)).toBe(true);
+		const explicit = { ...settings, targetTokens: 160_000 };
+		expect(shouldCompact(160_000, 272_000, explicit, 10_000)).toBe(false);
+		expect(shouldCompact(160_001, 272_000, explicit, 10_000)).toBe(true);
+		expect(shouldCompact(200_000, 272_000, explicit, 120_000)).toBe(false);
+		const full = { ...settings, targetTokens: "model-limit" as const };
+		expect(shouldCompact(255_616, 272_000, full, 300_000)).toBe(false);
+		expect(shouldCompact(255_617, 272_000, full, 300_000)).toBe(true);
+	});
+
+	it("estimates only fixed schemas, current TaskFrame pieces and the latest harness snapshot", () => {
+		const custom = (customType: string, content: string): AgentMessage => ({
+			role: "custom",
+			customType,
+			content,
+			display: false,
+			timestamp: 0,
+		});
+		const oldSnapshot = custom(HARNESS_SNAPSHOT_CUSTOM_TYPE, "old ".repeat(1_000));
+		const frame = custom(TASK_FRAME_CUSTOM_TYPE, "frame ".repeat(20));
+		const revision = custom(TASK_FRAME_CUSTOM_TYPE, "new ".repeat(10));
+		const snapshot = custom(HARNESS_SNAPSHOT_CUSTOM_TYPE, "current ".repeat(10));
+		const user: AgentMessage = { role: "user", content: "history ".repeat(1_000), timestamp: 0 };
+		const messages = [
+			oldSnapshot,
+			frame,
+			user,
+			revision,
+			snapshot,
+			createAssistantMessage("archived history ".repeat(1_000)),
+			custom("ordinary", "history ".repeat(1_000)),
+		];
+		const tools = [{ name: "inspect", description: "inspect selected data", parameters: { type: "object" } }];
+		const expected = Math.ceil((40 + JSON.stringify(tools).length) / 4) + 30 + 10 + 20;
+		expect(estimateFixedCompactionTokens("s".repeat(40), tools, messages)).toBe(expected);
+		expect(
+			estimateFixedCompactionTokens(
+				"s".repeat(40),
+				tools,
+				messages.map((message, index) => renderPublicHistory(message, String(index), 100_000)),
+			),
+		).toBe(expected);
+	});
+
+	it("rejects a nonpositive working target", () => {
+		expect(() => SettingsManager.inMemory({ compaction: { targetTokens: 0 } }).getCompactionSettings()).toThrow(
+			"compaction.targetTokens",
+		);
+	});
+
 	it("should return true when context exceeds threshold", () => {
 		const settings: CompactionSettings = {
 			enabled: true,
@@ -267,7 +342,7 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(true);
-		expect(shouldCompact(89000, 100000, settings)).toBe(false);
+		expect(shouldCompact(80000, 100000, settings)).toBe(false);
 	});
 
 	it("should return false when disabled", () => {

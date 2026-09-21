@@ -186,7 +186,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					: undefined;
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			let client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
-			if (attempts.enabled) {
+			if (attempts.enabled || options?.signal) {
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}

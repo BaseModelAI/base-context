@@ -515,7 +515,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				client = created.client;
 				isOAuth = created.isOAuthToken;
 			}
-			if (attempts.enabled) {
+			if (attempts.enabled || options?.signal) {
 				client = client.withOptions({});
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}

@@ -19,10 +19,12 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	HARNESS_SNAPSHOT_CUSTOM_TYPE,
 } from "../messages.js";
 import type { NativeCompactionRequestOutputAssociation } from "../request-events.js";
 import { MODEL_REQUEST_ID_HEADER } from "../semantic-edges.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
+import { TASK_FRAME_CUSTOM_TYPE } from "../task-frame.js";
 import { addAssistantUsage, emptyUsage } from "../usage.js";
 import {
 	computeFileLists,
@@ -154,6 +156,8 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Soft working-context target; the model limit always takes precedence. */
+	targetTokens?: number | "model-limit";
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -252,10 +256,47 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 /**
  * Check if compaction should trigger based on context usage.
  */
-export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+export function shouldCompact(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	fixedContextTokens = 0,
+): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const modelLimit = contextWindow - settings.reserveTokens;
+	// Fixed instructions cannot shrink. Leave meaningful room for retained history
+	// and new work above that floor, without relaxing the actual model ceiling.
+	const target =
+		settings.targetTokens === "model-limit"
+			? modelLimit
+			: Math.max(
+					settings.targetTokens ?? Math.min(96_000, contextWindow / 2),
+					fixedContextTokens + 4 * settings.keepRecentTokens,
+				);
+	return contextTokens > Math.min(target, modelLimit);
+}
+
+/** Chars/4 heuristic, not a provider count. Ordinary history never raises this floor. */
+export function estimateFixedCompactionTokens(
+	systemPrompt: string,
+	tools: readonly { name: string; description: string; parameters: unknown }[],
+	messages: readonly AgentMessage[],
+): number {
+	const toolSchemas = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+	let tokens = Math.ceil((systemPrompt.length + (tools.length ? JSON.stringify(toolSchemas).length : 0)) / 4);
+	let hasHarnessSnapshot = false;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "custom") continue;
+		// A TaskFrame may contain dependent sparse revisions; all current pieces count.
+		if (message.customType === TASK_FRAME_CUSTOM_TYPE) tokens += estimateTokens(message);
+		else if (message.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE && !hasHarnessSnapshot) {
+			tokens += estimateTokens(message);
+			hasHarnessSnapshot = true;
+		}
+	}
+	return tokens;
 }
 /** Raise suffix estimates when observed usage exceeds chars/4 for the same prefix. */
 function compactionTokenScale(messages: readonly AgentMessage[]): number {

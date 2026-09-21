@@ -33,6 +33,8 @@ export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
+/** Model-visible, canonical current-state snapshot; unlike refinement_outcome this is not UI-only. */
+export const HARNESS_SNAPSHOT_CUSTOM_TYPE = "harness_snapshot";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 

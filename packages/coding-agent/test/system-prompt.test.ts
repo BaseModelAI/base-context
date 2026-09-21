@@ -259,6 +259,8 @@ describe("buildSystemPrompt", () => {
 					"Preserve earlier requirements unless later instructions replace them. Apply stated eligibility, priorities, and decision order literally, even when a different policy seems simpler or more sensible; reevaluate later decisions when earlier actions change their inputs.",
 					"The required commands must implement the stated workflow from its stated starting state, without development-only state or extra steps.",
 					"During tool-based inspection of large datasets, request schemas or small samples. Process full inputs in local code instead of printing entire datasets into the conversation.",
+					"Read long text in bounded pages; use a character limit as well as a line limit when lines are long. If output is truncated, page the retained result instead of repeating the original command or printing the whole file again.",
+					"Batch nonurgent child updates. Send results, blockers, or decisions that need action rather than acknowledgements and repeated status requests. Continue independent work while children run, and report meaningful milestones to the user.",
 					"Do not repeat a successful check without a concrete reason, such as changed input, an edit, or an observed failure.",
 					"Choose algorithms whose time and memory costs fit the stated input limits.",
 					"For constrained search, prune known-impossible partial states before expanding them; do not postpone all feasibility checks until completed candidates.",
@@ -381,6 +383,14 @@ describe("buildSystemPrompt", () => {
 		});
 
 		expect(prompt).toContain("# Continual Harness State");
+		const staticPrompt = buildSystemPrompt({ cwd: "/repo", harnessState, harnessSection: "instructions" });
+		expect(staticPrompt).toContain("latest Continual Harness Snapshot");
+		expect(staticPrompt).not.toContain("[global:validation]");
+		const changedHarness = structuredClone(harnessState);
+		changedHarness.entries.memory = {};
+		expect(buildSystemPrompt({ cwd: "/repo", harnessState: changedHarness, harnessSection: "instructions" })).toBe(
+			staticPrompt,
+		);
 		expect(prompt).toContain("Local continual harness entries belong to this Base Context session");
 		expect(prompt).toContain("The continual harness entries below are compact summaries, not full descriptions");
 		expect(prompt).toContain("Use global continual harness refinement only for stable cross-session lessons");

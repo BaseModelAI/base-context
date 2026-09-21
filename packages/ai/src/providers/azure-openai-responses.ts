@@ -86,9 +86,9 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			let client = createClient(model, apiKey, options);
-			if (attempts.enabled) {
-				client = client.withOptions({});
+			const client = createClient(model, apiKey, options);
+			if (attempts.enabled || options?.signal) {
+				// This client is request-local. Inherited withOptions loses Azure's apiVersion.
 				client.fetchWithTimeout = attempts.wrapHttp(client.fetchWithTimeout.bind(client));
 			}
 			let params = buildParams(model, context, options, deploymentName);

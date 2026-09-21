@@ -1,6 +1,10 @@
+import { getEventListeners } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { streamAnthropic } from "../src/providers/anthropic.js";
+import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.js";
+import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.js";
-import type { Model, ProviderAttemptReceipt } from "../src/types.js";
+import type { Model, ProviderAttemptReceipt, StreamOptions } from "../src/types.js";
 import {
 	type ProviderRequestRepresentation,
 	type RequestTokenAssessment,
@@ -73,9 +77,156 @@ function response(usage = rawUsage): Response {
 	});
 }
 
-afterEach(() => vi.unstubAllGlobals());
+type SdkApi = "openai-responses" | "azure-openai-responses" | "openai-completions" | "anthropic-messages";
+const sdkCases = (
+	["openai-responses", "azure-openai-responses", "openai-completions", "anthropic-messages"] as const
+).flatMap((api) => [false, true].map((record) => ({ api, record })));
+function sdkStream(api: SdkApi, options: StreamOptions) {
+	const { compat: _compat, ...shared } = model;
+	switch (api) {
+		case "openai-responses":
+			return streamOpenAIResponses(model, { messages: [] }, options);
+		case "azure-openai-responses":
+			return streamAzureOpenAIResponses({ ...shared, api, provider: api }, { messages: [] }, options);
+		case "openai-completions":
+			return streamOpenAICompletions({ ...shared, api }, { messages: [] }, options);
+		case "anthropic-messages":
+			return streamAnthropic({ ...shared, api, provider: "anthropic" }, { messages: [] }, options);
+	}
+}
+function sdkResponse(api: SdkApi): Response {
+	if (api === "openai-completions") {
+		const chunk = {
+			id: "fixture",
+			model: model.id,
+			choices: [{ index: 0, delta: { role: "assistant", content: "OK" }, finish_reason: "stop" }],
+			usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+		};
+		return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+			headers: { "content-type": "text/event-stream" },
+		});
+	}
+	if (api !== "anthropic-messages") return response();
+	const events = [
+		{
+			type: "message_start",
+			message: {
+				id: "fixture",
+				type: "message",
+				role: "assistant",
+				model: model.id,
+				content: [],
+				usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+			},
+		},
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "OK" } },
+		{ type: "content_block_stop", index: 0 },
+		{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } },
+		{ type: "message_stop" },
+	];
+	return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.restoreAllMocks();
+});
 
 describe("physical provider attempts", () => {
+	it.each(sdkCases)("does not retain SDK abort listeners: $api, receipts=$record", async ({ api, record }) => {
+		const controller = new AbortController();
+		const receipts: ProviderAttemptReceipt[] = [];
+		const derivedSignals: AbortSignal[] = [];
+		const derive = AbortSignal.any.bind(AbortSignal);
+		vi.spyOn(AbortSignal, "any").mockImplementation((sources) => {
+			const signal = derive(sources);
+			derivedSignals.push(signal);
+			return signal;
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => sdkResponse(api)),
+		);
+		for (let index = 0; index < 12; index++) {
+			const result = await sdkStream(api, {
+				apiKey: "fixture",
+				maxRetries: 0,
+				signal: controller.signal,
+				attempts: record
+					? {
+							async admit() {
+								return `attempt-${index}`;
+							},
+							async settle(receipt) {
+								receipts.push(receipt);
+							},
+						}
+					: undefined,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+		}
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		expect(derivedSignals.length).toBeGreaterThan(0);
+		for (const signal of derivedSignals) {
+			expect(signal.aborted).toBe(true);
+			expect(getEventListeners(signal, "abort")).toHaveLength(0);
+		}
+		expect(receipts).toHaveLength(record ? 12 : 0);
+	});
+
+	it.each(["admission", "fetch"])("preserves cancellation during %s with request-local SDK signals", async (stage) => {
+		const controller = new AbortController();
+		const receipts: ProviderAttemptReceipt[] = [];
+		let started!: () => void;
+		const ready = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		let release!: () => void;
+		const admitted = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const fetch = vi.fn(
+			(_url: unknown, init?: RequestInit) =>
+				new Promise<Response>((_resolve, reject) => {
+					const signal = init!.signal!;
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+					started();
+				}),
+		);
+		vi.stubGlobal("fetch", fetch);
+		const result = streamOpenAIResponses(
+			model,
+			{ messages: [] },
+			{
+				apiKey: "fixture",
+				maxRetries: 0,
+				signal: controller.signal,
+				attempts: {
+					async admit() {
+						if (stage === "admission") {
+							started();
+							await admitted;
+						}
+						return "cancelled-attempt";
+					},
+					async settle(receipt) {
+						receipts.push(receipt);
+					},
+				},
+			},
+		).result();
+		await ready;
+		controller.abort();
+		release();
+		expect((await result).stopReason).toBe("aborted");
+		expect(fetch).toHaveBeenCalledTimes(stage === "fetch" ? 1 : 0);
+		expect(receipts).toMatchObject([{ outcome: "cancelled" }]);
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
+
 	it.each(["Selected model is at capacity.", "retry"])(
 		"admits each SDK retry and retains only confirmed capacity: %s",
 		async (providerMessage) => {

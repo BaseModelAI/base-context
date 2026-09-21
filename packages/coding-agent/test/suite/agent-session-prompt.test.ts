@@ -97,18 +97,27 @@ describe("AgentSession prompt characterization", () => {
 		expect(kernelEnv.BASE_CONTEXT_HARNESS_STATE_DIR).not.toBe(workspaceDir);
 		expect(kernelEnv.BASE_CONTEXT_GLOBAL_HARNESS_STATE_DIR).not.toBe(workspaceDir);
 		const prompts: string[] = [];
+		const snapshots: string[] = [];
 		harness.setResponses(
 			[1, 2].map(() => (context) => {
 				prompts.push(context.systemPrompt ?? "");
+				snapshots.push(
+					context.messages
+						.map(getMessageText)
+						.filter((text) => text.startsWith("# Continual Harness Snapshot"))
+						.at(-1) ?? "",
+				);
 				return fauxAssistantMessage("done");
 			}),
 		);
 		await harness.session.prompt("Run project tests.");
-		expect(prompts[0]).toContain(fix);
-		expect(prompts[0].split(fix)).toHaveLength(2);
+		expect(prompts[0]).not.toContain(fix);
+		expect(snapshots[0]).toContain(fix);
+		expect(snapshots[0].split(fix)).toHaveLength(2);
 		harness.settingsManager.applyOverrides({ learning: { enabled: false } });
 		await harness.session.prompt("Run project tests again.");
 		expect(prompts[1]).not.toContain(fix);
+		expect(snapshots[1]).not.toContain(fix);
 		expect(loadHarnessState(workspaceDir, "workspace").entries.memory["error-fix:project-tests"].content).toBe(fix);
 	});
 
@@ -164,7 +173,7 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("hi");
 		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.eventsOfType("session_action_update")).toEqual([]);
@@ -290,12 +299,13 @@ describe("AgentSession prompt characterization", () => {
 		expect(toolRuns).toEqual(["hello"]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
 			"user",
+			"custom",
 			"assistant",
 			"toolResult",
 			"assistant",
 		]);
-		expect(harness.session.messages[2]?.role).toBe("toolResult");
-		expect(harness.session.messages[3]?.role).toBe("assistant");
+		expect(harness.session.messages[3]?.role).toBe("toolResult");
+		expect(harness.session.messages[4]?.role).toBe("assistant");
 	});
 
 	it("executes multiple tool calls from one response and continues with a single follow-up response", async () => {
@@ -514,7 +524,7 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.sendUserMessage("from extension");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "custom", "assistant"]);
 		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
 	});
 
@@ -1218,9 +1228,10 @@ stale post-hook extension instructions`,
 		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
 		await harness.session.agent.waitForIdle();
 
-		expect(contextRoles).toEqual([["user", "assistant", "user", "user"]]);
-		expect(contextTexts[0]?.[2]).toContain("Ran `echo hi`");
-		expect(contextTexts[0]?.[3]).toBe("agent-to-agent payload");
+		expect(contextRoles).toEqual([["user", "user", "assistant", "user", "user"]]);
+		expect(contextTexts[0]?.[1]).toContain("# Continual Harness Snapshot");
+		expect(contextTexts[0]?.[3]).toContain("Ran `echo hi`");
+		expect(contextTexts[0]?.[4]).toBe("agent-to-agent payload");
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 	});
 

@@ -31,6 +31,7 @@ import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import type { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
+import { createTestResourceLoader } from "../utilities.js";
 import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 import { createDeferred } from "./scheduling.js";
 
@@ -648,11 +649,17 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 	});
 
 	async function createRecoveryCompactionFixture(
-		options: { unbudgeted?: boolean; sessionManager?: SessionManager; firstMainUsage?: number } = {},
+		options: {
+			unbudgeted?: boolean;
+			sessionManager?: SessionManager;
+			firstMainUsage?: number;
+			rlmDepth?: number;
+		} = {},
 	) {
 		const model = getModel("deepseek", "deepseek-flash");
 		const harness = await createHarness({
 			persistSession: true,
+			rlmDepth: options.rlmDepth,
 			sessionManager: options.sessionManager,
 			cwd: options.sessionManager?.getCwd(),
 			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
@@ -718,8 +725,11 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 				)
 				.at(-1)!;
 			const summarizing = admitted.purpose === "summary";
-			if (summarizing) summaries.push(body);
-			else {
+			if (summarizing) {
+				expect(admitted.contextEpoch).toBeUndefined();
+				summaries.push(body);
+			} else {
+				expect(admitted.purpose).toBe(options.rlmDepth ? "child" : "main");
 				admissions.push(admitted);
 				const epoch = entries.filter((entry) => entry.type === "compaction").at(-1);
 				if (epoch) {
@@ -793,9 +803,10 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		return { harness, main, admissions, summaries, readRecovery };
 	}
 
-	it("compacts fresh unbudgeted native recovery after a containing MAIN request", async () => {
+	it.each([0, 1])("compacts fresh unbudgeted native recovery (depth %i)", async (rlmDepth) => {
 		const model = getModel("deepseek", "deepseek-flash");
 		const harness = await createHarness({
+			rlmDepth,
 			persistSession: true,
 			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
@@ -872,8 +883,9 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(containing.contextEpoch).toBeDefined();
 	});
 
-	it("keeps unbudgeted recovery native when the adapter offers no replay projection", async () => {
+	it.each([0, 1])("keeps unprojected recovery native (depth %i)", async (rlmDepth) => {
 		const harness = await createHarness({
+			rlmDepth,
 			persistSession: true,
 			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
@@ -899,7 +911,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		);
 	});
 
-	it("keeps optional unbudgeted Responses recovery native with request metadata", async () => {
+	it.each([0, 1])("keeps optional Responses metadata recovery native (depth %i)", async (rlmDepth) => {
 		const model: Model<"openai-responses"> = {
 			id: "offline-recovery-metadata",
 			name: "Offline recovery metadata",
@@ -913,6 +925,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		};
 		const harness = await createHarness({
+			rlmDepth,
 			persistSession: true,
 			settings: {
 				compaction: { enabled: false, keepRecentTokens: 1 },
@@ -1017,8 +1030,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(bodies).toHaveLength(3);
 	});
 
-	it("defers automatic cold recovery until the first native ACK without a failed outcome", async () => {
-		const first = await createRecoveryCompactionFixture({ unbudgeted: true, firstMainUsage: 1048576 });
+	it.each([0, 1])("defers cold recovery until a native ACK (depth %i)", async (rlmDepth) => {
+		const first = await createRecoveryCompactionFixture({ rlmDepth, unbudgeted: true, firstMainUsage: 1048576 });
 		const priorOutcome = first.harness.session.agent.getTurnOutcome;
 		first.harness.session.agent.getTurnOutcome = (context, signal) =>
 			context.toolResults.some((result) => result.toolCallId === "recovery_call")
@@ -1035,6 +1048,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		await first.harness.session.disposeAsync();
 		const reopened = await SessionManager.open(file);
 		const next = await createRecoveryCompactionFixture({
+			rlmDepth,
 			unbudgeted: true,
 			sessionManager: reopened,
 			firstMainUsage: 1048576,
@@ -1063,10 +1077,10 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).toContain(result.id);
 	});
 
-	it("cold-resumes an uncompacted overflowed native-tool session without a budget profile", async () => {
+	it.each([0, 1])("cold-resumes overflowed native-tool history (depth %i)", async (rlmDepth) => {
 		// Seed a genuine admitted native-tool history; the reopened CLI-style owner
 		// deliberately has no request-budget profile.
-		const first = await createRecoveryCompactionFixture();
+		const first = await createRecoveryCompactionFixture({ rlmDepth });
 		await first.harness.session.prompt(
 			`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(2000)}`,
 		);
@@ -1118,7 +1132,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			.map((entry) => entry.id);
 		await first.harness.session.disposeAsync();
 		const reopened = await SessionManager.open(file);
-		const next = await createRecoveryCompactionFixture({ unbudgeted: true, sessionManager: reopened });
+		const next = await createRecoveryCompactionFixture({ rlmDepth, unbudgeted: true, sessionManager: reopened });
 		// The SDK restores the read-only session context before accepting new input;
 		// this low-level AgentSession harness must perform that same public read.
 		next.harness.session.agent.state.messages = (await next.harness.session.buildSessionContext()).messages;
@@ -1146,8 +1160,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(next.harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(true);
 	});
 
-	it("accepts refinement_outcome after an existing DeepSeek epoch without sending the UI message", async () => {
-		const { harness, main } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("accepts UI bookkeeping after a DeepSeek epoch (depth %i)", async (rlmDepth) => {
+		const { harness, main } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
 		expect(main).toHaveLength(3);
 		const existingEpoch = main.at(-1)!.epoch.id;
@@ -1175,7 +1189,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(body).toContain("Apply the SLA update.");
 	});
 
-	it("adopts native epochs and mode changes when bookkeeping arrives after their ACK", async () => {
+	it.each([0, 1])("adopts epochs despite post-ACK bookkeeping (depth %i)", async (rlmDepth) => {
 		const original = SessionManager.prototype.bindCompactionSink;
 		let acknowledgements = 0;
 		vi.spyOn(SessionManager.prototype, "bindCompactionSink").mockImplementation(function (
@@ -1194,7 +1208,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			};
 			return sink;
 		});
-		const { harness, main } = await createRecoveryCompactionFixture();
+		const { harness, main } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
 		expect(main).toHaveLength(3);
 		await harness.session.setContextMode("off");
@@ -1207,8 +1221,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(harness.eventsOfType("compaction_end").filter((event) => event.errorMessage)).toEqual([]);
 	});
 
-	it("compacts an overfull public history into a fitting request", async () => {
-		const { harness, main, summaries } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("compacts overfull public history (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Older context. ".repeat(2000)}`);
 		expect(main).toHaveLength(3);
 		const previous = main.at(-1)!.request;
@@ -1257,8 +1271,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(harness.session.messages.some((message) => message.role === "compactionSummary")).toBe(true);
 	});
 
-	it("compacts recovery over budget before any containing MAIN acknowledgement", async () => {
-		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("compacts over-budget recovery before its first ACK (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
 		const priorOutcome = harness.session.agent.getTurnOutcome;
 		harness.session.agent.getTurnOutcome = (context, signal) =>
 			context.toolResults.some((result) => result.toolCallId === "recovery_call")
@@ -1295,7 +1309,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 					(entry) =>
 						entry.type === "request" &&
 						entry.request.type === "attempt_admitted" &&
-						entry.request.purpose === "main",
+						entry.request.purpose === (rlmDepth > 0 ? "child" : "main"),
 				),
 		).toHaveLength(1);
 		const rebuilt = await harness.sessionManager.readBranchHistory((history) =>
@@ -1326,8 +1340,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(admitted.descriptor.requestBudget?.status).toBe("within-estimate");
 	});
 
-	it("compacts exact inherited recovery again without an intervening MAIN request", async () => {
-		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("compacts inherited recovery without a new request (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
 		const { result } = await readRecovery();
 		await harness.session.compact();
@@ -1358,8 +1372,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).toContain(result.id);
 	});
 
-	it("refuses an oversized mandatory public request without paying for a summary", async () => {
-		const { harness, main, summaries } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("refuses oversized mandatory public input (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt("RECOVERY_EVIDENCE: keep the warehouse rule.");
 		expect(main).toHaveLength(3);
 		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
@@ -1375,8 +1389,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(summaries).toHaveLength(0);
 	});
 
-	it("renews recovery coverage at accepted ACK, reuses an ordinary tail, and manually compacts", async () => {
-		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("renews recovery at ACK and retains an ordinary tail (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
 		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
 		expect(main).toHaveLength(3);
 		const { result, source } = await readRecovery();
@@ -1427,8 +1441,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(retained).toEqual(expect.arrayContaining([result.id, callerSource]));
 	});
 
-	it("refuses manual compaction of native recovery before any containing candidate is accepted", async () => {
-		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture();
+	it.each([0, 1])("refuses uncovered native recovery compaction (depth %i)", async (rlmDepth) => {
+		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
 		const priorOutcome = harness.session.agent.getTurnOutcome;
 		harness.session.agent.getTurnOutcome = (context, signal) =>
 			context.toolResults.some((result) => result.toolCallId === "recovery_call")
@@ -1448,9 +1462,14 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		]);
 	});
 
-	it.each(["tool_calls", "length"] as const)(
-		"continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload (%s)",
-		async (finishReason) => {
+	it.each([
+		{ finishReason: "tool_calls", rlmDepth: 0 },
+		{ finishReason: "length", rlmDepth: 0 },
+		{ finishReason: "tool_calls", rlmDepth: 1 },
+		{ finishReason: "length", rlmDepth: 1 },
+	] as const)(
+		"continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload ($finishReason, depth $rlmDepth)",
+		async ({ finishReason, rlmDepth }) => {
 			const model = getModel("deepseek", "deepseek-flash");
 			const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
 			const lengthLimited = finishReason === "length";
@@ -1459,6 +1478,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			let executions = 0;
 			const harness = await createHarness({
 				persistSession: true,
+				rlmDepth,
 				settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 				tools: [
 					{
@@ -2475,8 +2495,9 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(harness.session.thinkingLevel).toBe(mainEffort);
 	});
 
-	it("cancels in-progress manual compaction when abortCompaction is called", async () => {
+	it.each([0, 1])("cancels in-progress manual compaction (depth %i)", async (rlmDepth) => {
 		const harness = await createHarness({
+			rlmDepth,
 			settings: { compaction: { keepRecentTokens: 1 } },
 			extensionFactories: [
 				(pi) => {
@@ -3587,6 +3608,32 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		).toBe(false);
 
 		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not repeatedly summarize a fixed required prefix above the soft target", async () => {
+		const requiredPrefix = "REQUIRED_PREFIX ".repeat(30_000);
+		const harness = await createHarness({
+			persistSession: true,
+			resourceLoader: { ...createTestResourceLoader(), getSystemPrompt: () => requiredPrefix },
+			models: [{ id: "faux-1", contextWindow: 272_000 }],
+			settings: { compaction: { enabled: false, keepRecentTokens: 20_000 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses(
+			Array.from({ length: 40 }, () => () => fauxAssistantMessage("A short successful response or summary.")),
+		);
+		for (let turn = 0; turn < 8; turn++) {
+			await harness.session.prompt(`Seed ${turn}: ${"history ".repeat(2_500)}`);
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		}
+		harness.settingsManager.applyOverrides({ compaction: { enabled: true, keepRecentTokens: 20_000 } });
+		await harness.session.prompt("First short continuation.");
+		const first = harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined).length;
+		await harness.session.prompt("Second short continuation.");
+		const second = harness.eventsOfType("compaction_end").filter((event) => event.result !== undefined).length;
+		expect(harness.session.systemPrompt.includes(requiredPrefix)).toBe(true);
+		expect(second).toBe(first);
+		expect(second).toBe(0);
 	});
 
 	it("does not trigger threshold compaction below the threshold or when disabled", async () => {

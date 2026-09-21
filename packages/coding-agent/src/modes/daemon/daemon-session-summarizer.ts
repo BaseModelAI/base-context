@@ -8,6 +8,8 @@ import type { ActiveSessionState } from "./active-session-state.js";
 const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
+// Keep rapid tool/stream updates local; periodically refresh the generated recap.
+const MIN_REFRESH_INTERVAL_MS = 60_000;
 
 const SUMMARY_CONTEXT_MESSAGES = 8;
 const SUMMARY_MAX_CHARS_PER_MESSAGE = 600;
@@ -50,7 +52,7 @@ function messageText(content: unknown): { text: string; tools: string[] } {
 		const type = (block as { type?: unknown }).type;
 		if (type === "text" && typeof (block as { text?: unknown }).text === "string") {
 			parts.push((block as { text: string }).text);
-		} else if (type === "tool_use" || type === "toolUse") {
+		} else if (type === "toolCall" || type === "tool_use" || type === "toolUse") {
 			const name = (block as { name?: unknown }).name;
 			if (typeof name === "string") {
 				tools.push(name);
@@ -133,13 +135,14 @@ export interface GenerateAgentStatusParams {
 	model?: Model<Api>;
 	messages: readonly AgentMessage[];
 	isWorking: boolean;
+	sessionId?: string;
 	signal?: AbortSignal;
 	requests?: InferenceCoordinator;
 }
 
 /** Use the session's selected model, or keep the local status when unavailable. */
 export async function generateAgentStatus(params: GenerateAgentStatusParams): Promise<AgentStatusResult | undefined> {
-	const { registry, messages, isWorking, signal, requests, model: selectedModel } = params;
+	const { registry, messages, isWorking, sessionId, signal, requests, model: selectedModel } = params;
 	if (messages.length === 0) {
 		return undefined;
 	}
@@ -167,7 +170,13 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 					},
 				],
 			},
-			{ maxTokens: SUMMARY_MAX_TOKENS, apiKey: auth.apiKey, headers: auth.headers, signal },
+			{
+				maxTokens: SUMMARY_MAX_TOKENS,
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				signal,
+				sessionId: sessionId ? `daemon-status:${sessionId}` : undefined,
+			},
 			{ purpose: "native-control", purposeDetail: "daemon-status" },
 		);
 		if (response.stopReason === "error") {
@@ -211,6 +220,10 @@ export class DaemonSessionSummarizer {
 	private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	// Controller per in-flight summary so a closing session can abort its write.
 	private readonly inFlight = new Map<string, AbortController>();
+	private readonly refreshes = new Map<
+		string,
+		{ isCurrentSource: () => boolean; input?: string; attemptedAt?: number; wasWorking?: boolean }
+	>();
 	private readonly tasks = new Map<string, Promise<void>>();
 	private readonly forgotten = new Set<string>();
 	private stopped = false;
@@ -268,6 +281,7 @@ export class DaemonSessionSummarizer {
 			this.debounceTimers.delete(activeSessionId);
 		}
 		this.inFlight.get(activeSessionId)?.abort();
+		this.refreshes.delete(activeSessionId);
 		this.rerunRequested.delete(activeSessionId);
 		await this.tasks.get(activeSessionId);
 	}
@@ -286,6 +300,10 @@ export class DaemonSessionSummarizer {
 
 	/** Called when a session finishes a turn; debounce until the agent settles. */
 	notifyActivity(state: ActiveSessionState): void {
+		this.schedule(state, SETTLE_DEBOUNCE_MS);
+	}
+
+	private schedule(state: ActiveSessionState, delay: number): void {
 		const id = state.activeSessionId;
 		if (this.stopped || this.forgotten.has(id)) return;
 		const existing = this.debounceTimers.get(id);
@@ -295,7 +313,7 @@ export class DaemonSessionSummarizer {
 		const timer = setTimeout(() => {
 			this.debounceTimers.delete(id);
 			this.summarize(state);
-		}, SETTLE_DEBOUNCE_MS);
+		}, delay);
 		timer.unref?.();
 		this.debounceTimers.set(id, timer);
 	}
@@ -331,51 +349,76 @@ export class DaemonSessionSummarizer {
 		const messageCount = messages.length;
 		const isWorking = isSessionWorking(state);
 		const previous = state.summaryState;
-		// Idle sessions with a current verdict need no refresh unless a terminal
-		// error must replace a previously fabricated verdict. Working sessions
-		// always refresh so the recap keeps up with the in-progress turn.
-		const contentUnchanged = previous?.basedOnMessageCount === messageCount;
 		const owesIdleVerdict = !isWorking && previous?.taskState === undefined;
-		// A blank recap means the model call hasn't succeeded yet (e.g. the
-		// needs_input fallback fired on a transient failure); keep retrying until a
-		// real summary lands so the recap isn't left permanently empty.
 		const owesSummary = !isWorking && !previous?.summary;
 		const turnError = !isWorking ? terminalTurnError(messages) : undefined;
-		const owesErrorVerdict =
-			turnError !== undefined && (previous?.taskState !== "needs_input" || previous?.summary !== turnError);
-		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary && !owesErrorVerdict) {
-			return;
-		}
-		// Include the in-progress message so a long streaming turn gets a live recap.
-		const streaming = isWorking ? session.state.streamingMessage : undefined;
-		const contextMessages = streaming ? [...messages, streaming] : messages;
-
-		const controller = new AbortController();
-		const isCurrent = () =>
-			!controller.signal.aborted &&
+		// Compare exactly what the classifier sees, not message counts or hidden
+		// thinking/tool output beyond the bounded prompt.
+		const contextMessages = () => {
+			const streaming = isWorking ? session.state.streamingMessage : undefined;
+			return streaming ? [...session.messages, streaming] : session.messages;
+		};
+		const input = buildStatusContext(contextMessages(), isWorking);
+		const model = session.model;
+		const isCurrentSource = () =>
 			state.runtime.session === session &&
 			session.sessionManager === sessionManager &&
 			sessionManager.getSessionId() === sessionId &&
 			sessionManager.getSessionFile() === sessionFile &&
+			session.model === model;
+		let refresh = this.refreshes.get(id);
+		if (!refresh?.isCurrentSource()) {
+			refresh = { isCurrentSource };
+			this.refreshes.set(id, refresh);
+		}
+		const finalTransition = !isWorking && refresh.wasWorking === true;
+		refresh.wasWorking = isWorking;
+		const reuse = turnError === undefined && refresh.input === input && previous?.summary ? previous : undefined;
+		if (
+			(reuse ||
+				(turnError !== undefined && previous?.summary === turnError && previous.taskState === "needs_input")) &&
+			previous?.basedOnMessageCount === messageCount
+		) {
+			return;
+		}
+		if (!reuse && turnError === undefined) {
+			// A final working -> idle verdict must not wait behind the live recap.
+			const remaining = MIN_REFRESH_INTERVAL_MS - (Date.now() - (refresh.attemptedAt ?? -Infinity));
+			if (!finalTransition && remaining > 0) {
+				this.schedule(state, remaining);
+				return;
+			}
+			refresh.attemptedAt = Date.now();
+		}
+
+		const controller = new AbortController();
+		const isCurrent = () =>
+			!controller.signal.aborted &&
+			isCurrentSource() &&
 			isSessionWorking(state) === isWorking &&
-			session.messages.length === messageCount;
+			session.messages.length === messageCount &&
+			buildStatusContext(contextMessages(), isWorking) === input &&
+			(isWorking || terminalTurnError(session.messages) === turnError);
 		this.inFlight.set(id, controller);
 		let requests: InferenceCoordinator | undefined;
 		let status: AgentStatus | undefined;
+		let completedInput: string | undefined;
 		let changed = false;
 		try {
-			if (turnError === undefined) requests = this.getRequests?.(session);
+			if (!reuse && turnError === undefined) requests = this.getRequests?.(session);
 			const generated: AgentStatusResult | undefined =
-				turnError !== undefined
+				reuse ??
+				(turnError !== undefined
 					? { summary: turnError, taskState: "needs_input" }
 					: await this.generate({
 							registry: session.modelRegistry,
-							model: session.model,
-							messages: contextMessages,
+							model,
+							messages: contextMessages(),
 							isWorking,
+							sessionId,
 							signal: controller.signal,
 							requests,
-						});
+						}));
 			// An unused capture otherwise counts this idle subject as working.
 			await requests?.dispose();
 			// A failed classification on an idle session would spin at "working"
@@ -394,6 +437,7 @@ export class DaemonSessionSummarizer {
 			if (!isCurrent()) {
 				return;
 			}
+			if (generated && turnError === undefined) completedInput = input;
 			// A working refresh carries no verdict; keep the prior one at the same
 			// message count so a still-valid needs_input isn't dropped.
 			const taskState =
@@ -422,6 +466,7 @@ export class DaemonSessionSummarizer {
 			}
 		}
 		if (status && isCurrent()) {
+			refresh.input = completedInput;
 			state.summaryState = status;
 			if (changed) this.onStatusChanged?.(state);
 		}

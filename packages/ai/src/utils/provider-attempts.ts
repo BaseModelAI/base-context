@@ -89,6 +89,7 @@ export class ProviderAttemptTracker {
 	private details: AttemptDetails = {};
 	private budgetError?: unknown;
 	private contextObservation: { value?: RetainedContextTokens } = {};
+	private httpLifetime?: AbortController;
 
 	constructor(
 		private readonly model: Pick<Model<Api>, "api" | "provider" | "id">,
@@ -307,8 +308,20 @@ export class ProviderAttemptTracker {
 		send: (...args: TArgs) => Promise<Response>,
 		operation?: "input-count",
 	): (...args: TArgs) => Promise<Response> {
-		if (!this.enabled) return send;
 		return async (...args) => {
+			const requestInit = args[1] as { signal?: AbortSignal | null } | undefined;
+			// SDKs can leave their abort callback attached after a response. A derived
+			// signal keeps those callbacks off the caller's long-lived cancellation source.
+			let signal: AbortSignal | undefined;
+			if (requestInit?.signal) {
+				this.httpLifetime ??= new AbortController();
+				signal = AbortSignal.any([requestInit.signal, this.httpLifetime.signal]);
+			}
+			if (signal) args[1] = { ...requestInit, signal };
+			if (!this.enabled) {
+				signal?.throwIfAborted();
+				return send(...args);
+			}
 			if (operation === "input-count") this.options?.signal?.throwIfAborted();
 			if (this.hasRequestBudget && operation !== "input-count") {
 				const target = args[0];
@@ -329,6 +342,7 @@ export class ProviderAttemptTracker {
 			await this.begin("http", operation === "input-count" ? { kind: "input-count" } : {});
 			let response: Response;
 			try {
+				signal?.throwIfAborted();
 				if (operation === "input-count") this.options?.signal?.throwIfAborted();
 				this.sent();
 				response = await send(...args);
@@ -413,6 +427,9 @@ export class ProviderAttemptTracker {
 		} catch (error) {
 			output.stopReason = "error";
 			output.errorMessage = `Attempt settlement failed: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			// The body has finished. Release SDK listeners without cancelling the caller.
+			this.httpLifetime?.abort();
 		}
 		if (output.stopReason === "error" || output.stopReason === "aborted") {
 			stream.push({ type: "error", reason: output.stopReason, error: output });

@@ -630,10 +630,16 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async getContextTree(): Promise<ContextTreeNode> {
-		return this.requestData<ContextTreeNode>({
+		const tree = await this.requestData<ContextTreeNode>({
 			type: "get_context_tree",
 			activeSessionId: this.activeSessionId,
 		});
+		if (this.client.supportsServerCapability("context_request_usage")) return tree;
+		const legacy = (node: ContextTreeNode): ContextTreeNode => {
+			const { ownRequestUsage: _ignored, ...rest } = node;
+			return { ...rest, children: node.children.map(legacy) };
+		};
+		return legacy(tree);
 	}
 
 	async getSessionContext(): Promise<AgentConnectionSessionContext> {

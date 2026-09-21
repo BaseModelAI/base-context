@@ -82,7 +82,23 @@ Profiles identify the API, provider, endpoint, final model, context allowance, o
 
 In supported native Responses/Codex selection paths, historical assistant literals can become optional at accepted boundaries. Users, the latest assistant, TaskFrames, summaries, recovery, and required dependencies remain mandatory. If that set cannot fit, the request can refuse. Unsupported media, opaque layouts, or missing contracts also remain explicit limits.
 
-See [SDK request-token profiles](sdk.md#explicit-request-token-budget-profiles) for the exact scope and configuration. Ordinary [compaction](compaction.md) and its `reserveTokens`/`keepRecentTokens` settings are separate.
+See [SDK request-token profiles](sdk.md#explicit-request-token-budget-profiles) for the exact scope and configuration.
+
+Ordinary [compaction](compaction.md) uses a separate model-aware soft target:
+`max(4 * keepRecentTokens, min(96000, contextWindow / 2))`. The actual trigger also
+leaves `4 * keepRecentTokens` above estimated fixed context, then caps the result
+at `contextWindow - reserveTokens`. Fixed context includes current system
+instructions, tool schemas, the current TaskFrame and latest harness snapshot,
+not every historical message. This avoids repeated ineffective summaries of
+noncompactable instructions.
+
+With small fixed context, default settings trigger earlier at 96000 estimated
+tokens for a 272000-token model. Set `compaction.targetTokens` to a positive safe
+integer to replace the soft target (still subject to fixed-context headroom), or
+`"model-limit"` to use exactly the full-window threshold.
+This policy reduces repeated large-history requests without clipping required
+replay groups. It can add summary calls and rereads; it is not a strict request
+cap, an optimality guarantee, or evidence of a deployment's actual limit.
 
 ## Stable context epochs
 

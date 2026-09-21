@@ -35,13 +35,36 @@ or loss from a summary alone.
 
 ### When It Triggers
 
-Auto-compaction triggers when:
+Auto-compaction uses an earlier, model-aware soft target by default:
 
 ```
-contextTokens > contextWindow - reserveTokens
+softTarget = max(4 * keepRecentTokens, min(96000, contextWindow / 2))
+threshold = min(contextWindow - reserveTokens, max(softTarget, fixedContextTokens + 4 * keepRecentTokens))
+contextTokens > threshold
 ```
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.base-context/settings.json` or `<project-dir>/.base-context/settings.json`). This leaves room for the LLM's response.
+With default `keepRecentTokens` of 20000 and `reserveTokens` of 16384, before
+fixed-context headroom raises the target, the thresholds are 96000 for a
+272000-token model, 80000 for a 128000-token model, and 47616 for a 64000-token
+model. The model-window ceiling always applies.
+
+`fixedContextTokens` estimates current system instructions, tool schemas, the
+current TaskFrame and latest harness snapshot. It does not count all historical
+messages or obsolete snapshots as fixed. Reserving room above this context avoids
+repeated ineffective summaries when required instructions already exceed the
+soft target. These are local estimates, not exact provider token counts.
+
+Set `compaction.targetTokens` to a positive safe integer to replace the soft
+target; required-context headroom can still raise a numeric target. Set
+`"model-limit"` to use exactly `contextWindow - reserveTokens` instead.
+Configure these settings in `~/.base-context/settings.json` or
+`<project-dir>/.base-context/settings.json`.
+
+This is a compaction heuristic, not a strict request cap, a validated backend
+limit, or a promise of optimal token use. Earlier summaries trade shorter replay
+for summary calls and possible rereads. Required instructions and replay
+dependencies are not clipped to meet this target. Explicit SDK request-token
+budgets remain separate; see [context management](context-management.md#model-aware-budgets).
 
 You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary — for example `/compact focus on the auth refactor, remember the exact migration command`. The instructions are passed to the summarization prompt with high priority, persisted on the `CompactionEntry`, and shown on the `[compaction]` message in the TUI.
 
@@ -432,6 +455,7 @@ Configure compaction in `~/.base-context/settings.json` or `<project-dir>/.base-
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Headroom used by the compaction threshold |
 | `keepRecentTokens` | `20000` | Estimated recent-token target for the retained tail |
+| `targetTokens` | Model-aware soft target | Positive safe integer to override the soft target, or `"model-limit"` for the model-window threshold |
 
 Disable automatic compaction with `"compaction": { "enabled": false }`. Manual
 `/compact` remains available while `context.mode` is `"on"`. Setting `context.mode`

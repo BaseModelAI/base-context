@@ -225,6 +225,7 @@ function createBudgetAgent(
 		model: ai.Model<"openai-responses" | "openai-codex-responses">;
 		apiKey: string;
 		tools?: typeof replayTools;
+		purpose?: RequestPurpose;
 	},
 ) {
 	const requestModel = native?.model ?? model;
@@ -305,7 +306,7 @@ function createBudgetAgent(
 	}
 	let events: Awaited<ReturnType<StreamFn>> | undefined;
 	agent.bindStreamOwner((streamFn) => {
-		const owned = requests.bindStream(streamFn, { purpose: "main" });
+		const owned = requests.bindStream(streamFn, { purpose: native?.purpose ?? "main" });
 		return async (...args) => {
 			events = await owned(...args);
 			return events;
@@ -408,6 +409,42 @@ async function auxiliaryFixture(budget?: ai.RequestTokenBudgetOptions) {
 }
 
 describe("native inference coordination", () => {
+	it.each(["main", "child", "summary", "refine", "learning", "native-control", "other"] as const)(
+		"applies the captured primary boundary without promoting auxiliary requests (%s)",
+		async (purpose) => {
+			const { manager } = await auxiliaryFixture();
+			const refusal = new Error("Captured primary request refused");
+			const commit = vi.fn(async (_candidate: RequestViewCandidate) => {});
+			const validate = vi.fn(() => {
+				throw refusal;
+			});
+			const fixture = createBudgetAgent(manager, undefined, undefined, commit, validate, {
+				model,
+				apiKey: "offline-primary-boundary-key",
+				purpose,
+			});
+			const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => auxiliaryResponse());
+			try {
+				const running = fixture.agent.prompt("Keep this captured request boundary.");
+				if (purpose === "main" || purpose === "child") {
+					await expect(running).rejects.toBe(refusal);
+					expect(validate).toHaveBeenCalledOnce();
+					expect(fetch).not.toHaveBeenCalled();
+					expect(fixture.facts).toEqual([]);
+				} else {
+					await running;
+					expect(validate).not.toHaveBeenCalled();
+					expect(fetch).toHaveBeenCalledOnce();
+					expect(fixture.facts.map((fact) => fact.type)).toEqual(["attempt_admitted", "attempt_settled"]);
+					expect(fixture.facts.every((fact) => fact.purpose === purpose && !fact.contextEpoch)).toBe(true);
+				}
+				expect(commit).not.toHaveBeenCalled();
+			} finally {
+				await fixture.requests.dispose();
+			}
+		},
+	);
+
 	it.each([930, 1000])(
 		"counts a near-limit prepared request under native control ownership (%i tokens)",
 		async (inputTokens) => {

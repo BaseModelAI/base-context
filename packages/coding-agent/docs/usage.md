@@ -49,7 +49,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
 | `/session` | Show session file, ID, and message counts |
-| `/usage`, `/context` | Show the parent and subagent context, token, and cost breakdown |
+| `/usage`, `/context` | Show captured-family request usage, context, and separate goal-budget scope |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -72,6 +72,29 @@ Type `/` in the editor to open command completion. Extensions can register custo
 The value is saved as the global `rlmMaxSubagents` preference, so it survives restarts and supplies the limit for later sessions. Use a non-negative safe integer. `/agents 0` disables new subagent spawns. Malformed, fractional, negative, and unsafe integer values are rejected without changing the setting.
 
 Lowering the limit never kills or passivates existing agents. They keep running or remain idle. Only new spawns/admissions are blocked until the live count is below the limit. This slash command is separate from `base-context agents`, which lists agents.
+
+## Token usage and status
+
+`/context` (also `/usage`) separates generation usage from the goal budget:
+
+- When saved provider-attempt receipts are available, it shows each captured agent's own usage by purpose: main work, child work, compaction, refinement, status, and other recorded generation calls. The captured-family total counts each source once. It does not add assistant or child-attribution projections on top of receipts.
+- Processed tokens equal total input (including cache) plus output. Cached input is not added again. Uncached input, cache read/write, and output are also shown separately.
+- Missing or partial usage, unsettled attempts, unavailable prices, and agents without receipts are explicit. Missing values are not zero. The captured family may not include every historical child or request.
+- Dollar amounts are catalog estimates from recorded rates, not provider invoices. Unavailable prices are not treated as free usage.
+- Older sessions or daemons without receipt data use a labeled legacy conversation projection. It can omit auxiliary calls and is not whole-family provider spend.
+- The goal budget remains **root successful main uncached input + output only**. Cached input, child work, and auxiliary calls do not consume that counter.
+
+Dashboard summaries do not request inference again when their bounded input is unchanged. Changed working input and retries are coalesced with a 60-second minimum interval and a short settle debounce. An observed working-to-idle transition can request a final summary without waiting for that interval. Local activity, queues, and terminal errors remain visible without a new summary call. The selected status model is unchanged.
+
+## Harness refinement
+
+`/refine` updates the editable continual harness. Manual and automatic refinement keep their existing scheduling and scope rules.
+
+Static harness instructions stay in the system prompt. Fresh compact entries and selected error-fix advice enter the next owned model request as a saved **Continual Harness Snapshot**, rather than rewriting the system prefix. Direct kernel harness edits use the same path. Unchanged snapshots are not appended again.
+
+The latest snapshot supersedes older snapshots, including deletions, rollbacks, and empty state. Entries remain advice below system instructions and the current task. Resume and native context epochs use the retained source records; if compaction removes the snapshot, the next request adds the current state again. Snapshot rows are hidden in the normal UI but remain model-visible.
+
+This preserves fresh advice while reducing prefix changes. It does not guarantee a provider cache hit or reduce refinement frequency.
 
 ## Message Queue
 

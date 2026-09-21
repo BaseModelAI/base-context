@@ -1,4 +1,6 @@
-import { statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type FauxResponseFactory,
 	fauxAssistantMessage,
@@ -6,19 +8,32 @@ import {
 	type SimpleStreamOptions,
 } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../../src/config.js";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
+import { appendContextEpoch, readContextEpoch } from "../../src/core/context-epoch.js";
 import type { SessionBeforeRefineEvent } from "../../src/core/extensions/index.js";
 import { HistoryIndex } from "../../src/core/history-index.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
+import { convertToLlm, HARNESS_SNAPSHOT_CUSTOM_TYPE } from "../../src/core/messages.js";
 import {
 	type AutoRefineReview,
+	applyRefinementProposal,
+	getLocalHarnessStateDir,
 	loadHarnessState,
 	REFINEMENT_CUSTOM_TYPE,
 	type RefinementProposal,
+	saveHarnessState,
 } from "../../src/core/refinement/index.js";
+import type { SessionHistoryReadView } from "../../src/core/session-history-index.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
-import type { CustomEntry, RequestJournalEntry, SessionEntry } from "../../src/core/session-manager.js";
+import {
+	type CustomEntry,
+	type RequestJournalEntry,
+	type SessionEntry,
+	SessionManager,
+} from "../../src/core/session-manager.js";
 import { createHarness, type Harness } from "./harness.js";
+import { createDeferred } from "./scheduling.js";
 
 const learningModel: Model<"openai-responses"> = {
 	api: "openai-responses",
@@ -35,12 +50,336 @@ const learningModel: Model<"openai-responses"> = {
 
 describe("AgentSession session_before_refine extension hook", () => {
 	const harnesses: Harness[] = [];
+	const profiles: string[] = [];
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
+		vi.unstubAllEnvs();
+		for (const profile of profiles.splice(0)) rmSync(profile, { recursive: true, force: true });
+	});
+
+	it("keeps native prefixes stable while fresh canonical advice survives changes, deletion, cold reopen and summaries", async () => {
+		const profile = mkdtempSync(join(tmpdir(), "refinement-cache-profile-"));
+		profiles.push(profile);
+		vi.stubEnv(ENV_AGENT_DIR, profile);
+		const nativeModel = { ...learningModel, provider: "openai", id: "native-main", maxTokens: 256 };
+		const requestTokenBudget = {
+			mode: "enforce" as const,
+			profiles: [
+				{
+					id: "refinement-cache",
+					revision: "1",
+					api: nativeModel.api,
+					provider: nativeModel.provider,
+					url: `${nativeModel.baseUrl}/responses`,
+					model: nativeModel.id,
+					authMode: "fixture-api-key",
+					templateRevision: "responses-text-v1",
+					replayFamily: "responses-text-v1",
+					contextTokens: 128000,
+					outputCeilingTokens: 256,
+					estimate: { tokensPerUtf8Byte: 1, templateTokens: 8, marginTokens: 16 },
+				},
+			],
+		};
+		const create = async (manager?: SessionManager) => {
+			const harness = await createHarness({
+				cwd: profile,
+				persistSession: true,
+				sessionManager: manager,
+				tools: [],
+				requestTokenBudget,
+				settings: {
+					compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 1 },
+					autoRefine: { enabled: false },
+					retry: { enabled: false },
+				},
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_refine", () => ({
+							proposal: {
+								summary: "Keep the lesson",
+								rationale: "fixture",
+								expectedOutcome: "fresh advice",
+								edits: [
+									{
+										action: "create",
+										kind: "memory",
+										id: "cache-lesson",
+										title: "Cache lesson",
+										content: "Fresh cache lesson alpha.",
+									},
+								],
+							},
+						}));
+						pi.on("session_before_compact", (event) => ({
+							compaction: {
+								summary: "A completed earlier phase; old harness advice may be obsolete.",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						}));
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.session.modelRegistry.registerProvider(nativeModel.provider, {
+				api: nativeModel.api,
+				baseUrl: nativeModel.baseUrl,
+				apiKey: "offline-refinement-cache",
+				models: [nativeModel],
+			});
+			await harness.session.setModel(nativeModel);
+			return harness;
+		};
+		let harness = await create();
+		const bodies: Array<{ input: unknown[]; [key: string]: unknown }> = [];
+		const latestSnapshots: string[] = [];
+		const transportErrors: unknown[] = [];
+		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			const body = JSON.parse(String(init?.body));
+			bodies.push(body);
+			await harness.sessionManager
+				.readBranchHistory(async (history) => {
+					const manifest = await history.branchContext.contextManifest({ limit: 1 });
+					if (manifest.selection !== "known" || !manifest.summaryRef)
+						throw new Error("Missing accepted epoch before send");
+					const control = await history.hydrateEntry(manifest.summaryRef.entryId, 2 * 1024 * 1024);
+					if (control?.entry.type !== "compaction") throw new Error("Missing epoch control");
+					expect(control.source.qualification).toBe("native-context-epoch");
+					const checkpoint = readContextEpoch(control.entry.details, 2 * 1024 * 1024)!;
+					const snapshots = (await harness.sessionManager.readEntries()).filter(
+						(entry) => entry.type === "custom_message" && entry.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE,
+					);
+					const snapshot = snapshots.at(-1)!;
+					if (snapshot.type !== "custom_message") throw new Error("Missing canonical advice");
+					latestSnapshots.push(String(snapshot.content));
+					expect(checkpoint.source.sourceSequence).toBeGreaterThanOrEqual(
+						(await history.get(snapshot.id))!.sequence,
+					);
+					expect(
+						checkpoint.literalTailId === snapshot.id ||
+							checkpoint.views.some((view) => view.ref.entryId === snapshot.id),
+					).toBe(true);
+				})
+				.catch((error) => {
+					transportErrors.push(error);
+					throw error;
+				});
+			const item = {
+				type: "message",
+				id: `msg_cache_${bodies.length}`,
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "Done with this phase.", annotations: [] }],
+			};
+			const sse = [
+				{
+					type: "response.output_item.added",
+					output_index: 0,
+					item: { ...item, status: "in_progress", content: [] },
+				},
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: `resp_cache_${bodies.length}`,
+						model: nativeModel.id,
+						status: "completed",
+						usage: {
+							input_tokens: 20,
+							output_tokens: 5,
+							total_tokens: 25,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				},
+			]
+				.map((event) => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+		const snapshots = async () =>
+			(await harness.sessionManager.readEntries()).filter(
+				(entry) => entry.type === "custom_message" && entry.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE,
+			);
+		const bind = harness.sessionManager.bindCompactionSink.bind(harness.sessionManager);
+		let rejectAck = true;
+		const ackFailure = vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((limits) => {
+			const sink = bind(limits);
+			const append = sink[appendContextEpoch];
+			vi.spyOn(sink, appendContextEpoch).mockImplementation(async (...args) => {
+				if (rejectAck) {
+					rejectAck = false;
+					throw new Error("fixture epoch ACK failed");
+				}
+				return append(...args);
+			});
+			return sink;
+		});
+		await harness.session.prompt("This preparation cannot pass its epoch ACK.").catch(() => {});
+		expect(fetch).not.toHaveBeenCalled();
+		expect(harness.session.agent.state.errorMessage).toContain("fixture epoch ACK failed");
+		expect(await snapshots()).toHaveLength(1);
+		ackFailure.mockRestore();
+		await harness.session.prompt("Start the phase.");
+		expect(await snapshots()).toHaveLength(1);
+		expect(transportErrors).toEqual([]);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		const prefix = structuredClone(bodies[0].input);
+		const system = harness.session.systemPrompt;
+		const refined = await harness.session.refine();
+		expect(harness.session.systemPrompt).toBe(system);
+		await harness.session.prompt("Use the lesson.");
+		expect(bodies[1].input.slice(0, prefix.length)).toEqual(prefix);
+		expect(JSON.stringify(bodies[1])).toContain("Fresh cache lesson alpha.");
+		expect(harness.session.systemPrompt).not.toContain("Fresh cache lesson alpha.");
+		expect(await snapshots()).toHaveLength(2);
+		// Native/public conversion can erase customType; dedup must still use canonical source recipes.
+		harness.session.agent.state.messages = convertToLlm([...harness.session.messages]);
+		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(false);
+		// An unrelated receipt append during the fixed read does not change the conversation owner.
+		const internals = harness.session as unknown as {
+			_readHarnessSnapshot(view: SessionHistoryReadView): Promise<string | undefined>;
+		};
+		const originalRead = internals._readHarnessSnapshot.bind(internals);
+		const priorRequest = (await harness.sessionManager.readEntries()).find(
+			(entry) => entry.type === "request" && entry.request.type === "attempt_settled",
+		);
+		if (priorRequest?.type !== "request") throw new Error("Missing native receipt");
+		const unrelated = vi.spyOn(internals, "_readHarnessSnapshot").mockImplementationOnce(async (view) => {
+			const result = await originalRead(view);
+			const sink = harness.sessionManager.bindRequestSink();
+			try {
+				await sink.persist({ ...priorRequest.request, attemptId: "unrelated-receipt", source: await sink.source });
+			} finally {
+				await sink.release();
+			}
+			return result;
+		});
+		await harness.session.prompt("Keep working without a harness change.");
+		unrelated.mockRestore();
+		expect(await snapshots()).toHaveLength(2);
+		await harness.session.refine({ rollbackId: refined.id });
+		await harness.session.prompt("The lesson was rolled back.");
+		expect(latestSnapshots.at(-1)).toContain("No saved harness entries yet.");
+		expect(latestSnapshots.at(-1)).not.toContain("Fresh cache lesson alpha.");
+		expect(await snapshots()).toHaveLength(3);
+		const local = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
+		const state = loadHarnessState(local, "local");
+		applyRefinementProposal(
+			state,
+			{
+				summary: "Direct edit",
+				rationale: "fixture",
+				expectedOutcome: "fresh direct edit",
+				edits: [
+					{
+						action: "create",
+						kind: "memory",
+						id: "direct",
+						title: "Direct edit",
+						content: "Fresh direct kernel-style lesson.",
+					},
+				],
+			},
+			{ id: "direct", scope: "local" },
+		);
+		saveHarnessState(local, state);
+		await harness.session.prompt("Read a direct harness edit.");
+		expect(latestSnapshots.at(-1)).toContain("Fresh direct kernel-style lesson.");
+		const file = harness.sessionManager.getSessionFile()!;
+		await harness.session.disposeAsync({ kernelSnapshot: false });
+		const reopened = await SessionManager.open(file);
+		harness = await create(reopened);
+		await harness.session.prompt("Resume unchanged after cold reopen.");
+		expect(await snapshots()).toHaveLength(4);
+		await harness.session.compact();
+		await harness.session.prompt("Continue after the real summary.");
+		expect(latestSnapshots.at(-1)).toContain("Fresh direct kernel-style lesson.");
+		expect(await snapshots()).toHaveLength(5);
+		delete state.entries.memory.direct;
+		saveHarnessState(local, state);
+		await harness.session.prompt("The last entry was deleted.");
+		expect(latestSnapshots.at(-1)).toContain("No saved harness entries yet.");
+		expect(latestSnapshots.at(-1)).not.toContain("Fresh direct kernel-style lesson.");
+		expect(await snapshots()).toHaveLength(6);
+		expect(fetch).toHaveBeenCalledTimes(8);
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
+		// Going away and back to the same leaf still invalidates the captured source owner.
+		const reopenedInternals = harness.session as unknown as typeof internals;
+		const readSnapshot = reopenedInternals._readHarnessSnapshot.bind(reopenedInternals);
+		const switched = vi.spyOn(reopenedInternals, "_readHarnessSnapshot").mockImplementationOnce(async (view) => {
+			const result = await readSnapshot(view);
+			await harness.sessionManager.branchTo(null);
+			await harness.sessionManager.branchTo(view.source.leafId);
+			return result;
+		});
+		await harness.session.prompt("A branch switch races snapshot preparation.").catch(() => {});
+		expect(fetch).toHaveBeenCalledTimes(8);
+		expect(harness.session.agent.state.errorMessage).toContain("Harness snapshot source changed");
+		switched.mockRestore();
+		await harness.session.prompt("Retry the unchanged snapshot after the source settles.");
+		expect(await snapshots()).toHaveLength(6);
+		await harness.sessionManager.branchTo(null);
+		await harness.session.prompt("An empty branch needs its own current snapshot.");
+		expect(await snapshots()).toHaveLength(7);
+		expect(JSON.stringify(bodies.at(-1))).not.toContain("Fresh direct kernel-style lesson.");
+		await harness.sessionManager.newSession();
+		await harness.session.prompt("A new source must not reuse the old source's snapshot.");
+		expect(await snapshots()).toHaveLength(1);
+		expect(fetch).toHaveBeenCalledTimes(11);
+		const newLocal = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
+		saveHarnessState(newLocal, {
+			...state,
+			entries: {
+				...state.entries,
+				memory: {
+					abort: {
+						id: "abort",
+						kind: "memory",
+						title: "Abort lesson",
+						content: "Accepted snapshot survives cancellation.",
+						path: "test",
+						scope: "local",
+						reference: {},
+						arguments: {},
+						metadata: {},
+						source: "test",
+						version: 1,
+						created_at: "",
+						updated_at: "",
+					},
+				},
+			},
+		});
+		const entered = createDeferred();
+		const release = createDeferred();
+		const appendSnapshot = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+		const gated = vi
+			.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback")
+			.mockImplementationOnce(async (...args) => {
+				const id = await appendSnapshot(...args);
+				entered.resolve();
+				await release.promise;
+				return id;
+			});
+		const cancelled = harness.session.prompt("Cancel after snapshot acceptance.");
+		await entered.promise;
+		const abort = harness.session.abort();
+		release.resolve();
+		await Promise.allSettled([cancelled, abort]);
+		gated.mockRestore();
+		expect(fetch).toHaveBeenCalledTimes(11);
+		expect(await snapshots()).toHaveLength(2);
+		await harness.session.prompt("Retry after cancellation.");
+		expect(fetch).toHaveBeenCalledTimes(12);
+		expect(await snapshots()).toHaveLength(2);
+		expect(latestSnapshots.at(-1)).toContain("Accepted snapshot survives cancellation.");
+		expect(transportErrors).toEqual([]);
 	});
 
 	it("applies an extension-provided proposal without calling the built-in planner", async () => {

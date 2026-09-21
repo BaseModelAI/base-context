@@ -44,7 +44,17 @@ import { createTestExtensionsResult, createTestResourceLoader } from "./utilitie
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
 function userText(context: Context): string {
-	const lastMessage = context.messages[context.messages.length - 1] as AgentMessage | undefined;
+	const lastMessage = [...context.messages].reverse().find((message) => {
+		if (message.role !== "user") return true;
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.filter((block): block is TextContent => block.type === "text")
+						.map((block) => block.text)
+						.join("\n");
+		return !text.startsWith("# Continual Harness Snapshot\n");
+	}) as AgentMessage | undefined;
 	if (!lastMessage) return "";
 	if (isAgentSessionMessage(lastMessage)) {
 		return lastMessage.content.replace(/^\[task from parent\]\n\n/, "");
@@ -4236,8 +4246,9 @@ describe("AgentSession RLM session dir", () => {
 		serperKey?: string,
 		loadWebsearchSkill = false,
 		rlmSessionDir?: string,
+		respond?: FauxResponseFactory,
 	): Promise<AgentSession> {
-		const faux = createResponseProvider(() => assistantMessage("ignored"));
+		const faux = createResponseProvider(respond ?? (() => assistantMessage("ignored")));
 		providers.add(faux);
 		const nativeModel = faux.getModel();
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
@@ -4341,7 +4352,7 @@ describe("AgentSession RLM session dir", () => {
 		expect(env.BASE_CONTEXT_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
 	});
 
-	it("loads the ephemeral RLM harness path into the host system prompt", async () => {
+	it("loads the ephemeral RLM harness path into owned advice without changing the system prefix", async () => {
 		const ephemeralDir = join(tempDir, "ephemeral-rlm");
 		mkdirSync(join(ephemeralDir, "harness"), { recursive: true });
 		writeFileSync(
@@ -4374,12 +4385,32 @@ describe("AgentSession RLM session dir", () => {
 			}),
 			"utf8",
 		);
-		const root = await createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
-
+		let delivered: Context | undefined;
+		const root = await createSession(
+			SessionManager.inMemory(tempDir),
+			undefined,
+			undefined,
+			false,
+			ephemeralDir,
+			(context) => {
+				delivered = context;
+				return assistantMessage("ignored");
+			},
+		);
 		const prompt = root.systemPrompt;
-
-		expect(prompt).toContain("Ephemeral note");
-		expect(prompt).toContain("Loaded from the RLM session harness path.");
+		await root.prompt("Inspect the current harness.");
+		expect(delivered?.systemPrompt).toBe(prompt);
+		expect(JSON.stringify(delivered?.messages)).toContain("Ephemeral note");
+		expect(JSON.stringify(delivered?.messages)).toContain("Loaded from the RLM session harness path.");
+		const snapshot = root.sessionManager
+			.buildSessionContext()
+			.messages.find((message) => message.role === "custom" && message.customType === "harness_snapshot");
+		expect(root.systemPrompt).toBe(prompt);
+		expect(prompt).not.toContain("Ephemeral note");
+		expect(snapshot?.role === "custom" ? snapshot.content : "").toContain("Ephemeral note");
+		expect(snapshot?.role === "custom" ? snapshot.content : "").toContain(
+			"Loaded from the RLM session harness path.",
+		);
 	});
 
 	it("exports the configured agentDir to the kernel so skills find auth.json", async () => {

@@ -1,12 +1,18 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import { type AssistantMessage, getModel } from "@ponythewhite/base-context-ai";
 import { describe, expect, test, vi } from "vitest";
+import { completeInference } from "../src/core/inference-coordinator.js";
+import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { AgentStatus } from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
 	buildStatusContext,
 	DaemonSessionSummarizer,
+	generateAgentStatus,
 	parseAgentStatusResponse,
 } from "../src/modes/daemon/daemon-session-summarizer.js";
+
+vi.mock("../src/core/inference-coordinator.js", () => ({ completeInference: vi.fn() }));
 
 function userMessage(text: string): AgentMessage {
 	return { role: "user", content: [{ type: "text", text }], timestamp: 0 } as unknown as AgentMessage;
@@ -143,6 +149,20 @@ describe("daemon session summarizer", () => {
 			expect(context).toContain("assistant: Editing the router [tools: Edit, Bash]");
 		});
 
+		test("includes native tool calls without their arguments or hidden reasoning", () => {
+			const message = {
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "private reasoning" },
+					{ type: "toolCall", name: "python", id: "call-1", arguments: { code: "large input" } },
+				],
+			} as AssistantMessage;
+			const context = buildStatusContext([message], true);
+			expect(context).toContain("assistant: [tools: python]");
+			expect(context).not.toContain("private reasoning");
+			expect(context).not.toContain("large input");
+		});
+
 		test("marks idle sessions as finished", () => {
 			expect(buildStatusContext([userMessage("hi")], false)).toContain("idle (finished its turn)");
 		});
@@ -152,6 +172,44 @@ describe("daemon session summarizer", () => {
 			const context = buildStatusContext(messages, false);
 			expect(context).toContain("message 19");
 			expect(context).not.toContain("message 0\n");
+		});
+	});
+
+	describe("generateAgentStatus", () => {
+		test("uses the explicit model with a stable, session-isolated auxiliary cache identity", async () => {
+			const complete = vi.mocked(completeInference);
+			complete.mockClear();
+			complete.mockResolvedValue({
+				content: [{ type: "text", text: "<recap>Editing the router</recap><status>COMPLETED</status>" }],
+				stopReason: "stop",
+			} as AssistantMessage);
+			const registry = {
+				getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "test-only" }),
+			} as unknown as ModelRegistry;
+			const model = getModel("openai", "gpt-4o-mini");
+			for (const sessionId of ["one", "one", "two"]) {
+				expect(
+					await generateAgentStatus({
+						registry,
+						model,
+						messages: [userMessage("Edit router")],
+						isWorking: false,
+						sessionId,
+					}),
+				).toEqual({ summary: "Editing the router", taskState: "completed" });
+			}
+			expect(complete.mock.calls.map((call) => call[3]?.sessionId)).toEqual([
+				"daemon-status:one",
+				"daemon-status:one",
+				"daemon-status:two",
+			]);
+			expect(complete.mock.calls[0]?.[1]).toEqual(model);
+			expect(complete.mock.calls[0]?.[4]).toEqual({ purpose: "native-control", purposeDetail: "daemon-status" });
+			complete.mockClear();
+			expect(
+				await generateAgentStatus({ registry, messages: [userMessage("Hi")], isWorking: true }),
+			).toBeUndefined();
+			expect(complete).not.toHaveBeenCalled();
 		});
 	});
 

@@ -113,6 +113,10 @@ interface BoundOperation {
 	readonly metadata: Omit<NativeRequestMetadata, "source" | "owner" | "contextEpoch">;
 }
 
+function isPrimaryRequest(purpose: RequestPurpose): boolean {
+	return purpose === "main" || purpose === "child";
+}
+
 const REQUEST_STREAM_BINDING = Symbol("base-context.request-stream-binding");
 /** Internal AgentSession built-in compaction entry, not a public inference option. */
 export const captureNativeCompactionRequests = Symbol("base-context.native-compaction-requests");
@@ -391,7 +395,7 @@ export class InferenceCoordinator {
 		return captured;
 	}
 
-	/** Explicit Root-owned epoch boundary, on this same captured MAIN source only. */
+	/** Explicit session-owned epoch boundary, on this same captured primary source only. */
 	bindRequestViewBoundary(
 		messages: readonly AgentMessage[],
 		commit: RequestViewCommit,
@@ -650,7 +654,7 @@ export class InferenceCoordinator {
 			this.releaseCapture();
 			this.finishCapturePending?.();
 			// Capture the opted-in budgeted invocation before source/auth waits. Callbacks and signals stay live handles.
-			if (this.work.budget || (this.requestViewBoundary && operation.metadata.purpose === "main")) {
+			if (this.work.budget || (this.requestViewBoundary && isPrimaryRequest(operation.metadata.purpose))) {
 				model = structuredClone(model);
 				// Agent tool objects also carry live executors. Snapshot only the native Tool definition.
 				context = structuredClone({
@@ -689,7 +693,7 @@ export class InferenceCoordinator {
 			assertBuiltInAttemptSupport(model.api);
 			if (!this.work.admissionOpen) throw new Error("Inference owner is closing");
 			const parentBudget = this.work.budget;
-			const boundary = operation.metadata.purpose === "main" ? this.requestViewBoundary : undefined;
+			const boundary = isPrimaryRequest(operation.metadata.purpose) ? this.requestViewBoundary : undefined;
 			const budget = boundary ? parentBudget?.capture() : parentBudget;
 			let measuredForAdmission = false;
 			let countingInput = false;
@@ -931,7 +935,18 @@ export class InferenceCoordinator {
 			const signal = options?.signal
 				? AbortSignal.any([options.signal, this.work.cancellation.signal])
 				: this.work.cancellation.signal;
-			const events = await send(model, context, { ...options, signal, attempts, requireProviderAttempts: true });
+			const sessionId =
+				options?.sessionId ??
+				(isPrimaryRequest(operation.metadata.purpose)
+					? source.sessionId
+					: `${operation.metadata.purpose}:${source.sessionId}`);
+			const events = await send(model, context, {
+				...options,
+				sessionId,
+				signal,
+				attempts,
+				requireProviderAttempts: true,
+			});
 			localSimulation = isLocalFauxStream(events);
 			const settled = settle(events.result());
 			events.result = async () => (await settled).message;
@@ -1096,7 +1111,7 @@ export class InferenceCoordinator {
 					context,
 					options,
 					inner,
-					captured !== undefined && request.purpose === "main",
+					captured !== undefined && isPrimaryRequest(request.purpose),
 				)
 			).events;
 		};

@@ -1,39 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { complete } from "../src/stream.js";
 import type { Model } from "../src/types.js";
 
-const mockState = vi.hoisted(() => ({
-	chunks: [] as unknown[],
-}));
-
-vi.mock("openai", () => {
-	class FakeOpenAI {
-		chat = {
-			completions: {
-				create: () => {
-					const chunks = mockState.chunks;
-					const stream = {
-						async *[Symbol.asyncIterator]() {
-							for (const chunk of chunks) yield chunk;
-						},
-					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
-					promise.withResponse = async () => ({
-						data: stream,
-						response: { status: 200, headers: new Headers() },
-					});
-					return promise;
-				},
-			},
-		};
-	}
-	return { default: FakeOpenAI };
-});
+const mockState = { chunks: [] as unknown[] };
 
 function openRouterAuto(): Model<"openai-completions"> {
 	return {
@@ -53,7 +22,18 @@ function openRouterAuto(): Model<"openai-completions"> {
 describe("openai-completions responseModel", () => {
 	beforeEach(() => {
 		mockState.chunks = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						`${mockState.chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+			),
+		);
 	});
+	afterEach(() => vi.unstubAllGlobals());
 
 	it("surfaces routed chunk.model on responseModel without changing model", async () => {
 		mockState.chunks = [

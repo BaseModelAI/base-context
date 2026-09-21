@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
 	DAEMON_COMMAND_COMPATIBILITY,
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_REVISION,
@@ -211,7 +212,12 @@ describe("DaemonClient", () => {
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["session_input_admission"], 46);
+		emitHello(
+			socket,
+			DAEMON_PROTOCOL_VERSION,
+			["session_input_admission"],
+			CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision,
+		);
 
 		expect(client.supportsServerCapability("heartbeat_catalog")).toBe(false);
 		await expect(client.request({ type: "heartbeats_list" })).rejects.toThrow("does not support heartbeat_catalog");

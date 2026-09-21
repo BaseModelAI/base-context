@@ -16,6 +16,7 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { GOAL_STATE_CUSTOM_TYPE } from "../../src/core/goals.js";
+import { HARNESS_SNAPSHOT_CUSTOM_TYPE } from "../../src/core/messages.js";
 import { LocalRlmSubagentCapacity } from "../../src/core/rlm-max-subagents.js";
 import type { RlmChildAdmission, SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
 import {
@@ -775,6 +776,12 @@ describe("AgentSessionRuntime characterization", () => {
 		await manager.close();
 		const parent = await internals.createRuntime({ type: "create", sessionPath: parentFile });
 		await parent.runtime.session.setRlmMaxSubagents(1);
+		faux.setResponses([fauxAssistantMessage("parent prepared")]);
+		await parent.runtime.session.promptAndWait("Prepare a parent response for child usage.");
+		const parentAttributions = async () =>
+			(await parent.runtime.session.sessionManager.readEntries()).filter(
+				(entry) => entry.type === "child_usage_attributed",
+			);
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("done")]);
 		const firstStart = parent.runtime.session.runRlmChild("first resident", { name: "resident-one" });
 		// Neither name/model selection nor the factory has completed its first await.
@@ -785,6 +792,9 @@ describe("AgentSessionRuntime characterization", () => {
 			(state) => state.runtime.metadata.rlmChildId === first.rlm_child_id,
 		)!;
 		const firstFile = firstState.runtime.session.sessionFile!;
+		await parent.runtime.session.waitForRlmQuiescence();
+		expect(await parentAttributions()).toHaveLength(1);
+		expect((await parentAttributions())[0].origin).toBe("spawn_task");
 		expect(firstState.runtime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
 		await expect(firstState.runtime.newSession()).rejects.toThrow("Owned child-runtime replacement is unavailable");
 		await expect(firstState.runtime.switchSession(firstFile)).rejects.toThrow(
@@ -853,6 +863,18 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(same).toBe(hydrated);
 		expect(hydrated.runtime.session).not.toBe(firstState.runtime.session);
 		expect(parent.runtime.session.getRlmChildSession(first.rlm_child_id)).toBe(hydrated.runtime.session);
+		// Repeated registration must not install a second usage subscriber. Real passivation
+		// disposed the original child; this reply belongs to the rehydrated runtime.
+		expect(await parent.runtime.session.registerRlmChildSession(first.rlm_child_id, hydrated.runtime.session)).toBe(
+			true,
+		);
+		const attributionsBeforeResume = await parentAttributions();
+		faux.setResponses([fauxAssistantMessage("resumed child reply")]);
+		await hydrated.runtime.session.promptAndWait("Continue the completed child after passive hydration.");
+		await parent.runtime.session.waitForRlmQuiescence();
+		const resumedAttributions = await parentAttributions();
+		expect(resumedAttributions).toHaveLength(attributionsBeforeResume.length + 1);
+		expect(resumedAttributions.at(-1)?.origin).toBe("direct_user");
 		await expect(parent.runtime.session.runRlmChild("hydrated completion is resident")).rejects.toThrow(
 			"resident child limit",
 		);
@@ -872,6 +894,154 @@ describe("AgentSessionRuntime characterization", () => {
 		await expect(refused).rejects.toBeInstanceOf(RequestTokenBudgetError);
 		await expect(refused).rejects.toMatchObject({ assessment: { status: "unknown" } });
 		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it.each(["error", "aborted"] as const)("does not report a child provider %s as done", async (stopReason) => {
+		const { runtime, faux } = await createRuntimeForTest(() => {});
+		faux.setResponses([
+			fauxAssistantMessage("", { stopReason, errorMessage: `terminal child ${stopReason}` }),
+			fauxAssistantMessage("parent acknowledges the failed child"),
+		]);
+		const updates: Array<{ status: string; error?: string }> = [];
+		const unsubscribe = runtime.session.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates.push(event.child);
+		});
+		try {
+			await runtime.session.runRlmChild("Fail in the provider without throwing promptAndWait.");
+			await runtime.session.waitForRlmQuiescence();
+			expect(updates.some((update) => update.status === "done")).toBe(false);
+			expect(updates).toContainEqual(
+				expect.objectContaining({
+					status: stopReason === "aborted" ? "cancelled" : "error",
+					error: `terminal child ${stopReason}`,
+				}),
+			);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("reports a recovered child provider error as a successful run", async () => {
+		const { runtime, faux } = await createRuntimeForTest(() => {});
+		faux.setResponses([
+			{
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage: "503 Service unavailable" }),
+				diagnostics: [
+					{
+						type: "provider_stream_failure",
+						timestamp: Date.now(),
+						details: { kind: "server_error", status: 503 },
+					},
+				],
+			},
+			fauxAssistantMessage("recovered child result"),
+			fauxAssistantMessage("parent acknowledges recovery"),
+		]);
+		const spawned = await runtime.session.runRlmChild("Recover the transient provider error.");
+		await runtime.session.waitForRlmQuiescence();
+		expect(runtime.session.getRlmChildSnapshots()).toContainEqual(
+			expect.objectContaining({ id: spawned.rlm_child_id, status: "done" }),
+		);
+		expect(runtime.session.getRlmChildSession(spawned.rlm_child_id)?.getLastAssistantText()).toBe(
+			"recovered child result",
+		);
+	});
+
+	it("forwards nested child usage deltas once without replaying aggregates", async () => {
+		const { runtime, faux } = await createRuntimeForTest(() => {});
+		faux.setResponses([
+			fauxAssistantMessage("parent"),
+			fauxAssistantMessage("child"),
+			fauxAssistantMessage("grandchild"),
+		]);
+		await runtime.session.promptAndWait("Parent source for nested usage.");
+		const spawned = await runtime.session.runRlmChild("First child");
+		await runtime.session.waitForRlmQuiescence();
+		const child = runtime.session.getRlmChildSession(spawned.rlm_child_id)!;
+		const parentBefore = (await runtime.session.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "child_usage_attributed",
+		);
+		expect(parentBefore).toHaveLength(1);
+		await runtime.session.registerRlmChildSession(spawned.rlm_child_id, child);
+		faux.setResponses([fauxAssistantMessage("grandchild"), fauxAssistantMessage("child acknowledges completion")]);
+		const grandchild = await child.runRlmChild("Nested child");
+		await runtime.session.waitForRlmQuiescence();
+		expect(child.getRlmChildSnapshots()).toContainEqual(
+			expect.objectContaining({ id: grandchild.rlm_child_id, status: "done" }),
+		);
+		const childAttributions = (await child.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "child_usage_attributed",
+		);
+		const parentAfter = (await runtime.session.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "child_usage_attributed",
+		);
+		expect(childAttributions).toHaveLength(1);
+		const childReply = [...child.messages].reverse().find((message) => message.role === "assistant")!;
+		expect(childReply.stopReason).toBe("stop");
+		expect(parentAfter).toHaveLength(3);
+		expect(parentAfter[0]).toEqual(parentBefore[0]);
+		expect(parentAfter.slice(1).map((entry) => entry.childUsage)).toEqual([
+			childAttributions[0].childUsage,
+			childReply.usage,
+		]);
+		expect(parentAfter[2].aggregateUsage.input).toBe(
+			parentBefore[0].aggregateUsage.input + childAttributions[0].childUsage.input + childReply.usage.input,
+		);
+		expect(parentAfter[2].aggregateUsage.cost.total).toBeCloseTo(
+			parentBefore[0].aggregateUsage.cost.total +
+				childAttributions[0].childUsage.cost.total +
+				childReply.usage.cost.total,
+		);
+	});
+
+	it("restores the original child usage anchor after a cold parent and child reopen", async () => {
+		const first = await createRuntimeForTest(() => {});
+		first.faux.setResponses([fauxAssistantMessage("spawn owner"), fauxAssistantMessage("first child reply")]);
+		await first.runtime.session.promptAndWait("Original child usage owner.");
+		const spawned = await first.runtime.session.runRlmChild("Anchored child");
+		await first.runtime.session.waitForRlmQuiescence();
+		const child = first.runtime.session.getRlmChildSession(spawned.rlm_child_id)!;
+		const childFile = child.sessionFile!;
+		const parentFile = first.runtime.session.sessionFile!;
+		const before = (await first.runtime.session.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "child_usage_attributed",
+		);
+		expect(before).toHaveLength(1);
+		first.faux.setResponses([fauxAssistantMessage("unrelated later parent response")]);
+		await first.runtime.session.promptAndWait("This later response must not own old child usage.");
+		await first.runtime.dispose();
+		const parent = await createRuntimeForTest(() => {}, { sessionManager: await SessionManager.open(parentFile) });
+		const resumed = await createRuntimeForTest(() => {}, {
+			sessionManager: await SessionManager.open(childFile),
+			sessionOptions: { rlmDepth: 1 },
+		});
+		expect(await parent.runtime.session.registerRlmChildSession(spawned.rlm_child_id, resumed.runtime.session)).toBe(
+			true,
+		);
+		expect(await parent.runtime.session.registerRlmChildSession(spawned.rlm_child_id, resumed.runtime.session)).toBe(
+			true,
+		);
+		await resumed.runtime.session.promptAndWait("Reply after cold reopen.");
+		await parent.runtime.session.waitForRlmQuiescence();
+		const after = (await parent.runtime.session.sessionManager.readEntries()).filter(
+			(entry) => entry.type === "child_usage_attributed",
+		);
+		expect(after).toHaveLength(before.length + 1);
+		expect(after.at(-1)?.targetId).toBe(before[0].targetId);
+		expect(after.at(-1)?.origin).toBe("direct_user");
+
+		// Old children without the anchor must not silently charge an unrelated current assistant.
+		const legacy = await createRuntimeForTest(() => {}, { sessionOptions: { rlmDepth: 1 } });
+		expect(await parent.runtime.session.registerRlmChildSession("legacy-no-anchor", legacy.runtime.session)).toBe(
+			true,
+		);
+		await legacy.runtime.session.promptAndWait("A legacy child still remains usable.");
+		await parent.runtime.session.waitForRlmQuiescence();
+		expect(
+			(await parent.runtime.session.sessionManager.readEntries()).filter(
+				(entry) => entry.type === "child_usage_attributed",
+			),
+		).toEqual(after);
 	});
 
 	it("disposes hosted RLM children during session replacement", async () => {
@@ -1135,7 +1305,7 @@ describe("AgentSessionRuntime characterization", () => {
 						? message.customType
 						: message.role,
 			),
-		).toEqual([TASK_FRAME_CUSTOM_TYPE, "Say one", "assistant"]);
+		).toEqual([TASK_FRAME_CUSTOM_TYPE, "Say one", HARNESS_SNAPSHOT_CUSTOM_TYPE, "assistant"]);
 		expect(runtime.session.sessionFile).toBeDefined();
 	});
 

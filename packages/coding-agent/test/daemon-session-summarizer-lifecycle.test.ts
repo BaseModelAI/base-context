@@ -1,11 +1,16 @@
 import { type AssistantMessage, getModel } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
-import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summarizer.js";
+import {
+	buildStatusContext,
+	DaemonSessionSummarizer,
+	type GenerateAgentStatusParams,
+} from "../src/modes/daemon/daemon-session-summarizer.js";
 
 // The debounce the summarizer waits for after a turn settles (kept in sync with
 // SETTLE_DEBOUNCE_MS in the module).
 const SETTLE_MS = 2000;
+const REFRESH_MS = 60_000;
 
 function assistantMessage(
 	options: Pick<AssistantMessage, "content" | "stopReason" | "errorMessage">,
@@ -113,17 +118,19 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 
 		summarizer.notifyActivity(state);
 		await vi.advanceTimersByTimeAsync(SETTLE_MS + 500);
+		expect(generate).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(REFRESH_MS);
 		expect(generate).toHaveBeenCalledTimes(2);
 		expect(state.summaryState).toMatchObject({ summary: "Reviewed the diff", taskState: "completed" });
+		await summarizer.stop();
 	});
 
-	test("refreshes a working session even when the message count is unchanged", async () => {
+	test("generates the first bounded input even when a working recap already exists", async () => {
 		vi.useFakeTimers();
 		const generate = vi.fn().mockResolvedValue({ summary: "Editing the router" });
 		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
 		const state = makeState({ working: true });
-		// A status already exists for the current message count, so an idle session
-		// would be skipped — but a working one must still refresh its recap.
+		// A seeded recap has no in-memory prompt snapshot yet.
 		state.summaryState = { summary: "Editing the router", taskState: undefined, basedOnMessageCount: 2 };
 
 		summarizer.notifyActivity(state);
@@ -255,6 +262,280 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 			basedOnMessageCount: 4,
 		});
 		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(1);
+		await summarizer.stop();
+	});
+
+	test("skips unchanged working inputs across sweeps and preserves local operation state", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		const actions = { queuedCount: 1, steering: [], followUps: [{ text: "next task" }] };
+		Object.assign(state.runtime.session, {
+			isStreaming: false,
+			isCompacting: true,
+			getSessionActionSnapshot: () => actions,
+		});
+		state.runtime.session.messages[0] = { role: "user", content: "A".repeat(601), timestamp: 0 };
+		const generate = vi.fn().mockResolvedValue({ summary: "Compacting the research context" });
+		const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+		summarizer.start();
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		state.runtime.session.messages[0] = {
+			role: "user",
+			content: `${"A".repeat(600)}different hidden suffix`,
+			timestamp: 100,
+		};
+		await vi.advanceTimersByTimeAsync(150_000);
+		expect(generate).toHaveBeenCalledOnce();
+		expect(state.summaryState?.summary).toBe("Compacting the research context");
+		expect(state.runtime.session.isSessionActive).toBe(true);
+		expect(state.runtime.session.isCompacting).toBe(true);
+		expect(state.runtime.session.getSessionActionSnapshot()).toBe(actions);
+		expect(state.runtime.session.getSessionActionSnapshot().queuedCount).toBe(1);
+		await summarizer.stop();
+	});
+
+	test("coalesces rapid streaming changes and generates the latest bounded input after the interval", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		const inputs: string[] = [];
+		const generate = vi.fn(async (params: GenerateAgentStatusParams) => {
+			inputs.push(buildStatusContext(params.messages, params.isWorking));
+			return { summary: "Editing the router" };
+		});
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		for (let i = 0; i < 5; i++) {
+			Object.assign(state.runtime.session.state, {
+				streamingMessage: assistantMessage({
+					content: [{ type: "text", text: `Progress ${i}` }],
+					stopReason: "stop",
+				}),
+			});
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		}
+		expect(generate).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(REFRESH_MS - 5 * SETTLE_MS - 1);
+		expect(generate).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(inputs[1]).toContain("assistant: Progress 4");
+		await summarizer.stop();
+	});
+
+	test("publishes a final idle verdict without waiting for the working refresh interval", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		const generate = vi
+			.fn()
+			.mockResolvedValueOnce({ summary: "Editing the router" })
+			.mockResolvedValue({ summary: "Finished the router", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		Object.assign(state.runtime.session, { isSessionActive: false, isStreaming: false });
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(generate.mock.calls[1]?.[0].isWorking).toBe(false);
+		expect(state.summaryState?.taskState).toBe("completed");
+		expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(1);
+		await summarizer.stop();
+	});
+
+	test("refreshes idle currency locally when new messages have the same bounded input", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ messages: 8 });
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the request", taskState: "completed" });
+		const onStatusChanged = vi.fn();
+		const summarizer = new DaemonSessionSummarizer(() => [], onStatusChanged, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		state.runtime.session.messages.push({ role: "user", content: "hi", timestamp: 0 });
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledOnce();
+		expect(state.summaryState).toEqual({
+			summary: "Reviewed the request",
+			taskState: "completed",
+			basedOnMessageCount: 9,
+		});
+		expect(onStatusChanged).toHaveBeenCalledTimes(2);
+		await summarizer.stop();
+	});
+
+	test("notices changed idle content at the same message count", async () => {
+		vi.useFakeTimers();
+		const state = makeState();
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the request", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		state.runtime.session.messages[1] = { role: "user", content: "Different request", timestamp: 0 };
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(REFRESH_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		await summarizer.stop();
+	});
+
+	test.each(["message", "stream", "session", "file", "model"] as const)(
+		"discards a result when its %s source changes without a message-count change",
+		async (change) => {
+			vi.useFakeTimers();
+			const state = makeState({ working: change === "stream" });
+			const generate = vi.fn(async () => {
+				switch (change) {
+					case "message":
+						state.runtime.session.messages[0] = { role: "user", content: "Replaced", timestamp: 0 };
+						break;
+					case "stream":
+						Object.assign(state.runtime.session.state, {
+							streamingMessage: assistantMessage({
+								content: [{ type: "text", text: "New progress" }],
+								stopReason: "stop",
+							}),
+						});
+						break;
+					case "session":
+						vi.spyOn(state.runtime.session.sessionManager, "getSessionId").mockReturnValue("replacement");
+						break;
+					case "file":
+						vi.spyOn(state.runtime.session.sessionManager, "getSessionFile").mockReturnValue("replacement.jsonl");
+						break;
+					case "model":
+						Object.assign(state.runtime.session, { model: getModel("openai", "gpt-4o") });
+				}
+				return { summary: "Stale result", taskState: "completed" as const };
+			});
+			const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+			expect(state.summaryState).toBeUndefined();
+			expect((state as unknown as { appendedStatuses: unknown[] }).appendedStatuses).toHaveLength(0);
+			await summarizer.stop();
+		},
+	);
+
+	test("coalesces concurrent activity and settles the final transition after the in-flight call", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		let finish!: () => void;
+		const pending = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const generate = vi
+			.fn()
+			.mockImplementationOnce(async () => {
+				await pending;
+				return { summary: "Stale working recap" };
+			})
+			.mockResolvedValue({ summary: "Finished the task", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		Object.assign(state.runtime.session, { isSessionActive: false, isStreaming: false });
+		for (let i = 0; i < 3; i++) {
+			summarizer.notifyActivity(state);
+			await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		}
+		expect(generate).toHaveBeenCalledOnce();
+		finish();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(state.summaryState).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(state.summaryState?.taskState).toBe("completed");
+		await summarizer.stop();
+	});
+
+	test.each(["stop", "forget"] as const)("%s aborts the in-flight call and cancels coalesced work", async (action) => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		let signal: AbortSignal | undefined;
+		const generate = vi.fn(
+			(params: GenerateAgentStatusParams) =>
+				new Promise<undefined>((resolve) => {
+					signal = params.signal;
+					signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+				}),
+		);
+		const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+		summarizer.start();
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		if (action === "stop") await summarizer.stop();
+		else await summarizer.forget(state.activeSessionId);
+		expect(signal?.aborted).toBe(true);
+		await vi.advanceTimersByTimeAsync(2 * REFRESH_MS);
+		expect(generate).toHaveBeenCalledOnce();
+		expect(state.summaryState).toBeUndefined();
+		await summarizer.stop();
+	});
+
+	test("finalizes after a working change was deferred, and reports terminal errors locally", async () => {
+		vi.useFakeTimers();
+		const state = makeState();
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the request", taskState: "completed" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		Object.assign(state.runtime.session, { isSessionActive: true });
+		state.runtime.session.messages[1] = { role: "user", content: "Another request", timestamp: 0 };
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledOnce();
+		Object.assign(state.runtime.session, { isSessionActive: false });
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		state.runtime.session.messages[1] = assistantMessage({
+			content: [],
+			stopReason: "error",
+			errorMessage: "Invalid request",
+		});
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(state.summaryState).toMatchObject({
+			summary: "Model request failed: Invalid request",
+			taskState: "needs_input",
+		});
+		await summarizer.stop();
+	});
+
+	test("a replacement source does not inherit an unchanged-input skip or minimum interval", async () => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the request" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		vi.spyOn(state.runtime.session.sessionManager, "getSessionId").mockReturnValue("replacement");
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		expect(generate).toHaveBeenCalledTimes(2);
+		expect(generate.mock.calls.map((call) => call[0].sessionId)).toEqual(["session-1", "replacement"]);
+		await summarizer.stop();
+	});
+
+	test.each(["stop", "forget"] as const)("%s cancels a minimum-interval deferred refresh", async (action) => {
+		vi.useFakeTimers();
+		const state = makeState({ working: true });
+		const generate = vi.fn().mockResolvedValue({ summary: "Reviewed the request" });
+		const summarizer = new DaemonSessionSummarizer(() => [], undefined, generate);
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		state.runtime.session.messages[1] = { role: "user", content: "Changed request", timestamp: 0 };
+		summarizer.notifyActivity(state);
+		await vi.advanceTimersByTimeAsync(SETTLE_MS);
+		if (action === "stop") await summarizer.stop();
+		else await summarizer.forget(state.activeSessionId);
+		await vi.advanceTimersByTimeAsync(REFRESH_MS);
+		expect(generate).toHaveBeenCalledOnce();
 		await summarizer.stop();
 	});
 

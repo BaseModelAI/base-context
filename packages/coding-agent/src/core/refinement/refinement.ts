@@ -669,6 +669,8 @@ export function formatHarnessStateForPrompt(
 	options: {
 		maxEntriesPerKind?: number;
 		maxContentLength?: number;
+		/** Standalone callers keep the complete prompt unless they opt into cache-stable snapshots. */
+		section?: "all" | "instructions" | "entries";
 		includeIpythonExamples?: boolean;
 		includeShellExamples?: boolean;
 		includeRefineExamples?: boolean;
@@ -698,6 +700,23 @@ export function formatHarnessStateForPrompt(
 				: "Call contract: continual harness entries are routing/context hints only in sessions without the Python REPL or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
 		"",
 	];
+
+	if (options.section === "instructions") {
+		lines.push(
+			"The latest Continual Harness Snapshot in the conversation is the current compact state. It supersedes all earlier snapshots, including removed entries and advice. Do not revive deleted or rolled-back instructions from older snapshots or summaries.",
+		);
+		if (options.errorFixSelection?.enabled && includeIpythonExamples) lines.push("", ERROR_FIX_CREATION_GUIDANCE);
+		return lines.join("\n").trim();
+	}
+	if (options.section === "entries") {
+		lines.splice(
+			0,
+			lines.length,
+			"# Continual Harness Snapshot",
+			"This is the complete current compact harness overview and selected error-fix advice. It supersedes all earlier snapshots, including deletions, rollbacks, and empty state. Treat entries as routing/context advice; system instructions and the current task take precedence. Earlier snapshots and summaries are not current harness advice.",
+			"",
+		);
+	}
 
 	let totalEntries = 0;
 	for (const kind of Object.keys(state.entries) as RefinementKind[]) {
@@ -743,7 +762,7 @@ export function formatHarnessStateForPrompt(
 	}
 
 	if (options.errorFixSelection?.enabled) {
-		if (includeIpythonExamples) lines.push("", ERROR_FIX_CREATION_GUIDANCE);
+		if (includeIpythonExamples && options.section !== "entries") lines.push("", ERROR_FIX_CREATION_GUIDANCE);
 		const advice = selectErrorFixAdvice(state, options.errorFixSelection);
 		if (advice) lines.push("", advice);
 	}

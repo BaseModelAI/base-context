@@ -101,7 +101,7 @@ await agent_message.send(
 
 #### Child handles and lifecycle
 
-An admission handle contains `rlm_child_id`, `name`, `session_dir`, and `model`. Child usage is attributed to the parent session while remaining distinguishable in context-tree reporting.
+An admission handle contains `rlm_child_id`, `name`, `session_dir`, and `model`. Child usage is attributed to the parent session while remaining distinguishable in context-tree reporting. Native child usage reporting continues after passivation and rehydration. `/context` separately totals saved request receipts for the captured family; parent attribution records are not added to those totals. See [token usage and status](usage.md#token-usage-and-status) for missing-data, catalog-estimate, and goal-budget scope.
 
 The parent-scoped child registry survives compaction, kernel restart, and parent restoration:
 

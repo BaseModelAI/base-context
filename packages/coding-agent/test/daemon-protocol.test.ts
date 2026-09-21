@@ -12,6 +12,7 @@ import {
 	DAEMON_OUTBOUND_COMPATIBILITY,
 	DAEMON_PROTOCOL_INFO,
 	DAEMON_PROTOCOL_VERSION,
+	DAEMON_RESPONSE_FIELD_COMPATIBILITY,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
 	DAEMON_SESSION_EVENT_FIELD_COMPATIBILITY,
@@ -81,9 +82,9 @@ describe("daemon protocol helpers", () => {
 
 	it("advertises optional agent results without raising startup requirements", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
-		expect(DAEMON_SCHEMA_REVISION).toBe(49);
+		expect(DAEMON_SCHEMA_REVISION).toBe(50);
 		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-subagent-capacity`,
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-context-request-usage`,
 		);
 		const command: DaemonCommand = {
 			type: "send_result",
@@ -105,6 +106,32 @@ describe("daemon protocol helpers", () => {
 		expect(meetsDaemonCommandCompatibility({ ...currentHello, serverCapabilities: [] }, compatibility)).toBe(false);
 		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
+		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(49);
+	});
+
+	it("keeps context request usage optional for both old clients and old daemons", () => {
+		const field = DAEMON_RESPONSE_FIELD_COMPATIBILITY.get_context_tree.ownRequestUsage;
+		expect(field).toEqual({ minProtocol: 13, minSchemaRevision: 50, capability: "context_request_usage" });
+		const current = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES,
+		};
+		const old = {
+			...current,
+			schemaRevision: 49,
+			serverCapabilities: current.serverCapabilities.filter((capability) => capability !== "context_request_usage"),
+		};
+		// A new reader must fall back on an old daemon, without making startup stricter.
+		expect(meetsDaemonCommandCompatibility(old, field)).toBe(false);
+		expect(meetsDaemonCommandCompatibility(current, field)).toBe(true);
+		expect(meetsDaemonCommandCompatibility({ ...current, serverCapabilities: [] }, field)).toBe(false);
+		const legacyCommand = { type: "get_context_tree", activeSessionId: "active" } as const;
+		const requirements = getDaemonCommandCompatibilities(legacyCommand);
+		// An old client's unchanged command remains accepted by a new daemon.
+		expect(requirements.every((requirement) => meetsDaemonCommandCompatibility(current, requirement))).toBe(true);
+		expect(requirements.every((requirement) => meetsDaemonCommandCompatibility(old, requirement))).toBe(true);
+		expect(requirements).not.toContainEqual(field);
 		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(49);
 	});
 

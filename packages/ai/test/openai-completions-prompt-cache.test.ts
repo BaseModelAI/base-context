@@ -3,75 +3,49 @@ import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import type { Model } from "../src/types.js";
 
-interface FakeOpenAIClientOptions {
-	apiKey: string;
-	baseURL: string;
-	dangerouslyAllowBrowser: boolean;
-	defaultHeaders?: Record<string, string>;
-}
-
 interface CapturedCompletionsPayload {
 	prompt_cache_key?: string;
 	prompt_cache_retention?: "24h" | "in-memory" | null;
 }
 
-const mockState = vi.hoisted(() => ({
+const mockState = {
 	lastParams: undefined as CapturedCompletionsPayload | undefined,
-	lastClientOptions: undefined as FakeOpenAIClientOptions | undefined,
-}));
-
-vi.mock("openai", () => {
-	class FakeOpenAI {
-		chat = {
-			completions: {
-				create: (params: CapturedCompletionsPayload) => {
-					mockState.lastParams = params;
-					const stream = {
-						async *[Symbol.asyncIterator]() {
-							yield {
-								choices: [{ delta: {}, finish_reason: "stop" }],
-								usage: {
-									prompt_tokens: 1,
-									completion_tokens: 1,
-									prompt_tokens_details: { cached_tokens: 0 },
-									completion_tokens_details: { reasoning_tokens: 0 },
-								},
-							};
-						},
-					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
-					promise.withResponse = async () => ({
-						data: stream,
-						response: { status: 200, headers: new Headers() },
-					});
-					return promise;
-				},
-			},
-		};
-
-		constructor(options: FakeOpenAIClientOptions) {
-			mockState.lastClientOptions = options;
-		}
-	}
-
-	return { default: FakeOpenAI };
-});
+	lastHeaders: {} as Record<string, string>,
+};
 
 describe("openai-completions prompt caching", () => {
 	const originalEnv = process.env.BASE_CONTEXT_CACHE_RETENTION;
 
 	beforeEach(() => {
 		mockState.lastParams = undefined;
-		mockState.lastClientOptions = undefined;
+		mockState.lastHeaders = {};
 		delete process.env.BASE_CONTEXT_CACHE_RETENTION;
+		// Exercise the actual SDK and owned-signal wrapper; replace only the transport.
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+				mockState.lastParams = JSON.parse(String(init?.body)) as CapturedCompletionsPayload;
+				mockState.lastHeaders = Object.fromEntries(new Headers(init?.headers));
+				expect(init?.signal).toBeInstanceOf(AbortSignal);
+				const chunk = {
+					id: "chatcmpl-cache-fixture",
+					choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+					usage: {
+						prompt_tokens: 1,
+						completion_tokens: 1,
+						prompt_tokens_details: { cached_tokens: 0 },
+						completion_tokens_details: { reasoning_tokens: 0 },
+					},
+				};
+				return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+					headers: { "content-type": "text/event-stream" },
+				});
+			}),
+		);
 	});
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		if (originalEnv === undefined) {
 			delete process.env.BASE_CONTEXT_CACHE_RETENTION;
 		} else {
@@ -96,7 +70,7 @@ describe("openai-completions prompt caching", () => {
 		},
 		model: Model<"openai-completions"> = createModel(),
 	) {
-		await streamOpenAICompletions(
+		const response = await streamOpenAICompletions(
 			model,
 			{
 				systemPrompt: "sys",
@@ -104,10 +78,11 @@ describe("openai-completions prompt caching", () => {
 			},
 			{ apiKey: "test-key", ...options },
 		).result();
+		expect(response.stopReason, response.errorMessage).toBe("stop");
 
 		return {
 			payload: mockState.lastParams,
-			headers: mockState.lastClientOptions?.defaultHeaders ?? {},
+			headers: mockState.lastHeaders,
 		};
 	}
 

@@ -8,6 +8,7 @@ import { exportHistoryLimits } from "./export-html/history.js";
 import type { ContextUsage } from "./extensions/index.js";
 import type { IndexedSourceEvent, ParentPathCursor } from "./history-index.js";
 import type { SourceSnapshotRef } from "./request-events.js";
+import { type OwnRequestUsage, RequestUsageAccumulator } from "./request-usage.js";
 import type { SessionHistoryReadLimits } from "./session-history-index.js";
 import { readCapturedSessionJournal } from "./session-journal-reader.js";
 import {
@@ -34,6 +35,8 @@ export interface ContextTreeNode {
 	model?: { provider: string; id: string };
 	ownUsage: Usage;
 	totalUsage: Usage;
+	/** Existing generation receipts for this session's captured source, never child aggregates. */
+	ownRequestUsage?: OwnRequestUsage;
 	contextUsage?: ContextUsage;
 	children: ContextTreeNode[];
 }
@@ -179,6 +182,13 @@ export function computeOwnAndTotalUsage(
 	return { ownUsage, totalUsage };
 }
 
+interface ContextTreeUsage {
+	ownUsage: Usage;
+	totalUsage: Usage;
+	ownRequestUsage?: OwnRequestUsage;
+	hasPostCompactionUsage?: boolean;
+}
+
 /** Complete bounded snapshot of an explicitly resident Manager, never an index-error fallback.
  * This synchronous reduction runs in the pre-await live-tree capture walk. It never
  * retains a decoded resident snapshot while native/disk work waits for a slot.
@@ -187,8 +197,11 @@ export function readResidentContextTreeUsage(
 	manager: SessionManager,
 	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
 	availabilityMaxSourceBytes?: number,
-): { ownUsage: Usage; totalUsage: Usage; hasPostCompactionUsage?: boolean } {
+): ContextTreeUsage {
 	const snapshot = manager.materializeResidentHistory(limits);
+	const receipts = new RequestUsageAccumulator(manager.getSessionId());
+	for (const entry of snapshot.entries) if (entry.type === "request") receipts.add(entry.request);
+	const ownRequestUsage = receipts.finish();
 	const branch = branchEntries(snapshot.entries, snapshot.leafId, availabilityMaxSourceBytes !== undefined);
 	if (availabilityMaxSourceBytes !== undefined) {
 		if (!Number.isSafeInteger(availabilityMaxSourceBytes) || availabilityMaxSourceBytes <= 0)
@@ -201,6 +214,7 @@ export function readResidentContextTreeUsage(
 	}
 	return {
 		...computeOwnAndTotalUsage(branch, snapshot.entries),
+		...(ownRequestUsage ? { ownRequestUsage } : {}),
 		...(availabilityMaxSourceBytes === undefined ? {} : { hasPostCompactionUsage: hasPostCompactionUsage(branch) }),
 	};
 }
@@ -220,9 +234,7 @@ export async function readContextTreeUsage(
 	limits: SessionHistoryReadLimits = { maxEntries: 16_384, maxSourceBytes: 64 * 1024 * 1024 },
 	request?: ContextTreeRequest,
 	availabilityMaxSourceBytes?: number,
-): Promise<
-	{ source: SourceSnapshotRef; ownUsage: Usage; totalUsage: Usage; hasPostCompactionUsage?: boolean } | undefined
-> {
+): Promise<(ContextTreeUsage & { source: SourceSnapshotRef }) | undefined> {
 	if (!manager.supportsCapturedHistoryReads()) return undefined;
 	const sourceLimits = request?.limits ?? limits;
 	const capturedLimits = { maxEntries: sourceLimits.maxEntries, maxSourceBytes: sourceLimits.maxSourceBytes };
@@ -233,6 +245,9 @@ export async function readContextTreeUsage(
 		request?.retainMetadata(history.source);
 		const reduce = async () => {
 			const allEntries: SessionEntry[] = [];
+			let receipts: RequestUsageAccumulator | undefined = new RequestUsageAccumulator(history.source.sessionId);
+			let requestEntries = 0;
+			let requestBytes = 0;
 			let sourceBytes = 0;
 			let after = 0;
 			for (;;) {
@@ -240,6 +255,22 @@ export async function readContextTreeUsage(
 				if (page.indexedThrough < history.source.sourceSequence)
 					throw new Error("Captured history has incomplete index coverage");
 				for (const reference of page.events) {
+					if (reference.kind === "request" && receipts) {
+						requestEntries++;
+						requestBytes += reference.locator.length;
+						if (requestEntries > capturedLimits.maxEntries || requestBytes > capturedLimits.maxSourceBytes) {
+							receipts = undefined;
+						} else {
+							try {
+								const hydrated = await history.hydrateEntry(reference.id, reference.locator.length);
+								if (hydrated?.entry.type !== "request") receipts = undefined;
+								else receipts.add(hydrated.entry.request);
+							} catch {
+								// Optional accounting metadata must not prevent the context overview.
+								receipts = undefined;
+							}
+						}
+					}
 					if (!isContextTreeUsageReference(reference)) continue;
 					if (allEntries.length >= capturedLimits.maxEntries) throw new Error("History entry budget exceeded");
 					if (sourceBytes + reference.locator.length > capturedLimits.maxSourceBytes)
@@ -286,8 +317,10 @@ export async function readContextTreeUsage(
 					available = calculateContextTokens(assistant.message.usage) > 0;
 				}
 			}
+			const ownRequestUsage = receipts?.finish();
 			const usage = {
 				...computeOwnAndTotalUsage(branch, allEntries),
+				...(ownRequestUsage ? { ownRequestUsage } : {}),
 				...(available === undefined ? {} : { hasPostCompactionUsage: available }),
 			};
 			request?.retainMetadata(usage);
@@ -477,11 +510,19 @@ function listChildSessionDirs(rlmSessionDir: string, request: ContextTreeRequest
 async function readContextTreeProjectionFromDisk(
 	sessionFile: string,
 	request: ContextTreeRequest,
-): Promise<{ entries: SessionEntry[]; leafId: string | null; hasSourceLeaf: boolean }> {
+): Promise<{
+	entries: SessionEntry[];
+	leafId: string | null;
+	hasSourceLeaf: boolean;
+	ownRequestUsage?: OwnRequestUsage;
+}> {
 	const entries: SessionEntry[] = [];
 	const hiddenParents = new Map<string, string | null>();
 	let leafId: string | null = null;
 	let hasHeader = false;
+	let receipts: RequestUsageAccumulator | undefined;
+	let requestEntries = 0;
+	let requestBytes = 0;
 	let sourceBytes = 0;
 	let metadataBytes = 0;
 	try {
@@ -494,6 +535,14 @@ async function readContextTreeProjectionFromDisk(
 				if (entry.type !== "session" || typeof entry.id !== "string")
 					throw new Error("Session source has no valid header");
 				hasHeader = true;
+				receipts = new RequestUsageAccumulator(entry.id);
+			}
+			if (entry.type === "request" && receipts) {
+				requestEntries++;
+				requestBytes += record.source?.locator.length ?? Buffer.byteLength(record.json) + 1;
+				if (requestEntries > request.limits.maxEntries || requestBytes > request.limits.maxSourceBytes)
+					receipts = undefined;
+				else receipts.add(entry.request);
 			}
 			if (entry.type !== "session") leafId = entry.id;
 			if (entry.type === "request" || entry.type === "tool_intent") {
@@ -523,7 +572,8 @@ async function readContextTreeProjectionFromDisk(
 		const hasSourceLeaf = leafId !== null;
 		leafId = visibleParent(leafId);
 		applyChildUsageAttributions(entries);
-		return { entries, leafId, hasSourceLeaf };
+		const ownRequestUsage = receipts?.finish();
+		return { entries, leafId, hasSourceLeaf, ...(ownRequestUsage ? { ownRequestUsage } : {}) };
 	} finally {
 		request.releaseMetadata(metadataBytes);
 	}
@@ -543,7 +593,12 @@ async function readContextTreeChildNodeFromDisk(
 	request: ContextTreeRequest,
 	identity?: Pick<ContextTreeNode, "id" | "label" | "status">,
 ): Promise<ContextTreeNode | undefined> {
-	const { entries: allEntries, leafId, hasSourceLeaf } = await readContextTreeProjectionFromDisk(sessionFile, request);
+	const {
+		entries: allEntries,
+		leafId,
+		hasSourceLeaf,
+		ownRequestUsage,
+	} = await readContextTreeProjectionFromDisk(sessionFile, request);
 	const branch = branchEntries(allEntries, leafId);
 	if (branch.length === 0 && !hasSourceLeaf) {
 		return undefined;
@@ -579,10 +634,13 @@ async function readContextTreeChildNodeFromDisk(
 		model,
 		ownUsage,
 		totalUsage,
+		...(ownRequestUsage ? { ownRequestUsage } : {}),
 		contextUsage: computeContextUsageFromEntries(allEntries, branch, contextWindow),
 	};
 	// A registered run's identity was already admitted by its live parent.
-	request.retainMetadata(identity ? { model, ownUsage, totalUsage, contextUsage: metadata.contextUsage } : metadata);
+	request.retainMetadata(
+		identity ? { model, ownUsage, totalUsage, ownRequestUsage, contextUsage: metadata.contextUsage } : metadata,
+	);
 	return { ...metadata, children: [] };
 }
 

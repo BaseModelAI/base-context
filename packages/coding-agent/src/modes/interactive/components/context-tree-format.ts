@@ -2,6 +2,7 @@ import type { Usage } from "@ponythewhite/base-context-ai";
 import { truncateToWidth, visibleWidth } from "@ponythewhite/base-context-tui";
 import type { ContextTreeNode } from "../../../core/context-tree.js";
 import type { ContextUsage } from "../../../core/extensions/index.js";
+import { addRequestUsageTotals, emptyRequestUsageTotals } from "../../../core/request-usage.js";
 import { addAssistantUsage, emptyUsage } from "../../../core/usage.js";
 import { formatTokenCount } from "../agent-activity.js";
 import { theme } from "../theme/theme.js";
@@ -104,6 +105,56 @@ function sumOwnUsage(root: ContextTreeNode): Usage {
 	return total;
 }
 
+const GOAL_SCOPE =
+	"Goal budget: root successful main uncached input + output only; excludes cache, children and auxiliary requests";
+
+function formatReceiptContextTree(root: ContextTreeNode, width: number): string {
+	const rows = flattenContextTree(root);
+	const total = emptyRequestUsageTotals();
+	const seen = new Set<string>();
+	let missingNodes = 0;
+	const lines = [theme.bold("Context"), "", "Generation receipts: captured sources, known usage only", ""];
+	for (const { node, prefix } of rows) {
+		const usage = node.ownRequestUsage;
+		const label = truncateToWidth(`${prefix}${node.label}`, Math.max(16, width - 45), "...");
+		if (!usage) {
+			missingNodes++;
+			lines.push(`${statusIcon(node.status)} ${label}: request usage unknown`);
+		} else if (seen.has(usage.sessionId)) {
+			lines.push(`${statusIcon(node.status)} ${label}: shared source (counted once)`);
+		} else {
+			seen.add(usage.sessionId);
+			addRequestUsageTotals(total, usage.total);
+			lines.push(
+				`${statusIcon(node.status)} ${label}: ${formatTokenCount(usage.total.processedTokens)} tokens · ${formatCost(usage.total.catalogEstimateUsd)} est.`,
+			);
+			for (const [purpose, bucket] of Object.entries(usage.byPurpose)) {
+				lines.push(
+					`  ${purpose}: ${bucket.processedTokens.toLocaleString()} tokens · $${bucket.catalogEstimateUsd.toFixed(4)} est. · ${bucket.settledAttempts} settled`,
+				);
+			}
+		}
+		if (node.contextUsage) lines.push(`  Context: ${formatContextColumn(node.contextUsage, node.id === "root")}`);
+	}
+	lines.push("", theme.bold("Captured family — known generation usage"));
+	lines.push(`Sessions with receipts: ${seen.size}; request usage unavailable: ${missingNodes}`);
+	lines.push(`Uncached input: ${total.input.toLocaleString()}`);
+	lines.push(`Input total (including cache): ${total.inputTotal.toLocaleString()}`);
+	lines.push(`Cache read: ${total.cacheRead.toLocaleString()}; cache write: ${total.cacheWrite.toLocaleString()}`);
+	lines.push(`Output: ${total.output.toLocaleString()}`);
+	lines.push(`Processed total: ${total.processedTokens.toLocaleString()}`);
+	lines.push(`Catalog estimate (unvalidated rates, not an invoice): $${total.catalogEstimateUsd.toFixed(4)}`);
+	lines.push(
+		`Unknown usage: ${total.missingUsageAttempts} missing, ${total.partialUsageAttempts} partial, ${total.unsettledAttempts} unsettled attempts; ${total.unpricedAttempts} settled attempts unpriced`,
+	);
+	lines.push(
+		"Missing fields are not zero. Totals exclude unavailable sessions and non-generation token-count requests.",
+	);
+	lines.push("Captured sources are not a guarantee of complete historical family usage.");
+	lines.push("", GOAL_SCOPE);
+	return lines.join("\n");
+}
+
 /**
  * Render the /context overview: a tree with one row per agent showing its own
  * tokens and cost (descendants excluded, so columns add up) plus per-agent
@@ -111,6 +162,7 @@ function sumOwnUsage(root: ContextTreeNode): Usage {
  */
 export function formatContextTree(root: ContextTreeNode, width: number): string {
 	const rows = flattenContextTree(root);
+	if (rows.some(({ node }) => node.ownRequestUsage)) return formatReceiptContextTree(root, width);
 
 	const tokenCells = rows.map((row) => formatTokenCount(spentTokens(row.node.ownUsage)));
 	const costCells = rows.map((row) => formatCost(row.node.ownUsage.cost.total));
@@ -129,6 +181,9 @@ export function formatContextTree(root: ContextTreeNode, width: number): string 
 
 	const lines: string[] = [];
 	lines.push(theme.bold("Context"));
+	lines.push("");
+	lines.push("Legacy conversation projection — request receipts unavailable; auxiliary usage may be missing");
+	lines.push("Costs below are catalog estimates, not invoices");
 	lines.push("");
 	if (root.model) {
 		lines.push(`${theme.fg("dim", "Model:")} ${root.model.provider}/${root.model.id}`);
@@ -196,5 +251,6 @@ export function formatContextTree(root: ContextTreeNode, width: number): string 
 		}
 	}
 
+	lines.push("", GOAL_SCOPE);
 	return lines.join("\n");
 }
