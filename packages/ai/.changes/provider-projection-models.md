@@ -1,0 +1,1 @@
+- Added GPT-6 Sol and GPT-6 Luna to the OpenAI API and Codex subscription model pickers with provider-specific reasoning and context metadata.

@@ -89,6 +89,8 @@ ${data}`,
 /** An explicit public window, not replacement text for a native signature or opaque item. */
 export function renderPublicHistory(message: AgentMessage, entryId: string, maxBytes: number): AgentMessage {
 	if (message.role !== "assistant" && message.role !== "toolResult") return message;
+	if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted"))
+		return message;
 	const content: unknown[] = [];
 	for (const part of message.content) {
 		switch (part.type) {

@@ -35,6 +35,23 @@ An OpenAI API key belongs to the separate `openai` provider; it is not required 
 
 The SDK also offers an optional, explicitly injected read-only Codex backend for existing credentials. Only that mode disables login, refresh, credential writes, and API-key fallback. It does not restrict normal interactive subscription login. See [SDK authentication](sdk.md#api-keys-and-oauth).
 
+### GPT-6 Sol and Luna
+
+Both `gpt-6-sol` and `gpt-6-luna` are listed under these separate providers:
+
+| Provider | Authentication | Route | Catalog context capacity |
+|----------|----------------|-------|--------------------------|
+| `openai` | OpenAI API key | `openai-responses`, `https://api.openai.com/v1/responses` | 1,050,000 tokens |
+| `openai-codex` | ChatGPT/Codex subscription OAuth | `openai-codex-responses`, `https://chatgpt.com/backend-api/codex/responses` | 872,000 tokens |
+
+The official Codex catalog specifies a 272,000-token **client default** and an 872,000-token **maximum configuration override** for both models. Base Context uses that documented maximum as catalog capacity, without importing Codex's compaction percentages. The API model cards specify 1,050,000 context tokens, 922,000 maximum input tokens, and 128,000 maximum output tokens. All four catalog entries use the nominal 128,000 output ceiling; a separate Codex account/backend output limit has not been verified. Both accept text and images and produce text.
+
+API reasoning levels are `off` (sent as `none`), `low`, `medium`, `high`, `xhigh`, and `max`. The Codex entries expose `low` through `max`, without `off` or `minimal`. Codex's Ultra option is client-side task delegation, not an additional Base Context reasoning level.
+
+Catalog costs are flat Standard API-rate estimates. Long-context and service-tier premiums are not modeled by these entries. Codex costs are API-equivalent estimates, not subscription charges or invoices. Model availability depends on account, workspace, client, and rollout; live account access has not been verified.
+
+Official sources: [Sol model card](https://developers.openai.com/api/docs/models/gpt-6-sol), [Luna model card](https://developers.openai.com/api/docs/models/gpt-6-luna), [API pricing](https://developers.openai.com/api/docs/pricing), [Codex models](https://developers.openai.com/codex/models), [Codex catalog](https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json), and [context-field definitions](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/openai_models.rs).
+
 ## API Keys
 
 ### Environment Variables or Auth File

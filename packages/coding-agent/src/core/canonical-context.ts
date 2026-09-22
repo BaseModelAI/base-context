@@ -224,6 +224,8 @@ export function preparePublicContextWindow(
 	const replacements: { messageIndex: number; text: string }[] = [];
 	for (const [index, message] of captured.entries()) {
 		if (index < firstMessageIndex || (message.role !== "assistant" && message.role !== "toolResult")) continue;
+		if (message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted"))
+			continue;
 		// Public v1 has no media representation. Do not disturb an otherwise valid native request.
 		if (message.content.some((part) => !["text", "toolCall", "thinking"].includes(part.type))) return;
 		const reference = references[index];
@@ -1455,6 +1457,13 @@ export class CanonicalContextCompiler {
 					...(actual ? { result: { id: actual.id, sequence: actual.sequence, revision: actual.revision } } : {}),
 				});
 			}
+			// Older summaries can retain an absent-call plan for a failed, provider-filtered reply.
+			// Validate its captured absence above, but keep that reply only in canonical history.
+			if (
+				(candidate.message.stopReason === "error" || candidate.message.stopReason === "aborted") &&
+				calls.every((call) => call.admission === "absent")
+			)
+				continue;
 			toolContinuations.push({ assistantEntryId: candidate.reference.ref.entryId, calls });
 			pendingPublicMessageGroups.push(members.sort((left, right) => left - right));
 		}

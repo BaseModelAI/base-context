@@ -138,6 +138,8 @@ export function bindMessageReplayUnits(
 		}
 		if (message.role === "assistant") {
 			closeCalls();
+			// Failed replies remain canonical barriers, but the provider never replays their partial calls.
+			if (message.stopReason === "error" || message.stopReason === "aborted") continue;
 			for (const part of message.content)
 				if (part.type === "toolCall") {
 					if (calls.has(part.id)) throw new Error("Ambiguous tool call in a replay group");

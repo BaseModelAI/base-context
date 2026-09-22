@@ -1924,7 +1924,55 @@ async function generateModels() {
 	writeModels(allModels);
 }
 
+// Official model cards: https://developers.openai.com/api/docs/models/gpt-6-sol
+// https://developers.openai.com/api/docs/models/gpt-6-luna
+function getOpenAiGpt6Models(): Model<Api>[] {
+	const apiModels = [
+		{
+			id: "gpt-6-sol",
+			name: "GPT-6 Sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			thinkingLevelMap: { off: "none", minimal: null, xhigh: "xhigh", max: "max" },
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			contextWindow: 1050000,
+			maxTokens: 128000,
+		},
+		{
+			id: "gpt-6-luna",
+			name: "GPT-6 Luna",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			thinkingLevelMap: { off: "none", minimal: null, xhigh: "xhigh", max: "max" },
+			input: ["text", "image"],
+			cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+			contextWindow: 1050000,
+			maxTokens: 128000,
+		},
+	] satisfies Model<"openai-responses">[];
+
+	// Codex metadata: https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
+	// Use its allowed context maximum, not its default window or compaction threshold.
+	// Costs remain API-equivalent estimates, not subscription charges.
+	const codexModels: Model<"openai-codex-responses">[] = apiModels.map((model) => ({
+		...model,
+		api: "openai-codex-responses",
+		provider: "openai-codex",
+		baseUrl: "https://chatgpt.com/backend-api",
+		contextWindow: 872000,
+		thinkingLevelMap: { ...model.thinkingLevelMap, off: null },
+	}));
+	return [...apiModels, ...codexModels];
+}
+
 function writeModels(allModels: Model<Api>[]): void {
+	// Pin these model cards for both live discovery and offline snapshot generation.
+	allModels = [...getOpenAiGpt6Models(), ...allModels];
 	// Group by provider and deduplicate by model ID
 	const providers: Record<string, Record<string, Model<Api>>> = {};
 	for (const model of allModels) {
