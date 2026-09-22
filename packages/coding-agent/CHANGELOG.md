@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.14] - 2026-09-22
+
+- Fixed compaction recovery after failed or interrupted partial tool calls, including resuming affected saved sessions without exposing failed replies to the provider.
+
 ## [1.0.13] - 2026-09-21
 
 - Changed the default automatic compaction target to 90% of the model context window, retaining required-context headroom, the output reserve, and earlier agent-requested compaction.

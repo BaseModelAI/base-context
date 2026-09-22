@@ -1,1 +1,0 @@
-- Fixed compaction recovery after failed or interrupted partial tool calls, including resuming affected saved sessions without exposing failed replies to the provider.
