@@ -1,8 +1,9 @@
 # Changelog
 
-## [1.0.14] - 2026-09-22
+## [1.0.14] - 2026-09-23
 
 - Added GPT-6 Sol and GPT-6 Luna to the OpenAI API and Codex subscription model pickers with provider-specific reasoning and context metadata.
+- Fixed nested Codex stream errors losing supplied messages and codes.
 
 ## [1.0.12] - 2026-09-21
 

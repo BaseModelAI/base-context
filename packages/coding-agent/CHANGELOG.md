@@ -1,8 +1,13 @@
 # Changelog
 
-## [1.0.14] - 2026-09-22
+## [1.0.14] - 2026-09-23
 
 - Fixed compaction recovery after failed or interrupted partial tool calls, including resuming affected saved sessions without exposing failed replies to the provider.
+- Fixed autonomous turn, token, and time limits being bypassed by native tool loops. Limits now stop at a completed tool-turn boundary before another request.
+- Fixed JSON print mode returning success for terminal assistant, session-command, or compaction failures. Capped autonomous runs no longer treat unrun quality gates as passed.
+- Documented headless error handling, client-owned versus resident lifetimes, stable session IDs, and goal/autonomous token-budget semantics.
+- Fixed unknown explicit CLI models falling back to a saved model during startup.
+- Fixed daemon sessions using `--session-dir` so custom transcript storage no longer fails RLM family ownership checks.
 
 ## [1.0.13] - 2026-09-21
 
