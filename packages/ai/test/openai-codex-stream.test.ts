@@ -248,7 +248,7 @@ describe("Codex websocket connection identity", () => {
 });
 
 describe("openai-codex streaming", () => {
-	it.each(["body transport", "permanent HTTP"] as const)(
+	it.each(["body transport", "permanent HTTP", "top-level API", "nested API"] as const)(
 		"preserves %s failure identity without restarting the provider stream",
 		async (failure) => {
 			process.env.BASE_CONTEXT_HOME = mkdtempSync(join(tmpdir(), "codex-recovery-"));
@@ -280,13 +280,21 @@ describe("openai-codex streaming", () => {
 					}
 				},
 			});
+			const apiError = { message: "Fixture request rejected", code: "invalid_request_error" };
+			const apiEvent =
+				failure === "nested API" ? { type: "error", error: apiError } : { type: "error", ...apiError };
 			const response =
 				failure === "body transport"
 					? new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })
-					: new Response(JSON.stringify({ error: { message: "Denied", code: "overloaded_error" } }), {
-							status: 401,
-							statusText: "Unauthorized",
-						});
+					: failure === "permanent HTTP"
+						? new Response(JSON.stringify({ error: { message: "Denied", code: "overloaded_error" } }), {
+								status: 401,
+								statusText: "Unauthorized",
+							})
+						: new Response(`data: ${JSON.stringify(apiEvent)}\n\n`, {
+								status: 200,
+								headers: { "content-type": "text/event-stream" },
+							});
 			const fetchMock = vi.fn(async () => response);
 			global.fetch = fetchMock as typeof fetch;
 			const stream = streamOpenAICodexResponses(
@@ -307,8 +315,11 @@ describe("openai-codex streaming", () => {
 				expect(events.filter((type) => type === "start")).toHaveLength(1);
 				expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Hello" }));
 				expect(details).toMatchObject({ kind: "transport", providerErrorType: "UND_ERR_SOCKET" });
-			} else {
+			} else if (failure === "permanent HTTP") {
 				expect(details).toMatchObject({ kind: "auth", status: 401 });
+			} else {
+				expect(result.errorMessage).toBe(`Codex error: ${apiError.message}`);
+				expect(details).toMatchObject({ kind: "invalid_request", providerErrorType: apiError.code });
 			}
 		},
 	);

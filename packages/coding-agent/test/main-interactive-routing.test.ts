@@ -322,6 +322,67 @@ describe("agents view command parsing", () => {
 });
 
 describe("runtime session option resolution", () => {
+	test.each(["known", "unknown"] as const)(
+		"resolves an explicit %s model without falling back to the saved model",
+		async (selection) => {
+			const harness = await createHarness();
+			const model = harness.getModel();
+			try {
+				const settings = SettingsManager.create(harness.tempDir, harness.tempDir);
+				settings.setDefaultModelAndProvider(model.provider, model.id);
+				await settings.flush();
+				const factory = createDefaultRuntimeFactory(
+					{
+						provider: model.provider,
+						model: selection === "known" ? model.id : "missing-cli-model",
+						agentDir: harness.tempDir,
+						noSkills: true,
+						noPromptTemplates: true,
+						noThemes: true,
+						noContextFiles: true,
+						noTools: true,
+					},
+					[
+						(pi) => {
+							pi.registerProvider(model.provider, {
+								baseUrl: model.baseUrl,
+								apiKey: "faux-key",
+								api: harness.faux.api,
+								models: [model],
+							});
+						},
+					],
+				);
+				const creation = factory({
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					sessionManager: SessionManager.inMemory(),
+					sessionStartEvent: { type: "session_start", reason: "startup" },
+				});
+				if (selection === "unknown") {
+					const error = await creation.then(
+						async (unexpected) => {
+							await unexpected.session.disposeAsync();
+							return undefined;
+						},
+						(error: unknown) => error,
+					);
+					expect(error).toBeInstanceOf(Error);
+					expect((error as Error).message).toContain(`Model "${model.provider}/missing-cli-model" not found`);
+				} else {
+					const created = await creation;
+					try {
+						expect(created.session.model).toMatchObject({ provider: model.provider, id: model.id });
+						expect(created.diagnostics.some((diagnostic) => diagnostic.type === "error")).toBe(false);
+					} finally {
+						await created.session.disposeAsync();
+					}
+				}
+			} finally {
+				await harness.cleanup();
+			}
+		},
+	);
 	test.each(["none", "saved", "same-provider", "other-provider"])(
 		"restores only an explicit persisted selection matching the requested provider (%s)",
 		async (selection) => {

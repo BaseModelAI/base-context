@@ -75,8 +75,21 @@ Followed by events as they occur:
 {"type":"agent_end","messages":[...]}
 ```
 
+## Completion and Errors
+
+JSON mode has the same exit-status rules as text print mode. Terminal assistant errors or aborts, failed session commands, failed compaction, and unfinished autonomous runs stopped by a limit return a nonzero exit status. A configured gate that has not run is not a passed gate. Error diagnostics go to stderr; stdout remains a JSON event stream. Recovered intermediate errors do not by themselves make the final result fail.
+
+An unknown explicit `--model` fails startup instead of falling back to the saved model. Startup failures can occur before the session header is emitted.
+
+Keep stderr and check the process exit status. An `agent_end` event means the agent loop ended, not that the task succeeded: inspect the terminal assistant's `stopReason` and `errorMessage`, and any gate or compaction failure. Codex error diagnostics retain supplied flat or nested error messages and codes; an empty provider error cannot reveal a cause the provider did not send.
+
+Record the first session header's `id` when launching a run. Use that session ID with lifecycle commands; neither cwd nor an operating-system process title uniquely identifies a session. See [Long-Running Agents](long-running-agents.md#daemon-backed-sessions) for client-owned versus resident lifetimes.
+
 ## Example
 
+Use `pipefail` so the filter does not hide a failing CLI exit status:
+
 ```bash
-base-context --mode json "List files" 2>/dev/null | jq -c 'select(.type == "message_end")'
+set -o pipefail
+base-context --mode json "List files" 2>run.err | jq -c 'select(.type == "message_end")'
 ```

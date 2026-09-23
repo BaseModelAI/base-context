@@ -154,6 +154,7 @@ import {
 	DAEMON_WORKER_INSTANCE_ID_ENV,
 	DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
+	DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV,
 	DAEMON_WORKER_ROLE_ENV,
 	DAEMON_WORKER_ROSTER_CAPABILITY,
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
@@ -571,6 +572,7 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 		(descriptor.pid ?? 0) > 0 &&
 		(descriptor.processStartId === undefined || typeof descriptor.processStartId === "string") &&
 		(descriptor.ownerClientId === undefined || typeof descriptor.ownerClientId === "string") &&
+		(descriptor.rlmLedgerSessionDir === undefined || typeof descriptor.rlmLedgerSessionDir === "string") &&
 		typeof descriptor.socketPath === "string" &&
 		typeof descriptor.authenticationToken === "string" &&
 		(descriptor.workerInstanceId === undefined || typeof descriptor.workerInstanceId === "string") &&
@@ -2072,7 +2074,9 @@ export class DaemonSupervisor {
 		}
 		const owner = this.rlmCapacityOwner(worker);
 		const journal = this.assertRlmJournalAdmission();
-		const scope = this.rlmJournalScope(worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir);
+		const scope = this.rlmJournalScope(
+			worker.descriptor.rlmLedgerSessionDir ?? worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir,
+		);
 		if (canonicalSessionPath(scope.journalPath) !== journal.ledgerPath) {
 			throw new Error("Worker RLM family is not owned by this supervisor");
 		}
@@ -2223,7 +2227,11 @@ export class DaemonSupervisor {
 					throw new Error("Worker authentication failed for RLM ledger mutation");
 				}
 				const owner = this.assertRlmJournalAdmission();
-				const scope = this.rlmJournalScope(worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir);
+				const scope = this.rlmJournalScope(
+					worker.descriptor.rlmLedgerSessionDir ??
+						worker.descriptor.sessionDir ??
+						this.defaultSessionConfig.sessionDir,
+				);
 				if (canonicalSessionPath(scope.journalPath) !== owner.ledgerPath) {
 					throw new Error("Worker RLM ledger family is not owned by this supervisor");
 				}
@@ -3108,12 +3116,12 @@ export class DaemonSupervisor {
 		if ("activeSessionId" in command) {
 			const match = await this.findWorkerForClient(client, command.activeSessionId);
 			cwd = match.summary.cwd;
-			sessionDir = this.defaultSessionConfig.sessionDir;
+			sessionDir = match.worker.descriptor.sessionDir ?? this.defaultSessionConfig.sessionDir;
 		} else {
 			cwd = resolve(command.cwd);
 			sessionDir = command.sessionDir;
 		}
-		const { agentDir, sessionsDir: ledgerSessionDir } = this.rlmJournalScope(sessionDir);
+		const { agentDir, sessionsDir: ledgerSessionDir } = this.rlmJournalScope();
 		const page = await this.catalog.list(cwd, sessionDir, { page: pageQuery, scope, agentDir, ledgerSessionDir });
 		return success(command.id, "list_saved_sessions", page);
 	}
@@ -3389,6 +3397,7 @@ export class DaemonSupervisor {
 		const orphanProcessJournalPath =
 			existing?.descriptor.orphanProcessJournalPath ?? join(this.descriptorDir, `${workerId}.orphans.jsonl`);
 		const launch = createCliSubprocessLaunchSpec(["--mode", "daemon", "--daemon-socket", socketPath]);
+		const rlmLedgerSessionDir = this.rlmJournalScope().sessionsDir;
 		const workerEnvironment = createCliSubprocessEnv({
 			...process.env,
 			...launchEnv,
@@ -3397,6 +3406,7 @@ export class DaemonSupervisor {
 			[DAEMON_WORKER_INSTANCE_ID_ENV]: workerInstanceId,
 			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
 			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
+			[DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV]: rlmLedgerSessionDir,
 			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
 			[DAEMON_WORKER_STARTUP_GATE_FD_ENV]: String(WORKER_STARTUP_GATE_FD),
 			[ORPHAN_PROCESS_JOURNAL_ENV]: orphanProcessJournalPath,
@@ -3469,6 +3479,7 @@ export class DaemonSupervisor {
 				rootActiveSessionId,
 				ownerClientId: existing?.descriptor.ownerClientId ?? ownerClientId,
 				sessionDir: createCommand.config?.sessionDir,
+				rlmLedgerSessionDir,
 				createdAt: existing?.descriptor.createdAt ?? now,
 				updatedAt: now,
 				lifecycle: "starting",

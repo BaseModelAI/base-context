@@ -96,6 +96,7 @@ import {
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
 	addAutonomousUsage,
+	autonomousRunLimitReason,
 	autonomousStatus,
 	createAutonomousRuntimeState,
 	nextAutonomousContinuation,
@@ -3596,6 +3597,8 @@ export class AgentSession {
 	}
 
 	private async _getTurnOutcome(context: GetTurnOutcomeContext, signal?: AbortSignal): Promise<AgentTurnOutcome> {
+		// Usage is recorded by message_end. Join it before admitting another native tool turn.
+		if (this._autonomousState.enabled) await this._agentEventQueue;
 		const sourceOwner = signal ? this._invocationCompactionOwner : this._captureCompactionOwner();
 		if (
 			!sourceOwner ||
@@ -3626,6 +3629,8 @@ export class AgentSession {
 		try {
 			if (await this._stopGoalContinuationForTerminalMessage(context.message, goalOwner)) return { kind: "finish" };
 			if (!current()) return { kind: "cancelled" };
+			if (this._autonomousState.enabled && autonomousRunLimitReason(this._autonomousState))
+				return { kind: "finish" };
 			try {
 				if (await this._accountGoalUsageForAssistantMessage(context.message, goalOwner)) {
 					this._assertGoalContinuationOwner(goalOwner);

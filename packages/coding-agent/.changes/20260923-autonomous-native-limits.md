@@ -1,0 +1,1 @@
+- Fixed autonomous turn, token, and time limits being bypassed by native tool loops. Limits now stop at a completed tool-turn boundary before another request.

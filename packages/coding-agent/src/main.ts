@@ -537,7 +537,7 @@ function buildSessionOptions(
 			diagnostics.push({ type: "warning", message: resolved.warning });
 		}
 		if (resolved.error) {
-			diagnostics.push({ type: "error", message: resolved.error });
+			throw new Error(resolved.error);
 		}
 		if (resolved.model) {
 			options.model = resolved.model;

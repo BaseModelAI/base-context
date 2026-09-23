@@ -119,27 +119,25 @@ async function runPrintModeWithConnectionInternal(
 		}
 
 		const autonomousStatus = await connection.waitForHeadlessCompletion();
-		if (mode === "text") {
-			const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
-			if (primary?.role === "assistant") {
-				if (primary.stopReason === "error" || primary.stopReason === "aborted") {
-					console.error(primary.errorMessage || `Request ${primary.stopReason}`);
-					exitCode = 1;
-				} else {
-					for (const content of primary.content) {
-						if (content.type === "text") {
-							writeRawStdout(`${content.text}\n`);
-						}
+		const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
+		if (primary?.role === "assistant") {
+			if (primary.stopReason === "error" || primary.stopReason === "aborted") {
+				console.error(primary.errorMessage || `Request ${primary.stopReason}`);
+				exitCode = 1;
+			} else if (mode === "text") {
+				for (const content of primary.content) {
+					if (content.type === "text") {
+						writeRawStdout(`${content.text}\n`);
 					}
 				}
-			} else if (primary) {
-				writeRawStdout(`${primary.content}\n`);
-				if (!primary.details.success || primary.details.severity === "error") exitCode = 1;
 			}
-			for (const outcome of compactionOutcomes) {
-				console.error(outcome.content);
-				if (outcome.details.outcome === "failed") exitCode = 1;
-			}
+		} else if (primary) {
+			if (mode === "text") writeRawStdout(`${primary.content}\n`);
+			if (!primary.details.success || primary.details.severity === "error") exitCode = 1;
+		}
+		for (const outcome of compactionOutcomes) {
+			if (mode === "text" || outcome.details.outcome === "failed") console.error(outcome.content);
+			if (outcome.details.outcome === "failed") exitCode = 1;
 		}
 
 		const autonomousLimit = autonomousLimitReason(autonomousStatus);
@@ -151,7 +149,12 @@ async function runPrintModeWithConnectionInternal(
 				`Autonomous quality gate still failing after attempt ${latestAutonomousGateAttempt(autonomousStatus)}/${autonomousStatus.gates.maxRetries}: ${autonomousStatus.lastGateFailure.exitText}${limitText}`,
 			);
 			exitCode = 1;
-		} else if (autonomousStatus.enabled && autonomousStatus.gates.commands.length === 0 && autonomousLimit) {
+		} else if (
+			autonomousStatus.enabled &&
+			autonomousLimit &&
+			(autonomousStatus.gates.commands.length === 0 ||
+				autonomousStatus.gates.commands.some((command) => autonomousStatus.gateAttempts[command] !== 0))
+		) {
 			console.error(
 				`Autonomous run stopped before terminal evidence; ${describeAutonomousLimit(autonomousStatus, autonomousLimit)}`,
 			);

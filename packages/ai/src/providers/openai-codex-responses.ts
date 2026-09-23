@@ -607,8 +607,9 @@ async function* mapCodexEvents(
 		}
 
 		if (type === "error") {
-			const code = (event as { code?: string }).code || "";
-			const message = (event as { message?: string }).message || "";
+			const error = event as { code?: string; message?: string; error?: { code?: string; message?: string } };
+			const code = error.code || error.error?.code || "";
+			const message = error.message || error.error?.message || "";
 			throw new CodexApiError(`Codex error: ${message || code || "Unknown error"}`, {
 				code: code || undefined,
 				payload: event,

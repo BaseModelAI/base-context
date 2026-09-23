@@ -1042,7 +1042,7 @@ describe("initial goal seeding from config", () => {
 		});
 
 		// Goal is persisted before first prompt
-		const branch = harness.sessionManager.getBranch();
+		const branch = await harness.sessionManager.readBranch();
 		const goalEntry = branch.find((e) => e.type === "custom" && e.customType === GOAL_STATE_CUSTOM_TYPE);
 		expect(goalEntry).toBeDefined();
 
@@ -1101,7 +1101,7 @@ describe("initial goal seeding from config", () => {
 		// Assert the reopened branch contains a thread_goal_state custom entry
 		// before constructing the new AgentSession. This proves the goal was
 		// persisted to disk.
-		const reopenedBranch = newSessionManager.getBranch();
+		const reopenedBranch = await newSessionManager.readBranch();
 		const goalEntries = reopenedBranch.filter(
 			(e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "thread_goal_state",
 		);
@@ -1234,10 +1234,10 @@ describe("initial goal seeding from config", () => {
 
 		// Simulate restart on the same session file
 		const newSession = await createRestartSession(harness);
-		const reopenedGoalEntry = newSession.sessionManager.getEntry(goalEntryId);
+		const reopenedGoalEntry = await newSession.sessionManager.readEntry(goalEntryId);
 		expect(reopenedGoalEntry).toMatchObject({ data: { tokensUsed: 7 } });
 		expect(reopenedGoalEntry).not.toHaveProperty("nativeOrigin");
-		expect(newSession.sessionManager.getEntryRetention(goalEntryId)).toBeUndefined();
+		expect(await newSession.sessionManager.readEntryRetention(goalEntryId)).toBeUndefined();
 
 		// Restore the latest native goal snapshot, not the original seed or new initialGoal.
 		expect(newSession.goalState.status).toBe("active");
@@ -1249,7 +1249,7 @@ describe("initial goal seeding from config", () => {
 
 		// The same real source imported as retained history must not activate that goal or reseed.
 		const retainedSession = await createRestartSession(harness, true);
-		expect(retainedSession.sessionManager.getEntryRetention(goalEntryId)).toBe("retained-import");
+		expect(await retainedSession.sessionManager.readEntryRetention(goalEntryId)).toBe("retained-import");
 		expect(retainedSession.goalState).toMatchObject({ active: false, status: "idle" });
 		expect(retainedSession.goalState.objective).toBeUndefined();
 		expect(retainedSession.getActiveToolNames()).not.toContain("ipython");

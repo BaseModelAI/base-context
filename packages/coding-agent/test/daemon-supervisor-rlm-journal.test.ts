@@ -46,7 +46,8 @@ function fixture() {
 			workerInstanceId: "worker-incarnation",
 			pid: 12345,
 			processStartId: "worker-start",
-			sessionDir,
+			sessionDir: "/mock/custom-transcripts",
+			rlmLedgerSessionDir: sessionDir,
 		},
 	};
 	const write = vi.fn(() => true);
@@ -101,7 +102,7 @@ describe("supervisor remote RLM journal", () => {
 		await expect(supervisor.handleCommand(client, { ...command, workerInstanceId: "stale" })).rejects.toThrow(
 			"authentication",
 		);
-		worker.descriptor.sessionDir = "/mock/other-family";
+		worker.descriptor.rlmLedgerSessionDir = "/mock/other-family";
 		await expect(supervisor.handleCommand(client, command)).rejects.toThrow("family");
 		expect(actor.mutate).toHaveBeenCalledTimes(1);
 		ack.resolve();

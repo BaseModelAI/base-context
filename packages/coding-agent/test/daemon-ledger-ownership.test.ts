@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
-import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV,
+	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 
 const rpc = vi.hoisted(() => ({ connect: vi.fn(), hello: vi.fn(), request: vi.fn(), close: vi.fn() }));
@@ -21,6 +24,7 @@ vi.mock("../src/modes/daemon/daemon-client.js", async (importOriginal) => ({
 vi.mock("../src/core/rlm-journal-owner.js", () => ({ RlmJournalOwner: { open: vi.fn() } }));
 
 type ModeLedger = {
+	rlmLedgerSessionsDir(): string;
 	openRlmJournalOwner(): Promise<void>;
 	rlmSpawnLedger(): RlmSpawnLedger;
 	closeRlmJournal(): Promise<void>;
@@ -65,6 +69,9 @@ describe("daemon ledger ownership", () => {
 
 	it("awaits the authenticated owner ack without a local writer and preserves ambiguous failure", async () => {
 		const worker = mode(true);
+		const ledgerSessionDir = join(directory, "supervisor-sessions");
+		vi.stubEnv(DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV, ledgerSessionDir);
+		expect(worker.rlmLedgerSessionsDir()).toBe(ledgerSessionDir);
 		const ack = deferred<DaemonResponse>();
 		rpc.request.mockReturnValueOnce(ack.promise);
 		const mutation = {

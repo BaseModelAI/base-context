@@ -46,7 +46,9 @@ The client can detach at any point. The resident worker continues to own the que
 
 Normal interactive sessions run in resident worker processes managed by a local supervisor. The worker owns the root session, its Python kernel, scheduled jobs, and RLM descendants.
 
-Closing the terminal UI detaches the client; it does not stop the worker. List and reconnect to active agents with:
+Closing the terminal UI detaches the client; it does not stop the resident worker. Print/JSON and RPC sessions are client-owned instead: losing their client connection triggers worker cleanup. ACP sessions are resident unless `--no-session` is used. A separate launcher or monitoring process can fail while its CLI child remains connected; that is not a client disconnect.
+
+List and reconnect to active agents with:
 
 ```bash
 base-context list
@@ -64,11 +66,15 @@ base-context doctor [--fix]          # Diagnose or repair service state
 base-context shutdown [--force]     # Stop all agents and services
 ```
 
+Use the session ID from the JSON stream header or the IDs in `base-context list --json` to track a run. Several sessions can share one cwd. The process title `base-context` identifies the program, not an individual session. `stop` reports an error for an unknown or ambiguous target; do not suppress all stop failures or infer worker death from a separate launcher's exit.
+
 Workers persist native-framed journals and use derived indexes. The default flat paths are `~/.base-context/sessions/<session-id>.jsonl` and `~/.base-context/session-artifacts/<session-id>/`. `BASE_CONTEXT_HOME` selects the product root; `BASE_CONTEXT_SESSION_DIR` can select a different absolute sessions directory, with artifacts under its parent's `session-artifacts/` directory.
 
 The `.jsonl` extension does not make a native journal an editable transcript. Use the asynchronous, bounded SessionManager APIs described in [Sessions](sessions.md#session-format), not `jq`, manual appends or text edits. Recovery uses the native owners and supported artifacts. Copying a journal alone does not restore a worker, Python process, live children or pending dispatch authority.
 
 Daemon workers are process-isolated for lifecycle and failure containment, not security-sandboxed. They normally run with the same operating-system permissions as the client.
+
+If a run must not create subagents, use the existing `/agents 0` control or the `rlmMaxSubagents: 0` setting. This blocks new admissions; it does not stop existing children. A prompt instruction alone is not a capability limit. Parent `message_end` usage describes parent responses, not all delegated work; inspect child usage separately. See [RLM](rlm.md) and [Settings](settings.md).
 
 ## Agent-to-Agent Communication
 
@@ -228,6 +234,15 @@ await goal.complete()
 
 Goal state records token usage, elapsed time, continuation count, and an optional explicit token budget. The harness keeps prompting an active goal after ordinary assistant turns; only `goal.complete()` marks successful completion. Creating a persistent goal is an explicit user or host action, not something the agent should infer from every task. Imported historical goal entries remain retained data; importing them does not reactivate the goal.
 
+Goal objectives are limited to 4,000 characters because they remain part of the ongoing task context. Keep the objective short and pass a longer brief as prompt input, for example:
+
+```bash
+base-context -p --goal "Complete the change described in BRIEF.md" \
+  --goal-token-budget 200000 @BRIEF.md
+```
+
+`--goal-token-budget` accompanies `--goal`; resuming a session alone restores the saved goal budget and usage. `/goal resume` does not reset an exhausted budget. To authorize more work after exhaustion, explicitly start a new goal with a new budget. Goal token usage counts `input + output`, not cached reads.
+
 ## Autonomous Mode
 
 Autonomous mode is a bounded host policy for runs where no human input is expected. Base Context adds follow-up continuations until configured quality gates pass or a continuation, turn, token, or wall-clock limit is reached.
@@ -250,7 +265,13 @@ base-context \
   "Implement and verify the requested change"
 ```
 
-Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Gate commands run before the session may finish; a failed gate returns its bounded output to the agent for another attempt. Base Context avoids rerunning the same failed gate when the workspace has not changed.
+Autonomous mode supports limits for continuations, assistant turns, tokens, and wall-clock duration. Defaults are 3 continuations, 12 turns, 80,000 tokens, and 30 minutes. Set explicit limits for longer jobs rather than relying on unbounded execution.
+
+The autonomous token counter is `input + output + cacheWrite`. It excludes `cacheRead`; provider `totalTokens` includes cached reads and is not the same budget or a monetary cost. An external launcher that sums `totalTokens` therefore applies a different limit.
+
+Turn, token, and time limits are checked at completed native tool-turn boundaries before another main-loop request. A running response or tool is allowed to finish, so usage or elapsed time can exceed the exact cap by that work. These limits are not process-kill timers and do not cancel every auxiliary lifecycle operation. `maxContinuations` counts host-injected prompts separately; the final permitted prompt can still execute its tool turns.
+
+Gate commands run before successful autonomous completion; a failed gate returns its bounded output to the agent for another attempt. Base Context avoids rerunning the same failed gate when the workspace has not changed. A work limit can stop a run before its gates execute. Headless mode returns nonzero in that case, rather than treating an unrun gate as success.
 
 Goals and autonomous mode are complementary but different:
 

@@ -1,0 +1,3 @@
+- Fixed JSON print mode returning success for terminal assistant, session-command, or compaction failures. Capped autonomous runs no longer treat unrun quality gates as passed.
+- Documented headless error handling, client-owned versus resident lifetimes, stable session IDs, and goal/autonomous token-budget semantics.
+- Fixed unknown explicit CLI models falling back to a saved model during startup.

@@ -1,0 +1,1 @@
+- Fixed daemon sessions using `--session-dir` so custom transcript storage no longer fails RLM family ownership checks.

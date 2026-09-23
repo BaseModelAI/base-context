@@ -20,6 +20,7 @@ import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/da
 import { DAEMON_PROTOCOL_INFO, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
+	DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV,
 	type DaemonWorkerDescriptor,
 	type DaemonWorkerFrameHeader,
 	isDaemonWorkerFrameHeader,
@@ -1493,6 +1494,95 @@ describe("daemon supervisor resident workers", () => {
 			replacement.close();
 		}
 	}, 90_000);
+
+	it("keeps custom transcript directories in the supervisor-owned RLM family", async () => {
+		const root = tempDir();
+		const agentDir = join(root, "agent");
+		const projectDir = join(root, "project");
+		const defaultDir = join(agentDir, "sessions");
+		const customDir = join(root, "custom-sessions");
+		const socketPath = join(tmpdir(), `bctx-custom-dir-${process.pid}-${randomUUID().slice(0, 8)}.sock`);
+		mkdirSync(projectDir, { recursive: true });
+		const supervisor = await spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		try {
+			for (const sessionDir of [defaultDir, customDir]) {
+				const source = trackSession(await SessionManager.create(projectDir, sessionDir));
+				await source.appendMessage({ role: "user", content: "custom directory fixture", timestamp: 1 });
+				const sessionFile = source.getSessionFile()!;
+				const artifactDir = source.getSessionArtifactDir()!;
+				await closeFixtureSessions();
+				const created = await client.request({
+					type: "create",
+					lifecycle: "client_owned",
+					sessionPath: sessionFile,
+					config: { cwd: projectDir, agentDir, sessionDir, noTools: true, noExtensions: true },
+					launchEnv: { [DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV]: join(root, "untrusted-scope") },
+				});
+				if (!created.success) throw new Error(created.error);
+				const summary = requireSummary(created.data);
+				if (!summary.workerPid) throw new Error("Missing custom directory worker pid");
+				workerPids.add(summary.workerPid);
+				expect(summary.sessionFile).toBe(sessionFile);
+				const activeSessionId = summary.activeSessionId ?? summary.id;
+				if (sessionDir === defaultDir) {
+					expect(await client.request({ type: "complete_owned_session", activeSessionId })).toMatchObject({
+						success: true,
+					});
+					continue;
+				}
+				const descriptor = readWorkerDescriptor(agentDir);
+				expect(descriptor).toMatchObject({ sessionDir: customDir, rlmLedgerSessionDir: defaultDir });
+				const childDir = join(artifactDir, "sub-child");
+				const child = trackSession(
+					await SessionManager.create(projectDir, childDir, { parentSession: sessionFile, rlmDepth: 1 }),
+				);
+				await child.appendMessage({ role: "user", content: "saved child fixture", timestamp: 2 });
+				const childFile = child.getSessionFile()!;
+				const childId = child.getSessionId();
+				await closeFixtureSessions();
+				expect(
+					await client.request({
+						type: "rlm_ledger_mutate",
+						workerToken: descriptor.authenticationToken,
+						workerInstanceId: descriptor.workerInstanceId!,
+						mutation: {
+							op: "spawn",
+							childId: "sub-child",
+							parent: sessionFile,
+							child: childFile,
+							depth: 1,
+							name: "child",
+						},
+					}),
+				).toMatchObject({ success: true });
+				expect(
+					await client.request({ type: "set_rlm_max_subagents", activeSessionId, maxSubagents: 2 }),
+				).toMatchObject({ success: true });
+				const resumed = await client.request({
+					type: "create",
+					lifecycle: "client_owned",
+					sessionPath: childFile,
+					config: { cwd: projectDir, agentDir, sessionDir: childDir, noTools: true, noExtensions: true },
+				});
+				if (!resumed.success) throw new Error(resumed.error);
+				const childSummary = requireSummary(resumed.data);
+				if (!childSummary.workerPid) throw new Error("Missing descendant worker pid");
+				workerPids.add(childSummary.workerPid);
+				expect(
+					await client.request({
+						type: "get_rlm_max_subagents_status",
+						activeSessionId: childSummary.activeSessionId ?? childSummary.id,
+					}),
+				).toMatchObject({ success: true, data: { maxSubagents: 2 } });
+				const saved = await client.request({ type: "list_saved_sessions", activeSessionId, scope: "current" });
+				expect(saved.success).toBe(true);
+				expect(JSON.stringify(saved)).toContain(childId);
+			}
+		} finally {
+			client.close();
+		}
+	}, 60_000);
 
 	it("hosts and adopts isolated worker processes", async () => {
 		const root = tempDir();

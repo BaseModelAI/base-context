@@ -13,6 +13,7 @@ export const DAEMON_WORKER_INSTANCE_ID_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKE
 export const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
 export const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
 export const DAEMON_WORKER_RECOVERY_JOURNAL_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
+export const DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER_RLM_LEDGER_SESSION_DIR";
 export const DAEMON_WORKER_STARTUP_GATE_FD_ENV = "BASE_CONTEXT_INTERNAL_DAEMON_WORKER_STARTUP_GATE_FD";
 export const DAEMON_WORKER_STARTUP_GATE_COMMIT = "start\n";
 export type DaemonWorkerLifecycle = "starting" | "ready" | "recovering" | "stopping" | "failed";
@@ -212,6 +213,8 @@ export interface DaemonWorkerDescriptor {
 	rootSessionId?: string;
 	sessionFile?: string;
 	sessionDir?: string;
+	/** Supervisor-assigned journal scope, independent of transcript storage. */
+	rlmLedgerSessionDir?: string;
 	createdAt: string;
 	updatedAt: string;
 	lifecycle: DaemonWorkerLifecycle;
@@ -254,6 +257,7 @@ export function durableDaemonWorkerDescriptor(descriptor: DaemonWorkerDescriptor
 		...(descriptor.rootSessionId !== undefined ? { rootSessionId: descriptor.rootSessionId } : {}),
 		...(descriptor.sessionFile !== undefined ? { sessionFile: descriptor.sessionFile } : {}),
 		...(sessionDir !== undefined ? { sessionDir } : {}),
+		...(descriptor.rlmLedgerSessionDir !== undefined ? { rlmLedgerSessionDir: descriptor.rlmLedgerSessionDir } : {}),
 		createdAt: descriptor.createdAt,
 		updatedAt: descriptor.updatedAt,
 		lifecycle: descriptor.lifecycle,

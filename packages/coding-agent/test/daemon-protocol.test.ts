@@ -47,6 +47,7 @@ describe("daemon protocol helpers", () => {
 			workerInstanceId: "instance-1",
 			rootActiveSessionId: "active",
 			sessionFile: "/sessions/root.jsonl",
+			rlmLedgerSessionDir: "/supervisor/sessions",
 			createdAt: "2026-01-01T00:00:00.000Z",
 			updatedAt: "2026-01-01T00:00:00.000Z",
 			lifecycle: "ready",
@@ -76,6 +77,7 @@ describe("daemon protocol helpers", () => {
 			workerInstanceId: "instance-1",
 			sessionFile: "/sessions/root.jsonl",
 			sessionDir: "/legacy/sessions",
+			rlmLedgerSessionDir: "/supervisor/sessions",
 		});
 		expect(JSON.stringify(durable)).not.toContain("secret-");
 	});

@@ -208,6 +208,7 @@ import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
+	DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV,
 	DAEMON_WORKER_ROLE_ENV,
 	DAEMON_WORKER_ROSTER_CAPABILITY,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
@@ -1001,7 +1002,8 @@ export class AgentDaemon {
 
 	/** Root sessions dir that keys this daemon's spawn ledger. */
 	private rlmLedgerSessionsDir(): string {
-		return this.options.defaultSessionConfig.sessionDir ?? getSessionsDir(this.agentDir);
+		const assigned = this.options.worker ? process.env[DAEMON_WORKER_RLM_LEDGER_SESSION_DIR_ENV] : undefined;
+		return assigned ?? this.options.defaultSessionConfig.sessionDir ?? getSessionsDir(this.agentDir);
 	}
 
 	private async openRlmJournalOwner(): Promise<void> {
@@ -4171,7 +4173,7 @@ export class AgentDaemon {
 						cwd,
 						sessionDir,
 						agentDir: this.agentDir,
-						ledgerSessionDir: sessionDir ?? this.rlmLedgerSessionsDir(),
+						ledgerSessionDir: this.rlmLedgerSessionsDir(),
 						scope: command.scope,
 					},
 					pageQuery,

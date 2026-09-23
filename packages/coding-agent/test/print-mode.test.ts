@@ -254,23 +254,27 @@ describe("runPrintMode", () => {
 		}
 	});
 
-	it("returns non-zero for failed session command results in text mode", async () => {
-		const result = createSessionSlashCommandResultMessage("Command failed: bad arguments", {
-			command: { name: "refine", args: "rollback", text: "/refine rollback" },
-			success: false,
-			severity: "error",
-			error: "bad arguments",
-		});
-		const runtimeHost = createRuntimeHost(result);
-		output.write.mockClear();
+	it.each(["text", "json"] as const)(
+		"returns non-zero for failed session command results in %s mode",
+		async (mode) => {
+			const result = createSessionSlashCommandResultMessage("Command failed: bad arguments", {
+				command: { name: "refine", args: "rollback", text: "/refine rollback" },
+				success: false,
+				severity: "error",
+				error: "bad arguments",
+			});
+			const runtimeHost = createRuntimeHost(result);
+			output.write.mockClear();
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
+			const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode,
+			});
 
-		expect(exitCode).toBe(1);
-		expect(output.write).toHaveBeenCalledWith("Command failed: bad arguments\n");
-	});
+			expect(exitCode).toBe(1);
+			if (mode === "text") expect(output.write).toHaveBeenCalledWith("Command failed: bad arguments\n");
+			else expect(output.write).not.toHaveBeenCalled();
+		},
+	);
 
 	it("emits session_shutdown in json mode", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
@@ -287,22 +291,25 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
 
-	it("emits session_shutdown and returns non-zero on assistant error", async () => {
-		const runtimeHost = createRuntimeHost(
-			createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" }),
-		);
-		const { session } = runtimeHost;
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+	it.each(["text", "json"] as const)(
+		"emits session_shutdown and returns non-zero on assistant error in %s mode",
+		async (mode) => {
+			const runtimeHost = createRuntimeHost(
+				createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" }),
+			);
+			const { session } = runtimeHost;
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
-		});
+			const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode,
+			});
 
-		expect(exitCode).toBe(1);
-		expect(errorSpy).toHaveBeenCalledWith("provider failure");
-		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
-		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
-	});
+			expect(exitCode).toBe(1);
+			expect(errorSpy).toHaveBeenCalledWith("provider failure");
+			expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
+			expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+		},
+	);
 
 	it("prints assistant output and reports a trailing compaction outcome", async () => {
 		const outcome = createCompactionOutcomeMessage("Auto-compaction skipped: nothing to compact", {
@@ -343,7 +350,7 @@ describe("runPrintMode", () => {
 		expect(output.write).toHaveBeenCalledWith("done\n");
 	});
 
-	it("reports an outcome-only failure and exits non-zero", async () => {
+	it.each(["text", "json"] as const)("reports an outcome-only failure and exits non-zero in %s mode", async (mode) => {
 		const outcome = createCompactionOutcomeMessage("Context overflow recovery failed", {
 			reason: "overflow",
 			outcome: "failed",
@@ -353,7 +360,7 @@ describe("runPrintMode", () => {
 		output.write.mockClear();
 
 		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
-			mode: "text",
+			mode,
 		});
 
 		expect(exitCode).toBe(1);
@@ -552,7 +559,7 @@ describe("runPrintMode", () => {
 				startedAt: Date.now(),
 				limits: { maxContinuations: 1, maxTurns: 20, maxTokens: 100_000, timeoutMs: 60_000 },
 				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
-				gateAttempts: { "verify-public": 1 },
+				gateAttempts: { "verify-public": 0 },
 			},
 		];
 		const runtimeHost = createRuntimeHost(
@@ -695,6 +702,44 @@ describe("runPrintMode", () => {
 		expect(errorSpy).toHaveBeenCalledWith(
 			"Autonomous run stopped before terminal evidence; maxContinuations reached (3/3)",
 		);
+	});
+
+	it.each([
+		["text", false],
+		["text", true],
+		["json", false],
+		["json", true],
+	] as const)("handles a native-turn cap in %s mode (gates passed: %s)", async (mode, gatesPassed) => {
+		const runtimeHost = createRuntimeHost(
+			{
+				role: "toolResult",
+				toolCallId: "call-capped",
+				toolName: "ipython",
+				content: [{ type: "text", text: "completed tool" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+			{
+				enabled: true,
+				continuationsUsed: 0,
+				turnsUsed: 1,
+				tokensUsed: 100,
+				startedAt: Date.now(),
+				limits: { maxContinuations: 3, maxTurns: 1, maxTokens: 100_000, timeoutMs: 60_000 },
+				gates: { commands: ["verify-public"], maxRetries: 3, timeoutMs: 300_000 },
+				gateAttempts: gatesPassed ? { "verify-public": 0 } : {},
+			},
+		);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode });
+
+		expect(exitCode).toBe(gatesPassed ? 0 : 1);
+		if (gatesPassed) expect(errorSpy).not.toHaveBeenCalled();
+		else
+			expect(errorSpy).toHaveBeenCalledWith(
+				"Autonomous run stopped before terminal evidence; maxTurns reached (1/1)",
+			);
+		expect(runtimeHost.session.prompt).not.toHaveBeenCalled();
 	});
 
 	it("keeps prompting while autonomous gates fail below retry limits", async () => {

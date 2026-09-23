@@ -259,6 +259,14 @@ export function autonomousLimitReason(
 	if (state.continuationsUsed >= state.limits.maxContinuations) {
 		return "maxContinuations";
 	}
+	return autonomousRunLimitReason(state, now);
+}
+
+/** Work limits also apply between native tool turns, not only injected continuations. */
+export function autonomousRunLimitReason(
+	state: AutonomousLimitState,
+	now = Date.now(),
+): Exclude<AutonomousLimitReason, "maxContinuations"> | undefined {
 	if (state.turnsUsed >= state.limits.maxTurns) {
 		return "maxTurns";
 	}
