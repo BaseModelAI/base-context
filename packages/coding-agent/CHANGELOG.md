@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.16] - 2026-09-28
+
+- Fixed background child-usage updates incorrectly stopping an active goal during request preparation.
+- Kept failed goals visible in the bottom-right status tray instead of hiding them.
+- Fixed temporary memory retention when reading a final multi-chunk line without a trailing newline.
+
 ## [1.0.15] - 2026-09-28
 
 - Fixed compaction of long-lived sessions by selecting the active canonical context before source hydration. This covers manual, agent-requested, threshold, and overflow-recovery compaction without increasing source limits.

@@ -18,7 +18,7 @@ import {
 	SubagentSummaryLine,
 } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 function child(
 	id: string,
@@ -430,6 +430,71 @@ describe("SubagentSummaryLine", () => {
 			const rendered = stripAnsi(line.render(217).join("\n"));
 			expect(rendered).toContain("Pursuing goal (1m 05s)");
 			expect(rendered).not.toContain(goal.objective);
+		} finally {
+			mode.stopGoalTrayTimer();
+			mode.stopWorkingPulse();
+		}
+	});
+
+	it("keeps an errored goal visible after attach, ordinary renders, and a post-compaction resync", async () => {
+		const { mode, line, goal, showError, getListener } = createGoalTrayHarness();
+		const erroredGoal: GoalState = { ...goal, active: false, status: "error", lastError: "Request failed" };
+		const snapshot: AgentConnectionSnapshot = {
+			state: { ...mode.connectionState, goal: erroredGoal },
+			messages: [],
+		};
+		vi.spyOn(mode.agentConnection, "getInitialSnapshot").mockResolvedValue(snapshot);
+		Object.assign(mode, {
+			refreshCommandCatalogForCurrentSession: vi.fn(async () => {}),
+			refreshQueueSelectionFromState: vi.fn(),
+			updatePendingMessagesDisplay: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+		});
+		try {
+			await mode.renderInitialMessages();
+			for (let render = 0; render < 2; render++) {
+				const rendered = line.render(217).join("\n");
+				expect(rendered).toContain(theme.fg("error", "Goal error"));
+				expect(stripAnsi(rendered)).not.toContain("Pursuing goal");
+			}
+
+			mode.subscribeToAgent();
+			await getListener()!({
+				type: "session_resynced",
+				snapshot: {
+					...snapshot,
+					state: {
+						...snapshot.state,
+						compactionCount: 1,
+						contextUsage: { tokens: null, percent: null, contextWindow: 100_000 },
+					},
+				},
+			});
+
+			expect(showError).not.toHaveBeenCalled();
+			expect(stripAnsi(line.render(217).join("\n"))).toMatch(/Goal error\s*$/);
+			expect(mode.connectionState.goal).toEqual(erroredGoal);
+			expect(Reflect.get(mode, "goalTrayTimer")).toBeUndefined();
+		} finally {
+			mode.stopGoalTrayTimer();
+			mode.stopWorkingPulse();
+		}
+	});
+
+	it("hides a live goal error only when the goal is explicitly cleared", async () => {
+		const { mode, line, goal, showError, getListener } = createGoalTrayHarness();
+		const erroredGoal: GoalState = { ...goal, active: false, status: "error", lastError: "Request failed" };
+		try {
+			mode.subscribeToAgent();
+			await getListener()!({ type: "session_event", event: { type: "goal_update", goal: erroredGoal } });
+			expect(stripAnsi(line.render(217).join("\n"))).toContain("Goal error");
+
+			await getListener()!({ type: "session_event", event: { type: "goal_update", goal: emptyGoalState() } });
+
+			expect(showError).not.toHaveBeenCalled();
+			expect(mode.getTrayContextLabel()).toBeUndefined();
+			expect(stripAnsi(line.render(217).join("\n"))).not.toContain("Goal error");
+			expect(mode.connectionState.goal).toEqual(emptyGoalState());
 		} finally {
 			mode.stopGoalTrayTimer();
 			mode.stopWorkingPulse();

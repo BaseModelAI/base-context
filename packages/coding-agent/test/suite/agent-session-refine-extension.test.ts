@@ -7,6 +7,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@ponythewhite/base-context-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../../src/config.js";
 import { RefineSkippedError } from "../../src/core/agent-session.js";
@@ -90,7 +91,15 @@ describe("AgentSession session_before_refine extension hook", () => {
 				cwd: profile,
 				persistSession: true,
 				sessionManager: manager,
-				tools: [],
+				tools: [
+					{
+						name: "ipython",
+						label: "ipython",
+						description: "Offline goal fixture tool",
+						parameters: Type.Object({ code: Type.String() }),
+						execute: async () => ({ content: [{ type: "text", text: "fixture" }], details: {} }),
+					},
+				],
 				requestTokenBudget,
 				settings: {
 					compaction: { enabled: false, reserveTokens: 1024, keepRecentTokens: 1 },
@@ -139,6 +148,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 		const bodies: Array<{ input: unknown[]; [key: string]: unknown }> = [];
 		const latestSnapshots: string[] = [];
 		const transportErrors: unknown[] = [];
+		let onRequest: (() => Promise<void>) | undefined;
 		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
 			const body = JSON.parse(String(init?.body));
 			bodies.push(body);
@@ -169,6 +179,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 					transportErrors.push(error);
 					throw error;
 				});
+			await onRequest?.();
 			const item = {
 				type: "message",
 				id: `msg_cache_${bodies.length}`,
@@ -241,7 +252,13 @@ describe("AgentSession session_before_refine extension hook", () => {
 		// Native/public conversion can erase customType; dedup must still use canonical source recipes.
 		harness.session.agent.state.messages = convertToLlm([...harness.session.messages]);
 		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(false);
-		// An unrelated receipt append during the fixed read does not change the conversation owner.
+		// Receipts and late child accounting during the fixed read do not change the content owner.
+		const usageTarget = (await harness.sessionManager.readEntries()).find(
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		);
+		if (usageTarget?.type !== "message" || usageTarget.message.role !== "assistant")
+			throw new Error("Missing child usage target");
+		const childUsage = { ...usageTarget.message.usage, input: 3, output: 2, totalTokens: 5 };
 		const internals = harness.session as unknown as {
 			_readHarnessSnapshot(view: SessionHistoryReadView): Promise<string | undefined>;
 		};
@@ -252,6 +269,8 @@ describe("AgentSession session_before_refine extension hook", () => {
 		if (priorRequest?.type !== "request") throw new Error("Missing native receipt");
 		const unrelated = vi.spyOn(internals, "_readHarnessSnapshot").mockImplementationOnce(async (view) => {
 			const result = await originalRead(view);
+			await harness.sessionManager.appendChildUsageAttribution(usageTarget.id, childUsage);
+			expect(harness.sessionManager.getLeafId()).not.toBe(view.source.leafId);
 			const sink = harness.sessionManager.bindRequestSink();
 			try {
 				await sink.persist({ ...priorRequest.request, attemptId: "unrelated-receipt", source: await sink.source });
@@ -260,8 +279,29 @@ describe("AgentSession session_before_refine extension hook", () => {
 			}
 			return result;
 		});
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "Continue the unfinished fixture task" });
+		const goalId = harness.session.goalState.goalId;
+		expect(harness.session.goalState.tokenBudget).toBeUndefined();
+		let goalRequests = 0;
+		onRequest = async () => {
+			goalRequests++;
+			expect(harness.session.goalState).toMatchObject({
+				goalId,
+				active: true,
+				status: "active",
+				continuationsUsed: goalRequests - 1,
+			});
+			// Only the fixture stops the goal, after a real automatic continuation reaches transport.
+			if (goalRequests === 2) await harness.session.prompt("/goal pause");
+		};
 		await harness.session.prompt("Keep working without a harness change.");
+		onRequest = undefined;
 		unrelated.mockRestore();
+		expect(goalRequests, JSON.stringify(harness.session.goalState)).toBe(2);
+		expect(harness.session.goalState).toMatchObject({ goalId, status: "paused", continuationsUsed: 1 });
+		expect(harness.session.goalState.lastError).toBeUndefined();
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
+		expect(fetch).toHaveBeenCalledTimes(4);
 		expect(await snapshots()).toHaveLength(2);
 		await harness.session.refine({ rollbackId: refined.id });
 		await harness.session.prompt("The lesson was rolled back.");
@@ -289,7 +329,45 @@ describe("AgentSession session_before_refine extension hook", () => {
 			{ id: "direct", scope: "local" },
 		);
 		saveHarnessState(local, state);
+		const appendWithAccounting = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(
+			harness.sessionManager,
+		);
+		const appendInterleave = vi
+			.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback")
+			.mockImplementationOnce(async (...args) => {
+				const id = await appendWithAccounting(...args);
+				await harness.sessionManager.appendChildUsageAttribution(usageTarget.id, childUsage);
+				expect(harness.sessionManager.getLeafId()).not.toBe(id);
+				return id;
+			});
+		const flush = harness.sessionManager.flushNow.bind(harness.sessionManager);
+		let interleaveAtFlush = false;
+		let flushInterleaved = false;
+		const flushInterleave = vi.spyOn(harness.sessionManager, "flushNow").mockImplementation(async () => {
+			await flush();
+			if (!interleaveAtFlush) return;
+			interleaveAtFlush = false;
+			await harness.sessionManager.appendChildUsageAttribution(usageTarget.id, childUsage);
+			flushInterleaved = true;
+		});
+		const beforeOwnership = harness.session as unknown as {
+			_appendHarnessSnapshotIfChanged(): Promise<() => void>;
+		};
+		const prepareSnapshot = beforeOwnership._appendHarnessSnapshotIfChanged.bind(beforeOwnership);
+		const preparation = vi
+			.spyOn(beforeOwnership, "_appendHarnessSnapshotIfChanged")
+			.mockImplementationOnce(async () => {
+				const assertCurrent = await prepareSnapshot();
+				interleaveAtFlush = true;
+				return assertCurrent;
+			});
 		await harness.session.prompt("Read a direct harness edit.");
+		appendInterleave.mockRestore();
+		flushInterleave.mockRestore();
+		preparation.mockRestore();
+		expect(flushInterleaved).toBe(true);
+		expect(harness.session.agent.state.errorMessage).toBeUndefined();
+		expect(fetch).toHaveBeenCalledTimes(6);
 		expect(latestSnapshots.at(-1)).toContain("Fresh direct kernel-style lesson.");
 		const file = harness.sessionManager.getSessionFile()!;
 		await harness.session.disposeAsync({ kernelSnapshot: false });
@@ -307,7 +385,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 		expect(latestSnapshots.at(-1)).toContain("No saved harness entries yet.");
 		expect(latestSnapshots.at(-1)).not.toContain("Fresh direct kernel-style lesson.");
 		expect(await snapshots()).toHaveLength(6);
-		expect(fetch).toHaveBeenCalledTimes(8);
+		expect(fetch).toHaveBeenCalledTimes(9);
 		expect(harness.session.agent.state.errorMessage).toBeUndefined();
 		// Going away and back to the same leaf still invalidates the captured source owner.
 		const reopenedInternals = harness.session as unknown as typeof internals;
@@ -319,7 +397,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 			return result;
 		});
 		await harness.session.prompt("A branch switch races snapshot preparation.").catch(() => {});
-		expect(fetch).toHaveBeenCalledTimes(8);
+		expect(fetch).toHaveBeenCalledTimes(9);
 		expect(harness.session.agent.state.errorMessage).toContain("Harness snapshot source changed");
 		switched.mockRestore();
 		await harness.session.prompt("Retry the unchanged snapshot after the source settles.");
@@ -331,7 +409,7 @@ describe("AgentSession session_before_refine extension hook", () => {
 		await harness.sessionManager.newSession();
 		await harness.session.prompt("A new source must not reuse the old source's snapshot.");
 		expect(await snapshots()).toHaveLength(1);
-		expect(fetch).toHaveBeenCalledTimes(11);
+		expect(fetch).toHaveBeenCalledTimes(12);
 		const newLocal = getLocalHarnessStateDir(harness.sessionManager.getSessionArtifactDir())!;
 		saveHarnessState(newLocal, {
 			...state,
@@ -373,13 +451,36 @@ describe("AgentSession session_before_refine extension hook", () => {
 		release.resolve();
 		await Promise.allSettled([cancelled, abort]);
 		gated.mockRestore();
-		expect(fetch).toHaveBeenCalledTimes(11);
+		expect(fetch).toHaveBeenCalledTimes(12);
 		expect(await snapshots()).toHaveLength(2);
 		await harness.session.prompt("Retry after cancellation.");
-		expect(fetch).toHaveBeenCalledTimes(12);
+		expect(fetch).toHaveBeenCalledTimes(13);
 		expect(await snapshots()).toHaveLength(2);
 		expect(latestSnapshots.at(-1)).toContain("Accepted snapshot survives cancellation.");
 		expect(transportErrors).toEqual([]);
+	});
+
+	it("rejects changed content after the harness snapshot ACK instead of recapturing its owner", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("Must not send the stale request")]);
+		const append = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(
+			async (...args) => {
+				const id = await append(...args);
+				await harness.sessionManager.appendCustomMessageEntry(
+					"changed-content",
+					"A different request input",
+					false,
+				);
+				return id;
+			},
+		);
+
+		await harness.session.prompt("Prepare the request.");
+
+		expect(harness.session.agent.state.errorMessage).toBe("Harness snapshot source changed during append");
+		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
 	it("applies an extension-provided proposal without calling the built-in planner", async () => {

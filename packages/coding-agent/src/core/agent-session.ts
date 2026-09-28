@@ -6257,10 +6257,10 @@ export class AgentSession {
 	/** Persist mutable advice before the request owner captures its source and epoch ACK boundary. */
 	private async _appendHarnessSnapshotIfChanged(): Promise<() => void> {
 		const manager = this.sessionManager;
-		let leafId = manager.getLeafId();
-		const sourceIsCurrent = manager.captureCompactionSourceOwner();
+		const sourceIsCurrent = manager.captureCompactionContentOwner();
+		let ownAppends = 0;
 		const assertCurrent = () => {
-			if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent() || manager.getLeafId() !== leafId)
+			if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent(ownAppends))
 				throw new Error("Harness snapshot source changed before request ownership");
 		};
 		let previous: CustomMessage["content"] | undefined;
@@ -6286,8 +6286,9 @@ export class AgentSession {
 				: undefined,
 		});
 		if (previous === content) return assertCurrent;
-		const entryId = await manager.appendCustomMessageEntryWithRollback(HARNESS_SNAPSHOT_CUSTOM_TYPE, content, false);
-		if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent() || manager.getLeafId() !== entryId)
+		await manager.appendCustomMessageEntryWithRollback(HARNESS_SNAPSHOT_CUSTOM_TYPE, content, false);
+		ownAppends++;
+		if (this._disposed || this.sessionManager !== manager || !sourceIsCurrent(ownAppends))
 			throw new Error("Harness snapshot source changed during append");
 		if (!manager.isPersisted())
 			this.agent.state.messages.push({
@@ -6297,7 +6298,6 @@ export class AgentSession {
 				display: false,
 				timestamp: Date.now(),
 			});
-		leafId = entryId;
 		return assertCurrent;
 	}
 

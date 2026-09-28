@@ -6125,9 +6125,10 @@ export class InteractiveMode {
 				return `Goal paused (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
 			case "budget_limited":
 				return `Goal budget limited (${this.formatGoalElapsed(goal.timeUsedSeconds)})`;
+			case "error":
+				return theme.fg("error", "Goal error") + theme.getFgAnsi("muted");
 			case "idle":
 			case "complete":
-			case "error":
 				return undefined;
 			default: {
 				const _exhaustive: never = goal.status;

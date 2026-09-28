@@ -2617,6 +2617,14 @@ export class SessionManager {
 			state.branchSelectionRevision === selectionRevision;
 	}
 
+	/** Capture content ownership, ignoring bookkeeping and allowing the caller's known ACKed content appends. */
+	captureCompactionContentOwner(): (ownAppends?: number) => boolean {
+		const sourceIsCurrent = this.captureCompactionSourceOwner();
+		const state = this.writeState;
+		const revision = state.compactionRevision;
+		return (ownAppends = 0) => sourceIsCurrent() && state.compactionRevision === revision + ownAppends;
+	}
+
 	bindCompactionSink(limits: SessionHistoryReadLimits = DEFAULT_MANAGER_HISTORY_LIMITS): BoundCompactionSink {
 		const state = this.writeState;
 		const owner = state.owner;
