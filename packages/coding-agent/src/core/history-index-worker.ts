@@ -1987,7 +1987,9 @@ process.on("disconnect", () => {
 	void queue.finally(() => {
 		try {
 			db.close();
-		} catch {}
+		} catch {
+			// The close request may already have closed the database before IPC disconnects.
+		}
 	});
 });
 process.send?.({ ready: true });

@@ -45,6 +45,7 @@ async function closeFixtureSessions(): Promise<void> {
 	fixtureSessions.clear();
 }
 const workerPids = new Set<number>();
+const supervisorPids = new Set<number>();
 const daemonSockets = new Set<string>();
 const childDiagnostics = new WeakMap<ChildProcess, { stdout: string; stderr: string }>();
 const PROCESS_STRESS_WORKERS = Number.parseInt(process.env.BASE_CONTEXT_STRESS_WORKERS ?? "10", 10);
@@ -59,6 +60,7 @@ afterEach(async () => {
 			// Already gone.
 		} finally {
 			client.close();
+			if (client.hello) trackSupervisor(client);
 		}
 	}
 	daemonSockets.clear();
@@ -88,6 +90,9 @@ afterEach(async () => {
 	}
 	await Promise.all([...workerPids].map((pid) => waitForProcessGone(pid).catch(() => undefined)));
 	workerPids.clear();
+	// Detached replacement supervisors outlive socket closure while releasing their state owners.
+	await Promise.all([...supervisorPids].map((pid) => waitForProcessGone(pid)));
+	supervisorPids.clear();
 	await closeFixtureSessions();
 	for (const directory of tempDirs.splice(0)) {
 		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -203,6 +208,12 @@ function readSupervisorConfig(agentDir: string): { defaultSessionConfig?: { sess
 	throw new Error("Supervisor config was not persisted");
 }
 
+function trackSupervisor(client: DaemonClient): void {
+	const pid = client.hello?.supervisorPid;
+	if (!pid) throw new Error("Daemon hello did not expose its supervisor pid");
+	supervisorPids.add(pid);
+}
+
 async function connectEventually(socketPath: string, child?: ChildProcess): Promise<DaemonClient> {
 	const deadline = Date.now() + 15_000;
 	let lastError: unknown;
@@ -218,6 +229,7 @@ async function connectEventually(socketPath: string, child?: ChildProcess): Prom
 		try {
 			await client.connect(250);
 			await client.waitForHello(1000);
+			trackSupervisor(client);
 			return client;
 		} catch (error) {
 			lastError = error;
@@ -1897,6 +1909,7 @@ describe("daemon supervisor resident workers", () => {
 		while (!connectionEvents.includes("connection_status:connected") && Date.now() < reconnectDeadline) {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
 		}
+		trackSupervisor(client);
 		expect(connectionEvents).toContain("connection_status:reconnecting");
 		// The direct worker link held through the supervisor swap, so no resync is warranted.
 		expect(connectionEvents).not.toContain("session_resynced");

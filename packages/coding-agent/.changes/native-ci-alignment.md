@@ -1,0 +1,1 @@
+- Fixed temporary memory retention when reading a final multi-chunk line without a trailing newline.

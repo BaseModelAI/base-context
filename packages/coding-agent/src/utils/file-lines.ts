@@ -67,5 +67,10 @@ export async function* readLinesAsBuffers(
 			start = end + 1;
 		}
 	}
-	if (pendingParts.length > 0 && !options.completeOnly) yield Buffer.concat(pendingParts, pendingBytes);
+	if (pendingParts.length > 0 && !options.completeOnly) {
+		const line = Buffer.concat(pendingParts, pendingBytes);
+		pendingParts.length = 0;
+		pendingBytes = 0;
+		yield line;
+	}
 }
