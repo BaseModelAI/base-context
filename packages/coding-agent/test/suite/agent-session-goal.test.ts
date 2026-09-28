@@ -707,6 +707,23 @@ describe("AgentSession goals", () => {
 		}
 	});
 
+	it("acknowledges the goal cleared by /goal stop", async () => {
+		const harness = await createGoalHarness();
+		await harness.session.handleGoalHostRequest("goal.create", { objective: "finish the task" });
+		harness.setResponses([fauxAssistantMessage("unused")]);
+
+		await harness.session.prompt("/goal stop");
+
+		expect(harness.session.goalState.status).toBe("idle");
+		expect(harness.session.messages.at(-1)).toMatchObject({
+			role: "custom",
+			customType: "session_slash_command_result",
+			content: "Goal cleared.",
+			details: { success: true, severity: "info" },
+		});
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
 	it("clears a goal with /goal clear without consuming a provider response", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);

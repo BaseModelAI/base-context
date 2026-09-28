@@ -223,6 +223,13 @@ export interface SessionHeader {
 	git?: GitContext;
 }
 
+/** Bounded source entries for a compiled view, with exact chronological suffix membership. */
+export interface CompactionSourceEntries {
+	entries: SessionEntry[];
+	suffixAnchors: ReadonlySet<string>;
+	leafKind?: string;
+}
+
 /** One captured branch for summary input, physical requests, and the queued compaction commit. */
 export interface BoundCompactionSink extends BoundSessionRequestSink {
 	/** Original ownership and compaction input, including this sink's own acknowledged checkpoint. */
@@ -230,6 +237,7 @@ export interface BoundCompactionSink extends BoundSessionRequestSink {
 	/** Internal explicit-copy read on this same held source, never a provider-view capability. */
 	[readCopiedEpochSource]<T>(read: (history: SessionHistoryReadScope) => Promise<T>): Promise<T>;
 	readBranch(): Promise<SessionEntry[]>;
+	readCompactionEntries(entryIds: readonly string[]): Promise<CompactionSourceEntries>;
 	[appendContextEpoch](
 		checkpoint: ContextEpochCheckpoint,
 		tokensBefore: number | null,
@@ -2704,6 +2712,10 @@ export class SessionManager {
 			isCurrent: () => isCurrent(currentRevision),
 			readHistory: (read) => sink.readHistory((history) => read(history.branchContext)),
 			[readCopiedEpochSource]: (read) => sink.readHistory(read),
+			readCompactionEntries: (entryIds) => {
+				const ids = [...new Set(entryIds)];
+				return sink.readHistory((history) => this._readCompactionEntriesAt(history, ids, capturedLimits));
+			},
 			readBranch: async () => {
 				if (indexed)
 					return sink.readHistory(
@@ -3822,6 +3834,60 @@ export class SessionManager {
 			applyChildUsageAttributions(entries);
 			return entries;
 		});
+	}
+
+	private async _readCompactionEntriesAt(
+		history: SessionHistoryReadScope,
+		entryIds: readonly string[],
+		limits: SessionHistoryReadLimits,
+	): Promise<CompactionSourceEntries> {
+		const { maxEntries, maxSourceBytes } = limits;
+		if (
+			!Number.isSafeInteger(maxEntries) ||
+			maxEntries <= 0 ||
+			!Number.isSafeInteger(maxSourceBytes) ||
+			maxSourceBytes <= 0
+		)
+			throw new Error("Invalid compaction source limits");
+		if (entryIds.length > maxEntries) throw new Error("Compaction entry budget exceeded");
+		const selected = new Set(entryIds);
+		const references: IndexedSourceEvent[] = [];
+		for (const id of entryIds) {
+			const reference = await history.branchContext.get(id);
+			if (!reference) throw new Error("Compaction entry is outside its captured branch");
+			references.push(reference);
+		}
+		references.sort((a, b) => a.sequence - b.sequence);
+
+		// Pinned older views cannot cross an omitted message to become a chronological cut.
+		// Walk metadata only: excluded lifetime payloads must not consume the hydration budget.
+		const suffixAnchors = new Set<string>();
+		const visited = new Set<string>();
+		let current = history.source.leafId;
+		let leafKind: string | undefined;
+		while (current !== null) {
+			if (visited.has(current)) throw new Error("Compaction parent path is unresolved");
+			visited.add(current);
+			const reference = await history.branchContext.get(current);
+			if (!reference) throw new Error("Compaction parent path is unresolved");
+			leafKind ??= reference.kind;
+			if (["message", "custom_message", "branch_summary"].includes(reference.kind)) {
+				if (!selected.has(reference.id)) break;
+				suffixAnchors.add(reference.id);
+			}
+			current = reference.parentId;
+		}
+		const entries: SessionEntry[] = [];
+		let sourceBytes = 0;
+		for (const reference of references) {
+			const remaining = maxSourceBytes - sourceBytes;
+			sourceBytes += reference.locator.length;
+			if (sourceBytes > maxSourceBytes) throw new Error("Compaction source byte budget exceeded");
+			const value = await history.hydrateEntry(reference.id, remaining);
+			if (!value) throw new Error("Compaction entry source is unavailable");
+			entries.push(withEntryRetention(value.entry, value.source.retention, value.source.qualification));
+		}
+		return { entries, suffixAnchors, leafKind };
 	}
 
 	private async _readBranchesAt(

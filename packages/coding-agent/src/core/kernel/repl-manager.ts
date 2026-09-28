@@ -521,6 +521,10 @@ export class ReplKernelManager {
 			if (this.child !== child) return;
 			this.appendKernelDiagnostic(`kernel stdout error: ${errorMessage(error)}`);
 		});
+		child.stderr?.on("error", (error) => {
+			if (this.child !== child) return;
+			this.appendKernelDiagnostic(`kernel stderr error: ${errorMessage(error)}`);
+		});
 		child.once("exit", () => {
 			// One turn for the poll phase to deliver the bytes the kernel wrote
 			// before dying (the pipe buffer bounds them), then destroy: EOF may

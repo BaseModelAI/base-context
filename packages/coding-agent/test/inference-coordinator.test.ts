@@ -6,9 +6,15 @@ import * as ai from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as realBedrock from "../../ai/src/providers/amazon-bedrock.js";
 import { ProviderAttemptTracker } from "../../ai/src/utils/provider-attempts.js";
-import { CanonicalContextCompiler, getCanonicalViewUnits } from "../src/core/canonical-context.js";
+import {
+	CanonicalContextCompiler,
+	getCanonicalViewSelectionSource,
+	getCanonicalViewUnits,
+	prepareCanonicalEpoch,
+} from "../src/core/canonical-context.js";
 import { type CompactionPreparation, compact } from "../src/core/compaction/compaction.js";
 import { createFileOps } from "../src/core/compaction/utils.js";
+import { appendContextEpoch } from "../src/core/context-epoch.js";
 import {
 	bindAuxiliaryInferenceStream,
 	captureNativeCompactionRequests,
@@ -690,6 +696,108 @@ describe("native inference coordination", () => {
 		} finally {
 			await Promise.all(captures.map((capture) => capture.dispose()));
 			await requests.dispose();
+		}
+	});
+
+	it.each([false, true])("keeps Codex retry epoch ACK only for the prepared body (changed=%s)", async (changed) => {
+		const { manager, requests: seedRequests } = await auxiliaryFixture();
+		const limits = { maxMessages: 32, maxSourceBytes: 128 * 1024 };
+		const seedSink = manager.bindCompactionSink();
+		const seedCapture = seedRequests.capture(seedSink);
+		try {
+			const messages = await seedCapture.readHistory((view) => new CanonicalContextCompiler().compile(view, limits));
+			const prepared = prepareCanonicalEpoch(
+				messages,
+				getCanonicalViewUnits(messages)!.map((unit) => unit.id),
+				"fixture-codex-retry/1",
+				limits.maxSourceBytes,
+			);
+			await seedSink[appendContextEpoch](prepared.checkpoint, null);
+		} finally {
+			await seedCapture.dispose();
+			await seedRequests.dispose();
+		}
+
+		const commit = vi.fn(async (candidate: RequestViewCandidate) => {
+			expect(getCanonicalViewSelectionSource(fixture.viewMessages)?.requiresEpoch).toBe(true);
+			const prepared = prepareCanonicalEpoch(
+				fixture.viewMessages,
+				candidate.selectedUnitIds,
+				"fixture-codex-retry/1",
+				limits.maxSourceBytes,
+				candidate.projection.replayContract,
+			);
+			const sink = manager.bindCompactionSink();
+			try {
+				const entryId = await sink[appendContextEpoch](prepared.checkpoint, null);
+				return { sessionId: manager.getSessionId(), entryId };
+			} finally {
+				await sink.release();
+			}
+		});
+		const fixture = createBudgetAgent(manager, 8192, undefined, commit, undefined, {
+			model: codexModel,
+			apiKey: codexFixtureKey(),
+		});
+		fixture.agent.streamFn = createNativeInferenceStream(async (_model, _context, options) => ({
+			...options,
+			transport: "sse",
+		}));
+		const prepare = ProviderAttemptTracker.prototype.prepareRequest;
+		let preparations = 0;
+		vi.spyOn(ProviderAttemptTracker.prototype, "prepareRequest").mockImplementation(function (
+			this: ProviderAttemptTracker,
+			request,
+			projection,
+			counter,
+		) {
+			preparations++;
+			if (preparations === 2) {
+				expect(projection).toBeUndefined();
+				if (changed)
+					request = {
+						...request,
+						body: JSON.stringify({ ...JSON.parse(request.body!), instructions: "changed retry instructions" }),
+					};
+			}
+			return prepare.call(this, request, projection, counter);
+		});
+		const offlineFetch = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ error: { message: "offline retry failure", type: "server_error" } }), {
+					status: 503,
+					headers: { "content-type": "application/json", "retry-after": "0" },
+				}),
+			)
+			.mockImplementation(async () => auxiliaryResponse());
+		try {
+			await fixture.agent.prompt("Retry this native captured request");
+			const message = await fixture.events.result();
+			expect(commit).toHaveBeenCalledTimes(1);
+			expect(preparations).toBe(2);
+			if (changed) {
+				expect(message).toMatchObject({
+					stopReason: "error",
+					errorMessage: "Context transition requires an acknowledged native epoch",
+				});
+				expect(offlineFetch).toHaveBeenCalledTimes(1);
+				expect(fixture.facts).toHaveLength(2);
+			} else {
+				expect(message.errorMessage).toBeUndefined();
+				expect(message).toMatchObject({ stopReason: "stop" });
+				expect(offlineFetch).toHaveBeenCalledTimes(2);
+				expect(offlineFetch.mock.calls[1][1]?.body).toBe(offlineFetch.mock.calls[0][1]?.body);
+				const admitted = fixture.facts.filter((event) => event.type === "attempt_admitted");
+				expect(admitted.map((event) => event.descriptor.kind)).toEqual(["initial", "retry"]);
+				expect(admitted[0].contextEpoch).toEqual(await commit.mock.results[0].value);
+				expect(admitted[1].contextEpoch).toEqual(admitted[0].contextEpoch);
+				expect(
+					fixture.facts.filter((event) => event.type === "attempt_settled").map((event) => event.receipt.status),
+				).toEqual([503, 200]);
+			}
+		} finally {
+			await fixture.requests.dispose();
 		}
 	});
 

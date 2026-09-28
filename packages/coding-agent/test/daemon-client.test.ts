@@ -7,6 +7,7 @@ import {
 	DAEMON_SCHEMA_REVISION,
 	type DaemonCommand,
 } from "../src/modes/daemon/daemon-protocol.js";
+import { DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
 
 const netMock = vi.hoisted(() => {
 	type Listener = (...args: unknown[]) => void;
@@ -1092,6 +1093,44 @@ describe("DaemonClient", () => {
 			client.close();
 		},
 	);
+});
+
+describe("DaemonWorkerClient", () => {
+	beforeEach(() => {
+		netMock.sockets.length = 0;
+		netMock.createConnection.mockClear();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each(["error", "timeout"] as const)("allows a successful retry after a connect %s", async (failure) => {
+		const client = new DaemonWorkerClient("/tmp/base-context-worker.sock");
+		const firstAttempt = captureRejection(client.connect(5));
+		const firstSocket = netMock.sockets[0]!;
+		if (failure === "timeout") {
+			await vi.advanceTimersByTimeAsync(5);
+			expect(firstSocket.destroyed).toBe(true);
+		} else {
+			firstSocket.emit("error", new Error("worker connect failed"));
+		}
+		await expect(firstAttempt).resolves.toMatchObject({
+			message:
+				failure === "timeout"
+					? "Timed out connecting to daemon worker socket: /tmp/base-context-worker.sock"
+					: "worker connect failed",
+		});
+		expect(client.isConnected).toBe(false);
+
+		const secondAttempt = client.connect();
+		expect(netMock.sockets).toHaveLength(2);
+		netMock.sockets[1]!.emit("connect");
+		await expect(secondAttempt).resolves.toBeUndefined();
+		expect(client.isConnected).toBe(true);
+		client.close();
+	});
 });
 
 async function captureRejection(promise: Promise<void>): Promise<Error> {

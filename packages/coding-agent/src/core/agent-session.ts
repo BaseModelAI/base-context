@@ -4558,14 +4558,14 @@ export class AgentSession {
 				this._assertCompactionOwner(owner);
 				const compaction = owner.manager.bindCompactionSink();
 				const captured = owner.requests.capture(compaction);
-				let branch: SessionEntry[];
 				let preparation: CompactionPreparation | undefined;
+				let leafKind: string | undefined;
 				try {
-					branch = await compaction.readBranch();
-					this._assertCompactionOwner(owner);
-					preparation = this.isStreaming
-						? (await this._prepareCapturedCompaction(branch, settings, captured, compaction, owner)).preparation
-						: undefined;
+					if (this.isStreaming) {
+						const prepared = await this._prepareCapturedCompaction(settings, captured, compaction, owner);
+						preparation = prepared.preparation;
+						leafKind = prepared.leafKind;
+					}
 				} catch (error) {
 					try {
 						await captured.dispose();
@@ -4584,10 +4584,9 @@ export class AgentSession {
 						reason: "no active turn; compaction can only be requested while a turn is running",
 					};
 				if (!preparation) {
-					const lastEntry = branch.at(-1);
 					return {
 						scheduled: false,
-						reason: lastEntry?.type === "compaction" ? "already compacted" : "session is too short to compact",
+						reason: leafKind === "compaction" ? "already compacted" : "session is too short to compact",
 					};
 				}
 				this._assertContextOptimizationAllowed();
@@ -8157,10 +8156,14 @@ export class AgentSession {
 						actionId: action.id,
 						submittedText: input.submitted?.text,
 					};
+					const clearedGoal =
+						Boolean(this._goalState.objective) && this._parseGoalSlashCommand(input.text)?.kind === "clear";
 					await this._handleGoalSlashCommand(input.text, input.images, goalOrigin);
 					resultText = this._goalState.objective
 						? `Goal ${this._goalState.status}: ${this._goalState.objective}`
-						: "No active goal.";
+						: clearedGoal
+							? "Goal cleared."
+							: "No active goal.";
 					break;
 				}
 				case "autonomous":
@@ -9601,14 +9604,12 @@ export class AgentSession {
 			const semanticEdges = owner.semanticEdges;
 			compaction = owner.manager.bindCompactionSink();
 			requests = owner.requests.capture(compaction);
-			const pathEntries = await compaction.readBranch();
 			this._assertCompactionOwner(owner);
 			const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 			this._assertCompactionOwner(owner);
 			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
-				pathEntries,
 				settings,
 				requests,
 				compaction,
@@ -9698,7 +9699,6 @@ export class AgentSession {
 
 	/** A private compiled context keeps extension summary edits separate from retained source recipes. */
 	private async _prepareCapturedCompaction(
-		pathEntries: SessionEntry[],
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>,
 		requests: InferenceCoordinator,
 		compaction: BoundCompactionSink,
@@ -9708,6 +9708,8 @@ export class AgentSession {
 		capacity?: PublicContextBudgetError,
 	): Promise<{
 		preparation: CompactionPreparation | undefined;
+		pathEntries: SessionEntry[];
+		leafKind?: string;
 		messages?: readonly AgentMessage[];
 		resource?: OwnedResourceCapture;
 		maxSourceBytes: number;
@@ -9717,11 +9719,16 @@ export class AgentSession {
 		const resource = this._captureKernelResource();
 		const source = await compaction.source;
 		this._assertCompactionOwner(owner);
-		if (!source.persistent)
+		if (!source.persistent) {
+			const pathEntries = await compaction.readBranch();
+			this._assertCompactionOwner(owner);
 			return {
 				preparation: prepareCompaction(pathEntries, settings, allowShortSession),
+				pathEntries,
+				leafKind: pathEntries.at(-1)?.type,
 				maxSourceBytes: limits.maxSourceBytes,
 			};
+		}
 		return requests.readHistory(async (view) => {
 			const messages = await new CanonicalContextCompiler().compile(
 				view,
@@ -9735,27 +9742,36 @@ export class AgentSession {
 			);
 			this._assertCompactionOwner(owner);
 			const context = getCanonicalEpochContext(messages)!;
-			if (context.checkpoint?.includeSummary && pathEntries.at(-1)?.type === "compaction")
-				return { preparation: undefined, maxSourceBytes: limits.maxSourceBytes };
+			const entryIds = context.references.map((ref) => ref?.ref.entryId);
+			const selected = await compaction.readCompactionEntries(entryIds.filter((id) => id !== undefined));
+			this._assertCompactionOwner(owner);
+			const pathEntries = selected.entries;
+			if (context.checkpoint?.includeSummary && selected.leafKind === "compaction")
+				return {
+					preparation: undefined,
+					pathEntries,
+					leafKind: selected.leafKind,
+					maxSourceBytes: limits.maxSourceBytes,
+				};
 			const authorization = getRecoveryCompactionAuthorization(capacity);
 			const boundary = canonicalRecoveryBoundary(messages, authorization);
-			const preparation =
-				budgetPressure || context.checkpoint || boundary
-					? prepareViewCompaction(
-							messages,
-							context.references.map((ref) => ref?.ref.entryId),
-							pathEntries,
-							settings,
-							boundary,
-							allowShortSession,
-							budgetPressure,
-						)
-					: prepareCompaction(pathEntries, settings, allowShortSession);
+			const preparation = prepareViewCompaction(
+				messages,
+				entryIds,
+				pathEntries,
+				settings,
+				boundary,
+				allowShortSession,
+				budgetPressure,
+				selected.suffixAnchors,
+			);
 			// Refuse unsupported public data or open groups before starting the summary model call.
 			if (preparation)
 				prepareRecoveryCompaction(messages, preparation.firstKeptEntryId, limits.maxSourceBytes, authorization);
 			return {
 				preparation,
+				pathEntries,
+				leafKind: selected.leafKind,
 				messages,
 				resource: context.resourceRevision !== undefined ? resource : undefined,
 				maxSourceBytes: limits.maxSourceBytes,
@@ -9779,7 +9795,6 @@ export class AgentSession {
 		compaction: BoundCompactionSink;
 		semanticEdges: SemanticEdgeRecorder;
 		owner?: CompactionOwner;
-		pathEntries: Awaited<ReturnType<SessionManager["readBranch"]>>;
 		settings: ReturnType<SettingsManager["getCompactionSettings"]>;
 		allowShortSession?: boolean;
 		budgetPressure?: boolean;
@@ -9795,7 +9810,6 @@ export class AgentSession {
 			requests,
 			compaction,
 			semanticEdges,
-			pathEntries,
 			settings,
 			owner = this._captureCompactionOwner(),
 			allowShortSession = false,
@@ -9803,7 +9817,6 @@ export class AgentSession {
 		} = options;
 
 		const prepared = await this._prepareCapturedCompaction(
-			pathEntries,
 			settings,
 			requests,
 			compaction,
@@ -9815,9 +9828,9 @@ export class AgentSession {
 		this._assertCompactionOwner(owner);
 		if (prepared.resource) assertResourceCurrent(prepared.resource);
 		const preparation = prepared.preparation;
+		const pathEntries = prepared.pathEntries;
 		if (!preparation) {
-			const lastEntry = pathEntries[pathEntries.length - 1];
-			if (lastEntry?.type === "compaction") {
+			if (prepared.leafKind === "compaction") {
 				throw new CompactionSkippedError("Already compacted");
 			}
 			throw new CompactionSkippedError("Session is too short to compact — try again once it grows");
@@ -11434,7 +11447,6 @@ export class AgentSession {
 			const semanticEdges = owner.semanticEdges;
 			compaction = owner.manager.bindCompactionSink();
 			requests = owner.requests.capture(compaction);
-			const pathEntries = await compaction.readBranch();
 			this._assertCompactionOwner(owner);
 			const authResult = model ? await this._modelRegistry.getApiKeyAndHeaders(model) : undefined;
 			this._assertCompactionOwner(owner);
@@ -11457,7 +11469,6 @@ export class AgentSession {
 			committed = await this._performCompaction({
 				model,
 				thinkingLevel,
-				pathEntries,
 				settings,
 				requests,
 				compaction,

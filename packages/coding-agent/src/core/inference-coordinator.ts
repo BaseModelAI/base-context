@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage, AgentOwnedStreamFn, StreamFn } from "@ponythewhite/base-context-agent";
 import {
 	type Api,
@@ -799,6 +800,7 @@ export class InferenceCoordinator {
 					: undefined;
 			let publicAccepted = false;
 			let selectedContextEpoch: ContextEpochEntryRef | undefined;
+			let preparedRequest: ProviderRequestRepresentation | undefined;
 			const attempts: ProviderAttemptObserver = {
 				...(responsesMessageIds ? { responsesMessageIds } : {}),
 				...(requiredPublic
@@ -813,6 +815,11 @@ export class InferenceCoordinator {
 					? ({
 							prepareRequest: async (representation, projection, countInput) => {
 								try {
+									// Adapters may retry the exact prepared body without another projection.
+									// Keep its ACK only inside this captured execution; final measurement still runs.
+									if (!projection && preparedRequest && isDeepStrictEqual(representation, preparedRequest))
+										return;
+									preparedRequest = undefined;
 									selectedContextEpoch = undefined;
 									publicAccepted = false;
 									if (JSON.parse(representation.body!).model !== model.id) return;
@@ -833,7 +840,10 @@ export class InferenceCoordinator {
 											projection,
 											assessment,
 										);
-										if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
+										if (accepted) {
+											selectedContextEpoch = Object.freeze({ ...accepted });
+											preparedRequest = structuredClone(representation);
+										}
 										return;
 									}
 									return await selectRequestView(
@@ -842,7 +852,10 @@ export class InferenceCoordinator {
 											...(responsesMessageIds ? { responseItemIdentity: this.work.responsesIdentity } : {}),
 											commit: async (candidate) => {
 												const accepted = await boundary!.commit(candidate);
-												if (accepted) selectedContextEpoch = Object.freeze({ ...accepted });
+												if (accepted) {
+													selectedContextEpoch = Object.freeze({ ...accepted });
+													preparedRequest = structuredClone(candidate.request);
+												}
 												publicAccepted = Boolean(
 													accepted &&
 														candidate.publicMessages &&

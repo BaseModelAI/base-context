@@ -317,6 +317,76 @@ describe("AgentSession compaction characterization", () => {
 		return { harness, internals, scheduled, continued, running, pause, releaseTool, compacted };
 	}
 
+	it.each(["manual", "requested", "threshold", "overflow"] as const)(
+		"compacts a bounded active view over more than 64 MiB of older source (%s)",
+		async (mode) => {
+			let harness: Harness;
+			let checkpoint: Awaited<ReturnType<typeof prepareNativeCheckpoint>> | undefined;
+			if (mode === "manual" || mode === "overflow") {
+				harness = await createHarness({
+					persistSession: true,
+					settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+				});
+				harnesses.push(harness);
+			} else {
+				checkpoint = await prepareNativeCheckpoint({
+					persistSession: true,
+					...(mode === "threshold" ? { autonomous: { enabled: true } } : {}),
+				});
+				harness = checkpoint.harness;
+			}
+			const padding = ".".repeat(8 * 1024 * 1024);
+			for (let index = 0; index < 9; index++) {
+				await harness.sessionManager.appendCustomEntry("historical-fixture", { padding });
+			}
+			if (!checkpoint) {
+				harness.setResponses([fauxAssistantMessage("first response"), fauxAssistantMessage("second response")]);
+				await harness.session.prompt("first request");
+				await harness.session.prompt("second request");
+				if (mode === "manual") {
+					const file = harness.sessionManager.getSessionFile()!;
+					await harness.session.dispose();
+					await harness.sessionManager.close();
+					harness = await createHarness({
+						sessionManager: await SessionManager.open(file),
+						settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+					});
+					harnesses.push(harness);
+					harness.setResponses([
+						fauxAssistantMessage("bounded history summary"),
+						fauxAssistantMessage("bounded turn summary"),
+					]);
+					await expect(harness.session.compact()).resolves.toMatchObject({ summary: expect.any(String) });
+				} else {
+					harness.settingsManager.applyOverrides({ compaction: { enabled: true, keepRecentTokens: 1 } });
+					harness.setResponses([
+						fauxAssistantMessage("", { stopReason: "error", errorMessage: "maximum context length exceeded" }),
+						fauxAssistantMessage("bounded history summary"),
+						fauxAssistantMessage("bounded turn summary"),
+						fauxAssistantMessage("continued after provider overflow"),
+					]);
+					await harness.session.prompt("recover the offline overflow");
+				}
+			} else {
+				try {
+					checkpoint.releaseTool.resolve();
+					await checkpoint.compacted.promise;
+				} finally {
+					checkpoint.pause.release();
+				}
+				await checkpoint.running;
+				await harness.session.waitForHeadlessIdle();
+			}
+			expect(harness.eventsOfType("compaction_end")).toContainEqual(
+				expect.objectContaining({ reason: mode, result: expect.any(Object), aborted: false }),
+			);
+			harness.setResponses([fauxAssistantMessage("continued after large history")]);
+			await harness.session.prompt("continue after compaction");
+			expect(getAssistantTexts(harness)).toContain("continued after large history");
+		},
+		60_000,
+	);
+
 	it.each(["manual", "requested", "threshold"] as const)(
 		"commits %s compaction despite concurrent child accounting and continues",
 		async (mode) => {
@@ -1802,15 +1872,15 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		let branchReads = 0;
 		const bound = vi.spyOn(harness.sessionManager, "bindCompactionSink").mockImplementation((limits) => {
 			const sink = originalBind(limits);
-			const read = sink.readBranch.bind(sink);
-			vi.spyOn(sink, "readBranch").mockImplementation(() => {
+			const read = sink.readCompactionEntries.bind(sink);
+			vi.spyOn(sink, "readCompactionEntries").mockImplementation((entryIds) => {
 				branchReads++;
 				if (branchReads === 1) {
 					harness.settingsManager.applyOverrides({
 						compaction: { model: { ...selection, modelId: "changed-after-capture", thinkingLevel: "low" } },
 					});
 				}
-				return read();
+				return read(entryIds);
 			});
 			return sink;
 		});

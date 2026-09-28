@@ -27,6 +27,36 @@ describe("session write isolation", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
+	it("keeps compaction cuts on the selected chronological suffix and enforces source limits", async () => {
+		let session = await SessionManager.create(dir, join(dir, "bounded-compaction"));
+		managers.push(session);
+		const pinned = await session.appendMessage({ role: "user", content: "older pinned view", timestamp: 1 });
+		await session.appendMessage({ role: "user", content: "omitted source message", timestamp: 2 });
+		const tail = await session.appendMessage({ role: "user", content: "selected tail", timestamp: 3 });
+		const file = session.getSessionFile()!;
+		await session.close();
+		managers.splice(managers.indexOf(session), 1);
+		session = await SessionManager.open(file);
+		managers.push(session);
+		const sink = session.bindCompactionSink();
+		try {
+			const selected = await sink.readCompactionEntries([pinned, tail]);
+			expect(selected.entries.map((entry) => entry.id)).toEqual([pinned, tail]);
+			expect([...selected.suffixAnchors]).toEqual([tail]);
+			await expect(sink.readCompactionEntries(["not-in-captured-branch"])).rejects.toThrow(
+				"outside its captured branch",
+			);
+		} finally {
+			await sink.release();
+		}
+		const bounded = session.bindCompactionSink({ maxEntries: 16, maxSourceBytes: 1 });
+		try {
+			await expect(bounded.readCompactionEntries([tail])).rejects.toThrow("Compaction source byte budget exceeded");
+		} finally {
+			await bounded.release();
+		}
+	});
+
 	it("persists owned sessions and permits explicit read/copy from a legacy input", async () => {
 		const ownedDir = join(dir, "owned");
 		let session = await SessionManager.create(dir, ownedDir);

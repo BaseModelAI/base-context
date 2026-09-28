@@ -107,6 +107,7 @@ export class DaemonWorkerClient {
 		await new Promise<void>((resolve, reject) => {
 			const timeout = setTimeout(() => {
 				cleanup();
+				this.clearSocketReference(socket);
 				socket.destroy();
 				reject(new Error(`Timed out connecting to daemon worker socket: ${this.socketPath}`));
 			}, timeoutMs);
@@ -121,6 +122,7 @@ export class DaemonWorkerClient {
 			};
 			const onError = (error: Error) => {
 				cleanup();
+				this.clearSocketReference(socket);
 				reject(error);
 			};
 			socket.once("connect", onConnect);
@@ -377,6 +379,12 @@ export class DaemonWorkerClient {
 			this.helloWaiters.delete(waiter);
 			waiter.reject(error);
 		}
+	}
+
+	private clearSocketReference(socket: Socket): void {
+		if (this.socket !== socket) return;
+		this.socket = undefined;
+		this.channel = undefined;
 	}
 
 	private notifyClosed(socket: Socket, error: Error): void {

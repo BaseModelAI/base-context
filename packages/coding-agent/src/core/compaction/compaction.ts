@@ -700,17 +700,20 @@ export function prepareViewCompaction(
 	maxCutEntryId?: string,
 	allowShortSession = false,
 	budgetPressure = false,
+	capturedSuffixAnchors?: ReadonlySet<string>,
 ): CompactionPreparation | undefined {
 	if (messages.length !== entryIds.length) throw new Error("Compaction views do not match their source anchors");
 	// firstKeptEntryId restores a chronological source suffix, not a selected-view suffix.
 	// Older pinned views cannot become cut anchors across omitted source messages.
 	const selectedIds = new Set(entryIds);
-	const suffixAnchors = new Set<string>();
-	for (let index = pathEntries.length - 1; index >= 0; index--) {
-		const entry = pathEntries[index];
-		if (!getMessageFromEntryForCompaction(entry)) continue;
-		if (!selectedIds.has(entry.id)) break;
-		suffixAnchors.add(entry.id);
+	const suffixAnchors = new Set(capturedSuffixAnchors);
+	if (!capturedSuffixAnchors) {
+		for (let index = pathEntries.length - 1; index >= 0; index--) {
+			const entry = pathEntries[index];
+			if (!getMessageFromEntryForCompaction(entry)) continue;
+			if (!selectedIds.has(entry.id)) break;
+			suffixAnchors.add(entry.id);
+		}
 	}
 	let cuts = messages.flatMap((message, index) =>
 		entryIds[index] &&

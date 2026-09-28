@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.15] - 2026-09-28
+
+- Fixed compaction of long-lived sessions by selecting the active canonical context before source hydration. This covers manual, agent-requested, threshold, and overflow-recovery compaction without increasing source limits.
+- Fixed Codex HTTP retries losing native context acknowledgement after retryable failures. Only an unchanged prepared request can reuse its acknowledged epoch.
+- Changed `/goal stop` and `/goal clear` to acknowledge the goal that was cleared instead of reporting only the resulting idle state.
+- Fixed daemon worker connection retries retaining failed socket and channel references.
+- Handled Python kernel stderr stream errors through the existing kernel error path.
+
 ## [1.0.14] - 2026-09-23
 
 - Fixed compaction recovery after failed or interrupted partial tool calls, including resuming affected saved sessions without exposing failed replies to the provider.
