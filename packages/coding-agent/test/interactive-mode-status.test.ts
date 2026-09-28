@@ -1604,6 +1604,7 @@ describe("InteractiveMode connection events", () => {
 			restoreTurnStartFromMessages: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		const renderInitialMessages = (
 			InteractiveMode.prototype as unknown as { renderInitialMessages(this: InteractiveMode): Promise<void> }

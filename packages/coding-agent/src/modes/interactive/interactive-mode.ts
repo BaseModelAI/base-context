@@ -500,6 +500,12 @@ export class BrandSplashHeader implements Component {
 
 type StartupPromptBarrierOutcome = "admitted" | "retained" | "lifecycle-cancelled";
 
+interface ConnectionStateRead {
+	connection: AgentConnection;
+	generation: number;
+	goal: GoalState | undefined;
+}
+
 type GoalAnnouncementSnapshot = {
 	goalId?: string;
 	status: GoalState["status"];
@@ -2500,13 +2506,15 @@ export class InteractiveMode {
 
 	private async refreshConnectionCatalog(): Promise<void> {
 		this.invalidateConnectionModelRefresh();
+		const read = this.captureConnectionStateRead();
 		const [state, commands, modelCatalog, resources] = await Promise.all([
 			this.agentConnection.getState(),
 			this.agentConnection.getCommands().catch(() => []),
 			this.agentConnection.getModelCatalog(),
 			this.agentConnection.getResourceSnapshot(),
 		]);
-		this.applyConnectionStateSnapshot(state);
+		if (!this.isConnectionStateReadCurrent(read)) return;
+		this.applyConnectionStateSnapshot(state, read);
 		this.connectionCommands = commands;
 		this.applyConnectionModelCatalog(modelCatalog);
 		this.connectionModelsFetchedAt = Date.now();
@@ -2546,7 +2554,25 @@ export class InteractiveMode {
 		return scopeHeartbeatsToSession(this.heartbeatCatalog, this.connectionState, this.subagentSnapshots.values());
 	}
 
-	private applyConnectionStateSnapshot(state: AgentConnectionState): void {
+	private captureConnectionStateRead(): ConnectionStateRead {
+		return {
+			connection: this.agentConnection,
+			generation: this.sessionEventGeneration,
+			goal: this.connectionState?.goal,
+		};
+	}
+
+	private isConnectionStateReadCurrent(read: ConnectionStateRead): boolean {
+		return read.connection === this.agentConnection && read.generation === this.sessionEventGeneration;
+	}
+
+	private applyConnectionStateSnapshot(state: AgentConnectionState, read?: ConnectionStateRead): void {
+		const current = this.connectionState;
+		// A pending read must not replace a goal observation applied after that read began.
+		// Authoritative replacement/resync snapshots apply without a read capture.
+		if (read && current?.sessionId === state.sessionId && current.goal !== read.goal) {
+			state = { ...state, goal: current.goal };
+		}
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
 		this.scheduleHeartbeatManagerRefresh();
@@ -6555,13 +6581,15 @@ export class InteractiveMode {
 	}
 
 	async renderInitialMessages(): Promise<void> {
+		const read = this.captureConnectionStateRead();
 		const snapshot = await this.agentConnection.getInitialSnapshot();
+		if (!this.isConnectionStateReadCurrent(read)) return;
 		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
 		const state = snapshot.state;
 		const streamingMessage = snapshot.streamingMessage;
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.seedSubagentSummary(snapshot.children);
-		this.applyConnectionStateSnapshot(state);
+		this.applyConnectionStateSnapshot(state, read);
 		this.restoreTurnStartFromMessages(context.messages);
 		await this.renderSessionContext(context, {
 			updateFooter: true,
@@ -7464,10 +7492,12 @@ export class InteractiveMode {
 	}
 
 	private async showSettingsSelector(): Promise<void> {
+		const read = this.captureConnectionStateRead();
 		let state: AgentConnectionState;
 		try {
 			state = await this.agentConnection.getState();
-			this.applyConnectionStateSnapshot(state);
+			if (!this.isConnectionStateReadCurrent(read)) return;
+			this.applyConnectionStateSnapshot(state, read);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;

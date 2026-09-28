@@ -7516,6 +7516,11 @@ Use prime_context read/search with selected lines or a query.`;
 			if (!state || !state.clients.has(client)) {
 				continue;
 			}
+			const streamsSnapshot =
+				client.transport === "private-framed" &&
+				daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot");
+			const snapshotSignal = streamsSnapshot ? markClientSnapshotStreaming(client, activeSessionId) : undefined;
+			let ownsSnapshot = streamsSnapshot;
 			try {
 				const result = await this.createAttachResult(client, state, {
 					type: "attach",
@@ -7524,10 +7529,7 @@ Use prime_context read/search with selected lines or a query.`;
 				if (this.sessions.get(activeSessionId) !== state || !state.clients.has(client)) {
 					continue;
 				}
-				if (
-					client.transport === "private-framed" &&
-					daemonClientCapabilitiesForSession(client, activeSessionId).has("chunked_snapshot")
-				) {
+				if (snapshotSignal) {
 					if (purpose === "replacement") {
 						this.write(client, {
 							type: "session_replaced",
@@ -7544,20 +7546,14 @@ Use prime_context read/search with selected lines or a query.`;
 						});
 					}
 					const snapshotId = `${result.activeSessionId}-${result.lastEventCursor?.generation}-${result.lastEventSequence}`;
-					const snapshotSignal = markClientSnapshotStreaming(client, activeSessionId);
-					let transcript: SnapshotTranscriptChunkSource;
-					try {
-						transcript = createSnapshotTranscriptChunks({
-							activeSessionId,
-							snapshotId,
-							messages: result.snapshot.messages,
-							targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
-							signal: snapshotSignal,
-						});
-					} catch (error) {
-						finishClientSnapshotStreaming(client, activeSessionId);
-						throw error;
-					}
+					const transcript = createSnapshotTranscriptChunks({
+						activeSessionId,
+						snapshotId,
+						messages: result.snapshot.messages,
+						targetChunkBytes: SNAPSHOT_TARGET_CHUNK_BYTES,
+						signal: snapshotSignal,
+					});
+					ownsSnapshot = false;
 					await this.streamWorkerSnapshot(
 						client,
 						{
@@ -7606,6 +7602,8 @@ Use prime_context read/search with selected lines or a query.`;
 				this.log(`could not catch up client ${client.id} for ${activeSessionId}: ${String(error)}`);
 				this.scheduleClientCatchupRetry(client);
 				return "retry-later";
+			} finally {
+				if (ownsSnapshot) finishClientSnapshotStreaming(client, activeSessionId);
 			}
 		}
 		return "drained";

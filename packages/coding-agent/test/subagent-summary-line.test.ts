@@ -1,10 +1,17 @@
-import { setKeybindings } from "@ponythewhite/base-context-tui";
+import { Container, setKeybindings } from "@ponythewhite/base-context-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { emptyGoalState, type GoalState } from "../src/core/goals.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
+import type {
+	AgentConnectionEventListener,
+	AgentConnectionRlmChildAgentSnapshot,
+	AgentConnectionSnapshot,
+	AgentConnectionState,
+} from "../src/modes/agent-connection/types.js";
 import { isDirectAgentChild } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import {
 	countDirectSubagentStatuses,
 	countRosterSubagentStatuses,
@@ -314,6 +321,150 @@ describe("SubagentSummaryLine", () => {
 
 		await expect(subscribe.call(mode)).resolves.toBeUndefined();
 		expect(Reflect.get(mode, "rosterBar")).toBeUndefined();
+	});
+
+	type GoalTrayHarness = {
+		agentConnection: { getInitialSnapshot(): Promise<AgentConnectionSnapshot> };
+		connectionState: AgentConnectionState;
+		getTrayContextLabel(): string | undefined;
+		subscribeToAgent(): void;
+		renderInitialMessages(): Promise<void>;
+		stopGoalTrayTimer(): void;
+		stopWorkingPulse(): void;
+	};
+
+	function createGoalTrayHarness() {
+		const mode = Object.create(InteractiveMode.prototype) as GoalTrayHarness;
+		const line = new SubagentSummaryLine(
+			() => "model",
+			() => mode.getTrayContextLabel(),
+		);
+		const showError = vi.fn();
+		let listener: AgentConnectionEventListener | undefined;
+		const state: AgentConnectionState = {
+			cwd: "/tmp/project",
+			thinkingLevel: "medium",
+			serviceTier: "default",
+			availableThinkingLevels: ["medium"],
+			isStreaming: false,
+			isCompacting: false,
+			isBashRunning: false,
+			retryAttempt: 0,
+			steeringMode: "all",
+			followUpMode: "all",
+			sessionId: "goal-tray-session",
+			leafId: null,
+			autoCompactionEnabled: true,
+			messageCount: 1,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			compactionCount: 0,
+			goal: emptyGoalState(),
+			scopedModels: [],
+			activeToolNames: [],
+			contextUsage: undefined,
+		};
+		const goal: GoalState = {
+			...emptyGoalState(),
+			active: true,
+			status: "active",
+			goalId: "goal-tray-1",
+			objective: "finish the offline fixture",
+			timeUsedSeconds: 65,
+		};
+		Object.assign(mode, {
+			connectionState: state,
+			isInitialized: true,
+			workingVisible: true,
+			sessionEventQueue: Promise.resolve(),
+			sessionEventGeneration: 0,
+			agentConnection: {
+				subscribe: (next: AgentConnectionEventListener) => {
+					listener = next;
+					return () => {};
+				},
+				getInitialSnapshot: async () => ({ state: { ...state, goal }, messages: [] }),
+			},
+			subagentSummaryLine: line,
+			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
+			heartbeatCatalog: [],
+			activityTracker: new AgentActivityTracker(),
+			chatContainer: new Container(),
+			footer: { invalidate: vi.fn(), setAutoCompactEnabled: vi.fn() },
+			ui: { requestRender: vi.fn(), terminal: { columns: 217 } },
+			bindPromptStashSession: vi.fn(),
+			scheduleHeartbeatManagerRefresh: vi.fn(),
+			renderRecap: vi.fn(),
+			renderSessionContext: vi.fn(async () => {}),
+			showError,
+		});
+		return { mode, line, goal, showError, getListener: () => listener };
+	}
+
+	it("renders an active goal delivered through the interactive event subscription", async () => {
+		const { mode, line, goal, showError, getListener } = createGoalTrayHarness();
+		mode.connectionState.isStreaming = true;
+		try {
+			mode.subscribeToAgent();
+			const listener = getListener();
+			expect(listener).toBeDefined();
+			await listener!({ type: "session_event", event: { type: "goal_update", goal } });
+
+			expect(showError).not.toHaveBeenCalled();
+			expect(mode.connectionState.goal).toEqual(goal);
+			const rendered = stripAnsi(line.render(217).join("\n"));
+			expect(rendered).toContain("Pursuing goal (1m 05s)");
+			expect(rendered).not.toContain(goal.objective);
+		} finally {
+			mode.stopGoalTrayTimer();
+			mode.stopWorkingPulse();
+		}
+	});
+
+	it("renders an initially active goal from the attach snapshot without a live goal event", async () => {
+		const { mode, line, goal, showError } = createGoalTrayHarness();
+		try {
+			await mode.renderInitialMessages();
+
+			expect(showError).not.toHaveBeenCalled();
+			expect(mode.connectionState.goal).toEqual(goal);
+			const rendered = stripAnsi(line.render(217).join("\n"));
+			expect(rendered).toContain("Pursuing goal (1m 05s)");
+			expect(rendered).not.toContain(goal.objective);
+		} finally {
+			mode.stopGoalTrayTimer();
+			mode.stopWorkingPulse();
+		}
+	});
+
+	it.each([false, true])("keeps a live goal update over an older pending snapshot (cleared=%s)", async (cleared) => {
+		const { mode, line, goal, showError, getListener } = createGoalTrayHarness();
+		mode.connectionState.goal = cleared ? goal : emptyGoalState();
+		const olderSnapshot: AgentConnectionSnapshot = {
+			state: structuredClone(mode.connectionState),
+			messages: [],
+		};
+		let finishSnapshot!: (snapshot: AgentConnectionSnapshot) => void;
+		const pendingSnapshot = new Promise<AgentConnectionSnapshot>((resolve) => {
+			finishSnapshot = resolve;
+		});
+		vi.spyOn(mode.agentConnection, "getInitialSnapshot").mockReturnValue(pendingSnapshot);
+		const updatedGoal = cleared ? emptyGoalState() : goal;
+		try {
+			mode.subscribeToAgent();
+			const rendering = mode.renderInitialMessages();
+			await getListener()!({ type: "session_event", event: { type: "goal_update", goal: updatedGoal } });
+			finishSnapshot(olderSnapshot);
+			await rendering;
+
+			expect(showError).not.toHaveBeenCalled();
+			const rendered = stripAnsi(line.render(217).join("\n"));
+			if (cleared) expect(rendered).not.toContain("Pursuing goal");
+			else expect(rendered).toContain("Pursuing goal (1m 05s)");
+			expect(mode.connectionState.goal).toEqual(updatedGoal);
+		} finally {
+			mode.stopGoalTrayTimer();
+			mode.stopWorkingPulse();
+		}
 	});
 
 	it("turns a selection into the scoped agents-view run result", async () => {

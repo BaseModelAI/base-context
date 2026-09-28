@@ -29,6 +29,7 @@ import {
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
+import { emptyGoalState } from "../src/core/goals.js";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -3479,6 +3480,7 @@ describe("daemon mode helpers", () => {
 				activeSessionId: state.activeSessionId,
 				snapshot: { lastEventSequence: state.lastEventSequence },
 				lastEventSequence: state.lastEventSequence,
+				lastEventCursor: { generation: state.eventGeneration, sequence: state.lastEventSequence },
 			}) as unknown as DaemonAttachResult;
 
 		internals.broadcastToSession(state, {
@@ -3618,6 +3620,8 @@ describe("daemon mode helpers", () => {
 		};
 		internals.handleConnection(socket);
 		const client = [...internals.clients][0]!;
+		client.transport = "private-framed";
+		setDaemonClientSessionCapabilities(client, state.activeSessionId, new Set(["chunked_snapshot"]));
 		client.attachedActiveSessionIds.add(state.activeSessionId);
 		state.clients.add(client);
 		internals.sessions.set(state.activeSessionId, state);
@@ -3626,6 +3630,8 @@ describe("daemon mode helpers", () => {
 
 		await internals.catchUpBackpressuredClient(client);
 
+		expect(client.snapshotStreaming).toBe(false);
+		expect(client.snapshotActiveSessionIds).not.toContain(state.activeSessionId);
 		expect(client.catchupRetryTimer).toBeDefined();
 		socketState.destroyed = true;
 		socket.emit("close");
@@ -3706,6 +3712,77 @@ describe("daemon mode helpers", () => {
 		expect(client.attachedActiveSessionIds).not.toContain(state.activeSessionId);
 	});
 
+	it("queues goal updates during chunked catch-up snapshot capture", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "bc-catchup-"));
+		const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+			createRuntime: vi.fn(),
+		});
+		const state = makeState("active");
+		state.eventGeneration = "generation-1";
+		const write = vi.fn(() => true);
+		const client = makeClient("client-1", state.activeSessionId);
+		client.socket = { destroyed: false, write } as unknown as Socket;
+		client.transport = "private-framed";
+		setDaemonClientSessionCapabilities(client, state.activeSessionId, new Set(["chunked_snapshot"]));
+		client.catchupActiveSessionIds = new Set([state.activeSessionId]);
+		state.clients.add(client);
+		let goal = emptyGoalState();
+		let releaseSnapshot!: () => void;
+		const snapshotGate = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		let snapshotCaptured!: () => void;
+		const captured = new Promise<void>((resolve) => {
+			snapshotCaptured = resolve;
+		});
+		const createAttachResult = vi.fn(async () => {
+			const result = {
+				activeSessionId: state.activeSessionId,
+				snapshot: { summary: {}, state: { goal }, messages: [], lastEventSequence: state.lastEventSequence },
+				lastEventSequence: state.lastEventSequence,
+				lastEventCursor: { generation: state.eventGeneration, sequence: state.lastEventSequence },
+			} as unknown as DaemonAttachResult;
+			if (createAttachResult.mock.calls.length === 1) {
+				snapshotCaptured();
+				await snapshotGate;
+			}
+			return result;
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult: typeof createAttachResult;
+			catchUpBackpressuredClient(client: DaemonSocketClient): Promise<void>;
+			broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
+			streamWorkerSnapshot(client: DaemonSocketClient, result: DaemonAttachResult): Promise<void>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.createAttachResult = createAttachResult;
+		const stream = vi.spyOn(internals, "streamWorkerSnapshot");
+		const catchup = internals.catchUpBackpressuredClient(client);
+		try {
+			await captured;
+			goal = { ...goal, active: true, status: "active", objective: "Finish the task" };
+			internals.broadcastToSession(state, {
+				type: "session_event",
+				activeSessionId: state.activeSessionId,
+				event: { type: "goal_update", goal },
+			});
+			expect(write).not.toHaveBeenCalled();
+			expect(client.snapshotActiveSessionIds).toContain(state.activeSessionId);
+			expect(client.catchupActiveSessionIds).toContain(state.activeSessionId);
+			releaseSnapshot();
+			await catchup;
+			expect(stream.mock.calls.map(([, result]) => result.snapshot.state.goal.status)).toEqual(["idle", "active"]);
+			expect(client.catchupActiveSessionIds).toEqual(new Set());
+			expect(client.snapshotStreaming).toBe(false);
+		} finally {
+			releaseSnapshot();
+			await catchup;
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("drops a backpressure catch-up when the client detaches during snapshot creation", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -3715,6 +3792,8 @@ describe("daemon mode helpers", () => {
 		const write = vi.fn(() => true);
 		const client = makeClient("client-1", state.activeSessionId);
 		client.socket = { destroyed: false, write } as unknown as Socket;
+		client.transport = "private-framed";
+		setDaemonClientSessionCapabilities(client, state.activeSessionId, new Set(["chunked_snapshot"]));
 		client.catchupActiveSessionIds = new Set([state.activeSessionId]);
 		state.clients.add(client);
 		let releaseSnapshot!: () => void;
@@ -3744,6 +3823,8 @@ describe("daemon mode helpers", () => {
 		releaseSnapshot();
 		await catchup;
 		expect(write).not.toHaveBeenCalled();
+		expect(client.snapshotStreaming).toBe(false);
+		expect(client.snapshotActiveSessionIds).not.toContain(state.activeSessionId);
 	});
 
 	it("marks a chunked attach as snapshotting before deferred streaming", async () => {

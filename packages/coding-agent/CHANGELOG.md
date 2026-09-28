@@ -7,6 +7,7 @@
 - Changed `/goal stop` and `/goal clear` to acknowledge the goal that was cleared instead of reporting only the resulting idle state.
 - Fixed daemon worker connection retries retaining failed socket and channel references.
 - Handled Python kernel stderr stream errors through the existing kernel error path.
+- Fixed the goal status display being overwritten by delayed state reads and streamed catch-up snapshots.
 
 ## [1.0.14] - 2026-09-23
 
