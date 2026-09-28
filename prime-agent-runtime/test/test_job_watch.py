@@ -1,0 +1,54 @@
+import asyncio
+import unittest
+from rlm.bash import bash
+from rlm.job_watch import identity, _probe, _handles
+from unittest.mock import AsyncMock, patch
+import gc
+
+
+class JobWatchCallbackTest(unittest.IsolatedAsyncioTestCase):
+    async def test_callback_and_identity_preserve_first_await_ownership(self):
+        handle = bash("python3 -c 'import time; time.sleep(10)'")
+        resource = identity(handle)
+        remove = handle.add_done_callback(lambda result: None)
+        with patch("rlm.host_request", new=AsyncMock()):
+            await _probe({"id": "probe", "resourceId": resource, "jobId": "job", "completionSource": "handle", "command": None})
+        self.assertFalse(handle._released)
+        async def wait():
+            return await handle
+        task = asyncio.create_task(wait())
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertIsNotNone(handle.poll())
+        self.assertNotEqual(handle.poll().exit_code, 0)
+        remove()
+
+    async def test_background_await_stays_nonowning_and_unregister_never_kills(self):
+        handle = bash("python3 -c 'import time; time.sleep(10)'")
+        _ = handle.pid
+        remove = handle.add_done_callback(lambda result: None)
+        async def wait():
+            return await handle
+        task = asyncio.create_task(wait())
+        await asyncio.sleep(0)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        remove()
+        self.assertIsNone(handle.poll())
+        handle.kill(grace=0)
+        await handle
+
+    async def test_completed_callback_is_immediate_and_idempotently_removable(self):
+        handle = bash("printf done")
+        resource = identity(handle)
+        result = await handle
+        seen = []
+        remove = handle.add_done_callback(seen.append)
+        remove(); remove()
+        self.assertEqual(seen, [result])
+        del remove, handle
+        gc.collect()
+        self.assertNotIn(resource, _handles)

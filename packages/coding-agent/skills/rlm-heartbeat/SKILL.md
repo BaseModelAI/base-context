@@ -12,8 +12,8 @@ replace, pause, resume, or clear that user-level heartbeat.
 Call directly from the Python REPL:
 
 ```python
-await rlm_heartbeat.create("check test progress", interval="5m", label="tests")
-await rlm_heartbeat.create("watch build", delivery_mode="follow_up")
+await rlm_heartbeat.create("review current priorities", interval="30m", label="review")
+await rlm_heartbeat.create("review pending decisions", delivery_mode="follow_up")
 await rlm_heartbeat.list()
 await rlm_heartbeat.update("job-id", status="pause")
 await rlm_heartbeat.delete("job-id")
@@ -46,9 +46,13 @@ the session when it is busy:
 
 - Use this when the user asks you to start, create, schedule, or manage your own
   heartbeat without explicitly referring to `/heartbeat`.
-- Use this only for agent-internal recurring checks and long-running task
-  coordination.
+- Use this for recurring work that needs a model decision. For deterministic
+  job checks, prefer `job-watch` when available: it probes before deciding whether
+  to wake the model. Preserve every required report and any explicit heartbeat
+  request; do not silently replace the user's schedule.
 - Do not use this skill to satisfy a user's request to configure `/heartbeat`;
   that is a separate user-level surface.
-- Keep heartbeat instructions specific and actionable so each recurring turn
-  knows exactly what to inspect or continue.
+- Name the current authoritative state and an existing parameterized project
+  helper in monitoring instructions. Do not copy the same detailed status into
+  heartbeats, messages, notebook variables, and status documents. Reuse the
+  helper with current inputs; repetition never authorizes new jobs.

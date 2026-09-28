@@ -78,6 +78,8 @@ export interface BranchBootstrapState {
 	serviceTier: IndexedSourceEvent | null;
 	goalState: IndexedSourceEvent | null;
 	rlmMaxDepth: IndexedSourceEvent | null;
+	jobWatchState?: IndexedSourceEvent | null;
+	jobWatchUnavailable?: "candidate_budget_exceeded";
 	latestCompaction: IndexedSourceEvent | null;
 	contextUsageAssistant: IndexedSourceEvent | null;
 	gitState: IndexedSourceEvent | null;

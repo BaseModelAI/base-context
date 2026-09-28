@@ -12,6 +12,7 @@ import {
 import { decodeJournalFrame } from "../src/core/journal-frame.js";
 import { renderPublicHistory } from "../src/core/public-context.js";
 import { retainToolOutput } from "../src/core/retained-tool-output.js";
+import { SELECTED_SKILL_CUSTOM_TYPE } from "../src/core/selected-skills.js";
 import {
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
 	NativeRecoveryBudgetRefusal,
@@ -23,12 +24,14 @@ import {
 import { createBranchHistoryReadView } from "../src/core/session-history-index.js";
 import {
 	APPEND_NATIVE_ADMISSION,
+	APPEND_NATIVE_RECOVERY,
 	APPEND_NATIVE_TOOL_EXECUTION,
 	SESSION_JOURNAL_MAX_FRAME_BYTES,
 	SessionJournalOwner,
 } from "../src/core/session-journal-owner.js";
 import { getSessionArtifactPathForFile } from "../src/core/session-manager.js";
 import { TASK_STATE_SCHEMA } from "../src/core/task-state.js";
+import { MAX_NATIVE_RECOVERY_TOOL_RESULT_BYTES, nativeRecoveryToolResult } from "../src/core/tools/prime-context.js";
 
 let dir: string;
 let index: HistoryIndex;
@@ -53,6 +56,70 @@ function source(id: string, sequence: number, text: string): IndexedSourceEvent 
 		textComplete: true,
 	};
 }
+
+it("keeps optional watch bootstrap unavailable when foreign branches exhaust its candidate budget", async () => {
+	const owner = await SessionJournalOwner.open({ journalPath: join(dir, "watch-candidates.jsonl"), create: true });
+	try {
+		await owner.appendJson(
+			JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "watch-candidates",
+				timestamp: "2026-01-01T00:00:00Z",
+				cwd: dir,
+			}),
+		);
+		await owner.appendJson(
+			JSON.stringify({ id: "root", parentId: null, type: "model_change", provider: "fixture", modelId: "model" }),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				id: "owned-watch",
+				parentId: "root",
+				type: "custom",
+				customType: "job_watch_state",
+				data: { version: 1 },
+			}),
+		);
+		const initial = owner.getSnapshot();
+		await index.syncSource("watch-candidates", initial);
+		expect(
+			(await index.branchBootstrap("watch-candidates", { leafId: "owned-watch", through: initial.nextSequence - 1 }))
+				.jobWatchState?.id,
+		).toBe("owned-watch");
+		for (let candidate = 0; candidate < 129; candidate++) {
+			await owner.appendJson(
+				JSON.stringify({
+					id: `foreign-${candidate}`,
+					parentId: "root",
+					type: "custom",
+					customType: "job_watch_state",
+					data: { version: 1 },
+				}),
+			);
+		}
+		await owner.appendJson(
+			JSON.stringify({
+				id: "current-leaf",
+				parentId: "owned-watch",
+				type: "message",
+				message: { role: "user", content: "Current branch remains available" },
+			}),
+		);
+		const current = owner.getSnapshot();
+		await index.syncSource("watch-candidates", current);
+		const bootstrap = await index.branchBootstrap("watch-candidates", {
+			leafId: "current-leaf",
+			through: current.nextSequence - 1,
+		});
+		expect(bootstrap.jobWatchState).toBeUndefined();
+		expect(bootstrap.jobWatchUnavailable).toBe("candidate_budget_exceeded");
+		expect(bootstrap.model?.id).toBe("root");
+		expect(bootstrap.hasBranchMessage).toBe(true);
+	} finally {
+		await owner.close();
+	}
+});
 
 it("indexes exact case-sensitive IDs and bounded pages/search without copying source bodies", async () => {
 	const events = [source("Item", 1, "parser symbol"), source("item", 2, "different symbol")];
@@ -1488,6 +1555,121 @@ it("indexes exact case-sensitive IDs and bounded pages/search without copying so
 		} finally {
 			await budgetOwner.close();
 		}
+	} finally {
+		await owner.close();
+	}
+});
+
+it("bounds the encoded envelope of a 2364-byte selected skill under a 2800-byte recovery limit", async () => {
+	const journalPath = join(dir, "selected-skill.jsonl");
+	const owner = await SessionJournalOwner.open({ journalPath, create: true });
+	try {
+		const lines = Array.from({ length: 55 }, (_, i) => `step ${i + 1}: read "évidence" at C:\\probe.`);
+		const text = lines.join("\n");
+		const body = text + ".".repeat(2364 - Buffer.byteLength(text));
+		expect(Buffer.byteLength(body)).toBe(2364);
+		expect(body.split("\n")).toHaveLength(55);
+		expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(2364);
+		await owner.appendJson(JSON.stringify({ type: "session", version: 3, id: "skill-budget", cwd: dir }));
+		await owner[APPEND_NATIVE_RECOVERY](
+			JSON.stringify({
+				type: "custom_message",
+				id: "selected-skill",
+				parentId: null,
+				customType: SELECTED_SKILL_CUSTOM_TYPE,
+				content: body,
+				details: {
+					baseContextSelectedSkill: {
+						version: 1,
+						producer: "model",
+						descriptor: {
+							name: "budget-fixture",
+							description: "Selected skill envelope fixture",
+							kind: "markdown",
+							filePath: join(dir, "SKILL.md"),
+							baseDir: dir,
+							disableModelInvocation: false,
+						},
+					},
+				},
+			}),
+		);
+		await index.syncSource("skill-budget", owner.getSnapshot());
+		const metadata = (await index.get("skill-budget", "selected-skill"))!;
+		const view = createBranchHistoryReadView(
+			index,
+			{
+				sessionId: "skill-budget",
+				sessionFile: journalPath,
+				leafId: metadata.id,
+				sourceSequence: 1,
+				persistent: true,
+			},
+			(query) => query(),
+		);
+		const request = {
+			action: "read" as const,
+			ref: metadata.id,
+			revision: metadata.revision,
+			field: "/content",
+			startLine: 1,
+			endLine: 55,
+			maxBytes: 2800,
+		};
+		const refused = await recoverCapturedHistory(view, request);
+		expect(refused).toMatchObject({
+			status: "budget_refused",
+			coverage: "unknown",
+			sources: [],
+			results: [{ reason: "output_limit", records: [] }],
+		});
+		expect(Buffer.byteLength(stringifyNativeRecoveryResponse(refused, 2800))).toBeLessThanOrEqual(2800);
+		const complete = await recoverCapturedHistory(view, { ...request, maxBytes: 4096 });
+		const encoded = stringifyNativeRecoveryResponse(complete, 4096);
+		expect(Buffer.byteLength(encoded)).toBeGreaterThan(2800);
+		expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(4096);
+		expect(complete).toMatchObject({
+			status: "found",
+			coverage: "complete",
+			authority: "tool-data",
+			freshness: "unknown",
+			results: [
+				{
+					records: [
+						{
+							ref: metadata.id,
+							revision: metadata.revision,
+							field: "/content",
+							startLine: 1,
+							endLine: 55,
+							text: body,
+						},
+					],
+				},
+			],
+		});
+		expect(complete.sources[0]).toMatchObject({
+			entryId: metadata.id,
+			revision: metadata.revision,
+			field: "/content",
+			startByte: 0,
+			endByte: 2364,
+			prefixOmitted: false,
+			suffixOmitted: false,
+		});
+		const toolResult = nativeRecoveryToolResult(complete);
+		expect(toolResult.content).toEqual([{ type: "text", text: encoded }]);
+		expect(toolResult.details.nativeRecovery.sources).toEqual(complete.sources);
+		expect(toolResult.details.nativeRecovery).not.toHaveProperty("results");
+		expect(Buffer.byteLength(JSON.stringify(toolResult))).toBeGreaterThan(Buffer.byteLength(encoded));
+		expect(Buffer.byteLength(JSON.stringify(toolResult))).toBeLessThanOrEqual(MAX_NATIVE_RECOVERY_TOOL_RESULT_BYTES);
+		const smaller = await recoverCapturedHistory(view, { ...request, endLine: 20 });
+		expect(smaller).toMatchObject({
+			status: "found",
+			coverage: "complete",
+			results: [{ records: [{ text: lines.slice(0, 20).join("\n"), suffixOmitted: true }] }],
+		});
+		expect(Buffer.byteLength(stringifyNativeRecoveryResponse(smaller, 2800))).toBeLessThanOrEqual(2800);
 	} finally {
 		await owner.close();
 	}

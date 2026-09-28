@@ -47,6 +47,7 @@ import {
 	HOST_REQUEST_SHUTDOWN_TIMEOUT_MS,
 	installSignalHandlersOnce,
 	isRecord,
+	type JobWatchProbeRequest,
 	KERNEL_ABORT_GRACE_MS,
 	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
 	KERNEL_BUSY_REUSE_WAIT_MS,
@@ -195,6 +196,46 @@ export class ReplKernelManager {
 	private childOrphanOwner?: OrphanProcessJournalOwner;
 	private readyDeferred?: ReturnType<typeof createDeferred<number>>;
 	private pythonVersion?: string;
+	private jobWatchCapability = false;
+	private readonly jobWatchRequests = new Map<
+		string,
+		{
+			watchId: string;
+			resolve: (result: Record<string, unknown>) => void;
+			reject: (error: Error) => void;
+			timer: ReturnType<typeof setTimeout>;
+		}
+	>();
+
+	jobWatchProbe(request: JobWatchProbeRequest): Promise<Record<string, unknown>> {
+		if (!this.jobWatchCapability || !this.isRunning)
+			return Promise.reject(new Error("Kernel job_watch_probe_v1 is unavailable; no probe was launched"));
+		const id = uuid();
+		return new Promise((resolve, reject) => {
+			const timer = setTimeout(() => {
+				this.jobWatchRequests.delete(id);
+				void this.writeLine({ type: "job_watch_probe", id, cancel: true }).catch(() => {});
+				reject(new Error("Job watch probe transport timed out"));
+			}, request.timeoutMs + 5000);
+			timer.unref();
+			this.jobWatchRequests.set(id, { watchId: request.watchId, resolve, reject, timer });
+			void this.writeLine({ type: "job_watch_probe", id, ...request }).catch((error) => {
+				clearTimeout(timer);
+				this.jobWatchRequests.delete(id);
+				reject(error);
+			});
+		});
+	}
+
+	cancelJobWatchProbe(watchId: string): void {
+		for (const [id, pending] of this.jobWatchRequests) {
+			if (pending.watchId !== watchId) continue;
+			clearTimeout(pending.timer);
+			this.jobWatchRequests.delete(id);
+			void this.writeLine({ type: "job_watch_probe", id, cancel: true }).catch(() => {});
+			pending.reject(new Error("Job watch probe cancelled"));
+		}
+	}
 	private kernelStderr = "";
 	/** Serializes execute() calls — the runtime runs one request at a time. */
 	private executionQueue: Promise<unknown> = Promise.resolve();
@@ -838,6 +879,8 @@ export class ReplKernelManager {
 	private handleEvent(event: Record<string, unknown>): void {
 		const type = event.event;
 		if (type === "ready") {
+			this.jobWatchCapability =
+				Array.isArray(event.capabilities) && event.capabilities.includes("job_watch_probe_v1");
 			this.pythonVersion = typeof event.python === "string" ? event.python : undefined;
 			this.readyDeferred?.resolve(typeof event.protocol === "number" ? event.protocol : -1);
 			return;
@@ -1356,6 +1399,17 @@ export class ReplKernelManager {
 			throw new Error("host request payload must have a string type");
 		}
 
+		if (data.type === "job_watch.probe_result") {
+			const id = typeof data.request_id === "string" ? data.request_id : "";
+			const pending = this.jobWatchRequests.get(id);
+			if (pending) {
+				clearTimeout(pending.timer);
+				this.jobWatchRequests.delete(id);
+				if (isRecord(data.result)) pending.resolve(data.result);
+				else pending.reject(new Error("Malformed job watch probe result"));
+			}
+			return {};
+		}
 		const handler = this.options.hostHandlers?.[data.type];
 		if (!handler) {
 			throw new Error(`host request type "${data.type}" is not available in this session`);
@@ -1419,6 +1473,12 @@ export class ReplKernelManager {
 	}
 
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): Error | undefined {
+		this.jobWatchCapability = false;
+		for (const pending of this.jobWatchRequests.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Kernel lost; job state is unknown"));
+		}
+		this.jobWatchRequests.clear();
 		const failures: unknown[] = [];
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();

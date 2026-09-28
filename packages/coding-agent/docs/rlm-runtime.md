@@ -90,12 +90,15 @@ Requests flow to the runtime on stdin and events return on stdout, one JSON obje
 
 ```text
 requests  execute, interrupt, host_reply, snapshot, restore, list_names, shutdown
+optional  job_watch_probe (job_watch_probe_v1 capability)
 events    ready, stdout, stderr, result, display, host_request, error, done
 ```
 
 Output events carry the id of the cell that was running when the bytes were produced; asyncio tasks keep their spawning cell's id even after that cell finishes, so detached work is attributed correctly.
 
 Calls to `ReplKernelManager.execute()` are serialized. One kernel has one shared namespace and does not run two ordinary Python cells concurrently. RLM child agents can still run concurrently because each delegation uses a distinct host request and child runtime.
+
+The optional `job_watch_probe_v1` ready capability supports contained read-only probes outside the cell FIFO and passive Bash completion callbacks. `AgentSession` schedules and compares observations before model admission, then uses ordinary prepared follow-ups. Explicit parking gates goal and autonomous continuation, not user input or unrelated work. No daemon protocol version changes; an older runtime without the capability is refused locally. See [job-watch](../skills/job-watch/SKILL.md) for reporting, restoration, and supported backlog limits.
 
 ## Host-Request Event Flow
 
@@ -173,7 +176,7 @@ test_review = await rlm("review the tests", name="test-reviewer")
 audit = await rlm("slow independent audit", name="audit-reviewer")
 ```
 
-End the turn instead of waiting for completion. Children send requested answers with `await agent_message.send(message, receiver_role="parent")`, and replies arrive as ordinary agent messages over later turns. A child may instead write results to files for the parent to read. The host runs each admitted child as an independent `AgentSession`; daemon-backed children can be retained as independently addressable session workers.
+End the turn instead of waiting for completion. Use `agent_message.send` for short coordination and `await agent_message.send_result(summary, findings, receiver_role="parent")` for substantial findings or final reports. Replies arrive over later turns; recover capsule details only when needed. Without that capability, use files for fan-in. The host runs each admitted child as an independent `AgentSession`; daemon-backed children can be retained as independently addressable session workers.
 
 ## Parent-Scoped Sub-Agent Registry
 

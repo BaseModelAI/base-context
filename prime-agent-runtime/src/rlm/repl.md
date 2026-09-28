@@ -3,7 +3,7 @@
 `python -m rlm.repl` starts a CPython REPL runtime that executes code cells in
 one persistent `__main__` namespace on a single asyncio event loop. The wire
 format is newline-delimited JSON: one object per line, UTF-8, no other framing.
-The current protocol version is `3`; the runtime announces it in the `ready`
+The current protocol version is `4`; the runtime announces it in the `ready`
 event.
 
 ## Channels
@@ -30,20 +30,23 @@ event.
 | `execute` | `{"type":"execute","id":str,"code":str}` |
 | `interrupt` | `{"type":"interrupt","id"?:str}` — no reply |
 | `host_reply` | `{"type":"host_reply","id":str,"data":{"status":"ok","result":{...}}}` or an error envelope — no reply |
+| `job_watch_probe` | Optional capability: `{"type":"job_watch_probe","id":str,"watchId":str,"generation":str,"resourceId":str,"jobId":str,"completionSource":"handle"|"probe","command":str|null,"timeoutMs":number}`; cancel with `{"type":"job_watch_probe","id":str,"cancel":true}` |
 | `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
 | `restore` | `{"type":"restore","id":str,"path":str}` |
 | `list_names` | `{"type":"list_names","id":str}` |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
 
-Requests other than `interrupt` and `host_reply` run strictly in order, one at
-a time. A malformed line
+Requests other than `interrupt`, `host_reply`, and the optional `job_watch_probe`
+run strictly in order, one at a time. A malformed line
 produces `{"event":"error","id":null,"ename":"ProtocolError",...}` and the
 runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 
 ## Events
 
-- `{"event":"ready","protocol":3,"python":"3.13.11"}` — sent once at startup;
-  the handshake. No banner precedes it.
+- `{"event":"ready","protocol":4,"python":"3.13.11"}` — sent once at startup;
+  the handshake. No banner precedes it. The optional `capabilities` array may
+  contain `"job_watch_probe_v1"`. Protocol version remains 4; old hosts ignore
+  optional metadata and new hosts refuse probes locally when the capability is absent.
 - `{"event":"stdout"|"stderr","id":str|null,"text":str}` — captured output.
   `id` is the cell whose Python execution context performed the write; asyncio
   tasks inherit the spawning cell's id (even after that cell finished). `null`
@@ -62,7 +65,7 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
   carrying the same id.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
-  request, always after all of that request's other events. A snapshot `done`
+  queued request, always after all of that request's other events. A snapshot `done`
   adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
   `failed`; a `list_names` `done` adds `names`; a failed snapshot/restore adds
   `reason`. Restoring a missing file reports `status:"ok"` with empty
@@ -137,6 +140,25 @@ never through the request queue, since the awaiting cell is itself the
 in-flight execute. Replies for unknown ids, or for a request whose awaiting
 cell was cancelled, are dropped. `rlm.repl.is_active()` reports whether the
 process is serving the protocol (importing the module does not count).
+
+## Optional job-watch bridge
+
+`job_watch_probe_v1` runs contained read-only probes outside the ordinary cell
+FIFO, not notebook closures. Results use the existing host bridge with
+`type:"job_watch.probe_result"`, the original `request_id`, and `result`; this
+request does not produce an ordinary cell `done`. Local handle completion uses
+`job_watch.observation` with watch identity/generation. The host owns comparison,
+scheduling, prepared follow-ups, and scoped goal/autonomous parking.
+
+Probe commands must name the intended working directory, interpreter, and paths;
+no notebook environment snapshot is persisted.
+
+`completionSource` distinguishes a local handle from an authoritative external
+probe. A lost handle becomes unknown; neither a PID nor a successful detached
+launcher is proof of remote completion. Cancelling a probe or unregistering a
+watch does not kill the monitored job. The passive Bash callback bridge does
+not change interrupted-await ownership. This adds no daemon wire version or
+model tool and requires no extra startup service.
 
 ## Snapshot / restore
 

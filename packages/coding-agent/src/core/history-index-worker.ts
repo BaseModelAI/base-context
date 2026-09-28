@@ -495,6 +495,12 @@ function insertContextUpdates(sessionId: string, item: IndexedSourceEvent, entry
 		insertUpdate.run(sessionId, item.id, "assistant-usage", entry.targetId, item.sequence);
 	} else if (entry.type === "label" && typeof entry.targetId === "string" && entry.targetId.length <= 512) {
 		insertUpdate.run(sessionId, item.id, "label", entry.targetId, item.sequence);
+	} else if (
+		entry.type === "custom" &&
+		entry.customType === "job_watch_state" &&
+		item.retention !== "retained-import"
+	) {
+		insertUpdate.run(sessionId, item.id, "job-watch-state", "session", item.sequence);
 	} else if (entry.type === "custom" && entry.customType === IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY) {
 		const parsed = parsePersistedIpythonSentAgentMessage(entry.data);
 		if (parsed && parsed.toolCallId.length <= MAX_CONTEXT_UPDATE_KEY) {
@@ -1512,7 +1518,23 @@ function branchBootstrap(request: Extract<HistoryIndexRequest, { action: "branch
 		if (!row) throw new Error("Branch bootstrap source metadata is unavailable; rebuild the derived index");
 		return event(row);
 	};
+	const watchCandidates = db
+		.prepare(
+			"SELECT event_id FROM context_update WHERE session=? AND update_kind='job-watch-state' AND target_key='session' AND sequence<=? ORDER BY sequence DESC LIMIT ?",
+		)
+		.all(sessionId, scope.through, MAX_CONTEXT_UPDATE_CANDIDATES + 1);
+	let jobWatchState: IndexedSourceEvent | null = null;
+	for (const candidate of watchCandidates.slice(0, MAX_CONTEXT_UPDATE_CANDIDATES)) {
+		const row = pointEvent(sessionId, String(candidate.event_id), scope);
+		if (row) {
+			jobWatchState = event(row);
+			break;
+		}
+	}
+	const watchBudgetExceeded = !jobWatchState && watchCandidates.length > MAX_CONTEXT_UPDATE_CANDIDATES;
 	return {
+		...(jobWatchState ? { jobWatchState } : {}),
+		...(watchBudgetExceeded ? { jobWatchUnavailable: "candidate_budget_exceeded" as const } : {}),
 		model: reference(state?.latest_model),
 		thinkingLevel: reference(state?.latest_thinking),
 		serviceTier: reference(state?.latest_service_tier),

@@ -594,6 +594,25 @@ class BashHandle:
                 return
         callback()
 
+    def add_done_callback(self, callback: Callable[[BashResult], None]) -> Callable[[], None]:
+        """Observe completion without taking await ownership; return an unsubscribe function.
+
+        The callback may run on a worker thread or immediately for a finished handle.
+        Removing it never signals the process. A callback already running may finish.
+        """
+        def invoke() -> None:
+            assert self._result is not None
+            callback(self._result)
+
+        self._add_done_callback(invoke)
+
+        def remove() -> None:
+            with self._callback_lock:
+                if invoke in self._callbacks:
+                    self._callbacks.remove(invoke)
+
+        return remove
+
     async def _wait(self) -> BashResult:
         # Asyncio-native wakeup: no executor thread is parked for the command's
         # duration, so many concurrent awaits cannot exhaust the default pool.

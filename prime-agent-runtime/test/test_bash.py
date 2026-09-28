@@ -1237,8 +1237,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": "notanint",
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": "notanint",
                 },
             ):
                 with self.assertRaises(RuntimeError):
@@ -1250,8 +1250,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    "BASE_CONTEXT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "BASE_CONTEXT_KERNEL_OWNER_PID": str(os.getpid()),
                 },
             ):
                 with mock.patch.object(bash_module, "_process_start_id", return_value=None):

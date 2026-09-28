@@ -5,6 +5,9 @@
 - Fixed background child-usage updates incorrectly stopping an active goal during request preparation.
 - Kept failed goals visible in the bottom-right status tray instead of hiding them.
 - Fixed temporary memory retention when reading a final multi-chunk line without a trailing newline.
+- Added `job-watch` for native job monitoring, prepared reports, and scoped waiting in goal and autonomous modes.
+- Added `bounded-inspect` for selected text and JSON evidence under shared source and output budgets.
+- Improved skill recovery, child-result capsule guidance, and reuse of small project helpers.
 
 ## [1.0.15] - 2026-09-28
 

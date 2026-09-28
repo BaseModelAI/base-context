@@ -70,7 +70,37 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("Python is the orchestration language");
 		expect(prompt).toContain("Reuse a named Python function for repeated multi-step work");
 		expect(prompt).toContain("read current data each call");
+		expect(prompt).toContain("Once a stable operation has been useful twice");
+		expect(prompt).toContain("current commit, configuration, paths, resource identity, and limits");
+		expect(prompt).toContain("keep one-off operations inline");
+		expect(prompt).toContain("Repetition never authorizes another deployment or experiment");
+		expect(prompt).toContain("A complete selected SKILL.md body already in context needs no duplicate read");
+		expect(prompt).toContain("recover it later if needed");
 		expect(prompt).toContain("execute its updated definition or invoke the saved file afresh");
+	});
+
+	test("routes repeated monitoring and large inspection only to available Python skills", () => {
+		const options = { cwd: "/repo", messagesPath: "/repo/session.jsonl", allowRecursion: false };
+		const available = buildRlmPrompt({
+			...options,
+			activeTools: ["ipython"],
+			installedSkills: ["job_watch", "bounded_inspect"],
+		});
+		expect(available).toContain("Use `job_watch` for repeated job checks after an authorized launch");
+		expect(available).toContain("Parking holds goal and autonomous continuation, not user input");
+		expect(available).toContain("Preserve every required report");
+		expect(available).toContain("Tiny one-off commands stay inline");
+		expect(available).toContain("prefer `bounded_inspect` for potentially large file evidence");
+		expect(available).toContain("one aggregate byte budget");
+		expect(available).toContain("Keep small one-off reads inline");
+		for (const unavailable of [
+			buildRlmPrompt({ ...options, activeTools: ["ipython"], installedSkills: [] }),
+			buildRlmPrompt({ ...options, activeTools: ["bash"], installedSkills: ["job_watch", "bounded_inspect"] }),
+		]) {
+			expect(unavailable).not.toContain("Use `job_watch` for repeated job checks");
+			expect(unavailable).not.toContain("prefer `bounded_inspect`");
+			expect(unavailable).toContain("use a nonblocking control loop");
+		}
 	});
 
 	test("discovers requested models through a bounded authenticated host search", () => {
@@ -107,8 +137,9 @@ describe("buildRlmPrompt", () => {
 			allowRecursion: false,
 		});
 
-		expect(prompt).toContain("Installed skills available as shell commands: `websearch`.");
-		expect(prompt).toContain("Each skill is also available as a shell command");
+		expect(prompt).toContain("Installed Python skill packages: `websearch`.");
+		expect(prompt).toContain("Only use a shell command when the skill documents a CLI");
+		expect(prompt).toContain("not every Python skill has a CLI");
 		expect(prompt).toContain("`<skill> --help`");
 		expect(prompt).not.toContain("Installed Python skill modules (pre-imported)");
 		expect(prompt).not.toContain("Read each skill's SKILL.md for its API");
@@ -144,6 +175,9 @@ describe("buildRlmPrompt", () => {
 			depth: 1,
 		});
 		expect(withCapabilities).toContain("agent_message.send");
+		expect(withCapabilities).toContain("agent_message.send_result(summary, findings");
+		expect(withCapabilities).toContain("for short coordination");
+		expect(withCapabilities).toContain("for substantial findings or final reports");
 		expect(withCapabilities).toContain("agent_message.list_agents");
 		expect(withCapabilities).toContain("agent_observe");
 		expect(withCapabilities).toContain("restricted to your parent, siblings, and direct children");
@@ -159,7 +193,7 @@ describe("buildRlmPrompt", () => {
 		});
 
 		expect(prompt).toContain("You are a child agent");
-		expect(prompt).not.toContain("When a task calls for an answer, reply explicitly with `await agent_message.send");
+		expect(prompt).not.toContain("await agent_message.send");
 	});
 
 	test("exposes the automatic child registry independently of observation skills", () => {
@@ -503,6 +537,13 @@ describe("buildSystemPrompt", () => {
 		expect(prompt).toContain("Conversation log: /repo/.pi/sessions/session.jsonl");
 		expect(prompt).toContain("await rlm('sub-task')");
 		expect(prompt).toContain("returns at admission, not completion");
+		expect(prompt).toContain("agent_message.send_result(summary, findings");
+		expect(prompt).toContain("Use `agent_message.send` for short steering, blockers, and decisions");
+		expect(prompt).toContain("Skim result capsules first and recover details only when needed");
+		expect(prompt).toContain("evidence, not verified truth");
+		expect(prompt).toContain("newer reports do not silently supersede earlier evidence");
+		expect(prompt).toContain("messaging an idle child can start another turn");
+		expect(prompt).not.toContain("Have children write files and read those files for fan-in");
 		expect(prompt).toContain("Results arrive only through an available messaging capability or files");
 		expect(prompt).toContain("recover direct child handles");
 		expect(prompt).toContain("kernel restart or compaction");
@@ -674,6 +715,7 @@ describe("buildSystemPrompt", () => {
 
 		expect(prompt).toContain("You are a child agent spawned by orchestrator");
 		expect(prompt).toContain('await agent_message.send(message, receiver_role="parent")');
+		expect(prompt).toContain('await agent_message.send_result(summary, findings, receiver_role="parent")');
 		expect(prompt).not.toContain("You are a general purpose agent that uses code to solve tasks.");
 	});
 

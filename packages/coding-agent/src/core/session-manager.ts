@@ -148,7 +148,8 @@ const COMPACTION_BOOKKEEPING_ENTRY_TYPES = new Set<SessionEntry["type"]>([
 function isCompactionBookkeeping(entry: SessionEntry): boolean {
 	return (
 		COMPACTION_BOOKKEEPING_ENTRY_TYPES.has(entry.type) ||
-		(entry.type === "custom_message" && entry.customType === COMPACTION_OUTCOME_CUSTOM_TYPE)
+		(entry.type === "custom_message" && entry.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) ||
+		(entry.type === "custom" && entry.customType === "job_watch_state")
 	);
 }
 

@@ -51,6 +51,8 @@ Base Context ships with built-in skills that load by default:
 
 - `skill-creator` - teaches the agent to create new skills: markdown skill layout, frontmatter rules, placement and precedence, and the full Python-backed skill contract (package layout, `run()` convention, optional CLI, kernel venv behavior) with a working template in `references/python-skills.md`.
 - `websearch` - a Python-backed Google search skill using the [Serper](https://serper.dev) API.
+- [`job-watch`](../skills/job-watch/SKILL.md) - native job completion/probe monitoring, prepared reports, and scoped goal/autonomous waiting. Launch jobs through `bash()` or existing authorized helpers.
+- [`bounded-inspect`](../skills/bounded-inspect/SKILL.md) - selected text/JSON evidence under shared source and serialized-output budgets. Historical conversation recovery remains with `prime_context`.
 
 Built-in skills behave like any other skill but have the lowest precedence: a user, project, package, or `--skill` skill with the same name overrides the built-in one.
 
@@ -138,8 +140,9 @@ This is progressive disclosure: only descriptions are always in context, full in
 
 For native epochs, select an advertised skill with
 `prime_context` using `{"action":"skill","name":"..."}`. The response gives its
-captured body and canonical source reference. Use the returned ref and field with
-`action="read"` for bounded recovery; do not reopen the mutable location to replace
+captured body and canonical source reference. If the complete body is already
+in context, no duplicate read is needed. For later bounded recovery, use the
+returned ref and field with `action="read"`; do not reopen the mutable location to replace
 a selected version. A committed epoch keeps that selected descriptor and instruction
 body. After an existing context transition commits a new epoch, a later selection
 can capture updated contents. The original captured body remains recoverable from
@@ -157,18 +160,19 @@ Skills with `disable-model-invocation: true` are hidden from the startup skill l
 
 For repeated multi-step work, start with an ordinary named Python function in
 `ipython`. Keep one-off operations inline and prefer an existing project command
-when it already does the work. Give changing paths, selectors, output paths and
-options explicit parameters. Reuse the code, not its previous answer: read current
+when it already does the work. Pass the current commit, configuration, paths,
+resource identity, selectors and limits explicitly where applicable. Reuse the code, not its previous answer: read current
 inputs on every call. Do not capture an open handle or hidden mutable REPL state.
 
-After two useful occurrences across tasks, or an explicit request for reuse, save
-the function in an editable `.py` file with a short project markdown skill. This
-is a practical heuristic, not a repetition detector. A small helper needs no
+After two useful occurrences, or an explicit request for reuse, save the function
+in a small editable project `.py` file. Short project instructions are optional;
+no new global skill is needed. This is a practical heuristic, not a repetition
+detector. A small helper needs no
 `pyproject.toml`, package installation, manifest or promotion step. Use the standard
 library and dependencies already available in the selected environment.
 
-For example, save `scripts/matching_lines.py` in
-`.base-context/skills/matching-lines/`:
+For example, save `scripts/matching_lines.py` in the project. This example is
+for small files; use `bounded-inspect` for potentially large evidence:
 
 ```python
 from pathlib import Path
@@ -188,26 +192,13 @@ def matching_lines(path: str, needle: str, limit: int = 20) -> list[tuple[int, s
     return matches
 ```
 
-Add the ordinary `SKILL.md` next to `scripts/`:
-
-```markdown
----
-name: matching-lines
-description: Read current UTF-8 files for repeated literal line lookups. Inputs are path, needle and limit; output is a list of one-based line numbers and text.
----
-Load scripts/matching_lines.py afresh with runpy.run_path, then call
-matching_lines(path, needle, limit=20). Resolve the script path against this
-skill directory. No matches returns an empty list; ordinary errors propagate.
-```
-
-Only the short skill description enters discovery. Load the instructions and code
-when the active task needs them. For this standard-library helper, a fresh load
-and call in `ipython` can be:
+For this standard-library helper, load the saved file afresh and call it in
+`ipython`. No registration or package installation is needed:
 
 ```python
 from runpy import run_path
 
-matching_lines = run_path("/repo/.base-context/skills/matching-lines/scripts/matching_lines.py")["matching_lines"]
+matching_lines = run_path("/repo/scripts/matching_lines.py")["matching_lines"]
 matches = matching_lines("/repo/current.txt", "needle", limit=20)
 ```
 
@@ -217,7 +208,8 @@ use the project's own environment instead of installing them into the kernel.
 Fresh execution of editable code does not replace the captured instruction body
 of an active native skill epoch.
 
-Saving a helper does not schedule or authorize execution. Invocation still needs
+Repetition never authorizes another deployment or experiment. Saving a helper
+does not schedule or authorize execution. Invocation still needs
 the normal model/tool decision or an explicit user workflow, under the existing
 permissions. Do not add an import manager, dependency snapshots or per-call setup.
 

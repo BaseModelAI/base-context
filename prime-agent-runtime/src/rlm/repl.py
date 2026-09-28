@@ -986,6 +986,10 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
             return
         _request_interrupt(req.get("id"))
         return
+    if rtype == "job_watch_probe":
+        from .job_watch import dispatch
+        _loop.call_soon_threadsafe(dispatch, req)
+        return
     if rtype == "host_reply":
         # Bypass the FIFO queue: the awaiting cell IS the in-flight
         # execute, so a queued reply would deadlock behind it.
@@ -1152,7 +1156,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
-    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
+    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version(),
+           "capabilities": ["job_watch_probe_v1"]})
 
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
     # A KeyboardInterrupt escaping a cell or background task stops

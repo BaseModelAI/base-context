@@ -62,7 +62,8 @@ if child is not None:
 
 ## Result capsules
 
-Use `send()` for short coordination. Use `send_result()` for a full public report:
+Use `send()` for short steering, blockers, and decisions. Use `send_result()`
+for substantial findings or a final public report, not for a short message:
 
 ```python
 from pathlib import Path
@@ -74,7 +75,9 @@ receipt = await agent_message.send_result(
 )
 ```
 
-State conclusions, caveats, and decisions in the capsule. If it revises or
+State the outcome, important caveats, decisions, and evidence references in the
+capsule. Child findings are evidence, not independently verified truth. Retrieve
+details only when needed. If it revises or
 replaces earlier reports, name their exact report refs in the summary. With
 several updates, skim the capsules first, then retrieve the last relevant
 report or reports. Older reports remain readable. Do not treat unrelated
@@ -82,6 +85,9 @@ findings or unresolved blockers as replaced merely because a newer report
 arrived. There is no automatic latest-wins, dropping, or coalescing.
 
 ## Safety
+
+- Avoid routine acknowledgements and repeated status broadcasts. Messaging an
+  idle child can start another turn; not every message needs a reply.
 
 - Do not delete a child immediately after `send`: delivered follow-ups may still
   be running and queued receipts have not run yet. Wait until observation shows

@@ -309,10 +309,23 @@ export interface CapturedKernelLifecycle {
 	isCurrent(): boolean;
 }
 
+export interface JobWatchProbeRequest {
+	watchId: string;
+	generation: string;
+	resourceId: string;
+	jobId: string;
+	completionSource?: "handle" | "probe";
+	command: string | null;
+	timeoutMs: number;
+}
+
 /** Public surface every kernel client exposes to the provisioner and session layer. */
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;
 	readonly isRunning: boolean;
+	/** Optional job_watch_probe_v1 capability. Never evaluates a notebook cell. */
+	jobWatchProbe?(request: JobWatchProbeRequest): Promise<Record<string, unknown>>;
+	cancelJobWatchProbe?(watchId: string): void;
 	start(options?: KernelStartOptions): Promise<void>;
 	execute(code: string, opts?: ExecuteOptions): Promise<ExecuteResult>;
 	shutdown(opts?: KernelShutdownOptions): Promise<boolean>;

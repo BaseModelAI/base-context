@@ -220,6 +220,7 @@ import {
 	type SessionRuntimeServices,
 	takeNativeInferenceAuthSource,
 } from "./inference-coordinator.js";
+import { JOB_WATCH_STATE, JobWatchController, type JobWatchSnapshot } from "./job-watch.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
 import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
@@ -280,6 +281,7 @@ import { getRecoveryCompactionAuthorization, PublicContextBudgetError } from "./
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import { assertResourceCurrent, type OwnedResourceCapture } from "./resource-view.js";
+import { retainToolOutput } from "./retained-tool-output.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -1328,6 +1330,7 @@ export class AgentSession {
 	private _goalStateRevision = 0;
 	private _goalAccountingStartedAt: number | undefined = undefined;
 	private _goalContinuationAwaitsRlmWork = false;
+	private _jobWatchController?: JobWatchController;
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -2209,6 +2212,8 @@ export class AgentSession {
 				activeToolNames: this._initialActiveToolNames,
 				includeAllExtensionTools: true,
 			});
+			if (bootstrap.jobWatchState) await this._getJobWatchController().restore(bootstrap.jobWatchState);
+			if (bootstrap.jobWatchUnavailable) this._surfaceSessionInputError(new Error(bootstrap.jobWatchUnavailable));
 			if (
 				this._goalState.status === "active" &&
 				this._includeGoals &&
@@ -2724,6 +2729,8 @@ export class AgentSession {
 		goalState: GoalState;
 		goalSeedable: boolean;
 		rlmMaxDepth: PersistedRlmMaxDepthState | undefined;
+		jobWatchState?: JobWatchSnapshot;
+		jobWatchUnavailable?: string;
 		hasBranchMessage: boolean;
 	}> {
 		const { maxSourceBytes } = this.settingsManager.getCanonicalContextLimits();
@@ -2759,8 +2766,31 @@ export class AgentSession {
 				)
 					throw new Error("Bootstrap RLM depth source is unavailable or ineligible");
 				rlmMaxDepth = hydrated.entry.data;
+				remaining -= bootstrap.rlmMaxDepth.locator.length;
+			}
+			let jobWatchState: JobWatchSnapshot | undefined;
+			let jobWatchUnavailable: string | undefined = bootstrap.jobWatchUnavailable
+				? `Monitoring unavailable: optional job-watch bootstrap candidate budget exceeded. Inspect ${this.sessionManager.getSessionFile()}; no watches were resumed.`
+				: undefined;
+			if (bootstrap.jobWatchState) {
+				if (
+					bootstrap.jobWatchState.locator.length >
+					Math.min(remaining, 64 * 1024 + 1024, Math.floor(maxSourceBytes / 2) + 1024)
+				) {
+					jobWatchUnavailable = `Monitoring unavailable: optional job-watch state exceeds the existing source budget. Inspect ${this.sessionManager.getSessionFile()} entry ${bootstrap.jobWatchState.id}; no watches were resumed.`;
+				} else {
+					const hydrated = await view.hydrateEntry(bootstrap.jobWatchState.id, remaining);
+					if (
+						hydrated?.entry.type === "custom" &&
+						hydrated.entry.customType === JOB_WATCH_STATE &&
+						hydrated.source.retention !== "retained-import"
+					)
+						jobWatchState = hydrated.entry.data as JobWatchSnapshot;
+				}
 			}
 			return {
+				jobWatchState,
+				jobWatchUnavailable,
 				goalState,
 				goalSeedable: bootstrap.goalSeedable,
 				rlmMaxDepth,
@@ -2814,6 +2844,8 @@ export class AgentSession {
 	}
 
 	private async _reloadBranchRuntimeState(): Promise<void> {
+		this._jobWatchController?.dispose();
+		this._jobWatchController = undefined;
 		this._contextMode = await this._readContextMode();
 		const bootstrap = this.sessionManager.isPersisted()
 			? await this._readRuntimeBootstrap()
@@ -3336,7 +3368,13 @@ export class AgentSession {
 
 	private async _resumeGoalContinuationAfterRlmWork(): Promise<void> {
 		if (!this._goalContinuationAwaitsRlmWork) return;
-		if (this._disposed || this._disposing || this._hasUnsettledRlmQuiescenceWork()) return;
+		if (
+			this._disposed ||
+			this._disposing ||
+			this._hasUnsettledRlmQuiescenceWork() ||
+			this._jobWatchController?.isParked()
+		)
+			return;
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
@@ -4315,7 +4353,12 @@ export class AgentSession {
 		owner = this._captureCompactionOwner(this.agent.signal),
 		capture = this._captureThresholdAutonomousOwner(),
 	): Promise<CheckpointAction | undefined> {
-		if (!this._isCompactionOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
+		if (
+			!this._isCompactionOwnerCurrent(owner) ||
+			!this._contextOptimizationAllowed() ||
+			this._jobWatchController?.isParked()
+		)
+			return undefined;
 		const queued = this._queuedAutonomousThresholdContinuations.get(message);
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		const { state, snapshot: original, arrivalEpoch, cwd } = capture;
@@ -4367,7 +4410,8 @@ export class AgentSession {
 	): Promise<CheckpointAction | undefined> {
 		if (!this._isGoalContinuationOwnerCurrent(owner) || !this._contextOptimizationAllowed()) return undefined;
 		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
-		if (owner.goal.status !== "active" || !owner.goal.objective) return undefined;
+		if (owner.goal.status !== "active" || !owner.goal.objective || this._jobWatchController?.isParked())
+			return undefined;
 		const queued = this._queuedGoalThresholdContinuation;
 		if (queued && this._checkpointActionPending(queued)) return queued;
 		const before = owner.goal;
@@ -4936,6 +4980,7 @@ export class AgentSession {
 		if (this._goalState.status !== "active" || !this._goalState.objective) {
 			return { kind: "finish" };
 		}
+		if (this._jobWatchController?.isParked()) return { kind: "wait_for_owned_work" };
 		// Delegating and ending the turn is correct behavior; retain the existing wakeup owner.
 		if (this._hasUnsettledRlmQuiescenceWork()) {
 			this._goalContinuationAwaitsRlmWork = true;
@@ -4980,6 +5025,7 @@ export class AgentSession {
 	): Promise<AgentContinuationOutcome> {
 		if (signal?.aborted || this._disposed || this._disposing) return this._stoppedContinuationOutcome(signal);
 		if (this.queuedActionCount > 0) return { kind: "finish" };
+		if (this._jobWatchController?.isParked()) return { kind: "wait_for_owned_work" };
 		const owner = this._captureGoalContinuationOwner(signal);
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = owner.goal;
@@ -5824,6 +5870,18 @@ export class AgentSession {
 			await drain(() => this._agentEventQueue);
 			await drain(() => this._goalResumeOperation);
 			await drain(() => this._waitForChildUsageWrites());
+			if (this._jobWatchController) {
+				const undelivered = new Set(
+					this._actionStore
+						.unfinishedActions()
+						.filter(
+							(action) =>
+								action.queueKey && action.payload.kind === "turn" && !primaryDeliveryRecord(action).durable,
+						)
+						.map((action) => action.queueKey!),
+				);
+				await drain(() => this._jobWatchController?.settleShutdown(undelivered));
+			}
 			await drain(() => this.dispose());
 		} catch (error) {
 			errors.push(error);
@@ -5865,6 +5923,7 @@ export class AgentSession {
 		}
 		this.requests.stopAdmission();
 		this._disposed = true;
+		this._jobWatchController?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -8806,6 +8865,7 @@ export class AgentSession {
 				this._advanceCheckpointPauseEpoch();
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				void this._jobWatchController?.flushPending().catch((error) => this._surfaceSessionInputError(error));
 				this._scheduleGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
 			},
@@ -8918,6 +8978,7 @@ export class AgentSession {
 		this._sessionInputPumpEpoch++;
 		this._notifySessionInputCheckpointChange();
 		this._flushDeferredRlmTerminalNotices();
+		void this._jobWatchController?.flushPending().catch((error) => this._surfaceSessionInputError(error));
 	}
 
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
@@ -12228,6 +12289,81 @@ export class AgentSession {
 		}
 	}
 
+	private _getJobWatchController(): JobWatchController {
+		if (this._jobWatchController?.isCurrent()) return this._jobWatchController;
+		this._jobWatchController?.dispose();
+		const manager = this.sessionManager;
+		const ownsSource = manager.captureCompactionSourceOwner();
+		const controller = new JobWatchController({
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			current: () => !this._disposed && !this._disposing && this.sessionManager === manager && ownsSource(),
+			goalId: () => this._goalState.goalId,
+			persist: async (state) => {
+				if (this.sessionManager !== manager || !ownsSource()) return;
+				await manager.appendCustomEntry(JOB_WATCH_STATE, state);
+			},
+			waitForDelivery: true,
+			stateBudgetBytes: Math.min(
+				64 * 1024,
+				Math.floor(this.settingsManager.getCanonicalContextLimits().maxSourceBytes / 2),
+			),
+			probe: async (request) => {
+				const kernel = await this._ipythonKernelProvisioner?.ensure();
+				if (!kernel?.jobWatchProbe) throw new Error("Kernel job_watch_probe_v1 is unavailable");
+				const result = await kernel.jobWatchProbe({
+					watchId: request.id,
+					generation: request.generation,
+					resourceId: request.resource_id,
+					jobId: request.job_id,
+					completionSource: request.completion_source,
+					command: request.command ?? null,
+					timeoutMs: request.timeout_ms,
+				});
+				await controller.observe({ id: request.id, generation: request.generation, ...result });
+			},
+			cancelProbe: (id) => this._ipythonKernelProvisioner?.manager?.cancelJobWatchProbe?.(id),
+			retain: async (output) => {
+				const directory = manager.getSessionArtifactDir();
+				if (!directory) return undefined;
+				const retained = await retainToolOutput(directory, [output], false);
+				return join(directory, retained.artifactId);
+			},
+			onError: (error) => this._surfaceSessionInputError(error),
+			admit: (text, eventId) => {
+				if (this._sessionInputAdmissionPauses.size) return false;
+				const content = `[job-watch] ${text}`;
+				const admission = this._admitSessionInput(
+					this._createPreparedTurnAction("followUp", content, undefined, {
+						message: {
+							role: "custom",
+							customType: "job_watch_event",
+							content,
+							display: true,
+							timestamp: Date.now(),
+						},
+						queueKey: eventId,
+						resumeIfIdle: !this._sessionInputPumpSuspended,
+					}),
+					{ wake: !this._sessionInputPumpSuspended },
+				);
+				if (admission.ticket)
+					void admission.ticket.delivered
+						.then(
+							(outcome) =>
+								outcome.status === "delivered"
+									? controller.acknowledge(eventId)
+									: controller.releaseDelivery(eventId, true),
+							() => controller.releaseDelivery(eventId, false),
+						)
+						.catch((error) => this._surfaceSessionInputError(error));
+				return admission.accepted;
+			},
+		});
+		this._jobWatchController = controller;
+		return controller;
+	}
+
 	private _createKernelHostHandlers(): HostRequestHandlers {
 		const handlers: HostRequestHandlers = {
 			prime_context: async (payload, context) => {
@@ -12273,6 +12409,35 @@ export class AgentSession {
 			]) {
 				handlers[type] = async (payload) => this.handleRlmHeartbeatHostRequest(type, payload);
 			}
+		}
+		for (const type of ["watch", "status", "park", "unregister", "observation"]) {
+			handlers[`job_watch.${type}`] = async (payload) => {
+				if (this._disposed || this._disposing) throw new Error("Job watch source owner changed");
+				if (type === "observation" && !this._jobWatchController?.isCurrent()) return { ignored: true };
+				const controller = this._getJobWatchController();
+				switch (type) {
+					case "watch":
+						return { ...(await controller.watch(payload)) };
+					case "status":
+						return controller.status(typeof payload.id === "string" ? payload.id : undefined);
+					case "park":
+						if (!Array.isArray(payload.ids) || !payload.ids.every((id) => typeof id === "string"))
+							throw new Error("park requires watch ids");
+						return controller.park(payload.ids);
+					case "unregister":
+						return controller.unregister(String(payload.id));
+					default:
+						if (
+							typeof payload.id !== "string" ||
+							typeof payload.generation !== "string" ||
+							!payload.result ||
+							typeof payload.result !== "object"
+						)
+							throw new Error("Invalid job watch observation");
+						await controller.observe({ ...payload.result, id: payload.id, generation: payload.generation });
+						return {};
+				}
+			};
 		}
 		const visibleKernelSkillNames = new Set(
 			this._modelVisibleSkills()

@@ -92,7 +92,9 @@ type SessionRetryCompactionInternals = {
 	_postCompactionContinuationScheduled: boolean;
 	_processAgentEvent: (event: AgentEvent) => Promise<void>;
 	_checkCompaction: (message: AssistantMessage) => Promise<boolean>;
-	_schedulePostCompactionContinue: () => void;
+	_captureCompactionOwner: () => object;
+	_captureCheckpointResume: (owner: object, boundary: { kind: "overflow"; state: "pending" }) => object;
+	_schedulePostCompactionContinue: (resume: object) => void;
 	_cancelPostCompactionContinue: () => void;
 };
 
@@ -142,15 +144,13 @@ describe("AgentSession retry and event characterization", () => {
 		expect(requests.map((request) => request.headers[MODEL_REQUEST_ID_HEADER])).toEqual([requestId, requestId]);
 		expect(requests.map((request) => request.headers[IDEMPOTENCY_KEY_HEADER])).toEqual([requestId, requestId]);
 		expect(
-			harness.sessionManager
-				.getEntries()
-				.some(
-					(entry) =>
-						entry.type === "message" &&
-						entry.message.role === "assistant" &&
-						entry.message.stopReason === "error" &&
-						entry.message.errorMessage === "overloaded_error",
-				),
+			(await harness.sessionManager.readEntries()).some(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.message.stopReason === "error" &&
+					entry.message.errorMessage === "overloaded_error",
+			),
 		).toBe(true);
 	});
 
@@ -677,7 +677,11 @@ describe("AgentSession retry and event characterization", () => {
 			internals._retryResolve = resolve;
 		});
 		internals._autoCompactionAbortController = compactionAbortController;
-		internals._schedulePostCompactionContinue();
+		const resume = internals._captureCheckpointResume(internals._captureCompactionOwner(), {
+			kind: "overflow",
+			state: "pending",
+		});
+		internals._schedulePostCompactionContinue(resume);
 
 		try {
 			expect(internals._postCompactionContinuationScheduled).toBe(true);
