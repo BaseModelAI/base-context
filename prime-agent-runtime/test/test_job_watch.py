@@ -4,6 +4,7 @@ from rlm.bash import bash
 from rlm.job_watch import identity, _probe, _handles
 from unittest.mock import AsyncMock, patch
 import gc
+import threading
 
 
 class JobWatchCallbackTest(unittest.IsolatedAsyncioTestCase):
@@ -42,13 +43,25 @@ class JobWatchCallbackTest(unittest.IsolatedAsyncioTestCase):
         await handle
 
     async def test_completed_callback_is_immediate_and_idempotently_removable(self):
-        handle = bash("printf done")
+        workers = []
+        real_thread = threading.Thread
+        def worker_thread(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            workers.append(thread)
+            return thread
+        with patch("rlm.bash.threading.Thread", side_effect=worker_thread):
+            handle = bash("printf done")
         resource = identity(handle)
         result = await handle
         seen = []
         remove = handle.add_done_callback(seen.append)
         remove(); remove()
         self.assertEqual(seen, [result])
+        # Foreground result delivery precedes containment-worker retirement.
+        # Their bound methods legitimately retain the handle until they exit.
+        for worker in workers:
+            await asyncio.to_thread(worker.join, 1)
+            self.assertFalse(worker.is_alive())
         del remove, handle
         gc.collect()
         self.assertNotIn(resource, _handles)
