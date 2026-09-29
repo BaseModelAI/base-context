@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.18] - 2026-09-29
+
+- Fixed Codex discovery to include account-authorized GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Sol models.
+
 ## [1.0.17] - 2026-09-29
 
 - Fixed compaction keeping old recovered tool output in active context indefinitely; summarized evidence remains available through its original references.

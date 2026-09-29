@@ -4,12 +4,14 @@ import { getModel, streamSimple } from "../src/index.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("GPT-6 Sol and Luna provider routing", () => {
+describe("GPT-6 and GPT-6.1 provider routing", () => {
 	it.each([
 		["openai", "gpt-6-sol"],
 		["openai", "gpt-6-luna"],
+		["openai", "gpt-6.1-sol"],
 		["openai-codex", "gpt-6-sol"],
 		["openai-codex", "gpt-6-luna"],
+		["openai-codex", "gpt-6.1-sol"],
 	] as const)("serializes %s/%s through its native Responses adapter", async (provider, id) => {
 		const model = getModel(provider, id);
 		const requests: { url: string; body: Record<string, unknown> }[] = [];

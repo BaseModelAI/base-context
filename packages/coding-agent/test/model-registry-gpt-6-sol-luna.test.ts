@@ -2,7 +2,7 @@ import { expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 
-it("offers GPT-6 Sol and Luna in the API-key and subscription model pickers", () => {
+it("offers GPT-6 Sol, Luna, and GPT-6.1 Sol in the API-key and subscription model pickers", () => {
 	const authStorage = AuthStorage.inMemory({
 		openai: { type: "api_key", key: "test-openai-key" },
 		"openai-codex": {
@@ -16,7 +16,7 @@ it("offers GPT-6 Sol and Luna in the API-key and subscription model pickers", ()
 	const available = registry.getAvailable();
 
 	for (const provider of ["openai", "openai-codex"] as const) {
-		for (const id of ["gpt-6-sol", "gpt-6-luna"] as const) {
+		for (const id of ["gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol"] as const) {
 			const model = registry.find(provider, id);
 			expect(model).toBeDefined();
 			expect(available.filter((candidate) => candidate.provider === provider && candidate.id === id)).toEqual([

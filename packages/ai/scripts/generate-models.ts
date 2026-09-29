@@ -1926,8 +1926,22 @@ async function generateModels() {
 
 // Official model cards: https://developers.openai.com/api/docs/models/gpt-6-sol
 // https://developers.openai.com/api/docs/models/gpt-6-luna
+// https://developers.openai.com/api/docs/models/gpt-6.1-sol
 function getOpenAiGpt6Models(): Model<Api>[] {
 	const apiModels = [
+		{
+			id: "gpt-6.1-sol",
+			name: "GPT-6.1 Sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+			contextWindow: 1050000,
+			maxTokens: 128000,
+		},
 		{
 			id: "gpt-6-sol",
 			name: "GPT-6 Sol",

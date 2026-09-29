@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.18] - 2026-09-29
+
+- Added GPT-6.1 Sol for OpenAI API keys and Codex subscriptions with low through max reasoning effort.
+
 ## [1.0.14] - 2026-09-23
 
 - Added GPT-6 Sol and GPT-6 Luna to the OpenAI API and Codex subscription model pickers with provider-specific reasoning and context metadata.
