@@ -1464,6 +1464,8 @@ export type SessionListItem = (session: SessionInfo) => void;
 export interface SessionListCallbacks {
 	onProgress?: SessionListProgress;
 	onSession?: SessionListItem;
+	/** Select discovered paths before reading their session metadata. */
+	includeSession?: (sessionPath: string) => boolean;
 }
 
 async function listSessionsFromDir(
@@ -1491,7 +1493,7 @@ async function listSessionsFromDir(
 
 		let loaded = 0;
 		for (const file of files) {
-			const info = await readSessionInfo(file);
+			const info = callbacks?.includeSession?.(file) === false ? null : await readSessionInfo(file);
 			loaded++;
 			callbacks?.onProgress?.(progressOffset + loaded, total);
 			if (info) {
@@ -5131,6 +5133,7 @@ export class SessionManager {
 		const matchesCwd = (session: SessionInfo) => sessionInfoMatchesCwd(session, cwd);
 		const sessions = (
 			await listSessionsFromDir(dir, {
+				includeSession: callbacks?.includeSession,
 				onProgress: callbacks?.onProgress,
 				onSession: callbacks?.onSession
 					? (session) => {

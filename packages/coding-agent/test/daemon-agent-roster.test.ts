@@ -1,11 +1,32 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VERSION } from "../src/config.js";
+import type {
+	AgentFamilyCatalogEntry,
+	AgentSessionMessageAgentSummary,
+	AgentSessionMessageListResult,
+} from "../src/core/agent-messages.js";
+import { HistoryIndex } from "../src/core/history-index.js";
+import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
 import { RlmJournalOwner } from "../src/core/rlm-journal-owner.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import {
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import {
 	type AgentRosterEntry,
@@ -17,7 +38,7 @@ import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js"
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { acquireDaemonSupervisorOwnership } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerRosterOutbound } from "../src/modes/daemon/daemon-worker-protocol.js";
-import { RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
+import { type RlmLedgerEdge, RlmSpawnLedger, rlmLedgerPath } from "../src/modes/daemon/rlm-ledger.js";
 import * as childProcessModule from "../src/utils/child-process.js";
 
 type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
@@ -507,6 +528,274 @@ describe("worker roster reporter", () => {
 		});
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
+	});
+});
+
+describe("live family catalog", () => {
+	async function nativeSession(directory: string, id: string, parentSession?: string, rlmDepth = 0) {
+		const path = join(directory, `${id}.jsonl`);
+		mkdirSync(directory, { recursive: true });
+		const header = encodeJournalFrame(
+			{
+				type: "session",
+				id,
+				version: 3,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: directory,
+				parentSession,
+				rlmDepth,
+			},
+			INITIAL_JOURNAL_CURSOR,
+		);
+		const named = encodeJournalFrame(
+			{ type: "session_info", id: "name", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", name: id },
+			header.next,
+		);
+		writeFileSync(path, header.line + named.line);
+		const index = await HistoryIndex.open(join(getSessionArtifactPathForFile(path, id), "history.sqlite"));
+		try {
+			const source = statSync(path);
+			await index.syncSource(id, {
+				journalPath: path,
+				nextSequence: named.next.sequence,
+				format: "framed",
+				byteLength: source.size,
+				checksum: named.next.checksum,
+				dev: source.dev,
+				ino: source.ino,
+			});
+		} finally {
+			await index.close();
+		}
+		return {
+			path,
+			appendWithoutIndex() {
+				const appended = encodeJournalFrame(
+					{
+						type: "session_info",
+						id: "rename",
+						parentId: "name",
+						timestamp: "2026-01-01T00:00:02.000Z",
+						name: `${id}-new`,
+					},
+					named.next,
+				);
+				appendFileSync(path, appended.line);
+			},
+		};
+	}
+
+	function catalogDaemon(
+		sessionsDir: string,
+		states: ActiveSessionState[],
+		edges: RlmLedgerEdge[] = [],
+		peers: AgentSessionMessageAgentSummary[] = [],
+	) {
+		for (const state of states) Object.assign(state.runtime, { cwd: sessionsDir });
+		return Object.assign(Object.create(AgentDaemon.prototype), {
+			options: { defaultSessionConfig: { sessionDir: sessionsDir } },
+			sessions: new Map(states.map((state) => [state.activeSessionId, state])),
+			bindingSessions: new Set(),
+			closingSessions: new Set(),
+			pendingSessionNames: new Set(),
+			rlmSpawnLedger: () => ({ edges: async () => edges }),
+			listSupervisorAgentPeers: async () => peers,
+		}) as {
+			sessions: Map<string, ActiveSessionState>;
+			bindingSessions: Set<string>;
+			closingSessions: Set<string>;
+			createAgentMessageListResult(current: ActiveSessionState): Promise<AgentSessionMessageListResult>;
+			createAgentFamilyCatalog(current: ActiveSessionState): Promise<AgentFamilyCatalogEntry[]>;
+			sendAgentSessionMessage(options: {
+				targetSelector: string;
+				message: string;
+				fromState: ActiveSessionState;
+				origin: "agent";
+			}): Promise<unknown>;
+			assertFamilySessionNameAvailable(
+				input: { name: string; depth: number },
+				current: ActiveSessionState,
+			): Promise<void>;
+			listPassiveRlmSubagents(
+				savedRoots?: SessionInfo[],
+				includeResident?: boolean,
+			): Promise<
+				Array<{
+					info: Pick<SessionInfo, "id" | "path" | "name" | "cwd" | "rlmDepth">;
+					chain: Array<{ sessionFile: string }>;
+				}>
+			>;
+		};
+	}
+
+	it("lists resident children during index lag and retains passive traversal and source checks", async () => {
+		const directory = realpathSync(mkdtempSync(join(tmpdir(), "prime-live-catalog-child-")));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const root = await nativeSession(sessionsDir, "root");
+		const child = await nativeSession(join(directory, "child"), "child", root.path, 1);
+		const passive = await nativeSession(join(directory, "passive"), "passive", child.path, 2);
+		const parent = makeState({ activeSessionId: "root-active", sessionId: "root", sessionFile: root.path });
+		const resident = makeState({
+			activeSessionId: "child-active",
+			sessionId: "child",
+			sessionFile: child.path,
+			kind: "subagent",
+			rlmChildId: "child",
+			parentActiveSessionId: parent.activeSessionId,
+			parentSessionFile: root.path,
+		});
+		const peers: AgentSessionMessageAgentSummary[] = [];
+		const daemon = catalogDaemon(
+			sessionsDir,
+			[parent, resident],
+			[
+				{ childId: "child", parent: root.path, child: child.path, depth: 1, name: "child" },
+				{ childId: "passive", parent: child.path, child: passive.path, depth: 2, name: "passive" },
+			],
+			peers,
+		);
+		const expectedIds = ["child", "passive", "root"];
+		expect((await daemon.createAgentMessageListResult(parent)).agents.map((agent) => agent.sessionId).sort()).toEqual(
+			expectedIds,
+		);
+
+		child.appendWithoutIndex();
+		await expect(readSessionInfo(child.path)).rejects.toThrow("Catalog does not cover the current canonical source");
+		const listed = await daemon.createAgentMessageListResult(parent);
+		expect(listed.agents.map((agent) => agent.sessionId).sort()).toEqual(expectedIds);
+		expect(listed.agents.find((agent) => agent.sessionId === "passive")).toMatchObject({
+			parentActiveSessionId: resident.activeSessionId,
+			parentSessionId: "child",
+			rlmDepth: 2,
+			status: "inactive",
+		});
+		const included = await daemon.listPassiveRlmSubagents([], true);
+		expect(included.find(({ info }) => info.id === "child")).toMatchObject({
+			info: { path: child.path, name: "name-child-active", rlmDepth: 1 },
+			chain: [{ sessionFile: child.path }],
+		});
+		expect(included.some(({ info, chain }) => info.id === "passive" && chain.length === 2)).toBe(true);
+
+		daemon.sessions.delete(resident.activeSessionId);
+		await expect(daemon.createAgentMessageListResult(parent)).rejects.toThrow(
+			"Catalog does not cover the current canonical source",
+		);
+		peers.push(
+			...listed.agents
+				.filter((agent) => agent.sessionId === "child")
+				.map((agent) => ({
+					...agent,
+					activeSessionId: "peer-child-active",
+					sessionName: "peer-child-live",
+				})),
+		);
+		const remote = await daemon.createAgentMessageListResult(parent);
+		expect(remote.agents.map((agent) => agent.sessionId).sort()).toEqual(expectedIds);
+		expect(remote.agents.find((agent) => agent.sessionId === "child")).toMatchObject({
+			activeSessionId: "peer-child-active",
+			sessionName: "peer-child-live",
+		});
+		const receipt = { deliveryStatus: "delivered" };
+		const sendRemote = vi.fn(async () => receipt);
+		Object.assign(daemon, {
+			options: { defaultSessionConfig: { sessionDir: sessionsDir }, worker: { authenticationToken: "token" } },
+			sendRemoteAgentSessionMessage: sendRemote,
+		});
+		const send = () =>
+			daemon.sendAgentSessionMessage({
+				targetSelector: "peer-child-active",
+				message: "hello",
+				fromState: parent,
+				origin: "agent",
+			});
+		await expect(send()).resolves.toBe(receipt);
+		expect(sendRemote).toHaveBeenCalledExactlyOnceWith(parent, "peer-child-active", "hello", undefined);
+		peers.length = 0;
+		await expect(send()).rejects.toThrow("Catalog does not cover the current canonical source");
+		expect(sendRemote).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses local and peer roots before cold reads while preserving saved roots and name collisions", async () => {
+		const directory = realpathSync(mkdtempSync(join(tmpdir(), "prime-live-catalog-root-")));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const root = await nativeSession(sessionsDir, "root");
+		const peer = await nativeSession(sessionsDir, "peer");
+		const saved = await nativeSession(sessionsDir, "saved");
+		const hidden = await nativeSession(sessionsDir, "hidden");
+		const current = makeState({ activeSessionId: "root-active", sessionId: "root", sessionFile: root.path });
+		const hiddenState = makeState({
+			activeSessionId: "hidden-active",
+			sessionId: "hidden",
+			sessionFile: hidden.path,
+		});
+		const daemon = catalogDaemon(
+			sessionsDir,
+			[current, hiddenState],
+			[],
+			[
+				{
+					activeSessionId: "peer-active",
+					sessionId: "peer",
+					sessionName: "peer-live",
+					sessionPath: peer.path,
+					runtimeKind: "top-level",
+					cwd: directory,
+					isStreaming: true,
+					unfinishedActionCount: 1,
+					rlmDepth: 0,
+					status: "running",
+				},
+			],
+		);
+		daemon.bindingSessions.add(hiddenState.activeSessionId);
+		expect((await daemon.createAgentFamilyCatalog(current)).map((entry) => entry.id).sort()).toEqual([
+			"hidden",
+			"peer",
+			"root",
+			"saved",
+		]);
+		root.appendWithoutIndex();
+		peer.appendWithoutIndex();
+		hidden.appendWithoutIndex();
+		for (const path of [root.path, peer.path, hidden.path]) {
+			await expect(readSessionInfo(path)).rejects.toThrow("Catalog does not cover the current canonical source");
+		}
+		expect(await daemon.createAgentFamilyCatalog(current)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ id: "root", name: "name-root-active" }),
+				expect.objectContaining({ id: "peer", name: "peer-live", status: "running" }),
+				expect.objectContaining({ id: "saved", name: "saved", status: "inactive" }),
+			]),
+		);
+		await expect(
+			daemon.assertFamilySessionNameAvailable({ name: "unused", depth: 0 }, current),
+		).resolves.toBeUndefined();
+		for (const name of ["name-root-active", "peer-live", "saved"]) {
+			await expect(daemon.assertFamilySessionNameAvailable({ name, depth: 0 }, current)).rejects.toThrow(/already/);
+		}
+		for (const hiddenSet of [daemon.bindingSessions, daemon.closingSessions]) {
+			daemon.bindingSessions.clear();
+			hiddenSet.add(hiddenState.activeSessionId);
+			expect(
+				(await daemon.createAgentMessageListResult(current)).agents.map((agent) => agent.sessionId),
+			).not.toContain("hidden");
+			expect(await daemon.createAgentFamilyCatalog(current)).toContainEqual(
+				expect.objectContaining({
+					id: "hidden",
+					name: "name-hidden-active",
+					status: "inactive",
+				}),
+			);
+			await expect(
+				daemon.assertFamilySessionNameAvailable({ name: "name-hidden-active", depth: 0 }, current),
+			).rejects.toThrow(/already/);
+		}
+		saved.appendWithoutIndex();
+		await expect(daemon.assertFamilySessionNameAvailable({ name: "unused", depth: 0 }, current)).rejects.toThrow(
+			"Catalog does not cover the current canonical source",
+		);
 	});
 });
 

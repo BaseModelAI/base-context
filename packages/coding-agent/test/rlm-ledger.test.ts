@@ -36,7 +36,11 @@ import type { Api, Model } from "@ponythewhite/base-context-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { decodeJournalFrame, encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
+import type {
+	CreateRlmSubagentRuntimeOptions,
+	RlmChildAdmission,
+	SubagentRuntimeHost,
+} from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import * as sessionManagerModule from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
@@ -56,6 +60,11 @@ import {
 } from "../src/modes/daemon/rlm-ledger.js";
 
 import { RLM_LEDGER_MAX_PENDING_OPERATIONS } from "../src/modes/daemon/rlm-ledger-mutations.js";
+import {
+	readSavedSessionPage,
+	type SavedSessionPage,
+	type SavedSessionPageQuery,
+} from "../src/modes/daemon/saved-session-page.js";
 
 const { SessionManager } = sessionManagerModule;
 const fixtureSessions = new Set<sessionManagerModule.SessionManager>();
@@ -639,8 +648,7 @@ describe("rlm spawn ledger", () => {
 	});
 });
 
-function makeDaemonFixture(tempDir: string) {
-	const sessionsDir = join(tempDir, "sessions");
+function makeDaemonFixture(tempDir: string, sessionsDir = join(tempDir, "sessions")) {
 	const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
 		session: makeRuntimeSession(options.sessionManager),
 		extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
@@ -669,6 +677,7 @@ function makeDaemonFixture(tempDir: string) {
 			reason?: RlmLedgerDeleteReason,
 		): Promise<void>;
 		setStateSessionName(state: ActiveSessionState, name: string): Promise<void>;
+		handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
 		rlmSpawnLedger(): RlmSpawnLedger;
 		rlmSpawnLedgerInstance: RlmSpawnLedger;
 	};
@@ -680,9 +689,39 @@ function makeRuntimeSession(
 	sessionManager: Parameters<CreateAgentSessionRuntimeFactory>[0]["sessionManager"],
 ): Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"] {
 	trackSession(sessionManager);
-	return {
+	const session = {
 		sessionManager,
 		messages: [],
+		requests: { getRequestTokenBudgetOptions: vi.fn(() => undefined) },
+		reserveRlmChildAdmission: vi.fn(async (): Promise<RlmChildAdmission> => {
+			let child: RlmChildAdmission["session"];
+			let pending = true;
+			let settle!: () => void;
+			const settlement = new Promise<void>((resolve) => {
+				settle = resolve;
+			});
+			return {
+				parent: session,
+				get session() {
+					return child;
+				},
+				get pending() {
+					return pending;
+				},
+				settlement,
+				assertCurrent: vi.fn(),
+				beginSetup: vi.fn(),
+				claimFactory: vi.fn(),
+				bind: vi.fn((value) => {
+					child = value;
+				}),
+				confirmUnboundCleanup: vi.fn(async () => {}),
+				settle: vi.fn(async () => {
+					pending = false;
+					settle();
+				}),
+			};
+		}),
 		extensionRunner: { hasHandlers: vi.fn(() => false), emit: vi.fn(async () => {}) },
 		sessionFile: sessionManager.getSessionFile(),
 		sessionId: sessionManager.getSessionId(),
@@ -711,6 +750,7 @@ function makeRuntimeSession(
 		}),
 		abort: vi.fn(async () => {}),
 	} as unknown as Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"];
+	return session;
 }
 
 function subagentRuntimeOptions(
@@ -1304,7 +1344,15 @@ describe("passive descendants in the saved catalog", () => {
 				sessionsDir,
 				createRlmLedgerRegistrySeedSource(),
 			);
-			Object.assign(supervisor.catalog, { list: vi.fn(async () => [parentInfo]) });
+			Object.assign(supervisor.catalog, {
+				list: vi.fn(
+					(
+						cwd: string,
+						sessionDir: string | undefined,
+						options: Parameters<typeof readSavedSessionPage>[0] & { page: SavedSessionPageQuery },
+					) => readSavedSessionPage({ ...options, cwd, sessionDir }, options.page),
+				),
+			});
 			const ledger = supervisor.rlmSpawnLedger();
 			await ledger.appendSpawn({
 				childId: "sub-11111111",
@@ -1327,11 +1375,9 @@ describe("passive descendants in the saved catalog", () => {
 				{ type: "list_saved_sessions", cwd: tempDir, sessionDir: sessionsDir, scope: "all" },
 			);
 			if (!response?.success) throw new Error("list_saved_sessions failed");
-			const sessions = (
-				response.data as {
-					sessions: Array<{ id: string; parentSessionPath?: string; rlmDepth?: number; messageCount: number }>;
-				}
-			).sessions;
+			const page = response.data as SavedSessionPage;
+			if (page.status !== "page") throw new Error(page.message);
+			const sessions = page.sessions;
 			expect(sessions.map(({ id }) => id)).toEqual([parentInfo.id, child.manager.getSessionId()]);
 			expect(sessions[1]).toMatchObject({
 				parentSessionPath: canonicalSessionPath(parentFile),
@@ -1344,7 +1390,7 @@ describe("passive descendants in the saved catalog", () => {
 		}
 	});
 
-	it("merges each requested dir's own passivated descendants and survives a broken ledger", async () => {
+	it("lists each configured dir's own passivated descendants and refuses a broken ledger", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-catalog-daemon-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
@@ -1387,28 +1433,30 @@ describe("passive descendants in the saved catalog", () => {
 				name: "other-worker",
 			});
 
-			const handle = internals as unknown as {
-				handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
-			};
-			const list = async (dir: string) => {
-				const response = (await handle.handleCommand(
+			const otherDaemon = makeDaemonFixture(tempDir, otherDir).internals;
+			const list = async (handle: Pick<SupervisorLedgerInternals, "handleCommand">, dir: string) => {
+				const response = await handle.handleCommand(
 					{},
 					{ type: "list_saved_sessions", cwd: tempDir, sessionDir: dir, scope: "all" },
-				)) as { success: boolean; data: { sessions: Array<{ id: string }> } };
-				expect(response.success).toBe(true);
-				return response.data.sessions.map(({ id }) => id);
+				);
+				if (!response?.success) throw new Error("list_saved_sessions failed");
+				return response.data as SavedSessionPage;
 			};
-			const defaultIds = await list(sessionsDir);
+			const defaultPage = await list(internals, sessionsDir);
+			if (defaultPage.status !== "page") throw new Error(defaultPage.message);
+			const defaultIds = defaultPage.sessions.map(({ id }) => id);
 			expect(defaultIds).toContain(child.manager.getSessionId());
 			expect(defaultIds).not.toContain(otherChild.manager.getSessionId());
-			const otherIds = await list(otherDir);
+			const otherPage = await list(otherDaemon, otherDir);
+			if (otherPage.status !== "page") throw new Error(otherPage.message);
+			const otherIds = otherPage.sessions.map(({ id }) => id);
 			expect(otherIds).toContain(otherChild.manager.getSessionId());
 			expect(otherIds).not.toContain(child.manager.getSessionId());
 
-			// A directory squatting where the other family's ledger file should be: every read throws.
+			// A damaged ledger refuses the page instead of silently dropping descendants.
 			rmSync(rlmLedgerPath(tempDir, otherDir), { force: true });
 			mkdirSync(rlmLedgerPath(tempDir, otherDir), { recursive: true });
-			expect(await list(otherDir)).toEqual([otherParent.getSessionId()]);
+			expect(await list(otherDaemon, otherDir)).toMatchObject({ status: "refused", reason: "source_unavailable" });
 		} finally {
 			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });

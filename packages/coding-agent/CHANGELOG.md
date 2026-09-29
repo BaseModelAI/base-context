@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.19] - 2026-09-29
+
+- Fixed family rosters, agent messaging, and subagent name checks failing when active session metadata was still being indexed.
+
 ## [1.0.18] - 2026-09-29
 
 - Fixed Codex discovery to include account-authorized GPT-6 Sol, GPT-6 Luna, and GPT-6.1 Sol models.

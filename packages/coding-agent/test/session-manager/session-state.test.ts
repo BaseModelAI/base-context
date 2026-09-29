@@ -114,7 +114,7 @@ describe("SessionManager session state", () => {
 			const rename = reopened.appendSessionInfo("Renamed draft");
 			expect(reopened.getSessionName()).toBeUndefined();
 			await rename;
-			reopened.branch(previousLeaf);
+			await reopened.branchTo(previousLeaf);
 			const entries = vi.spyOn(reopened, "getEntries");
 			expect(reopened.getSessionName()).toBe("Renamed draft");
 			expect(entries).not.toHaveBeenCalled();
@@ -302,10 +302,15 @@ describe("SessionManager session state", () => {
 			expect(sessionFile).toBeDefined();
 			expect(existsSync(sessionFile!)).toBe(true);
 
+			const limits = { maxEntries: 10, maxSourceBytes: 64 * 1024 };
+			const history = await session.materializeSourceHistory(limits);
+			expect(history.entries.filter(({ entry }) => entry.type === "message")).toHaveLength(2);
+			const leaf = session.getLeafId();
 			rmSync(sessionFile!, { force: true });
 			await expect(session.appendSessionState({ status: "archived" })).rejects.toThrow();
 			expect(existsSync(sessionFile!)).toBe(false);
-			expect(session.getEntries().filter((entry) => entry.type === "message")).toHaveLength(2);
+			expect(session.getLeafId()).toBe(leaf);
+			await expect(session.materializeSourceHistory(limits)).rejects.toThrow("outcome may be unknown");
 			expect(session.getSessionState()).toBeUndefined();
 		} finally {
 			await Promise.all(managers.splice(0).map((manager) => manager.close()));

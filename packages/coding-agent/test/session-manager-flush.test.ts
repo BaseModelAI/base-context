@@ -216,13 +216,17 @@ describe("SessionManager acknowledged custom entries", () => {
 		const manager = await createManager();
 		await manager.appendMessage(assistant);
 		const leaf = manager.getLeafId();
-		const entries = manager.getEntries();
-		loseNextAcknowledgement();
-		await expect(manager.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).rejects.toThrow(
-			"acknowledgement lost",
-		);
-		expect(manager.getLeafId()).toBe(leaf);
-		expect(manager.getEntries()).toEqual(entries);
+		await manager.readSourceHistory(async (history) => {
+			const limits = { maxEntries: 10, maxSourceBytes: 64 * 1024 };
+			const entries = await history.materialize(limits);
+			loseNextAcknowledgement();
+			await expect(manager.appendCustomMessageEntryWithRollback("test.outcome", "details", false)).rejects.toThrow(
+				"acknowledgement lost",
+			);
+			expect(manager.getLeafId()).toBe(leaf);
+			expect(await history.materialize(limits)).toEqual(entries);
+			await expect(manager.materializeSourceHistory(limits)).rejects.toThrow("outcome may be unknown");
+		});
 	});
 
 	it("refuses blind retries and repairs a torn tail only under a new owned recovery", async () => {

@@ -470,9 +470,11 @@ type PassiveRlmRoot =
 	| { rootParentState: ActiveSessionState; rootInfo?: never }
 	| { rootParentState?: never; rootInfo: SessionInfo };
 
-type PassiveRlmSubagent = PassiveRlmRoot & {
+type RlmSubagentInfo = Pick<SessionInfo, "path" | "id" | "name" | "cwd" | "rlmDepth">;
+
+type PassiveRlmSubagent<Info extends RlmSubagentInfo = SessionInfo> = PassiveRlmRoot & {
 	entry: PassiveRlmSubagentEntry;
-	info: SessionInfo;
+	info: Info;
 	chain: PassiveRlmSubagentEntry[];
 };
 
@@ -1355,11 +1357,22 @@ export class AgentDaemon {
 		return { ...base, rlmDepth: edge.depth, status: "completed", createdAt };
 	}
 
-	/** List each root's passive (non-resident) descendants from the ledger, without creating runtimes. */
+	/** List each root's descendants from the ledger, without creating runtimes. */
+	private listPassiveRlmSubagents(
+		savedRoots?: SessionInfo[],
+		includeResident?: false,
+		peers?: AgentSessionMessageAgentSummary[],
+	): Promise<PassiveRlmSubagent[]>;
+	private listPassiveRlmSubagents(
+		savedRoots: SessionInfo[],
+		includeResident: boolean,
+		peers?: AgentSessionMessageAgentSummary[],
+	): Promise<PassiveRlmSubagent<RlmSubagentInfo>[]>;
 	private async listPassiveRlmSubagents(
 		savedRoots: SessionInfo[] = [],
 		includeResident = false,
-	): Promise<PassiveRlmSubagent[]> {
+		peers: AgentSessionMessageAgentSummary[] = [],
+	): Promise<PassiveRlmSubagent<RlmSubagentInfo>[]> {
 		const residentRoots: Array<{ parentState: ActiveSessionState; sessionFile: string }> = [];
 		for (const parentState of this.sessions.values()) {
 			const parentFile = parentState.runtime.session.sessionFile;
@@ -1377,7 +1390,13 @@ export class AgentDaemon {
 			childrenByParent.set(parentPath, siblings);
 		}
 		const legacyRegistryCache = new Map<string, Promise<LegacyRlmSubagentRegistryEntry[]>>();
-		const passive: PassiveRlmSubagent[] = [];
+		const residentByPath = new Map(
+			residentRoots.map(({ parentState, sessionFile }) => [canonicalSessionPath(sessionFile), parentState]),
+		);
+		const peersByPath = new Map(
+			peers.flatMap((peer) => (peer.sessionPath ? [[canonicalSessionPath(peer.sessionPath), peer] as const] : [])),
+		);
+		const passive: PassiveRlmSubagent<RlmSubagentInfo>[] = [];
 		const visit = async (
 			root: PassiveRlmRoot,
 			parent: { sessionId: string; sessionFile: string },
@@ -1393,13 +1412,33 @@ export class AgentDaemon {
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
-				const info = await readSessionInfo(entry.sessionFile);
+				const canonicalPath = canonicalSessionPath(entry.sessionFile);
+				const resident = this.findSessionBySessionFile(entry.sessionFile) ?? residentByPath.get(canonicalPath);
+				// A resident child walks its own subtree as an outer root below. Do not
+				// cold-read its changing journal before deciding whether to include it.
+				if (resident && !includeResident) continue;
+				const peer = peersByPath.get(canonicalPath);
+				const info: RlmSubagentInfo | null = resident
+					? {
+							path: entry.sessionFile,
+							id: resident.runtime.session.sessionId,
+							name: resident.runtime.session.sessionName,
+							cwd: resident.runtime.cwd,
+							rlmDepth: resident.runtime.session.rlmDepth,
+						}
+					: peer
+						? {
+								path: entry.sessionFile,
+								id: peer.sessionId,
+								name: peer.sessionName,
+								cwd: peer.cwd,
+								rlmDepth: peer.rlmDepth ?? entry.rlmDepth ?? edge.depth,
+							}
+						: await readSessionInfo(entry.sessionFile);
 				if (!info) continue;
-				// A resident child walks its own subtree as an outer root below. Avoid
-				// both duplicate rows and attributing its descendants to an ancestor.
-				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
 				const chain = [...parentChain, entry];
-				passive.push({ ...root, entry, info, chain });
+				if (!peer || resident) passive.push({ ...root, entry, info, chain });
+				// Peer runtimes are not local roots; keep walking their saved descendants.
 				await visit(root, { sessionId: info.id, sessionFile: entry.sessionFile }, chain, visited);
 			}
 		};
@@ -1422,12 +1461,9 @@ export class AgentDaemon {
 		return passive;
 	}
 
-	private async passiveRlmSubagentsByPath(
-		savedRoots: SessionInfo[] = [],
-		includeResident = false,
-	): Promise<Map<string, PassiveRlmSubagent>> {
+	private async passiveRlmSubagentsByPath(savedRoots: SessionInfo[] = []): Promise<Map<string, PassiveRlmSubagent>> {
 		return new Map(
-			(await this.listPassiveRlmSubagents(savedRoots, includeResident)).map((passive) => [
+			(await this.listPassiveRlmSubagents(savedRoots)).map((passive) => [
 				resolve(passive.entry.sessionFile),
 				passive,
 			]),
@@ -1506,8 +1542,15 @@ export class AgentDaemon {
 	private async findPassiveRlmSubagent(
 		target: string,
 		includeResident = false,
-	): Promise<PassiveRlmSubagent | undefined> {
-		const matches = [...(await this.passiveRlmSubagentsByPath([], includeResident)).values()].filter(
+	): Promise<PassiveRlmSubagent<RlmSubagentInfo> | undefined> {
+		const peers = await this.listSupervisorAgentPeers();
+		const byPath = new Map(
+			(await this.listPassiveRlmSubagents([], includeResident, peers)).map((passive) => [
+				resolve(passive.entry.sessionFile),
+				passive,
+			]),
+		);
+		const matches = [...byPath.values()].filter(
 			({ entry, info }) =>
 				entry.childId === target ||
 				resolve(entry.sessionFile) === resolve(target) ||
@@ -3032,7 +3075,7 @@ export class AgentDaemon {
 	}
 
 	private async hydratePassiveRlmSubagent(
-		passive: PassiveRlmSubagent,
+		passive: PassiveRlmSubagent<RlmSubagentInfo>,
 		clientEnv?: Record<string, string>,
 	): Promise<ActiveSessionState> {
 		if (this.updateRestart !== undefined) {
@@ -5806,7 +5849,7 @@ export class AgentDaemon {
 		const localAgents = this.listTargetableSessionStates(current).map((state) =>
 			this.createAgentMessageAgentSummary(state),
 		);
-		for (const passive of await this.listPassiveRlmSubagents()) {
+		for (const passive of await this.listPassiveRlmSubagents([], false, peers)) {
 			const { entry, info } = passive;
 			localAgents.push({
 				// Before hydration the persisted session id is its supervisor-routable id.
@@ -5853,15 +5896,23 @@ export class AgentDaemon {
 		const localAgents = current
 			? [this.createAgentMessageAgentSummary(current), ...listed.agents.filter((agent) => !remotePeerSet.has(agent))]
 			: listed.agents;
-		const activePaths = new Set(
-			localAgents.flatMap((agent) => (agent.sessionPath ? [canonicalSessionPath(agent.sessionPath)] : [])),
-		);
-		const savedRoots = (await SessionManager.listAll(undefined, this.options.defaultSessionConfig.sessionDir))
-			.filter(
-				(info) =>
-					(info.rlmDepth ?? (info.parentSessionPath ? -1 : 0)) === 0 &&
-					!activePaths.has(canonicalSessionPath(info.path)),
+		const residentStates = [...this.sessions.values()];
+		const activePaths = new Set([
+			...[...localAgents, ...remotePeers].flatMap((agent) =>
+				agent.sessionPath ? [canonicalSessionPath(agent.sessionPath)] : [],
+			),
+			...residentStates.flatMap((state) => {
+				const file = state.runtime.session.sessionFile;
+				return file ? [canonicalSessionPath(file)] : [];
+			}),
+		]);
+		const savedRoots = (
+			await SessionManager.listAll(
+				{ includeSession: (path) => !activePaths.has(canonicalSessionPath(path)) },
+				this.options.defaultSessionConfig.sessionDir,
 			)
+		)
+			.filter((info) => (info.rlmDepth ?? (info.parentSessionPath ? -1 : 0)) === 0)
 			.map(
 				(info): AgentFamilyCatalogEntry => ({
 					id: info.id,
@@ -5872,6 +5923,19 @@ export class AgentDaemon {
 				}),
 			);
 		const byId = new Map<string, AgentFamilyCatalogEntry>(savedRoots.map((entry) => [entry.id, entry]));
+		// Hidden resident roots still reserve their names, as saved roots did, without
+		// making half-bound or closing runtimes targetable.
+		for (const state of residentStates) {
+			const session = state.runtime.session;
+			if (!session.sessionFile || (session.rlmDepth ?? 0) !== 0) continue;
+			byId.set(session.sessionId, {
+				id: session.sessionId,
+				...(session.sessionName ? { name: session.sessionName } : {}),
+				depth: 0,
+				status: "inactive",
+				sessionPath: canonicalSessionPath(session.sessionFile),
+			});
+		}
 		const addAgent = (agent: AgentSessionMessageAgentSummary) => {
 			const depth = agent.rlmDepth ?? 0;
 			byId.set(agent.sessionId, {
@@ -5900,7 +5964,7 @@ export class AgentDaemon {
 			if (entry && state.runtime.session.sessionFile)
 				entry.sessionPath = canonicalSessionPath(state.runtime.session.sessionFile);
 		}
-		for (const passive of await this.listPassiveRlmSubagents()) {
+		for (const passive of await this.listPassiveRlmSubagents([], false, remotePeers)) {
 			const entry = byId.get(passive.info.id);
 			if (entry) entry.sessionPath = canonicalSessionPath(passive.entry.sessionFile);
 		}
@@ -6099,7 +6163,7 @@ export class AgentDaemon {
 		};
 	}
 
-	private passiveAgentFamilyEntry(passive: PassiveRlmSubagent): AgentFamilyCatalogEntry {
+	private passiveAgentFamilyEntry(passive: PassiveRlmSubagent<RlmSubagentInfo>): AgentFamilyCatalogEntry {
 		const entry = passive.entry;
 		const depth = passive.info.rlmDepth ?? entry.rlmDepth ?? passive.chain.length;
 		const parentSessionPath =
