@@ -465,7 +465,6 @@ export function canonicalRecoveryBoundary(
 	if (context.toolContinuations?.length && !context.readOnly)
 		throw new Error("Tool continuation summary requires its captured public read view");
 	const recoveries = units.flatMap((unit, index) => (unit.kind === "recovery" ? [context.references[index]] : []));
-	if (!recoveries.length) return;
 	if (authorization) {
 		// The captured native owner may certify bookkeeping-only appends, never new context or a branch change.
 		const ownerStillCurrent = authorization.isSourceCurrent?.();
@@ -483,8 +482,9 @@ export function canonicalRecoveryBoundary(
 			)
 		)
 			throw new Error("Recovery compaction authorization no longer matches its captured source");
-		return latestLiteralReference(context.references)?.ref.entryId;
+		return recoveries.length ? latestLiteralReference(context.references)?.ref.entryId : undefined;
 	}
+	if (!recoveries.length) return;
 	const checkpoint = context.checkpoint;
 	const inherited = checkpoint?.includeSummary === true && checkpoint.replayContract === "message-groups";
 	if (
@@ -502,7 +502,7 @@ export function canonicalRecoveryBoundary(
 	return checkpoint.literalTailId;
 }
 
-/** Retain exact recovery evidence. An accepted public-window transition replaces whole old protocol groups. */
+/** Summarize older recovery output while retaining the current suffix and whole tool continuations. */
 export function prepareRecoveryCompaction(
 	messages: readonly AgentMessage[],
 	firstKeptEntryId: string,
@@ -531,8 +531,10 @@ export function prepareRecoveryCompaction(
 		selection.limits,
 	);
 	const toolGroups = new Set(context.toolContinuations?.map((group) => group.assistantEntryId));
+	// Recovery qualification authenticates its source; it is not a permanent retention request.
+	// Pre-cut output is covered by the summary. Keep tool continuations whole until their own boundary.
 	const roots = units
-		.filter((unit, index) => unit.kind === "recovery" || toolGroups.has(context.references[index]?.ref.entryId ?? ""))
+		.filter((_, index) => toolGroups.has(context.references[index]?.ref.entryId ?? ""))
 		.map((unit) => unit.id);
 	const closed = new Set(closeViewSelection(units, roots, selection.limits).map((unit) => unit.id));
 	let renderedBytes = 0;

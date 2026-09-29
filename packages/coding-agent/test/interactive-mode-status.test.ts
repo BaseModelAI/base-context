@@ -696,6 +696,7 @@ describe("InteractiveMode working timer", () => {
 		statusContainer: { addChild: ReturnType<typeof vi.fn> };
 		startWorkingTimer: ReturnType<typeof vi.fn>;
 		startFeatureHintPresentation: ReturnType<typeof vi.fn>;
+		showStatus: ReturnType<typeof vi.fn>;
 	};
 
 	function createInitialTimerHarness(snapshot: AgentConnectionSnapshot, turnStartedAt = 1): InitialTimerHarness {
@@ -737,6 +738,16 @@ describe("InteractiveMode working timer", () => {
 			timestamp,
 		};
 	}
+
+	test.each([0, 14])("labels %i context checkpoints without claiming summary calls", async (compactionCount) => {
+		const harness = createInitialTimerHarness({ state: createConnectionState({ compactionCount }), messages: [] });
+		await harness.renderInitialMessages();
+		if (compactionCount > 0) {
+			expect(harness.showStatus).toHaveBeenCalledWith(`Session context checkpoints: ${compactionCount}`);
+		} else {
+			expect(harness.showStatus).not.toHaveBeenCalled();
+		}
+	});
 
 	test("restores the first active-run starter instead of a steering message", async () => {
 		const harness = createInitialTimerHarness({

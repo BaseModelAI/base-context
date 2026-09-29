@@ -28,6 +28,16 @@ export interface JobObservation {
 	evidence: string[];
 	observation_error?: string;
 }
+interface PendingWatchEvent {
+	id: string;
+	text: string;
+	generation?: string;
+	routine?: boolean;
+	superseded?: number;
+	admitted?: boolean;
+	uncertain?: boolean;
+	reconcile?: boolean;
+}
 export interface WatchDeclaration {
 	id: string;
 	generation: string;
@@ -51,7 +61,7 @@ export interface WatchDeclaration {
 	last_problem?: string;
 	last_attention?: string;
 	last_admitted?: string;
-	pending: Array<{ id: string; text: string; admitted?: boolean; uncertain?: boolean; reconcile?: boolean }>;
+	pending: PendingWatchEvent[];
 }
 export interface JobWatchSnapshot {
 	version: 1;
@@ -70,6 +80,8 @@ interface WatchHooks {
 	cancelProbe: (id: string, generation: string) => void;
 	persist: (state: JobWatchSnapshot) => Promise<void>;
 	admit: (text: string, eventId: string) => boolean;
+	replaceQueued?: (eventId: string, text: string) => boolean;
+	revokeQueued?: (eventId: string) => void;
 	waitForDelivery?: boolean;
 	stateBudgetBytes?: number;
 	retain?: (text: string) => Promise<string | undefined>;
@@ -315,6 +327,9 @@ export class JobWatchController {
 			const watch = this.watches.get(id);
 			if (watch) {
 				this.hooks.cancelProbe(watch.id, watch.generation);
+				for (const event of watch.pending) {
+					if (event.routine && !event.reconcile) this.hooks.revokeQueued?.(event.id);
+				}
 				this.watches.delete(id);
 				if (!this.watches.size) this.unavailable = undefined;
 				if (this.parked?.ids.includes(id)) this.parked = undefined;
@@ -480,11 +495,10 @@ export class JobWatchController {
 			watch.last_problem = problem;
 			watch.last_attention = attention;
 			const emit = (eventReasons: string[], due?: number) => {
-				const id = randomUUID();
+				const routine = eventReasons.every((reason) => reason === "progress" || reason === "report");
 				const value = {
 					watch_id: watch.id,
 					goal_id: watch.goal_id,
-					event_id: id,
 					...watch.latest,
 					previous_state: previous,
 					reasons: eventReasons,
@@ -492,12 +506,35 @@ export class JobWatchController {
 						? {}
 						: { scheduled_for: new Date(due).toISOString(), late_by_ms: Math.max(0, now - due) }),
 				};
-				watch.pending.push({ id, text: bounded(value) });
+				const pending = watch.pending.at(-1);
+				if (pending?.routine && pending.generation === watch.generation && !pending.reconcile) {
+					const superseded = (pending.superseded ?? 0) + 1;
+					const replacement = bounded({
+						...value,
+						event_id: pending.id,
+						superseded_snapshots: superseded,
+					});
+					// An admitted input may still be unread, but selected/preparing inputs are frozen.
+					if (!pending.admitted || this.hooks.replaceQueued?.(pending.id, replacement)) {
+						pending.text = replacement;
+						pending.routine = routine;
+						pending.superseded = superseded;
+						return;
+					}
+				}
+				const id = randomUUID();
+				watch.pending.push({
+					id,
+					text: bounded({ ...value, event_id: id }),
+					generation: watch.generation,
+					routine,
+				});
 			};
 			if (reasons.length) emit(reasons);
 			if (watch.report_ms && watch.next_report !== undefined && watch.next_report <= now) {
 				while (watch.next_report <= now) {
-					emit(["report"], watch.next_report);
+					// A terminal notification already contains this final observation.
+					if (watch.active) emit(["report"], watch.next_report);
 					watch.next_report += watch.report_ms;
 					if (this.stateBytes() > this.stateBudget() - STATE_REFUSAL_RESERVE) {
 						await this.refusePendingBudget(watch, before);

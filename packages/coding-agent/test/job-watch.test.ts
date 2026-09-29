@@ -141,7 +141,7 @@ describe("job-watch deterministic scheduling", () => {
 		await f.advance();
 		expect(f.probes).toHaveLength(20);
 	});
-	it("preserves every five-minute report for two sequential thirty-minute jobs and stops after two", async () => {
+	it("delivers five-minute snapshots and terminal results for two jobs without changing checks", async () => {
 		const f = fixture();
 		let launches = 0;
 		for (let job = 0; job < 2; job++) {
@@ -164,9 +164,11 @@ describe("job-watch deterministic scheduling", () => {
 		expect(launches).toBe(2);
 		expect(f.probes).toHaveLength(12);
 		const reports = f.notices.filter((notice) => (notice.reasons as string[]).includes("report"));
-		expect(reports).toHaveLength(12);
-		expect(new Set(reports.map((r) => r.event_id)).size).toBe(12);
-		expect(reports.map((r) => r.job_id)).toEqual([...Array(6).fill("job-0"), ...Array(6).fill("job-1")]);
+		expect(reports).toHaveLength(10);
+		expect(new Set(reports.map((r) => r.event_id)).size).toBe(10);
+		expect(reports.map((r) => r.job_id)).toEqual([...Array(5).fill("job-0"), ...Array(5).fill("job-1")]);
+		expect(f.notices.filter((notice) => notice.state === "succeeded")).toHaveLength(2);
+		expect(f.notices).toHaveLength(12);
 		console.info(
 			"job-watch-measurement",
 			JSON.stringify({
@@ -215,7 +217,7 @@ describe("job-watch deterministic scheduling", () => {
 		await observe(f, w, f.observation("succeeded"));
 		expect(f.notices).toHaveLength(1);
 	});
-	it("retains distinct reports while admission is cancelled and marks delayed observations", async () => {
+	it("keeps the latest unread report while admission is cancelled", async () => {
 		const f = fixture();
 		const w = await watch(f, { report_every: "5m" });
 		await f.controller.park([w.id]);
@@ -223,10 +225,11 @@ describe("job-watch deterministic scheduling", () => {
 		await f.advance(900000);
 		expect(f.probes).toHaveLength(1);
 		expect(f.notices).toHaveLength(0);
-		expect(f.snapshot().watches[0].pending).toHaveLength(3);
+		expect(f.snapshot().watches[0].pending).toHaveLength(1);
 		f.setAdmits(true);
 		await f.controller.flushPending();
-		expect(f.notices.map((n) => n.late_by_ms)).toEqual([600000, 300000, 0]);
+		expect(f.notices).toHaveLength(1);
+		expect(f.notices[0]).toMatchObject({ late_by_ms: 0, superseded_snapshots: 2 });
 		expect(f.controller.isParked()).toBe(false);
 	});
 	it("restores only authoritative probes; handles become unknown and imported/forked owners stay inactive", async () => {
@@ -301,7 +304,7 @@ describe("job-watch deterministic scheduling", () => {
 		await f.controller.flushPending();
 		expect(f.notices).toHaveLength(0);
 	});
-	it("preserves all forty actually observed reports while admission is held", async () => {
+	it("keeps forty checks but only the latest unread report while admission is held", async () => {
 		const f = fixture();
 		const w = await watch(f, { report_every: "5m", fields: ["updates"] });
 		f.setAdmits(false);
@@ -310,14 +313,12 @@ describe("job-watch deterministic scheduling", () => {
 			await f.advance();
 		}
 		expect(f.probes).toHaveLength(40);
-		expect(f.snapshot().watches[0].pending).toHaveLength(40);
+		expect(f.snapshot().watches[0].pending).toHaveLength(1);
 		f.setAdmits(true);
 		await f.controller.flushPending();
-		expect(f.notices).toHaveLength(40);
+		expect(f.notices).toHaveLength(1);
 		expect(f.controller.status(w.id)).toMatchObject({ pending_events: 0 });
-		expect(f.notices.map((notice) => (notice.progress as { updates: number }).updates)).toEqual(
-			Array.from({ length: 40 }, (_, i) => i + 1),
-		);
+		expect(f.notices[0]).toMatchObject({ progress: { updates: 40 }, superseded_snapshots: 39 });
 	});
 	it("keeps five-minute checks when reports and a deadline fall between them", async () => {
 		const f = fixture();
@@ -331,6 +332,28 @@ describe("job-watch deterministic scheduling", () => {
 		await f.advance(180000);
 		expect(f.probes).toHaveLength(4); // 10-minute check remains due
 	});
+	it("keeps critical evidence as a barrier while superseding unread routine snapshots", async () => {
+		const f = fixture();
+		const w = await watch(f, { notify: "changes", fields: ["updates"] });
+		f.setAdmits(false);
+		await observe(f, w, f.observation("running", 1));
+		await observe(f, w, f.observation("running", 2));
+		await f.controller.observe({ ...w, source: "probe", error: "transport lost" });
+		await observe(f, w, f.observation("running", 3));
+		await observe(f, w, f.observation("running", 4));
+		await observe(f, w, f.observation("failed", 5));
+		expect(f.snapshot().watches[0].pending).toHaveLength(2);
+		f.setAdmits(true);
+		await f.controller.flushPending();
+		expect(f.notices.map((notice) => notice.state)).toEqual(["unknown", "failed"]);
+		expect(f.notices[0].reasons).toContain("observability");
+		expect(f.notices[1]).toMatchObject({
+			reasons: ["failure", "progress"],
+			progress: { updates: 5 },
+			superseded_snapshots: 2,
+		});
+	});
+
 	it("retains evidence until native delivery ACK and makes uncertain crash delivery explicit", async () => {
 		const f = fixture(true);
 		const w = await watch(f);
@@ -357,7 +380,7 @@ describe("job-watch deterministic scheduling", () => {
 		await ack.controller.acknowledge(String(ack.notices[0].event_id));
 		expect(ack.snapshot().watches[0].pending).toHaveLength(0);
 	});
-	it("refuses exhausted pending-state budget explicitly without dropping prior reports or stopping the job", async () => {
+	it("refuses exhausted critical-evidence budget without stopping the job", async () => {
 		const f = fixture(false, 8192);
 		const w = await watch(f, { report_every: "5m", fields: ["updates"] });
 		f.setAdmits(false);
@@ -367,7 +390,7 @@ describe("job-watch deterministic scheduling", () => {
 			return "/retained/unsupported-observation.json";
 		});
 		for (let update = 1; update <= 40; update++) {
-			f.setObservation(f.observation("running", update));
+			f.setObservation({ ...f.observation("running", update), attention: [`warning-${update}`] });
 			await f.advance();
 		}
 		expect(f.probes.length).toBeLessThan(40); // explicit UNSUPPORTED boundary, not cadence preservation
@@ -381,7 +404,7 @@ describe("job-watch deterministic scheduling", () => {
 		expect(Buffer.byteLength(JSON.stringify(f.snapshot()))).toBeLessThanOrEqual(8192);
 		const preserved = f.snapshot().watches[0].pending.map((event) => JSON.parse(event.text));
 		expect(
-			preserved.filter((event) => event.reasons.includes("report")).map((event) => event.progress.updates),
+			preserved.filter((event) => event.reasons.includes("attention")).map((event) => event.progress.updates),
 		).toEqual(Array.from({ length: f.probes.length - 1 }, (_, i) => i + 1));
 		expect(preserved.at(-1)).toMatchObject({
 			state: "unknown",

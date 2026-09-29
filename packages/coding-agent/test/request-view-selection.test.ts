@@ -6,12 +6,14 @@ import {
 	type Model,
 	type ProviderRequestProjection,
 	type ProviderRequestRepresentation,
+	RequestTokenBudget,
 } from "@ponythewhite/base-context-ai";
 import { expect, it } from "vitest";
 import { bindResponsesPublicWindow, convertResponsesMessages } from "../../ai/src/providers/openai-responses-shared.js";
 import {
 	CanonicalContextCompiler,
 	getCanonicalEpochContext,
+	getCanonicalViewUnits,
 	prepareCanonicalEpoch,
 	preparePublicContextWindow,
 } from "../src/core/canonical-context.js";
@@ -24,9 +26,11 @@ import { convertToLlm } from "../src/core/messages.js";
 import {
 	captureRequestViewBoundary,
 	matchesRequestView,
+	PublicContextBudgetError,
 	type RequestViewCandidate,
 	selectRequestView,
 } from "../src/core/request-view-selection.js";
+import { bindNativeEntryWriter } from "../src/core/session-entry-origin.js";
 import { captureNativeRequestOutputSource, SessionManager } from "../src/core/session-manager.js";
 
 const model: Model<"openai-responses"> = {
@@ -187,6 +191,121 @@ it.each(["error", "aborted", "toolUse"] as const)(
 				}
 			} finally {
 				await reloaded.release();
+			}
+		} finally {
+			await manager.close();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	},
+);
+
+it.each(["old", "current"] as const)(
+	"budgets summary retirement without dropping the %s recovery from ordinary requests",
+	async (largeRecovery) => {
+		const dir = mkdtempSync(join(tmpdir(), "base-context-recovery-summary-capacity-"));
+		const manager = await SessionManager.create(dir, dir);
+		try {
+			const appendRecovery = async (id: string, text: string) => {
+				const assistantId = await manager.appendMessage({
+					...fauxAssistantMessage([
+						{ type: "toolCall", id, name: "prime_context", arguments: { action: "read" } },
+					]),
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					stopReason: "toolUse",
+				});
+				const resultId = await manager[bindNativeEntryWriter]().captureRecoveryExchange(id)({
+					executionId: id,
+					sourceOrder: 0,
+					toolCallId: id,
+					toolName: "prime_context",
+					originalInput: { action: "read" },
+					executedInput: { action: "read" },
+					toolExecution: "sequential",
+					executionOutcome: "completed",
+					cancellationRequested: false,
+					result: {
+						role: "toolResult",
+						toolCallId: id,
+						toolName: "prime_context",
+						content: [{ type: "text", text }],
+						isError: false,
+						timestamp: 1,
+					},
+				});
+				return [assistantId, resultId];
+			};
+			const large = "Selected recovery evidence. ".repeat(300);
+			const oldIds = await appendRecovery("older-recovery", largeRecovery === "old" ? large : "Older evidence.");
+			const currentIds = await appendRecovery(
+				"current-recovery",
+				largeRecovery === "current" ? large : "Current evidence.",
+			);
+			const sink = manager.bindRequestSink();
+			try {
+				const messages = await sink.readHistory((history) =>
+					new CanonicalContextCompiler().compile(history, limits),
+				);
+				const boundary = captureRequestViewBoundary(messages, async () => {
+					throw new Error("Oversized recovery must not commit an ordinary request");
+				});
+				const llm = convertToLlm(messages);
+				let projection: ProviderRequestProjection | undefined;
+				const input = convertResponsesMessages(model, { messages: llm }, new Set([model.provider]), {
+					onProjection: (value) => {
+						projection = value;
+					},
+				});
+				const request: ProviderRequestRepresentation = {
+					api: model.api,
+					provider: model.provider,
+					url: `${model.baseUrl}/responses`,
+					body: JSON.stringify({ model: model.id, input, max_output_tokens: 16 }),
+				};
+				const budget = new RequestTokenBudget({
+					mode: "enforce",
+					profiles: [
+						{
+							id: "recovery-summary-capacity",
+							revision: "1",
+							api: model.api,
+							provider: model.provider,
+							url: request.url,
+							model: model.id,
+							authMode: "fixture",
+							templateRevision: "1",
+							replayFamily: "fixture",
+							contextTokens: 3500,
+							outputCeilingTokens: 16,
+							estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 0 },
+						},
+					],
+				});
+				const leaf = manager.getLeafId();
+				const failure = await selectRequestView(
+					boundary,
+					request,
+					bindResponsesPublicWindow(request, projection!),
+					budget,
+					true,
+				).catch((error: unknown) => error);
+				expect(failure).toBeInstanceOf(PublicContextBudgetError);
+				if (!(failure instanceof PublicContextBudgetError)) throw new Error("Expected native public capacity");
+				expect(failure.mandatoryAssessment?.status).toBe(
+					largeRecovery === "old" ? "within-estimate" : "over-budget",
+				);
+				const actualSuffixCapacity = failure.remainingSummaryTokens(new Set(currentIds), "Summary wrapper");
+				if (largeRecovery === "old") expect(actualSuffixCapacity).toBeGreaterThan(0);
+				else expect(actualSuffixCapacity).toBeLessThan(0);
+				// A legal cut constrained to the older suffix still cannot fit; the lower bound is not a cut permit.
+				expect(failure.remainingSummaryTokens(new Set([...oldIds, ...currentIds]), "Summary wrapper")).toBeLessThan(
+					0,
+				);
+				expect(getCanonicalViewUnits(messages)?.filter((unit) => unit.kind === "recovery")).toHaveLength(2);
+				expect(manager.getLeafId()).toBe(leaf);
+			} finally {
+				await sink.release();
 			}
 		} finally {
 			await manager.close();

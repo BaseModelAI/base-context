@@ -1144,7 +1144,14 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 				next.harness.settingsManager.getCanonicalContextLimits(),
 			),
 		);
-		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).toContain(result.id);
+		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).not.toContain(result.id);
+		const archived = await next.harness.session.recoverNativeHistory({
+			action: "read",
+			ref: result.id,
+			startByte: 0,
+			endByte: 128,
+		});
+		expect(archived.results[0].records[0].ref).toBe(result.id);
 	});
 
 	it.each([0, 1])("cold-resumes overflowed native-tool history (depth %i)", async (rlmDepth) => {
@@ -1388,7 +1395,14 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 				harness.settingsManager.getCanonicalContextLimits(),
 			),
 		);
-		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).toContain(result.id);
+		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).not.toContain(result.id);
+		const archived = await harness.session.recoverNativeHistory({
+			action: "read",
+			ref: result.id,
+			startByte: 0,
+			endByte: 128,
+		});
+		expect(archived.results[0].records[0].ref).toBe(result.id);
 		const refused = recover.mock.calls.at(-1)![0];
 		if (!(refused instanceof PublicContextBudgetError)) throw new Error("Expected actual public budget failure");
 		const authorization = getRecoveryCompactionAuthorization(refused);

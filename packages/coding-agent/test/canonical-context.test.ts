@@ -36,6 +36,7 @@ import {
 	selectRequestView,
 } from "../src/core/request-view-selection.js";
 import { createAgentSession } from "../src/core/sdk.js";
+import { recoverCapturedHistory } from "../src/core/selective-recovery.js";
 import {
 	appendSentAgentMessageToToolResult,
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
@@ -72,12 +73,21 @@ function copiedVisibleMessages(messages: readonly AgentMessage[]) {
 	);
 }
 
-async function compileCopyContext(manager: SessionManager) {
+async function compileCopyContext(manager: SessionManager, purpose: "request" | "read" = "request") {
 	const requests = new InferenceCoordinator(() => manager.bindRequestSink());
 	const captured = requests.capture();
 	try {
 		return await captured.readHistory((history) =>
-			new CanonicalContextCompiler().compile(history, { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 }),
+			new CanonicalContextCompiler().compile(
+				history,
+				{ maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 },
+				undefined,
+				{},
+				undefined,
+				"on",
+				false,
+				purpose,
+			),
 		);
 	} finally {
 		await captured.dispose();
@@ -989,9 +999,9 @@ it("retains the legal chronological suffix after view compaction", async () => {
 	}
 });
 
-it("preserves pinned recovery without resurrecting omitted messages after view compaction", async () => {
+it("summarizes older recovery without resurrecting omitted messages and keeps its source recoverable", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "base-context-compaction-sparse-"));
-	const manager = await SessionManager.create(dir, dir);
+	let manager = await SessionManager.create(dir, dir);
 	const maxBytes = 2 * 1024 * 1024;
 	try {
 		await manager.appendMessage({ role: "user", content: "Earlier task", timestamp: 0 });
@@ -1027,7 +1037,7 @@ it("preserves pinned recovery without resurrecting omitted messages after view c
 				role: "toolResult",
 				toolCallId: "recovery-call",
 				toolName: "prime_context",
-				content: [{ type: "text", text: "Pinned recovered evidence" }],
+				content: [{ type: "text", text: "Older recovered evidence ".repeat(2500) }],
 				isError: false,
 				timestamp: 2,
 			},
@@ -1042,9 +1052,29 @@ it("preserves pinned recovery without resurrecting omitted messages after view c
 		const currentUserId = await manager.appendMessage({ role: "user", content: "Current task", timestamp: 5 });
 		const currentAssistantId = await manager.appendMessage({
 			...assistant,
-			content: [{ type: "text", text: "Current answer" }],
-			stopReason: "stop",
+			content: [
+				{ type: "toolCall", id: "current-recovery-call", name: "prime_context", arguments: { action: "read" } },
+			],
 			timestamp: 6,
+		});
+		const currentResultId = await manager[bindNativeEntryWriter]().captureRecoveryExchange("current-recovery")({
+			executionId: "current-recovery",
+			sourceOrder: 0,
+			toolCallId: "current-recovery-call",
+			toolName: "prime_context",
+			originalInput: { action: "read" },
+			executedInput: { action: "read" },
+			toolExecution: "sequential",
+			executionOutcome: "completed",
+			cancellationRequested: false,
+			result: {
+				role: "toolResult",
+				toolCallId: "current-recovery-call",
+				toolName: "prime_context",
+				content: [{ type: "text", text: "Current recovery evidence" }],
+				isError: false,
+				timestamp: 7,
+			},
 		});
 		await manager.appendCompaction("Earlier work summarized", recoveryCallId, 100);
 		const publicInput = preparePublicContextWindow(await compileCopyContext(manager))!.messages;
@@ -1071,7 +1101,13 @@ it("preserves pinned recovery without resurrecting omitted messages after view c
 			getCanonicalEpochContext(messages)!.references.flatMap((ref, index) =>
 				ref && messages[index].role !== "compactionSummary" ? [ref.ref.entryId] : [],
 			);
-		expect(sourceIds(captured)).toEqual([recoveryCallId, recoveryResultId, currentUserId, currentAssistantId]);
+		expect(sourceIds(captured)).toEqual([
+			recoveryCallId,
+			recoveryResultId,
+			currentUserId,
+			currentAssistantId,
+			currentResultId,
+		]);
 		expect(getCanonicalViewUnits(captured)!.find((unit) => unit.kind === "recovery")!.exactSources).toContain(
 			recoveryResultId,
 		);
@@ -1089,8 +1125,11 @@ it("preserves pinned recovery without resurrecting omitted messages after view c
 		)!;
 		// Retention reaches the old pin, but that pin cannot name a chronological suffix across the omitted gap.
 		expect(preparation.firstKeptEntryId).toBe(currentUserId);
-		// Public history is not a native tool exchange: only the recovery result is pinned; its old call can summarize.
+		// Both the old call and recovered body can summarize after accepted coverage.
 		expect(preparation.messagesToSummarize).toContainEqual(captured[callIndex]);
+		expect(preparation.messagesToSummarize).toContainEqual(
+			captured[references.findIndex((ref) => ref?.ref.entryId === recoveryResultId)],
+		);
 		const checkpoint = prepareRecoveryCompaction(captured, preparation.firstKeptEntryId, maxBytes)!;
 		const summarySink = manager.bindCompactionSink();
 		try {
@@ -1102,11 +1141,103 @@ it("preserves pinned recovery without resurrecting omitted messages after view c
 		}
 
 		const rebuilt = await compileCopyContext(manager);
-		expect(sourceIds(rebuilt)).toEqual([recoveryResultId, currentUserId, currentAssistantId]);
+		expect(sourceIds(rebuilt)).toEqual([currentUserId, currentAssistantId, currentResultId]);
 		expect(rebuilt.filter((message) => message.role !== "compactionSummary")).toEqual(
-			captured.filter((message, index) => message.role !== "compactionSummary" && index !== callIndex),
+			captured.filter((_, index) =>
+				[currentUserId, currentAssistantId, currentResultId].includes(references[index]?.ref.entryId ?? ""),
+			),
 		);
 		expect(rebuilt[0]).toMatchObject({ role: "compactionSummary", summary: "Selected work summarized" });
+		expect(Buffer.byteLength(JSON.stringify(rebuilt))).toBeLessThan(5000);
+
+		const nextRequest = prepareCanonicalEpoch(
+			rebuilt,
+			getCanonicalViewUnits(rebuilt)!.map((unit) => unit.id),
+			"fixture-native-template/1",
+			maxBytes,
+			"message-groups",
+			true,
+		);
+		const nextSink = manager.bindCompactionSink();
+		try {
+			await nextSink[appendContextEpoch](nextRequest.checkpoint, 100);
+		} finally {
+			await nextSink.release();
+		}
+		const second = prepareRecoveryCompaction(await compileCopyContext(manager), currentUserId, maxBytes)!;
+		const secondSink = manager.bindCompactionSink();
+		try {
+			await secondSink[appendContextEpoch](second, 100, { summary: "Selected work summarized again" });
+		} finally {
+			await secondSink.release();
+		}
+		const sessionFile = manager.getSessionFile()!;
+		await manager.close();
+		manager = await SessionManager.open(sessionFile, dir);
+		const cold = await compileCopyContext(manager);
+		expect(sourceIds(cold)).toEqual([currentUserId, currentAssistantId, currentResultId]);
+		expect(Buffer.byteLength(JSON.stringify(cold))).toBeLessThan(5000);
+		const recovered = await manager.readBranchHistory((history) =>
+			recoverCapturedHistory(history.branchContext, {
+				action: "read",
+				ref: recoveryResultId,
+				startByte: 0,
+				endByte: 24,
+			}),
+		);
+		expect(recovered.results[0].records[0]).toMatchObject({
+			ref: recoveryResultId,
+			text: "Older recovered evidence",
+		});
+	} finally {
+		await manager.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+it("keeps an unresolved tool continuation intact across summary and cold replay", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "base-context-compaction-unresolved-"));
+	let manager = await SessionManager.create(dir, dir);
+	const maxBytes = 2 * 1024 * 1024;
+	try {
+		const assistantId = await manager.appendMessage({
+			...fauxAssistantMessage("Outcome still unknown"),
+			content: [{ type: "toolCall", id: "pending-call", name: "fixture", arguments: {} }],
+			stopReason: "toolUse",
+		});
+		await manager[bindNativeEntryWriter]().captureToolInvocation({
+			sessionId: manager.getSessionId(),
+			sessionFile: manager.getSessionFile(),
+			entryId: assistantId,
+		})({
+			executionId: "pending-execution",
+			sourceOrder: 0,
+			toolCallId: "pending-call",
+			toolName: "fixture",
+			originalInput: {},
+			executedInput: {},
+			toolExecution: "sequential",
+		});
+		const tailId = await manager.appendMessage({ role: "user", content: "Keep the current task", timestamp: 3 });
+		const messages = await compileCopyContext(manager, "read");
+		const checkpoint = prepareRecoveryCompaction(messages, tailId, maxBytes)!;
+		expect(checkpoint.toolContinuations?.[0]).toMatchObject({
+			assistantEntryId: assistantId,
+			calls: [{ executionId: "pending-execution", outcome: "outcome_unknown" }],
+		});
+		expect(checkpoint.views.map((view) => view.ref.entryId)).toContain(assistantId);
+		const sink = manager.bindCompactionSink();
+		try {
+			await sink[appendContextEpoch](checkpoint, 100, { summary: "Earlier work summarized" });
+		} finally {
+			await sink.release();
+		}
+		const sessionFile = manager.getSessionFile()!;
+		await manager.close();
+		manager = await SessionManager.open(sessionFile, dir);
+		const cold = await compileCopyContext(manager, "read");
+		expect(getCanonicalEpochContext(cold)?.toolContinuations).toEqual(checkpoint.toolContinuations);
+		expect(getCanonicalEpochContext(cold)?.references.some((ref) => ref?.ref.entryId === tailId)).toBe(true);
 	} finally {
 		await manager.close();
 		rmSync(dir, { recursive: true, force: true });

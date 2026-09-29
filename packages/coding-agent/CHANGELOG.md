@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.17] - 2026-09-29
+
+- Fixed compaction keeping old recovered tool output in active context indefinitely; summarized evidence remains available through its original references.
+- Clarified that the session checkpoint count includes native context checkpoints, not only compaction summaries.
+- Coalesced unread job-watch status snapshots while preserving important events, and removed queued routine updates when their watch is unregistered.
+
 ## [1.0.16] - 2026-09-28
 
 - Fixed background child-usage updates incorrectly stopping an active goal during request preparation.

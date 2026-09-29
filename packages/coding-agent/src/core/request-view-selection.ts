@@ -259,7 +259,8 @@ function publicBudgetFailure(
 	const required = new Set(
 		source.units.flatMap((unit, index) => {
 			const reference = context.references[index];
-			return ["task-frame", "resource-view", "recovery"].includes(unit.kind) ||
+			// Old recovery output can be summarized; the actual legal suffix is added by retainedInput below.
+			return ["task-frame", "resource-view"].includes(unit.kind) ||
 				unit.id === "native-selected-skill-versions" ||
 				(reference && (reference.ref.sequence === tailSequence || toolEntries.has(reference.ref.entryId)))
 				? [index]

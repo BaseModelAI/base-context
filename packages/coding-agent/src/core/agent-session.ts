@@ -12289,6 +12289,40 @@ export class AgentSession {
 		}
 	}
 
+	private _queuedJobWatchAction(eventId: string): SessionAction<PreparedTurnPayload> | undefined {
+		return this._actionStore
+			.queuedActions("when_run_idle")
+			.find((action): action is SessionAction<PreparedTurnPayload> => {
+				if (action.source !== "internal" || action.queueKey !== eventId || action.payload.kind !== "turn")
+					return false;
+				const message = primaryDeliveryRecord(action).message;
+				return message.role === "custom" && message.customType === "job_watch_event";
+			});
+	}
+
+	private _replaceQueuedJobWatchEvent(eventId: string, text: string): boolean {
+		const action = this._queuedJobWatchAction(eventId);
+		if (!action) return false;
+		const content = `[job-watch] ${text}`;
+		action.payload.text = content;
+		action.payload.content = [{ type: "text", text: content }];
+		action.payload.prepared = undefined;
+		if (action.payload.customMessage) action.payload.customMessage.content = content;
+		primaryDeliveryRecord(action).message.content = content;
+		this._emitQueueUpdate();
+		return true;
+	}
+
+	private _revokeQueuedJobWatchEvent(eventId: string): void {
+		const action = this._queuedJobWatchAction(eventId);
+		if (!action) return;
+		this._cancelSessionActions(
+			(candidate) => candidate === action,
+			new Error("Queued job-watch snapshot was cleared when its watch was unregistered."),
+		);
+		this._emitQueueUpdate();
+	}
+
 	private _getJobWatchController(): JobWatchController {
 		if (this._jobWatchController?.isCurrent()) return this._jobWatchController;
 		this._jobWatchController?.dispose();
@@ -12330,6 +12364,11 @@ export class AgentSession {
 				return join(directory, retained.artifactId);
 			},
 			onError: (error) => this._surfaceSessionInputError(error),
+			replaceQueued: (eventId, text) =>
+				this.sessionManager === manager && ownsSource() && this._replaceQueuedJobWatchEvent(eventId, text),
+			revokeQueued: (eventId) => {
+				if (this.sessionManager === manager && ownsSource()) this._revokeQueuedJobWatchEvent(eventId);
+			},
 			admit: (text, eventId) => {
 				if (this._sessionInputAdmissionPauses.size) return false;
 				const content = `[job-watch] ${text}`;

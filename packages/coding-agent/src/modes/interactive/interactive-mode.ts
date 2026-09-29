@@ -6599,11 +6599,10 @@ export class InteractiveMode {
 		});
 		await this.restoreStreamingMessageFromSnapshot(streamingMessage);
 
-		// Show compaction info if session was compacted
+		// Native epoch checkpoints also contribute to this count.
 		const compactionCount = state.compactionCount;
 		if (compactionCount > 0) {
-			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-			this.showStatus(`Session compacted ${times}`);
+			this.showStatus(`Session context checkpoints: ${compactionCount}`);
 		}
 	}
 
