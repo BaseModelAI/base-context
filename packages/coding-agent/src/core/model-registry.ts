@@ -429,7 +429,7 @@ function readOpenAICodexAccountId(token: string): string | undefined {
  *
  * Catalog behaviour measured 2026-08-13; see #702.
  */
-const OPENAI_CODEX_CLIENT_VERSION = "0.155.0";
+const OPENAI_CODEX_CLIENT_VERSION = "0.159.2";
 
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");

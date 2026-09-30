@@ -65,8 +65,8 @@ describe("issue #702 codex model discovery client version", () => {
 		expect(requestedUrls).toHaveLength(1);
 		const discoveryUrl = new URL(requestedUrls[0]!);
 		expect(discoveryUrl.pathname).toBe("/backend-api/codex/models");
-		// Codex models.json requires 0.155.0 for GPT-6 Sol and Luna.
-		expect(discoveryUrl.searchParams.get("client_version")).toBe("0.155.0");
+		// Use the pinned Codex client version for account model discovery.
+		expect(discoveryUrl.searchParams.get("client_version")).toBe("0.159.2");
 
 		const executableIds = executable.filter((model) => model.provider === "openai-codex").map((model) => model.id);
 		expect(executableIds.sort()).toEqual([...authorizedIds].sort());

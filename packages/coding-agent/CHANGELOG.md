@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.20] - 2026-09-30
+
+- Updated the Codex client version used for model discovery to `0.159.2`.
+
 ## [1.0.19] - 2026-09-29
 
 - Fixed family rosters, agent messaging, and subagent name checks failing when active session metadata was still being indexed.
