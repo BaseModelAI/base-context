@@ -514,6 +514,14 @@ type UserBashEndDetails = {
 
 export class CompactionSkippedError extends Error {}
 
+/** Expected cancellation from a native compaction abort or extension cancellation. */
+class CompactionCancelledError extends Error {
+	constructor() {
+		super("Compaction cancelled");
+		this.name = "CompactionCancelledError";
+	}
+}
+
 interface CompactionCommit {
 	entryId: string;
 	result: CompactionResult;
@@ -5729,10 +5737,10 @@ export class AgentSession {
 	/** Drain accepted refinement and explicit queued requests; never start an opportunistic review or plan. */
 	private async _drainPendingRefinementForDisposal(): Promise<void> {
 		this.closeAutoRefineAdmission();
-		await this._drainAcceptedRefinement();
+		await this._drainAcceptedRefinement({ allowCancellation: true });
 	}
 
-	private async _drainAcceptedRefinement(): Promise<void> {
+	private async _drainAcceptedRefinement(options: { allowCancellation?: boolean } = {}): Promise<void> {
 		const errors: unknown[] = [];
 		const drain = async () => {
 			for (const timer of this._scheduledAutoRefineTimers) {
@@ -5806,7 +5814,10 @@ export class AgentSession {
 		} catch (error) {
 			errors.push(error);
 		}
-		const distinct = [...new Set(errors)];
+		// Only native compaction cancellation is expected in this disposal drain.
+		const distinct = [...new Set(errors)].filter(
+			(error) => !(options.allowCancellation && error instanceof CompactionCancelledError),
+		);
 		if (distinct.length === 1) throw distinct[0];
 		if (distinct.length > 1) throw new AggregateError(distinct, "Session refinement drain failed");
 	}
@@ -9843,7 +9854,7 @@ export class AgentSession {
 	/**
 	 * Shared compaction core behind /compact, auto-compaction, and the compact
 	 * skill. Throws CompactionSkippedError when there is nothing to compact and
-	 * Error("Compaction cancelled") on abort or extension cancel.
+	 * CompactionCancelledError on abort or extension cancel.
 	 */
 	private async _performCompaction(options: {
 		model: Model<any>;
@@ -9923,7 +9934,7 @@ export class AgentSession {
 
 				this._assertCompactionOwner(owner);
 				if (result?.cancel) {
-					throw new Error("Compaction cancelled");
+					throw new CompactionCancelledError();
 				}
 
 				if (result?.compaction) {
@@ -9997,7 +10008,7 @@ export class AgentSession {
 			}
 
 			if (signal.aborted) {
-				throw new Error("Compaction cancelled");
+				throw new CompactionCancelledError();
 			}
 
 			this._assertCompactionOwner(owner);

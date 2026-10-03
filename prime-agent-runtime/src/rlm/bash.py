@@ -969,11 +969,12 @@ def _record_journal(
         }
         data = (json.dumps(record) + "\n").encode()
         # This database is only the shared Node/Python mutex, never process state.
-        # EXCLUSIVE locking_mode retains ownership after COMMIT until close().
+        # Acquire in NORMAL mode before retaining ownership past COMMIT until close().
+        # Switching first can retain competing read locks during acquisition.
         database = sqlite3.connect(assert_product_state_path(f"{path}.owner.sqlite"), timeout=5, isolation_level=None)
         database.executescript(
-            "PRAGMA busy_timeout=5000; PRAGMA locking_mode=EXCLUSIVE; "
-            "BEGIN EXCLUSIVE; PRAGMA user_version=1; COMMIT;"
+            "PRAGMA busy_timeout=5000; BEGIN EXCLUSIVE; "
+            "PRAGMA locking_mode=EXCLUSIVE; PRAGMA user_version=1; COMMIT;"
         )
         fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
         size = os.fstat(fd).st_size

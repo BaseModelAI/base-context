@@ -278,6 +278,22 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		}
 	});
 
+	it("settles large stdout through the native SDK tool", async () => {
+		const lifecycle = await createNativeLifecycleFixture(dir, "native-large-stdout");
+		try {
+			lifecycle.calls.push({
+				type: "toolCall",
+				name: "ipython",
+				id: "large-stdout",
+				arguments: { code: 'for i in range(1000000): print(i, repr("x" * 200))' },
+			});
+			await lifecycle.session.prompt("Run the requested Python cell.");
+			expect(lifecycle.bodies).toHaveLength(2);
+		} finally {
+			await lifecycle.dispose();
+		}
+	}, 60_000);
+
 	it("streams stdout/stderr, returns results, and persists state across cells", async () => {
 		manager = new ReplKernelManager({ python: python as string, cwd: dir });
 		const chunks: { name: string; text: string }[] = [];
@@ -420,6 +436,10 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 						field: "/message/content",
 						startLine: 2,
 						endLine: 2,
+						startByte: 7,
+						endByte: 24,
+						prefixOmitted: true,
+						suffixOmitted: true,
 						text: "Preserve Foo.txt.",
 					},
 				]);

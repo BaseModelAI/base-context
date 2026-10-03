@@ -639,6 +639,86 @@ describe("AgentSession compaction characterization", () => {
 		});
 	});
 
+	it("drains cancelled manual compaction before completing disposal", async () => {
+		const entered = createDeferred();
+		const summaryGate = createDeferred();
+		const callbackEntered = createDeferred();
+		const callbackGate = createDeferred();
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [],
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		const summaryResponse = async () => {
+			entered.resolve();
+			await summaryGate.promise;
+			return fauxAssistantMessage("cancelled summary", { stopReason: "aborted" });
+		};
+		harness.setResponses([
+			fauxAssistantMessage("first response"),
+			fauxAssistantMessage("second response"),
+			summaryResponse,
+			summaryResponse,
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const close = vi.spyOn(harness.sessionManager, "close");
+		harness.session.registerDisposeCallback(async () => {
+			callbackEntered.resolve();
+			await callbackGate.promise;
+		});
+		const compacting = harness.session.compact();
+		const cancelled = expect(compacting).rejects.toMatchObject({
+			name: "CompactionCancelledError",
+			message: "Compaction cancelled",
+		});
+		await entered.promise;
+		harness.session.requestAbort();
+		let disposed = false;
+		const disposal = harness.session.disposeAsync().then(() => {
+			disposed = true;
+		});
+		try {
+			summaryGate.resolve();
+			await cancelled;
+			await callbackEntered.promise;
+			expect(disposed).toBe(false);
+			expect(close).not.toHaveBeenCalled();
+			callbackGate.resolve();
+			await disposal;
+			expect(close).toHaveBeenCalledOnce();
+			expect(disposed).toBe(true);
+		} finally {
+			summaryGate.resolve();
+			callbackGate.resolve();
+			await Promise.allSettled([compacting, disposal]);
+		}
+	});
+
+	it("preserves ordinary compaction errors with cancellation text during disposal drain", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			tools: [],
+			settings: { compaction: { enabled: false }, autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		const summary = createDeferred<never>();
+		const internals = harness.session as unknown as {
+			_performCompaction(): Promise<never>;
+			_drainPendingRefinementForDisposal(): Promise<void>;
+		};
+		const perform = vi.spyOn(internals, "_performCompaction").mockReturnValue(summary.promise);
+		const compacting = harness.session.compact();
+		const failure = new Error("Compaction cancelled");
+		const failed = expect(compacting).rejects.toBe(failure);
+		await vi.waitFor(() => expect(perform).toHaveBeenCalledOnce());
+		harness.session.requestAbort();
+		const drained = expect(internals._drainPendingRefinementForDisposal()).rejects.toBe(failure);
+		summary.reject(failure);
+		await Promise.all([failed, drained]);
+	});
+
 	it("manually compacts using an extension-provided summary", async () => {
 		const harness = await createHarness({
 			persistSession: true,

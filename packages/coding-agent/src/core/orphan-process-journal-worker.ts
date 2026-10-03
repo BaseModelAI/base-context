@@ -14,10 +14,11 @@ try {
 	if (process.ppid !== input.parentPid) throw new Error("Orphan journal writer has no original parent");
 	const path = assertProductStatePath(input.path);
 	database = new DatabaseSync(assertProductStatePath(`${path}.owner.sqlite`));
-	// Same lock file and SQLite locking protocol as Python. Do not remove or replace it.
-	// SQLite's bounded lock wait is not an append retry: a failed append is never replayed.
+	// Acquire in NORMAL mode before retaining exclusive ownership through append and close.
+	// Switching first can retain competing read locks during acquisition.
+	// Same lock file/protocol as Python; a failed append is never replayed.
 	database.exec(
-		"PRAGMA busy_timeout=5000; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; PRAGMA user_version=1; COMMIT;",
+		"PRAGMA busy_timeout=5000; BEGIN EXCLUSIVE; PRAGMA locking_mode=EXCLUSIVE; PRAGMA user_version=1; COMMIT;",
 	);
 	if (process.ppid !== input.parentPid) throw new Error("Orphan journal writer lost its original parent");
 	descriptor = openSync(path, "a+", 0o600);

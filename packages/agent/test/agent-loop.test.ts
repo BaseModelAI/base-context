@@ -507,6 +507,61 @@ describe("agentLoop with AgentMessage", () => {
 		expect(events.some((event) => event.type === "agent_end")).toBe(true);
 	});
 
+	it("should report asynchronous tool update failures before finalizing the tool", async () => {
+		let rejectUpdate!: (error: Error) => void;
+		const update = new Promise<void>((_resolve, reject) => {
+			rejectUpdate = reject;
+		});
+		let reportExecuted!: () => void;
+		const executed = new Promise<void>((resolve) => {
+			reportExecuted = resolve;
+		});
+		const tool: AgentTool = {
+			name: "work",
+			label: "Work",
+			description: "Work",
+			parameters: Type.Object({}),
+			execute: async (_toolCallId, _params, _signal, onUpdate) => {
+				onUpdate?.({ content: [{ type: "text", text: "progress" }], details: {} });
+				reportExecuted();
+				return { content: [{ type: "text", text: "done" }], details: {} };
+			},
+		};
+		const events: AgentEvent[] = [];
+		let requests = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			const message =
+				requests++ === 0
+					? createAssistantMessage([{ type: "toolCall", id: "tool_1", name: "work", arguments: {} }], "toolUse")
+					: createAssistantMessage([{ type: "text", text: "Finished" }], "stop");
+			queueMicrotask(() => stream.push({ type: "done", reason: message.stopReason as "toolUse" | "stop", message }));
+			return stream;
+		};
+		const run = runAgentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "You are helpful.", messages: [], tools: [tool] },
+			{ model: createModel(), convertToLlm: identityConverter, toolExecution: "sequential" },
+			(event) => {
+				events.push(event);
+				if (event.type === "tool_execution_update") return update;
+			},
+			undefined,
+			streamFn,
+		);
+		await executed;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(events.some((event) => event.type === "tool_execution_end")).toBe(false);
+		expect(requests).toBe(1);
+		rejectUpdate(new Error("progress observer failed"));
+		const messages = await run;
+		expect(messages.find((message) => message.role === "toolResult")).toMatchObject({
+			isError: true,
+			content: [{ type: "text", text: "progress observer failed" }],
+		});
+		expect(requests).toBe(2);
+	});
+
 	it("should preserve a successful tool result when abort fires during update flush", async () => {
 		const controller = new AbortController();
 		const toolSchema = Type.Object({});

@@ -1,0 +1,1 @@
+- Fixed tool progress draining for very large output streams without retaining every update promise.

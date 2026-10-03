@@ -1099,8 +1099,24 @@ async function executePreparedToolCall(
 		);
 		if (owner) source.owner = owner;
 	}
-	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
+	let pendingUpdates = 0;
+	let finishUpdates!: () => void;
+	let failUpdates!: (error: unknown) => void;
+	const updateEvents = new Promise<void>((resolve, reject) => {
+		finishUpdates = resolve;
+		failUpdates = reject;
+	});
+	// Observe early failures now; the normal execution path still awaits and reports them.
+	void updateEvents.catch(() => undefined);
+	const settleUpdate = () => {
+		pendingUpdates--;
+		if (!acceptingUpdates && pendingUpdates === 0) finishUpdates();
+	};
+	const stopUpdates = () => {
+		acceptingUpdates = false;
+		if (pendingUpdates === 0) finishUpdates();
+	};
 	let executionStarted = false;
 
 	try {
@@ -1111,25 +1127,26 @@ async function executePreparedToolCall(
 				if (!acceptingUpdates || signal?.aborted) {
 					return;
 				}
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
+				const update = Promise.resolve(
+					emit({
+						type: "tool_execution_update",
+						toolCallId: prepared.toolCall.id,
+						toolName: prepared.toolCall.name,
+						args: prepared.toolCall.arguments,
+						partialResult,
+					}),
 				);
+				// Do not retain every stdout callback or feed an unbounded array to Promise.all.
+				pendingUpdates++;
+				void update.then(settleUpdate, (error) => {
+					failUpdates(error);
+					settleUpdate();
+				});
 			});
 		const result = await raceWithAbort(source.owner ? source.owner.run(run) : run(), signal);
-		acceptingUpdates = false;
+		stopUpdates();
 		try {
-			await raceWithAbort(
-				Promise.all(updateEvents).then(() => undefined),
-				signal,
-			);
+			await raceWithAbort(updateEvents, signal);
 		} catch (error) {
 			if (!signal?.aborted || !isAbortError(error)) {
 				throw error;
@@ -1137,11 +1154,8 @@ async function executePreparedToolCall(
 		}
 		return { result, isError: false, executedInput, executionOutcome: "completed" };
 	} catch (error) {
-		acceptingUpdates = false;
-		await raceWithAbort(
-			Promise.all(updateEvents).then(() => undefined),
-			signal,
-		).catch(() => undefined);
+		stopUpdates();
+		await raceWithAbort(updateEvents, signal).catch(() => undefined);
 		return {
 			result: createErrorToolResult(
 				signal?.aborted ? "Tool execution aborted" : error instanceof Error ? error.message : String(error),
