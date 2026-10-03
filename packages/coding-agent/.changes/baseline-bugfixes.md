@@ -1,2 +1,0 @@
-- Fixed overlapping shell commands failing to acquire orphan-process journal ownership.
-- Fixed session disposal failing after an expected compaction cancellation while preserving caller cancellation and other errors.

@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.0.21] - 2026-10-03
+
+- Fixed tool progress draining for very large output streams without retaining every update promise.
+
 ## [1.0.8] - 2026-09-18
 
 - Allowed one deterministic context reprepare before the existing single request-recovery attempt, without restarting the invocation or completed tools.

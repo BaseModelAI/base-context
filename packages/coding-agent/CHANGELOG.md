@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.21] - 2026-10-03
+
+- Fixed overlapping shell commands failing to acquire orphan-process journal ownership.
+- Fixed session disposal failing after an expected compaction cancellation while preserving caller cancellation and other errors.
+
 ## [1.0.20] - 2026-09-30
 
 - Updated the Codex client version used for model discovery to `0.159.2`.
