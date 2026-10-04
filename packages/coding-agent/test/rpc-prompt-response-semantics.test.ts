@@ -231,6 +231,73 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("advertises native family completion and acknowledges only after its barrier", async () => {
+		const { lineHandler, session, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		let release!: () => void;
+		let announce!: () => void;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const entered = new Promise<void>((resolve) => {
+			announce = resolve;
+		});
+		let admit!: () => void;
+		let announcePrompt!: () => void;
+		const admission = new Promise<void>((resolve) => {
+			admit = resolve;
+		});
+		const promptStarted = new Promise<void>((resolve) => {
+			announcePrompt = resolve;
+		});
+		const prompt = vi.spyOn(session, "prompt").mockImplementation(async (_text, options) => {
+			announcePrompt();
+			await admission;
+			options?.preflightResult?.(true);
+		});
+		const barrier = vi.spyOn(session, "waitForRlmQuiescence").mockImplementation(async () => {
+			announce();
+			await held;
+		});
+		const response = (id: string) =>
+			new Promise<ParsedOutputLine>((resolve) => {
+				rpcIo.onOutput = (line) => {
+					const record = parseOutputLines([line]).find((item) => item.type === "response" && item.id === id);
+					if (record) resolve(record);
+				};
+			});
+		try {
+			const state = response("state");
+			lineHandler(JSON.stringify({ id: "state", type: "get_state" }));
+			expect(await state).toMatchObject({
+				success: true,
+				data: { protocolVersion: 13, schemaRevision: 51, capabilities: ["rlm_quiescence_barrier"] },
+			});
+			const completed = response("completed");
+			lineHandler(JSON.stringify({ id: "prompt", type: "prompt", message: "Wait for admission" }));
+			lineHandler(JSON.stringify({ id: "completed", type: "wait_for_completion" }));
+			await promptStarted;
+			expect(barrier).not.toHaveBeenCalled();
+			admit();
+			await entered;
+			expect(getPromptResponses(rpcIo.outputLines, "prompt")).toHaveLength(1);
+			expect(parseOutputLines(rpcIo.outputLines).some((record) => record.id === "completed")).toBe(false);
+			release();
+			expect(await completed).toEqual({
+				id: "completed",
+				type: "response",
+				command: "wait_for_completion",
+				success: true,
+			});
+			expect(barrier).toHaveBeenCalledOnce();
+		} finally {
+			admit();
+			release();
+			prompt.mockRestore();
+			barrier.mockRestore();
+			await cleanup();
+		}
+	});
+
 	it("reports a late native request-budget failure after ACK while stdin stays open", async () => {
 		const tempDir = join(tmpdir(), `rpc-native-refusal-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });

@@ -14,13 +14,14 @@ import type {
 import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION } from "../daemon/daemon-protocol.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
 import { createRpcExtensionUiBridge } from "./rpc-extension-ui-context.js";
-import type {
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-	RpcSessionState,
-	RpcSlashCommand,
+import {
+	RPC_CAPABILITIES,
+	type RpcCommand,
+	type RpcExtensionUIRequest,
+	type RpcExtensionUIResponse,
+	type RpcResponse,
+	type RpcSessionState,
+	type RpcSlashCommand,
 } from "./rpc-types.js";
 
 export type {
@@ -227,6 +228,11 @@ async function runRpcModeWithConnectionInternal(
 		});
 	}
 
+	const waitForCompletion = async () => {
+		await promptCommandTail;
+		await connection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
+	};
+
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
 		switch (command.type) {
@@ -254,11 +260,15 @@ async function runRpcModeWithConnectionInternal(
 						command.parentSession ? { parentSession: command.parentSession } : undefined,
 					),
 				);
+			case "wait_for_completion":
+				await waitForCompletion();
+				return success(id, command.type);
 			case "get_state": {
 				const state = await connection.getState();
 				const rpcState: RpcSessionState = {
 					protocolVersion: DAEMON_PROTOCOL_VERSION,
 					schemaRevision: DAEMON_SCHEMA_REVISION,
+					capabilities: RPC_CAPABILITIES,
 					model: state.model,
 					thinkingLevel: state.thinkingLevel,
 					isStreaming: state.isStreaming,
@@ -548,7 +558,7 @@ async function runRpcModeWithConnectionInternal(
 		queueMicrotask(() => {
 			void cancelPendingExtensionUi()
 				.then(() => Promise.allSettled([...pendingInputHandlers]))
-				.then(() => connection.waitForIdle())
+				.then(() => waitForCompletion())
 				.then(
 					() => shutdown(),
 					() => shutdown(1),

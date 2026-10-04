@@ -45,6 +45,7 @@ const IMPLEMENTATION_CONTRACT = [
 	"Implement the full stated input domain and required outputs, not only the cases present in the supplied data. Do not invent additional input formats or compatibility branches beyond that contract.",
 	"Preserve earlier requirements unless later instructions replace them. Apply stated eligibility, priorities, and decision order literally, even when a different policy seems simpler or more sensible; reevaluate later decisions when earlier actions change their inputs.",
 	"The required commands must implement the stated workflow from its stated starting state, without development-only state or extra steps.",
+	"Complete unambiguous work before stopping for clarification. For low-risk, reversible choices, proceed with a reasonable stated assumption. Ask when missing information is needed for correctness, safety, authorization, or an irreversible action.",
 	"During tool-based inspection of large datasets, request schemas or small samples. Process full inputs in local code instead of printing entire datasets into the conversation.",
 	"Read long text in bounded pages; use a character limit as well as a line limit when lines are long. If output is truncated, page the retained result instead of repeating the original command or printing the whole file again.",
 	"Batch nonurgent child updates. Send results, blockers, or decisions that need action rather than acknowledgements and repeated status requests. Continue independent work while children run, and report meaningful milestones to the user.",

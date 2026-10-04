@@ -1152,7 +1152,7 @@ async function executePreparedToolCall(
 				throw error;
 			}
 		}
-		return { result, isError: false, executedInput, executionOutcome: "completed" };
+		return { result, isError: result.isError ?? false, executedInput, executionOutcome: "completed" };
 	} catch (error) {
 		stopUpdates();
 		await raceWithAbort(updateEvents, signal).catch(() => undefined);

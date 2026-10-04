@@ -32,6 +32,12 @@ import {
 	durableDaemonWorkerDescriptor,
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 
+import {
+	RPC_CAPABILITIES,
+	RPC_COMMAND_COMPATIBILITY,
+	RPC_RESPONSE_FIELD_COMPATIBILITY,
+} from "../src/modes/rpc/rpc-types.js";
+
 describe("daemon protocol helpers", () => {
 	it("serializes worker descriptors as identity-only version 2 state", () => {
 		const descriptor = {
@@ -84,9 +90,9 @@ describe("daemon protocol helpers", () => {
 
 	it("advertises optional agent results without raising startup requirements", () => {
 		expect(DAEMON_PROTOCOL_VERSION).toBe(13);
-		expect(DAEMON_SCHEMA_REVISION).toBe(50);
+		expect(DAEMON_SCHEMA_REVISION).toBe(51);
 		expect(DAEMON_SCHEMA_ID).toBe(
-			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-context-request-usage`,
+			`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-rpc-family-completion`,
 		);
 		const command: DaemonCommand = {
 			type: "send_result",
@@ -109,6 +115,23 @@ describe("daemon protocol helpers", () => {
 		expect(getDaemonCommandCompatibilities({ type: "create" })).toEqual(NATIVE_WORK_COMPATIBILITIES);
 		expect(DAEMON_COMMAND_COMPATIBILITY.send_message).toEqual(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY);
 		expect(CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision).toBe(49);
+	});
+
+	it("requires the advertised RPC family barrier without changing legacy commands", () => {
+		const compatibility = RPC_COMMAND_COMPATIBILITY.wait_for_completion;
+		expect(compatibility).toEqual({ minProtocol: 13, minSchemaRevision: 51, capability: "rlm_quiescence_barrier" });
+		expect(RPC_RESPONSE_FIELD_COMPATIBILITY.get_state.capabilities).toEqual(compatibility);
+		const current = {
+			protocol: DAEMON_PROTOCOL_INFO,
+			schemaRevision: DAEMON_SCHEMA_REVISION,
+			serverCapabilities: RPC_CAPABILITIES,
+		};
+		expect(meetsDaemonCommandCompatibility(current, compatibility)).toBe(true);
+		expect(meetsDaemonCommandCompatibility({ ...current, schemaRevision: 50 }, compatibility)).toBe(false);
+		expect(meetsDaemonCommandCompatibility({ ...current, serverCapabilities: [] }, compatibility)).toBe(false);
+		expect(getDaemonCommandCompatibilities({ type: "get_state", activeSessionId: "root" })).toEqual([
+			DAEMON_COMMAND_COMPATIBILITY.get_state,
+		]);
 	});
 
 	it("keeps context request usage optional for both old clients and old daemons", () => {

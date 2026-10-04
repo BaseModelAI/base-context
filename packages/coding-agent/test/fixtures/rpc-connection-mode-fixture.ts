@@ -78,6 +78,10 @@ const connection = {
 	async waitForIdle() {
 		await activePrompt;
 	},
+	async waitForHeadlessCompletion(options: { waitForRlmQuiescence?: boolean }) {
+		if (options.waitForRlmQuiescence !== true) throw new Error("Expected native family completion");
+		await connection.waitForIdle();
+	},
 	async getLastAssistantText() {
 		return undefined;
 	},

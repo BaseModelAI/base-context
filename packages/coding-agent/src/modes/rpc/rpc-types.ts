@@ -21,6 +21,16 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSourceInfo } from "../agent-connection/types.js";
+import type { DaemonCommandCompatibility } from "../daemon/daemon-protocol.js";
+
+export const RPC_CAPABILITIES = ["rlm_quiescence_barrier"] as const;
+export const RPC_COMMAND_COMPATIBILITY = {
+	wait_for_completion: { minProtocol: 13, minSchemaRevision: 51, capability: "rlm_quiescence_barrier" },
+} as const satisfies Partial<Record<RpcCommand["type"], DaemonCommandCompatibility>>;
+export const RPC_RESPONSE_FIELD_COMPATIBILITY = {
+	get_state: { capabilities: RPC_COMMAND_COMPATIBILITY.wait_for_completion },
+} as const;
+// This additive command changes no session-event fields or their compatibility.
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -36,6 +46,7 @@ export type RpcCommand =
 
 	// State
 	| { id?: string; type: "get_state" }
+	| { id?: string; type: "wait_for_completion" }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -140,6 +151,8 @@ export interface RpcSessionState {
 	protocolVersion?: number;
 	/** Missing on older servers that do not qualify native task admission. */
 	schemaRevision?: number;
+	/** Optional on older servers; require the advertised barrier before using it. */
+	capabilities?: readonly (typeof RPC_CAPABILITIES)[number][];
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	isStreaming: boolean;
@@ -170,6 +183,7 @@ export type RpcResponse =
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
+	| { id?: string; type: "response"; command: "wait_for_completion"; success: true }
 
 	// Model
 	| {

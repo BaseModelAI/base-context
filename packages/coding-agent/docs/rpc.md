@@ -16,6 +16,8 @@ base-context --mode rpc --rpc-protocol-version 13 [options]
 
 This uses the current Base Context daemon protocol marker, not the package version. Updating only the server cannot make an old client understand a new terminal event.
 
+Schema revision 51 adds the `rlm_quiescence_barrier` capability and [`wait_for_completion`](#wait_for_completion). Clients that need full-family completion must check `get_state` for schema revision at least 51 and this capability before submitting work. Protocol 13 alone does not imply support.
+
 Common options:
 - `--provider <name>`: Set the LLM provider (anthropic, openai, google, etc.)
 - `--model <pattern>`: Model pattern or ID (supports `provider/id` and optional `:<thinking>`)
@@ -40,6 +42,10 @@ This matters for clients:
 - Do not use generic line readers that treat Unicode separators as newlines
 
 In particular, Node `readline` is not protocol-compliant for RPC mode because it also splits on `U+2028` and `U+2029`, which are valid inside JSON strings.
+
+### Completion and EOF
+
+Prompt acceptance and a single `agent_end` do not establish completion of the whole request. On schema revision 51 hosts, EOF drains prior prompt admissions and waits for the same full-family barrier as `wait_for_completion` before disposing the RPC connection. This includes admitted RLM descendants, their terminal parent messages, and resulting parent turns. It does not wait for future external commands or future scheduled jobs. Forced process termination does not provide this guarantee.
 
 ## Commands
 
@@ -81,6 +87,23 @@ Response:
 `success: true` means the prompt was accepted, queued, or handled immediately. `success: false` means the prompt was rejected before acceptance. Failures after acceptance are reported through the normal event and message stream, not as a second `response` for the same request id.
 
 The `images` field is optional. Each image uses `ImageContent` format: `{"type": "image", "data": "base64-encoded-data", "mimeType": "image/png"}`.
+
+#### wait_for_completion
+
+Wait for previously submitted prompt admissions and all admitted work in the current session family to settle. This includes RLM descendants, their terminal parent messages, and resulting parent turns. Requires schema revision at least 51 and `get_state.capabilities` containing `rlm_quiescence_barrier`.
+
+```json
+{"id": "done-1", "type": "wait_for_completion"}
+```
+
+Response, emitted only after the barrier completes:
+```json
+{"id": "done-1", "type": "response", "command": "wait_for_completion", "success": true}
+```
+
+Events continue while this command waits. Correlate the submitted user message with the event stream and retain its final outcome; do not advance on an intermediate `agent_end`. A successful barrier response means work has settled, not that the task succeeded. Inspect refusals, completion errors, and the final assistant `stopReason`; `length` means truncated output. For staged requests, wait for this response before sending the next stage.
+
+The barrier does not cover future external commands or future scheduled jobs. Local `isStreaming`/`sessionActions` snapshots or a child's `done` event are not substitutes for it.
 
 #### steer
 
@@ -179,6 +202,9 @@ Response:
   "command": "get_state",
   "success": true,
   "data": {
+    "protocolVersion": 13,
+    "schemaRevision": 51,
+    "capabilities": ["rlm_quiescence_barrier"],
     "model": {...},
     "thinkingLevel": "medium",
     "isStreaming": false,
@@ -200,7 +226,7 @@ Response:
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
+The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `capabilities` lists optional RPC features; check it before using `wait_for_completion`. Idle local state does not establish full-family completion.
 
 #### get_messages
 
@@ -797,7 +823,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | Event | Description |
 |-------|-------------|
 | `agent_start` | Agent begins processing |
-| `agent_end` | Terminal completion: complete messages on success, or explicit output refusal |
+| `agent_end` | One run ended with finalized messages or an output refusal; not full-family completion |
 | `turn_start` | New turn begins |
 | `turn_end` | Turn completes (includes assistant message and tool results) |
 | `message_start` | Message begins |
@@ -823,7 +849,7 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted at the terminal boundary. Successful completion contains every finalized message:
+Emitted when one agent run ends, including a steering handoff. Queued follow-ups, RLM descendants, or resulting parent turns may still remain. A non-refusal event contains that run's finalized messages:
 
 ```json
 {
@@ -848,7 +874,7 @@ Output refusal is terminal failure, not an empty successful run:
 
 `messages` is absent on refusal. The prompt response remains an acceptance ACK, not
 completion. `RpcClient.promptAndWait()` rejects refusal; `collectEvents()` preserves the
-terminal descriptor, and `waitForIdle()` only reports that execution became idle.
+terminal descriptor, and `waitForIdle()` only reports that execution became idle. These helpers do not replace the explicit `wait_for_completion` family barrier.
 
 ### turn_start / turn_end
 
@@ -1406,24 +1432,51 @@ def read_events():
     for line in proc.stdout:
         yield json.loads(line)
 
-# Send prompt
-send({"type": "prompt", "message": "Hello!"})
+# Negotiate the completion capability before sending work.
+send({"id": "state-1", "type": "get_state"})
+for event in read_events():
+    if event.get("type") == "response" and event.get("id") == "state-1":
+        state = event.get("data", {})
+        if (not event["success"] or state.get("schemaRevision", 0) < 51
+                or "rlm_quiescence_barrier" not in state.get("capabilities", [])):
+            raise RuntimeError("Server lacks the family-completion barrier")
+        break
 
-# Process events
+send({"id": "req-1", "type": "prompt", "message": "Hello!"})
+terminal = None
 for event in read_events():
     if event.get("type") == "message_update":
         delta = event.get("assistantMessageEvent", {})
         if delta.get("type") == "text_delta":
             print(delta["delta"], end="", flush=True)
-    
+
     if event.get("type") == "agent_end":
-        if "refusal" in event:
-            raise RuntimeError(f"Invocation output refused: {event['refusal']}")
+        terminal = event  # A later run can supersede this event.
+
+    if event.get("type") == "response" and event.get("id") == "req-1":
+        if not event["success"]:
+            raise RuntimeError(event.get("error", "Prompt rejected"))
+        send({"id": "done-1", "type": "wait_for_completion"})
+
+    if event.get("type") == "response" and event.get("id") == "done-1":
+        if not event["success"]:
+            raise RuntimeError(event.get("error", "Completion barrier failed"))
+        if terminal is None or "refusal" in terminal:
+            raise RuntimeError(f"No successful terminal output: {terminal}")
+        assistant = next((message for message in reversed(terminal.get("messages", []))
+                          if message.get("role") == "assistant"), {})
+        if assistant.get("stopReason") != "stop":
+            raise RuntimeError(f"Incomplete or failed reply: {assistant.get('stopReason')}")
         print()
         break
+
+proc.stdin.close()
+proc.wait()
 ```
 
 ## Example: Interactive Client (Node.js)
+
+The per-run notifications below update the UI; they are not full-request completion signals. Use the negotiated `wait_for_completion` command when a caller needs that boundary.
 
 See [`test/rpc-example.ts`](../test/rpc-example.ts) for a complete interactive example, or [`src/modes/rpc/rpc-client.ts`](../src/modes/rpc/rpc-client.ts) for a typed client implementation.
 

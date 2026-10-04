@@ -344,6 +344,8 @@ def prepare_workspace(task_dir: Path, scenario: dict[str, Any], workspace: Path)
 
 
 def make_read_only(path: Path) -> None:
+    if path.is_symlink():
+        return
     try:
         mode = path.stat().st_mode
         path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
@@ -357,7 +359,11 @@ def make_payload_read_only(source: Path, destination: Path) -> None:
 
 
 def make_writable_tree(path: Path) -> None:
+    if path.is_symlink():
+        return
     for item in [path, *path.rglob("*")]:
+        if item.is_symlink():
+            continue
         try:
             mode = item.stat().st_mode
             item.chmod(mode | stat.S_IWUSR)

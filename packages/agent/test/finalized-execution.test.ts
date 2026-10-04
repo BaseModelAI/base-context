@@ -128,6 +128,51 @@ it("captures invocation snapshots and final middleware results before observers,
 	}
 });
 
+it.each(["success", "error"] as const)("preserves the tool-returned %s status", async (status) => {
+	const isError = status === "error";
+	const events: AgentEvent[] = [];
+	const hookErrors: boolean[] = [];
+	const agent = new Agent({
+		initialState: {
+			model,
+			tools: [
+				{
+					name: "result",
+					label: "Result",
+					description: "Fixture",
+					parameters: Type.Object({}),
+					async execute() {
+						return {
+							content: [{ type: "text", text: status }],
+							details: { status },
+							...(isError ? { isError } : {}),
+						};
+					},
+				},
+			],
+		},
+		streamFn: streamResponse(response([{ type: "toolCall", id: "result", name: "result", arguments: {} }])),
+		afterToolCall: async (context) => {
+			hookErrors.push(context.isError);
+			return undefined;
+		},
+		shouldStopAfterTurn: () => true,
+	});
+	agent.subscribe((event) => {
+		events.push(event);
+	});
+	await agent.prompt("Run the tool");
+	expect(hookErrors).toEqual([isError]);
+	const end = events.find((event) => event.type === "tool_execution_end");
+	expect(end?.isError).toBe(isError);
+	expect(end?.exchange?.result).toMatchObject({
+		content: [{ type: "text", text: status }],
+		details: { status },
+		isError,
+	});
+	expect(agent.state.messages.find((message) => message.role === "toolResult")?.isError).toBe(isError);
+});
+
 it.each(["blocked", "invalid", "throws", "abort"] as const)(
 	"retains truthful finalized evidence for %s without a second execution",
 	async (scenario) => {

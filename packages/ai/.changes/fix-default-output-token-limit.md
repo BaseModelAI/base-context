@@ -1,0 +1,1 @@
+- Fixed DeepSeek requests to use native effort-aware output limits when no explicit limit is set, without changing other provider defaults.

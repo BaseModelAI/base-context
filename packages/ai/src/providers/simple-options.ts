@@ -1,9 +1,12 @@
 import type { Api, Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel } from "../types.js";
 
 export function buildBaseOptions(model: Model<Api>, options?: SimpleStreamOptions, apiKey?: string): StreamOptions {
+	// DeepSeek chooses its native output limit from the reasoning mode and effort.
+	const defaultMaxTokens =
+		model.provider !== "deepseek" && model.maxTokens > 0 ? Math.min(model.maxTokens, 32000) : undefined;
 	return {
 		temperature: options?.temperature,
-		maxTokens: options?.maxTokens ?? (model.maxTokens > 0 ? Math.min(model.maxTokens, 32000) : undefined),
+		maxTokens: options?.maxTokens ?? defaultMaxTokens,
 		signal: options?.signal,
 		apiKey: apiKey || options?.apiKey,
 		transport: options?.transport,

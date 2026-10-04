@@ -102,8 +102,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 8;
 // Revision 48 removes remote data export policy from session commands and worker state.
 // Revision 49 requires shared root-family subagent capacity and adds its get/set commands.
 // Revision 50 adds optional captured request usage to context-tree responses.
-export const DAEMON_SCHEMA_REVISION = 50;
-export const DAEMON_SCHEMA_ID = "protocol-13-schema-50-context-request-usage";
+// Revision 51 exposes the native family-completion barrier through JSON RPC.
+export const DAEMON_SCHEMA_REVISION = 51;
+export const DAEMON_SCHEMA_ID = "protocol-13-schema-51-rpc-family-completion";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
