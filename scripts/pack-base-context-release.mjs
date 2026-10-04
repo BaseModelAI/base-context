@@ -97,6 +97,7 @@ Creates package tarballs for GitHub Releases:
   <out-dir>/artifacts/base-context-ai-<version>.tgz
   <out-dir>/artifacts/base-context-agent-<version>.tgz
   <out-dir>/artifacts/base-context-tui-<version>.tgz
+  <out-dir>/artifacts/install.sh
   <out-dir>/artifacts/SHA256SUMS
   <out-dir>/artifacts/<channel>
   <out-dir>/artifacts/latest.json (stable) or beta.json (beta)
@@ -274,6 +275,13 @@ function main() {
 	rmSync(args.outDir, { force: true, recursive: true });
 	mkdirSync(stagingRoot, { recursive: true });
 	mkdirSync(artifactsDir, { recursive: true });
+
+	writeFileSync(
+		join(artifactsDir, "install.sh"),
+		readFileSync(join(root, "install.sh"), "utf8")
+			.replaceAll("__BASE_CONTEXT_DOWNLOAD_BASE_URL__", args.baseUrl)
+			.replaceAll("__BASE_CONTEXT_DEFAULT_RELEASE_CHANNEL__", args.channel),
+	);
 
 	const tarballs = [];
 	for (const releasePackage of releasePackages) {
