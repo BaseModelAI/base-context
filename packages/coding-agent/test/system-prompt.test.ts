@@ -56,6 +56,8 @@ describe("buildRlmPrompt", () => {
 		expect(prefix(changed)).not.toBe(prefix(first));
 		expect(changed).not.toContain("persistent Python REPL");
 		expect(changed).not.toContain("Reuse a named Python function");
+		expect(changed).not.toContain("pending execution ID");
+		expect(changed).not.toContain('"action":"status"');
 	});
 	test("defaults omitted activeTools to ipython guidance", () => {
 		const prompt = buildRlmPrompt({
@@ -77,6 +79,15 @@ describe("buildRlmPrompt", () => {
 		expect(prompt).toContain("A complete selected SKILL.md body already in context needs no duplicate read");
 		expect(prompt).toContain("recover it later if needed");
 		expect(prompt).toContain("execute its updated definition or invoke the saved file afresh");
+		expect(prompt).toContain("still running after 1 second returns a pending execution ID without being cancelled");
+		expect(prompt).toContain("Pending is not paused");
+		expect(prompt).toContain('{"action":"status","execution_id":"<id>"}');
+		expect(prompt).toContain('{"action":"interrupt","execution_id":"<id>"}');
+		expect(prompt).toContain("These are tool arguments, not Python code");
+		expect(prompt).toContain("New code is rejected until the cell finishes and its result is collected");
+		expect(prompt).toContain("Completion sends a follow-up with the execution ID");
+		expect(prompt).toContain("not a resumable pause or rollback");
+		expect(prompt).toContain("does not guarantee cleanup of arbitrary subprocess groups");
 	});
 
 	test("routes repeated monitoring and large inspection only to available Python skills", () => {

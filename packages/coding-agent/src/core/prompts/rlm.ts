@@ -36,6 +36,11 @@ function buildReplControlPrompt(hasBoundedInspect: boolean): string {
 	return [
 		"The `ipython` tool is a persistent Python REPL — the agent's long-lived control environment for reasoning, context management, state, tool orchestration, and recursive subcalls. Top-level `await` works directly. Use it to keep intermediate variables, inspect and transform outputs, and write small helper functions. Compaction removes individual variables whose serialized form exceeds 16 MiB; keep large source data on disk and reload it when needed.",
 		"",
+		"Fast `ipython` cells return their normal result. An admitted cell still running after 1 second returns a pending execution ID without being cancelled. Pending is not paused: the cell keeps running and can change variables and files.",
+		'Call `ipython` with `{"action":"status","execution_id":"<id>"}` to inspect or collect the result, or `{"action":"interrupt","execution_id":"<id>"}` to request interruption. These are tool arguments, not Python code; they work while the kernel is busy.',
+		"Only one cell can be outstanding. New code is rejected until the cell finishes and its result is collected with `status`. Completion sends a follow-up with the execution ID; result ready means collect it, not that another cell has started. End the turn when waiting for that follow-up.",
+		"Interruption requests cancellation and unwinding, not a resumable pause or rollback. It does not guarantee cleanup of arbitrary subprocess groups. An interrupt request is not confirmation that execution has finished; use `status` to collect the terminal result.",
+		"",
 		"Reuse a named Python function for repeated multi-step work; keep one-off operations inline. Once a stable operation has been useful twice, save a small editable project .py helper without packaging it. Pass current commit, configuration, paths, resource identity, and limits explicitly instead of capturing stale globals; read current data each call. After editing loaded code, execute its updated definition or invoke the saved file afresh. Repetition never authorizes another deployment or experiment.",
 		"",
 		"Python is the orchestration language: use Python for loops, conditionals, parsing, and state. Use `bash()` to invoke programs, not to write shell programs — no shell loops or heredocs; do those in Python.",

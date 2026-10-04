@@ -98,6 +98,14 @@ Output events carry the id of the cell that was running when the bytes were prod
 
 Calls to `ReplKernelManager.execute()` are serialized. One kernel has one shared namespace and does not run two ordinary Python cells concurrently. RLM child agents can still run concurrently because each delegation uses a distinct host request and child runtime.
 
+### Nonblocking cell control
+
+The model-facing `ipython` tool accepts `{"code":"..."}`, `{"action":"status","execution_id":"..."}`, or `{"action":"interrupt","execution_id":"..."}`. After a one-second wait from native execution admission, an unfinished call returns a pending execution handle without cancelling the original execution. Fast cells keep the normal result path. Status and ID-targeted interruption run in the TypeScript host rather than as another queued Python cell; no Python wire request or protocol-version change is needed.
+
+The host retains one cell slot, its output collection and physical-completion tracking. New code cannot enter that slot while the cell is pending. When the cell physically finishes, an existing follow-up wakes the model and asks it to collect the rich result with `status`. The completed-but-uncollected state is explicitly result-ready, not still running. New code remains rejected until `status` delivers the final result once and frees the slot; there is no completed-job registry. A completed, uncollected result does not itself keep a headless session alive, and abort or disposal does not force another collection turn.
+
+Yielding is not pausing: the original cell continues in the existing namespace. An explicit interrupt cancels/unwinds; it is not resumable suspension or rollback, and arbitrary subprocess-group cleanup is not guaranteed. An interrupt request is not a completion acknowledgment. The host keeps the pending cell in session completion and end-of-input barriers until physical completion, then delivers the completion follow-up. Result collection frees the cell slot. It must not dispose the kernel merely because the model-facing tool returned pending. See [pending cell control](rlm.md#pending-cell-control) for the model call forms.
+
 The optional `job_watch_probe_v1` ready capability supports contained read-only probes outside the cell FIFO and passive Bash completion callbacks. `AgentSession` schedules and compares observations before model admission, then uses ordinary prepared follow-ups. Explicit parking gates goal and autonomous continuation, not user input or unrelated work. No daemon protocol version changes; an older runtime without the capability is refused locally. See [job-watch](../skills/job-watch/SKILL.md) for reporting, restoration, and supported backlog limits.
 
 ## Host-Request Event Flow

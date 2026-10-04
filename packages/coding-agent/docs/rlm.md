@@ -50,6 +50,21 @@ print(result.output)
 
 Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Base Context extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
+#### Pending cell control
+
+Fast `ipython` cells return their normal result. If an admitted cell has not finished after one second, the tool returns a pending execution ID without cancelling it. The cell is **not paused**: it keeps running in the same namespace and can change variables and files.
+
+Use these `ipython` tool arguments, not Python code:
+
+| Operation | Arguments |
+|---|---|
+| Inspect progress or collect the final result | `{"action":"status","execution_id":"<id>"}` |
+| Request interruption | `{"action":"interrupt","execution_id":"<id>"}` |
+
+Status and interrupt are handled by the host, so they do not wait for the busy Python cell. Use either `code` or an `action` with `execution_id`, never both. One cell can be outstanding. New code is rejected while it runs. After it finishes, a completion follow-up gives its ID; new code remains rejected with a result-ready notice until `status` collects the final rich result and frees the slot. End the turn when waiting for the completion follow-up. This is not a registry of completed jobs.
+
+Interruption requests cancellation and unwinding. It is not a resumable pause or rollback, and it does not guarantee cleanup of arbitrary subprocess groups. The request can return before execution has stopped; collect the terminal result with `status`. Pending execution remains part of session completion and end-of-input handling. Yielding does not change the task deadline or restart the kernel.
+
 ### 2. Subagents are native RLM calls
 
 The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:

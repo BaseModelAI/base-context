@@ -40,6 +40,7 @@ import {
 	createKernelStartupAbortError,
 	DEFAULT_MAX_OUTPUT_CHARS,
 	DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+	type Deferred,
 	DIFF_DISPLAY_MIME,
 	type ExecuteOptions,
 	type ExecuteResult,
@@ -128,6 +129,7 @@ interface ActiveExecution {
 	status: ExecuteResult["status"];
 	doneFields?: Record<string, unknown>;
 	settled: boolean;
+	physicalSettlement: Deferred<void>;
 	resolve: (result: InternalExecuteResult) => void;
 	reject: (error: Error) => void;
 }
@@ -1100,6 +1102,7 @@ export class ReplKernelManager {
 			backgroundOutputTruncated: this.pendingBackgroundOutputTruncated,
 			status: "ok",
 			settled: false,
+			physicalSettlement: createDeferred<void>(),
 			resolve: result.resolve,
 			reject: result.reject,
 		};
@@ -1141,6 +1144,16 @@ export class ReplKernelManager {
 				this.lastCellCode = code;
 			}
 			try {
+				opts.onExecutionStarted?.({
+					id: requestId,
+					settled: execution.physicalSettlement.promise,
+					snapshot: () => ({
+						stdout: execution.stdout,
+						stderr: execution.stderr,
+						durationMs: Date.now() - execution.started,
+					}),
+					interrupt: () => (this.activeExecution === execution ? this.interrupt() : Promise.resolve()),
+				});
 				const sendPromise = this.writeLine({ ...requestFields, id: requestId });
 				sendPromise.catch(() => undefined);
 				await Promise.race([sendPromise, result.promise.then(() => undefined)]);
@@ -1150,6 +1163,8 @@ export class ReplKernelManager {
 			} catch (error) {
 				if (this.activeExecution === execution) {
 					this.activeExecution = undefined;
+					execution.physicalSettlement.resolve();
+					this.notifyActiveExecutionIdle();
 				}
 				throw error instanceof Error ? error : new Error(String(error));
 			}
@@ -1246,6 +1261,7 @@ export class ReplKernelManager {
 			execution.nativeRecoveries = [];
 		}
 		if (didClearActive) {
+			execution.physicalSettlement.resolve();
 			this.notifyActiveExecutionIdle();
 		}
 	}
@@ -1288,6 +1304,7 @@ export class ReplKernelManager {
 		execution.nativeRecoveryAbort.abort();
 		execution.nativeRecoveries = [];
 		execution.reject(error);
+		execution.physicalSettlement.resolve();
 		this.notifyActiveExecutionIdle();
 	}
 

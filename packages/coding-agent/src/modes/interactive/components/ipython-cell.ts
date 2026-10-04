@@ -63,6 +63,7 @@ interface SentAgentMessageDisplay {
 interface IpythonDetails {
 	durationMs?: number;
 	status?: string;
+	executionId?: string;
 	errorEname?: string;
 	stdout?: string;
 	stderr?: string;
@@ -128,11 +129,15 @@ function closeOpenSgr(line: string): string {
 }
 
 export function getIpythonCodeFromArgs(args: unknown): string {
-	if (!args || typeof args !== "object" || !("code" in args)) {
+	if (!args || typeof args !== "object") {
 		return "";
 	}
-	const code = (args as { code?: unknown }).code;
-	return typeof code === "string" ? code : "";
+	const record = args as Record<string, unknown>;
+	if (record.action === "status" || record.action === "interrupt") {
+		const executionId = typeof record.execution_id === "string" ? record.execution_id : "";
+		return `${record.action} ${executionId}`.trimEnd();
+	}
+	return typeof record.code === "string" ? record.code : "";
 }
 
 function readDetails(details: unknown): IpythonDetails {
@@ -144,6 +149,7 @@ function readDetails(details: unknown): IpythonDetails {
 	return {
 		durationMs: typeof record.durationMs === "number" ? record.durationMs : undefined,
 		status: typeof record.status === "string" ? record.status : undefined,
+		executionId: typeof record.executionId === "string" ? record.executionId : undefined,
 		errorEname: error?.ename ?? (typeof record.errorEname === "string" ? record.errorEname : undefined),
 		stdout: typeof record.stdout === "string" ? record.stdout : undefined,
 		stderr: typeof record.stderr === "string" ? record.stderr : undefined,
@@ -395,6 +401,10 @@ export class IPythonCellComponent implements Component {
 		const languageLabel = isBashCell && preview.language !== "bash" ? `bash · ${preview.language}` : preview.language;
 		const parts = [`${this.marker(details)} ${theme.fg("muted", languageLabel)}`];
 
+		if (details.status === "pending" || details.status === "ready") {
+			const label = details.status === "ready" ? "result ready" : "pending";
+			parts.push(theme.fg("warning", details.executionId ? `${label} ${details.executionId}` : label));
+		}
 		if (preview.text) {
 			parts.push(this.highlightInputLine(preview.text, preview.language === "bash"));
 		} else if (!this.state.executionStarted) {
@@ -431,6 +441,9 @@ export class IPythonCellComponent implements Component {
 				return theme.fg("warning", "✗");
 			case "done":
 				return theme.fg("success", "✓");
+			case "pending":
+			case "ready":
+				return theme.fg("warning", "◇");
 			case "running":
 				return theme.fg("bashMode", workingIconFrame(getWorkingPulseFrame()));
 			default: // queued
@@ -466,13 +479,18 @@ export class IPythonCellComponent implements Component {
 		return segments.length > 0 ? `${segments.join(" ")} lines` : undefined;
 	}
 
-	private statusKind(details: IpythonDetails): "error" | "aborted" | "running" | "queued" | "done" {
+	private statusKind(
+		details: IpythonDetails,
+	): "error" | "aborted" | "pending" | "ready" | "running" | "queued" | "done" {
 		const status = details.status;
 		if (this.state.isError || status === "error") {
 			return "error";
 		}
 		if (status === "aborted") {
 			return "aborted";
+		}
+		if (status === "pending" || status === "ready") {
+			return status;
 		}
 		// Keyed off the result, not executionStarted, so calls rehydrated from a
 		// past session (which never saw the live start) render done, not running.

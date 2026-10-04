@@ -76,6 +76,14 @@ export interface KernelStartOptions {
 	signal?: AbortSignal;
 }
 
+/** Host control of one admitted request. Settlement means the interpreter released its slot. */
+export interface KernelExecutionHandle {
+	readonly id: string;
+	readonly settled: Promise<void>;
+	snapshot(): { stdout: string; stderr: string; durationMs: number };
+	interrupt(): Promise<void>;
+}
+
 export interface ExecuteOptions {
 	/** Only a finalized ipython tool call can retain recovery output; not bootstrap/state cells. */
 	nativeRecovery?: boolean;
@@ -83,6 +91,8 @@ export interface ExecuteOptions {
 	runNativeRecovery?: <T>(read: () => Promise<T>) => Promise<T>;
 	/** Aborting interrupts the kernel out-of-band. */
 	signal?: AbortSignal;
+	/** Called after native admission; controls never enqueue another Python request. */
+	onExecutionStarted?: (execution: KernelExecutionHandle) => void;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
 	/** Cap stdout / stderr / result at this many characters. Default 65536. */

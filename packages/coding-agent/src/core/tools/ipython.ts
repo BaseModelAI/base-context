@@ -12,6 +12,7 @@ import { withKernelBootPermit } from "../kernel/boot-gate.js";
 import type { KernelBootstrapProgressHandler } from "../kernel/bootstrap.js";
 import {
 	type CapturedKernelLifecycle,
+	createDeferred,
 	type ExecuteOptions,
 	type ExecuteResult,
 	type HostRequestHandlers,
@@ -19,6 +20,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelClient,
 	type KernelDiffDisplay,
+	type KernelExecutionHandle,
 	type KernelSentAgentMessage,
 	ReplKernelManager,
 } from "../kernel/index.js";
@@ -158,10 +160,18 @@ for _prime_agent_skill_name in ${JSON.stringify(importNames)}:
 }
 
 const ipythonSchema = Type.Object({
-	code: Type.String({
-		description:
-			"Python code to execute in the persistent Python REPL. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
-	}),
+	code: Type.Optional(
+		Type.String({
+			description:
+				"Python code to execute in the persistent Python REPL. Use the target project's own environment for project imports, tests, scripts, CLIs, and dependency checks instead of direct kernel imports.",
+		}),
+	),
+	action: Type.Optional(
+		Type.Union([Type.Literal("status"), Type.Literal("interrupt")], {
+			description: "Host-only control of the returned execution_id; does not execute Python.",
+		}),
+	),
+	execution_id: Type.Optional(Type.String({ description: "Execution ID returned by a pending ipython call." })),
 });
 
 const BUSY_KERNEL_WAIT_CHOICE = "Wait and preserve state";
@@ -268,7 +278,8 @@ export interface IpythonToolDetails {
 	/** Descriptive selectors only; the exact selected body is in this tool result's content. */
 	nativeRecoveries?: ReturnType<typeof nativeRecoveryMetadata>[];
 	durationMs?: number;
-	status?: "ok" | "error" | "aborted" | "starting";
+	status?: "ok" | "error" | "aborted" | "starting" | "pending" | "ready";
+	executionId?: string;
 	errorEname?: string;
 	stdout?: string;
 	stderr?: string;
@@ -288,6 +299,23 @@ export interface IpythonToolDetails {
 		evalue: string;
 		traceback: string[];
 	};
+}
+
+/** A yielded cell remains owned until both its result and physical native settlement exist. */
+export interface IpythonPendingExecution {
+	readonly id: string;
+	readonly completion: Promise<void>;
+	readonly status: "pending" | "completed";
+	readonly notificationRequired: boolean;
+	interrupt(): Promise<void>;
+}
+
+type IpythonExecutionOutcome = { value: { result: ExecuteResult; kernelRestarted: boolean } } | { error: unknown };
+
+interface OwnedIpythonExecution extends IpythonPendingExecution {
+	kernel: KernelExecutionHandle;
+	outcome?: IpythonExecutionOutcome;
+	deliverNativeRecovery?: () => void;
 }
 
 export interface IpythonToolOptions {
@@ -315,6 +343,10 @@ export interface IpythonToolOptions {
 	 */
 	onRestore?: (result: RestoreResult) => void;
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
+	/** Register physical ownership on admission; only an actual yield needs a later model notification. */
+	onExecutionPending?: (execution: IpythonPendingExecution) => void;
+	/** Capture the genuine producer so later collection can transfer its actual read qualification. */
+	captureNativeRecoveryDelivery?: () => () => void;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
 }
@@ -615,6 +647,7 @@ async function executeWithBusyKernelChoice(
 	onLateSentAgentMessage: ((toolCallId: string, message: KernelSentAgentMessage) => void) | undefined,
 	runNativeRecovery: ExecuteOptions["runNativeRecovery"],
 	ctx: ExtensionContext | undefined,
+	onExecutionStarted?: ExecuteOptions["onExecutionStarted"],
 ): Promise<{ result: ExecuteResult; kernelRestarted: boolean }> {
 	let kernelRestarted = false;
 	while (true) {
@@ -625,6 +658,7 @@ async function executeWithBusyKernelChoice(
 					signal,
 					nativeRecovery: true,
 					runNativeRecovery,
+					onExecutionStarted,
 					onStream,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
@@ -665,6 +699,34 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
+	let pendingExecution: OwnedIpythonExecution | undefined;
+	let admittingExecution = false;
+	const pendingResult = (execution: OwnedIpythonExecution, notice?: string, rejected = false) => {
+		const snapshot = execution.kernel.snapshot();
+		const status = execution.status === "pending" ? "pending" : "ready";
+		const instruction =
+			status === "ready"
+				? "Result ready; call status with execution_id to collect before submitting more code."
+				: "The same cell is still pending. Use host status or explicit interrupt with execution_id; do not submit more code.";
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: [
+						notice,
+						JSON.stringify({ execution_id: execution.id, status, elapsed_seconds: snapshot.durationMs / 1000 }),
+						instruction,
+						snapshot.stdout ? `Captured stdout excerpt:\n${outputExcerpt(snapshot.stdout, 2048)}` : undefined,
+						snapshot.stderr ? `Captured stderr excerpt:\n${outputExcerpt(snapshot.stderr, 2048)}` : undefined,
+					]
+						.filter(Boolean)
+						.join("\n"),
+				},
+			],
+			details: { status, executionId: execution.id, durationMs: snapshot.durationMs },
+			isError: rejected,
+		} satisfies AgentToolResult<IpythonToolDetails> & { isError: boolean };
+	};
 
 	return {
 		name: "ipython",
@@ -689,25 +751,110 @@ export function createIpythonToolDefinition(
 				});
 			};
 
+			let ownsAdmission = false;
+			let collectedExecution: OwnedIpythonExecution | undefined;
 			try {
-				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
-					provisioner,
-					reportStartupProgress,
-					toolCallId,
-					params.code,
-					signal,
-					(chunk) => {
-						onUpdate?.({
-							content: [{ type: "text", text: chunk }],
-							details: { status: "ok" },
+				let outcome: IpythonExecutionOutcome;
+				if (params.action !== undefined) {
+					if (params.code !== undefined || !params.execution_id) {
+						throw new Error("IPython status/interrupt require execution_id and no code.");
+					}
+					const execution = pendingExecution;
+					if (!execution || execution.id !== params.execution_id) {
+						throw new Error("IPython execution not found or already collected; no kernel was started.");
+					}
+					if (params.action === "interrupt") {
+						if (execution.status === "pending") await execution.interrupt();
+						return pendingResult(
+							execution,
+							"Interrupt requested only for this execution; native completion is separate.",
+						);
+					}
+					if (execution.status === "pending") return pendingResult(execution);
+					collectedExecution = execution;
+					outcome = execution.outcome!;
+				} else {
+					if (typeof params.code !== "string" || params.execution_id !== undefined) {
+						throw new Error("IPython execution requires code; controls require action and execution_id.");
+					}
+					if (pendingExecution) return pendingResult(pendingExecution, "No new code was executed.", true);
+					if (admittingExecution)
+						throw new Error("Python execution admission is already in progress; no new code was executed.");
+					admittingExecution = true;
+					ownsAdmission = true;
+					const admitted = createDeferred<KernelExecutionHandle>();
+					const deliverNativeRecovery = options?.captureNativeRecoveryDelivery?.();
+					const execution = executeWithBusyKernelChoice(
+						provisioner,
+						reportStartupProgress,
+						toolCallId,
+						params.code,
+						signal,
+						(chunk) => onUpdate?.({ content: [{ type: "text", text: chunk }], details: { status: "ok" } }),
+						setToolWorkingMessage,
+						options?.onLateSentAgentMessage,
+						options?.captureNativeRecoveryScope?.(),
+						ctx,
+						admitted.resolve,
+					);
+					const finished = execution.then<IpythonExecutionOutcome, IpythonExecutionOutcome>(
+						(value) => ({ value }),
+						(error: unknown) => ({ error }),
+					);
+					const first = await Promise.race([
+						admitted.promise.then((kernel) => ({ kernel })),
+						finished.then((result) => ({ result })),
+					]);
+					if ("result" in first) {
+						outcome = first.result;
+					} else {
+						const completion = createDeferred<void>();
+						let physicallyComplete = false;
+						let yielded = false;
+						const owned: OwnedIpythonExecution = {
+							id: first.kernel.id,
+							kernel: first.kernel,
+							deliverNativeRecovery,
+							completion: completion.promise,
+							get status() {
+								return physicallyComplete ? "completed" : "pending";
+							},
+							get notificationRequired() {
+								return yielded;
+							},
+							interrupt: () => first.kernel.interrupt(),
+						};
+						pendingExecution = owned;
+						void Promise.all([finished, first.kernel.settled]).then(([result]) => {
+							owned.outcome = result;
+							physicallyComplete = true;
+							completion.resolve();
 						});
-					},
-					setToolWorkingMessage,
-					options?.onLateSentAgentMessage,
-					options?.captureNativeRecoveryScope?.(),
-					ctx,
-				);
-
+						options?.onExecutionPending?.(owned);
+						let timer: ReturnType<typeof setTimeout> | undefined;
+						try {
+							await Promise.race([
+								completion.promise,
+								new Promise<void>((resolve) => {
+									timer = setTimeout(resolve, 1000);
+								}),
+							]);
+						} finally {
+							if (timer) clearTimeout(timer);
+						}
+						if (owned.status === "pending") {
+							yielded = true;
+							return pendingResult(owned);
+						}
+						collectedExecution = owned;
+						outcome = owned.outcome!;
+					}
+				}
+				if ("error" in outcome) {
+					if (pendingExecution === collectedExecution) pendingExecution = undefined;
+					throw outcome.error;
+				}
+				const { result: r, kernelRestarted } = outcome.value;
 				const parts: string[] = [];
 				const add = (value: string | undefined) => {
 					if (value) {
@@ -769,6 +916,7 @@ export function createIpythonToolDefinition(
 				const result: AgentToolResult<IpythonToolDetails> & { isError: boolean } = {
 					content,
 					details: {
+						executionId: collectedExecution?.id,
 						durationMs: r.durationMs,
 						status: r.status,
 						errorEname: error?.ename,
@@ -786,7 +934,8 @@ export function createIpythonToolDefinition(
 					},
 					isError: r.status === "error" || r.status === "aborted",
 				};
-				return r.nativeRecoveries?.length
+				if (r.nativeRecoveries?.length) collectedExecution?.deliverNativeRecovery?.();
+				const delivered = r.nativeRecoveries?.length
 					? admitNativeRecoveryToolResult(result, (refusal) => ({
 							content: nativeRecoveryToolResult(refusal).content,
 							details: {
@@ -798,7 +947,10 @@ export function createIpythonToolDefinition(
 							isError: true,
 						}))
 					: result;
+				if (pendingExecution === collectedExecution) pendingExecution = undefined;
+				return delivered;
 			} finally {
+				if (ownsAdmission) admittingExecution = false;
 				if (hasWorkingMessage) {
 					setToolWorkingMessage();
 				}

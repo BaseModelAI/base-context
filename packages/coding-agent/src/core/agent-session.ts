@@ -394,7 +394,7 @@ import { THINKING_LEVELS } from "./thinking-levels.js";
 import { acpMcpToolNames, createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
-import { IpythonKernelProvisioner } from "./tools/ipython.js";
+import { IpythonKernelProvisioner, type IpythonPendingExecution } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { type SessionUsageSummary, sessionUsageSummaryFrom } from "./usage.js";
 import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./websearch-credential.js";
@@ -1416,6 +1416,16 @@ export class AgentSession {
 	private _disposing = false;
 	private _disposeAsyncPromise?: Promise<void>;
 	private _ipythonKernelProvisioner?: IpythonKernelProvisioner;
+	private readonly _pendingIpythonExecutions = new Map<
+		IpythonPendingExecution,
+		{
+			isCurrent: () => boolean;
+			cancelled: boolean;
+			settled: boolean;
+			admitted: Promise<void>;
+			release: () => void;
+		}
+	>();
 	/** Artifact dir backing the current provisioner's kernel snapshot, if any. */
 	private _ipythonKernelSnapshotDir?: string;
 	/** True once the runtime has been built once; later builds are in-process rebuilds (/reload). */
@@ -5934,6 +5944,7 @@ export class AgentSession {
 		}
 		this.requests.stopAdmission();
 		this._disposed = true;
+		this._abortPendingIpythonExecutions();
 		this._jobWatchController?.dispose();
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
@@ -8623,6 +8634,7 @@ export class AgentSession {
 	get isSessionActive(): boolean {
 		return (
 			this.requests.hasPending ||
+			this._pendingIpythonExecutions.size > 0 ||
 			this._goalResumeOperation !== undefined ||
 			this.isStreaming ||
 			this.isCompacting ||
@@ -8876,6 +8888,7 @@ export class AgentSession {
 				this._advanceCheckpointPauseEpoch();
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._flushPendingIpythonExecutions();
 				void this._jobWatchController?.flushPending().catch((error) => this._surfaceSessionInputError(error));
 				this._scheduleGoalContinuationAfterRlmWork();
 				this._scheduleSessionInputPump();
@@ -8896,6 +8909,7 @@ export class AgentSession {
 				this._queuedWorkPauses.delete(token);
 				this._notifySessionInputCheckpointChange();
 				this._flushDeferredRlmTerminalNotices();
+				this._flushPendingIpythonExecutions();
 				this._scheduleSessionInputPump();
 			},
 		};
@@ -8989,6 +9003,7 @@ export class AgentSession {
 		this._sessionInputPumpEpoch++;
 		this._notifySessionInputCheckpointChange();
 		this._flushDeferredRlmTerminalNotices();
+		this._flushPendingIpythonExecutions();
 		void this._jobWatchController?.flushPending().catch((error) => this._surfaceSessionInputError(error));
 	}
 
@@ -9072,6 +9087,10 @@ export class AgentSession {
 	async waitForHeadlessIdle(): Promise<void> {
 		while (true) {
 			await this.waitForIdle();
+			if (this._pendingIpythonExecutions.size > 0) {
+				await Promise.all([...this._pendingIpythonExecutions.values()].map((pending) => pending.admitted));
+				continue;
+			}
 			const postCompactionContinuation = this._postCompactionContinuationSettlement?.promise;
 			if (!postCompactionContinuation) return;
 			await postCompactionContinuation;
@@ -9132,6 +9151,7 @@ export class AgentSession {
 		this._sessionInputPumpRequested = false;
 		this._sessionInputPumpEpoch++;
 		this._sessionInputPumpSuspended = true;
+		this._abortPendingIpythonExecutions();
 		this._sessionInputSuspendedForUpdateRestart = false;
 		this._demoteRlmTerminalNoticeActions();
 		this._cancelSessionActions(
@@ -9181,6 +9201,7 @@ export class AgentSession {
 		this._cancelPostCompactionContinue();
 		this.abortRetry();
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
+		this._abortPendingIpythonExecutions();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
 		this._goalAbortInProgress = this._goalState.status === "active";
 		this.agent.abort();
@@ -9473,6 +9494,89 @@ export class AgentSession {
 		return this.model ? (clampThinkingLevel(this.model, level) as ThinkingLevel) : "off";
 	}
 
+	private _trackPendingIpythonExecution(
+		execution: IpythonPendingExecution,
+		provisioner: IpythonKernelProvisioner,
+	): void {
+		const manager = this.sessionManager;
+		const ownsSource = manager.captureCompactionSourceOwner();
+		let release = () => {};
+		const admitted = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const pending = {
+			isCurrent: () =>
+				!this._disposed &&
+				!this._disposing &&
+				this.sessionManager === manager &&
+				this._ipythonKernelProvisioner === provisioner &&
+				ownsSource(),
+			cancelled: this._sessionInputPumpSuspended,
+			settled: false,
+			admitted,
+			release,
+		};
+		this._pendingIpythonExecutions.set(execution, pending);
+		this._notifySessionInputCheckpointChange();
+		const complete = () => {
+			// The tool contract includes physical native idle, not just an early aborted result.
+			pending.settled = true;
+			this._flushPendingIpythonExecutions();
+		};
+		void execution.completion.then(complete).catch((error) => this._surfaceSessionInputError(error));
+		if (pending.cancelled || !pending.isCurrent()) {
+			pending.cancelled = true;
+			void execution.interrupt().catch((error) => this._surfaceSessionInputError(error));
+		}
+	}
+
+	private _flushPendingIpythonExecutions(): void {
+		for (const [execution, pending] of this._pendingIpythonExecutions) {
+			if (!pending.settled) continue;
+			if (execution.notificationRequired && !pending.cancelled && pending.isCurrent()) {
+				if (
+					this._sessionInputPumpSuspended ||
+					this._sessionInputAdmissionPauses.size > 0 ||
+					this._queuedWorkPauses.size > 0
+				)
+					continue;
+				const content = `IPython execution ${execution.id} finished (${execution.status}). Use ipython status with this id to collect the outcome.`;
+				this._admitSessionInput(
+					this._createPreparedTurnAction("followUp", content, undefined, {
+						message: {
+							role: "custom",
+							customType: "ipython_execution_complete",
+							content,
+							display: true,
+							details: { id: execution.id, state: execution.status },
+							timestamp: Date.now(),
+						},
+						queueKey: `ipython:${execution.id}`,
+						source: "internal",
+						queueVisible: false,
+						resumeIfIdle: true,
+					}),
+				);
+			}
+			// Admission transfers ownership to the ordinary action before this owner disappears.
+			this._pendingIpythonExecutions.delete(execution);
+			pending.release();
+			this._notifySessionInputCheckpointChange();
+		}
+		this._scheduleGoalContinuationAfterRlmWork();
+	}
+
+	private _abortPendingIpythonExecutions(): void {
+		for (const [execution, pending] of this._pendingIpythonExecutions) {
+			if (pending.cancelled) continue;
+			pending.cancelled = true;
+			if (!pending.settled) {
+				void execution.interrupt().catch((error) => this._surfaceSessionInputError(error));
+			}
+		}
+		this._flushPendingIpythonExecutions();
+	}
+
 	private _captureKernelResource(): OwnedResourceCapture {
 		const provisioner = this._ipythonKernelProvisioner;
 		const captured = provisioner ? captureOwnedKernelState.call(provisioner) : undefined;
@@ -9493,7 +9597,8 @@ export class AgentSession {
 	private async _syncKernelStateAfterCompaction(owner = this._captureCompactionOwner()): Promise<void> {
 		this._assertCompactionOwner(owner);
 		const provisioner = owner.provisioner;
-		if (!provisioner?.hasRunningKernel) return;
+		// A yielded cell owns the interpreter; inventory maintenance must not join its FIFO.
+		if (!provisioner?.hasRunningKernel || this._pendingIpythonExecutions.size > 0) return;
 		const pruned = await provisioner.pruneOversizedVariables().catch(() => null);
 		this._assertCompactionOwner(owner);
 		const abort = new AbortController();
@@ -12032,6 +12137,7 @@ export class AgentSession {
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 			});
+			const provisioner = this._ipythonKernelProvisioner;
 			configuredBaseToolDefinitions = createAllToolDefinitions(this._cwd, {
 				prime_context: { recover: (input, signal) => this.recoverNativeHistory(input, signal) },
 				ipython: {
@@ -12039,7 +12145,15 @@ export class AgentSession {
 						const producer = this._nativeRecoveryProducer.getStore();
 						return producer ? (run) => this._nativeRecoveryProducer.run(producer, run) : undefined;
 					},
-					provisioner: this._ipythonKernelProvisioner,
+					provisioner,
+					onExecutionPending: (execution) => this._trackPendingIpythonExecution(execution, provisioner),
+					captureNativeRecoveryDelivery: () => {
+						const producer = this._nativeRecoveryProducer.getStore();
+						return () => {
+							const collector = this._nativeRecoveryProducer.getStore();
+							if (producer?.used && collector) collector.used = true;
+						};
+					},
 					commandPrefix: this.settingsManager.getShellCommandPrefix(),
 					shellPath: this.settingsManager.getShellPath(),
 					onLateSentAgentMessage: (toolCallId, message) =>
@@ -13789,7 +13903,8 @@ export class AgentSession {
 	}
 
 	private _hasUnsettledRlmQuiescenceWork(): boolean {
-		if (this.requests.hasPending || this._childUsageWrites.size > 0) return true;
+		if (this.requests.hasPending || this._pendingIpythonExecutions.size > 0 || this._childUsageWrites.size > 0)
+			return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
