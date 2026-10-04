@@ -38,6 +38,7 @@ import {
 	cleanupSessionResources,
 	conservativeTextTokenCost,
 	getSupportedThinkingLevels,
+	getUsableContextWindow,
 	isContextOverflow,
 	isTransientProviderFailure,
 	modelsAreEqual,
@@ -3744,6 +3745,15 @@ export class AgentSession {
 		if (!requested && !(await this._thresholdCompactionNeeded(context, owner, goalOwner, autonomousOwner)))
 			return false;
 		if (!this._isCompactionOwnerCurrent(owner)) return false;
+		// Finished user turns do not compact by default; queued/goal/tool continuations still do.
+		if (
+			!requested &&
+			this.settingsManager.getCompactionContextPolicy(this.model)?.postTurnCompactThresholdPercent === 0 &&
+			!context.hasMoreToolCalls &&
+			!this.agent.hasQueuedMessages() &&
+			!this.hasPendingSessionWork
+		)
+			return false;
 		this._pendingCheckpoint = this._captureCheckpointResume(
 			owner,
 			context.hasMoreToolCalls ? { kind: "tool", state: "pending" } : undefined,
@@ -4324,6 +4334,7 @@ export class AgentSession {
 				contextWindow,
 				settings,
 				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
+				this.settingsManager.getCompactionContextPolicy(this.model),
 			)
 		)
 			return false;
@@ -11419,7 +11430,7 @@ export class AgentSession {
 			!assistantIsFromBeforeCompaction &&
 			(settings.enabled || this._pendingRequestedCompaction !== undefined) &&
 			sameModel &&
-			isContextOverflow(assistantMessage, contextWindow)
+			isContextOverflow(assistantMessage, this.model ? getUsableContextWindow(this.model) : contextWindow)
 		) {
 			if (this._overflowRecovery !== "idle") {
 				if (this._overflowRecovery === "attempted") {
@@ -11449,6 +11460,12 @@ export class AgentSession {
 		}
 
 		if (!this._contextOptimizationAllowed() || !settings.enabled || assistantIsFromBeforeCompaction) return false;
+		if (
+			!beforeNextTurn &&
+			!this._pendingCheckpoint &&
+			this.settingsManager.getCompactionContextPolicy(this.model)?.postTurnCompactThresholdPercent === 0
+		)
+			return false;
 		// A native turn already made its typed decision. Do not synthesize a new policy winner at agent_end.
 		if (invocationOwner && !this._pendingCheckpoint) return false;
 
@@ -11463,6 +11480,7 @@ export class AgentSession {
 				contextWindow,
 				settings,
 				estimateFixedCompactionTokens(this.systemPrompt, this.agent.state.tools, this.messages),
+				this.settingsManager.getCompactionContextPolicy(this.model),
 			)
 		) {
 			if (this._hasFailedThresholdCompaction()) return false;
@@ -14536,7 +14554,10 @@ export class AgentSession {
 	}
 
 	private _isRetryableError(message: AssistantMessage): boolean {
-		return isTransientProviderFailure(message) && !isContextOverflow(message, this.model?.contextWindow ?? 0);
+		return (
+			isTransientProviderFailure(message) &&
+			!isContextOverflow(message, this.model ? getUsableContextWindow(this.model) : 0)
+		);
 	}
 
 	private _getProviderStreamFailureDetails(message: AssistantMessage): Record<string, unknown> | undefined {
@@ -15212,7 +15233,7 @@ export class AgentSession {
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const selectedModel = summarySelection?.model ?? this.model!;
 				const model = { ...selectedModel, cost: { ...selectedModel.cost } };
-				const branchSummarySettings = { ...this.settingsManager.getBranchSummarySettings() };
+				const reserveTokens = this.settingsManager.getBranchSummaryReserveTokens();
 				const summaryEntries = structuredClone(entriesToSummarize);
 				const summaryManager = this.sessionManager;
 				const requests = this.requests[captureNativeBranchRequests](summaryManager.bindRequestSink());
@@ -15226,7 +15247,7 @@ export class AgentSession {
 						signal: this._branchSummaryAbortController.signal,
 						customInstructions,
 						replaceInstructions,
-						reserveTokens: branchSummarySettings.reserveTokens,
+						reserveTokens,
 						requests,
 					});
 					if (result.aborted) {
@@ -15388,7 +15409,7 @@ export class AgentSession {
 	async getContextUsage(): Promise<ContextUsage | undefined> {
 		const model = this.model;
 		if (!model) return undefined;
-		const contextWindow = model.contextWindow ?? 0;
+		const contextWindow = getUsableContextWindow(model);
 		if (contextWindow <= 0) return undefined;
 
 		// Capture the working-view estimate before the source read can yield.
@@ -15408,7 +15429,10 @@ export class AgentSession {
 	}
 
 	private _contextWindowResolver(): ContextWindowResolver {
-		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
+		return (provider, modelId) => {
+			const model = this._modelRegistry.find(provider, modelId);
+			return model ? getUsableContextWindow(model) : undefined;
+		};
 	}
 
 	// Whole-source own spend, identical to the catalog reduction at passivation.
@@ -15443,7 +15467,7 @@ export class AgentSession {
 			model: model ? { provider: model.provider, id: model.id } : undefined,
 		};
 		request.retainMetadata(identity ? { model: rootNode.model } : rootNode);
-		const contextWindow = model?.contextWindow ?? 0;
+		const contextWindow = model ? getUsableContextWindow(model) : 0;
 		const estimate = model && !(contextWindow <= 0) ? estimateContextTokens(this.messages) : undefined;
 		const availabilityBytes = estimate ? this.settingsManager.getCanonicalContextLimits().maxSourceBytes : undefined;
 		const resolveContextWindow = this._contextWindowResolver();

@@ -6,7 +6,13 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
-import type { AssistantMessage, Model, Usage } from "@ponythewhite/base-context-ai";
+import {
+	type AssistantMessage,
+	type CodexContextPolicy,
+	getCodexContextPolicy,
+	type Model,
+	type Usage,
+} from "@ponythewhite/base-context-ai";
 import {
 	completeInference,
 	InferenceCoordinator,
@@ -261,9 +267,11 @@ export function shouldCompact(
 	contextWindow: number,
 	settings: CompactionSettings,
 	fixedContextTokens = 0,
+	policy?: CodexContextPolicy,
 ): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
+	if (policy) return contextTokens >= policy.autoCompactTokenLimit;
 	const modelLimit = contextWindow - settings.reserveTokens;
 	// Fixed instructions cannot shrink. Leave meaningful room for retained history
 	// and new work above that floor, without relaxing the actual model ceiling.
@@ -623,7 +631,7 @@ export async function generateSummary(
 	requests?: InferenceCoordinator,
 	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
-	const maxTokens = outputTokenLimit ?? Math.floor(0.8 * reserveTokens);
+	const maxTokens = outputTokenLimit ?? (getCodexContextPolicy(model) ? undefined : Math.floor(0.8 * reserveTokens));
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
@@ -979,15 +987,19 @@ export async function compact(
 		throw new Error(
 			"Context capacity exceeded: required evidence, retained tail and summary wrapper leave no room for a summary.",
 		);
+	// Capacity is internal planning, not an explicit output override. Only an enforced
+	// request budget retains its pressure caps for the selected parity models.
+	const limitSummaryOutput =
+		!getCodexContextPolicy(model) || requests?.getRequestTokenBudgetOptions()?.mode === "enforce";
 	const historyLimit =
-		capacity === undefined
+		capacity === undefined || !limitSummaryOutput
 			? undefined
 			: Math.min(
 					Math.floor(0.8 * settings.reserveTokens),
 					split && historyNeeded ? Math.max(1, Math.floor(capacity * 0.6)) : capacity,
 				);
 	const turnLimit =
-		capacity === undefined
+		capacity === undefined || !limitSummaryOutput
 			? undefined
 			: Math.min(Math.floor(0.5 * settings.reserveTokens), capacity - (historyNeeded ? historyLimit! : 0));
 
@@ -1088,7 +1100,7 @@ async function generateTurnPrefixSummary(
 	requests?: InferenceCoordinator,
 	outputTokenLimit?: number,
 ): Promise<SummarySlice> {
-	const maxTokens = outputTokenLimit ?? Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
+	const maxTokens = outputTokenLimit ?? (getCodexContextPolicy(model) ? undefined : Math.floor(0.5 * reserveTokens));
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;

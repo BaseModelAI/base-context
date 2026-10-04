@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.0] - 2026-10-04
+
+- Fixed DeepSeek requests to use native effort-aware output limits when no explicit limit is set, without changing other provider defaults.
+- Aligned built-in context windows and exposed usable-window and compaction defaults for DeepSeek Flash and OpenAI Codex GPT-6.1 Sol/GPT-6 Astra while preserving explicit model overrides.
+
 ## [1.0.18] - 2026-09-29
 
 - Added GPT-6.1 Sol for OpenAI API keys and Codex subscriptions with low through max reasoning effort.

@@ -1,1 +1,0 @@
-- Fixed tools that return an error result being reported as successful.

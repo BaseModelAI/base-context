@@ -1,5 +1,12 @@
 import type { ThinkingLevel } from "@ponythewhite/base-context-agent";
-import type { ServiceTier, Transport } from "@ponythewhite/base-context-ai";
+import {
+	type Api,
+	type CodexContextPolicy,
+	getCodexContextPolicy,
+	type Model,
+	type ServiceTier,
+	type Transport,
+} from "@ponythewhite/base-context-ai";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -34,7 +41,7 @@ export interface BranchSummaryModelSettings {
 }
 
 export interface BranchSummarySettings {
-	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
+	reserveTokens?: number; // explicit prompt/response reserve; otherwise use the model input-window default
 	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
 	/** Absent: inherit the main model and retain omitted request effort. */
 	model?: BranchSummaryModelSettings;
@@ -932,6 +939,21 @@ export class SettingsManager {
 		return model === undefined ? undefined : structuredClone(model);
 	}
 
+	/** Explicit Base tuning keeps its existing threshold and timing semantics. */
+	getCompactionContextPolicy(
+		model: Pick<Model<Api>, "provider" | "id" | "contextWindow"> | undefined,
+	): CodexContextPolicy | undefined {
+		const settings = this.settings.compaction;
+		if (
+			!model ||
+			settings?.targetTokens !== undefined ||
+			settings?.reserveTokens !== undefined ||
+			settings?.keepRecentTokens !== undefined
+		)
+			return undefined;
+		return getCodexContextPolicy(model);
+	}
+
 	getCompactionSettings(): {
 		enabled: boolean;
 		reserveTokens: number;
@@ -985,6 +1007,11 @@ export class SettingsManager {
 	getBranchSummaryModel(): BranchSummaryModelSettings | undefined {
 		const model = this.settings.branchSummary?.model;
 		return model === undefined ? undefined : structuredClone(model);
+	}
+
+	/** Preserve absence until the selected summary model supplies its input window. */
+	getBranchSummaryReserveTokens(): number | undefined {
+		return this.settings.branchSummary?.reserveTokens;
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {

@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.1.0] - 2026-10-04
+
+- Added guidance to keep heavy computation outside the main REPL and bound task-sized experiments.
+- Added guidance to finish unambiguous work and state low-risk assumptions while preserving necessary clarification.
+- Added an RPC completion barrier and made EOF wait for delegated work before closing the session.
+- Added non-destructive IPython cell yielding with execution status, targeted interruption, and completion follow-ups.
+- Changed default context accounting and compaction for DeepSeek Flash, GPT-6.1 Sol, and GPT-6 Astra to use Codex context ratios, skip finished-turn threshold compaction, and omit internal summary output caps while preserving explicit settings.
+- Changed the public IPython tool contract to return pending for long-running cells; SDK callers must collect the final result with status before submitting another cell.
+
 ## [1.0.21] - 2026-10-03
 
 - Fixed overlapping shell commands failing to acquire orphan-process journal ownership.

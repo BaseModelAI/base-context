@@ -1,12 +1,20 @@
 import { MODELS } from "./models.generated.js";
 import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
 
+const BUILTIN_CODEX_CONTEXT_WINDOWS = new Map([
+	["deepseek/deepseek-flash", 1048576],
+	["openai-codex/gpt-6.1-sol", 272000],
+	["openai-codex/gpt-6-astra", 272000],
+]);
+
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
 for (const [provider, models] of Object.entries(MODELS)) {
 	const providerModels = new Map<string, Model<Api>>();
 	for (const [id, model] of Object.entries(models)) {
-		providerModels.set(id, model as Model<Api>);
+		const registeredModel = model as Model<Api>;
+		const contextWindow = BUILTIN_CODEX_CONTEXT_WINDOWS.get(`${provider}/${id}`);
+		providerModels.set(id, contextWindow === undefined ? registeredModel : { ...registeredModel, contextWindow });
 	}
 	modelRegistry.set(provider, providerModels);
 }
@@ -33,6 +41,30 @@ export function getModels<TProvider extends KnownProvider>(
 ): Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
 	const models = modelRegistry.get(provider);
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
+}
+
+export interface CodexContextPolicy {
+	nominalContextWindow: number;
+	usableContextWindow: number;
+	autoCompactTokenLimit: number;
+	postTurnCompactThresholdPercent: 0;
+}
+
+/** Derive limits from the resolved nominal window, including explicit model overrides. */
+export function getCodexContextPolicy(
+	model: Pick<Model<Api>, "provider" | "id" | "contextWindow">,
+): CodexContextPolicy | undefined {
+	if (!BUILTIN_CODEX_CONTEXT_WINDOWS.has(`${model.provider}/${model.id}`)) return undefined;
+	return {
+		nominalContextWindow: model.contextWindow,
+		usableContextWindow: Math.floor(0.95 * model.contextWindow),
+		autoCompactTokenLimit: Math.floor(0.9 * model.contextWindow),
+		postTurnCompactThresholdPercent: 0,
+	};
+}
+
+export function getUsableContextWindow(model: Pick<Model<Api>, "provider" | "id" | "contextWindow">): number {
+	return getCodexContextPolicy(model)?.usableContextWindow ?? model.contextWindow;
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {

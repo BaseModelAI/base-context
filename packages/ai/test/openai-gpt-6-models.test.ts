@@ -38,7 +38,7 @@ describe("GPT-6 and GPT-6.1 catalog", () => {
 				reasoning: true,
 				input: ["text", "image"],
 				cost,
-				contextWindow: isCodex ? 872000 : 1050000,
+				contextWindow: isCodex ? (id === "gpt-6.1-sol" ? 272000 : 872000) : 1050000,
 				maxTokens: 128000,
 			});
 			expect(getSupportedThinkingLevels(model)).toEqual(

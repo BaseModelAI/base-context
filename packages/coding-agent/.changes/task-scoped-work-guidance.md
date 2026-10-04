@@ -1,3 +1,0 @@
-- Added guidance to keep heavy computation outside the main REPL and bound task-sized experiments.
-- Added guidance to finish unambiguous work and state low-risk assumptions while preserving necessary clarification.
-- Added an RPC completion barrier and made EOF wait for delegated work before closing the session.

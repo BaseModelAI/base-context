@@ -35,7 +35,47 @@ or loss from a summary alone.
 
 ### When It Triggers
 
-Auto-compaction uses 90% of the model context window as its default soft target:
+### Codex-aligned model defaults
+
+These provider/model pairs use the configured windows and trigger values from
+Codex 0.160.0. The defaults apply at every benchmarked reasoning effort.
+
+| Provider / model | Nominal context | Usable accounting window | Auto-compaction trigger |
+|---|---:|---:|---:|
+| `deepseek / deepseek-flash` | 1,048,576 | 996,147 | 943,718 |
+| `openai-codex / gpt-6.1-sol` | 272,000 | 258,400 | 244,800 |
+| `openai-codex / gpt-6-astra` | 272,000 | 258,400 | 244,800 |
+
+Usable context is `floor(0.95 * nominalContext)`. The automatic trigger is
+`floor(0.90 * nominalContext)`, not 90% of the usable window. The default check
+uses `contextTokens >= trigger` without the legacy fixed-context floor or extra
+16,384-token reserve subtraction. Automatic checks remain before requests and
+between continuation steps. A finished user turn does not trigger an optional
+idle compaction. Manual compaction and context-overflow recovery remain available.
+
+The usable window is planning/accounting headroom, not a strict serialized-input
+admission limit. It does not enable the optional enforced request-token budget.
+Normal generation and internally generated summaries do not add a default
+output-token cap for these model pairs. Omission leaves provider defaults in
+control; it does not establish an unlimited or identical server output limit.
+Base uses Chat Completions for DeepSeek, whereas the compared Codex used Responses.
+
+Explicit model and compaction settings continue to take precedence. Such
+overrides are outside the default comparison configuration. The model metadata
+keeps nominal context separate from the usable accounting window. Other provider
+routes, including similarly named models, retain their own defaults.
+
+This aligns numeric windows, triggers, timing and client output options, not the
+compaction algorithm. Base keeps its boundary-aware all-role recent tail
+(default target 20,000 tokens), summaries and working-set dependency handling.
+Codex's DeepSeek local compactor retains up to 20,000 estimated tokens of user
+text; its OpenAI remote compactor uses a 64,000-token filtered-message budget and
+an opaque summary. Those are different measurements, not interchangeable values
+for Base's `keepRecentTokens`. Token estimators and retained content also differ.
+
+### Other models and explicit legacy threshold settings
+
+Other models use 90% of the model context window as the default soft target:
 
 ```
 softTarget = floor(0.9 * contextWindow)
@@ -471,19 +511,21 @@ Configure compaction in `~/.base-context/settings.json` or `<project-dir>/.base-
 ```json
 {
   "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "enabled": true
   }
 }
 ```
 
+Leave numeric compaction settings unset to use the model-aligned defaults.
+Explicit `targetTokens`, `reserveTokens`, or `keepRecentTokens` select a custom
+Base compaction policy rather than the frozen Codex default configuration.
+
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `enabled` | `true` | Enable auto-compaction |
-| `reserveTokens` | `16384` | Headroom used by the compaction threshold |
+| `reserveTokens` | `16384` | Internal compaction reserve; legacy thresholds use it as headroom. Codex-aligned default thresholds do not subtract it again. |
 | `keepRecentTokens` | `20000` | Estimated recent-token target for the retained tail |
-| `targetTokens` | 90% of the model context window | Positive safe integer to override the soft target, or `"model-limit"` for the model-window threshold; fixed-context headroom and the model reserve still apply as described above |
+| `targetTokens` | 90% of the nominal model context window | Positive safe integer to override the soft target, or `"model-limit"` for the model-window threshold. Explicit settings use the legacy headroom/reserve policy described above. |
 | `agentCallable` | `true` | Expose the `compact` skill so the agent can request earlier compaction |
 
 Disable automatic compaction with `"compaction": { "enabled": false }`. Manual

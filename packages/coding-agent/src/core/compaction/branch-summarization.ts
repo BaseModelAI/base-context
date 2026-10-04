@@ -6,7 +6,7 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@ponythewhite/base-context-agent";
-import type { Model, Usage } from "@ponythewhite/base-context-ai";
+import { getCodexContextPolicy, type Model, type Usage } from "@ponythewhite/base-context-ai";
 import { completeInference, InferenceCoordinator } from "../inference-coordinator.js";
 import {
 	convertToLlm,
@@ -92,7 +92,7 @@ export interface GenerateBranchSummaryOptions {
 	customInstructions?: string;
 	/** If true, customInstructions replaces the default prompt instead of being appended */
 	replaceInstructions?: boolean;
-	/** Tokens reserved for prompt + LLM response (default 16384) */
+	/** Explicit prompt/response reserve; absent uses the selected model input-window default. */
 	reserveTokens?: number;
 }
 /** Collect the abandoned suffix from two complete, captured chronological paths. */
@@ -254,10 +254,12 @@ export async function generateBranchSummary(
 		signal,
 		customInstructions,
 		replaceInstructions,
-		reserveTokens = 16384,
+		reserveTokens,
 	} = options;
+	const policy = getCodexContextPolicy(model);
 	const contextWindow = model.contextWindow || 128000;
-	const tokenBudget = contextWindow - reserveTokens;
+	const tokenBudget =
+		reserveTokens === undefined && policy ? policy.usableContextWindow : contextWindow - (reserveTokens ?? 16384);
 
 	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget);
 
@@ -293,7 +295,7 @@ export async function generateBranchSummary(
 			apiKey,
 			headers,
 			signal,
-			maxTokens: 2048,
+			...(policy ? {} : { maxTokens: 2048 }),
 			...(thinkingLevel === undefined ? {} : { reasoning: thinkingLevel }),
 		},
 		{

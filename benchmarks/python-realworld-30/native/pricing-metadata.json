@@ -1,0 +1,99 @@
+{
+  "schema": "published-api-pricing/v1",
+  "recorded_on": "2026-10-03",
+  "currency": "USD",
+  "unit": "million_tokens",
+  "basis": "Official published API list rates, not invoices or subscription cash charges.",
+  "models": {
+    "gpt-6.1-sol": {
+      "provider_family": "openai",
+      "input": 2.0,
+      "cache_read": 0.1,
+      "cache_write": 2.5,
+      "output": 10.0,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol"
+    },
+    "gpt-6-astra": {
+      "provider_family": "openai",
+      "input": 10.0,
+      "cache_read": 1.0,
+      "cache_write": 12.5,
+      "output": 50.0,
+      "source": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+    },
+    "deepseek-flash": {
+      "provider_family": "deepseek",
+      "off_peak": {
+        "input": 0.15,
+        "cache_read": 0.003,
+        "output": 0.6
+      },
+      "peak": {
+        "input": 0.3,
+        "cache_read": 0.006,
+        "output": 1.2
+      },
+      "cache_write": "Not separately priced; all cache-miss input uses the input rate.",
+      "source": "https://api-docs.deepseek.com/quick_start/pricing"
+    }
+  },
+  "model_aliases": {
+    "deepseek-v4-flash": "deepseek-flash",
+    "deepseek-v4-flash-vision-exp": "deepseek-flash"
+  },
+  "openai_modifiers": {
+    "long_input_above_tokens": 272000,
+    "long_input_multipliers": {
+      "input": 2,
+      "cache_read": 2,
+      "cache_write": 2,
+      "output": 1.5
+    },
+    "tier_multipliers": {
+      "default": 1,
+      "standard": 1,
+      "fast": 2,
+      "priority": 2,
+      "flex": 0.5,
+      "batch": 0.5
+    },
+    "unknown_tier": "Assume standard list rate and mark this explicitly; do not claim actual invoiced tier."
+  },
+  "deepseek_schedule": {
+    "timezone": "UTC",
+    "peak_weekdays": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_hour_intervals": [
+      [
+        1,
+        4
+      ],
+      [
+        6,
+        10
+      ]
+    ],
+    "holiday_exclusion": "Chinese public holidays; calendar intentionally not supplied. Potential weekday peak stays bounded/unresolved.",
+    "weekends": "off_peak",
+    "request_time_basis": "Use recorded request sent/admitted timestamp, not campaign wall clock."
+  },
+  "limitations": [
+    "Unsupported models remain unpriced. No manifest-selected model is substituted without request metadata.",
+    "Reasoning tokens are a subset of output; never add reasoning output a second time.",
+    "Per-record costs concern captured native requests/responses only. Family coverage can remain unknown.",
+    "No regional-processing modifier is inferred; only supplied explicit service-tier and prompt-length rules are applied.",
+    "DeepSeek boundary-crossing or invoicing rules are not asserted; these are list-rate observations at the recorded request timestamp."
+  ],
+  "collector_input_semantics": {
+    "base-context": "attempts[].usage.input is uncached ordinary input; inputTotal includes cache categories. Only native attempt records are priced.",
+    "codex": "response_receipts[].usage.input_tokens includes cache read/write categories; subtract reported cache categories before pricing ordinary input. Model comes from source turn_context, not verified backend resolution.",
+    "deepseek": "Cache writes are not a separate tariff; observed input total minus cache reads is priced as cache-miss input.",
+    "reasoning": "reasoning_output_tokens is already inside output_tokens; not added."
+  },
+  "timestamp_caveat": "Base uses sentAt/admittedAt when recorded. Codex rollout timestamp is only a timestamp proxy, not exact provider dispatch time."
+}

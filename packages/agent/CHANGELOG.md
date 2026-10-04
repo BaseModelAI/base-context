@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.0] - 2026-10-04
+
+- Fixed tools that return an error result being reported as successful.
+
 ## [1.0.21] - 2026-10-03
 
 - Fixed tool progress draining for very large output streams without retaining every update promise.
