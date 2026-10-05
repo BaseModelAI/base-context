@@ -78,7 +78,7 @@ SDK and child sessions normally start the kernel lazily on first Python REPL use
 1. An explicit `BASE_CONTEXT_KERNEL_PYTHON` takes precedence and must provide a current `base-context-runtime`. An invalid override reports an error rather than selecting another interpreter.
 2. Without an interpreter override, use the managed environment selected by `BASE_CONTEXT_KERNEL_VENV`, an owned release-local environment, or `~/.base-context/runtime`.
 
-The default managed environment includes Python 3.13, `base-context-runtime`, `dill`, and the default Python packages. Bootstrap uses `uv`; install it first or opt in with `BASE_CONTEXT_INSTALL_UV=1`. The owned installer prepares its release-local default environment before activation. A bootstrap marker detects stale environments. There is no fallback into upstream Prime state. See [installation](installation.md#python-setup).
+The default managed environment includes Python 3.13, `base-context-runtime`, `dill`, and the default Python packages. Bootstrap uses `uv`; install it first or opt in with `BASE_CONTEXT_INSTALL_UV=1`. The owned installer prepares its release-local default environment before activation. A bootstrap marker detects stale environments. There is no fallback into upstream Prime state. See [installation](installation.md#custom-python-environments).
 
 Startup spawns `python -m rlm.repl` and exchanges newline-delimited JSON over stdio: the runtime announces itself with a single `ready` event, then requests and events flow one JSON object per line (see `prime-agent-runtime/src/rlm/repl.md`).
 

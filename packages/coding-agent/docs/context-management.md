@@ -150,6 +150,6 @@ In `~/.base-context/settings.json` or `.base-context/settings.json`:
 
 `context.mode` is a **creation default**. A saved session's accepted mode takes precedence. The SDK can change an existing session with `await session.setContextMode("off")` or `await session.setContextMode("on")` after accepted work settles.
 
-Off retains native/public context, explicit history recovery, cancellation, and resource/request limits. It does not replay demoted archives. New compaction and refinement require re-enabling optimization. It is not equivalent to running stock Prime Agent, and is not the benchmark's upstream control.
+Off retains native/public context, explicit history recovery, cancellation, and resource/request limits. It does not replay demoted archives. New compaction and refinement require re-enabling optimization. It is not equivalent to running stock Prime Agent or Codex; the published benchmark uses the separate tools.
 
 Use `/context` and `/usage` to inspect the current session. Use `/compact` to request a summary and `/refine` to review durable harness lessons while optimization is enabled. For all settings, see [settings](settings.md).

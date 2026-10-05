@@ -241,7 +241,7 @@ base-context -p --goal "Complete the change described in BRIEF.md" \
   --goal-token-budget 200000 @BRIEF.md
 ```
 
-`--goal-token-budget` accompanies `--goal`; resuming a session alone restores the saved goal budget and usage. `/goal resume` does not reset an exhausted budget. To authorize more work after exhaustion, explicitly start a new goal with a new budget. Goal token usage counts `input + output`, not cached reads.
+`--goal-token-budget` accompanies `--goal`; resuming a session alone restores the saved goal budget and usage. `/goal resume` does not reset an exhausted budget. To authorize more work after exhaustion, explicitly start a new goal with a new budget. Goal token usage counts successful root main `input + output` (uncached input). Cached reads, child work, and auxiliary calls are outside that counter. It is not a total-spend limit; `/context` reports captured-family usage separately.
 
 ## Autonomous Mode
 

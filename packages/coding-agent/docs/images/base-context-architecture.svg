@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="740" viewBox="0 0 1180 740" role="img" aria-labelledby="title desc">
+  <title id="title">Base Context: keep the work, focus the context</title>
+  <desc id="desc">A TypeScript session assembles a working set from retained source history and sends it to the selected model. TaskFrames carry selected task state; ViewUnits keep required message groups together; epochs keep accepted choices stable. The model uses a persistent Python workspace for variables, commands, and skills. Python admits independent child agents, which return messages and retained reports. Restoration and retrieval have limits.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0e182b"/><stop offset="1" stop-color="#101225"/></linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#91a6c2"/></marker>
+    <style>
+      text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .heading { font-size: 24px; font-weight: 700; fill: #f0f5ff; }
+      .label { font-size: 19px; font-weight: 650; fill: #edf3fc; }
+      .body { font-size: 17px; fill: #becce0; }
+      .small { font-size: 15px; fill: #a4b7ce; }
+      .tag { font-size: 13px; font-weight: 700; letter-spacing: 1.4px; }
+      .line { fill: none; stroke: #91a6c2; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1180" height="740" rx="20" fill="url(#bg)"/>
+  <text x="40" y="48" class="tag" fill="#66e5c2">THE BASE CONTEXT WORKFLOW</text>
+  <text x="40" y="88" font-size="32" font-weight="750" fill="#f5f8ff">A focused prompt. A workspace that keeps working.</text>
+  <rect x="24" y="124" width="1132" height="550" rx="16" fill="#0b1323" stroke="#2b3d59"/>
+  <text x="48" y="155" class="small">TypeScript host · model calls · session state · goals · scheduling · child lifecycles</text>
+
+  <rect x="48" y="186" width="300" height="240" rx="12" fill="#122137" stroke="#344d6d"/>
+  <text x="70" y="220" class="tag" fill="#9abbe6">RETAIN</text>
+  <text x="70" y="256" class="heading">Source history</text>
+  <text x="70" y="295" class="body">Session records and artifacts</text>
+  <text x="70" y="329" class="body">Indexed public-text recovery</text>
+  <path d="M70 351 H326" stroke="#30455f"/>
+  <text x="70" y="380" class="small">Stored does not mean in the prompt.</text>
+  <text x="70" y="403" class="small">Retrieve selected evidence as needed.</text>
+
+  <path d="M354 300 H378" class="line"/>
+  <rect x="390" y="186" width="354" height="240" rx="12" fill="#0c282b" stroke="#3c9f92"/>
+  <text x="414" y="220" class="tag" fill="#66e5c2">SELECT</text>
+  <text x="414" y="256" class="heading">The working set</text>
+  <text x="414" y="295" class="label">TaskFrame <tspan class="body">· selected task state</tspan></text>
+  <text x="414" y="329" class="label">ViewUnits <tspan class="body">· required groups</tspan></text>
+  <text x="414" y="363" class="label">Epochs <tspan class="body">· accepted context choices</tspan></text>
+  <text x="414" y="403" class="small">Retain dependencies. Recover details.</text>
+
+  <path d="M750 300 H774" class="line"/>
+  <rect x="786" y="186" width="344" height="240" rx="12" fill="#20203e" stroke="#8177bd"/>
+  <text x="810" y="220" class="tag" fill="#c7b6fc">REASON</text>
+  <text x="810" y="256" class="heading">Your selected model</text>
+  <text x="810" y="295" class="body">Explicit provider and effort</text>
+  <text x="810" y="329" class="body">Current task + working context</text>
+  <text x="810" y="363" class="body">Answer or next Python call</text>
+  <text x="810" y="403" class="small">The model window is still finite.</text>
+
+  <path d="M505 486 V438" class="line"/>
+  <text x="380" y="462" text-anchor="end" class="small">tool results</text>
+  <path d="M960 434 V453 H615 V486" class="line"/>
+  <rect x="770" y="441" width="143" height="24" rx="6" fill="#0b1323"/>
+  <text x="842" y="458" text-anchor="middle" class="small">Python tool calls</text>
+
+  <rect x="390" y="498" width="354" height="146" rx="12" fill="#122137" stroke="#344d6d"/>
+  <text x="414" y="533" class="label">Persistent Python workspace</text>
+  <text x="414" y="566" class="body">Variables · parsed data · commands</text>
+  <text x="414" y="597" class="body">Skills · background-work handles</text>
+  <text x="414" y="625" class="small">State across calls; best-effort restoration</text>
+
+  <path d="M750 551 H774" class="line"/>
+  <path d="M780 597 H756" class="line"/>
+  <rect x="786" y="498" width="344" height="146" rx="12" fill="#122137" stroke="#344d6d"/>
+  <text x="810" y="533" class="label">Parallel child agents</text>
+  <text x="810" y="566" class="body">Admit with await rlm(...)</text>
+  <text x="810" y="597" class="body">Messages + retained reports</text>
+  <text x="810" y="625" class="small">Independent context · shared family cap</text>
+
+  <text x="48" y="545" class="label">Continue independent work.</text>
+  <text x="48" y="578" class="body">A child handle is not its answer.</text>
+  <text x="48" y="609" class="body">Read the reply when it arrives.</text>
+  <text x="40" y="711" class="small">Retain source history. Select relevant context. Coordinate code and workers in a persistent workspace.</text>
+</svg>

@@ -43,7 +43,7 @@ Rollback selects the retained previous CLI/Python pair for future launches. It d
 To install a specific release, download that release's installer and pass its version:
 
 ```bash
-VERSION=1.0.1
+VERSION=1.1.1
 curl -fsSL "https://github.com/BaseModelAI/base-context/releases/download/v${VERSION}/install.sh" -o install-base-context.sh
 sh install-base-context.sh "$VERSION"
 ```
@@ -114,7 +114,7 @@ Saved Python namespaces are not portable across minor versions; native startup r
 For unpublished packages, use the dedicated installer from the matching, freshly built and extracted main package. Supply all three other first-party archives explicitly:
 
 ```bash
-VERSION=1.0.1
+VERSION=1.1.1
 PACKS=/absolute/path/to/pack
 node /absolute/path/to/extracted-main/package/dist/installer.mjs install \
   /absolute/path/to/new-install-root null \
@@ -141,6 +141,57 @@ This entry skips agent/model/auth startup, but npm and Python setup can download
 Keep writable Base Context state separate from other applications. Use [offline history import](sessions.md#importing-an-offline-prime-root) when needed.
 
 `--offline` or `BASE_CONTEXT_OFFLINE=1` disables startup network operations, including update and package checks. It is not a network sandbox and does not make a remote model available offline.
+
+## Uninstall
+
+
+There is no `base-context uninstall` command. Save your work and close Base Context terminals, then stop its agents and background services **before removing the CLI**:
+
+```bash
+base-context shutdown
+```
+
+Confirm the shutdown prompt. If you use a custom `BASE_CONTEXT_HOME`, run shutdown with that same value; repeat for any other state roots you use.
+
+### One-line installer (macOS/Linux)
+
+Remove the owned installation, including retained CLI versions and their release-local Python environments:
+
+```bash
+rm -rf -- "${XDG_DATA_HOME:-$HOME/.local/share}/base-context"
+```
+
+This is the default location. If you set `BASE_CONTEXT_INSTALL_ROOT`, remove that installation directory instead. Use the paths from your installation if your environment has changed.
+
+Remove the installer's `# Synerise base-context` comment and associated `export PATH=...` line from the shell profile it updated (`~/.bashrc`, `~/.zshrc`, or `~/.profile`; Zsh may use `$ZDOTDIR/.zshrc`). If you still use its managed Node.js, edit that line to remove only the `base-context/bin` entry and keep the Node.js entry. If you declined profile changes, skip this step. Open a new terminal afterward.
+
+If the installer supplied Node.js and you do **not** use that copy for other programs, you can also remove it:
+
+```bash
+rm -rf -- "${XDG_DATA_HOME:-$HOME/.local/share}/base-context-node"
+```
+
+Shared `uv` and Python installations are left in place; other tools may use them.
+
+### npm installation
+
+Use the same npm installation/global prefix that you used to install the CLI:
+
+```bash
+npm uninstall -g @ponythewhite/base-context
+```
+
+If you installed through both npm and the one-line installer, remove both copies. For a source installation, remove your checkout after saving any local changes.
+
+### Optional: delete saved data
+
+By default, these steps keep your Base Context settings, saved credentials, and session history in `~/.base-context`. To **permanently delete** the default global state and its runtime cache, back up anything you need first. On macOS/Linux, run:
+
+```bash
+rm -rf -- "$HOME/.base-context"
+```
+
+For a custom `BASE_CONTEXT_HOME`, use that directory instead. Project-local `.base-context` directories and sessions stored through `BASE_CONTEXT_SESSION_DIR` or `--session-dir` are separate; remove them only if you also want to delete that data. Do not remove another application's credential store.
 
 ## Troubleshooting
 

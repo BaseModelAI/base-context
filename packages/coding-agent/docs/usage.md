@@ -43,6 +43,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/model` | Switch models |
 | `/effort` | Set the reasoning/thinking level |
 | `/agents [N]` | Show or save the maximum live subagents (default: 4) |
+| `/goal [--budget <tokens>] <objective>` | Start an explicit persistent goal |
+| `/goal status\|pause\|resume\|clear` | Inspect or manage the current goal |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
@@ -72,6 +74,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 The value is saved as the global `rlmMaxSubagents` preference, so it survives restarts and supplies the limit for later sessions. Use a non-negative safe integer. `/agents 0` disables new subagent spawns. Malformed, fractional, negative, and unsafe integer values are rejected without changing the setting.
 
 Lowering the limit never kills or passivates existing agents. They keep running or remain idle. Only new spawns/admissions are blocked until the live count is below the limit. This slash command is separate from `base-context agents`, which lists agents.
+
+## Goals and side questions
+
+Use `/goal <objective>` when you explicitly want a persistent goal, rather than an ordinary task prompt. The harness continues prompting while it is active. Use `/goal status`, `/goal pause`, `/goal resume`, and `/goal clear` to manage it. The agent marks success through `goal.complete()`; ending a response is not completion. An optional `/goal --budget <tokens> <objective>` budget counts root successful main uncached input and output, not child work, cached input, or auxiliary calls. See [persistent goals](long-running-agents.md#persistent-goals).
+
+Use `/btw <question>` (or `/side <question>`) for a separate side conversation without steering or interrupting the main task. It uses the current main conversation as context, with no tools. Follow-ups see the latest main context and previous side turns. The side conversation is not added to the main session. Press Esc to return to the main editor. These are model calls; their captured usage belongs to the session's auxiliary usage, not the goal token counter.
 
 ## Token usage and status
 
@@ -174,7 +182,7 @@ await agent_message.send(
 )
 ```
 
-Native parents currently have one resident-child slot. A completed resident child still occupies it until confirmed disposal or passivation; do not start parallel siblings on this path. Continue independent parent work while waiting for the child reply. See the [SDK runtime guide](sdk.md) for the admission and disposal limits.
+The root family shares the [configured live-subagent cap](#limit-concurrent-subagents), which defaults to four. Pending admissions, running children, and idle resident children consume capacity. A completed resident child still counts until confirmed disposal or passivation. Independent children can run in parallel while the parent continues unrelated work. See the [RLM runtime guide](rlm-runtime.md#concurrent-subagent-limit) for capacity and lifecycle details.
 
 Children inherit the parent model unless the user requests another model. They run as TypeScript `AgentSession` instances under the same root worker and can use the same provider, tools, skills, session storage, and scheduling system. See [RLM Runtime Architecture](rlm-runtime.md).
 

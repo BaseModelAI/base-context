@@ -1,0 +1,61 @@
+profile_id,model,effort,task_id,task_name,base_selected_attempt,base_eligible_candidates,base_completed,base_full_pass,base_progress_level,base_main_checks_passed,base_main_checks_total,base_edge_check_passed,base_estimated_api_cost_usd,base_runtime_seconds,codex_selected_attempt,codex_eligible_candidates,codex_completed,codex_full_pass,codex_progress_level,codex_main_checks_passed,codex_main_checks_total,codex_edge_check_passed,codex_estimated_api_cost_usd,codex_runtime_seconds
+gpt-6.1-sol-high,gpt-6.1-sol,high,1,Household Expense Reconciliation,2,2,True,True,5,5,5,True,0.0642376,125.89450597797986,2,2,True,True,5,5,5,True,0.0970824,168.6868289920094
+gpt-6.1-sol-high,gpt-6.1-sol,high,2,Calendar Merge and Conflict Report,2,2,True,True,5,5,5,True,0.0810312,164.37362319702515,2,2,True,True,5,5,5,True,0.1627468,232.16799650597386
+gpt-6.1-sol-high,gpt-6.1-sol,high,3,Mailbox Thread Cleanup,2,2,True,True,5,5,5,True,0.1248336,262.25189840298845,1,2,True,True,5,5,5,True,0.1906456,352.24747164099244
+gpt-6.1-sol-high,gpt-6.1-sol,high,4,Invoice and Payment Matching,1,2,True,True,5,5,5,True,0.0815264,119.62817896599881,1,2,True,True,5,5,5,True,0.1100772,198.2454781709821
+gpt-6.1-sol-high,gpt-6.1-sol,high,5,Inventory Reorder and Transfer Plan,1,2,True,True,5,5,5,True,0.1851096,337.6505135729676,1,2,True,True,5,5,5,True,0.22725,450.6293090090039
+gpt-6.1-sol-high,gpt-6.1-sol,high,6,Volunteer Shift Rescheduling,3,2,True,True,5,5,5,True,0.1971752,418.050025790988,1,2,True,True,5,5,5,True,0.360412,570.6075734549959
+gpt-6.1-sol-high,gpt-6.1-sol,high,7,Utility Consumption Anomaly Report,2,2,True,True,5,5,5,True,0.0611432,123.10083656903589,2,2,True,True,5,5,5,True,0.0951396,210.02854314699653
+gpt-6.1-sol-high,gpt-6.1-sol,high,8,Travel Itinerary Repair,2,2,True,True,5,5,5,True,0.1309544,241.21461959095905,3,2,True,True,5,5,5,True,0.1796548,427.50707838102244
+gpt-6.1-sol-high,gpt-6.1-sol,high,9,Support SLA Event Analysis,2,2,True,True,5,5,5,True,0.0634532,121.87111665704288,2,2,True,True,5,5,5,True,0.104058,221.4067975160142
+gpt-6.1-sol-high,gpt-6.1-sol,high,10,Local Supplier Catalog Crawler,2,2,True,True,5,5,5,True,0.084132,115.58663823298411,1,2,True,True,5,5,5,True,0.1142084,205.73583491702448
+gpt-6.1-sol-high,gpt-6.1-sol,high,11,SQLite CRM Migration,1,2,True,True,5,5,5,True,0.1154884,249.9661710539949,2,2,True,True,5,5,5,True,0.1893424,377.229796989006
+gpt-6.1-sol-high,gpt-6.1-sol,high,12,Webhook Receiver and Replay,2,2,True,True,5,5,5,True,0.1652172,374.2617600639933,1,2,True,True,5,5,5,True,0.2416872,452.1579121979885
+gpt-6.1-sol-high,gpt-6.1-sol,high,13,Cross-Service Incident Timeline,2,2,True,True,5,5,5,True,0.4320744,723.3237648659851,3,2,True,True,5,5,5,True,0.5314976,987.8089931090362
+gpt-6.1-sol-high,gpt-6.1-sol,high,14,Layered Configuration Upgrade,1,2,True,True,5,5,5,True,0.071646,135.86906542698853,2,2,True,True,5,5,5,True,0.120762,200.55767211702187
+gpt-6.1-sol-high,gpt-6.1-sol,high,15,Backup Restore Planner,1,2,True,True,5,5,5,True,0.0974388,145.6995240409742,1,2,True,True,5,5,5,True,0.1199524,264.2143567770254
+gpt-6.1-sol-high,gpt-6.1-sol,high,16,Markdown Knowledge-Base Repair,1,2,True,True,5,5,5,True,0.2522724,440.72001369902864,1,2,True,True,5,5,5,True,0.2516652,462.99825814401265
+gpt-6.1-sol-high,gpt-6.1-sol,high,17,Contract Clause Index and Comparison,3,2,True,True,5,5,5,True,0.1839152,403.01048875803826,1,2,True,True,5,5,5,True,0.3482436,657.3420333680115
+gpt-6.1-sol-high,gpt-6.1-sol,high,18,Research-Note Search and Deduplication,1,2,True,True,5,5,5,True,0.1792136,393.81079472601414,2,2,True,True,5,5,5,True,0.2662488,449.52032173098996
+gpt-6.1-sol-high,gpt-6.1-sol,high,19,Sensor Resampling and Gap Report,2,2,True,True,5,5,5,True,0.1178736,220.30248531495454,2,2,True,True,5,5,5,True,0.151484,331.1167983429914
+gpt-6.1-sol-high,gpt-6.1-sol,high,20,Time-of-Use Energy Billing,1,2,True,True,5,5,5,True,0.1617336,327.4855421470129,2,2,True,True,5,5,5,True,0.247694,465.16399159102
+gpt-6.1-sol-high,gpt-6.1-sol,high,21,WAV Interview Cleanup and Chapters,2,2,True,True,5,5,5,True,0.1173512,243.91274640301708,1,2,True,True,5,5,5,True,0.1862264,355.3880905690021
+gpt-6.1-sol-high,gpt-6.1-sol,high,22,Timesheet and Payroll Correction,2,2,True,True,5,5,5,True,0.2061244,430.39815498900134,3,2,True,True,5,5,5,True,0.2687776,561.0381007739925
+gpt-6.1-sol-high,gpt-6.1-sol,high,23,Procurement Three-Way Match,1,2,True,True,5,5,5,True,0.2260028,480.21092854096787,2,2,True,True,5,5,5,True,0.36996,645.4165297599975
+gpt-6.1-sol-high,gpt-6.1-sol,high,24,Multi-Warehouse Order Fulfillment,2,2,True,True,5,5,5,True,0.1573452,327.58686038898304,1,2,True,True,5,5,5,True,0.4045472,622.5559523109987
+gpt-6.1-sol-high,gpt-6.1-sol,high,25,Library Circulation Reconstruction,1,2,True,True,5,5,5,True,0.16707,366.5156936169951,1,2,True,True,5,5,5,True,0.2912944,565.3700328440173
+gpt-6.1-sol-high,gpt-6.1-sol,high,26,School Meal Allergen and Stock Plan,1,2,True,True,5,5,5,True,0.1034828,219.13934985903325,2,2,True,True,5,5,5,True,0.1578368,279.25226491800277
+gpt-6.1-sol-high,gpt-6.1-sol,high,27,Clinic Appointment Rescheduling,1,2,True,True,5,5,5,True,1.0434528,1215.831747321994,1,2,True,True,5,5,5,True,0.6262624,1186.7212588359835
+gpt-6.1-sol-high,gpt-6.1-sol,high,28,Permit Intake and Status Pipeline,1,2,True,True,5,5,5,True,0.4287412,832.3213123040041,1,2,True,True,5,5,5,True,0.4578212,788.970032510988
+gpt-6.1-sol-high,gpt-6.1-sol,high,29,Legacy Budgeting CLI Repair,2,2,True,True,5,5,5,True,0.205906,439.87735832401086,2,2,True,True,5,5,5,True,0.3960208,685.7162949659978
+gpt-6.1-sol-high,gpt-6.1-sol,high,30,Helpdesk Service Upgrade,2,2,True,True,5,5,5,True,1.2412516,1313.3937778300024,2,2,True,True,5,5,5,True,0.7591292,1347.3923326180084
+gpt-6-astra-medium,gpt-6-astra,medium,1,Household Expense Reconciliation,1,2,True,True,5,5,5,True,0.277298,93.76024733501254,2,2,True,True,5,5,5,True,0.341272,128.29999627600773
+gpt-6-astra-medium,gpt-6-astra,medium,2,Calendar Merge and Conflict Report,1,2,True,True,5,5,5,True,0.428318,101.64929413801292,1,2,True,True,5,5,5,True,0.66289,187.3356060880178
+gpt-6-astra-medium,gpt-6-astra,medium,3,Mailbox Thread Cleanup,3,2,True,True,5,5,5,True,0.40527,133.2455204790458,1,2,True,True,5,5,5,True,0.718444,250.4152354229882
+gpt-6-astra-medium,gpt-6-astra,medium,4,Invoice and Payment Matching,2,2,True,True,5,5,5,True,0.279386,84.89432364900131,2,2,True,True,5,5,5,True,0.513042,177.91514660199755
+gpt-6-astra-medium,gpt-6-astra,medium,5,Inventory Reorder and Transfer Plan,1,2,True,True,5,5,5,True,0.588326,186.9926723880344,2,2,True,True,5,5,5,True,0.951644,347.007822109008
+gpt-6-astra-medium,gpt-6-astra,medium,6,Volunteer Shift Rescheduling,2,2,True,True,5,5,5,True,0.882916,255.4566778599983,1,2,True,True,5,5,5,True,1.34566,1495.7279398620012
+gpt-6-astra-medium,gpt-6-astra,medium,7,Utility Consumption Anomaly Report,1,2,True,True,5,5,5,True,0.252856,70.97689988202183,2,2,True,True,5,5,5,True,0.379172,162.96941085200524
+gpt-6-astra-medium,gpt-6-astra,medium,8,Travel Itinerary Repair,1,2,True,True,5,5,5,True,0.620838,177.60311510402244,2,2,True,True,5,5,5,True,0.68426,255.71205738399294
+gpt-6-astra-medium,gpt-6-astra,medium,9,Support SLA Event Analysis,2,2,True,True,5,5,5,True,0.32362,97.06588579399977,1,2,True,True,5,5,5,True,0.39144,61.985710342996754
+gpt-6-astra-medium,gpt-6-astra,medium,10,Local Supplier Catalog Crawler,1,2,True,True,5,5,5,True,0.322928,85.41242642799625,1,2,True,True,5,5,5,True,0.452726,193.61502259899862
+gpt-6-astra-medium,gpt-6-astra,medium,11,SQLite CRM Migration,2,2,True,True,5,5,5,True,0.633426,152.6267829440185,2,2,True,True,5,5,5,True,0.80931,307.91905285499524
+gpt-6-astra-medium,gpt-6-astra,medium,12,Webhook Receiver and Replay,2,2,True,True,5,5,5,True,1.224358,215.44221740897046,2,2,True,True,5,5,5,True,1.012166,366.0347671940108
+gpt-6-astra-medium,gpt-6-astra,medium,13,Cross-Service Incident Timeline,1,2,True,True,5,5,5,True,2.026538,464.5365253040218,2,2,True,True,5,5,5,True,2.344114,615.8976583769836
+gpt-6-astra-medium,gpt-6-astra,medium,14,Layered Configuration Upgrade,2,2,True,True,5,5,5,True,0.304142,85.69584093301091,2,2,True,True,5,5,5,True,0.386868,166.28872255899478
+gpt-6-astra-medium,gpt-6-astra,medium,15,Backup Restore Planner,2,2,True,True,5,5,5,True,0.382822,81.63244296301855,2,2,True,True,5,5,5,True,0.392322,139.0578424349951
+gpt-6-astra-medium,gpt-6-astra,medium,16,Markdown Knowledge-Base Repair,1,2,True,True,5,5,5,True,0.840754,210.44901878299424,1,2,True,True,5,5,5,True,0.957776,341.9289602790086
+gpt-6-astra-medium,gpt-6-astra,medium,17,Contract Clause Index and Comparison,1,2,True,True,5,5,5,True,0.78832,233.78883704199689,2,2,True,True,5,5,5,True,1.11382,404.22126320400275
+gpt-6-astra-medium,gpt-6-astra,medium,18,Research-Note Search and Deduplication,1,2,True,True,5,5,5,True,0.738934,172.22119945002487,1,2,True,True,5,5,5,True,0.996272,373.566906077991
+gpt-6-astra-medium,gpt-6-astra,medium,19,Sensor Resampling and Gap Report,2,2,True,True,5,5,5,True,0.339396,101.55027907900512,2,2,True,True,5,5,5,True,0.449554,192.49849441301194
+gpt-6-astra-medium,gpt-6-astra,medium,20,Time-of-Use Energy Billing,1,2,True,True,5,5,5,True,0.6637,308.7273811220075,1,2,True,True,5,5,5,True,0.876222,307.47864694701275
+gpt-6-astra-medium,gpt-6-astra,medium,21,WAV Interview Cleanup and Chapters,1,2,True,True,5,5,5,True,0.466496,144.5382618799922,1,2,True,True,5,5,5,True,0.614788,218.35851913801162
+gpt-6-astra-medium,gpt-6-astra,medium,22,Timesheet and Payroll Correction,1,2,True,True,5,5,5,True,0.775238,230.65101689996663,2,2,True,True,5,5,5,True,0.950948,338.0826776569884
+gpt-6-astra-medium,gpt-6-astra,medium,23,Procurement Three-Way Match,2,2,True,True,5,5,5,True,0.890372,267.4651464409544,2,2,True,True,5,5,5,True,1.326036,377.26727394998306
+gpt-6-astra-medium,gpt-6-astra,medium,24,Multi-Warehouse Order Fulfillment,1,2,True,True,5,5,5,True,0.954474,258.99337802495575,1,2,True,True,5,5,5,True,1.23497,373.66919763898477
+gpt-6-astra-medium,gpt-6-astra,medium,25,Library Circulation Reconstruction,2,2,True,True,5,5,5,True,0.574784,208.3048120099702,1,2,True,True,5,5,5,True,0.844252,151.58879823298776
+gpt-6-astra-medium,gpt-6-astra,medium,26,School Meal Allergen and Stock Plan,2,2,True,True,5,5,5,True,0.433754,124.29654747800669,1,2,True,True,5,5,5,True,0.622938,216.1710177079949
+gpt-6-astra-medium,gpt-6-astra,medium,27,Clinic Appointment Rescheduling,2,2,True,True,5,5,5,True,3.176268,681.4739847749588,2,2,True,True,5,5,5,True,2.109452,800.9345800220035
+gpt-6-astra-medium,gpt-6-astra,medium,28,Permit Intake and Status Pipeline,2,2,True,True,5,5,5,True,1.24362,327.4037406449788,1,2,True,True,5,5,5,True,1.692876,539.3367629490094
+gpt-6-astra-medium,gpt-6-astra,medium,29,Legacy Budgeting CLI Repair,1,2,True,True,5,5,5,True,0.86783,271.386386468017,1,2,True,True,5,5,5,True,1.436916,533.3907430050022
+gpt-6-astra-medium,gpt-6-astra,medium,30,Helpdesk Service Upgrade,2,2,True,True,5,5,5,True,1.954554,593.0394894389901,2,2,True,True,5,5,5,True,2.777942,950.0852706199803

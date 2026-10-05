@@ -4,15 +4,15 @@ Base Context is a coding and research agent built around a persistent Python wor
 
 ## Quick start
 
-With Node.js `^22.12.0 || >=23.3.0`, npm, and [uv](https://docs.astral.sh/uv/getting-started/installation/):
+On macOS or Linux:
 
 ```bash
-npm install -g @ponythewhite/base-context
-cd /path/to/project
-base-context
+curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
 ```
 
-Use `/login` to configure an authorized provider, then `/model` to choose a model. See [quickstart](quickstart.md) for the first session and [installation](installation.md) for source builds, Python setup, updates, and rollback.
+The installer prepares missing prerequisites and managed Python before activating the CLI. Run its final PATH command, then start `base-context` in your project. Use `/login` for your provider, `/model` for your model, and `/effort` for its reasoning level.
+
+See [quickstart](quickstart.md) for a first session and [installation](installation.md) for npm, Windows, source builds, updates, rollback, and uninstall. Coming from Codex? Start with [goals, worker limits, and side questions](quickstart.md#goals-workers-and-side-questions).
 
 Read [why we forked Prime Agent](fork-philosophy.md) and [how context management works](context-management.md) for the design and its limits.
 
@@ -51,7 +51,8 @@ Read [why we forked Prime Agent](fork-philosophy.md) and [how context management
 ## Reference
 
 - [Session format](session-format.md) - Native framed session format, entry types, and SessionManager API.
-- [CLI package reference](../README.md) - complete user and CLI reference.
+- [CLI reference](usage.md#cli-reference) - commands, flags, modes, and environment variables.
+- [Benchmark results](../../../benchmarks/python-realworld-30/README.md) - Base Context 1.1.1 versus Codex 0.160.0 on two model/effort profiles.
 
 ## Platform Setup
 

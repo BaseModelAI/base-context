@@ -28,7 +28,7 @@ Base Context retains that core approach, along with agent messaging, goals, sche
 
 `await rlm(...)` returns an admission handle. Children deliver results through messages or files. This distinction matters: a parent should continue independent work and read results when they arrive, not assume the spawn call contains the answer.
 
-For 1.0.1, we reviewed the 113 commits in Prime Agent 0.9.5 and selected small runtime, provider and packaging fixes rather than merging the release. The [complete selection and exclusions](upstream-0.9.5.md) explain how that choice preserves the fork's architecture.
+We selectively adapt upstream fixes rather than merging every release. The [0.9.5 selection](upstream-0.9.5.md) and [later selection for Base Context 1.0.15](upstream-1.0.15.md) explain that approach and its exclusions.
 
 ## What Base Context changes
 
@@ -48,13 +48,11 @@ This table describes the fork's implementation, not a claim that every capabilit
 
 ## How we evaluate the difference
 
-The published study uses an independent stock Prime Agent control, not Base Context with one setting switched off. It tests one SDK-level Python coding harness across 30 tasks and three model selections, with logical `medium` effort and the same fixed single-deferred-retry policy. Both arms use a shared Bash tool, not the native `ipython` workflow; this is not a test of recursive-agent performance.
+The published comparison covers Base Context **1.1.1** and Codex **0.160.0** on 30 Python tasks with two model/effort profiles: **GPT-6.1 Sol high** and **GPT-6 Astra medium**. Each harness uses its native execution path, with the same tasks and task checks. Best-of-two selection yields 60 matched task/profile pairs.
 
-We report task correctness, runtime cleanliness, retry attempts, and cumulative lifecycle time separately. A strict test pass can coexist with a compaction failure. Cumulative attempt durations are not campaign wall time or user-perceived latency. Repeated attempts belong in the time denominator rather than disappearing from a clean-success-only comparison.
+Both tools pass **60/60** selected tasks. Base Context has **30.99% shorter mean selected-run duration** and **18.73% lower selected captured API-cost estimates**. These are results for the published scope, not universal savings. Cost estimates are not invoices; task-run durations are not campaign wall time. Native execution conditions differ, and the comparison does not isolate the effect of context selection, Python, or delegation.
 
-The frozen measurements used Base Context package `0.1.0` at mixed source revisions: `84a7e6f` for Sol/Astra and `077f463` for DeepSeek. Release `1.0.0` builds on the latter source line. The study is not a fresh measurement of the 1.0.0 release artifact. It has unknown-cost attempts, so it cannot establish complete fees or a whole-campaign cost advantage. API-equivalent prices are not the same as cash charges.
-
-Read the [report](../../../benchmarks/python-realworld-30/REPORT.md), [complete cells](../../../benchmarks/python-realworld-30/results/cells.md), and [reproduction guide](../../../benchmarks/python-realworld-30/REPRODUCE.md). We treat these results as evidence from one study, not a general ranking of agents or providers.
+Read the [benchmark results and methodology](../../../benchmarks/python-realworld-30/README.md) for the exact selection rules, execution settings, per-profile results, and per-task pairs.
 
 ## Fork philosophy
 

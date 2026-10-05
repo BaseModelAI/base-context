@@ -28,7 +28,7 @@ git clone https://github.com/BaseModelAI/base-context.git
 cd base-context
 npm ci
 npm run build:source
-node packages/coding-agent/dist/bundle/cli.js
+BASE_CONTEXT_INSTALL_UV=1 node packages/coding-agent/dist/bundle/cli.js
 ```
 
 To use the source build in another project:
@@ -79,17 +79,49 @@ Base Context uses the persistent `ipython` kernel for file operations, project c
 
 Base Context runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
 
-## Recursive Subagents
+## Goals, workers, and side questions
 
-Recursive subagents are a built-in Base Context capability. The model spawns independent work from the Python REPL with `await rlm("subtask")`; each call returns at admission with a child handle and never returns the answer. Children send requested results as explicit `agent_message` replies to the parent or write them to files. Child agents use the same TypeScript agent runtime, providers, tools, skills, and session machinery as the parent.
+If you use Codex, the entry point is familiar: start in your repository, provide a concrete task, and keep project rules in `AGENTS.md`. Base Context adds a persistent Python workspace underneath the conversation. You do not need to write Python yourself.
 
-You can prompt the model to use that capability directly:
+### Keep a persistent objective
+
+An ordinary prompt does not create a persistent goal. Start one explicitly:
 
 ```text
-Delegate the requested parser change as one bounded subtask. Work on the independent documentation update while it runs, then read its reply before integrating the change.
+/goal Implement the migration in PLAN.md and run the project checks
 ```
 
-See [RLM Runtime Architecture](rlm-runtime.md) for the API and execution model.
+The harness keeps prompting an active goal across turns. Use `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear` to manage it. The agent marks completion through its `goal` skill. `/goal --budget 200000 <objective>` adds a token budget for root successful main uncached input and output; it is not a total-spend limit and excludes child work and auxiliary calls. See [persistent goals](long-running-agents.md#persistent-goals).
+
+### Delegate independent work
+
+```text
+Delegate the API review and documentation update to separate workers.
+Continue the parser fix while they run, then integrate their replies.
+```
+
+`/agents` shows the live-subagent cap; `/agents 4` sets it and saves the preference. The default is four across the root family. Pending admissions, running workers, and idle workers count. Lowering the cap does not stop existing workers; `/agents 0` blocks new ones.
+
+The model spawns work with `await rlm("subtask")` from Python. This returns an admission handle, not an answer. Children return results through messages or files, while the parent can continue independent work. See [RLM programming](rlm.md).
+
+For worker management from the shell:
+
+```bash
+base-context agents                 # Open the agents view
+base-context list                   # List active agents
+base-context attach <agent>         # Reattach to an agent
+base-context stop <agent>           # Stop one root agent
+```
+
+### Ask a side question
+
+```text
+/btw Why did you choose this parser?
+```
+
+This opens a tool-free side conversation using the current main context, without steering or interrupting the main task. Its questions and answers are not added to the main session. Follow-ups stay in the side pane; Esc returns to the main editor.
+
+Use `/context` or `/usage` for captured request usage and estimated cost. They show the goal token budget separately.
 
 ## Give Base Context Project Instructions
 
