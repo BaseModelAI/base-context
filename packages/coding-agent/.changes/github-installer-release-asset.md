@@ -1,1 +1,0 @@
-- Fixed the installer download in GitHub releases by including the configured installation script in release artifacts.

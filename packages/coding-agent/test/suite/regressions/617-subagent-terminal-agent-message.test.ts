@@ -16,15 +16,99 @@ function terminalNotices(messages: readonly unknown[]): CustomMessage[] {
 	);
 }
 
+function gate(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
+
 describe("#617 subagent terminal agent messages", () => {
 	let parent: Harness | undefined;
 	let child: Harness | undefined;
+	const releaseGates: Array<() => void> = [];
 
 	afterEach(async () => {
+		for (const release of releaseGates.splice(0)) release();
 		await child?.cleanup();
 		await parent?.cleanup();
 		child = undefined;
 		parent = undefined;
+	});
+
+	async function deleteChildDuringCompletion() {
+		const runStarted = gate();
+		const runFinished = gate();
+		const cleanupStarted = gate();
+		const cleanupFinished = gate();
+		const childWaitStarted = gate();
+		releaseGates.push(runFinished.resolve, cleanupFinished.resolve);
+		child = await createHarness();
+		const childPrompt = vi.spyOn(child.session, "promptAndWait").mockImplementation(async () => {
+			runStarted.resolve();
+			await runFinished.promise;
+		});
+		parent = await createHarness({
+			serializedRefine: true,
+			rlmDepth: 0,
+			rlmMaxDepth: 1,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: child!.session }),
+				deleteRlmSubagentRuntime: async (_id, session) => {
+					cleanupStarted.resolve();
+					await cleanupFinished.promise;
+					await session?.disposeAsync();
+				},
+			},
+		});
+		const spawned = await parent.session.runRlmChild("wait until deleted", { name: "deleted-worker" });
+		await runStarted.promise;
+		const waitForChild = child.session.waitForRlmQuiescence.bind(child.session);
+		vi.spyOn(child.session, "waitForRlmQuiescence").mockImplementation((...args) => {
+			const waiting = waitForChild(...args);
+			childWaitStarted.resolve();
+			return waiting;
+		});
+		const completion = waitForHeadlessCompletion(parent.session, { waitForRlmQuiescence: true });
+		const completed = vi.fn();
+		void completion.then(completed, completed);
+		await childWaitStarted.promise;
+		await parent.session.deleteRlmSubagent(spawned.rlm_child_id);
+		await cleanupStarted.promise;
+		return { completion, completed, childPrompt, runFinished, cleanupFinished };
+	}
+
+	it("waits for owned child deletion cleanup and the resulting parent turn during headless completion", async () => {
+		const { completion, completed, childPrompt, runFinished, cleanupFinished } = await deleteChildDuringCompletion();
+		const followUpStarted = gate();
+		const followUpFinished = gate();
+		releaseGates.push(followUpFinished.resolve);
+		parent!.setResponses([
+			async () => {
+				followUpStarted.resolve();
+				await followUpFinished.promise;
+				return fauxAssistantMessage("parent consumed the deletion");
+			},
+		]);
+		expect(completed).not.toHaveBeenCalled();
+		runFinished.resolve();
+		await childPrompt.mock.results[0].value;
+		expect(completed).not.toHaveBeenCalled();
+		cleanupFinished.resolve();
+		await followUpStarted.promise;
+		expect(completed).not.toHaveBeenCalled();
+		followUpFinished.resolve();
+		await completion;
+		expect(getAssistantTexts(parent!)).toEqual(["parent consumed the deletion"]);
+		expect((await parent!.session.listRlmSubagents()).subagents).toEqual([]);
+	});
+
+	it("keeps root cancellation authoritative while owned child deletion cleanup is pending", async () => {
+		const { completion, completed } = await deleteChildDuringCompletion();
+		expect(completed).not.toHaveBeenCalled();
+		parent!.session.requestAbort();
+		await expect(completion).rejects.toThrow("RLM quiescence wait cancelled");
 	});
 
 	it("delivers a child completion without a reply through the private typed notice path", async () => {

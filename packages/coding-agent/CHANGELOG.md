@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.1] - 2026-10-05
+
+- Fixed the installer download in GitHub releases by including the configured installation script in release artifacts.
+- Fixed headless family completion failing when an owned subagent is deleted while completion is pending.
+
 ## [1.1.0] - 2026-10-04
 
 - Added guidance to keep heavy computation outside the main REPL and bound task-sized experiments.

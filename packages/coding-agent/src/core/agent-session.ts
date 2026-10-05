@@ -1145,6 +1145,17 @@ interface RlmChildRun {
 	unsubscribe?: () => void;
 }
 
+class RlmChildDeletionCancellation extends Error {
+	constructor(
+		readonly owner: AgentSession,
+		readonly child: AgentSession,
+		readonly cleanup: Promise<unknown>,
+		readonly settlement?: Promise<void>,
+	) {
+		super("RLM quiescence wait cancelled");
+	}
+}
+
 interface RlmChildUsageSource {
 	sessionId: string;
 	sessionFile?: string;
@@ -13506,6 +13517,15 @@ export class AgentSession {
 		});
 	}
 
+	private _cancelChildQuiescenceForDeletion(
+		child: AgentSession,
+		cleanup: Promise<unknown>,
+		settlement?: Promise<void>,
+	): void {
+		const cancellation = new RlmChildDeletionCancellation(this, child, cleanup, settlement);
+		for (const controller of child._rlmQuiescenceWaitAborts) controller.abort(cancellation);
+	}
+
 	private async _deleteResolvedRlmSubagent(subagent: RlmSubagentRegistryEntry): Promise<RlmDeleteSubagentResult> {
 		const childId = subagent.rlm_child_id;
 		const run = this._activeRlmChildRuns.get(childId);
@@ -13521,22 +13541,26 @@ export class AgentSession {
 			// cancellation so its catch/finally path cannot race a normal release or
 			// terminal notice against the physical delete.
 			run.detachedDeletion = subagent;
-			if (this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
-				run.deletionNeedsCompletionNotice = true;
-			} else {
-				this._emitRlmSubagentRemoval(subagent);
-			}
 			const liveSession = run.session;
-			if (run.status === "error" && !liveSession && run.settled) {
-				this._deletedRlmChildIds.add(childId);
-				this._removeRlmSubagentTracking(childId, run);
-				return { subagent };
-			}
 			if (liveSession && run.settled) {
 				run.deletionRunFinished = true;
 				run.settlement = createAgentMessageDeferred();
 				run.settled = false;
 				this._unsettledRlmChildRuns.add(run);
+			}
+			if (liveSession) {
+				const cleanup = this._ensureRlmRunDeletionCleanup(run, liveSession);
+				this._cancelChildQuiescenceForDeletion(liveSession, cleanup, run.settlement.promise);
+			}
+			if (this._cancelRlmChildRun(run, "Deleted by parent orchestrator")) {
+				run.deletionNeedsCompletionNotice = true;
+			} else {
+				this._emitRlmSubagentRemoval(subagent);
+			}
+			if (run.status === "error" && !liveSession && run.settled) {
+				this._deletedRlmChildIds.add(childId);
+				this._removeRlmSubagentTracking(childId, run);
+				return { subagent };
 			}
 			if (liveSession) this._continueFinishedRlmRunDeletion(run, subagent, liveSession);
 
@@ -13548,6 +13572,8 @@ export class AgentSession {
 
 		this._emitRlmSubagentRemoval(subagent);
 		const retained = this._rlmChildSessions.get(childId)?.session;
+		const deletion = this._deletingRlmChildren.get(childId);
+		if (retained && deletion) this._cancelChildQuiescenceForDeletion(retained, deletion.promise);
 		try {
 			await this._deleteRlmSubagentSession(childId, retained);
 		} catch (error) {
@@ -13920,13 +13946,14 @@ export class AgentSession {
 		return [...sessions];
 	}
 
-	private _hasUnsettledRlmQuiescenceWork(): boolean {
+	private _hasUnsettledRlmQuiescenceWork(waitForOwnedChildDeletion = false): boolean {
+		if (waitForOwnedChildDeletion && this._deletingRlmChildren.size > 0) return true;
 		if (this.requests.hasPending || this._pendingIpythonExecutions.size > 0 || this._childUsageWrites.size > 0)
 			return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
-			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(),
+			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(waitForOwnedChildDeletion),
 		);
 	}
 
@@ -13935,7 +13962,10 @@ export class AgentSession {
 	 * message and for the resulting parent turns to drain. Re-snapshotting after
 	 * each drain includes descendants spawned while earlier results were consumed.
 	 */
-	async waitForRlmQuiescence(externalSignal?: AbortSignal): Promise<void> {
+	async waitForRlmQuiescence(
+		externalSignal?: AbortSignal,
+		options: { waitForOwnedChildDeletion?: boolean } = {},
+	): Promise<void> {
 		const cancellation = new AbortController();
 		const cancelFromParent = () => cancellation.abort();
 		if (externalSignal?.aborted) cancellation.abort();
@@ -13945,13 +13975,18 @@ export class AgentSession {
 		const cancelled = new Promise<never>((_resolve, reject) => {
 			rejectCancelled = reject;
 		});
-		const onCancelled = () => rejectCancelled(new Error("RLM quiescence wait cancelled"));
+		const cancellationError = () =>
+			cancellation.signal.reason instanceof RlmChildDeletionCancellation
+				? cancellation.signal.reason
+				: new Error("RLM quiescence wait cancelled");
+		const onCancelled = () => rejectCancelled(cancellationError());
 		cancellation.signal.addEventListener("abort", onCancelled, { once: true });
 		if (cancellation.signal.aborted) onCancelled();
 		const wait = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, cancelled]);
 		try {
 			while (true) {
 				await wait(this.waitForHeadlessIdle());
+				if (cancellation.signal.aborted) throw cancellationError();
 				// Strong RLM quiescence also owns work that interactive waitForIdle ignores.
 				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
 					await wait(this._waitForSessionActivityChange(cancellation.signal));
@@ -13959,17 +13994,40 @@ export class AgentSession {
 				}
 				const unsettledRuns = [...this._unsettledRlmChildRuns].filter((run) => !run.settled);
 				const childSessions = this._rlmChildSessionSnapshot();
-				if (unsettledRuns.length === 0 && !this._hasUnsettledRlmQuiescenceWork()) return;
+				const deletions = options.waitForOwnedChildDeletion
+					? [...this._deletingRlmChildren.values()].map((deletion) => deletion.promise)
+					: [];
+				if (unsettledRuns.length === 0 && !this._hasUnsettledRlmQuiescenceWork(options.waitForOwnedChildDeletion))
+					return;
 				await wait(
 					Promise.all([
 						...unsettledRuns.map((run) => run.settlement.promise),
 						...this._childUsageWrites,
-						...childSessions.map((child) => child.waitForRlmQuiescence(cancellation.signal)),
+						...deletions,
+						...childSessions.map(async (child) => {
+							try {
+								await child.waitForRlmQuiescence(cancellation.signal, options);
+							} catch (error) {
+								if (
+									!options.waitForOwnedChildDeletion ||
+									!(error instanceof RlmChildDeletionCancellation) ||
+									error.owner !== this ||
+									error.child !== child
+								) {
+									throw error;
+								}
+								// Only an admitted owned deletion may replace a cancelled child wait.
+								await wait(Promise.all([error.cleanup, error.settlement]));
+							}
+						}),
 					]),
 				);
 				// Always loop through the self-active/deferred checks again. Work may
 				// start at the child-settlement boundary.
 			}
+		} catch (error) {
+			if (cancellation.signal.aborted) throw cancellationError();
+			throw error;
 		} finally {
 			// A local descendant error must cancel sibling recursive waits owned by
 			// this barrier before their propagation listeners are removed.
@@ -14356,7 +14414,7 @@ export class AgentSession {
 				throwIfCancelled();
 				if (terminal?.stopReason === "error")
 					throw new Error(terminal.errorMessage || "RLM child inference failed");
-				await child.waitForRlmQuiescence();
+				await child.waitForRlmQuiescence(undefined, { waitForOwnedChildDeletion: true });
 				await usageSettlement;
 				throwIfCancelled();
 				if (run.error) throw new Error(run.error);

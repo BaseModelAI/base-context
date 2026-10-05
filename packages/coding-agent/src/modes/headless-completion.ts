@@ -88,8 +88,9 @@ export async function waitForHeadlessCompletion(
 	let lastPromptedProgressKey: string | undefined;
 	let repeatedProgressPrompts = 0;
 	while (true) {
-		if (options.waitForRlmQuiescence) await session.waitForRlmQuiescence();
-		else await session.waitForHeadlessIdle();
+		if (options.waitForRlmQuiescence) {
+			await session.waitForRlmQuiescence(undefined, { waitForOwnedChildDeletion: true });
+		} else await session.waitForHeadlessIdle();
 		const status = session.getAutonomousStatus();
 		if (!shouldContinueAutonomousGates(status) || !status.lastGateFailure) {
 			return status;
