@@ -1,4 +1,4 @@
-# Base Context
+# Synerise Base Context
 
 **Keep the work. Focus the context.**
 
