@@ -321,6 +321,16 @@ import {
 	wrapStreamFnWithSemanticEdges,
 } from "./semantic-edges.js";
 import {
+	type CommitPreparationPolicy,
+	captureSessionActionRecovery,
+	cloneCustomMessage,
+	type RecoverableCommandPayload as PreparedCommandPayload,
+	type RecoverableTurnPayload,
+	restoreSessionActionRecovery,
+	type SessionActionRecoverySnapshot,
+	type TurnExecutionPolicy,
+} from "./session-action-recovery.js";
+import {
 	ActionStore,
 	type ActionTicket,
 	canSelectSessionAction,
@@ -333,10 +343,7 @@ import {
 	type RuntimeActivity,
 	type SessionAction,
 	type SessionActionSnapshot,
-	type SessionCommandPayload,
-	type SessionTurnPayload,
 	transitionSessionAction,
-	type WakePolicy,
 } from "./session-action-store.js";
 import { readSessionBootstrap } from "./session-bootstrap.js";
 import { bindSessionContextEpoch } from "./session-context-epoch.js";
@@ -395,6 +402,15 @@ import { SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME } from "./we
 const captureOwnedKernelState = IpythonKernelProvisioner.prototype.captureKernelState;
 
 export type { GoalState, GoalStatus } from "./goals.js";
+export {
+	SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+	SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION,
+	type SessionActionRecoveryAction,
+	type SessionActionRecoveryPayload,
+	type SessionActionRecoveryRecord,
+	type SessionActionRecoverySnapshot,
+	type TurnExecutionPolicy,
+} from "./session-action-recovery.js";
 export type { SessionStats } from "./session-stats.js";
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-blocks.js";
 
@@ -725,18 +741,6 @@ interface SkillCommandExpansion {
 	assertSkillCurrent: () => void;
 }
 
-type PreTurnCompactionTiming = "beforeModelSelection" | "afterModelSelection" | "skip";
-type RefineBarrierPolicy = "always" | "ifInFlight" | "skip";
-
-interface CommitPreparationPolicy {
-	initialRefineBarrier: RefineBarrierPolicy;
-	flushPendingBashBeforeValidation: boolean;
-	validateModelAndAuth: boolean;
-	awaitPendingModelSelection: boolean;
-	preTurnCompaction: PreTurnCompactionTiming;
-	finalRefineBarrier: RefineBarrierPolicy;
-}
-
 interface CommitPreparationSteps<TPrepared, TCommitted> {
 	afterValidation?: () => void;
 	prepare: () => Promise<TPrepared>;
@@ -747,14 +751,6 @@ interface CommitPreparationSteps<TPrepared, TCommitted> {
 
 type QueuedAgentMessage = UserMessage | CustomMessage;
 type SessionInputSchedule = "steer" | "followUp";
-
-export interface TurnExecutionPolicy {
-	preparation: CommitPreparationPolicy;
-	runBeforeAgentStart: boolean;
-	nextTurnContextTiming: "preparation" | "commit" | "skip";
-	preserveEmptyExtensionPrompt: boolean;
-	completionIncludesRetryChain: boolean;
-}
 
 function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecutionPolicy): boolean {
 	return (
@@ -771,24 +767,10 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 	);
 }
 
-interface PreparedTurnPayload extends SessionTurnPayload {
-	submitted?: NativeSubmittedInput;
-	selectedSkillRef?: NativeSkillSourceRef;
-	images?: ImageContent[];
-	content?: (TextContent | ImageContent)[];
-	customMessage?: CustomMessage;
+interface PreparedTurnPayload extends RecoverableTurnPayload {
 	prepared?: PreparedPromptPreparation;
-	executionPolicy: TurnExecutionPolicy;
-	queueVisible: boolean;
-	acceptedAgentMessage: boolean;
-	acceptedBeforeCompletion: boolean;
 	captureRunMessages?: Set<AgentMessage>;
 	cancelledDispatchEnded?: boolean;
-}
-
-interface PreparedCommandPayload extends SessionCommandPayload {
-	submitted?: NativeSubmittedInput;
-	images?: ImageContent[];
 }
 
 type QueuedSessionAction = SessionAction<PreparedTurnPayload | PreparedCommandPayload>;
@@ -835,57 +817,6 @@ interface RestoredPromptInput {
 	prefixMessages?: CustomMessage[];
 }
 
-export const SESSION_ACTION_RECOVERY_FORMAT_VERSION = 1;
-/** Only snapshots carrying the new native source binding require this current-format discriminator. */
-export const SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION = 2;
-
-export interface SessionActionRecoveryRecord {
-	id: string;
-	role: DeliveryRecord["role"];
-	message: QueuedAgentMessage;
-	ownerActionId: string;
-}
-
-export type SessionActionRecoveryPayload =
-	| {
-			kind: "turn";
-			submitted?: NativeSubmittedInput;
-			selectedSkillRef?: NativeSkillSourceRef;
-			text: string;
-			preview?: string;
-			records: SessionActionRecoveryRecord[];
-			images?: ImageContent[];
-			content?: (TextContent | ImageContent)[];
-			customMessage?: CustomMessage;
-			executionPolicy: TurnExecutionPolicy;
-			queueVisible: boolean;
-			acceptedAgentMessage: boolean;
-			acceptedBeforeCompletion: boolean;
-	  }
-	| {
-			kind: "session_command";
-			submitted?: NativeSubmittedInput;
-			text: string;
-			command: SessionSlashCommand;
-			images?: ImageContent[];
-	  };
-
-export interface SessionActionRecoveryAction {
-	id: string;
-	source: InputSource | "internal";
-	delivery: DeliveryPolicy;
-	wake: WakePolicy;
-	payload: SessionActionRecoveryPayload;
-	queueKey?: string;
-	agentMessageId?: string;
-	suppressAutonomousContinuation?: boolean;
-}
-
-export interface SessionActionRecoverySnapshot {
-	formatVersion: typeof SESSION_ACTION_RECOVERY_FORMAT_VERSION | typeof SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION;
-	actions: SessionActionRecoveryAction[];
-}
-
 type GoalOperationOrigin = Extract<NativeEntryOrigin, { kind: "goal_operation" }>;
 type GoalOriginContext = Pick<GoalOperationOrigin, "actor" | "actionId" | "submittedText"> & {
 	writer: NativeEntryWriter;
@@ -896,21 +827,6 @@ function captureSubmittedInput(
 	input: { content?: (TextContent | ImageContent)[]; images?: ImageContent[] } = {},
 ): NativeSubmittedInput {
 	return structuredClone({ text, content: input.content, images: input.images });
-}
-
-function cloneCustomMessage(message: CustomMessage): CustomMessage {
-	return {
-		...message,
-		content: Array.isArray(message.content) ? message.content.map((block) => ({ ...block })) : message.content,
-	};
-}
-
-function cloneQueuedAgentMessage(message: QueuedAgentMessage): QueuedAgentMessage {
-	if (message.role === "custom") return cloneCustomMessage(message);
-	return {
-		...message,
-		content: Array.isArray(message.content) ? message.content.map((block) => ({ ...block })) : message.content,
-	};
 }
 
 function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
@@ -6979,100 +6895,10 @@ export class AgentSession {
 	}
 
 	async restoreSessionActions(snapshot: SessionActionRecoverySnapshot): Promise<number> {
-		if (
-			(snapshot.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
-				snapshot.formatVersion !== SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION) ||
-			(snapshot.formatVersion === SESSION_ACTION_RECOVERY_FORMAT_VERSION &&
-				snapshot.actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef))
-		) {
-			throw new Error(`Unsupported session action recovery format version: ${snapshot.formatVersion}`);
-		}
-		const actionIds = new Set(this._actionStore.ownedActions().map((action) => action.id));
-		const actions = snapshot.actions.map((recovered): QueuedSessionAction => {
-			if (actionIds.has(recovered.id)) throw new Error(`Duplicate session action id: ${recovered.id}`);
-			actionIds.add(recovered.id);
-			if (
-				recovered.payload.kind === "turn" &&
-				recovered.payload.records.some((record) => record.ownerActionId !== recovered.id)
-			) {
-				throw new Error(`Session action ${recovered.id} has invalid delivery correlation`);
-			}
-			const payload: PreparedTurnPayload | PreparedCommandPayload =
-				recovered.payload.kind === "turn"
-					? {
-							kind: "turn",
-							text: recovered.payload.text,
-							...(recovered.payload.selectedSkillRef
-								? { selectedSkillRef: { ...recovered.payload.selectedSkillRef } }
-								: {}),
-							...(recovered.payload.submitted
-								? { submitted: structuredClone(recovered.payload.submitted) }
-								: {}),
-							...(recovered.payload.preview ? { preview: recovered.payload.preview } : {}),
-							records: recovered.payload.records.map((record) => ({
-								id: record.id,
-								role: record.role,
-								message: cloneQueuedAgentMessage(record.message),
-								started: false,
-								durable: false,
-								ownerActionId: record.ownerActionId,
-							})),
-							...(recovered.payload.images
-								? {
-										images: recovered.payload.images.map((image) => ({
-											...image,
-										})),
-									}
-								: {}),
-							...(recovered.payload.content
-								? {
-										content: recovered.payload.content.map((block) => ({
-											...block,
-										})),
-									}
-								: {}),
-							...(recovered.payload.customMessage
-								? {
-										customMessage: cloneCustomMessage(recovered.payload.customMessage),
-									}
-								: {}),
-							executionPolicy: {
-								...recovered.payload.executionPolicy,
-								preparation: {
-									...recovered.payload.executionPolicy.preparation,
-								},
-							},
-							queueVisible: recovered.payload.queueVisible,
-							acceptedAgentMessage: recovered.payload.acceptedAgentMessage,
-							acceptedBeforeCompletion: recovered.payload.acceptedBeforeCompletion,
-						}
-					: {
-							kind: "session_command",
-							text: recovered.payload.text,
-							...(recovered.payload.submitted
-								? { submitted: structuredClone(recovered.payload.submitted) }
-								: {}),
-							command: { ...recovered.payload.command },
-							...(recovered.payload.images
-								? {
-										images: recovered.payload.images.map((image) => ({
-											...image,
-										})),
-									}
-								: {}),
-						};
-			return {
-				id: recovered.id,
-				source: recovered.source,
-				delivery: recovered.delivery,
-				wake: recovered.wake,
-				payload,
-				lifecycle: { state: "queued" },
-				...(recovered.queueKey ? { queueKey: recovered.queueKey } : {}),
-				...(recovered.agentMessageId ? { agentMessageId: recovered.agentMessageId } : {}),
-				...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
-			};
-		});
+		const actions = restoreSessionActionRecovery(
+			snapshot,
+			this._actionStore.ownedActions().map((action) => action.id),
+		);
 		for (const action of actions) {
 			const durableTerminalNotice = this._isRlmTerminalNoticeAction(action);
 			if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.add(action.id);
@@ -8462,79 +8288,7 @@ export class AgentSession {
 	}
 
 	getSessionActionRecoverySnapshot(): SessionActionRecoverySnapshot {
-		const actions = this._actionStore.snapshotActions();
-		return {
-			formatVersion: actions.some((action) => action.payload.kind === "turn" && action.payload.selectedSkillRef)
-				? SESSION_ACTION_SKILL_RECOVERY_FORMAT_VERSION
-				: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
-			actions: actions.map((action) => ({
-				id: action.id,
-				source: action.source,
-				delivery: action.delivery,
-				wake: action.wake,
-				...(action.queueKey ? { queueKey: action.queueKey } : {}),
-				...(action.agentMessageId ? { agentMessageId: action.agentMessageId } : {}),
-				...(action.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
-				payload:
-					action.payload.kind === "turn"
-						? {
-								kind: "turn",
-								text: action.payload.text,
-								...(action.payload.selectedSkillRef
-									? { selectedSkillRef: { ...action.payload.selectedSkillRef } }
-									: {}),
-								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
-								...(action.payload.preview ? { preview: action.payload.preview } : {}),
-								records: action.payload.records.map((record) => ({
-									id: record.id,
-									role: record.role,
-									message: cloneQueuedAgentMessage(record.message),
-									ownerActionId: record.ownerActionId,
-								})),
-								...(action.payload.images
-									? {
-											images: action.payload.images.map((image) => ({
-												...image,
-											})),
-										}
-									: {}),
-								...(action.payload.content
-									? {
-											content: action.payload.content.map((block) => ({
-												...block,
-											})),
-										}
-									: {}),
-								...(action.payload.customMessage
-									? {
-											customMessage: cloneCustomMessage(action.payload.customMessage),
-										}
-									: {}),
-								executionPolicy: {
-									...action.payload.executionPolicy,
-									preparation: {
-										...action.payload.executionPolicy.preparation,
-									},
-								},
-								queueVisible: action.payload.queueVisible,
-								acceptedAgentMessage: action.payload.acceptedAgentMessage,
-								acceptedBeforeCompletion: action.payload.acceptedBeforeCompletion,
-							}
-						: {
-								kind: "session_command",
-								text: action.payload.text,
-								...(action.payload.submitted ? { submitted: structuredClone(action.payload.submitted) } : {}),
-								command: { ...action.payload.command },
-								...(action.payload.images
-									? {
-											images: action.payload.images.map((image) => ({
-												...image,
-											})),
-										}
-									: {}),
-							},
-			})),
-		};
+		return captureSessionActionRecovery(this._actionStore.snapshotActions());
 	}
 
 	private _notifySessionInputCheckpointChange(): void {
