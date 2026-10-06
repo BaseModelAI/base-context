@@ -11,7 +11,8 @@ describe("root-family subagent capacity", () => {
 		const harness = await createHarness({ rlmMaxDepth: 3 });
 		try {
 			expect(await harness.session.getRlmMaxSubagentsStatus()).toEqual({ maxSubagents: 4 });
-			harness.setResponses(Array.from({ length: 6 }, () => fauxAssistantMessage("done")));
+			// Each of four children can also trigger a separate parent terminal-notice turn.
+			harness.setResponses(Array.from({ length: 8 }, () => fauxAssistantMessage("done")));
 			const starts = await Promise.allSettled(
 				Array.from({ length: 5 }, (_, i) => harness.session.runRlmChild(`task ${i}`, { name: `worker-${i}` })),
 			);

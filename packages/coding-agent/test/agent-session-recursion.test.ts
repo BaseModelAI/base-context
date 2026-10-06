@@ -2462,7 +2462,12 @@ describe("AgentSession rlm recursion", () => {
 		const result = await root.runRlmChild("summarize shard 1");
 
 		expect(result.rlm_child_id).toMatch(/^sub-/);
-		await waitFor(() => respond.mock.calls.length >= 1);
+		// Spawning admits detached startup; join the child lifecycle before checking its result.
+		await root.waitForRlmQuiescence();
+		expect(respond).toHaveBeenCalled();
+		expect(root.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText()).toBe(
+			"child answer: summarize shard 1",
+		);
 	});
 
 	it("adds child usage to the parent session aggregate", async () => {

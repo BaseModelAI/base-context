@@ -94,19 +94,22 @@ describe("ENG-4620 fast mode child agents", () => {
 					expect(options?.serviceTier).toBe("priority");
 					return fauxAssistantMessage("child answer");
 				},
+				fauxAssistantMessage("child notice handled"),
 			]);
 
 			const result = await harness.session.runRlmChild("Check fast mode");
 			expect(result.rlm_child_id).toMatch(/^sub-/);
-			await vi.waitFor(() => {
-				expect(harness.session.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText()).toBe(
-					"child answer",
-				);
-			});
+			// Live text can precede the child's native source/catalog writes.
+			await harness.session.waitForRlmQuiescence();
+			expect(harness.session.getRlmChildSession(result.rlm_child_id)?.getLastAssistantText()).toBe("child answer");
 			expect(result.session_dir).not.toBeNull();
 			const childSessions = await SessionManager.list(harness.tempDir, result.session_dir!);
 			const childSession = await SessionManager.openReadOnly(childSessions[0]!.path, result.session_dir!);
-			expect(childSession.buildSessionContext().serviceTier).toBe("priority");
+			try {
+				expect(childSession.buildSessionContext().serviceTier).toBe("priority");
+			} finally {
+				await childSession.close();
+			}
 		} finally {
 			await harness.cleanup();
 		}

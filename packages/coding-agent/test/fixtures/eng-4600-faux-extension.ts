@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import type { ExtensionAPI } from "../../src/index.js";
 
 export default function registerEng4600FauxProvider(pi: ExtensionAPI): void {
@@ -6,7 +6,16 @@ export default function registerEng4600FauxProvider(pi: ExtensionAPI): void {
 		provider: "faux",
 		models: [{ id: "faux", reasoning: false }],
 	});
-	faux.setResponses(Array.from({ length: 16 }, (_, index) => fauxAssistantMessage(`upgrade response ${index + 1}`)));
+	let turnCount = 0;
+	const respond: FauxResponseFactory = (_context, options) => {
+		faux.appendResponses([respond]);
+		// Background status requests share this provider but are not conversation turns.
+		if (options?.sessionId?.startsWith("daemon-status:")) {
+			return fauxAssistantMessage("<recap>Completed upgrade fixture turn</recap><status>COMPLETED</status>");
+		}
+		return fauxAssistantMessage(`upgrade response ${++turnCount}`);
+	};
+	faux.setResponses([respond]);
 	pi.registerProvider(faux.getModel().provider, {
 		api: faux.api,
 		apiKey: "faux-key",
