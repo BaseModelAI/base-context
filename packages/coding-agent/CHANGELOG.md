@@ -12,6 +12,9 @@
 - Fixed SDK examples to use their selected model and corrected subagent Bash setup, inherited worker identity, and configuration paths.
 - Added local-only release preparation without reinstalling dependencies, tagging, publication, or pushes.
 - Added offline workflow coverage for retained Python state, exact historical recovery, and concurrent parent/child reporting, and preserved configured Python runtimes in the test runner.
+- Fixed observe-mode request budgets rejecting over-budget requests, required tool continuations, and compatible saved sessions restored without a matching profile.
+- Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication. Required the complete offline CI suites before release packaging.
+- Separated goal state, accounting, and persistence from session scheduling while preserving goal control and continuation ownership.
 
 ## [1.1.1] - 2026-10-05
 
