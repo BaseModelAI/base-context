@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { credentialTests } from "../../scripts/test-suites.mjs";
 
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
@@ -12,6 +13,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		exclude: [...configDefaults.exclude, ...(process.env.BASE_CONTEXT_CREDENTIAL_TESTS === "1" ? [] : credentialTests["coding-agent"])],
 		tags: [
 			{
 				name: "process-stress",

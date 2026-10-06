@@ -161,19 +161,26 @@ describe("AgentSession session_before_refine extension hook", () => {
 					if (control?.entry.type !== "compaction") throw new Error("Missing epoch control");
 					expect(control.source.qualification).toBe("native-context-epoch");
 					const checkpoint = readContextEpoch(control.entry.details, 2 * 1024 * 1024)!;
-					const snapshots = (await harness.sessionManager.readEntries()).filter(
+					const entries = await harness.sessionManager.readEntries();
+					const request = entries
+						.flatMap((entry) =>
+							entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+						)
+						.at(-1)!;
+					expect(request.contextEpoch).toEqual({
+						sessionId: harness.sessionManager.getSessionId(),
+						entryId: control.entry.id,
+					});
+					const snapshots = entries.filter(
 						(entry) => entry.type === "custom_message" && entry.customType === HARNESS_SNAPSHOT_CUSTOM_TYPE,
 					);
 					const snapshot = snapshots.at(-1)!;
 					if (snapshot.type !== "custom_message") throw new Error("Missing canonical advice");
 					latestSnapshots.push(String(snapshot.content));
-					expect(checkpoint.source.sourceSequence).toBeGreaterThanOrEqual(
-						(await history.get(snapshot.id))!.sequence,
-					);
-					expect(
-						checkpoint.literalTailId === snapshot.id ||
-							checkpoint.views.some((view) => view.ref.entryId === snapshot.id),
-					).toBe(true);
+					// A stable epoch can be reused while newer advice joins its admitted literal tail.
+					expect(request.source.sourceSequence).toBeGreaterThanOrEqual((await history.get(snapshot.id))!.sequence);
+					expect(request.source.sourceSequence).toBeGreaterThanOrEqual(checkpoint.source.sourceSequence);
+					expect(JSON.stringify(body.input)).toContain(JSON.stringify(snapshot.content));
 				})
 				.catch((error) => {
 					transportErrors.push(error);

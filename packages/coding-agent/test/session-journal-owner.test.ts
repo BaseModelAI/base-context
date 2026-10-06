@@ -87,7 +87,7 @@ describe("session journal owner process", () => {
 
 	it("creates without clobbering, excludes aliases, transports multi-MB JSON, drains close, and hands off ownership", async () => {
 		expect(SESSION_JOURNAL_MAX_RECORD_BYTES).toBe(64 * 1024 * 1024);
-		expect(SESSION_JOURNAL_MAX_FRAME_BYTES).toBe(SESSION_JOURNAL_MAX_RECORD_BYTES + 256);
+		expect(SESSION_JOURNAL_MAX_FRAME_BYTES).toBe(SESSION_JOURNAL_MAX_RECORD_BYTES + 320);
 		await expect(open()).rejects.toThrow();
 		expect(existsSync(journalPath)).toBe(false);
 		await expect(SessionJournalOwner.remove({ journalPath, nodeExecutable })).resolves.toMatchObject({ ok: true });

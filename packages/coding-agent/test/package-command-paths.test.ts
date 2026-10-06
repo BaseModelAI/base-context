@@ -341,7 +341,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		}
 	});
 
-	it("installs the active package name from the update check during self-update", async () => {
+	it("refuses another package name from the update check during self-update", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
 		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@mariozechner", "pi-coding-agent");
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
@@ -379,26 +379,25 @@ else {
 		try {
 			await expect(runSelfUpdateInstallChild(["update", "--self"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
-			expect(errorSpy).not.toHaveBeenCalled();
-			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-				expect.arrayContaining(["install", "-g", activePackageName]),
-			]);
+			expect(process.exitCode).toBe(1);
+			expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+				"release lookup is unavailable; self-update was not attempted.",
+			);
+			expect(existsSync(recordPath)).toBe(false);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("installs the Prime Agent tarball from the update manifest during self-update", async () => {
+	it("installs the Base Context tarball from the update manifest during self-update", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", ...PACKAGE_NAME.split("/"));
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
-		const baseUrl = "https://downloads.example.test/prime-agent";
-		const tarballPath = "releases/v0.73.0/prime-agent-0.73.0.tgz";
+		const baseUrl = "https://downloads.example.test/base-context";
+		const nextVersion = getNewerPatchVersion();
+		const tarballPath = `releases/v${nextVersion}/base-context-${nextVersion}.tgz`;
 		mkdirSync(selfPackageDir, { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
@@ -423,7 +422,7 @@ else {
 		});
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ package: "prime-agent", tarball: tarballPath, version: "0.73.0" })),
+			vi.fn(async () => Response.json({ package: PACKAGE_NAME, tarball: tarballPath, version: nextVersion })),
 		);
 
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -435,22 +434,19 @@ else {
 			expect(process.exitCode).toBeUndefined();
 			expect(errorSpy).not.toHaveBeenCalled();
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
-			expect(recordedCalls).toEqual([
-				expect.arrayContaining(["install", "-g", `${baseUrl}/${tarballPath}`]),
-				expect.arrayContaining(["uninstall", "-g", PACKAGE_NAME]),
-			]);
+			expect(recordedCalls).toEqual([expect.arrayContaining(["install", "-g", `${baseUrl}/${tarballPath}`])]);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
 		}
 	});
 
-	it("does not self-update when the same-version manifest uses the Prime Agent package alias", async () => {
+	it("does not self-update when the same-version manifest declares the current package name", async () => {
 		const globalPrefix = join(tempDir, "global-prefix");
-		const selfPackageDir = join(globalPrefix, "lib", "node_modules", "@earendil-works", "pi-coding-agent");
+		const selfPackageDir = join(globalPrefix, "lib", "node_modules", ...PACKAGE_NAME.split("/"));
 		const fakeNpmPath = join(tempDir, "fake-npm.cjs");
 		const recordPath = join(tempDir, "self-update.json");
-		const baseUrl = "https://downloads.example.test/prime-agent";
+		const baseUrl = "https://downloads.example.test/base-context";
 		mkdirSync(selfPackageDir, { recursive: true });
 		writeFileSync(
 			fakeNpmPath,
@@ -473,8 +469,8 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 			"fetch",
 			vi.fn(async () =>
 				Response.json({
-					package: "prime-agent",
-					tarball: "releases/current/prime-agent.tgz",
+					package: PACKAGE_NAME,
+					tarball: "releases/current/base-context.tgz",
 					version: VERSION,
 				}),
 			),

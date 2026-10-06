@@ -2,6 +2,7 @@ import type { Model } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
+import { buildSessionContext } from "../../../src/core/session-manager.js";
 import { createTestResourceLoader } from "../../utilities.js";
 import { createHarness, type Harness } from "../harness.js";
 
@@ -50,6 +51,11 @@ describe("ENG-4620 fast mode empty resume", () => {
 		sessions.push(resumedSession);
 
 		expect(resumedSession.serviceTier).toBe("priority");
-		expect(resumedSession.sessionManager.buildSessionContext().serviceTier).toBe("priority");
+		expect(
+			buildSessionContext(
+				await resumedSession.sessionManager.readBranch(),
+				resumedSession.sessionManager.getLeafId(),
+			).serviceTier,
+		).toBe("priority");
 	});
 });

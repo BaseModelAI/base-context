@@ -4,11 +4,16 @@
 
 An open-source coding and research agent with a persistent Python workspace, parallel workers, and source-backed context. Built by [Synerise](https://synerise.com), on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-## Same 60/60 success. 31% less time. 19% lower estimated API cost.
+## Keep useful state between turns
 
-[![Base Context versus Codex: both pass all 60 task/profile pairs; Base Context has 31% shorter mean selected-run time and 19% lower selected captured API-cost estimate.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.svg)](benchmarks/python-realworld-30/README.md)
+- **One Python workspace:** keep parsed data, variables, and command handles instead of rebuilding them on each turn. Run project commands in the project's own environment.
+- **Retained output:** keep long results outside the prompt and recover a needed passage by reference or search.
+- **Earlier instructions:** a small TaskFrame carries selected user instructions and goal state through compaction, without repeating user text already visible in the request.
+- **Independent workers:** delegate separate tasks and keep working while their replies arrive.
 
-**30 Python tasks × 2 profiles:** GPT-6.1 Sol **high** and GPT-6 Astra **medium**. Base Context **1.1.1** versus Codex **0.160.0**, using selected best-of-two runs. Time is mean task-run duration; cost is the estimated API cost of captured usage. [Results and method →](benchmarks/python-realworld-30/README.md)
+These are available in normal sessions. **Request-budget selection is opt-in**, through an explicit route/model profile in settings or the SDK. See the [working configuration](packages/coding-agent/docs/request-token-budgets.md). No single context policy supports every provider payload.
+
+New here? Follow the [ten-minute workflow](packages/coding-agent/docs/quickstart.md).
 
 **On this page:** [Install](#install) · [Work with it](#work-with-it) · [Benchmarks](#benchmarks) · [How it works](#how-it-works) · [Documentation](#documentation) · [License and thanks](#license-and-thanks)
 
@@ -96,6 +101,10 @@ Normal interactive sessions keep running after the terminal detaches. Save impor
 
 ## Benchmarks
 
+**Historical comparison: Base Context 1.1.1 versus Codex 0.160.0.** On 30 Python tasks × two profiles (GPT-6.1 Sol high and GPT-6 Astra medium), selected best-of-two runs passed 60/60 for both tools. Base had 31% shorter mean selected-run time and a 19% lower captured API-cost estimate in this sample.
+
+[![Historical Base 1.1.1 versus Codex 0.160.0 selected best-of-two results.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.svg)](benchmarks/python-realworld-30/README.md)
+
 [![Results by profile for GPT-6.1 Sol high and GPT-6 Astra medium: task passes, selected captured API-cost estimates, and mean selected-run times for Base Context and Codex.](packages/coding-agent/docs/images/benchmarks/benchmark-models.svg)](benchmarks/python-realworld-30/README.md)
 
 | Across the 60 task/profile pairs | Base Context 1.1.1 | Codex 0.160.0 |
@@ -106,7 +115,9 @@ Normal interactive sessions keep running after the terminal detaches. Save impor
 | Lower estimated cost, paired tasks | **55/60** | 5/60 |
 | Shorter duration, paired tasks | **55/60** | 5/60 |
 
-**Method in brief:** the same 30 tasks, two matched model/effort profiles, the same task checks, and best-of-two selection for both tools. Each tool uses its native instructions, tools, and context management. The linked methodology gives the run settings and selection rules behind these results.
+**Scope and limits:** these are self-authored standard-library tasks, with a ceiling effect at 60/60 selected passes. Best-of-two selection is not single-attempt reliability. Runs used different dates and concurrency limits (Base 24, Codex 12); tools and native instructions also differed. Costs are captured-usage API estimates, not subscription invoices or complete campaign spend.
+
+**The benchmark did not enable request-budget selection.** It does not show that selection caused savings, measure the changes in the current source, or establish long-session and delegation quality. The published tasks, checks, data, and selection method remain available for inspection.
 
 [Per-task chart](packages/coding-agent/docs/images/benchmarks/benchmark-task-pairs.svg) · [Selection rules, execution settings, and full results](benchmarks/python-realworld-30/README.md).
 
@@ -119,7 +130,7 @@ Normal interactive sessions keep running after the terminal detaches. Save impor
 ### Three ideas, one workflow
 
 - **Program, rather than repeat.** The Python kernel keeps variables, parsed data, and command handles across tool calls. The agent uses each project's own environment for its commands. Skills expose reusable Python functions instead of requiring a separate model tool for every operation.
-- **Select context, retain evidence.** A **TaskFrame** carries selected goals, constraints, and open work. Dependency-aware **ViewUnits** keep required calls and results together. Indexed history recovery retrieves bounded source text; **context epochs** keep accepted context choices stable.
+- **Keep instructions and recover details.** A **TaskFrame** carries selected earlier user text and goal state. History recovery retrieves bounded original text. With an explicit budget profile, dependency-aware **ViewUnits** and **context epochs** support stable request selections; they are not an always-on default CLI optimizer.
 - **Delegate without losing the thread.** `await rlm(...)` admits a child and returns a handle, not its answer. Workers run independently. Messages and retained reports bring their findings back; the parent can continue unrelated work meanwhile.
 
 The TypeScript host owns model calls, sessions, goals, scheduling, and child lifecycles. Python is the agent's control environment, not a second agent engine. Recognized transient provider errors can recover within the same invocation without replaying completed tools, subject to cancellation and configured limits.

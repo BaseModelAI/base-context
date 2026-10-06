@@ -12,7 +12,12 @@ import {
 	shutdownDaemonAndWait,
 } from "../src/cli/daemon-launch.js";
 import { ENV_AGENT_DIR, getDaemonLogPath, VERSION } from "../src/config.js";
-import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	DAEMON_DEFAULT_SERVER_CAPABILITIES,
+	DAEMON_PROTOCOL_VERSION,
+	DAEMON_SCHEMA_ID,
+	DAEMON_SCHEMA_REVISION,
+} from "../src/modes/daemon/daemon-protocol.js";
 
 interface FakeDaemonOptions {
 	/** Sessions returned for a `list` command. */
@@ -60,7 +65,8 @@ async function startFakeDaemon(options: FakeDaemonOptions = {}): Promise<FakeDae
 						? options.firstSchemaId
 						: (options.schemaId ?? DAEMON_SCHEMA_ID),
 				clientId: "fake-client",
-				serverCapabilities: options.serverCapabilities ?? [],
+				serverCapabilities: options.serverCapabilities ?? DAEMON_DEFAULT_SERVER_CAPABILITIES,
+				schemaRevision: DAEMON_SCHEMA_REVISION,
 			});
 		}
 		let buffer = "";

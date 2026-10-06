@@ -13,7 +13,7 @@ Edit directly or use `/settings` for common options. `BASE_CONTEXT_HOME` overrid
 
 Use [providers](providers.md) for credentials, [models](models.md) for custom model definitions, and [usage](usage.md#environment-variables) for environment overrides. Project settings override global settings, except where a setting is explicitly global-only. Arrays replace rather than merge with global arrays.
 
-The sections below cover user-facing settings. Onboarding flags, recent-model history, and disclosure markers are maintained by the application. SDK request-token profiles are configured separately; see [context management](context-management.md#model-aware-budgets).
+The sections below cover user-facing settings. Onboarding flags, recent-model history, and disclosure markers are maintained by the application. Request-token profiles can be set here or through the SDK; see the [working request-budget example](request-token-budgets.md).
 
 ## Settings reference
 
@@ -156,6 +156,12 @@ profile, widen support or bypass limits. Extension-provided summaries and generi
 standalone calls retain their own behavior. Selecting a model does not schedule
 extra calls or enable context optimization when it is off.
 
+### Request token budgets
+
+`requestTokenBudget` is optional. When present, it configures request measurement and enables supported budget-aware context epochs. Use `mode: "observe"` to measure without budget-driven omission or refusal, or `mode: "enforce"` to select supported optional context and reject unknown or over-budget requests. Required user text and tool dependencies are not discarded to make a request fit.
+
+The `profiles` array must cover each exact API/provider/endpoint/model used, including auxiliary summary or learning models. Profiles are captured at session creation; explicit SDK options override settings. See [the complete CLI/settings example and profile field guide](request-token-budgets.md). This is separate from compaction thresholds and goal token accounting.
+
 ### Canonical Context Resources
 
 Persistent sessions reconstruct inference context from the captured canonical source.
@@ -227,7 +233,7 @@ profile, enable a new provider capability or establish deployment availability.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `retry.enabled` | boolean | `true` | Recover concrete transient provider failures while the operation remains authorized |
-| `retry.maxRetries` | number | `3` | Legacy setting; does not limit native transient-provider recovery |
+| `retry.maxRetries` | non-negative integer | Unlimited when absent | Native retries after the initial send; `0` disables retries, `3` permits up to four sends per retry cycle |
 | `retry.baseDelayMs` | number | `2000` | Base delay for capped native exponential backoff (2s, 4s, 8s, ...) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
 | `retry.provider.maxRetries` | number | SDK default | Provider/SDK retry attempts |
@@ -236,9 +242,12 @@ profile, enable a new provider capability or establish deployment availability.
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
 Native recovery uses concrete transport, overload, rate-limit, or server-error metadata,
-not error-message wording. It has no outage retry-count cutoff. Its backoff uses the
-positive `retry.provider.maxRetryDelayMs` ceiling, or 60 seconds when that setting is
-zero. Cancellation, disabled recovery, permanent/unknown failures, and existing
+not error-message wording. Explicit `retry.maxRetries` limits each recovery cycle; a new
+prompt or auxiliary invocation gets a fresh allowance. With the field absent, retries
+remain unlimited until success or cancellation. Its backoff uses the positive
+`retry.provider.maxRetryDelayMs` ceiling, or 60 seconds when that setting is zero.
+Provider/SDK retries are a separate layer; set `retry.provider.maxRetries: 0` when you
+want only native retries, as in the example below. Cancellation, disabled recovery, permanent/unknown failures, and existing
 request/output/auxiliary budgets still stop the operation. Failed output and physical
 attempts remain accounted for. A failed request resumes in the same Agent invocation;
 completed tools are not replayed. Owned summaries, refinement calls, and side questions

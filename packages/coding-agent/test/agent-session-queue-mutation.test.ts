@@ -5,13 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@ponythewhite/base-context-agent";
 import {
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
-	getModel,
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
 	type ImageContent,
+	registerFauxProvider,
 } from "@ponythewhite/base-context-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -20,37 +19,10 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
-	constructor() {
-		super(
-			(event) => event.type === "done" || event.type === "error",
-			(event) => {
-				if (event.type === "done") return event.message;
-				if (event.type === "error") return event.error;
-				throw new Error("Unexpected event type");
-			},
-		);
-	}
-}
-
-const zeroUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-
-function createAssistantMessage(text: string): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "mock",
-		usage: { ...zeroUsage, totalTokens: 0, cost: zeroUsage },
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
-}
-
 describe("AgentSession queue mutation", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	let faux: FauxProviderRegistration;
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-queue-mutation-test-${Date.now()}-${Math.random()}`);
@@ -58,26 +30,24 @@ describe("AgentSession queue mutation", () => {
 	});
 
 	afterEach(async () => {
-		if (session) session.dispose();
+		if (session) await session.disposeAsync();
+		faux?.unregister();
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true });
 	});
 
 	function createSession() {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: "Test", tools: [] },
-			streamFn: (_model, _context, options) => {
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => stream.push({ type: "start", partial: createAssistantMessage("") }));
-				options?.signal?.addEventListener("abort", () =>
-					stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
-				);
-				return stream;
-			},
-		});
+		faux = registerFauxProvider();
+		faux.setResponses([
+			(_context, options) =>
+				new Promise((resolve) => {
+					options?.signal?.addEventListener("abort", () => resolve(fauxAssistantMessage("Aborted")), {
+						once: true,
+					});
+				}),
+		]);
+		const agent = new Agent({ initialState: { model: faux.getModel(), systemPrompt: "Test", tools: [] } });
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -92,7 +62,7 @@ describe("AgentSession queue mutation", () => {
 	/** Start a never-finishing turn so later submissions stay queued; returns the prompt promise. */
 	async function blockSession(): Promise<{ running: Promise<void> }> {
 		const running = session.prompt("running");
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await vi.waitFor(() => expect(faux.state.callCount).toBe(1));
 		return { running };
 	}
 

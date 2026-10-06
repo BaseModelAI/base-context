@@ -1,0 +1,28 @@
+{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-4.1",
+  "requestTokenBudget": {
+    "mode": "enforce",
+    "profiles": [
+      {
+        "id": "openai-gpt-4.1",
+        "revision": "1",
+        "api": "openai-responses",
+        "provider": "openai",
+        "url": "https://api.openai.com/v1/responses",
+        "model": "gpt-4.1",
+        "authMode": "api-key",
+        "templateRevision": "responses-v1",
+        "replayFamily": "openai-responses",
+        "contextTokens": 1047576,
+        "outputCeilingTokens": 32768,
+        "estimate": {
+          "tokensPerUtf8Byte": 1,
+          "tokenizer": "o200k_base",
+          "templateTokens": 1024,
+          "marginTokens": 4096
+        }
+      }
+    ]
+  }
+}

@@ -1,15 +1,16 @@
 # Extension Examples
 
-Example extensions for Prime Agent.
+Example extensions for Base Context.
 
 ## Usage
 
 ```bash
 # From the repository root, load an extension with --extension
-./prime-agent.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
+./base-context.sh --extension packages/coding-agent/examples/extensions/permission-gate.ts
 
 # Or copy to extensions directory for auto-discovery
-cp permission-gate.ts ~/.prime/agent/extensions/
+mkdir -p ~/.base-context/extensions
+cp packages/coding-agent/examples/extensions/permission-gate.ts ~/.base-context/extensions/
 ```
 
 ## Examples
@@ -96,7 +97,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `mac-system-theme.ts` | Syncs the Prime Agent theme with macOS dark/light mode |
+| `mac-system-theme.ts` | Syncs the Base Context theme with macOS dark/light mode |
 
 ### Resources
 
@@ -123,7 +124,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
-| `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@earendil-works/pi-ai` streaming API through a proxy |
+| `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@ponythewhite/base-context-ai` streaming API through a proxy |
 
 ### External Dependencies
 
@@ -137,7 +138,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 
 ```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@ponythewhite/base-context";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -157,7 +158,7 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({
       name: Type.String({ description: "Name to greet" }),
     }),
-    async execute(toolCallId, params, onUpdate, ctx, signal) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       return {
         content: [{ type: "text", text: `Hello, ${params.name}!` }],
         details: {},
@@ -179,7 +180,7 @@ export default function (pi: ExtensionAPI) {
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
 ```typescript
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum } from "@ponythewhite/base-context-ai";
 
 // Good
 action: StringEnum(["list", "add"] as const)

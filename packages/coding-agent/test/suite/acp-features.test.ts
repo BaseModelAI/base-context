@@ -645,7 +645,16 @@ describe("ACP mode preserves prime-agent features", () => {
 	}, 30_000);
 
 	it("does not let an earlier failed turn reject a later one", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("noop", {
+						description: "Handle a command without a model turn",
+						handler: async () => {},
+					});
+				},
+			],
+		});
 		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "Connection error." })]);
 		const fixture = await connectAcp(harness);
 
@@ -662,7 +671,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		// turn's error and wrongly reject this one.
 		const second = await fixture.agent.request("session/prompt", {
 			sessionId: fixture.sessionId,
-			prompt: [{ type: "text", text: "/compact" }],
+			prompt: [{ type: "text", text: "/noop" }],
 		});
 		expect(second.stopReason).toBe("end_turn");
 		await harness.cleanup();
@@ -718,7 +727,16 @@ describe("ACP mode preserves prime-agent features", () => {
 	}, 30_000);
 
 	it("does not mistake a rebuilt copy of an earlier failure for this turn's failure", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("noop", {
+						description: "Handle a command without a model turn",
+						handler: async () => {},
+					});
+				},
+			],
+		});
 		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "Connection error." })]);
 		let rebuiltIdentities = false;
 		const { connection, arm } = withMidTurnRebuild(harness, (messages) => {
@@ -741,7 +759,7 @@ describe("ACP mode preserves prime-agent features", () => {
 		arm();
 		const handled = await fixture.agent.request("session/prompt", {
 			sessionId: fixture.sessionId,
-			prompt: [{ type: "text", text: "/compact" }],
+			prompt: [{ type: "text", text: "/noop" }],
 		});
 		expect(handled.stopReason).toBe("end_turn");
 		expect(rebuiltIdentities, "the rebuild must replace the message objects").toBe(true);

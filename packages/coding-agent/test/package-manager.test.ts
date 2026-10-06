@@ -706,11 +706,12 @@ Content`,
 		it("should emit progress events on install attempt", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
+			const commands = packageManager as unknown as { runCommand(command: string, args: string[]): Promise<void> };
+			const runCommand = vi.spyOn(commands, "runCommand").mockRejectedValue(new Error("Install failed"));
 
-			try {
-				await packageManager.install("npm:nonexistent-package@1.0.0");
-			} catch {}
+			await expect(packageManager.install("npm:nonexistent-package@1.0.0")).rejects.toThrow("Install failed");
 
+			expect(runCommand).toHaveBeenCalledWith("npm", ["install", "-g", "nonexistent-package@1.0.0"], undefined);
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 			expect(events.some((e) => e.type === "error")).toBe(true);
 		});
@@ -718,21 +719,16 @@ Content`,
 		it("should recognize github URLs without git: prefix", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
-			const previousGitTerminalPrompt = process.env.GIT_TERMINAL_PROMPT;
-			process.env.GIT_TERMINAL_PROMPT = "0";
+			const commands = packageManager as unknown as { runCommand(command: string, args: string[]): Promise<void> };
+			const runCommand = vi.spyOn(commands, "runCommand").mockResolvedValue(undefined);
 
-			try {
-				try {
-					await packageManager.install("https://github.com/nonexistent/repo");
-				} catch {}
-			} finally {
-				if (previousGitTerminalPrompt === undefined) {
-					delete process.env.GIT_TERMINAL_PROMPT;
-				} else {
-					process.env.GIT_TERMINAL_PROMPT = previousGitTerminalPrompt;
-				}
-			}
+			await packageManager.install("https://github.com/nonexistent/repo");
 
+			expect(runCommand).toHaveBeenCalledWith("git", [
+				"clone",
+				"https://github.com/nonexistent/repo",
+				join(agentDir, "git", "github.com", "nonexistent", "repo"),
+			]);
 			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
 		});
 

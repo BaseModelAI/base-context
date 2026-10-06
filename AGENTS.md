@@ -75,29 +75,29 @@ When closing issues via commit:
 - If the user approves: create a feature branch, pull PR, rebase on main, apply adjustments, commit, merge into main, push, close PR, and leave a comment in the user's tone
 - We work in feature branches until everything is according to the user's requirements. Never merge PRs by yourself.
 
-## Testing Prime Agent Interactive Mode with tmux
+## Testing Base Context Interactive Mode with tmux
 
-To test Prime Agent's TUI in a controlled terminal environment:
+To test Base Context's TUI in a controlled terminal environment:
 
 ```bash
 # Create tmux session with specific dimensions
-tmux new-session -d -s prime-agent-test -x 80 -y 24
+tmux new-session -d -s base-context-test -c "$PWD" -x 80 -y 24
 
-# Start Prime Agent from source
-tmux send-keys -t prime-agent-test "cd /Users/kevin/pi/prime-agent && ./prime-agent.sh" Enter
+# Start Base Context from the repository root
+tmux send-keys -t base-context-test "./base-context.sh" Enter
 
 # Wait for startup, then capture output
-sleep 3 && tmux capture-pane -t prime-agent-test -p
+sleep 3 && tmux capture-pane -t base-context-test -p
 
 # Send input
-tmux send-keys -t prime-agent-test "your prompt here" Enter
+tmux send-keys -t base-context-test "your prompt here" Enter
 
 # Send special keys
-tmux send-keys -t prime-agent-test Escape
-tmux send-keys -t prime-agent-test C-o  # ctrl+o
+tmux send-keys -t base-context-test Escape
+tmux send-keys -t base-context-test C-o  # ctrl+o
 
 # Cleanup
-tmux kill-session -t prime-agent-test
+tmux kill-session -t base-context-test
 ```
 
 You, yourself, are often running into a tmux session, so be careful when killing tmux sessions. Lots of other processes can be running on different tmux sessions/
@@ -124,8 +124,8 @@ Example fragment (`packages/coding-agent/.changes/eng-1234-effort-command.md`):
 
 ### Attribution
 
-- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/PrimeIntellect-ai/prime-agent/issues/123))`
-- **External contributions**: `Added feature X ([#456](https://github.com/PrimeIntellect-ai/prime-agent/pull/456) by [@username](https://github.com/username))`
+- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/BaseModelAI/base-context/issues/123))`
+- **External contributions**: `Added feature X ([#456](https://github.com/BaseModelAI/base-context/pull/456) by [@username](https://github.com/username))`
 
 ## Adding a New LLM Provider (packages/ai)
 

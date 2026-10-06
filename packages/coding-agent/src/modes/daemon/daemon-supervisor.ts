@@ -3282,6 +3282,8 @@ export class DaemonSupervisor {
 	 * caller launch a fresh worker for the saved session.
 	 */
 	private async reclaimStaleWorkerRegistration(worker: ResidentWorker, freshCreate = false): Promise<boolean> {
+		// Adoption may finish by parking a dead worker; decide reuse only after that transition settles.
+		if (worker.recovery) await worker.recovery;
 		if (worker.client !== undefined || worker.recovery !== undefined) {
 			return false;
 		}

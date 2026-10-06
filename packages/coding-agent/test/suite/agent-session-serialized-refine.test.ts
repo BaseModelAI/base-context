@@ -263,7 +263,7 @@ describe("Serialized auto-refine checkpoint", () => {
 
 		await internals._runSerializedRefineCheckpoint();
 
-		// _applyRefine was called (which rebuilds system prompt).
+		// _applyRefine was called (persisting the updated harness advice).
 		expect(applyRefine).toHaveBeenCalledTimes(1);
 		expect(internals._assistantTurnsSinceAutoRefine).toBe(0);
 	});
@@ -1909,10 +1909,10 @@ describe("P0 concurrency regressions", () => {
 		expect(applySpy).not.toHaveBeenCalled();
 	});
 
-	it("non-mocked apply pipeline: harness state persisted, prompt rebuilt, refine_complete emitted", async () => {
+	it("non-mocked apply pipeline: harness state persisted, prompt stable, refine_complete emitted", async () => {
 		// This test does NOT mock _applyRefine. It uses a faux planRefine
 		// mock but lets the real _applyRefine run, which calls
-		// applyRefinementProposal, saveHarnessState, _rebuildSystemPrompt,
+		// applyRefinementProposal, saveHarnessState,
 		// and emits refine_complete.
 		const reviewer = vi.fn(async () => ({
 			shouldRefine: true,
@@ -1966,7 +1966,8 @@ describe("P0 concurrency regressions", () => {
 			return fauxPlan as never;
 		});
 
-		// Spy on _rebuildSystemPrompt (call-through) to assert it was invoked.
+		// Refinement updates advice without rebuilding the immutable system prefix.
+		const initialPrompt = harness.session.agent.state.systemPrompt;
 		const rebuildSpy = vi.spyOn(
 			harness.session as unknown as { _rebuildSystemPrompt: (tools: string[]) => string },
 			"_rebuildSystemPrompt",
@@ -1989,8 +1990,8 @@ describe("P0 concurrency regressions", () => {
 		await refinement;
 		await modeChange;
 
-		// _rebuildSystemPrompt was called by _applyRefine.
-		expect(rebuildSpy).toHaveBeenCalledTimes(1);
+		expect(rebuildSpy).not.toHaveBeenCalled();
+		expect(harness.session.agent.state.systemPrompt).toBe(initialPrompt);
 
 		// Harness state persisted to disk.
 		const localDir = (await import("../../src/core/refinement/index.js")).getLocalHarnessStateDir(
@@ -2011,13 +2012,18 @@ describe("P0 concurrency regressions", () => {
 
 		expect(harness.session.contextMode).toBe("off");
 		const acceptedPrompt = harness.session.agent.state.systemPrompt;
-		harness.setResponses([fauxAssistantMessage("ordinary off-mode response")]);
+		harness.setResponses([
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain("Added during non-mocked apply pipeline test");
+				return fauxAssistantMessage("ordinary off-mode response");
+			},
+		]);
 		await harness.session.prompt("Continue without optimization.");
 		expect(reviewer).not.toHaveBeenCalled();
 		expect(planSpy).toHaveBeenCalledTimes(1);
 		// The first MAIN after the off checkpoint captures its existing native skill policy;
-		// this second rebuild is not another refinement and leaves the prompt text unchanged.
-		expect(rebuildSpy).toHaveBeenCalledTimes(2);
+		// this policy rebuild is not another refinement and leaves the prompt text unchanged.
+		expect(rebuildSpy).toHaveBeenCalledTimes(1);
 		expect(rebuildSpy).toHaveBeenLastCalledWith(harness.session.getActiveToolNames(), true);
 		expect(harness.session.agent.state.systemPrompt).toBe(acceptedPrompt);
 		await expect(harness.session.refine()).rejects.toThrow("explicitly re-enable context.mode");

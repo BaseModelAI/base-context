@@ -1390,9 +1390,6 @@ export class AgentDaemon {
 			childrenByParent.set(parentPath, siblings);
 		}
 		const legacyRegistryCache = new Map<string, Promise<LegacyRlmSubagentRegistryEntry[]>>();
-		const residentByPath = new Map(
-			residentRoots.map(({ parentState, sessionFile }) => [canonicalSessionPath(sessionFile), parentState]),
-		);
 		const peersByPath = new Map(
 			peers.flatMap((peer) => (peer.sessionPath ? [[canonicalSessionPath(peer.sessionPath), peer] as const] : [])),
 		);
@@ -1413,7 +1410,8 @@ export class AgentDaemon {
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
 				const canonicalPath = canonicalSessionPath(entry.sessionFile);
-				const resident = this.findSessionBySessionFile(entry.sessionFile) ?? residentByPath.get(canonicalPath);
+				// The catalog reads above can outlive passivation; consult current residency.
+				const resident = this.findActiveSessionByFile(entry.sessionFile);
 				// A resident child walks its own subtree as an outer root below. Do not
 				// cold-read its changing journal before deciding whether to include it.
 				if (resident && !includeResident) continue;
@@ -2536,7 +2534,7 @@ export class AgentDaemon {
 			}
 			lookupError = error;
 		}
-		const passiveSubagent = await this.findPassiveRlmSubagent(id);
+		const passiveSubagent = await this.findPassiveRlmSubagent(id, true);
 		if (passiveSubagent) {
 			return this.hydratePassiveRlmSubagent(passiveSubagent);
 		}
@@ -6201,7 +6199,7 @@ export class AgentDaemon {
 				return this.getOrHydrateBoundSessionState(targetState.activeSessionId);
 			}
 		}
-		const passive = await this.findPassiveRlmSubagent(target);
+		const passive = await this.findPassiveRlmSubagent(target, true);
 		if (!passive) return this.getOrHydrateBoundSessionState(target);
 		assertAgentFamilyReach(this.agentFamilyEntry(currentState), this.passiveAgentFamilyEntry(passive));
 		return this.hydratePassiveRlmSubagent(passive);
@@ -6285,7 +6283,9 @@ export class AgentDaemon {
 					const resolved = this.resolveAgentFamilySessionName(options.fromState, targetSelector, error);
 					targetState = await this.getOrHydrateBoundSessionState(resolved.activeSessionId);
 				} else {
-					const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector);
+					// A resident child can passivate while this catalog lookup is in flight.
+					// Keep its saved identity so hydration joins the close instead of losing the target.
+					const passiveSubagent = await this.findPassiveRlmSubagent(targetSelector, true);
 					if (passiveSubagent) {
 						if (options.origin === "agent" && options.fromState) {
 							assertAgentFamilyReach(

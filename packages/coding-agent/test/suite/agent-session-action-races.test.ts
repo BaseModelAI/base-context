@@ -344,7 +344,14 @@ describe("AgentSession action commit-fence races", () => {
 		harness.session.resumeQueuedWork();
 		await harness.session.waitForIdle();
 
-		expect(deliveredMessages).toEqual(["prefix A", "shared next turn", "primary A", "prefix B", "primary B"]);
+		expect(deliveredMessages).toEqual([
+			"prefix A",
+			"shared next turn",
+			"primary A",
+			"prefix B",
+			"primary B",
+			expect.stringContaining("# Continual Harness Snapshot"),
+		]);
 	});
 
 	it("cancels an ordinary prompt while queued work is paused", async () => {

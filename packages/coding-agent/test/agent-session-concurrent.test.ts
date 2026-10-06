@@ -1,13 +1,16 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Agent } from "@ponythewhite/base-context-agent";
+import { Agent, type AgentOptions } from "@ponythewhite/base-context-agent";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
+	type FauxProviderRegistration,
+	type FauxResponseFactory,
 	getModel,
 	type ImageContent,
+	registerFauxProvider,
 	type TextContent,
 } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
@@ -60,6 +63,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	const fauxProviders: FauxProviderRegistration[] = [];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-concurrent-test-${Date.now()}`);
@@ -72,15 +76,31 @@ describe("AgentSession concurrent prompt guard", () => {
 		try {
 			if (session) await session.disposeAsync();
 		} finally {
+			for (const faux of fauxProviders.splice(0)) faux.unregister();
 			if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true });
 		}
 	});
+
+	function createFauxAgent(options: AgentOptions & { streamFn: NonNullable<AgentOptions["streamFn"]> }): Agent {
+		const faux = registerFauxProvider();
+		fauxProviders.push(faux);
+		const respond: FauxResponseFactory = async (context, streamOptions, _state, model) => {
+			faux.appendResponses([respond]);
+			return (await options.streamFn(model, context, streamOptions)).result();
+		};
+		faux.setResponses([respond]);
+		return new Agent({
+			...options,
+			streamFn: undefined,
+			initialState: { ...options.initialState, model: faux.getModel() },
+		});
+	}
 
 	function createSession(sessionManager = SessionManager.inMemory()) {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -108,7 +128,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 
 		session = new AgentSession({
 			agent,
@@ -296,7 +316,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		let lastInputSource: string | undefined;
 		const queueEvents: Array<{ steering: readonly string[]; followUp: readonly string[] }> = [];
 
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -345,7 +365,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 
 		const extensionsResult = await createTestExtensionsResult([
 			(pi) => {
@@ -410,7 +430,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let inputCalls = 0;
 		let receivedUserText: string | undefined;
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -442,7 +462,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 		const extensionsResult = await createTestExtensionsResult([
 			(pi) => {
 				pi.on("input", async () => {
@@ -527,7 +547,7 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("does not admit a cron prompt invalidated while async input handlers ran", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let deliveredUserText: string | undefined;
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -558,7 +578,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 		let jobInvalidated = false;
 		const extensionsResult = await createTestExtensionsResult([
 			(pi) => {
@@ -774,7 +794,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let inputCalls = 0;
 		let receivedUserText: string | undefined;
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -806,7 +826,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 		const extensionsResult = await createTestExtensionsResult([
 			(pi) => {
 				pi.on("input", async () => {
@@ -834,7 +854,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	it("should allow prompt() after previous completes", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -855,7 +875,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 
 		session = new AgentSession({
 			agent,
@@ -890,7 +910,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		};
 
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -956,7 +976,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 
 		session = new AgentSession({
 			agent,
@@ -1035,7 +1055,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		};
 
-		const agent = new Agent({
+		const agent = createFauxAgent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -1102,7 +1122,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.setRuntimeApiKey("faux", "test-key");
 
 		session = new AgentSession({
 			agent,

@@ -114,7 +114,6 @@ import {
 	getCanonicalViewSelectionSource,
 	getCanonicalViewUnits,
 	MissingRecoveryReplayContractError,
-	prepareCanonicalEpoch,
 	prepareContextModeEpoch,
 	prepareRecoveryCompaction,
 	readCanonicalContextMode,
@@ -138,18 +137,10 @@ import {
 } from "./compaction/index.js";
 import {
 	appendContextEpoch,
-	assertContextRequestContract,
 	CONTEXT_EPOCH_DETAIL,
-	CONTEXT_SKILL_EPOCH_RENDERER,
 	type ContextMode,
-	type ContextReplayContract,
 	contextEpochMode,
-	contextEpochRepresentation,
-	contextRequestContract,
 	readContextEpoch,
-	retainedContextRequestContract,
-	snapshotContextEpoch,
-	UnsupportedContextEpochConfigurationError,
 } from "./context-epoch.js";
 import {
 	type ContextTreeNode,
@@ -310,7 +301,6 @@ import {
 	type NativeSkillSourceRef,
 	readSkillSelection,
 	type SelectedSkillCapture,
-	sameSelectedSkills,
 	selectedSkillBlock,
 	selectedSkillIdentity,
 } from "./selected-skills.js";
@@ -349,6 +339,7 @@ import {
 	type WakePolicy,
 } from "./session-action-store.js";
 import { readSessionBootstrap } from "./session-bootstrap.js";
+import { bindSessionContextEpoch } from "./session-context-epoch.js";
 import {
 	appendSentAgentMessageToToolResult,
 	IPYTHON_SENT_AGENT_MESSAGE_CUSTOM_ENTRY,
@@ -1605,7 +1596,8 @@ export class AgentSession {
 		if (this._initialContextMode !== "on" && this._initialContextMode !== "off")
 			throw new Error("context.mode must be on or off");
 		this._contextMode = this._initialContextMode;
-		this._contextEpochsEnabled = config.requestTokenBudget !== undefined;
+		const requestTokenBudget = config.requestTokenBudget ?? config.settingsManager.getRequestTokenBudget();
+		this._contextEpochsEnabled = requestTokenBudget !== undefined;
 		const contextEpochsEnabled = this._contextEpochsEnabled;
 		this.agent.bindContextOwner(async () => {
 			await this.initialize();
@@ -1709,281 +1701,25 @@ export class AgentSession {
 					(contextEpochsEnabled || epochContext.checkpoint || unbudgetedPublic) &&
 					getCanonicalViewUnits(messages)?.length === messages.length
 				) {
-					let committed = epochContext.checkpoint;
-					let committedEntry = epochContext.checkpointEntry;
-					const fixed =
-						epochContext.mode === "off" ||
-						(committed?.policyOnly === true && !contextEpochsEnabled && !unbudgetedPublic);
-					let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
-					const nativeTail = messages.some(
-						(message) =>
-							message.role === "toolResult" ||
-							(message.role === "assistant" &&
-								message.content.some((part) => part.type !== "text" || part.textSignature !== undefined)),
-					);
-					let accepted: string | undefined;
-					let acceptedBody: string | undefined;
-					let acceptedResponseIdentity: string | undefined;
-					let acceptedReplayContract: ContextReplayContract | undefined;
-					let acknowledged: CompactionCommit | undefined;
-					const commitFailure = (cause: unknown) => {
-						if (!acknowledged) return cause;
-						const error = new CompactionCommittedError(acknowledged.entryId, acknowledged.result, cause);
-						this._compactionSetupFailure = error;
-						return error;
-					};
-					captured.bindRequestViewBoundary(
+					bindSessionContextEpoch({
 						messages,
-						async (candidate) => {
-							if (fixed) throw new Error("Context selection is disabled while context.mode is off");
-							if (
-								epochContext.toolContinuations?.length &&
-								(!candidate.publicMessages ||
-									JSON.stringify(getCanonicalEpochContext(candidate.publicMessages)?.toolContinuations) !==
-										JSON.stringify(epochContext.toolContinuations) ||
-									candidate.projection.pendingPublicMessageGroups?.length)
-							)
-								throw new Error("Tool continuation requires its exact public candidate before epoch ACK");
-							assertResourceCurrent(resource);
-							let representation: string;
-							try {
-								representation = contextEpochRepresentation(
-									candidate.request,
-									candidate.assessment,
-									limits.maxSourceBytes,
-									unbudgetedPublic,
-									candidate.responseItemIdentity,
-								);
-							} catch (error) {
-								if (
-									error instanceof UnsupportedContextEpochConfigurationError &&
-									!contextEpochsEnabled &&
-									!candidate.assessment &&
-									!committed &&
-									!acknowledged &&
-									!epochContext.taskFrameRebased &&
-									!epochContext.selectedSkills?.length &&
-									!epochContext.toolContinuations?.length &&
-									!candidate.publicMessages
-								) {
-									const source = getCanonicalViewSelectionSource(messages)!;
-									const selected = new Set(candidate.selectedUnitIds);
-									if (
-										source.recoveryContractRequested &&
-										!source.requiresEpoch &&
-										!source.pendingPublicMessageGroups?.length &&
-										this.sessionManager === epochManager &&
-										compaction.isCurrent() &&
-										JSON.stringify(candidate.source) === JSON.stringify(source.source) &&
-										candidate.selectedUnitIds.length === source.units.length &&
-										selected.size === source.units.length &&
-										source.units.every((unit) => selected.has(unit.id))
-									) {
-										// Optional capture only. Keep the unchanged full-native offer; grant no epoch or omission.
-										return;
-									}
-								}
-								throw error;
-							}
-							const replayContract =
-								"replayContract" in candidate.projection &&
-								candidate.projection.replayContract === "message-groups"
-									? "message-groups"
-									: "complete-context";
-							const publicWindow =
-								"publicWindow" in candidate.projection && candidate.projection.publicWindow === true;
-							const selection = JSON.stringify([
-								representation,
-								replayContract,
-								publicWindow,
-								candidate.publicMessages !== undefined,
-								candidate.selectedUnitIds,
-							]);
-							acceptedResponseIdentity = candidate.responseItemIdentity;
-							if (accepted !== undefined) {
-								if (accepted !== selection)
-									throw new Error("Captured epoch request selection changed after acceptance");
-								return committedEntry;
-							}
-							// Stable request settings do not cover recovery added after the committed source.
-							const recoverySourceSequence = committed?.source.sourceSequence ?? -1;
-							const hasUncoveredRecovery = getCanonicalViewUnits(messages)!.some((unit, index) => {
-								const reference = epochContext.references[index];
-								return (
-									unit.kind === "recovery" && (!reference || reference.ref.sequence > recoverySourceSequence)
-								);
-							});
-							if (
-								!candidate.publicMessages &&
-								!hasUncoveredRecovery &&
-								committed?.representation === representation &&
-								committed.replayContract === replayContract &&
-								(committed.publicWindow === true) === publicWindow &&
-								committed.taskFrame?.material === epochContext.taskFrame?.material &&
-								committed.resourceRevision === epochContext.resourceRevision &&
-								sameSelectedSkills(committed.selectedSkills, epochContext.selectedSkills) &&
-								candidate.selectedUnitIds.length === messages.length
-							) {
-								accepted = selection;
-								acceptedBody = candidate.request.body;
-								return committedEntry;
-							}
-							const prepared = prepareCanonicalEpoch(
-								candidate.publicMessages ?? messages,
-								candidate.selectedUnitIds,
-								representation,
-								limits.maxSourceBytes,
-								replayContract,
-								publicWindow,
-							);
-							if (JSON.stringify(prepared.checkpoint.source) !== JSON.stringify(candidate.source))
-								throw new Error("Context epoch candidate does not match its captured source");
-							const tokensBefore = candidate.originalAssessment?.estimatedInputTokens ?? null;
-							const result: CompactionResult = {
-								summary: "",
-								firstKeptEntryId: prepared.checkpoint.literalTailId,
-								tokensBefore,
-							};
-							// This is the sole commit. A resolved append is already canonical even if adoption fails.
-							const entryId = await compaction[appendContextEpoch](prepared.checkpoint, tokensBefore);
-							acknowledged = { entryId, result };
-							try {
-								assertResourceCurrent(resource);
-								if (this.sessionManager !== epochManager || !compaction.isCurrent())
-									throw new Error("Context epoch source changed before adoption");
-								this.agent.state.messages = prepared.messages;
-								committed = prepared.checkpoint;
-								committedEntry = { sessionId: epochContext.source.sessionId, entryId };
-								accepted = selection;
-								acceptedBody = candidate.request.body;
-								return committedEntry;
-							} catch (cause) {
-								throw commitFailure(cause);
-							}
+						epochContext,
+						resource,
+						maxSourceBytes: limits.maxSourceBytes,
+						contextEpochsEnabled,
+						unbudgetedPublic,
+						requests: captured,
+						compaction,
+						isSessionCurrent: () => this.sessionManager === epochManager,
+						adoptMessages: (messages) => {
+							this.agent.state.messages = messages;
 						},
-						(request, assessment) => {
-							try {
-								assertResourceCurrent(resource);
-								if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
-									throw new Error("Selected skill versions require a committed epoch boundary");
-								if (fixed) {
-									if (
-										(requestContract ||
-											committed?.pendingRequestContract ||
-											nativeTail ||
-											acceptedBody !== undefined) &&
-										(acceptedBody === undefined || request.body !== acceptedBody)
-									)
-										throw new Error("Fixed context requires a compatible final provider projection");
-									if (requestContract) {
-										if (!acceptedReplayContract)
-											throw new Error("Fixed context has no accepted replay projection");
-										assertContextRequestContract(requestContract, request, acceptedReplayContract);
-									}
-									return;
-								}
-								if (epochContext.taskFrameRebased && acceptedBody === undefined)
-									throw new Error("Task frame rebase requires a committed epoch boundary");
-								if (!committed) return;
-								if (acceptedBody === undefined || request.body !== acceptedBody)
-									throw new Error("Committed context epoch requires a compatible final provider projection");
-								if (
-									contextEpochRepresentation(
-										request,
-										assessment,
-										limits.maxSourceBytes,
-										unbudgetedPublic,
-										acceptedResponseIdentity,
-									) !== committed.representation
-								)
-									throw new Error("Context epoch representation changed without a committed boundary");
-								if (committed.resourceRevision !== epochContext.resourceRevision)
-									throw new Error("Context epoch resource revision requires a committed boundary");
-								if (committed.taskFrame?.material !== epochContext.taskFrame?.material)
-									throw new Error("Context epoch task revision requires a committed boundary");
-							} catch (cause) {
-								throw commitFailure(cause);
-							}
+						onCommittedFailure: (commit, cause) => {
+							const error = new CompactionCommittedError(commit.entryId, commit.result, cause);
+							this._compactionSetupFailure = error;
+							return error;
 						},
-						fixed
-							? async (request, projection) => {
-									try {
-										assertResourceCurrent(resource);
-										if (!requestContract && nativeTail)
-											throw new Error("Retained native context has no accepted request contract");
-										const replayContract = projection.replayContract ?? "complete-context";
-										const skillChange = !sameSelectedSkills(
-											committed?.selectedSkills,
-											epochContext.selectedSkills,
-										);
-										if (
-											skillChange &&
-											committed?.selectedSkills?.some(
-												(skill) =>
-													!sameSelectedSkills(
-														[skill],
-														epochContext.selectedSkills?.filter((item) => item.name === skill.name),
-													),
-											)
-										)
-											throw new Error("Fixed context cannot replace a selected skill version");
-										if ((!requestContract && committed?.pendingRequestContract) || skillChange) {
-											// Existing policy-only ACK: bind first selections, without changing fixed views or mode.
-											const base =
-												committed ??
-												prepareContextModeEpoch(messages, epochContext.mode, limits.maxSourceBytes)
-													.checkpoint;
-											if (base.version !== 5)
-												throw new Error("Fixed skill selection requires its policy checkpoint");
-											const nextContract =
-												requestContract ?? contextRequestContract(request, replayContract);
-											const checkpoint = snapshotContextEpoch(
-												{
-													...base,
-													renderer: epochContext.selectedSkills?.length
-														? CONTEXT_SKILL_EPOCH_RENDERER
-														: base.renderer,
-													...(epochContext.selectedSkills?.length
-														? { selectedSkills: epochContext.selectedSkills }
-														: {}),
-													source: epochContext.source,
-													requestContract: nextContract,
-													pendingRequestContract: undefined,
-												},
-												limits.maxSourceBytes,
-											);
-											const entryId = await compaction[appendContextEpoch](checkpoint, null);
-											acknowledged = {
-												entryId,
-												result: {
-													summary: "",
-													firstKeptEntryId: checkpoint.literalTailId,
-													tokensBefore: null,
-												},
-											};
-											committed = checkpoint;
-											committedEntry = { sessionId: epochContext.source.sessionId, entryId };
-											requestContract = nextContract;
-											assertResourceCurrent(resource);
-											if (this.sessionManager !== epochManager || !compaction.isCurrent())
-												throw new Error("Context contract source changed before acceptance");
-										}
-										if (!sameSelectedSkills(committed?.selectedSkills, epochContext.selectedSkills))
-											throw new Error("Fixed context selected skill versions changed after acceptance");
-										if (requestContract)
-											assertContextRequestContract(requestContract, request, replayContract);
-										if (acceptedBody !== undefined && request.body !== acceptedBody)
-											throw new Error("Fixed context changed after acceptance");
-										acceptedBody = request.body;
-										acceptedReplayContract = replayContract;
-										return committedEntry;
-									} catch (cause) {
-										throw commitFailure(cause);
-									}
-								}
-							: undefined,
-						compaction.isCurrent,
-					);
+					});
 				}
 				this._compactionSetupFailure = undefined;
 				return { messages, adoptMessages: true, streamContext: captured, release: () => captured.dispose() };
@@ -2162,11 +1898,12 @@ export class AgentSession {
 		this.requests = new InferenceCoordinator(
 			() => this.sessionManager.bindRequestSink(),
 			() => ({ parentSessionId: config.semanticParentSessionId }),
-			config.requestTokenBudget,
+			requestTokenBudget,
 		);
 		this.requests.setProviderRecoveryPolicy(() => ({
 			enabled: this.settingsManager.getRetryEnabled(),
 			baseDelayMs: this.settingsManager.getRetrySettings().baseDelayMs,
+			maxRetries: this.settingsManager.getRetrySettings().maxRetries,
 			maxRetryDelayMs: this.settingsManager.getProviderRetrySettings().maxRetryDelayMs || 60_000,
 		}));
 		this.runtimeServices = { requests: this.requests };
@@ -14199,22 +13936,10 @@ export class AgentSession {
 	private async _startRlmChildRun(
 		prompt: string,
 		admission: RlmChildAdmission,
+		{ spawnedByRequestId, usageSource }: { spawnedByRequestId?: string; usageSource?: RlmChildUsageSource },
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		// Snapshot before any await: the spawning request is the turn whose tool call is
-		// executing now. A spawn arriving outside an active run (a detached kernel task
-		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
-		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
-		const parentAssistantForUsage = this._findLastAssistantMessage();
-		const parentEntryId = parentAssistantForUsage && this._findAssistantEntryIdForMessage(parentAssistantForUsage);
-		const usageSource: RlmChildUsageSource | undefined = parentEntryId
-			? {
-					sessionId: this.sessionId,
-					sessionFile: this.sessionFile,
-					entryId: parentEntryId,
-				}
-			: undefined;
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -14593,8 +14318,21 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
+		// Snapshot before any await: the spawning request is the turn whose tool call is
+		// executing now. A spawn arriving outside an active run (a detached kernel task
+		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
+		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
+		const parentAssistantForUsage = this._findLastAssistantMessage();
+		const parentEntryId = parentAssistantForUsage && this._findAssistantEntryIdForMessage(parentAssistantForUsage);
+		const usageSource: RlmChildUsageSource | undefined = parentEntryId
+			? {
+					sessionId: this.sessionId,
+					sessionFile: this.sessionFile,
+					entryId: parentEntryId,
+				}
+			: undefined;
 		const admission = await this.reserveRlmChildAdmission();
-		const start = this._startRlmChildRun(prompt, admission, kwargs, spawnCode);
+		const start = this._startRlmChildRun(prompt, admission, { spawnedByRequestId, usageSource }, kwargs, spawnCode);
 		// Join pre-runtime name/model work during disposal as well as the detached task.
 		const pending = start.then(
 			() => undefined,
@@ -14688,7 +14426,13 @@ export class AgentSession {
 
 	private async _handleRetryableError(message: AssistantMessage, signal?: AbortSignal): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || signal?.aborted || !this._isRetryableError(message)) return false;
+		if (
+			!settings.enabled ||
+			signal?.aborted ||
+			!this._isRetryableError(message) ||
+			(settings.maxRetries !== undefined && this._retryAttempt >= settings.maxRetries)
+		)
+			return false;
 
 		// Join native message persistence before omitting its acknowledged assistant ID.
 		await this._waitForAgentEventsBeforeContext();

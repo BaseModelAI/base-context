@@ -4,6 +4,8 @@ import {
 	type CodexContextPolicy,
 	getCodexContextPolicy,
 	type Model,
+	RequestTokenBudget,
+	type RequestTokenBudgetOptions,
 	type ServiceTier,
 	type Transport,
 } from "@ponythewhite/base-context-ai";
@@ -71,7 +73,7 @@ export interface ProviderRetrySettings {
 
 export interface RetrySettings {
 	enabled?: boolean; // default: true
-	maxRetries?: number; // default: 3
+	maxRetries?: number; // native recovery retries; absent: unlimited, 0: no retry
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
 	provider?: ProviderRetrySettings;
 }
@@ -181,6 +183,8 @@ export interface Settings {
 	theme?: string;
 	/** Resource caps on complete canonical reconstruction, not model/token/heap limits. */
 	canonicalContext?: { maxMessages?: number; maxSourceBytes?: number };
+	/** Opt-in exact route/model budgets; also enables budget-aware context epochs. */
+	requestTokenBudget?: RequestTokenBudgetOptions;
 	/** Complete native invocation output, separate from the working context. */
 	invocationOutput?: { maxMessages?: number; maxSourceBytes?: number };
 	compaction?: CompactionSettings;
@@ -205,8 +209,8 @@ export interface Settings {
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
 	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
-	bundledSkills?: BundledSkillsSettings; // Configure built-in skills shipped with Prime Agent
-	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with prime-agent
+	bundledSkills?: BundledSkillsSettings; // Configure built-in skills shipped with Base Context
+	enableBuiltinSkills?: boolean; // default: true - load built-in skills shipped with Base Context
 	terminal?: TerminalSettings;
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
@@ -884,6 +888,19 @@ export class SettingsManager {
 		return limits;
 	}
 
+	/** Validate once at session creation; never infer profiles from the model catalog. */
+	getRequestTokenBudget(): RequestTokenBudgetOptions | undefined {
+		const configured = this.settings.requestTokenBudget;
+		if (configured === undefined) return undefined;
+		try {
+			return new RequestTokenBudget(configured).getOptions();
+		} catch (error) {
+			throw new Error(`Invalid requestTokenBudget: ${error instanceof Error ? error.message : String(error)}`, {
+				cause: error,
+			});
+		}
+	}
+
 	getInvocationOutputLimits(): { maxMessages: number; maxSourceBytes: number } {
 		const configured = this.settings.invocationOutput;
 		if (
@@ -1039,9 +1056,13 @@ export class SettingsManager {
 	}
 
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+		const maxRetries = this.settings.retry?.maxRetries;
+		if (maxRetries !== undefined && (!Number.isSafeInteger(maxRetries) || maxRetries < 0)) {
+			throw new Error("retry.maxRetries must be a non-negative safe integer");
+		}
 		return {
 			enabled: this.getRetryEnabled(),
-			maxRetries: this.settings.retry?.maxRetries ?? 3,
+			maxRetries: maxRetries ?? Number.POSITIVE_INFINITY,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
 		};
 	}

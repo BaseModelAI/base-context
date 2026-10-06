@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
-import { SessionManager } from "../../../src/core/session-manager.js";
+import { buildSessionContext, SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
 import { assistantMsg, createTestResourceLoader, userMsg } from "../../utilities.js";
 import { createHarness, type Harness } from "../harness.js";
@@ -140,7 +140,12 @@ describe("ENG-4620 fast mode settings", () => {
 		await currentHarness.session.setServiceTier("priority");
 		await currentHarness.session.setModel(currentHarness.getModel("gpt-4-turbo")!);
 		expect(currentHarness.session.serviceTier).toBe("default");
-		expect(currentHarness.sessionManager.buildSessionContext().serviceTier).toBe("priority");
+		expect(
+			buildSessionContext(
+				await currentHarness.sessionManager.readBranch(),
+				currentHarness.sessionManager.getLeafId(),
+			).serviceTier,
+		).toBe("priority");
 		await currentHarness.session.disposeAsync();
 
 		const createSession = async (modelId: string) =>

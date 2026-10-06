@@ -1305,7 +1305,7 @@ describe("AgentSessionRuntime characterization", () => {
 						? message.customType
 						: message.role,
 			),
-		).toEqual([TASK_FRAME_CUSTOM_TYPE, "Say one", HARNESS_SNAPSHOT_CUSTOM_TYPE, "assistant"]);
+		).toEqual(["Say one", HARNESS_SNAPSHOT_CUSTOM_TYPE, "assistant"]);
 		expect(runtime.session.sessionFile).toBeDefined();
 	});
 
@@ -1565,21 +1565,7 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.prompt("hello");
 		await runtime.session.prompt("again");
 
-		// A fork rebuilds one TaskFrame base instead of replaying the old render-cache revisions.
-		const beforeMessages = runtime.session.messages
-			.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
-			.map((message) => ({
-				role: message.role,
-				text:
-					message.role === "user"
-						? typeof message.content === "string"
-							? message.content
-							: message.content
-									.filter((part): part is { type: "text"; text: string } => part.type === "text")
-									.map((part) => part.text)
-									.join("")
-						: undefined,
-			}));
+		const beforeMessages = structuredClone(runtime.session.messages);
 		const previousSessionFile = runtime.session.sessionFile;
 		const leafId = runtime.session.sessionManager.getLeafId();
 		expect(leafId).toBeTruthy();
@@ -1588,28 +1574,11 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(result).toEqual({ cancelled: false, selectedText: undefined });
 		expect(runtime.session.sessionFile).not.toBe(previousSessionFile);
 		expect(await runtime.session.sessionManager.readLabel(leafId!)).toBeUndefined();
-		expect(
-			runtime.session.messages
-				.filter((message) => message.role !== "custom" || message.customType !== TASK_FRAME_CUSTOM_TYPE)
-				.map((message) => ({
-					role: message.role,
-					text:
-						message.role === "user"
-							? typeof message.content === "string"
-								? message.content
-								: message.content
-										.filter((part): part is { type: "text"; text: string } => part.type === "text")
-										.map((part) => part.text)
-										.join("")
-							: undefined,
-				})),
-		).toEqual(beforeMessages);
+		expect(runtime.session.messages).toEqual(beforeMessages);
 		const rebuiltFrames = runtime.session.messages
 			.filter((message) => message.role === "custom")
 			.filter((message) => message.customType === TASK_FRAME_CUSTOM_TYPE);
-		expect(rebuiltFrames).toHaveLength(1);
-		expect(rebuiltFrames[0]?.content).toContain('"text":"hello"');
-		expect(rebuiltFrames[0]?.content).toContain('"text":"again"');
+		expect(rebuiltFrames).toHaveLength(0);
 	});
 
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {

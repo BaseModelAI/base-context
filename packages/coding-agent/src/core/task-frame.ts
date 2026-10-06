@@ -139,19 +139,65 @@ function message(value: unknown, maxBytes: number): CustomMessage {
 	};
 }
 
+/** Exact user text still visible in this compiled request, not just in its source manifest. */
+export interface TaskFrameLiteralSource {
+	sessionId: string;
+	entryId: string;
+	revision: string;
+	text: readonly string[];
+}
+
+function literalKey(source: Pick<TaskStateSourceRef, "sessionId" | "entryId" | "revision">): string {
+	return JSON.stringify([source.sessionId, source.entryId, source.revision]);
+}
+
+function visibleRequirement(item: ReducedTaskItem, literals: ReadonlyMap<string, readonly string[]>): boolean {
+	const { event } = item;
+	return (
+		event.kind === "user_requirement" &&
+		event.text !== undefined &&
+		(literals.get(literalKey(event.source))?.some((text) => text.includes(event.text!)) ?? false)
+	);
+}
+
 /** Prepare without changing the previous render cache. Commit only with a successful context build. */
 function compileTaskFrameRevision(
 	view: TaskStateView,
 	limits: Readonly<TaskFrameLimits>,
-	previous?: CompiledTaskFrame,
+	previous: CompiledTaskFrame | undefined,
+	literals: readonly TaskFrameLiteralSource[],
 ): CompiledTaskFrame | undefined {
+	const literalText = new Map(literals.map((literal) => [literalKey(literal), literal.text]));
+	const visible = new Set(
+		view.items.filter((item) => visibleRequirement(item, literalText)).map((item) => key(item.event.source)),
+	);
 	const eligible = view.items
 		.flatMap((item) => {
 			const priority = rank(item);
-			return priority === undefined ? [] : [{ item, priority }];
+			return priority === undefined || visible.has(key(item.event.source)) ? [] : [{ item, priority }];
 		})
-		.sort((a, b) => a.priority - b.priority || b.item.event.source.sequence - a.item.event.source.sequence);
-	if (eligible.length === 0 && view.coverage === "complete" && !previous) return undefined;
+		.sort(
+			(a, b) =>
+				a.priority - b.priority ||
+				(a.item.event.kind === "user_requirement" && b.item.event.kind === "user_requirement"
+					? a.item.event.source.sequence - b.item.event.source.sequence
+					: b.item.event.source.sequence - a.item.event.source.sequence),
+		);
+	if (eligible.length === 0 && view.coverage === "complete") return undefined;
+	// Do not retain duplicate text in an older base or sparse revision either.
+	if (
+		previous &&
+		visible.size &&
+		previous.messages.some((message) => {
+			const content = message.content as string;
+			const value = JSON.parse(content.slice(content.indexOf("\n") + 1)) as {
+				rows?: TaskFrameRow[];
+				changed?: TaskFrameRow[];
+			};
+			return [...(value.rows ?? []), ...(value.changed ?? [])].some((row) => visible.has(key(row.source)));
+		})
+	)
+		previous = undefined;
 	const rows: TaskFrameRow[] = [];
 	let textBytes = 0;
 	// Reserve space for sparse revisions rather than filling the entire retained frame with the base.
@@ -246,14 +292,15 @@ export function compileTaskFrame(
 	view: TaskStateView,
 	limits: Readonly<TaskFrameLimits>,
 	previous?: CompiledTaskFrame,
+	literals: readonly TaskFrameLiteralSource[] = [],
 ): CompiledTaskFrame | undefined {
 	try {
-		return compileTaskFrameRevision(view, limits, previous);
+		return compileTaskFrameRevision(view, limits, previous, literals);
 	} catch (error) {
 		if (!(error instanceof Error) || error.message !== "Task frame byte budget exceeded") throw error;
 		if (previous) {
 			try {
-				return compileTaskFrameRevision(view, limits);
+				return compileTaskFrameRevision(view, limits, undefined, literals);
 			} catch (baseError) {
 				if (!(baseError instanceof Error) || baseError.message !== "Task frame byte budget exceeded")
 					throw baseError;

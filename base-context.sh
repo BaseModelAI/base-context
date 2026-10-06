@@ -2,9 +2,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PRIME_AGENT_LAUNCHER_PATH="$SCRIPT_DIR/prime-agent.sh"
+export BASE_CONTEXT_LAUNCHER_PATH="$SCRIPT_DIR/base-context.sh"
 if BUILD_ID="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null)"; then
-  export PRIME_AGENT_BUILD_ID="$BUILD_ID"
+  export BASE_CONTEXT_BUILD_ID="$BUILD_ID"
 fi
 
 # Check for --no-env / --dist flags
@@ -27,6 +27,9 @@ if [[ "$NO_ENV" == "true" ]]; then
   unset ANTHROPIC_OAUTH_TOKEN
   unset OPENAI_API_KEY
   unset PRIME_API_KEY
+  unset DEEPSEEK_API_KEY
+  unset FIREWORKS_API_KEY
+  unset KIMI_API_KEY
   unset GEMINI_API_KEY
   unset GROQ_API_KEY
   unset CEREBRAS_API_KEY
@@ -59,14 +62,14 @@ if [[ "$NO_ENV" == "true" ]]; then
   unset AZURE_OPENAI_API_KEY
   unset AZURE_OPENAI_BASE_URL
   unset AZURE_OPENAI_RESOURCE_NAME
-  echo "Running Prime Agent without API keys..."
+  echo "Running Base Context without provider environment credentials (stored logins remain available)."
 fi
 
 # --dist runs the bundled build (what users get; ~3x faster startup than tsx).
 if [[ "$USE_DIST" == "true" ]]; then
   BUNDLE="$SCRIPT_DIR/packages/coding-agent/dist/bundle/cli.js"
   if [[ ! -f "$BUNDLE" ]]; then
-    echo "Bundle not found at $BUNDLE. Run npm run build first." >&2
+    echo "Bundle not found at $BUNDLE. Build the CLI bundle before using --dist." >&2
     exit 1
   fi
   exec node "$BUNDLE" ${ARGS[@]+"${ARGS[@]}"}
@@ -74,7 +77,7 @@ fi
 
 TSX_BIN="$SCRIPT_DIR/node_modules/.bin/tsx"
 if [[ ! -x "$TSX_BIN" ]]; then
-  echo "tsx not found at $TSX_BIN. Run npm install from the repo root first." >&2
+  echo "tsx not found at $TSX_BIN. Run npm ci from the repo root first." >&2
   exit 1
 fi
 

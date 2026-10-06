@@ -82,7 +82,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		},
 		chatContainer,
 		footer: { invalidate: vi.fn() },
-		ui: { requestRender: vi.fn() } as unknown as TUI,
+		ui: { requestRender: vi.fn(), flushRender: vi.fn() } as unknown as TUI,
 		settingsManager: {
 			getShowImages: () => false,
 		},

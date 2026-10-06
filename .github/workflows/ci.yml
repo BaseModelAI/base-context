@@ -1,6 +1,5 @@
 name: Base Context checks
 
-# Native regression and release qualification runs are performed manually.
 on:
   push:
     branches: [main]
@@ -47,9 +46,63 @@ jobs:
       - name: Check
         run: npm run check
 
-      - name: Check source conventions
-        working-directory: packages/coding-agent
-        run: npx --no-install tsx ../../node_modules/vitest/dist/cli.js --run test/no-silent-catch.test.ts
-
       - name: Require committed formatting
         run: git diff --exit-code
+
+  offline-tests:
+    name: Offline ${{ matrix.package }} ${{ matrix.shard }} ${{ matrix.group }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { package: agent, shard: "1/1" }
+          - { package: ai, shard: "1/1" }
+          - { package: tui, shard: "1/1" }
+          - { package: coding-agent, shard: "1/8" }
+          - { package: coding-agent, shard: "2/8" }
+          - { package: coding-agent, shard: "3/8" }
+          - { package: coding-agent, shard: "4/8" }
+          - { package: coding-agent, shard: "5/8" }
+          - { package: coding-agent, shard: "6/8" }
+          - { package: coding-agent, shard: "7/8" }
+          - { package: coding-agent, shard: "8/8" }
+          - { package: coding-agent, shard: "1/1", group: kernel }
+          - { package: coding-agent, shard: "1/1", group: process-stress }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -s $(which fdfind) /usr/local/bin/fd
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build checked-in source
+        run: npm run build:source
+
+      - name: Install uv
+        if: matrix.package == 'coding-agent'
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run isolated offline tests
+        env:
+          TEST_PACKAGE: ${{ matrix.package }}
+          TEST_SHARD: ${{ matrix.shard }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: node scripts/test-offline.mjs "$TEST_PACKAGE" --shard="$TEST_SHARD" ${TEST_GROUP:+--group="$TEST_GROUP"}

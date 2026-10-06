@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AgentEvent, AgentOutputLimitError } from "@ponythewhite/base-context-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
+	DAEMON_PROTOCOL_VERSION,
+	DAEMON_SCHEMA_REVISION,
+} from "../src/modes/daemon/daemon-protocol.js";
 import { RpcClient } from "../src/modes/rpc/rpc-client.js";
 
 const directories: string[] = [];
@@ -126,10 +130,11 @@ describe("RpcClient completion", () => {
 		});
 		await expect(client.promptAndWait("work")).rejects.toBeInstanceOf(AgentOutputLimitError);
 		expect(unsubscribe).toHaveBeenCalledOnce();
-		const server = startup(DAEMON_SCHEMA_REVISION - 1);
+		const minimumSchema = CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY.minSchemaRevision;
+		const server = startup(minimumSchema - 1);
 		try {
 			await expect(server.client.start()).rejects.toThrow(
-				`Incompatible RPC schema: expected at least ${DAEMON_SCHEMA_REVISION}, got ${DAEMON_SCHEMA_REVISION - 1}`,
+				`Incompatible RPC schema: expected at least ${minimumSchema}, got ${minimumSchema - 1}`,
 			);
 			expect(existsSync(server.stopped)).toBe(true);
 		} finally {

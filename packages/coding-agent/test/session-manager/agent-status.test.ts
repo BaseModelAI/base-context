@@ -50,15 +50,15 @@ describe("SessionManager agent status", () => {
 			const m2 = await session.appendMessage(assistantMsg("reply"));
 
 			// Branch A off m1, leave a status on it.
-			session.branch(m1);
+			await session.branchTo(m1);
 			const branchAStatus = await session.appendAgentStatus({ summary: "branch A", basedOnMessageCount: 1 });
 
 			// Branch B off m2 with a status appended later in the file.
-			session.branch(m2);
+			await session.branchTo(m2);
 			await session.appendAgentStatus({ summary: "branch B", basedOnMessageCount: 1 });
 
 			// Re-activate branch A; its status must win despite B being later in the file.
-			session.branch(branchAStatus);
+			await session.branchTo(branchAStatus);
 			expect(session.getLatestAgentStatus()?.summary).toBe("branch A");
 		} finally {
 			await session?.close();
@@ -82,7 +82,7 @@ describe("SessionManager agent status", () => {
 				basedOnMessageCount: 2,
 			});
 
-			const context = buildSessionContext(session.getEntries(), session.getLeafId());
+			const context = buildSessionContext(await session.readBranch(), session.getLeafId());
 			expect(context.messages).toHaveLength(2);
 			expect(context.messages.every((message) => message.role === "user" || message.role === "assistant")).toBe(
 				true,

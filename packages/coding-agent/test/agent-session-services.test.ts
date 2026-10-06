@@ -45,7 +45,10 @@ describe("createAgentSessionFromServices", () => {
 		const tempDir = join(tmpdir(), `pi-session-request-budget-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 		cleanupPaths.push(tempDir);
-		const settingsManager = SettingsManager.inMemory();
+		const settingsManager = SettingsManager.inMemory({
+			requestTokenBudget: { mode: "enforce", profiles: [] },
+			retry: { enabled: false },
+		});
 		const services = await createAgentSessionServices({
 			cwd: tempDir,
 			agentDir: tempDir,
@@ -56,7 +59,6 @@ describe("createAgentSessionFromServices", () => {
 		const { session } = await createAgentSessionFromServices({
 			services,
 			sessionManager: await SessionManager.create(tempDir, join(tempDir, "sessions")),
-			requestTokenBudget: { mode: "enforce", profiles: [] },
 		});
 		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unbudgeted service request sent"));
 		try {
@@ -72,6 +74,7 @@ describe("createAgentSessionFromServices", () => {
 				maxTokens: 16,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			};
+			expect(session.requests.getRequestTokenBudgetOptions()).toEqual({ mode: "enforce", profiles: [] });
 			await expect(
 				session.requests.complete(
 					model,
@@ -81,6 +84,24 @@ describe("createAgentSessionFromServices", () => {
 				),
 			).rejects.toBeInstanceOf(RequestTokenBudgetError);
 			expect(fetch).not.toHaveBeenCalled();
+			const { session: overridden } = await createAgentSessionFromServices({
+				services,
+				sessionManager: SessionManager.inMemory(),
+				requestTokenBudget: { mode: "observe", profiles: [] },
+			});
+			try {
+				expect(overridden.requests.getRequestTokenBudgetOptions()).toEqual({ mode: "observe", profiles: [] });
+				const result = await overridden.requests.complete(
+					model,
+					{ messages: [] },
+					{ apiKey: "offline-services-key", maxRetries: 0 },
+					{ purpose: "main" },
+				);
+				expect(result.stopReason).toBe("error");
+				expect(fetch).toHaveBeenCalled();
+			} finally {
+				await overridden.disposeAsync();
+			}
 		} finally {
 			fetch.mockRestore();
 			await session.disposeAsync();
@@ -209,14 +230,21 @@ describe("createAgentSessionFromServices", () => {
 					expect(part.text).not.toContain('"sessionFile"');
 				}
 			}
-			const displayed = firstInput ? displayedSources.find((source) => source.entryId === firstInput.id) : undefined;
-			if (firstInput)
-				expect(displayed).toEqual({
-					sessionId: epochManager.getSessionId(),
-					entryId: firstInput.id,
-					field: "/nativeOrigin/submitted/text",
-					revision: expect.any(String),
-				});
+			// These inputs are still literal, so TaskFrame must not send them again.
+			if (firstInput) expect(displayedSources.some((source) => source.entryId === firstInput.id)).toBe(false);
+			// The transport fixture supplies exact coordinates to exercise native recovery independently of model discovery.
+			const metadata = firstInput
+				? await epochManager.readBranchHistory((history) => history.get(firstInput.id))
+				: undefined;
+			const displayed =
+				firstInput && metadata
+					? {
+							sessionId: epochManager.getSessionId(),
+							entryId: firstInput.id,
+							field: "/nativeOrigin/submitted/text",
+							revision: metadata.revision,
+						}
+					: undefined;
 			const recoveryRequest = {
 				action: "recover",
 				ref: displayed?.entryId,
@@ -276,7 +304,9 @@ describe("createAgentSessionFromServices", () => {
 									id: `msg_epoch_${bodies.length + summaryBodies.length}`,
 									role: "assistant",
 									status: "completed",
-									content: [{ type: "output_text", text: "OK", annotations: [] }],
+									content: [
+										{ type: "output_text", text: summarizing ? "Preserve Foo.txt." : "OK", annotations: [] },
+									],
 								};
 			const opaqueTail =
 				!summarizing && (bodies.length === 3 || requestRecovery || toolContinuationPhase === "intent");
@@ -448,17 +478,17 @@ describe("createAgentSessionFromServices", () => {
 					message.content.includes("call_epoch_recovery") &&
 					message.content.includes('"role":"toolResult"'),
 			);
-			expect(publicRecovery?.role).toBe("custom");
-			if (publicRecovery?.role !== "custom" || typeof publicRecovery.content !== "string")
-				throw new Error("Expected public recovery evidence");
-			const publicData = JSON.parse(publicRecovery.content.slice(publicRecovery.content.indexOf("\n") + 1));
-			expect(publicData).toMatchObject({
-				role: originalRecovery.role,
-				toolCallId: originalRecovery.toolCallId,
-				toolName: originalRecovery.toolName,
-				isError: originalRecovery.isError,
-				content: originalRecovery.content,
-			});
+			// Accepted pre-cut recovery is summarized, not pinned in every future request.
+			expect(publicRecovery).toBeUndefined();
+			const recoveryEntry = (await epochManager.readBranch()).find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === originalRecovery.toolCallId,
+			);
+			if (!recoveryEntry) throw new Error("Expected archived recovery source");
+			const recovered = await epochSession.recoverNativeHistory({ action: "read", ref: recoveryEntry.id });
+			expect(JSON.stringify(recovered)).toContain("Preserve Foo.txt.");
 			expect(getCanonicalEpochContext(afterSummary)?.checkpoint?.continuation?.kind).toBe("harness-summary");
 			expect(JSON.stringify(afterSummary)).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
 			const archived = await epochManager.readBranch();
@@ -474,7 +504,7 @@ describe("createAgentSessionFromServices", () => {
 						entry.type === "message" && JSON.stringify(entry.message) === JSON.stringify(originalRecovery),
 				),
 			).toBe(true);
-			expect(getCanonicalViewUnits(afterSummary)?.filter((unit) => unit.kind === "recovery")).toHaveLength(1);
+			expect(getCanonicalViewUnits(afterSummary)?.filter((unit) => unit.kind === "recovery")).toHaveLength(0);
 			expect(
 				afterSummary.some((message) => message.role === "compactionSummary" && message.summary === summary.summary),
 			).toBe(true);
@@ -495,9 +525,9 @@ describe("createAgentSessionFromServices", () => {
 			expect(bodies).toHaveLength(5);
 			expect(bodies[3]).toContain("Foo.txt.");
 			expect(bodies[3]).toContain("Bar.txt.");
-			expect(bodies[3]).toContain("call_epoch_recovery");
+			expect(bodies[3]).not.toContain("call_epoch_recovery");
 			expect(bodies[3]).not.toContain("OPTIONAL_PRIOR_LITERAL");
-			expect(epochSession.messages).toContainEqual(publicRecovery);
+			expect(epochSession.messages).not.toContainEqual(originalRecovery);
 			expect(bodies[3]).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
 			const publicBody = JSON.parse(bodies[3]);
 			expect(
@@ -614,9 +644,9 @@ describe("createAgentSessionFromServices", () => {
 						expect(view.source.sessionId).toBe(destination.getSessionId());
 						expect(view.ref.locator.path).toBe(destination.getSessionFile());
 					}
-					expect(copied).toContainEqual(publicRecovery);
+					expect(copied).not.toContainEqual(originalRecovery);
 					expect(getCanonicalViewUnits(copied)?.filter((unit) => unit.kind === "recovery")).toHaveLength(
-						retained ? 0 : 2,
+						retained ? 0 : 1,
 					);
 					expect(JSON.stringify(await destination.readBranch())).toContain("OPAQUE_TAIL_CANONICAL_ONLY");
 					({ session: copiedSession } = await createAgentSessionFromServices({
@@ -624,7 +654,7 @@ describe("createAgentSessionFromServices", () => {
 						sessionManager: destination,
 					}));
 					await copiedSession.prompt("Continue from the public checkpoint.");
-					expect(bodies.at(-1)).toContain("call_epoch_recovery");
+					expect(bodies.at(-1)).not.toContain("call_epoch_recovery");
 					expect(bodies.at(-1)).not.toContain("OPAQUE_TAIL_CANONICAL_ONLY");
 					expect(bodies.at(-1)).not.toContain("OPTIONAL_PRIOR_LITERAL");
 				} finally {

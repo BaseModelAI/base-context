@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeJournalFrame, INITIAL_JOURNAL_CURSOR } from "../src/core/journal-frame.js";
 import * as sessionJournalReader from "../src/core/session-journal-reader.js";
-import { loadEntriesFromFile, SessionManager } from "../src/core/session-manager.js";
+import { buildSessionContext, loadEntriesFromFile, SessionManager } from "../src/core/session-manager.js";
 
 function git(cwd: string, ...args: string[]): string {
 	return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -59,7 +59,7 @@ describe("SessionManager git state", () => {
 	it("does not record a git_state entry when nothing changed", async () => {
 		const sm = await createSession();
 		expect(await sm.recordGitStateIfChanged()).toBeUndefined();
-		expect(sm.getEntries().some((e) => e.type === "git_state")).toBe(false);
+		expect((await sm.readBranch()).some((e) => e.type === "git_state")).toBe(false);
 	});
 
 	it("records a git_state entry when the commit changes", async () => {
@@ -69,7 +69,7 @@ describe("SessionManager git state", () => {
 		const id = await sm.recordGitStateIfChanged();
 		expect(id).toBeDefined();
 
-		const entry = sm.getEntries().find((e) => e.type === "git_state");
+		const entry = (await sm.readBranch()).find((e) => e.type === "git_state");
 		expect(entry).toMatchObject({ type: "git_state", git: { commit: secondSha } });
 
 		expect(await sm.recordGitStateIfChanged()).toBeUndefined();
@@ -85,7 +85,7 @@ describe("SessionManager git state", () => {
 		// Navigate to before that entry: this branch's nearest git context is the header (firstSha),
 		// so even though the file already holds a git_state for the live commit, a new one must be
 		// appended on this path rather than deduped away.
-		sm.branch(msgId);
+		await sm.branchTo(msgId);
 		expect(await sm.recordGitStateIfChanged()).toBeDefined();
 	});
 
@@ -182,13 +182,13 @@ describe("SessionManager git state", () => {
 			.join("");
 		writeFileSync(sourcePath, source);
 
-		const reader = vi.spyOn(sessionJournalReader, "readSessionJournal");
+		const reader = vi.spyOn(sessionJournalReader, "readCapturedSessionJournal");
 		let forked: SessionManager;
 		try {
 			forked = await SessionManager.forkFrom(sourcePath, repoDir, sessionDir);
 			managers.push(forked);
 			expect(reader).toHaveBeenCalledTimes(1);
-			expect(reader).toHaveBeenCalledWith(sourcePath);
+			expect(reader).toHaveBeenCalledWith(sourcePath, expect.any(Function), { requireCompleteTail: false });
 		} finally {
 			reader.mockRestore();
 		}
@@ -200,16 +200,16 @@ describe("SessionManager git state", () => {
 			repoUrl: "https://github.com/acme/widgets.git",
 		});
 		// Source git_state is dropped and its children re-linked to keep the tree intact.
-		const entries = forked.getEntries();
+		const entries = await forked.readEntries();
 		expect(entries.map((entry) => [entry.id, entry.parentId])).toEqual([
 			["m1", null],
 			["usage-10", "m1"],
 			["usage-20", "m1"],
 			["m2", "m1"],
 		]);
-		expect(forked.getEntryRetention("m1")).toBeUndefined();
-		expect(forked.getEntryRetention("m2")).toBe("retained-import");
-		expect(forked.getEntry("m2")).toMatchObject({ message: { usage: usage(21) } });
+		expect(await forked.readEntryRetention("m1")).toBeUndefined();
+		expect(await forked.readEntryRetention("m2")).toBe("retained-import");
+		expect(await forked.readEntry("m2")).toMatchObject({ message: { usage: usage(21) } });
 		const persisted = loadEntriesFromFile(forked.getSessionFile()!);
 		expect(persisted.find((entry) => entry.id === "m2")).toMatchObject({
 			parentId: "m1",
@@ -217,9 +217,9 @@ describe("SessionManager git state", () => {
 		});
 		const imported = await SessionManager.importRetainedFrom(sourcePath, repoDir, sessionDir);
 		managers.push(imported);
-		expect(imported.getEntryRetention("m1")).toBe("retained-import");
-		expect(imported.getEntryRetention("m2")).toBe("retained-import");
-		expect(imported.getEntry("m2")).toMatchObject({ parentId: "m1", message: { usage: usage(21) } });
+		expect(await imported.readEntryRetention("m1")).toBe("retained-import");
+		expect(await imported.readEntryRetention("m2")).toBe("retained-import");
+		expect(await imported.readEntry("m2")).toMatchObject({ parentId: "m1", message: { usage: usage(21) } });
 		expect(readFileSync(sourcePath, "utf8")).toBe(source);
 	});
 
@@ -227,6 +227,6 @@ describe("SessionManager git state", () => {
 		const sm = await createSession();
 		commit(repoDir, "second");
 		await sm.recordGitStateIfChanged();
-		expect(sm.buildSessionContext().messages).toHaveLength(0);
+		expect(buildSessionContext(await sm.readBranch(), sm.getLeafId()).messages).toHaveLength(0);
 	});
 });

@@ -6,7 +6,11 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as kernelBootstrap from "../src/core/kernel/bootstrap.js";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
-import { ORPHAN_PROCESS_JOURNAL_ENV } from "../src/core/orphan-process-journal.js";
+import {
+	captureOrphanProcessJournalOwner,
+	ORPHAN_PROCESS_JOURNAL_ENV,
+	type OrphanProcessJournalOwner,
+} from "../src/core/orphan-process-journal.js";
 
 const ensureKernelPythonMock = vi.hoisted(() => vi.fn());
 
@@ -105,11 +109,13 @@ describe("repl kernel parent watchdog", () => {
 		const manager = new ReplKernelManager({ python: "/nonexistent/python", cwd: tempDir });
 		const internals = manager as unknown as {
 			child?: { pid?: number; kill(signal: string): boolean };
+			childOrphanOwner?: OrphanProcessJournalOwner;
 			cleanupResources(signal?: NodeJS.Signals): void;
 		};
 
 		try {
 			internals.child = { pid: 999999, kill: () => true };
+			internals.childOrphanOwner = captureOrphanProcessJournalOwner();
 			internals.cleanupResources("SIGKILL");
 
 			const records = readJournalRecords(journalPath);

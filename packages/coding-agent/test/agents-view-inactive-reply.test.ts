@@ -648,6 +648,7 @@ describe("agents view slash commands", () => {
 		const latchHarness = (text: string, responses: unknown[]) => {
 			const request = vi.fn(async () => responses.shift());
 			const persistentState: Record<string, unknown> = {};
+			const client = { request };
 			const self: Record<string, unknown> = {
 				persistentState,
 				reconnectPromise: undefined,
@@ -665,8 +666,14 @@ describe("agents view slash commands", () => {
 				syncSelectedRowState: vi.fn(),
 				ui: { requestRender: vi.fn() },
 				editor: editorWithText(text),
-				requireClient: () => ({ request }),
+				requireClient: () => client,
+				client,
 				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+				resetSavedPageIfOrderingChanged: vi.fn(),
+				savedPageRequest: () => ({ query: { text }, context: { cwd: "/tmp/project" } }),
+				releaseSavedPage: () => invoke("releaseSavedPage", self),
+				refuseSavedPage: (error: unknown, preserve: boolean) => invoke("refuseSavedPage", self, error, preserve),
+				drainSavedPages: (owner: object) => invoke("drainSavedPages", self, owner),
 				refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
 				rearmSavedSearchFetch() {
 					return invoke("rearmSavedSearchFetch", self);
@@ -699,17 +706,18 @@ describe("agents view slash commands", () => {
 		]);
 		invoke("queryChanged", failing.self);
 		invoke("queryChanged", failing.self);
-		expect(failing.request).toHaveBeenCalledTimes(1);
+		await vi.waitFor(() => expect(failing.request).toHaveBeenCalledTimes(1));
 		const olderFailure = (failing.self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]
 			?.value as Promise<boolean>;
 		const newerFailure = failing.supersede();
 		rejectFirst(new Error("gen1 failed"));
-		await expect(olderFailure).resolves.toBe(false);
+		expect(newerFailure).toBe(olderFailure);
+		await vi.waitFor(() => expect(failing.request).toHaveBeenCalledTimes(2));
 		expect(failing.self.savedSearchFetchStarted).toBe(true);
 		rejectSecond(new Error("gen2 failed"));
 		await expect(newerFailure).resolves.toBe(false);
 		expect(failing.self.savedSearchFetchStarted).toBe(false);
-		expect(failing.persistentState.savedCatalogLoaded).toBeUndefined();
+		expect(failing.persistentState.savedCatalogLoaded).toBe(false);
 	});
 
 	it("kills a live target and disarms the composer", async () => {

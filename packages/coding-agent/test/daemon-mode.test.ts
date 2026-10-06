@@ -6643,6 +6643,15 @@ describe("daemon mode helpers", () => {
 		const disposeStarted = new Promise<void>((resolve) => {
 			markDisposeStarted = resolve;
 		});
+		let releaseCatalog!: () => void;
+		const catalogGate = new Promise<void>((resolve) => {
+			releaseCatalog = resolve;
+		});
+		let markCatalogStarted!: () => void;
+		const catalogStarted = new Promise<void>((resolve) => {
+			markCatalogStarted = resolve;
+		});
+		let settledOperations: Promise<unknown> | undefined;
 		try {
 			const fixture = await makePersistedRlmDaemonFixture(tempDir, {
 				childDisposeStarted: markDisposeStarted,
@@ -6656,6 +6665,9 @@ describe("daemon mode helpers", () => {
 					getCurrentState: () => ActiveSessionState | undefined,
 				): AgentSessionMessageController;
 				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+				rlmSpawnLedger(): { edges(): Promise<unknown[]> };
+				getOrHydrateBoundSessionState(id: string): Promise<ActiveSessionState>;
+				createAgentObserveController(getCurrentState: () => ActiveSessionState): AgentObserveController;
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
@@ -6668,22 +6680,37 @@ describe("daemon mode helpers", () => {
 			// The child is still resident and closing while dispose is blocked. A child-ID
 			// selector must join passivation instead of treating that resident state as targetable.
 			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
+			const ledger = internals.rlmSpawnLedger();
+			const edges = ledger.edges.bind(ledger);
+			vi.spyOn(ledger, "edges").mockImplementationOnce(async () => {
+				markCatalogStarted();
+				await catalogGate;
+				return edges();
+			});
 			const delivery = internals
 				.createAgentMessageController(() => parentState)
 				.sendAgentMessage({
 					target: fixture.childId,
 					message: "arrived while passivating",
 				});
+			await catalogStarted;
+			const lookup = internals.getOrHydrateBoundSessionState(fixture.childId);
+			const observation = internals.createAgentObserveController(() => parentState).getAgent(fixture.childId);
 			const explicitOpen = internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			settledOperations = Promise.allSettled([passivation, delivery, lookup, observation, explicitOpen]);
 			await Promise.resolve();
 			expect(fixture.createRuntime).toHaveBeenCalledTimes(2);
 			releaseDispose();
 
 			await expect(passivation).resolves.toBe(1);
+			// Complete the saved-identity lookup after its original resident has gone.
+			releaseCatalog();
 			await expect(delivery).resolves.toMatchObject({ deliveryStatus: "delivered" });
 			await expect(explicitOpen).resolves.toMatchObject({
 				runtime: { metadata: { rlmChildId: fixture.childId } },
 			});
+			await expect(lookup).resolves.toBe(await explicitOpen);
+			await expect(observation).resolves.toMatchObject({ agent: { runtimeKind: "subagent" } });
 			expect(fixture.createRuntime).toHaveBeenCalledTimes(3);
 			expect(fixture.acceptAgentMessagePrompt).toHaveBeenCalledWith(
 				expect.stringContaining("arrived while passivating"),
@@ -6691,6 +6718,8 @@ describe("daemon mode helpers", () => {
 			);
 		} finally {
 			releaseDispose();
+			releaseCatalog();
+			await settledOperations;
 			await closeFixtureSessions();
 			rmSync(tempDir, { recursive: true, force: true });
 		}

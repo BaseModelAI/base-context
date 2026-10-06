@@ -42,6 +42,7 @@ describe("ENG-4509 side questions", () => {
 					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
 						"The project codename is kestrel.",
+						expect.stringContaining("# Continual Harness Snapshot"),
 						"The codename is kestrel.",
 						expect.stringContaining("What is the project codename?"),
 					]);
@@ -82,6 +83,7 @@ describe("ENG-4509 side questions", () => {
 					const texts = context.messages.map(getMessageText);
 					expect(texts).toEqual([
 						"Main context message.",
+						expect.stringContaining("# Continual Harness Snapshot"),
 						"main answer",
 						expect.stringContaining("First side question?"),
 						"first side answer",
@@ -89,8 +91,8 @@ describe("ENG-4509 side questions", () => {
 					]);
 					expect(context.tools).toEqual([]);
 					// The instruction is repeated only on the first side turn.
-					expect(texts[2]).toContain("Answer this side question");
-					expect(texts[4]).not.toContain("Answer this side question");
+					expect(texts[3]).toContain("Answer this side question");
+					expect(texts[5]).not.toContain("Answer this side question");
 					return fauxAssistantMessage("second side answer");
 				},
 			]);
@@ -128,6 +130,7 @@ describe("ENG-4509 side questions", () => {
 					expect(context.tools).toEqual([]);
 					expect(context.messages.map(getMessageText)).toEqual([
 						"Run the main task.",
+						expect.stringContaining("# Continual Harness Snapshot"),
 						expect.stringContaining("Can I ask this concurrently?"),
 					]);
 					return fauxAssistantMessage("yes");
@@ -796,7 +799,7 @@ describe("ENG-4509 side questions", () => {
 				connectionCommands: [],
 				isBashRunning: () => false,
 				patchConnectionState: vi.fn(),
-				ui: { requestRender: vi.fn() },
+				ui: { requestRender: vi.fn(), flushRender: vi.fn() },
 				agentConnection: { executeBash },
 				// handleEvent preamble stubs
 				isInitialized: true,
@@ -928,7 +931,7 @@ describe("ENG-4509 side questions", () => {
 			activityTracker: { handleEvent: vi.fn(), getStatus: () => ({ tokens: 0 }) },
 			updateWorkingLoaderMessage: vi.fn(),
 			isAgentStreaming: () => false,
-			ui: { requestRender: vi.fn() },
+			ui: { requestRender: vi.fn(), flushRender: vi.fn() },
 			chatContainer: new Container(),
 			pendingMessagesContainer: new Container(),
 			pendingBashComponents: [],
@@ -1021,7 +1024,7 @@ describe("ENG-4509 side questions", () => {
 			activityTracker: { handleEvent: vi.fn(), getStatus: () => ({ tokens: 0 }) },
 			updateWorkingLoaderMessage: vi.fn(),
 			isAgentStreaming: () => false,
-			ui: { requestRender: vi.fn() },
+			ui: { requestRender: vi.fn(), flushRender: vi.fn() },
 			chatContainer,
 			pendingMessagesContainer: new Container(),
 			pendingBashComponents: [],

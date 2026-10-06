@@ -30,12 +30,15 @@ import { startSideQuestion } from "../src/core/side-question.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
-function lastUserText(context: Context): string {
+function childTaskText(context: Context): string {
 	for (let i = context.messages.length - 1; i >= 0; i--) {
 		const message = context.messages[i];
 		if (message?.role !== "user") continue;
-		if (typeof message.content === "string") return message.content;
-		return message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		const text =
+			typeof message.content === "string"
+				? message.content
+				: message.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+		if (text.includes("[task from parent]")) return text;
 	}
 	return "";
 }
@@ -105,7 +108,7 @@ describe("AgentSession semantic edges", () => {
 			capturedHeaders.push(streamOptions?.headers);
 			options.onRequest?.(streamOptions?.headers);
 			faux.appendResponses([respond]);
-			if (options.hangMarker && lastUserText(context).includes(options.hangMarker)) {
+			if (options.hangMarker && childTaskText(context).includes(options.hangMarker)) {
 				options.onChildCallStarted?.();
 				await new Promise<void>((resolve) => {
 					if (streamOptions?.signal?.aborted) resolve();
@@ -114,10 +117,20 @@ describe("AgentSession semantic edges", () => {
 				return fauxAssistantMessage("", { stopReason: "aborted" });
 			}
 			const next = responses?.shift() ?? { text: "ok" };
-			return fauxAssistantMessage(next.text, {
+			const message = fauxAssistantMessage(next.text, {
 				stopReason: next.errorMessage ? "error" : "stop",
 				errorMessage: next.errorMessage,
 			});
+			if (next.errorMessage === "overloaded_error") {
+				message.diagnostics = [
+					{
+						type: "provider_stream_failure",
+						timestamp: Date.now(),
+						details: { kind: "server_error", status: 503 },
+					},
+				];
+			}
+			return message;
 		};
 		faux.setResponses([respond]);
 
@@ -394,13 +407,32 @@ describe("AgentSession semantic edges", () => {
 		const { session: root } = await createSession();
 		await root.prompt("turn one");
 		const firstId = startedRequestIds(ledgerFor(root))[0];
+		const firstAssistantEntryId = root.sessionManager.getLeafId();
+		expect(await root.sessionManager.readEntry(firstAssistantEntryId!)).toMatchObject({
+			type: "message",
+			message: { role: "assistant" },
+		});
 
 		// Advance the parent's lineage while runRlmChild is still awaiting preflight.
 		const spawnPromise = spawnDuringRun(root, () => root.runRlmChild("child task"));
 		const laterId = root.semanticEdges.startTurnRequest("later-body-hash");
+		root.agent.state.messages.push(fauxAssistantMessage("later response"));
 		const spawned = await spawnPromise;
 		await waitForAsync(async () => (await root.listRlmSubagents()).subagents[0]?.status === "completed");
 
+		const child = root.getRlmChildSession(spawned.rlm_child_id);
+		expect(child).toBeDefined();
+		expect(await child!.sessionManager.readEntries()).toContainEqual(
+			expect.objectContaining({
+				type: "custom",
+				customType: "rlm_parent_usage",
+				data: {
+					sessionId: root.sessionId,
+					sessionFile: root.sessionFile,
+					entryId: firstAssistantEntryId,
+				},
+			}),
+		);
 		const childEvents = readSemanticEdgeLedger(childLedgerPath(spawned.session_dir));
 		const registration = childEvents.find((event) => event.type === "session_registered");
 		expect(registration).toMatchObject({ spawned_by_request_id: firstId });
@@ -564,7 +596,7 @@ describe("AgentSession semantic edges", () => {
 
 		return createSession({
 			extensionsResult,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 			responses: [{ text: "answer" }, { text: "answer" }, { text: "answer" }],
 		});
 	}
@@ -675,7 +707,7 @@ describe("AgentSession semantic edges", () => {
 
 			const result = await session.compact();
 			expect(result.summary).toBe("summarized");
-			expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
+			expect((await sessionManager.readEntries()).some((entry) => entry.type === "compaction")).toBe(true);
 			expect(warn).toHaveBeenCalledOnce();
 		} finally {
 			warn.mockRestore();
@@ -702,7 +734,7 @@ describe("AgentSession semantic edges", () => {
 	it("fails the summary requests when compaction is aborted mid-summary", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -749,7 +781,7 @@ describe("AgentSession semantic edges", () => {
 	it("commits no summary slice when a racing split-turn sibling fails", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -795,7 +827,7 @@ describe("AgentSession semantic edges", () => {
 	it("settles a slice that resolves after a sibling already failed the compaction", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -841,7 +873,7 @@ describe("AgentSession semantic edges", () => {
 	it("mints a distinct request identity for each split-turn summary call", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1 }, autoRefine: { enabled: false } },
 		});
 		harnesses.push(harness);
 		const fauxModel = harness.getModel();

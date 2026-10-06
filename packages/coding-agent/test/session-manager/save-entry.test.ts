@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { type CustomEntry, SessionManager } from "../../src/core/session-manager.js";
 
 describe("SessionManager.saveCustomEntry", () => {
-	it("saves custom entries and includes them in tree traversal", () => {
+	it("saves custom entries and includes them in tree traversal", async () => {
 		const session = SessionManager.inMemory();
 
-		const msgId = session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
-		const customId = session.appendCustomEntry("my_data", { foo: "bar" });
+		const customId = await session.appendCustomEntry("my_data", { foo: "bar" });
 
-		const msg2Id = session.appendMessage({
+		const msg2Id = await session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
 			api: "anthropic-messages",

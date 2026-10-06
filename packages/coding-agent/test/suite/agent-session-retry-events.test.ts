@@ -194,7 +194,7 @@ describe("AgentSession retry and event characterization", () => {
 			persistSession: true,
 			tools: [echoTool],
 			invocationOutputLimits: outputLimits,
-			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1, provider: { maxRetryDelayMs: 2 } } },
+			settings: { retry: { enabled: true, baseDelayMs: 1, provider: { maxRetryDelayMs: 2 } } },
 		});
 		harnesses.push(harness);
 		expect(harness.sessionManager.supportsCapturedHistoryReads()).toBe(true);

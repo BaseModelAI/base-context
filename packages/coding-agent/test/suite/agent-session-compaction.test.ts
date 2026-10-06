@@ -806,7 +806,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			rlmDepth?: number;
 		} = {},
 	) {
-		const model = getModel("deepseek", "deepseek-flash");
+		// Keep the reply reservation inside the fixture's 120k context, independent of catalog defaults.
+		const model = { ...getModel("deepseek", "deepseek-flash"), maxTokens: 16_384 };
 		const harness = await createHarness({
 			persistSession: true,
 			rlmDepth: options.rlmDepth,
@@ -841,7 +842,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 								templateRevision: "deepseek-text-tools-fixture-v1",
 								replayFamily: "deepseek-completions",
 								contextTokens: 120000,
-								outputCeilingTokens: 393216,
+								outputCeilingTokens: model.maxTokens,
 								estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
 							},
 						],
@@ -1408,10 +1409,10 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			});
 		harness.settingsManager.applyOverrides({ compaction: { enabled: true } });
 		await harness.session.prompt(`Current required facts. ${"New ".repeat(Math.ceil(addedBytes / 4))}`);
-		expect(recover).toHaveBeenCalledTimes(2);
-		expect(await recover.mock.results[0].value).toBe("reprepare");
-		expect(await recover.mock.results[1].value).toBe(true);
-		const refused = recover.mock.calls[1][0];
+		// Visible user inputs no longer force a redundant TaskFrame rebase before compaction.
+		expect(recover).toHaveBeenCalledOnce();
+		expect(await recover.mock.results[0].value).toBe(true);
+		const refused = recover.mock.calls[0][0];
 		if (!(refused instanceof PublicContextBudgetError)) throw new Error("Expected captured public capacity");
 		const remaining =
 			refused.mandatoryAssessment!.availableInputTokens! - refused.mandatoryAssessment!.estimatedInputTokens!;
@@ -1634,7 +1635,8 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 	] as const)(
 		"continues DeepSeek tools through its native public checkpoint and rejects an altered replay payload ($finishReason, depth $rlmDepth)",
 		async ({ finishReason, rlmDepth }) => {
-			const model = getModel("deepseek", "deepseek-flash");
+			// Bound only the mock reply; keep the input budget and native replay assertions unchanged.
+			const model = { ...getModel("deepseek", "deepseek-flash"), maxTokens: 16_384 };
 			const privateThinking = `PRIVATE_DEEPSEEK_REASONING ${"thinking ".repeat(14000)}`;
 			const lengthLimited = finishReason === "length";
 			const expectedExecutions = lengthLimited ? 0 : 1;
@@ -1670,7 +1672,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 							templateRevision: "deepseek-text-tools-fixture-v1",
 							replayFamily: "deepseek-completions",
 							contextTokens: 120000,
-							outputCeilingTokens: 393216,
+							outputCeilingTokens: model.maxTokens,
 							estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 32 },
 						},
 					],
@@ -1693,7 +1695,7 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 			type Body = {
 				model: string;
 				messages: Array<Record<string, unknown>>;
-				max_tokens: number;
+				max_tokens?: number;
 				reasoning_effort?: string;
 				tools?: unknown[];
 			};
@@ -1714,7 +1716,6 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 				expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
 				const body = JSON.parse(String(init?.body)) as Body;
 				expect(body.model).toBe(model.id);
-				expect(body.max_tokens).toBeGreaterThan(0);
 				expect(body).not.toHaveProperty("max_completion_tokens");
 				expect(body).not.toHaveProperty("input");
 				const entries = await harness.sessionManager.readEntries();
@@ -1723,6 +1724,9 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 						entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
 					)
 					.at(-1)!;
+				// These main/manual-summary sends use the provider default, but reserve its declared ceiling.
+				expect(body).not.toHaveProperty("max_tokens");
+				expect(admitted.descriptor.requestBudget).toMatchObject({ outputReserveTokens: model.maxTokens });
 				const summarizing = admitted.purpose === "summary";
 				if (summarizing) summaryBodies.push(body);
 				else {

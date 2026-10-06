@@ -11,6 +11,9 @@ export default function registerEng4685FauxRefineProvider(pi: ExtensionAPI): voi
 			edits: [],
 			expectedOutcome: "No changes",
 		}),
+		// The goal-budget notice is a queued turn after the first serialized checkpoint.
+		"The goal budget is reached. Stopping now.",
+		JSON.stringify({ shouldRefine: false, rationale: "No new edits needed after the budget wrap-up" }),
 	];
 	let nextReply = 0;
 	globalThis.fetch = async (input, init) => {

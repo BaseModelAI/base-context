@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { Agent } from "../../../agent/src/agent.js";
 import type { FinalizedToolExchange } from "../../../agent/src/types.js";
-import { loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
+import { buildSessionContext, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
 
 let dir: string;
 let managers: SessionManager[];
@@ -120,18 +120,17 @@ it("records intent before effects and one exact result, with source-ordered repl
 	await manager.close();
 	const restored = await SessionManager.open(path);
 	managers.push(restored);
-	const resultEntries = restored
-		.getEntries()
-		.filter((entry) => entry.type === "message" && entry.message.role === "toolResult");
+	const resultEntries = (await restored.readBranch()).filter(
+		(entry) => entry.type === "message" && entry.message.role === "toolResult",
+	);
 	expect(resultEntries).toHaveLength(2);
 	for (const exchange of exchanges) {
-		expect(restored.getToolExchange(exchange.executionId)).toEqual(exchange);
-		const entry = restored.getEntry(exchange.executionId);
+		expect(await restored.readToolExchange(exchange.executionId)).toEqual(exchange);
+		const entry = await restored.readEntry(exchange.executionId);
 		expect(entry?.type === "message" ? entry.execution : undefined).not.toHaveProperty("originalInput");
 	}
 	expect(
-		restored
-			.buildSessionContext()
+		buildSessionContext(await restored.readBranch(), restored.getLeafId())
 			.messages.filter((message) => message.role === "toolResult")
 			.map((message) => message.toolCallId),
 	).toEqual(["first", "second"]);
@@ -166,11 +165,11 @@ it("retains a not-started result without inventing an invocation", async () => {
 	const first = manager.appendToolExchange(exchange);
 	const duplicate = manager.appendToolExchange(structuredClone(exchange));
 	expect(await duplicate).toBe(await first);
-	expect(manager.getEntries()).toHaveLength(1);
+	expect(await manager.readBranch()).toHaveLength(1);
 	await manager.close();
 	const restored = await SessionManager.open(manager.getSessionFile()!);
 	managers.push(restored);
-	expect(restored.getEntries().some((entry) => entry.type === "tool_intent")).toBe(false);
-	expect(restored.getToolExchange(exchange.executionId)).toEqual(exchange);
-	expect(restored.getToolExchange(exchange.executionId)).not.toHaveProperty("executedInput");
+	expect((await restored.readBranch()).some((entry) => entry.type === "tool_intent")).toBe(false);
+	expect(await restored.readToolExchange(exchange.executionId)).toEqual(exchange);
+	expect(await restored.readToolExchange(exchange.executionId)).not.toHaveProperty("executedInput");
 });

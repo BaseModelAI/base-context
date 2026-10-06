@@ -422,7 +422,7 @@ describe("createBranchedSession", () => {
 		const session = SessionManager.inMemory();
 		await session.appendMessage(userMsg("hello"));
 
-		await expect(session.createBranchedSession("nonexistent")).rejects.toThrow("Entry nonexistent not found");
+		await expect(session.createBranchedSession("nonexistent")).rejects.toThrow("Parent path lineage is unresolved");
 	});
 
 	it("creates new session with path to specified leaf (in-memory)", async () => {

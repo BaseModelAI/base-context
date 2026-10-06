@@ -252,6 +252,7 @@ describe("daemon extension binding", () => {
 		expect(replaced?.state.recap).toBeUndefined();
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:daemon replacement message",
+			expect.stringContaining("custom:# Continual Harness Snapshot"),
 			"assistant:replacement reply",
 		]);
 	});

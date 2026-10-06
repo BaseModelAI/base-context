@@ -97,6 +97,8 @@ export interface SessionRuntimeServices {
 
 interface ProviderRecoveryPolicy {
 	enabled: boolean;
+	/** Retries after the initial send; absent keeps recovering until success or cancellation. */
+	maxRetries?: number;
 	baseDelayMs: number;
 	maxRetryDelayMs: number;
 }
@@ -517,9 +519,11 @@ export class InferenceCoordinator {
 
 	private providerRecoveryWait(): (message: AssistantMessage, signal?: AbortSignal) => Promise<boolean> {
 		let nextDelayMs: number | undefined;
+		let retries = 0;
 		return async (message, callerSignal) => {
 			const policy = this.work.providerRecoveryPolicy?.();
 			if (!policy?.enabled || !isTransientProviderFailure(message)) return false;
+			if (policy.maxRetries !== undefined && retries >= policy.maxRetries) return false;
 			this.assertAdmission();
 			const signal = callerSignal
 				? AbortSignal.any([callerSignal, this.work.cancellation.signal])
@@ -530,6 +534,7 @@ export class InferenceCoordinator {
 			signal.throwIfAborted();
 			this.assertAdmission();
 			nextDelayMs = Math.min(delayMs * 2, policy.maxRetryDelayMs);
+			retries++;
 			return this.work.providerRecoveryPolicy?.().enabled === true;
 		};
 	}

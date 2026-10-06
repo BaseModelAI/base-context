@@ -27,6 +27,12 @@ describe("root-family subagent capacity", () => {
 			await expect(harness.session.runRlmChild("blocked by zero")).rejects.toThrow("resident child limit");
 			await harness.session.getRlmChildSession(handles[1].rlm_child_id)!.disposeAsync();
 			await harness.session.setRlmMaxSubagents(4);
+			// Initial child terminal notices may consume parent-turn responses.
+			harness.appendResponses([
+				fauxAssistantMessage("nested done"),
+				fauxAssistantMessage("nested notice handled"),
+				fauxAssistantMessage("root notice handled"),
+			]);
 			await expect(first.runRlmChild("nested after cleanup", { name: "nested-worker" })).resolves.toHaveProperty(
 				"rlm_child_id",
 			);

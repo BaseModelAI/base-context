@@ -1,7 +1,7 @@
 # Python Real-World 30: Base Context vs Codex
 
 **GPT-6.1 Sol · high and GPT-6 Astra · medium only.** 30 Python tasks,
-60 exact task/profile pairs. Base Context **1.1.1** vs vanilla Codex **0.160.0**.
+60 exact task/profile pairs. Historical Base Context **1.1.1** vs vanilla Codex **0.160.0**; these are not measurements of later source changes.
 
 ![Same full-pass result, less mean runtime and lower estimated API cost](../../packages/coding-agent/docs/images/benchmarks/benchmark-overview.svg)
 
@@ -67,6 +67,12 @@ Concurrency describes the shared campaigns, not a standalone two-profile run.
 Each product keeps its native instructions, tools and context management.
 These results describe the saved runs under the settings above; dates,
 concurrency and captured-usage coverage differ between the tools.
+
+## What this comparison does not establish
+
+The tasks are self-authored standard-library applications. Both tools reach 60/60 selected passes, so this sample has a quality ceiling. Best-of-two selection and exclusion of provider failures do not measure single-attempt reliability. Differences in dates, concurrency, and native tools prevent attributing the observed timing or cost difference to a single feature.
+
+The Base runs **did not enable request-budget selection**. This is not an ablation of selection, a measurement of later fixes, or a test of long-session recall, post-compaction instruction recovery, or delegation quality. Those need separate, appropriately designed evaluations. Selected captured estimates also exclude losing or rejected runs and are not complete campaign spend.
 
 ## Data and reproduction
 

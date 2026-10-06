@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import { buildSessionContext, SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestResourceLoader } from "./utilities.js";
 
@@ -84,8 +84,11 @@ async function createSession(persistent = false) {
 	return { session, sessionManager, settingsManager };
 }
 
-function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): void {
-	session.agent.state.messages = sessionManager.buildSessionContext().messages;
+async function syncAgentMessages(session: AgentSession, sessionManager: SessionManager): Promise<void> {
+	session.agent.state.messages = buildSessionContext(
+		await sessionManager.readBranch(),
+		sessionManager.getLeafId(),
+	).messages;
 }
 
 describe("AgentSession.getSessionStats", () => {
@@ -95,7 +98,7 @@ describe("AgentSession.getSessionStats", () => {
 		try {
 			await sessionManager.appendMessage(createUserMessage("hello", 1));
 			await sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
-			syncAgentMessages(session, sessionManager);
+			await syncAgentMessages(session, sessionManager);
 
 			const stats = await session.getSessionStats();
 			expect(stats.contextUsage).toEqual(await session.getContextUsage());
@@ -117,7 +120,7 @@ describe("AgentSession.getSessionStats", () => {
 			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
 			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			await sessionManager.appendMessage(createUserMessage("third", 5));
-			syncAgentMessages(session, sessionManager);
+			await syncAgentMessages(session, sessionManager);
 
 			const eagerBranch = vi.spyOn(sessionManager, "getBranch").mockImplementation(() => {
 				throw new Error("Unbounded context-usage branch scan");
@@ -148,7 +151,7 @@ describe("AgentSession.getSessionStats", () => {
 			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			await sessionManager.appendMessage(createUserMessage("third", 5));
 			const assistantId = await sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6));
-			syncAgentMessages(session, sessionManager);
+			await syncAgentMessages(session, sessionManager);
 
 			const eagerBranch = vi.spyOn(sessionManager, "getBranch").mockImplementation(() => {
 				throw new Error("Unbounded context-usage branch scan");
@@ -167,7 +170,7 @@ describe("AgentSession.getSessionStats", () => {
 			}
 			await sessionManager.appendMessage(createUserMessage("attribution branch", 7));
 			await sessionManager.appendChildUsageAttribution(assistantId, createUsage(0), createUsage(0));
-			sessionManager.branch(assistantId);
+			await sessionManager.branchTo(assistantId);
 			expect((await session.getContextUsage())?.tokens).toBeNull();
 			await sessionManager.appendChildUsageAttribution(assistantId, createUsage(1), createUsage(26_000));
 			expect((await session.getContextUsage())?.tokens).not.toBeNull();

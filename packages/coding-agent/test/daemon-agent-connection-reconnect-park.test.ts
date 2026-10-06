@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
+import {
+	DAEMON_DEFAULT_SERVER_CAPABILITIES,
+	DAEMON_PROTOCOL_INFO,
+	DAEMON_SCHEMA_REVISION,
+} from "../src/modes/daemon/daemon-protocol.js";
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -72,7 +77,9 @@ async function startScriptedDaemon(
 		const script = scripts[Math.min(sockets.length, scripts.length - 1)];
 		sockets.push(socket);
 		socket.on("error", () => undefined);
-		socket.write(`${JSON.stringify({ type: "daemon_hello", protocol: { version: 7 }, serverCapabilities: [] })}\n`);
+		socket.write(
+			`${JSON.stringify({ type: "daemon_hello", protocol: DAEMON_PROTOCOL_INFO, schemaRevision: DAEMON_SCHEMA_REVISION, serverCapabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES })}\n`,
+		);
 		let buffered = "";
 		socket.on("data", (chunk: Buffer) => {
 			buffered += chunk.toString("utf8");

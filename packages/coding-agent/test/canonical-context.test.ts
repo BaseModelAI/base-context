@@ -539,23 +539,9 @@ it("reconstructs the whole retained context across pages and caches immutable so
 		const sourceBeforeSecondDelta = await manager.readEntries();
 		const withSecondDelta = await capture.readHistory((view) => compiler.compile(view, frameLimits, omittedIds));
 		const secondFrames = withSecondDelta.filter(isTaskFrame);
-		expect(secondFrames).toHaveLength(3);
-		expect(secondFrames.slice(0, 2).map(frameText)).toEqual([baseText, revisionText]);
-		const secondRevisionText = frameText(secondFrames[2]);
-		const secondRevision = JSON.parse(secondRevisionText.slice(secondRevisionText.indexOf("\n") + 1));
-		expect(secondRevision).toMatchObject({
-			type: "revision",
-			changed: [
-				{
-					source: { entryId: laterInputId, field: "/nativeOrigin/submitted/text" },
-					kind: "user_requirement",
-					authority: "user",
-					state: "active",
-					text: laterInput.content,
-				},
-			],
-			noLongerSelected: [],
-		});
+		expect(secondFrames).toHaveLength(2);
+		expect(secondFrames.map(frameText)).toEqual([baseText, revisionText]);
+		expect(secondFrames.map(frameText).join("\n")).not.toContain(laterInput.content);
 		const earlierIndexNow = withSecondDelta.findIndex(
 			(message) => message.role === "user" && message.content === earlierInput.content,
 		);
@@ -564,7 +550,7 @@ it("reconstructs the whole retained context across pages and caches immutable so
 		);
 		expect(earlierIndexNow).toBe(earlierIndex);
 		expect(withSecondDelta[earlierIndexNow - 1]).toBe(secondFrames[1]);
-		expect(withSecondDelta[laterIndex - 1]).toBe(secondFrames[2]);
+		expect(withSecondDelta[laterIndex - 1]).toEqual(earlierInput);
 		expect(withSecondDelta[laterIndex]).toEqual(laterInput);
 		expect(compiler.hasActiveEntry(omittedAssistantId)).toBe(true);
 		expect(withSecondDelta.filter((message) => !isTaskFrame(message))).toEqual([
@@ -572,15 +558,15 @@ it("reconstructs the whole retained context across pages and caches immutable so
 			earlierInput,
 			laterInput,
 		]);
-		expect(withSecondDelta).toHaveLength(135);
+		expect(withSecondDelta).toHaveLength(134);
 		const previousFrameUnits = getCanonicalViewUnits(withDelta)!.filter((unit) => unit.kind === "task-frame");
 		const nextFrameUnits = getCanonicalViewUnits(withSecondDelta)!.filter((unit) => unit.kind === "task-frame");
 		expect(nextFrameUnits.slice(0, 2).map((unit) => [unit.id, unit.sourceRevision])).toEqual(
 			previousFrameUnits.map((unit) => [unit.id, unit.sourceRevision]),
 		);
-		expect(nextFrameUnits[2].requiredVisibleDependencies).toContain(nextFrameUnits[1].id);
+		expect(nextFrameUnits[1].requiredVisibleDependencies).toContain(nextFrameUnits[0].id);
 		const providerUnits = getCanonicalViewUnits(withSecondDelta)!;
-		const closedUnits = closeViewSelection(providerUnits, [nextFrameUnits[2].id], {
+		const closedUnits = closeViewSelection(providerUnits, [nextFrameUnits[1].id], {
 			maxUnits: frameLimits.maxMessages,
 			maxDependencies: frameLimits.maxMessages * 4,
 			maxMetadataBytes: frameLimits.maxSourceBytes,
@@ -827,6 +813,7 @@ it("reconstructs the whole retained context across pages and caches immutable so
 						let nativeSession: Awaited<ReturnType<typeof createAgentSessionFromServices>>["session"] | undefined;
 						let sentBody: string | undefined;
 						const nativeFetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+							let acceptedFrame: CompiledTaskFrame | undefined;
 							// This runs at the genuine native transport boundary, after the destination's canonical ACK.
 							await destination.readBranchHistory(async (history) => {
 								const manifest = await history.branchContext.contextManifest({ limit: 1 });
@@ -838,6 +825,7 @@ it("reconstructs the whole retained context across pages and caches immutable so
 								expect(finalized.source).toMatchObject({ qualification: "native-context-epoch" });
 								expect(finalized.source.retention).toBeUndefined();
 								const measured = readContextEpoch(finalized.entry.details, 2 * 1024 * 1024);
+								acceptedFrame = measured?.taskFrame;
 								if (finalized.source.id === copiedControl.id) {
 									// An unchanged full view may reuse its prior ACK; copying still supplies no profile claim.
 									expect(measured).toEqual(copiedEpoch);
@@ -859,7 +847,11 @@ it("reconstructs the whole retained context across pages and caches immutable so
 							if (typeof init?.body !== "string") throw new Error("Expected exact native Responses body");
 							sentBody = init.body;
 							expect(JSON.parse(sentBody).model).toBe(assistant.model);
-							for (const message of convertToLlm(copied)) {
+							// A copied frame may shed now-literal input at this ACK. Assert the actual accepted frame, not its uncommitted candidate metadata.
+							for (const message of convertToLlm([
+								...copied.filter((message) => !isTaskFrame(message)),
+								...(acceptedFrame?.messages ?? []),
+							])) {
 								const text =
 									typeof message.content === "string"
 										? [message.content]
@@ -1402,7 +1394,8 @@ it("refuses budgets and invalid retained boundaries instead of silently dropping
 		await expect(
 			capture.readHistory((view) => compiler.compile(view, { maxMessages: 2, maxSourceBytes: 4096 })),
 		).rejects.toThrow("Canonical context message budget exceeded");
-		expect(reads).not.toHaveBeenCalled();
+		// Literal-aware frames inspect actual text, but rejected builds cannot adopt their source cache.
+		expect(compiler.hasActiveEntry(secondEntryId)).toBe(false);
 
 		// Real captured compiler output refusal; no native transport or provider claim.
 		await capture.dispose();

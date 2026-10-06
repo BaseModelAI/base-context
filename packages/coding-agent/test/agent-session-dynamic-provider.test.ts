@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@ponythewhite/base-context-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { DefaultResourceLoader } from "../src/core/resource-loader.js";
 import type { ExtensionFactory } from "../src/core/sdk.js";
@@ -21,6 +21,7 @@ describe("AgentSession dynamic provider registration", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -56,11 +57,19 @@ describe("AgentSession dynamic provider registration", () => {
 		session: Awaited<ReturnType<typeof createSession>>,
 	): Promise<string | undefined> {
 		let baseUrl: string | undefined;
-		session.agent.streamFn = async (model) => {
-			baseUrl = model.baseUrl;
-			throw new Error("stop");
-		};
+		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = input instanceof Request ? input.url : String(input);
+			baseUrl = url.replace(/\/v1\/messages$/, "");
+			return new Response(
+				JSON.stringify({ type: "error", error: { type: "authentication_error", message: "test stop" } }),
+				{
+					status: 401,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		});
 		await session.prompt("hello");
+		expect(fetch).toHaveBeenCalledOnce();
 		return baseUrl;
 	}
 
@@ -74,7 +83,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/top-level");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/top-level");
 
-		session.dispose();
+		await session.disposeAsync();
 	});
 
 	it("applies session_start registerProvider overrides to the active model", async () => {
@@ -91,7 +100,7 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/session-start");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/session-start");
 
-		session.dispose();
+		await session.disposeAsync();
 	});
 
 	it("applies command-time registerProvider overrides without reload", async () => {
@@ -112,6 +121,6 @@ describe("AgentSession dynamic provider registration", () => {
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/command");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/command");
 
-		session.dispose();
+		await session.disposeAsync();
 	});
 });

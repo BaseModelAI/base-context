@@ -4,11 +4,9 @@
 
 An MIT-licensed coding and research agent with a persistent Python workspace, parallel workers, and source-backed context. Developed by [Synerise](https://synerise.com), built on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-## Same 60/60 success. 31% less time. 19% lower estimated API cost.
+Keep parsed data and command handles across turns. Retain long output outside the prompt, recover details by reference, and carry selected earlier instructions through compaction. Delegate independent work while the parent continues.
 
-[![Base Context 1.1.1 versus Codex 0.160.0: both pass 60/60 task/profile pairs; Base Context has 31% shorter mean selected-run time and 19% lower selected captured API-cost estimate.](https://raw.githubusercontent.com/BaseModelAI/base-context/main/packages/coding-agent/docs/images/benchmarks/benchmark-overview.svg)](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md)
-
-30 Python tasks × two profiles: **GPT-6.1 Sol high** and **GPT-6 Astra medium**, with best-of-two selection for both tools. Time is mean task-run duration; costs estimate the captured API usage of selected runs. [Full results and method](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md).
+Request-budget selection is **opt-in**, not default CLI optimization. Start with the [ten-minute workflow](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/quickstart.md), then see the [working budget profile](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/request-token-budgets.md) if you need request-level limits.
 
 [Install](#install) · [Use it](#use-it) · [How it works](#how-it-works) · [Documentation](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md)
 
@@ -67,7 +65,7 @@ Normal interactive workers can continue after the terminal detaches. [Quickstart
 ## How it works
 
 - **Persistent Python:** keep variables, parsed data, commands, and skills available across tool calls.
-- **Explicit working context:** TaskFrames carry selected task state; ViewUnits keep required messages together; indexed recovery retrieves retained public evidence.
+- **Instructions and recovery:** TaskFrames carry selected earlier user text and goal state without repeating visible user inputs. Indexed recovery retrieves original public text. An explicit budget profile enables supported ViewUnit selection and stable context epochs.
 - **Parallel children:** `await rlm(...)` returns an admission handle. Results arrive through messages or files, while independent work can continue.
 
 Base Context inherits the Python-first programming model from Prime Agent. Its focus is the source-backed working-set architecture around that model. Bring that workflow to your next coding or research task.
@@ -75,6 +73,12 @@ Base Context inherits the Python-first programming model from Prime Agent. Its f
 Summaries are not lossless, retrieval is bounded, and Python restoration is best-effort. Generated code runs with your user permissions; workers are **not a security sandbox**. Use an external sandbox for untrusted work. Retained sessions can contain sensitive data; compaction does not delete it.
 
 [Architecture, comparison charts, and design details](https://github.com/BaseModelAI/base-context#how-it-works) · [Context management](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/context-management.md) · [SDK](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md) · [All docs](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md).
+
+## Historical benchmark
+
+Base Context **1.1.1** and Codex **0.160.0** both passed **60/60** selected task/profile pairs on 30 self-authored Python standard-library tasks. Base had **31% shorter mean selected-run time** and a **19% lower captured API-cost estimate** in that sample, using GPT-6.1 Sol high and GPT-6 Astra medium.
+
+These are best-of-two results with a ceiling effect, different dates and concurrency limits, and different native tools/instructions. They are not single-attempt reliability, invoices, complete campaign spend, or measurements of the current changes. Request-budget selection was not enabled, so the comparison cannot establish its effect or long-session quality. [Data, charts, and full method](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md).
 
 ## License and thanks
 

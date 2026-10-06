@@ -1,5 +1,13 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
 import { stringifyBoundedJson } from "./bounded-json.js";
+import { insertSelectedSkills, insertTaskFrame } from "./canonical-context-overlays.js";
+import {
+	type CanonicalMessageSource,
+	canonicalMessageRenderer,
+	messageSources,
+} from "./canonical-context-rendering.js";
+import { type CachedContextEntry, canonicalEntryReader, readCanonicalManifest } from "./canonical-context-source.js";
+import { collectToolContinuations } from "./canonical-context-tools.js";
 import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
@@ -18,15 +26,7 @@ import {
 	snapshotContextEpoch,
 	type ToolContinuationGroup,
 } from "./context-epoch.js";
-import type {
-	ContextManifestCursor,
-	ContextManifestPage,
-	ContextRef,
-	ContextUpdateRef,
-	ContextUpdateTarget,
-	IndexedSourceEvent,
-} from "./history-index.js";
-import { createCompactionSummaryMessage, createCustomMessage } from "./messages.js";
+import type { ContextManifestCursor, ContextRef } from "./history-index.js";
 import {
 	PUBLIC_CONTEXT_RENDERER,
 	PUBLIC_TOOL_CONTINUATION_RENDERER,
@@ -35,17 +35,12 @@ import {
 } from "./public-context.js";
 import type { ContextEpochEntryRef, SourceSnapshotRef } from "./request-events.js";
 import { type OwnedResourceCapture, renderResourceView } from "./resource-view.js";
-import { isNativeSkillSelection, type SelectedSkillReference, selectedSkillCapture } from "./selected-skills.js";
-import { orderContextToolResults, sessionEntryMessage } from "./session-context-messages.js";
-import {
-	appendSentAgentMessageToToolResult,
-	parsePersistedIpythonSentAgentMessage,
-} from "./session-context-updates.js";
+import type { SelectedSkillReference } from "./selected-skills.js";
+import { orderContextToolResults } from "./session-context-messages.js";
 import { hydrateCapturedHistoryEntry, type SessionHistoryReadView } from "./session-history-index.js";
 import type { SessionEntry } from "./session-manager.js";
 import { type CompiledTaskFrame, compileTaskFrame, type TaskFrameLimits, taskFrameLimits } from "./task-frame.js";
 import { TaskStateReadCache } from "./task-state-reader.js";
-import { cloneUsage } from "./usage.js";
 import { bindMessageReplayUnits, closeViewSelection, type ViewUnit, type ViewUnitLimits } from "./view-units.js";
 
 export interface CanonicalContextLimits {
@@ -54,13 +49,6 @@ export interface CanonicalContextLimits {
 	maxSourceBytes: number;
 }
 
-interface CanonicalMessageSource {
-	readonly sessionId: string;
-	readonly sessionFile: string | undefined;
-	readonly entryId: string;
-}
-
-const messageSources = new WeakMap<AgentMessage, CanonicalMessageSource>();
 export interface CanonicalViewSelectionSource {
 	readonly source: SourceSnapshotRef;
 	readonly units: readonly ViewUnit[];
@@ -590,17 +578,96 @@ export function prepareRecoveryCompaction(
 	);
 }
 
-interface CachedEntry {
-	revision: string;
-	entry: SessionEntry;
+/** Recover the exact selected suffix of a prior summary, without treating a sequence range as coverage. */
+async function readInheritedRecoveryCoverage(
+	view: SessionHistoryReadView,
+	checkpoint: ContextEpochCheckpoint | undefined,
+	closedMessages: readonly AgentMessage[],
+	closedUnits: readonly ViewUnit[],
+	epochReferences: ReadonlyMap<AgentMessage, EpochViewReference>,
+	next: ReadonlyMap<string, CachedContextEntry>,
+	hydrate: ReturnType<typeof canonicalEntryReader>["hydrate"],
+	maxMessages: number,
+	maxSourceBytes: number,
+): Promise<EpochViewReference[]> {
+	const inheritedRecoveryCoverage: EpochViewReference[] = [];
+	if (
+		checkpoint?.includeSummary &&
+		checkpoint.replayContract === "message-groups" &&
+		closedUnits.some((unit) => unit.kind === "recovery")
+	) {
+		const prefix = await view.atSnapshot!(checkpoint.source);
+		const suffix = new Map<string, ContextRef>();
+		const frozenViews = new Map<string, EpochViewReference>();
+		let capturedMessages = 0;
+		let retained = false;
+		let cursor: ContextManifestCursor | undefined;
+		for (;;) {
+			const page = await prefix.contextManifest({ cursor, limit: 128 });
+			if (page.selection !== "known") throw new Error("Summary recovery source is unavailable");
+			if (!cursor && page.summaryRef) {
+				// The frozen source may itself have pinned views before its literal manifest.
+				const entry = await hydrate(page.summaryRef, undefined, prefix);
+				const metadata = await prefix.get(page.summaryRef.entryId);
+				const prior =
+					entry.type === "compaction" &&
+					metadata?.qualification === "native-context-epoch" &&
+					metadata.retention !== "retained-import"
+						? readContextEpoch(entry.details, maxSourceBytes)
+						: undefined;
+				if ((!prior || prior.includeSummary) && page.summaryRef.entryId === checkpoint.literalTailId)
+					retained = true;
+				capturedMessages += prior?.views.length ?? 0;
+				for (const pinned of prior?.views ?? []) {
+					if (pinned.ref.entryId === checkpoint.literalTailId) retained = true;
+					if (retained) {
+						suffix.set(pinned.ref.entryId, pinned.ref);
+						frozenViews.set(pinned.ref.entryId, pinned);
+					}
+				}
+			}
+			for (const ref of page.refs) {
+				if (ref.entryId === checkpoint.literalTailId) retained = true;
+				if (retained) suffix.set(ref.entryId, ref);
+			}
+			capturedMessages += page.refs.length;
+			if (capturedMessages > maxMessages) throw new Error("Summary recovery source exceeds its message budget");
+			if (!page.nextCursor) break;
+			cursor = page.nextCursor;
+		}
+		for (const [index, message] of closedMessages.entries()) {
+			if (closedUnits[index].kind !== "recovery") continue;
+			const reference = epochReferences.get(message)!;
+			if (checkpoint.views.some((covered) => sameRecoveryReference(reference, covered))) {
+				inheritedRecoveryCoverage.push(reference);
+				continue;
+			}
+			const frozen = suffix.get(reference.ref.entryId);
+			if (!frozen || JSON.stringify(frozen) !== JSON.stringify(reference.ref)) continue;
+			const pinned = frozenViews.get(frozen.entryId);
+			if (pinned) {
+				if (reference.sourceRevision === pinned.sourceRevision) inheritedRecoveryCoverage.push(reference);
+				continue;
+			}
+			const revisions = [frozen.revision];
+			const entry = next.get(frozen.entryId)?.entry;
+			if (entry?.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "ipython") {
+				const updates = await prefix.contextUpdates({
+					kind: "ipython-sent-message",
+					toolCallId: entry.message.toolCallId,
+				});
+				revisions.push(...updates.refs.map((update) => update.revision));
+			}
+			if (reference.sourceRevision === JSON.stringify(revisions)) inheritedRecoveryCoverage.push(reference);
+		}
+	}
+	return inheritedRecoveryCoverage;
 }
-
-type KnownManifest = Extract<ContextManifestPage, { selection: "known" }>;
 
 /** Exact active-context reconstruction. It never silently chooses a last-N transcript. */
 export class CanonicalContextCompiler {
 	private source?: SourceSnapshotRef;
-	private entries = new Map<string, CachedEntry>();
+	private entries = new Map<string, CachedContextEntry>();
 	private sourceBytes = 0;
 	private messageCount = 0;
 	private taskFrame?: CompiledTaskFrame;
@@ -664,88 +731,9 @@ export class CanonicalContextCompiler {
 			this.sourceBytes = 0;
 			this.messageCount = 0;
 		}
-		let first: KnownManifest | undefined;
-		let cursor: ContextManifestCursor | undefined;
-		let expected = 0;
-		let sourceBytes = 0;
-		const refs: ContextRef[] = [];
-		const sourceOrder = new Map<string, number>();
-		const countBytes = (ref: Pick<ContextRef, "locator">) => {
-			sourceBytes += ref.locator.length;
-			if (sourceBytes > maxSourceBytes) throw new Error("Canonical context source byte budget exceeded");
-		};
-		for (;;) {
-			const page = await view.contextManifest({ cursor, limit: 128 });
-			if (page.selection !== "known") throw new Error(`Canonical context selection is ${page.selection}`);
-			if (!first) {
-				first = page;
-				if (page.activeMessageCount + (page.summaryRef ? 1 : 0) > maxMessages)
-					throw new Error("Canonical context message budget exceeded");
-				expected = page.activeBase + 1;
-				if (page.summaryRef) countBytes(page.summaryRef);
-			} else if (
-				page.activeBase !== first.activeBase ||
-				page.activeMessageCount !== first.activeMessageCount ||
-				page.retainedMessageCount !== first.retainedMessageCount ||
-				page.summaryRef?.entryId !== first.summaryRef?.entryId ||
-				page.summaryRef?.revision !== first.summaryRef?.revision
-			) {
-				throw new Error("Canonical context manifest changed during its captured read");
-			}
-			for (const ref of page.refs) {
-				if (ref.ordinal !== expected++) throw new Error("Canonical context manifest skipped an active message");
-				countBytes(ref);
-				refs.push(ref);
-				sourceOrder.set(ref.entryId, ref.sequence);
-			}
-			if (!page.nextCursor) break;
-			if (!page.refs.length || page.nextCursor.nextOrdinal !== expected)
-				throw new Error("Canonical context manifest did not advance");
-			cursor = page.nextCursor;
-		}
-		if (refs.length !== first.activeMessageCount) throw new Error("Canonical context manifest is incomplete");
-
-		const next = new Map<string, CachedEntry>();
-		const hydrate = async (
-			ref: ContextRef | ContextUpdateRef,
-			target?: ContextUpdateTarget,
-			readView: SessionHistoryReadView = view,
-		): Promise<SessionEntry> => {
-			const cached = this.entries.get(ref.entryId);
-			if (cached?.revision === ref.revision) {
-				next.set(ref.entryId, cached);
-				return cached.entry;
-			}
-			const fragments: string[] = [];
-			let offset = 0;
-			let part = target
-				? await readView.readContextUpdatePayload(ref.entryId, target)
-				: await readView.readPayload(ref.entryId);
-			for (;;) {
-				if (!part || part.byteOffset !== offset || part.byteLength <= 0)
-					throw new Error("Canonical context payload is unavailable or incomplete");
-				offset += part.byteLength;
-				if (offset > ref.locator.length) throw new Error("Canonical context payload exceeds its source locator");
-				fragments.push(part.text);
-				if (!part.nextCursor) break;
-				part = target
-					? await readView.readContextUpdatePayload(ref.entryId, target, { cursor: part.nextCursor })
-					: await readView.readPayload(ref.entryId, { cursor: part.nextCursor });
-			}
-			const value: unknown = JSON.parse(fragments.join(""));
-			if (
-				!value ||
-				typeof value !== "object" ||
-				!("id" in value) ||
-				value.id !== ref.entryId ||
-				!("type" in value) ||
-				value.type !== ref.kind
-			)
-				throw new Error("Canonical context payload does not match its source reference");
-			const entry = value as SessionEntry;
-			next.set(ref.entryId, { revision: ref.revision, entry });
-			return entry;
-		};
+		const manifest = await readCanonicalManifest(view, maxMessages, maxSourceBytes);
+		const { first, refs, sourceOrder, countBytes } = manifest;
+		const { next, hydrate } = canonicalEntryReader(view, this.entries);
 		let checkpoint: ContextEpochCheckpoint | undefined;
 		let summaryEntry: SessionEntry | undefined;
 		if (first.summaryRef) {
@@ -786,18 +774,11 @@ export class CanonicalContextCompiler {
 			)
 				throw new Error("Selected skill epoch source is unavailable");
 		}
-		const toolSourceIds = new Set(
-			checkpoint?.toolContinuations?.flatMap((group) => [
-				group.assistantEntryId,
-				...group.calls.flatMap((call) => (call.result ? [call.result.id] : [])),
-			]),
-		);
 		const publicTail = checkpoint?.continuation?.publicTailThrough;
 		if (publicTail) {
 			if (!view.atSnapshot) throw new Error("Public summary transition requires its captured source");
 			await view.atSnapshot(publicTail);
 		}
-		let publicBytes = 0;
 		const boundary = JSON.stringify([first.summaryRef?.entryId ?? null, first.summaryRef?.revision ?? null]);
 		let resetFrame =
 			previousSource?.sessionId !== view.source.sessionId ||
@@ -824,220 +805,25 @@ export class CanonicalContextCompiler {
 		const referenceFrame = resetFrame ? checkpoint?.taskFrame : previousFrame;
 		if (resetFrame || (referenceFrame && referenceFrame.messages.length <= 1)) this.forceTaskFrameRebase = false;
 		const forceRebase = purpose === "request" && this.forceTaskFrameRebase;
-		let taskFrame = tasks
-			? compileTaskFrame(tasks, frameLimits, forceRebase ? undefined : referenceFrame)
-			: undefined;
-		const taskFrameRebased = Boolean(
-			mode === "on" &&
-				referenceFrame &&
-				taskFrame !== referenceFrame &&
-				(!taskFrame || taskFrame.messages.length === 1),
-		);
 		const resource =
 			mode === "on" && resourceCapture && (resourceCapture.enabled || checkpoint)
 				? renderResourceView(resourceCapture)
 				: undefined;
-		if (resource) {
-			sourceBytes += resource.bytes;
-			if (sourceBytes > maxSourceBytes) throw new Error("Canonical context source byte budget exceeded");
-		}
-		const messageCount =
-			first.activeMessageCount +
-			(checkpoint ? checkpoint.views.length + (checkpoint.includeSummary ? 1 : 0) : first.summaryRef ? 1 : 0) +
-			(taskFrame?.messages.length ?? 0) +
-			(resource ? 1 : 0);
-		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
+		if (resource) countBytes({ locator: { length: resource.bytes } });
 
-		const messages: AgentMessage[] = [];
-		const renderedMessages = new Map<AgentMessage, AgentMessage>();
-		const literalSources = new Map<AgentMessage, string>();
-		const unitSources = new Map<AgentMessage, ViewUnit>();
-		const epochReferences = new Map<AgentMessage, EpochViewReference>();
-		const sourceUnit = (ref: ContextRef, kind: ViewUnit["kind"]): ViewUnit => ({
-			id: JSON.stringify([view.source.sessionId, view.source.sessionFile, ref.entryId]),
-			sourceRevision: ref.revision,
-			kind,
-			exactSources: [ref.entryId],
-			requiredVisibleDependencies: [],
-			authority:
-				kind === "recovery"
-					? "tool-data"
-					: ref.authority === "user"
-						? "user"
-						: ref.authority === "assistant"
-							? "assistant-public"
-							: ref.authority === "runtime"
-								? "tool-data"
-								: "unrecorded",
-			tokenEstimate: null,
-			immutableWithinEpoch: true,
-		});
-		const addSummary = async (ref: ContextRef, readView: SessionHistoryReadView, retainedMessageCount: number) => {
-			const summary = await hydrate(ref, undefined, readView);
-			if (summary.type !== "compaction") throw new Error("Canonical context summary has the wrong source kind");
-			const message = createCompactionSummaryMessage(
-				summary.summary,
-				summary.tokensBefore,
-				summary.timestamp,
-				summary.customInstructions,
-				retainedMessageCount,
+		const { messages, renderedMessages, literalSources, unitSources, epochReferences, addSummary, addLiteral } =
+			canonicalMessageRenderer(
+				view,
+				hydrate,
+				countBytes,
+				sourceOrder,
+				selectedSkills,
+				omitted,
+				maxSourceBytes,
+				checkpoint,
 			);
-			messages.push(message);
-			literalSources.set(message, ref.entryId);
-			unitSources.set(message, sourceUnit(ref, "fixed-view"));
-			epochReferences.set(message, {
-				source: readView.source,
-				ref,
-				sourceRevision: ref.revision,
-				retainedMessageCount,
-			});
-			sourceOrder.set(ref.entryId, -1);
-		};
 		if (first.summaryRef && (!checkpoint || checkpoint.includeSummary))
 			await addSummary(first.summaryRef, view, first.retainedMessageCount);
-		const addLiteral = async (ref: ContextRef, readView: SessionHistoryReadView, pinned?: EpochViewReference) => {
-			const entry = await hydrate(ref, undefined, readView);
-			// Internal capture records never interrupt a native assistant/tool-result group.
-			// Retained records remain recoverable data, but cannot mint a new selection.
-			const skill = ref.qualification === "native-recovery" ? selectedSkillCapture(entry) : undefined;
-			if (skill) {
-				if (
-					skill.producer === "model" &&
-					isNativeSkillSelection(ref) &&
-					(!checkpoint || ref.sequence > checkpoint.source.sourceSequence)
-				) {
-					selectedSkills.set(skill.descriptor.name, {
-						name: skill.descriptor.name,
-						view: {
-							source: view.source,
-							ref: { ...ref, kind: "custom_message" },
-							sourceRevision: JSON.stringify([ref.revision]),
-						},
-					});
-				}
-				return;
-			}
-			const origin = entry.type === "message" || entry.type === "custom_message" ? entry.nativeOrigin : undefined;
-			if (
-				ref.qualification === "native-admission" &&
-				ref.retention !== "retained-import" &&
-				origin?.kind === "input" &&
-				origin.recordRole === "primary" &&
-				origin.selectedSkillRef &&
-				(!checkpoint || ref.sequence > checkpoint.source.sourceSequence) &&
-				![...selectedSkills.values()].some((skill) => skill.view.ref.entryId === origin.selectedSkillRef?.entryId)
-			) {
-				if (
-					origin.selectedSkillRef.sessionId !== view.source.sessionId ||
-					origin.selectedSkillRef.sessionFile !== view.source.sessionFile
-				)
-					throw new Error("Admitted skill selection belongs to another source");
-				const actual = await view.get(origin.selectedSkillRef.entryId);
-				if (
-					!actual ||
-					(actual.kind !== "custom" && actual.kind !== "custom_message") ||
-					actual.qualification !== "native-recovery"
-				)
-					throw new Error("Admitted input selected skill source is unavailable");
-				countBytes(actual);
-				const captured = await hydrateCapturedHistoryEntry(actual, actual.locator.length, view.readPayload);
-				const selected = captured ? selectedSkillCapture(captured.entry) : undefined;
-				if (!selected) throw new Error("Admitted input has no captured skill version");
-				selectedSkills.set(selected.descriptor.name, {
-					name: selected.descriptor.name,
-					view: {
-						source: view.source,
-						sourceRevision: JSON.stringify([actual.revision]),
-						ref: {
-							entryId: actual.id,
-							sequence: actual.sequence,
-							kind: actual.kind,
-							locator: actual.locator,
-							revision: actual.revision,
-							authority: actual.authority,
-							qualification: actual.qualification,
-							retention: actual.retention,
-						},
-					},
-				});
-			}
-			const original = sessionEntryMessage(entry);
-			if (!original) throw new Error("Canonical context reference is not a visible context entry");
-			// These IDs come from actual native retry controls, not inferred transcript membership or stop reasons.
-			if (original.role === "assistant" && omitted.has(ref.entryId)) return;
-			// Neither canonical updates nor replaceable transforms may mutate cached source entries.
-			const message = structuredClone(original);
-			const revisions = [ref.revision];
-			const exactSources = [ref.entryId];
-			if (message.role === "assistant") {
-				const target: ContextUpdateTarget = { kind: "assistant-usage", targetId: ref.entryId };
-				for (const update of (await readView.contextUpdates(target)).refs) {
-					countBytes(update);
-					const entry = await hydrate(update, target, readView);
-					revisions.push(update.revision);
-					exactSources.push(update.entryId);
-					if (entry.type !== "child_usage_attributed") throw new Error("Canonical usage update kind mismatch");
-					message.usage = cloneUsage(entry.aggregateUsage);
-				}
-			} else if (message.role === "toolResult" && message.toolName === "ipython") {
-				const target: ContextUpdateTarget = { kind: "ipython-sent-message", toolCallId: message.toolCallId };
-				for (const update of (await readView.contextUpdates(target)).refs) {
-					countBytes(update); // Charge each application, even when the source record is cached.
-					const entry = await hydrate(update, target, readView);
-					revisions.push(update.revision);
-					exactSources.push(update.entryId);
-					const sent = entry.type === "custom" ? parsePersistedIpythonSentAgentMessage(entry.data) : undefined;
-					if (!sent || sent.toolCallId !== message.toolCallId)
-						throw new Error("Canonical sent-message update mismatch");
-					appendSentAgentMessageToToolResult(message, message.toolCallId, sent.message);
-				}
-			}
-			const publicHistory =
-				!toolSourceIds.has(ref.entryId) &&
-				(pinned?.rendering === PUBLIC_CONTEXT_RENDERER ||
-					(!pinned && publicTail !== undefined && ref.sequence <= publicTail.sourceSequence));
-			const rendered = publicHistory ? renderPublicHistory(message, ref.entryId, maxSourceBytes) : message;
-			if (publicHistory) {
-				publicBytes += Buffer.byteLength(JSON.stringify(rendered), "utf8");
-				if (publicBytes > maxSourceBytes) throw new Error("Public summary view byte budget exceeded");
-			}
-			if (message.role === "assistant")
-				messageSources.set(rendered, {
-					sessionId: view.source.sessionId,
-					sessionFile: view.source.sessionFile,
-					entryId: ref.entryId,
-				});
-			messages.push(message);
-			renderedMessages.set(message, rendered);
-			literalSources.set(rendered, ref.entryId);
-			unitSources.set(rendered, {
-				...sourceUnit(
-					ref,
-					message.role === "toolResult" &&
-						ref.qualification === "native-recovery" &&
-						ref.retention !== "retained-import"
-						? "recovery"
-						: message.role === "toolResult" ||
-								(message.role === "assistant" && message.content.some((part) => part.type === "toolCall"))
-							? "replay-group"
-							: "literal",
-				),
-				sourceRevision: JSON.stringify(rendered !== message ? [...revisions, PUBLIC_CONTEXT_RENDERER] : revisions),
-				exactSources,
-			});
-			const revision = JSON.stringify(revisions);
-			if (pinned && pinned.sourceRevision !== revision)
-				throw new Error("Context epoch view no longer matches its frozen source revisions");
-			if (pinned && unitSources.get(rendered)!.kind !== "recovery")
-				unitSources.set(rendered, { ...unitSources.get(rendered)!, kind: "fixed-view" });
-			epochReferences.set(rendered, {
-				source: readView.source,
-				ref,
-				sourceRevision: revision,
-				...(rendered !== message ? { rendering: PUBLIC_CONTEXT_RENDERER } : {}),
-			});
-			sourceOrder.set(ref.entryId, ref.sequence);
-		};
 		if (checkpoint) {
 			if (!view.atSnapshot) throw new Error("Context epoch requires a captured native prefix reader");
 			const prefixViews = new Map<string, SessionHistoryReadView>();
@@ -1086,100 +872,58 @@ export class CanonicalContextCompiler {
 		// Public renderings hide tool roles; restore call order while the source roles are still available.
 		orderContextToolResults(messages);
 		for (const [index, message] of messages.entries()) messages[index] = renderedMessages.get(message) ?? message;
-		if (taskFrame) {
-			if (referenceFrame && taskFrame !== referenceFrame && !taskFrameRebased) {
-				const last = messages.at(-1);
-				const anchor = last
-					? {
-							entryId: literalSources.get(last)!,
-							side: last.role === "user" || last.role === "custom" ? ("before" as const) : ("after" as const),
-						}
-					: null;
-				taskFrame = { ...taskFrame, anchors: [...taskFrame.anchors.slice(0, -1), anchor] };
-			}
-			const [base, ...revisions] = structuredClone(taskFrame.messages);
-			const frames = [base, ...revisions];
-			const frameIds = frames.map((_, index) => JSON.stringify(["task-frame", taskFrame!.origins[index], index]));
-			for (const [index, frame] of frames.entries()) {
-				unitSources.set(frame, {
-					id: frameIds[index],
-					sourceRevision: frameIds[index],
-					kind: "task-frame",
-					exactSources: [JSON.stringify(taskFrame.origins[index])],
-					requiredVisibleDependencies: index ? [frameIds[index - 1]] : [],
-					authority: "tool-data",
-					tokenEstimate: null,
-					immutableWithinEpoch: true,
-				});
-			}
-			for (const anchor of taskFrame.anchors) {
-				if (!anchor || sourceOrder.has(anchor.entryId)) continue;
-				const origin = await view.get(anchor.entryId);
-				if (!origin) throw new Error("Task frame insertion source is unavailable");
-				sourceOrder.set(anchor.entryId, origin.sequence);
-			}
-			const positions = new Map(messages.map((message, index) => [literalSources.get(message)!, index]));
-			const slots = new Map<number, AgentMessage[]>();
-			for (const [index, revision] of revisions.entries()) {
-				const anchor = taskFrame.anchors[index];
-				let at = 0;
-				if (anchor) {
-					const position = positions.get(anchor.entryId);
-					if (position !== undefined) at = position + (anchor.side === "after" ? 1 : 0);
-					else {
-						// A later retry may omit that assistant. Keep its source slot, not the newest input slot.
-						const ordinal = sourceOrder.get(anchor.entryId);
-						if (ordinal === undefined) throw new Error("Task frame insertion source is unavailable");
-						at = messages.findIndex((message) => sourceOrder.get(literalSources.get(message)!)! > ordinal);
-						if (at < 0) at = messages.length;
-					}
-				}
-				const group = slots.get(at) ?? [];
-				group.push(revision);
-				slots.set(at, group);
-			}
-			const literal = messages.splice(0);
-			messages.push(base);
-			for (let at = 0; at <= literal.length; at++) {
-				messages.push(...(slots.get(at) ?? []));
-				if (at < literal.length) messages.push(literal[at]);
-			}
-		}
+		let taskFrame = tasks
+			? compileTaskFrame(
+					tasks,
+					frameLimits,
+					forceRebase ? undefined : referenceFrame,
+					messages.flatMap((message) => {
+						if (message.role !== "user") return [];
+						const reference = epochReferences.get(message)!;
+						return [
+							{
+								sessionId: reference.source.sessionId,
+								entryId: reference.ref.entryId,
+								revision: reference.ref.revision,
+								text:
+									typeof message.content === "string"
+										? [message.content]
+										: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+							},
+						];
+					}),
+				)
+			: undefined;
+		const taskFrameRebased = Boolean(
+			mode === "on" &&
+				referenceFrame &&
+				taskFrame !== referenceFrame &&
+				(!taskFrame || taskFrame.messages.length === 1),
+		);
+		const messageCount =
+			first.activeMessageCount +
+			(checkpoint ? checkpoint.views.length + (checkpoint.includeSummary ? 1 : 0) : first.summaryRef ? 1 : 0) +
+			(taskFrame?.messages.length ?? 0) +
+			(resource ? 1 : 0);
+		if (messageCount > maxMessages) throw new Error("Canonical context message budget exceeded");
+		if (taskFrame)
+			taskFrame = await insertTaskFrame(
+				taskFrame,
+				referenceFrame,
+				taskFrameRebased,
+				messages,
+				literalSources,
+				unitSources,
+				sourceOrder,
+				view,
+			);
 		if (resource) {
 			// Current owned display is regenerated; a stored acceptance marker is never a live view.
 			const at = messages[0] && unitSources.get(messages[0])?.kind === "task-frame" ? 1 : 0;
 			messages.splice(at, 0, resource.message);
 			unitSources.set(resource.message, resource.unit);
 		}
-		if (selectedSkills.size) {
-			const selections = [...selectedSkills.values()];
-			const content = `Selected Skill versions (canonical source references):\n${JSON.stringify(
-				selections.map((skill) => ({
-					name: skill.name,
-					ref: skill.view.ref.entryId,
-					revision: skill.view.ref.revision,
-					sourceSessionId: skill.view.source.sessionId,
-				})),
-			)}`;
-			const message = createCustomMessage(
-				"base-context-selected-skill-versions",
-				content,
-				false,
-				undefined,
-				"1970-01-01T00:00:00.000Z",
-			);
-			messages.unshift(message);
-			unitSources.set(message, {
-				id: "native-selected-skill-versions",
-				sourceRevision: JSON.stringify(selections),
-				kind: "literal",
-				exactSources: selections.map((skill) => skill.view.ref.entryId),
-				requiredVisibleDependencies: [],
-				authority: "tool-data",
-				tokenEstimate: null,
-				immutableWithinEpoch: true,
-			});
-		}
+		insertSelectedSkills(selectedSkills, messages, unitSources);
 		const unitLimits = {
 			maxUnits: maxMessages,
 			maxDependencies: Math.min(Number.MAX_SAFE_INTEGER, maxMessages * 4),
@@ -1206,282 +950,20 @@ export class CanonicalContextCompiler {
 			}
 		}
 		const replayUnits = bindMessageReplayUnits(messages, sourceUnits, unitLimits);
-		const frozenGroups = checkpoint?.toolContinuations ?? [];
-		const assistantSequences = messages
-			.flatMap((message) => {
-				const reference = epochReferences.get(message);
-				return message.role === "assistant" && reference ? [reference.ref.sequence] : [];
-			})
-			.sort((left, right) => left - right);
-		const candidates = messages.flatMap((message, index) => {
-			if (message.role !== "assistant") return [];
-			const reference = epochReferences.get(message);
-			const prior = frozenGroups.find((group) => group.assistantEntryId === reference?.ref.entryId);
-			if (!prior && !replayUnits[index].unavailableDependencies?.some((id) => id.startsWith("tool-result:")))
-				return [];
-			if (!reference || reference.ref.retention === "retained-import")
-				throw new Error("Tool continuation requires its original assistant source");
-			return [
-				{
-					message,
-					index,
-					reference,
-					prior,
-					nextAssistantSequence:
-						assistantSequences.find((sequence) => sequence > reference.ref.sequence) ?? Infinity,
-					unqualifiedIntent: false,
-					intents: new Map<number, Awaited<ReturnType<typeof hydrateCapturedHistoryEntry>>>(),
-				},
-			];
-		});
-		if (frozenGroups.length !== candidates.filter((candidate) => candidate.prior).length)
-			throw new Error("Committed tool continuation lost its original group");
-		if (purpose === "request" && candidates.length && (!allowPendingToolPublic || mode === "off"))
-			throw new Error("Tool continuation requires an enabled native public request boundary");
-		const readToolEvidence = async (metadata: IndexedSourceEvent) => {
-			const cached = next.get(metadata.id);
-			if (cached?.revision === metadata.revision) return { entry: cached.entry, source: metadata };
-			countBytes(metadata);
-			return hydrateCapturedHistoryEntry(metadata, maxSourceBytes, view.readPayload);
-		};
-		const acceptIntent = async (metadata: IndexedSourceEvent, selected = candidates) => {
-			if (metadata.kind !== "tool_intent") return;
-			const hydrated = await readToolEvidence(metadata);
-			const entry = hydrated.entry;
-			if (entry.type !== "tool_intent") return;
-			const invocation = entry.invocation;
-			const ownerMatch = selected.find((item) => item.reference.ref.entryId === entry.assistant?.entryId);
-			const candidate =
-				ownerMatch ??
-				selected.find(
-					(item) =>
-						metadata.sequence > item.reference.ref.sequence &&
-						metadata.sequence < item.nextAssistantSequence &&
-						item.message.content.some(
-							(part) =>
-								part.type === "toolCall" &&
-								part.id === invocation.toolCallId &&
-								part.name === invocation.toolName,
-						),
-				);
-			if (!candidate) return;
-			// A present but unqualified/copied intent is not an absence of admission.
-			if (
-				metadata.qualification !== "native-tool-execution" ||
-				metadata.retention === "retained-import" ||
-				entry.assistant?.sessionId !== view.source.sessionId ||
-				entry.assistant.sessionFile !== view.source.sessionFile ||
-				entry.assistant.entryId !== candidate.reference.ref.entryId
-			) {
-				candidate.unqualifiedIntent = true;
-				return;
-			}
-			const call = candidate.message.content.filter((part) => part.type === "toolCall")[invocation.sourceOrder];
-			if (
-				!Number.isSafeInteger(invocation.sourceOrder) ||
-				!call ||
-				call.id !== invocation.toolCallId ||
-				call.name !== invocation.toolName ||
-				!invocation.executionId ||
-				entry.id !== `${invocation.executionId}:intent` ||
-				metadata.sequence <= candidate.reference.ref.sequence ||
-				candidate.intents.has(invocation.sourceOrder)
-			)
-				throw new Error("Tool continuation has ambiguous original intent");
-			candidate.intents.set(invocation.sourceOrder, hydrated);
-		};
-		const absentPrefixes = new Map<string, { source: SourceSnapshotRef; candidates: typeof candidates }>();
-		for (const candidate of candidates) {
-			if (!candidate.prior) continue;
-			if (!Array.isArray(candidate.prior.calls)) throw new Error("Invalid committed tool continuation");
-			for (const call of candidate.prior.calls) {
-				if (call.admission === "absent") {
-					if (
-						checkpoint?.renderer !== CONTEXT_INTERRUPTED_TOOL_RENDERER ||
-						!call.source ||
-						call.source.sourceSequence < candidate.reference.ref.sequence ||
-						call.intent !== undefined ||
-						call.executionId !== undefined ||
-						call.outcome !== undefined ||
-						call.result !== undefined
-					)
-						throw new Error("Invalid committed absent tool admission");
-					const key = JSON.stringify(call.source);
-					const prefix = absentPrefixes.get(key) ?? { source: call.source, candidates: [] as typeof candidates };
-					if (!prefix.candidates.includes(candidate)) prefix.candidates.push(candidate);
-					absentPrefixes.set(key, prefix);
-					continue;
-				}
-				const actual = await view.get(call.intent.id);
-				if (!actual || actual.revision !== call.intent.revision || actual.sequence !== call.intent.sequence)
-					throw new Error("Committed tool intent is unavailable on this captured branch");
-				await acceptIntent(actual, [candidate]);
-			}
-		}
-		const scanIntents = async (readView: SessionHistoryReadView, selected: typeof candidates) => {
-			let after = Math.min(...selected.map((candidate) => candidate.reference.ref.sequence));
-			let scanned = 0;
-			for (;;) {
-				const page = await readView.page(after, Math.min(128, maxMessages - scanned + 1));
-				scanned += page.events.length;
-				if (scanned > maxMessages) throw new Error("Tool continuation source item budget exceeded");
-				if (page.coverage !== "complete") throw new Error("Tool continuation source coverage is incomplete");
-				for (const metadata of page.events) {
-					// Frozen qualified refs were already checked exactly, not another execution.
-					if (
-						!selected.some((candidate) =>
-							[...candidate.intents.values()].some((intent) => intent.source.id === metadata.id),
-						)
-					)
-						await acceptIntent(metadata, selected);
-				}
-				if (page.nextAfter === null) break;
-				if (page.nextAfter <= after) throw new Error("Tool continuation source page did not advance");
-				after = page.nextAfter;
-			}
-		};
-		const newGroups = candidates.filter((candidate) => !candidate.prior);
-		if (newGroups.length) await scanIntents(view, newGroups);
-		for (const prefix of absentPrefixes.values()) {
-			if (!view.atSnapshot) throw new Error("Absent tool admission requires its captured source");
-			await scanIntents(await view.atSnapshot(prefix.source), prefix.candidates);
-		}
-		const checkAbsentScope = async (candidate: (typeof candidates)[number]) => {
-			const entry = next.get(candidate.reference.ref.entryId)?.entry;
-			const output = entry?.type === "message" ? entry.requestOutput : undefined;
-			// This correlation limits the public-history scope. It never qualifies a tool owner or outcome.
-			if (
-				!output ||
-				typeof output.operationId !== "string" ||
-				!output.operationId ||
-				!Array.isArray(output.attemptIds) ||
-				output.attemptIds.some((id) => typeof id !== "string") ||
-				!output.source ||
-				output.source.sessionId !== view.source.sessionId ||
-				output.source.sessionFile !== view.source.sessionFile ||
-				!output.source.persistent ||
-				!Number.isSafeInteger(output.source.sourceSequence) ||
-				output.source.sourceSequence >= candidate.reference.ref.sequence ||
-				!view.atSnapshot
-			)
-				throw new Error("View-unit replay group is incomplete: original tool owner is unqualified");
-			await view.atSnapshot(output.source);
-		};
-		const toolContinuations: ToolContinuationGroup[] = [];
-		const pendingPublicMessageGroups: number[][] = [];
-		for (const candidate of candidates) {
-			const toolCalls = candidate.message.content.filter((part) => part.type === "toolCall");
-			if (
-				!toolCalls.length ||
-				candidate.unqualifiedIntent ||
-				(candidate.prior && candidate.prior.calls.length !== toolCalls.length)
-			)
-				throw new Error("View-unit replay group is incomplete: original tool owner is unqualified");
-			if (candidate.intents.size !== toolCalls.length) await checkAbsentScope(candidate);
-			const members = [candidate.index];
-			const calls: ToolContinuationGroup["calls"][number][] = [];
-			for (let order = 0; order < toolCalls.length; order++) {
-				const intent = candidate.intents.get(order);
-				const original = candidate.prior?.calls[order];
-				if (!intent) {
-					if (original && original.admission !== "absent")
-						throw new Error("Committed tool intent is unavailable on this captured branch");
-					if (
-						messages.some((message) => {
-							const sequence = epochReferences.get(message)?.ref.sequence;
-							return (
-								message.role === "toolResult" &&
-								message.toolCallId === toolCalls[order].id &&
-								sequence !== undefined &&
-								sequence > candidate.reference.ref.sequence &&
-								sequence < candidate.nextAssistantSequence
-							);
-						})
-					)
-						throw new Error("Tool outcome lacks its original finalized owner");
-					calls.push(original ?? { admission: "absent", source: { ...view.source } });
-					continue;
-				}
-				if (original?.admission === "absent") throw new Error("Committed absent tool admission changed");
-				if (intent.entry.type !== "tool_intent") throw new Error("Invalid native tool intent");
-				const invocation = intent.entry.invocation;
-				if (
-					original &&
-					(original.executionId !== invocation.executionId || original.intent.id !== intent.source.id)
-				)
-					throw new Error("Committed tool execution identity changed");
-				const actual = await view.get(invocation.executionId);
-				let outcome: Exclude<ToolContinuationGroup["calls"][number]["outcome"], undefined> = "outcome_unknown";
-				if (actual) {
-					if (
-						actual.kind !== "message" ||
-						actual.retention === "retained-import" ||
-						(actual.qualification !== "native-tool-execution" && actual.qualification !== "native-recovery") ||
-						actual.sequence <= intent.source.sequence
-					)
-						throw new Error("Tool outcome lacks its original finalized owner");
-					const { entry } = await readToolEvidence(actual);
-					if (
-						entry.type !== "message" ||
-						entry.message.role !== "toolResult" ||
-						entry.execution?.executionId !== invocation.executionId ||
-						!("invocationId" in entry.execution) ||
-						entry.execution.invocationId !== intent.source.id ||
-						entry.execution.sourceOrder !== order ||
-						entry.execution.toolCallId !== invocation.toolCallId ||
-						entry.execution.toolName !== invocation.toolName ||
-						entry.message.toolCallId !== invocation.toolCallId ||
-						entry.message.toolName !== invocation.toolName ||
-						!["not_started", "completed", "failed", "outcome_unknown"].includes(entry.execution.executionOutcome)
-					)
-						throw new Error("Tool outcome does not match its original captured intent");
-					outcome = entry.execution.executionOutcome;
-					const index = messages.findIndex((message) => {
-						const ref = epochReferences.get(message)?.ref;
-						return ref?.entryId === actual.id && ref.revision === actual.revision;
-					});
-					if (index <= candidate.index)
-						throw new Error("Finalized tool outcome is absent from its whole public group");
-					members.push(index);
-				}
-				if (
-					original?.result &&
-					(!actual ||
-						original.result.id !== actual.id ||
-						original.result.sequence !== actual.sequence ||
-						original.result.revision !== actual.revision)
-				)
-					throw new Error("Committed finalized tool outcome is unavailable on this captured branch");
-				calls.push({
-					executionId: invocation.executionId,
-					intent: { id: intent.source.id, sequence: intent.source.sequence, revision: intent.source.revision },
-					outcome,
-					...(actual ? { result: { id: actual.id, sequence: actual.sequence, revision: actual.revision } } : {}),
-				});
-			}
-			// Older summaries can retain an absent-call plan for a failed, provider-filtered reply.
-			// Validate its captured absence above, but keep that reply only in canonical history.
-			if (
-				(candidate.message.stopReason === "error" || candidate.message.stopReason === "aborted") &&
-				calls.every((call) => call.admission === "absent")
-			)
-				continue;
-			toolContinuations.push({ assistantEntryId: candidate.reference.ref.entryId, calls });
-			pendingPublicMessageGroups.push(members.sort((left, right) => left - right));
-		}
-		const publicSourceIds = new Set(
-			pendingPublicMessageGroups.flatMap((group) =>
-				group.map((index) => epochReferences.get(messages[index])!.ref.entryId),
-			),
+		const { toolContinuations, pendingPublicMessageGroups } = await collectToolContinuations(
+			view,
+			messages,
+			replayUnits,
+			epochReferences,
+			next,
+			countBytes,
+			maxMessages,
+			maxSourceBytes,
+			checkpoint,
+			mode,
+			allowPendingToolPublic,
+			purpose,
 		);
-		if (
-			checkpoint?.views.some(
-				(pinned) =>
-					pinned.rendering === PUBLIC_TOOL_CONTINUATION_RENDERER && !publicSourceIds.has(pinned.ref.entryId),
-			)
-		)
-			throw new Error("Committed tool rendering has no matching whole-group recipe");
-		stringifyBoundedJson(toolContinuations, maxSourceBytes);
 		const units = pendingPublicMessageGroups.length
 			? bindMessageReplayUnits(messages, sourceUnits, unitLimits, "complete-context", pendingPublicMessageGroups)
 			: replayUnits;
@@ -1522,81 +1004,17 @@ export class CanonicalContextCompiler {
 				...(pendingPublicMessageGroups.length ? { pendingPublicMessageGroups } : {}),
 			},
 		});
-		const inheritedRecoveryCoverage: EpochViewReference[] = [];
-		if (
-			checkpoint?.includeSummary &&
-			checkpoint.replayContract === "message-groups" &&
-			closedUnits.some((unit) => unit.kind === "recovery")
-		) {
-			const prefix = await view.atSnapshot!(checkpoint.source);
-			const suffix = new Map<string, ContextRef>();
-			const frozenViews = new Map<string, EpochViewReference>();
-			let capturedMessages = 0;
-			let retained = false;
-			let cursor: ContextManifestCursor | undefined;
-			for (;;) {
-				const page = await prefix.contextManifest({ cursor, limit: 128 });
-				if (page.selection !== "known") throw new Error("Summary recovery source is unavailable");
-				if (!cursor && page.summaryRef) {
-					// The frozen source may itself have pinned views before its literal manifest.
-					const entry = await hydrate(page.summaryRef, undefined, prefix);
-					const metadata = await prefix.get(page.summaryRef.entryId);
-					const prior =
-						entry.type === "compaction" &&
-						metadata?.qualification === "native-context-epoch" &&
-						metadata.retention !== "retained-import"
-							? readContextEpoch(entry.details, maxSourceBytes)
-							: undefined;
-					if ((!prior || prior.includeSummary) && page.summaryRef.entryId === checkpoint.literalTailId)
-						retained = true;
-					capturedMessages += prior?.views.length ?? 0;
-					for (const pinned of prior?.views ?? []) {
-						if (pinned.ref.entryId === checkpoint.literalTailId) retained = true;
-						if (retained) {
-							suffix.set(pinned.ref.entryId, pinned.ref);
-							frozenViews.set(pinned.ref.entryId, pinned);
-						}
-					}
-				}
-				for (const ref of page.refs) {
-					if (ref.entryId === checkpoint.literalTailId) retained = true;
-					if (retained) suffix.set(ref.entryId, ref);
-				}
-				capturedMessages += page.refs.length;
-				if (capturedMessages > maxMessages) throw new Error("Summary recovery source exceeds its message budget");
-				if (!page.nextCursor) break;
-				cursor = page.nextCursor;
-			}
-			for (const [index, message] of closedMessages.entries()) {
-				if (closedUnits[index].kind !== "recovery") continue;
-				const reference = epochReferences.get(message)!;
-				if (checkpoint.views.some((covered) => sameRecoveryReference(reference, covered))) {
-					inheritedRecoveryCoverage.push(reference);
-					continue;
-				}
-				const frozen = suffix.get(reference.ref.entryId);
-				if (!frozen || JSON.stringify(frozen) !== JSON.stringify(reference.ref)) continue;
-				const pinned = frozenViews.get(frozen.entryId);
-				if (pinned) {
-					if (reference.sourceRevision === pinned.sourceRevision) inheritedRecoveryCoverage.push(reference);
-					continue;
-				}
-				const revisions = [frozen.revision];
-				const entry = next.get(frozen.entryId)?.entry;
-				if (
-					entry?.type === "message" &&
-					entry.message.role === "toolResult" &&
-					entry.message.toolName === "ipython"
-				) {
-					const updates = await prefix.contextUpdates({
-						kind: "ipython-sent-message",
-						toolCallId: entry.message.toolCallId,
-					});
-					revisions.push(...updates.refs.map((update) => update.revision));
-				}
-				if (reference.sourceRevision === JSON.stringify(revisions)) inheritedRecoveryCoverage.push(reference);
-			}
-		}
+		const inheritedRecoveryCoverage = await readInheritedRecoveryCoverage(
+			view,
+			checkpoint,
+			closedMessages,
+			closedUnits,
+			epochReferences,
+			next,
+			hydrate,
+			maxMessages,
+			maxSourceBytes,
+		);
 		compiledEpochContexts.set(closedMessages, {
 			...(inheritedRecoveryCoverage.length ? { inheritedRecoveryCoverage } : {}),
 			...(purpose === "read" ? { readOnly: true as const } : {}),
@@ -1620,7 +1038,7 @@ export class CanonicalContextCompiler {
 		this.taskFrame = taskFrameRebased ? referenceFrame : taskFrame;
 		this.taskBoundary = boundary;
 		this.source = view.source;
-		this.sourceBytes = sourceBytes;
+		this.sourceBytes = manifest.sourceBytes;
 		this.messageCount = messageCount;
 		return purpose === "read" && pendingPublicMessageGroups.length
 			? renderToolContinuationWindow(closedMessages).messages

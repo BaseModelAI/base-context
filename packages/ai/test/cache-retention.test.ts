@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
+import { streamAnthropic } from "../src/providers/anthropic.js";
+import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.js";
 import { stream } from "../src/stream.js";
 import type { Context, Model } from "../src/types.js";
@@ -9,9 +11,11 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 
 	beforeEach(() => {
 		delete process.env.BASE_CONTEXT_CACHE_RETENTION;
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("test payload captured", { status: 401 }));
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		if (originalEnv !== undefined) {
 			process.env.BASE_CONTEXT_CACHE_RETENTION = originalEnv;
 		} else {
@@ -25,48 +29,44 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 	};
 
 	describe("Anthropic Provider", () => {
-		it.skipIf(!process.env.ANTHROPIC_API_KEY)(
-			"should use default cache TTL (no ttl field) when BASE_CONTEXT_CACHE_RETENTION is not set",
-			async () => {
-				const model = getModel("anthropic", "claude-haiku-4-5");
-				let capturedPayload: any = null;
+		it("should use default cache TTL (no ttl field) when BASE_CONTEXT_CACHE_RETENTION is not set", async () => {
+			const model = getModel("anthropic", "claude-haiku-4-5");
+			let capturedPayload: any = null;
 
-				const s = stream(model, context, {
-					onPayload: (payload) => {
-						capturedPayload = payload;
-					},
-				});
+			const s = stream(model, context, {
+				apiKey: "fake-key",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			});
 
-				for await (const _ of s) {
-				}
+			for await (const _ of s) {
+			}
 
-				expect(capturedPayload).not.toBeNull();
-				expect(capturedPayload.system).toBeDefined();
-				expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral" });
-			},
-		);
+			expect(capturedPayload).not.toBeNull();
+			expect(capturedPayload.system).toBeDefined();
+			expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral" });
+		});
 
-		it.skipIf(!process.env.ANTHROPIC_API_KEY)(
-			"should use 1h cache TTL when BASE_CONTEXT_CACHE_RETENTION=long",
-			async () => {
-				process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
-				const model = getModel("anthropic", "claude-haiku-4-5");
-				let capturedPayload: any = null;
+		it("should use 1h cache TTL when BASE_CONTEXT_CACHE_RETENTION=long", async () => {
+			process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
+			const model = getModel("anthropic", "claude-haiku-4-5");
+			let capturedPayload: any = null;
 
-				const s = stream(model, context, {
-					onPayload: (payload) => {
-						capturedPayload = payload;
-					},
-				});
+			const s = stream(model, context, {
+				apiKey: "fake-key",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			});
 
-				for await (const _ of s) {
-				}
+			for await (const _ of s) {
+			}
 
-				expect(capturedPayload).not.toBeNull();
-				expect(capturedPayload.system).toBeDefined();
-				expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-			},
-		);
+			expect(capturedPayload).not.toBeNull();
+			expect(capturedPayload.system).toBeDefined();
+			expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+		});
 
 		it("should add ttl for non-api.anthropic.com baseUrl by default", async () => {
 			process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
@@ -78,8 +78,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			};
 
 			let capturedPayload: any = null;
-
-			const { streamAnthropic } = await import("../src/providers/anthropic.js");
 
 			try {
 				const s = streamAnthropic(proxyModel, context, {
@@ -109,8 +107,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			};
 			let capturedPayload: any = null;
 
-			const { streamAnthropic } = await import("../src/providers/anthropic.js");
-
 			try {
 				const s = streamAnthropic(proxyModel, context, {
 					apiKey: "fake-key",
@@ -135,8 +131,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			const baseModel = getModel("anthropic", "claude-haiku-4-5");
 			let capturedPayload: any = null;
 
-			const { streamAnthropic } = await import("../src/providers/anthropic.js");
-
 			try {
 				const s = streamAnthropic(baseModel, context, {
 					apiKey: "fake-key",
@@ -160,8 +154,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 		it("should add cache_control to string user messages", async () => {
 			const baseModel = getModel("anthropic", "claude-haiku-4-5");
 			let capturedPayload: any = null;
-
-			const { streamAnthropic } = await import("../src/providers/anthropic.js");
 
 			try {
 				const s = streamAnthropic(baseModel, context, {
@@ -189,8 +181,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			const baseModel = getModel("anthropic", "claude-haiku-4-5");
 			let capturedPayload: any = null;
 
-			const { streamAnthropic } = await import("../src/providers/anthropic.js");
-
 			try {
 				const s = streamAnthropic(baseModel, context, {
 					apiKey: "fake-key",
@@ -213,46 +203,42 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 	});
 
 	describe("OpenAI Responses Provider", () => {
-		it.skipIf(!process.env.OPENAI_API_KEY)(
-			"should not set prompt_cache_retention when BASE_CONTEXT_CACHE_RETENTION is not set",
-			async () => {
-				const model = getModel("openai", "gpt-4o-mini");
-				let capturedPayload: any = null;
+		it("should not set prompt_cache_retention when BASE_CONTEXT_CACHE_RETENTION is not set", async () => {
+			const model = getModel("openai", "gpt-4o-mini");
+			let capturedPayload: any = null;
 
-				const s = stream(model, context, {
-					onPayload: (payload) => {
-						capturedPayload = payload;
-					},
-				});
+			const s = stream(model, context, {
+				apiKey: "fake-key",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			});
 
-				for await (const _ of s) {
-				}
+			for await (const _ of s) {
+			}
 
-				expect(capturedPayload).not.toBeNull();
-				expect(capturedPayload.prompt_cache_retention).toBeUndefined();
-			},
-		);
+			expect(capturedPayload).not.toBeNull();
+			expect(capturedPayload.prompt_cache_retention).toBeUndefined();
+		});
 
-		it.skipIf(!process.env.OPENAI_API_KEY)(
-			"should set prompt_cache_retention to 24h when BASE_CONTEXT_CACHE_RETENTION=long",
-			async () => {
-				process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
-				const model = getModel("openai", "gpt-4o-mini");
-				let capturedPayload: any = null;
+		it("should set prompt_cache_retention to 24h when BASE_CONTEXT_CACHE_RETENTION=long", async () => {
+			process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
+			const model = getModel("openai", "gpt-4o-mini");
+			let capturedPayload: any = null;
 
-				const s = stream(model, context, {
-					onPayload: (payload) => {
-						capturedPayload = payload;
-					},
-				});
+			const s = stream(model, context, {
+				apiKey: "fake-key",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			});
 
-				for await (const _ of s) {
-				}
+			for await (const _ of s) {
+			}
 
-				expect(capturedPayload).not.toBeNull();
-				expect(capturedPayload.prompt_cache_retention).toBe("24h");
-			},
-		);
+			expect(capturedPayload).not.toBeNull();
+			expect(capturedPayload.prompt_cache_retention).toBe("24h");
+		});
 
 		it("should omit prompt_cache_retention for unknown routes unless explicitly supported", async () => {
 			process.env.BASE_CONTEXT_CACHE_RETENTION = "long";
@@ -315,8 +301,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 			const model = getModel("openai", "gpt-4o-mini");
 			let capturedPayload: any = null;
 
-			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
-
 			try {
 				const s = streamOpenAIResponses(model, context, {
 					apiKey: "fake-key",
@@ -342,8 +326,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 		it("should set prompt_cache_retention when cacheRetention is long", async () => {
 			const model = getModel("openai", "gpt-4o-mini");
 			let capturedPayload: any = null;
-
-			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
 
 			try {
 				const s = streamOpenAIResponses(model, context, {
@@ -387,7 +369,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 
 		it("should set prompt_cache_retention for non-api.openai.com baseUrl by default", async () => {
 			let capturedPayload: any = null;
-			const { streamOpenAICompletions } = await import("../src/providers/openai-completions.js");
 
 			try {
 				const s = streamOpenAICompletions(createCompletionsModel(), context, {
@@ -413,7 +394,6 @@ describe("Cache Retention (BASE_CONTEXT_CACHE_RETENTION)", () => {
 
 		it("should omit prompt_cache_retention when supportsLongCacheRetention is false", async () => {
 			let capturedPayload: any = null;
-			const { streamOpenAICompletions } = await import("../src/providers/openai-completions.js");
 
 			try {
 				const s = streamOpenAICompletions(createCompletionsModel({ supportsLongCacheRetention: false }), context, {

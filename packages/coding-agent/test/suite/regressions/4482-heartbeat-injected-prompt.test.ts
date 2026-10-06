@@ -56,6 +56,14 @@ function render(component: InjectedPromptMessageComponent): string {
 	return stripAnsi(component.render(120).join("\n"));
 }
 
+function lastPrompt(messages: readonly Message[]): Message | undefined {
+	return messages
+		.filter(
+			(message) => message.role === "user" && !getMessageText(message).startsWith("# Continual Harness Snapshot\n"),
+		)
+		.at(-1);
+}
+
 function createHeartbeat(): AgentCronJob {
 	return {
 		id: "heartbeat-1",
@@ -132,8 +140,10 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		expect(getMessageText(harness.session.messages[0])).toBe(
 			"Check whether the long-running task needs another step.",
 		);
-		expect(providerMessages.at(-1)).toMatchObject({ role: "user" });
-		expect(getMessageText(providerMessages.at(-1))).toBe("Check whether the long-running task needs another step.");
+		expect(lastPrompt(providerMessages)).toMatchObject({ role: "user" });
+		expect(getMessageText(lastPrompt(providerMessages))).toBe(
+			"Check whether the long-running task needs another step.",
+		);
 	});
 
 	it("runs heartbeat prompts through before_agent_start handlers", async () => {
@@ -287,11 +297,11 @@ describe("ENG-4482 heartbeat injected prompt UI", () => {
 		const providerOrder: string[] = [];
 		harness.setResponses([
 			(context) => {
-				providerOrder.push(getMessageText(context.messages.at(-1)));
+				providerOrder.push(getMessageText(lastPrompt(context.messages)));
 				return fauxAssistantMessage("first done");
 			},
 			(context) => {
-				providerOrder.push(getMessageText(context.messages.at(-1)));
+				providerOrder.push(getMessageText(lastPrompt(context.messages)));
 				return fauxAssistantMessage("heartbeat done");
 			},
 		]);

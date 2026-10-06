@@ -99,8 +99,11 @@ describe("ENG-4531 agent message UI", () => {
 			customType: "agent_message",
 			display: true,
 		});
-		expect(getMessageText(providerMessages.at(-1))).toBe(prompt);
-		expect(providerMessages.at(-1)?.role).toBe("user");
+		expect(providerMessages.map(getMessageText)).toEqual([
+			prompt,
+			expect.stringContaining("# Continual Harness Snapshot"),
+		]);
+		expect(providerMessages.map((message) => message.role)).toEqual(["user", "user"]);
 		expect(
 			harness.session.sessionManager
 				.getEntries()
@@ -173,7 +176,14 @@ describe("ENG-4531 agent message UI", () => {
 	});
 
 	it("persists sent messages that arrive after their Python cell completes", async () => {
-		const harness = await createHarness({ persistSession: true });
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "IPython",
+			description: "Record an offline Python cell result",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async () => ({ content: [{ type: "text", text: "" }], details: { status: "ok" } }),
+		};
+		const harness = await createHarness({ persistSession: true, tools: [ipythonTool] });
 		harnesses.push(harness);
 		const toolResult: ToolResultMessage = {
 			role: "toolResult",
@@ -184,10 +194,20 @@ describe("ENG-4531 agent message UI", () => {
 			isError: false,
 			timestamp: Date.now(),
 		};
-		await harness.session.sessionManager.appendMessage(
-			fauxAssistantMessage(fauxToolCall("ipython", { code: "background_send" }), { stopReason: "toolUse" }),
-		);
-		const beforeLateEntryId = await harness.session.sessionManager.appendMessage(toolResult);
+		harness.setResponses([
+			fauxAssistantMessage(
+				{ ...fauxToolCall("ipython", { code: "background_send" }), id: toolResult.toolCallId },
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Cell completed."),
+		]);
+		await harness.session.prompt("Start the background send.");
+		const beforeLateEntryId = (await harness.session.sessionManager.readEntries()).find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === toolResult.toolCallId,
+		)!.id;
 		harness.session.agent.state.messages = (await harness.session.buildSessionContext()).messages;
 		const publishedToolResult = harness.session.messages.find(
 			(message): message is ToolResultMessage =>

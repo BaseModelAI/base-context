@@ -198,6 +198,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(stalePiThrows).toBe(true);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:Hello from the new session!",
+			expect.stringContaining("custom:# Continual Harness Snapshot"),
 			"assistant:hello reply",
 		]);
 	});
@@ -229,6 +230,7 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:seed",
+			expect.stringContaining("custom:# Continual Harness Snapshot"),
 			"assistant:seed reply",
 			"user:fork callback message",
 			"assistant:fork reply",
@@ -266,6 +268,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		expect(runtime.session.sessionFile).toBe(targetSessionPath);
 		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:target",
+			expect.stringContaining("custom:# Continual Harness Snapshot"),
 			"assistant:target reply",
 			"user:switch callback message",
 			"assistant:switch reply",

@@ -500,10 +500,10 @@ export function expandTildePath(path: string): string {
 }
 
 // =============================================================================
-// User Config Paths (~/.prime/agent/*)
+// User Config Paths (~/.base-context/*)
 // =============================================================================
 
-/** Get the agent config directory (e.g., ~/.prime/agent/) */
+/** Get the agent config directory (e.g., ~/.base-context/) */
 export function getAgentDir(): string {
 	return resolveRuntimePaths().home;
 }
@@ -513,7 +513,7 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Directory where daemon and client diagnostic logs are written (e.g. ~/.prime/agent/logs/). */
+/** Directory where daemon and client diagnostic logs are written (e.g. ~/.base-context/logs/). */
 export function getLogsDir(): string {
 	return join(getAgentDir(), "logs");
 }

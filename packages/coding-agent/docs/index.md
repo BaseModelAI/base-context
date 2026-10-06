@@ -12,7 +12,7 @@ curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/
 
 The installer prepares missing prerequisites and managed Python before activating the CLI. Run its final PATH command, then start `base-context` in your project. Use `/login` for your provider, `/model` for your model, and `/effort` for its reasoning level.
 
-See [quickstart](quickstart.md) for a first session and [installation](installation.md) for npm, Windows, source builds, updates, rollback, and uninstall. Coming from Codex? Start with [goals, worker limits, and side questions](quickstart.md#goals-workers-and-side-questions).
+Follow the [ten-minute workflow](quickstart.md) for a first session. Use [installation](installation.md) for npm, Windows, source builds, updates, rollback, and uninstall. Coming from Codex? See [goals, worker limits, and side questions](long-running-agents.md).
 
 Read [why we forked Prime Agent](fork-philosophy.md) and [how context management works](context-management.md) for the design and its limits.
 
@@ -25,6 +25,7 @@ Read [why we forked Prime Agent](fork-philosophy.md) and [how context management
 - [Long-running and background agents](long-running-agents.md) - daemon workers, messaging, heartbeats, goals, schedules, and autonomous mode.
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
 - [Settings](settings.md) - global and project settings.
+- [Request token budgets](request-token-budgets.md) - opt-in CLI/settings profile, supported routes, and field meanings.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.
