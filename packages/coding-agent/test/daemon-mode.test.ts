@@ -4384,6 +4384,9 @@ describe("daemon mode helpers", () => {
 				() => expect(stderr).toContain(`Could not register scheduled jobs for passive subagent ${fixture.childId}`),
 				{ timeout: 10_000 },
 			);
+			// The recovery failure has been observed; do not block the scheduler's next dispatch.
+			releaseJobsLock();
+			releaseJobsLock = undefined;
 			await vi.waitFor(async () => {
 				// Supplying the resident root routes directly to its worker, not the passive catalog.
 				const response = await client.request({ type: "heartbeats_list", activeSessionId: parentActiveSessionId });
