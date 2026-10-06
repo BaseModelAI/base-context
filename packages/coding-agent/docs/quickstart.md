@@ -90,7 +90,7 @@ Manage it with `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear`. 
 
 ## What needs extra configuration?
 
-The Python workspace, retained output, instruction frame, compaction, and workers are available in ordinary sessions. **Request-budget selection and stable context epochs need an explicit profile.** They are not active just because you launched the CLI. Use the [offline-tested settings example](request-token-budgets.md) if you want to opt in on a supported route.
+The Python workspace, retained output, instruction frame, compaction, and workers are available in ordinary sessions. **Budget-driven selection and epochs need an explicit profile.** They are not active just because you launched the CLI. Native recovery can also create an accepted replay epoch without enabling request-budget selection. Use the [offline-tested settings example](request-token-budgets.md) if you want to opt in on a supported route.
 
 Use `/context` and `/usage` to inspect the session. Python and project commands run with your user permissions, not inside a built-in security sandbox. Use an external sandbox for untrusted code.
 

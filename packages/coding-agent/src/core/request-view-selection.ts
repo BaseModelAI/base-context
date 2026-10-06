@@ -501,7 +501,7 @@ export async function selectRequestView(
 	projection = canonicalRequestProjection(boundary, projection);
 	let full = budget?.measure(request);
 	const inputKey = requestInputKey(request, projection);
-	if ((budget && full?.limitSource !== "explicit-profile") || !inputKey) return;
+	if ((allowShrink && budget && full?.limitSource !== "explicit-profile") || !inputKey) return;
 	if (
 		!budget &&
 		!boundary.requiresEpoch &&
@@ -549,7 +549,7 @@ export async function selectRequestView(
 	) => {
 		assessment = (await finalizeMeasurement?.(candidateRequest, assessment)) ?? assessment;
 		if (budget && assessment) {
-			if (assessment.status === "over-budget" && full)
+			if (allowShrink && assessment.status === "over-budget" && full)
 				throw publicBudgetFailure(
 					boundary,
 					publicMessages ?? boundary.messages,
@@ -633,7 +633,7 @@ export async function selectRequestView(
 		let assessment = budget?.measure(encoded.request);
 		if (assessment?.status === "over-budget")
 			assessment = (await finalizeMeasurement?.(encoded.request, assessment)) ?? assessment;
-		if (assessment && full) {
+		if (allowShrink && assessment && full) {
 			if (assessment.status === "over-budget") {
 				const subset = await offerPublicSubset(publicView.messages, encoded.request, encoded.projection);
 				if (subset !== undefined) return subset;
@@ -736,7 +736,8 @@ export async function selectRequestView(
 		);
 		return encoded.request.body;
 	};
-	if (full.status === "within-estimate") {
+	// Observation still ACKs the unchanged view; a retained epoch needs its final projection.
+	if (full.status === "within-estimate" || !allowShrink) {
 		const closed = selection.close(units.map((unit) => unit.id));
 		await offer(
 			closed.map((unit) => unit.id),

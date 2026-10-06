@@ -1,0 +1,1 @@
+- Fixed observe-mode request budgets rejecting over-budget requests, required tool continuations, and compatible saved sessions restored without a matching profile.

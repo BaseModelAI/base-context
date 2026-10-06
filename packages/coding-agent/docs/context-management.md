@@ -89,7 +89,7 @@ There are several different limits:
 
 Do not treat source bytes as model tokens, process memory, or provider charges.
 
-Model-aware request-token admission is **opt-in** through `requestTokenBudget` in global/project settings or explicit SDK options. It requires exact deployment profiles; the CLI does not infer them from a model name. `observe` records assessments without budget-driven omission or refusal; `enforce` enables supported selection and admission. Explicit SDK options take precedence. Existing budgeted epochs still require their matching configuration when restored.
+Model-aware request-token admission is **opt-in** through `requestTokenBudget` in global/project settings or explicit SDK options. It requires exact deployment profiles; the CLI does not infer them from a model name. `observe` records assessments without budget-driven omission or refusal; `enforce` enables supported selection and admission. Explicit SDK options take precedence. Restored epochs still require compatible native replay. Enforce mode also requires a matching budget profile; observe mode records missing or ambiguous profiles as unknown without a budget cutoff.
 
 Profiles identify the API, provider, endpoint, final model, context allowance, output ceiling, and estimation/replay configuration. The counter uses a configured conservative byte estimate or an optional supported tokenizer estimate, **not guaranteed provider accounting or a proven future bound**. A model name alone does not establish a deployment's limits.
 

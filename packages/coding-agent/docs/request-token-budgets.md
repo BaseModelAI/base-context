@@ -93,6 +93,6 @@ An unlisted response identity prevents ordinary calibration and can prevent Code
 - Estimates and margins are not a guarantee of provider acceptance or lower cost. On the supported OpenAI Responses route, a request near its limit can use the provider's input-count endpoint before admission; that is an additional provider request.
 - Ordinary compaction remains a separate mechanism. A smaller compaction target is not a substitute for an enforced serialized-request budget.
 
-Remove `requestTokenBudget` and start a new session to return to the default. Do not use an empty profile list as a disable switch in `enforce` mode: it rejects unknown requests. Saved budgeted epochs still need their matching configuration when restored.
+Remove `requestTokenBudget` and start a new session to return to the default. Do not use an empty profile list as a disable switch in `enforce` mode: it rejects unknown requests. In `observe` mode, missing or ambiguous profiles are recorded as unknown without a budget cutoff. Restoring a saved epoch still requires a compatible native request identity and replay layout; unknown measurement does not authorize a different route or model.
 
 See [context management](context-management.md#model-aware-budgets) and [SDK options](sdk.md#explicit-request-token-budget-profiles) for programmatic use. The published Base 1.1.1 benchmark did not enable this feature and is not evidence of its savings.

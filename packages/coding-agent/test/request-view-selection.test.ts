@@ -47,9 +47,15 @@ const model: Model<"openai-responses"> = {
 };
 const limits = { maxMessages: 256, maxSourceBytes: 2 * 1024 * 1024 };
 
-it.each(["error", "aborted", "toolUse"] as const)(
-	"resumes a stored absent-tool summary without replaying a filtered %s assistant",
-	async (stopReason) => {
+it.each([
+	{ stopReason: "error", budgetMode: undefined },
+	{ stopReason: "aborted", budgetMode: undefined },
+	{ stopReason: "toolUse", budgetMode: undefined },
+	{ stopReason: "toolUse", budgetMode: "observe" },
+	{ stopReason: "toolUse", budgetMode: "enforce" },
+] as const)(
+	"resumes a stored absent-tool summary without replaying a filtered $stopReason assistant (budget=$budgetMode)",
+	async ({ stopReason, budgetMode }) => {
 		const dir = mkdtempSync(join(tmpdir(), "base-context-filtered-projection-"));
 		let manager = await SessionManager.create(dir, dir);
 		try {
@@ -157,13 +163,40 @@ it.each(["error", "aborted", "toolUse"] as const)(
 					url: `${model.baseUrl}/responses`,
 					body: JSON.stringify({ model: model.id, input, max_output_tokens: 16 }),
 				};
-				const body = await selectRequestView(
+				const budget = budgetMode
+					? new RequestTokenBudget({
+							mode: budgetMode,
+							profiles: [
+								{
+									id: "pending-tool-observation",
+									revision: "1",
+									api: model.api,
+									provider: model.provider,
+									url: request.url,
+									model: model.id,
+									authMode: "fixture",
+									templateRevision: "1",
+									replayFamily: "openai-responses",
+									contextTokens: 1,
+									outputCeilingTokens: 16,
+									estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 0 },
+								},
+							],
+						})
+					: undefined;
+				const selected = selectRequestView(
 					boundary,
 					request,
 					bindResponsesPublicWindow(request, projection!),
-					undefined,
-					true,
+					budget,
+					budgetMode !== "observe",
 				);
+				if (budgetMode === "enforce") {
+					await expect(selected).rejects.toBeInstanceOf(PublicContextBudgetError);
+					expect(commits).toHaveLength(0);
+					return;
+				}
+				const body = await selected;
 				expect(commits).toHaveLength(1);
 				expect(commits[0].selectedUnitIds).toEqual(boundary.units.map((unit) => unit.id));
 				expect(body).not.toContain('"type":"function_call"');

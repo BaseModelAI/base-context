@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@ponythewhite/base-context-agent";
+import type { RequestTokenAssessment } from "@ponythewhite/base-context-ai";
 import {
 	getCanonicalEpochContext,
 	getCanonicalViewSelectionSource,
@@ -58,6 +59,9 @@ export function bindSessionContextEpoch({
 }: SessionContextEpochOptions): void {
 	let committed = epochContext.checkpoint;
 	let committedEntry = epochContext.checkpointEntry;
+	const observeBudget = requests.getRequestTokenBudgetOptions()?.mode === "observe";
+	const epochAssessment = (assessment: RequestTokenAssessment | undefined) =>
+		observeBudget && assessment?.limitSource !== "explicit-profile" ? undefined : assessment;
 	const fixed =
 		epochContext.mode === "off" || (committed?.policyOnly === true && !contextEpochsEnabled && !unbudgetedPublic);
 	let requestContract = fixed ? retainedContextRequestContract(committed) : undefined;
@@ -91,11 +95,21 @@ export function bindSessionContextEpoch({
 			assertResourceCurrent(resource);
 			let representation: string;
 			try {
+				if (observeBudget && candidate.assessment?.limitSource !== "explicit-profile") {
+					// Missing measurement is not replay permission: retain the accepted native identity.
+					const contract = retainedContextRequestContract(committed);
+					if (contract)
+						assertContextRequestContract(
+							contract,
+							candidate.request,
+							candidate.projection.replayContract ?? "complete-context",
+						);
+				}
 				representation = contextEpochRepresentation(
 					candidate.request,
-					candidate.assessment,
+					epochAssessment(candidate.assessment),
 					maxSourceBytes,
-					unbudgetedPublic,
+					unbudgetedPublic || observeBudget,
 					candidate.responseItemIdentity,
 				);
 			} catch (error) {
@@ -225,9 +239,9 @@ export function bindSessionContextEpoch({
 				if (
 					contextEpochRepresentation(
 						request,
-						assessment,
+						epochAssessment(assessment),
 						maxSourceBytes,
-						unbudgetedPublic,
+						unbudgetedPublic || observeBudget,
 						acceptedResponseIdentity,
 					) !== committed.representation
 				)
