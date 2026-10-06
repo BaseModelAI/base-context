@@ -1,0 +1,1 @@
+- Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication.

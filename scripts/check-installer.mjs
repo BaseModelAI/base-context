@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 const installerSource = readFileSync("install.sh", "utf-8");
+const releaseWorkflow = readFileSync(".github/workflows/build-binaries.yml", "utf-8");
 const mainCall = '\nmain "$@"';
 const mainCallIndex = installerSource.lastIndexOf(mainCall);
 const ansiPattern = /\x1b\[[0-?]*[ -/]*[@-~]/g;
@@ -158,6 +159,8 @@ try {
 	check(compactRows.meta.second.visible === "0", "expected compact row mode to hide the logo");
 
 	checkOwnedInstallerRoute();
+	checkReleaseVersion();
+	checkStableTagTarget();
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
 }
@@ -209,9 +212,9 @@ printf '1.2.3\n'
 	writeFileSync(join(binDir, "curl"), `#!/bin/sh
 [ "$1" = -fsSL ] && [ "$3" = -o ] || exit 1
 case "$2" in
-  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/SHA256SUMS)
+  "$EXPECTED_DOWNLOAD_URL/SHA256SUMS")
     [ "$4" = "$EXPECTED_CHECKSUMS" ] || exit 1 ;;
-  https://github.com/BaseModelAI/base-context/releases/download/v1.2.3/base-context-1.2.3.tgz)
+  "$EXPECTED_DOWNLOAD_URL/base-context-1.2.3.tgz")
     [ "$4" = "$EXPECTED_TARBALL" ] || exit 1 ;;
   *) exit 1 ;;
 esac
@@ -234,11 +237,19 @@ fi
 	const standaloneNodeBin = join(nodeDataDir, "base-context-node", "current", "bin");
 	mkdirSync(standaloneNodeBin, { recursive: true });
 	writeFileSync(join(standaloneNodeBin, "node"), readFileSync(join(binDir, "node")), { mode: 0o755 });
-	for (const [name, args, expectNpmView] of [
-		["default stable", [], "1"],
-		["explicit version", ["v1.2.3"], "0"],
-		["standalone setup", ["v1.2.3"], "0"],
-		["standalone rerun", ["v1.2.3"], "0"],
+	// Use the workflow's real upload/staging directories as the download server fixture.
+	// The native installer must request files where the workflow actually puts them.
+	const releaseDirectories = ["PRODUCTION_VERSION", "BETA_VERSION"].map((variable) => {
+		const line = releaseWorkflow.split("\n").find((line) => line.includes("RELEASE_PREFIX=") && line.includes(variable));
+		if (!line) throw new Error(`Missing release prefix for ${variable}`);
+		return line.match(/"([^"]+)"/)[1].replace(`\${${variable}}`, "1.2.3");
+	});
+	const smokeDirectory = releaseWorkflow.match(/mkdir -p "\$SMOKE_ROOT\/([^"]+)"/)[1].replace("$SMOKE_VERSION", "1.2.3");
+	for (const [name, args, expectNpmView, releaseDirectory] of [
+		["default stable", [], "1", releaseDirectories[0]],
+		["explicit version", ["v1.2.3"], "0", releaseDirectories[1]],
+		["standalone setup", ["v1.2.3"], "0", smokeDirectory],
+		["standalone rerun", ["v1.2.3"], "0", smokeDirectory],
 	]) {
 		const standalone = name.startsWith("standalone");
 		if (name === "standalone setup") writeFileSync(profile, originalProfile, "utf8");
@@ -255,6 +266,7 @@ fi
 				BASE_CONTEXT_SHELL_PROFILE: profile,
 				BASE_CONTEXT_RELEASE_CHANNEL: "stable", BASE_CONTEXT_VERSION: "",
 				FIXTURE_DOWNLOAD_DIR: downloadDir, EXPECT_NPM_VIEW: expectNpmView,
+				EXPECTED_DOWNLOAD_URL: `https://github.com/BaseModelAI/base-context/${releaseDirectory}`,
 				NPM_VIEW_MARKER: join(tempDir, "npm-view"), EXPECTED_CHECKSUMS: checksumsPath,
 				EXPECTED_ENTRY: join(downloadDir, "bootstrap", "package", "dist", "installer.mjs"),
 				EXPECTED_ROOT: root, EXPECTED_SELECTION: original, EXPECTED_TARBALL: tarballPath },
@@ -268,6 +280,68 @@ fi
 		check(result.stdout.includes(`export PATH='${ownedPath}':"$PATH" && base-context`), `${name} omitted the current-shell launch command`);
 		if (name === "standalone rerun") {
 			check(result.stdout.includes("PATH entry is already in"), "standalone rerun should reuse the sourced PATH entry");
+		}
+	}
+}
+
+function releaseStepScript(name) {
+	const step = releaseWorkflow.split(`      - name: ${name}\n`)[1];
+	return step.split("        run: |\n")[1].split(/^ {0,8}\S/m)[0]
+		.split("\n").map((line) => line.slice(10)).join("\n");
+}
+
+function checkStableTagTarget() {
+	const directory = join(tempDir, "tag-target");
+	mkdirSync(directory);
+	// A real pre-commit hook exports Git paths; fixture commits must never use its index.
+	const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
+	const git = (...args) => {
+		const result = spawnSync("git", ["-c", "user.name=Installer fixture", "-c", "user.email=fixture@example.com", "-c", "commit.gpgsign=false", ...args], {
+			cwd: directory, encoding: "utf8", env,
+		});
+		if (result.status !== 0) throw new Error(`Tag fixture setup failed: ${result.stderr}`);
+		return result.stdout.trim();
+	};
+	git("init", "--quiet");
+	git("commit", "--quiet", "--allow-empty", "-m", "prepared release");
+	git("tag", "-a", "v1.2.3", "-m", "prepared release");
+	const tagged = git("rev-parse", "HEAD");
+	git("commit", "--quiet", "--allow-empty", "-m", "later change");
+	const later = git("rev-parse", "HEAD");
+	for (const build of [tagged, later]) {
+		const result = spawnSync("bash", ["-e", "-c", releaseStepScript("Check stable tag target")], {
+			cwd: directory, encoding: "utf8",
+			env: { ...env, PRODUCTION_VERSION: "1.2.3", BUILD_REF: build },
+		});
+		check(build === tagged ? result.status === 0 : result.status !== 0 && result.stderr.includes("not the selected build"),
+			`stable tag target check failed for ${build === tagged ? "matching" : "different"} source\n${result.stderr}${result.stdout}`);
+	}
+}
+
+function checkReleaseVersion() {
+	const script = releaseStepScript("Resolve release context");
+	const directory = join(tempDir, "release-context");
+	mkdirSync(directory);
+	for (const relative of ["", "packages/ai", "packages/tui", "packages/agent", "packages/coding-agent"]) {
+		mkdirSync(join(directory, relative), { recursive: true });
+		writeFileSync(join(directory, relative, "package.json"), JSON.stringify({ version: "1.2.3" }));
+	}
+	for (const version of ["1.2.3", "9.9.9"]) {
+		const output = join(directory, `output-${version}`);
+		const result = spawnSync("bash", ["-e", "-c", script], {
+			cwd: directory,
+			encoding: "utf8",
+			env: { ...process.env, DEFAULT_BRANCH: "main", REF_NAME: "main",
+				GITHUB_SHA_VALUE: "0123456789abcdef", INPUT_RELEASE_TAG: `v${version}`,
+				RELEASE_CHANNEL: "stable", RUN_NUMBER: "1", RUN_ATTEMPT: "1", GITHUB_OUTPUT: output },
+		});
+		if (version === "1.2.3") {
+			check(result.status === 0, `matching stable release failed\n${result.stderr}${result.stdout}`);
+			if (result.status === 0) check(readFileSync(output, "utf8").includes("build_ref=0123456789abcdef\n"),
+				"stable release did not retain the selected source commit");
+		} else {
+			check(result.status !== 0 && result.stderr.includes("does not match source version"),
+				"stable release accepted an arbitrary version instead of the prepared source version");
 		}
 	}
 }
