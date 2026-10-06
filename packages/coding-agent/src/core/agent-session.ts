@@ -194,9 +194,7 @@ import {
 	GOAL_STATE_CUSTOM_TYPE,
 	type GoalHostResponse,
 	type GoalState,
-	type GoalStatus,
 	goalHostResponse,
-	goalTokenDeltaForUsage,
 	isPersistedGoalState,
 	normalizeGoalState,
 	validateGoalBudget,
@@ -362,6 +360,7 @@ import {
 	type NativeSubmittedInput,
 } from "./session-entry-origin.js";
 import { readUserMessagesForForking } from "./session-fork-messages.js";
+import { type GoalStateWriteOwner, SessionGoals } from "./session-goals.js";
 import {
 	hydrateCapturedHistoryEntry,
 	type SessionHistoryReadLimits,
@@ -783,14 +782,10 @@ interface PreparedPromptPreparation {
 class DeferredSessionInputError extends Error {}
 class StaleGoalContinuationError extends Error {}
 
-interface GoalContinuationOwner {
-	manager: SessionManager;
+interface GoalContinuationOwner extends GoalStateWriteOwner {
 	sessionId: string;
 	sessionFile: string | undefined;
 	pumpEpoch: number;
-	goal: GoalState;
-	goalRevision: number;
-	accountingStartedAt: number | undefined;
 	signal: AbortSignal | undefined;
 	checkpointOwner?: CompactionOwner;
 }
@@ -1253,12 +1248,12 @@ export class AgentSession {
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
-	private _goalState: GoalState = emptyGoalState();
-	private _goalStateRevision = 0;
-	private _goalAccountingStartedAt: number | undefined = undefined;
+	private readonly _goals = new SessionGoals(
+		() => this.sessionManager,
+		() => this._emitGoalUpdate(),
+	);
 	private _goalContinuationAwaitsRlmWork = false;
 	private _jobWatchController?: JobWatchController;
-	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
 	private _autonomousContinuationSuppressionDepth = 0;
@@ -1845,12 +1840,9 @@ export class AgentSession {
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
 		});
-		this._goalState = this.sessionManager.isPersisted() ? emptyGoalState() : this._loadPersistedGoalState();
 		this._initialGoal = config.initialGoal ? { ...config.initialGoal } : undefined;
 		this._restoreLateIpythonSentAgentMessages();
-		if (this._goalState.status === "active") {
-			this._goalAccountingStartedAt = Date.now();
-		}
+		this._goals.restore(this.sessionManager.isPersisted() ? emptyGoalState() : this._goals.loadResidentState());
 
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
@@ -1884,8 +1876,7 @@ export class AgentSession {
 		let goalSeedable = false;
 		if (this.sessionManager.isPersisted()) {
 			const bootstrap = await this._readRuntimeBootstrap();
-			this._goalState = bootstrap.goalState;
-			this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
+			this._goals.restore(bootstrap.goalState);
 			goalSeedable = bootstrap.goalSeedable;
 			const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
 			this._rlmMaxDepth = resolved.maxDepth;
@@ -1898,7 +1889,7 @@ export class AgentSession {
 			if (bootstrap.jobWatchState) await this._getJobWatchController().restore(bootstrap.jobWatchState);
 			if (bootstrap.jobWatchUnavailable) this._surfaceSessionInputError(new Error(bootstrap.jobWatchUnavailable));
 			if (
-				this._goalState.status === "active" &&
+				this._goals.state.status === "active" &&
 				this._includeGoals &&
 				!this.getActiveToolNames().includes("ipython")
 			) {
@@ -2482,22 +2473,6 @@ export class AgentSession {
 		});
 	}
 
-	private _loadPersistedGoalState(): GoalState {
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			if (
-				entry.type === "custom" &&
-				entry.customType === GOAL_STATE_CUSTOM_TYPE &&
-				this.sessionManager.getEntryRetention(entry.id) !== "retained-import" &&
-				isPersistedGoalState(entry.data)
-			) {
-				return normalizeGoalState(entry.data);
-			}
-		}
-		return emptyGoalState();
-	}
-
 	/**
 	 * Whether the session branch is seedable for an initial goal. Returns true
 	 * only when the branch contains exclusively bootstrap entry types
@@ -2532,9 +2507,8 @@ export class AgentSession {
 		this._contextMode = await this._readContextMode();
 		const bootstrap = this.sessionManager.isPersisted()
 			? await this._readRuntimeBootstrap()
-			: { goalState: this._loadPersistedGoalState(), rlmMaxDepth: this._loadPersistedRlmMaxDepthState() };
-		this._goalState = bootstrap.goalState;
-		this._goalAccountingStartedAt = this._goalState.status === "active" ? Date.now() : undefined;
+			: { goalState: this._goals.loadResidentState(), rlmMaxDepth: this._loadPersistedRlmMaxDepthState() };
+		this._goals.restore(bootstrap.goalState);
 		this._emitGoalUpdate();
 		const previousMaxDepth = this._rlmMaxDepth;
 		const resolved = this._resolveRlmMaxDepth(bootstrap.rlmMaxDepth);
@@ -2547,16 +2521,18 @@ export class AgentSession {
 	}
 
 	private _captureGoalContinuationOwner(signal?: AbortSignal): GoalContinuationOwner {
+		const session = this;
 		const manager = this.sessionManager;
 		return {
 			manager,
 			sessionId: manager.getSessionId(),
 			sessionFile: manager.getSessionFile(),
 			pumpEpoch: this._sessionInputPumpEpoch,
-			goal: this._goalState,
-			goalRevision: this._goalStateRevision,
-			accountingStartedAt: this._goalAccountingStartedAt,
+			...this._goals.capture(),
 			signal,
+			assertCurrent() {
+				session._assertGoalContinuationOwner(this);
+			},
 		};
 	}
 
@@ -2570,9 +2546,7 @@ export class AgentSession {
 			owner.manager.getSessionId() === owner.sessionId &&
 			owner.manager.getSessionFile() === owner.sessionFile &&
 			this._sessionInputPumpEpoch === (owner.checkpointOwner?.pumpEpoch ?? owner.pumpEpoch) &&
-			this._goalStateRevision === owner.goalRevision &&
-			this._goalState === owner.goal &&
-			this._goalAccountingStartedAt === owner.accountingStartedAt
+			this._goals.isCurrent(owner)
 		);
 	}
 
@@ -2586,22 +2560,7 @@ export class AgentSession {
 		return { kind: signal?.aborted || this._disposed || this._disposing ? "cancelled" : "finish" };
 	}
 
-	private async _persistGoalState(
-		goal: GoalState,
-		nativeGoalWrite?: CapturedNativeGoalWrite,
-		continuationOwner?: GoalContinuationOwner,
-	): Promise<void> {
-		const manager = continuationOwner?.manager ?? this.sessionManager;
-		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
-		if (nativeGoalWrite) await nativeGoalWrite(goal);
-		else await manager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
-		// Accepted writes stay on their source. Do not admit a flush on a replacement after the ACK.
-		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
-		// Force flush so the goal state is durable before the first assistant response.
-		await manager.flushNow();
-	}
-
-	private async _setGoalState(
+	private _setGoalState(
 		next: GoalState,
 		options: {
 			persist?: boolean;
@@ -2609,54 +2568,7 @@ export class AgentSession {
 			continuationOwner?: GoalContinuationOwner;
 		} = {},
 	): Promise<GoalState> {
-		const owner = options.continuationOwner;
-		if (owner) this._assertGoalContinuationOwner(owner);
-		// A newer goal write invalidates a continuation before that write's awaited publication.
-		this._goalStateRevision++;
-		if (owner) owner.goalRevision = this._goalStateRevision;
-		const normalized = normalizeGoalState({
-			...next,
-			updatedAt: Date.now(),
-		});
-		if (options.persist !== false) {
-			await this._persistGoalState(normalized, options.nativeGoalWrite, owner);
-		}
-		if (owner) this._assertGoalContinuationOwner(owner);
-		this._goalState = normalized;
-		if (normalized.status === "active") {
-			this._goalAccountingStartedAt ??= Date.now();
-		} else {
-			this._goalAccountingStartedAt = undefined;
-		}
-		if (owner) {
-			owner.goal = normalized;
-			owner.accountingStartedAt = this._goalAccountingStartedAt;
-		}
-		this._emitGoalUpdate();
-		return normalized;
-	}
-
-	private _goalWithCurrentWallClock(now = Date.now()): GoalState {
-		if (this._goalState.status !== "active" || !this._goalAccountingStartedAt) {
-			return this._goalState;
-		}
-		const elapsedSeconds = Math.floor((now - this._goalAccountingStartedAt) / 1000);
-		if (elapsedSeconds <= 0) {
-			return this._goalState;
-		}
-		return {
-			...this._goalState,
-			timeUsedSeconds: this._goalState.timeUsedSeconds + elapsedSeconds,
-		};
-	}
-
-	private _goalWithAccountedWallClock(): GoalState {
-		const now = Date.now();
-		const goal = this._goalWithCurrentWallClock(now);
-		if (goal !== this._goalState) {
-			this._goalAccountingStartedAt = now;
-		}
-		return goal;
+		return this._goals.set(next, options);
 	}
 
 	private _cancelSessionActions(
@@ -2743,22 +2655,7 @@ export class AgentSession {
 		tokenBudget: number | undefined,
 		nativeGoalWrite?: CapturedNativeGoalWrite,
 	): Promise<GoalState> {
-		const objective = validateGoalObjective(objectiveText);
-		const budget = validateGoalBudget(tokenBudget);
-		const now = Date.now();
-		const goal: GoalState = {
-			active: true,
-			status: "active",
-			goalId: randomUUID(),
-			objective,
-			tokenBudget: budget,
-			tokensUsed: 0,
-			timeUsedSeconds: 0,
-			continuationsUsed: 0,
-			createdAt: now,
-			updatedAt: now,
-		};
-		this._goalAccountingStartedAt = now;
+		const goal = this._goals.prepareNewGoal(objectiveText, tokenBudget);
 		this._goalContinuationAwaitsRlmWork = false;
 		return this._setGoalState(goal, { nativeGoalWrite });
 	}
@@ -2770,67 +2667,13 @@ export class AgentSession {
 
 	private async _pauseGoal(reason = "Paused by user", nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
 		this._clearQueuedGoalContexts();
-		if (this._goalState.status !== "active") {
-			this._emitGoalUpdate();
-			return;
-		}
-		const goal = this._goalWithAccountedWallClock();
-		await this._setGoalState(
-			{
-				...goal,
-				active: false,
-				status: "paused",
-				lastReason: reason,
-				lastError: undefined,
-			},
-			{ nativeGoalWrite },
-		);
+		await this._goals.pause(reason, nativeGoalWrite);
 	}
 
 	private async _resumeGoal(nativeGoalWrite?: CapturedNativeGoalWrite): Promise<void> {
-		if (!this._goalState.objective) {
-			this._emitGoalUpdate();
-			return;
-		}
-		if (this._goalState.status !== "paused" && this._goalState.status !== "budget_limited") {
-			this._emitGoalUpdate();
-			return;
-		}
-		const exhausted =
-			this._goalState.tokenBudget !== undefined && this._goalState.tokensUsed >= this._goalState.tokenBudget;
-		const nextStatus: GoalStatus = exhausted ? "budget_limited" : "active";
-		await this._setGoalState(
-			{
-				...this._goalState,
-				active: nextStatus === "active",
-				status: nextStatus,
-				lastReason: exhausted ? "Goal token budget already reached" : undefined,
-				lastError: undefined,
-			},
-			{ nativeGoalWrite },
-		);
-		if (nextStatus === "active") {
+		if (await this._goals.resume(nativeGoalWrite)) {
 			await this._runOrQueueGoalContext("continuation");
 		}
-	}
-
-	private async _finishGoalWithError(errorMessage: string, continuationOwner?: GoalContinuationOwner): Promise<void> {
-		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
-		if (!this._goalState.objective || this._goalState.status !== "active") {
-			return;
-		}
-		const goal = this._goalWithAccountedWallClock();
-		if (continuationOwner) continuationOwner.accountingStartedAt = this._goalAccountingStartedAt;
-		await this._setGoalState(
-			{
-				...goal,
-				active: false,
-				status: "error",
-				lastReason: errorMessage,
-				lastError: errorMessage,
-			},
-			{ continuationOwner },
-		);
 	}
 
 	private async _finishGoalForTerminalAssistantMessage(
@@ -2838,7 +2681,7 @@ export class AgentSession {
 		continuationOwner?: GoalContinuationOwner,
 	): Promise<void> {
 		if (continuationOwner) this._assertGoalContinuationOwner(continuationOwner);
-		if (this._goalState.status !== "active") {
+		if (this._goals.state.status !== "active") {
 			return;
 		}
 
@@ -2852,7 +2695,7 @@ export class AgentSession {
 				this._goalAbortInProgress = false;
 				return;
 			}
-			await this._finishGoalWithError(message.errorMessage || "Assistant response failed", continuationOwner);
+			await this._goals.finishWithError(message.errorMessage || "Assistant response failed", continuationOwner);
 		}
 	}
 
@@ -3058,7 +2901,7 @@ export class AgentSession {
 			this._jobWatchController?.isParked()
 		)
 			return;
-		if (this._goalState.status !== "active" || !this._goalState.objective) {
+		if (this._goals.state.status !== "active" || !this._goals.state.objective) {
 			this._goalContinuationAwaitsRlmWork = false;
 			return;
 		}
@@ -3101,9 +2944,9 @@ export class AgentSession {
 	}
 
 	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
-		if (!this._goalState.objective) return;
+		if (!this._goals.state.objective) return;
 		this._ensureGoalRuntimeActive();
-		const message = createGoalContextMessage(this._goalState, kind, images);
+		const message = createGoalContextMessage(this._goals.state, kind, images);
 		const normalized = normalizeMessageContent(message.content);
 		const action = this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
 			message,
@@ -3122,8 +2965,8 @@ export class AgentSession {
 			return false;
 		}
 
-		const previousGoalId = this._goalState.goalId;
-		const replacementOperation = this._goalState.objective ? "revise" : "create";
+		const previousGoalId = this._goals.state.goalId;
+		const replacementOperation = this._goals.state.objective ? "revise" : "create";
 		const origin = (operation: GoalOperationOrigin["operation"]): CapturedNativeGoalWrite | undefined => {
 			if (!context) return undefined;
 			const { writer, ...captured } = context;
@@ -3156,7 +2999,7 @@ export class AgentSession {
 			return true;
 		}
 
-		const previousWasActive = this._goalState.status === "active";
+		const previousWasActive = this._goals.state.status === "active";
 		const nativeGoalWrite = origin(replacementOperation);
 		if (!this.isStreaming) {
 			await this._validateCanStartAgentRun();
@@ -3165,54 +3008,6 @@ export class AgentSession {
 		this._clearQueuedGoalContexts();
 		await this._startGoal(command.objective, command.tokenBudget, nativeGoalWrite);
 		await this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images);
-		return true;
-	}
-
-	private async _accountGoalUsageForAssistantMessage(
-		message: AssistantMessage,
-		owner?: GoalContinuationOwner,
-	): Promise<boolean> {
-		if (owner) this._assertGoalContinuationOwner(owner);
-		if (!this._goalState.objective) {
-			return false;
-		}
-		if (message.stopReason === "error" || message.stopReason === "aborted") {
-			return false;
-		}
-		if (this._goalAccountedAssistantMessages.has(message)) {
-			return false;
-		}
-		// Usage is attributed at the assistant message's message_end, which fires
-		// before that turn's ipython cell runs. goal.complete() only arrives later
-		// over the kernel host bridge, so the completing turn is always accounted
-		// while the goal is still active. Only count turns spent pursuing the goal;
-		// post-completion turns (e.g. a closing summary) must not be attributed.
-		if (this._goalState.status !== "active") {
-			return false;
-		}
-		this._goalAccountedAssistantMessages.add(message);
-		const tokenDelta = goalTokenDeltaForUsage(message.usage);
-		const goal = this._goalWithAccountedWallClock();
-		if (owner) owner.accountingStartedAt = this._goalAccountingStartedAt;
-		const nextGoal: GoalState = {
-			...goal,
-			tokensUsed: goal.tokensUsed + tokenDelta,
-		};
-		const budgetReached = nextGoal.tokenBudget !== undefined && nextGoal.tokensUsed >= nextGoal.tokenBudget;
-		if (!budgetReached) {
-			await this._setGoalState(nextGoal, { continuationOwner: owner });
-			return false;
-		}
-		await this._setGoalState(
-			{
-				...nextGoal,
-				active: false,
-				status: "budget_limited",
-				lastReason: `Reached ${nextGoal.tokenBudget} token goal budget`,
-				lastError: undefined,
-			},
-			{ continuationOwner: owner },
-		);
 		return true;
 	}
 
@@ -3353,7 +3148,7 @@ export class AgentSession {
 			if (this._autonomousState.enabled && autonomousRunLimitReason(this._autonomousState))
 				return { kind: "finish" };
 			try {
-				if (await this._accountGoalUsageForAssistantMessage(context.message, goalOwner)) {
+				if (await this._goals.accountUsage(context.message, goalOwner)) {
 					this._assertGoalContinuationOwner(goalOwner);
 					const message = createGoalContextMessage(goalOwner.goal, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
@@ -4585,7 +4380,7 @@ export class AgentSession {
 	}
 
 	private async _createGoalFromHost(objective: string, tokenBudget: number | undefined): Promise<GoalState> {
-		switch (this._goalState.status) {
+		switch (this._goals.state.status) {
 			case "active":
 				throw new Error(
 					"cannot create a new goal because this thread already has an active goal; run `await goal.complete()` when it is achieved, or ask the user to clear it with /goal clear",
@@ -4615,10 +4410,10 @@ export class AgentSession {
 	}
 
 	private async _completeGoalFromHost(): Promise<GoalState> {
-		if (!this._goalState.objective || this._goalState.status === "idle") {
+		if (!this._goals.state.objective || this._goals.state.status === "idle") {
 			throw new Error("cannot complete goal because this thread has no goal");
 		}
-		const goal = this._goalWithAccountedWallClock();
+		const goal = this._goals.withAccountedWallClock();
 		// A turn can cross the budget and complete the goal at once: accounting
 		// runs at message_end, before the completing ipython cell executes, so a
 		// budget-limit context may already be steered. It is stale now — drop it.
@@ -4670,7 +4465,7 @@ export class AgentSession {
 			return this._stoppedContinuationOutcome(owner.signal);
 		}
 		if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
-		if (this._goalState.status !== "active" || !this._goalState.objective) {
+		if (this._goals.state.status !== "active" || !this._goals.state.objective) {
 			return { kind: "finish" };
 		}
 		if (this._jobWatchController?.isParked()) return { kind: "wait_for_owned_work" };
@@ -4695,7 +4490,7 @@ export class AgentSession {
 			if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(owner.signal);
 			const message = error instanceof Error ? error.message : String(error);
 			try {
-				await this._finishGoalWithError(message, owner);
+				await this._goals.finishWithError(message, owner);
 			} catch {
 				// Preserve the goal hook's existing non-rejection policy, without finishing a replacement goal.
 			}
@@ -4739,7 +4534,7 @@ export class AgentSession {
 					throw error;
 				}
 				if (!this._isGoalContinuationOwnerCurrent(owner)) return this._stoppedContinuationOutcome(signal);
-				this._goalAccountingStartedAt = goalAccountingStartedAt;
+				this._goals.restoreAccountingClock(goalAccountingStartedAt);
 				return { kind: "finish" };
 			}
 			return goalOutcome;
@@ -5064,8 +4859,8 @@ export class AgentSession {
 			// Preserve budget progress while a message_end transformer waits. The same subject WeakSet
 			// deduplicates the post-message and post-turn calls; goal state is published only after its ACK.
 			// Do not run serialized refinement/compaction or stop mandatory tools at this point.
-			if ((await this._accountGoalUsageForAssistantMessage(event.message)) && !this._invocationOutputRefused) {
-				const message = createGoalContextMessage(this._goalState, "budget_limit");
+			if ((await this._goals.accountUsage(event.message)) && !this._invocationOutputRefused) {
+				const message = createGoalContextMessage(this._goals.state, "budget_limit");
 				const normalized = normalizeMessageContent(message.content);
 				await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 					message,
@@ -5170,8 +4965,8 @@ export class AgentSession {
 					});
 					this._retryAttempt = 0;
 				}
-				if ((await this._accountGoalUsageForAssistantMessage(assistantMsg)) && !this._invocationOutputRefused) {
-					const message = createGoalContextMessage(this._goalState, "budget_limit");
+				if ((await this._goals.accountUsage(assistantMsg)) && !this._invocationOutputRefused) {
+					const message = createGoalContextMessage(this._goals.state, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
 					await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 						message,
@@ -5828,7 +5623,7 @@ export class AgentSession {
 	}
 
 	get goalState(): GoalState {
-		return { ...this._goalWithCurrentWallClock() };
+		return { ...this._goals.withCurrentWallClock() };
 	}
 
 	getAutonomousStatus(): AgentAutonomousStatus {
@@ -5944,7 +5739,7 @@ export class AgentSession {
 				enabled: this.settingsManager.getLearningEnabled(),
 				tools: validToolNames,
 				operation,
-				goal: this._goalState.objective,
+				goal: this._goals.state.objective,
 				environment: { cwd: this._cwd, platform: process.platform },
 				countTokens: conservativeTextTokenCost,
 			},
@@ -7823,10 +7618,10 @@ export class AgentSession {
 						submittedText: input.submitted?.text,
 					};
 					const clearedGoal =
-						Boolean(this._goalState.objective) && this._parseGoalSlashCommand(input.text)?.kind === "clear";
+						Boolean(this._goals.state.objective) && this._parseGoalSlashCommand(input.text)?.kind === "clear";
 					await this._handleGoalSlashCommand(input.text, input.images, goalOrigin);
-					resultText = this._goalState.objective
-						? `Goal ${this._goalState.status}: ${this._goalState.objective}`
+					resultText = this._goals.state.objective
+						? `Goal ${this._goals.state.status}: ${this._goals.state.objective}`
 						: clearedGoal
 							? "Goal cleared."
 							: "No active goal.";
@@ -8691,7 +8486,7 @@ export class AgentSession {
 		const branchSummaryOperation = this._branchSummaryOperation;
 		this.requestAbort();
 		this._cancelActiveRlmChildRuns("Parent session aborted");
-		this._goalAbortInProgress = this._goalState.status === "active";
+		this._goalAbortInProgress = this._goals.state.status === "active";
 		try {
 			await Promise.allSettled([
 				this.agent.waitForIdle(),
@@ -8716,7 +8511,7 @@ export class AgentSession {
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._abortPendingIpythonExecutions();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
-		this._goalAbortInProgress = this._goalState.status === "active";
+		this._goalAbortInProgress = this._goals.state.status === "active";
 		this.agent.abort();
 		if (this._goalAbortInProgress) {
 			void this.agent
@@ -10311,7 +10106,7 @@ export class AgentSession {
 						sessionId: manager.getSessionId(),
 						sessionFile: manager.getSessionFile(),
 						message: message ? ([message.id, message.timestamp] as const) : undefined,
-						goal: goalEvidence(this._loadPersistedGoalState()),
+						goal: goalEvidence(this._goals.loadResidentState()),
 					};
 				})();
 		return {
@@ -11729,7 +11524,7 @@ export class AgentSession {
 			? Object.keys(this._baseToolsOverride)
 			: ["ipython", "prime_context"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
-		if (this._goalState.status === "active" && this._includeGoals) {
+		if (this._goals.state.status === "active" && this._includeGoals) {
 			// An active goal needs ipython so the model can reach the goal skill.
 			baseActiveToolNames.push("ipython");
 		}
@@ -11977,7 +11772,7 @@ export class AgentSession {
 			sessionId: manager.getSessionId(),
 			sessionFile: manager.getSessionFile(),
 			current: () => !this._disposed && !this._disposing && this.sessionManager === manager && ownsSource(),
-			goalId: () => this._goalState.goalId,
+			goalId: () => this._goals.state.goalId,
 			persist: async (state) => {
 				if (this.sessionManager !== manager || !ownsSource()) return;
 				await manager.appendCustomEntry(JOB_WATCH_STATE, state);

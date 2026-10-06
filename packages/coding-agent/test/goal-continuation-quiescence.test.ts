@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
-import { emptyGoalState, type GoalState } from "../src/core/goals.js";
+import { emptyGoalState } from "../src/core/goals.js";
+import { SessionGoals } from "../src/core/session-goals.js";
+import { SessionManager } from "../src/core/session-manager.js";
 
 type Harness = {
-	_goalState: GoalState;
+	_goals: SessionGoals;
 	_jobWatchController?: { isParked: () => boolean };
 	_goalContinuationAwaitsRlmWork: boolean;
 	_disposed: boolean;
@@ -13,7 +15,6 @@ type Harness = {
 	_hasUnsettledRlmQuiescenceWork: () => boolean;
 	_stopGoalContinuationForTerminalMessage: () => boolean;
 	_ensureGoalRuntimeActive: () => void;
-	_persistGoalState: () => Promise<void>;
 	_emitGoalUpdate: () => void;
 	_createPreparedTurnAction: ReturnType<typeof vi.fn>;
 	_admitSessionInput: ReturnType<typeof vi.fn>;
@@ -28,12 +29,17 @@ const maybeResume = Reflect.get(AgentSession.prototype, "_resumeGoalContinuation
 ) => Promise<void>;
 
 function harness(overrides: Partial<Harness> = {}): Harness {
-	// Use the current async owner and goal-state methods; stub only persistence and admission.
+	// Use the real goal owner and in-memory persistence; stub only scheduling and admission.
+	const sessionManager = SessionManager.inMemory();
+	const goals = new SessionGoals(
+		() => sessionManager,
+		() => {},
+	);
+	goals.restore({ ...emptyGoalState(), active: true, status: "active", objective: "ship it", goalId: "goal-1" });
 	return Object.assign(Object.create(AgentSession.prototype), {
-		sessionManager: { getSessionId: () => "quiescence-fixture", getSessionFile: () => undefined },
+		sessionManager,
 		_sessionInputPumpEpoch: 0,
-		_goalStateRevision: 0,
-		_goalState: { ...emptyGoalState(), active: true, status: "active", objective: "ship it", goalId: "goal-1" },
+		_goals: goals,
 		_goalContinuationAwaitsRlmWork: false,
 		_disposed: false,
 		_disposing: false,
@@ -42,7 +48,6 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_hasUnsettledRlmQuiescenceWork: () => false,
 		_stopGoalContinuationForTerminalMessage: () => false,
 		_ensureGoalRuntimeActive: () => {},
-		_persistGoalState: async () => {},
 		_emitGoalUpdate: () => {},
 		_createPreparedTurnAction: vi.fn((schedule: string, _text: string, _images: unknown, options: unknown) => ({
 			schedule,
@@ -60,7 +65,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const mode = harness({ _hasUnsettledRlmQuiescenceWork: () => true });
 		await expect(getGoalContinuation.call(mode, context)).resolves.toEqual([]);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goalState.continuationsUsed).toBe(0);
+		expect(mode._goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("continues normally when no descendant work is pending", async () => {
@@ -68,7 +73,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const messages = await getGoalContinuation.call(mode, context);
 		expect(messages).toHaveLength(1);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(false);
-		expect(mode._goalState.continuationsUsed).toBe(1);
+		expect(mode._goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("resumes a deferred continuation exactly once, unqueued, idle-waking, and counted", async () => {
@@ -79,7 +84,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		const [action, options] = mode._admitSessionInput.mock.calls[0]!;
 		expect((action as { options: { resumeIfIdle: boolean } }).options.resumeIfIdle).toBe(true);
 		expect(options).toBeUndefined();
-		expect(mode._goalState.continuationsUsed).toBe(1);
+		expect(mode._goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("keeps the deferral while admission is paused and retries after release", async () => {
@@ -113,7 +118,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		});
 		await maybeResume.call(mode);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
-		expect(mode._goalState.continuationsUsed).toBe(0);
+		expect(mode._goals.state.continuationsUsed).toBe(0);
 	});
 
 	it("keeps child-work deferral while a selected watch is parked, then resumes once", async () => {
@@ -124,13 +129,13 @@ describe("goal continuation vs unsettled subagent work", () => {
 		});
 		await maybeResume.call(mode);
 		expect(mode._admitSessionInput).not.toHaveBeenCalled();
-		expect(mode._goalState.continuationsUsed).toBe(0);
+		expect(mode._goals.state.continuationsUsed).toBe(0);
 		expect(mode._goalContinuationAwaitsRlmWork).toBe(true);
 		parked = false;
 		await maybeResume.call(mode);
 		await maybeResume.call(mode);
 		expect(mode._admitSessionInput).toHaveBeenCalledTimes(1);
-		expect(mode._goalState.continuationsUsed).toBe(1);
+		expect(mode._goals.state.continuationsUsed).toBe(1);
 	});
 
 	it("stays deferred while work remains and drops the deferral for inactive goals", async () => {
@@ -140,7 +145,7 @@ describe("goal continuation vs unsettled subagent work", () => {
 		expect(busy._goalContinuationAwaitsRlmWork).toBe(true);
 
 		const inactive = harness({ _goalContinuationAwaitsRlmWork: true });
-		inactive._goalState = { ...inactive._goalState, active: false, status: "paused" };
+		inactive._goals.restore({ ...inactive._goals.state, active: false, status: "paused" });
 		await maybeResume.call(inactive);
 		expect(inactive._admitSessionInput).not.toHaveBeenCalled();
 		expect(inactive._goalContinuationAwaitsRlmWork).toBe(false);

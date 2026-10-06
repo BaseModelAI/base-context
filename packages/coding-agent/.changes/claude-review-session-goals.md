@@ -1,0 +1,1 @@
+- Separated goal state, accounting, and persistence from session scheduling while preserving goal control and continuation ownership.
