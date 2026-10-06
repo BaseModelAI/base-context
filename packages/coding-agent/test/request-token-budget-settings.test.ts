@@ -1,6 +1,11 @@
-import { readFileSync } from "node:fs";
-import { RequestTokenBudget } from "@ponythewhite/base-context-ai";
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getModel, RequestTokenBudget, RequestTokenBudgetError } from "@ponythewhite/base-context-ai";
+import { describe, expect, it, vi } from "vitest";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { SessionManager } from "../src/core/session-manager.js";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.js";
 
 const example: Settings = JSON.parse(
@@ -8,6 +13,56 @@ const example: Settings = JSON.parse(
 );
 
 describe("request token budget settings", () => {
+	it("loads the documented project profile through the CLI services and enforces the native route", async () => {
+		const root = mkdtempSync(join(tmpdir(), "base-context-budget-settings-"));
+		const agentDir = join(root, "agent");
+		const cwd = join(root, "project");
+		mkdirSync(agentDir, { recursive: true });
+		mkdirSync(join(cwd, ".base-context"), { recursive: true });
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ retry: { enabled: false } }));
+		writeFileSync(join(cwd, ".base-context", "settings.json"), JSON.stringify(example));
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		const services = await createAgentSessionServices({
+			cwd,
+			agentDir,
+			authStorage,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true, noContextFiles: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Offline transport reached"));
+		try {
+			const model = getModel("openai", "gpt-4.1");
+			expect(session.model?.id).toBe(model.id);
+			expect(session.requests.getRequestTokenBudgetOptions()).toEqual(example.requestTokenBudget);
+			const result = await session.requests.complete(
+				model,
+				{ messages: [] },
+				{ apiKey: "test-key", maxRetries: 0 },
+				{ purpose: "main" },
+			);
+			expect(result.stopReason).toBe("error");
+			expect(fetch).toHaveBeenCalledOnce();
+			expect(String(fetch.mock.calls[0][0])).toBe(example.requestTokenBudget!.profiles[0].url);
+			await expect(
+				session.requests.complete(
+					{ ...model, id: "uncovered-model" },
+					{ messages: [] },
+					{ apiKey: "test-key", maxRetries: 0 },
+					{ purpose: "main" },
+				),
+			).rejects.toBeInstanceOf(RequestTokenBudgetError);
+			expect(fetch).toHaveBeenCalledOnce();
+		} finally {
+			fetch.mockRestore();
+			await session.disposeAsync();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("opts in with the documented profile and leaves ordinary settings unchanged", () => {
 		expect(SettingsManager.inMemory().getRequestTokenBudget()).toBeUndefined();
 		const settings = SettingsManager.inMemory(example);
