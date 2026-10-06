@@ -9,6 +9,7 @@ from pathlib import Path
 
 from base_protocol import BaseContextProtocol
 from codex_protocol import CodexProtocol
+from run_one import base_resume_command
 from test_base_protocol import FakeRPC, STATE
 
 ROOT = Path(__file__).resolve().parent
@@ -103,6 +104,10 @@ class NativeLifecycleTest(unittest.IsolatedAsyncioTestCase):
         return watcher, new
 
     async def test_completed_compaction_same_identity_and_new_namespace_exit(self):
+        initial_command = ["base-context", "--mode", "rpc", "--rpc-protocol-version", "13",
+                           "--session-dir", "/home/bench/sessions"]
+        self.assertEqual(base_resume_command(initial_command, SAVED),
+                         [*initial_command, "--resume", SAVED["sessionFile"]])
         rpc, base = self.client(BaseContextProtocol)
         operation = self.task(base.compact())
         request = await rpc.request("compact")

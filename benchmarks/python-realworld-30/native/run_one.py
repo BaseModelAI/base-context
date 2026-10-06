@@ -143,6 +143,10 @@ async def start_fixture(config, scenario, task_dir, workspace, directory, main_n
     readers.append(asyncio.create_task(process.wait()))
 
 
+def base_resume_command(command, identity):
+    return [*command, "--resume", identity["sessionFile"]]
+
+
 def base_collector_command(config, directory, session_dir, output):
     """Load the selected installation's public decoder through static ESM imports."""
     package = Path(config["base_package"])
@@ -327,7 +331,7 @@ async def run_attempt(spec, config, output):
                     await client.close()
                     if spec["harness"] == "base-context":
                         launch = json.loads((driver / "launch.json").read_text())
-                        launch["command"] += ["--session", identity["sessionFile"]]
+                        launch["command"] = base_resume_command(launch["command"], identity)
                         write_json(driver / "launch.json", launch)
                     if watchdog.returncode is not None:
                         raise RuntimeError("Deadline watchdog exited before namespace restart")
