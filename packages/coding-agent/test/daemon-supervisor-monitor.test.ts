@@ -17,6 +17,7 @@ import {
 	createDaemonCommandEnvelope,
 	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 	type DaemonAttachResult,
+	type DaemonCommand,
 	success,
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
@@ -30,6 +31,8 @@ import {
 import {
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
+	type DaemonCreateCommand,
+	type DaemonWorkerDescriptor,
 	type DaemonWorkerFrameHeader,
 } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
@@ -253,6 +256,73 @@ function createSupervisorSnapshotState() {
 		pendingRosterRemoved: new Set<string>(),
 		rosterPushScheduled: false,
 	};
+}
+
+function createFailedOwnedReclaimHarness() {
+	const root = mkdtempSync(join(tmpdir(), "prime-supervisor-owned-resume-"));
+	supervisorRegistryDirs.add(root);
+	const descriptorDir = join(root, "workers");
+	mkdirSync(descriptorDir);
+	const sessionPath = join(root, "saved-root.jsonl");
+	const childPath = join(root, "saved-child.jsonl");
+	const retainedSource = `${JSON.stringify({ type: "session", id: "saved-root", cwd: root })}\n`;
+	writeFileSync(sessionPath, retainedSource);
+	writeFileSync(childPath, retainedSource);
+	const fixture = createExistingLaunchWorker(root, descriptorDir);
+	const descriptor: DaemonWorkerDescriptor = {
+		...fixture.descriptor,
+		ownerClientId: "original-owner",
+		processStartId: "proc:original",
+		rootSessionId: "saved-root",
+		sessionFile: sessionPath,
+		createCommand: { type: "create", sessionPath },
+	};
+	writeFileSync(fixture.descriptorPath, JSON.stringify(descriptor));
+	const replacement = { descriptor: { workerId: "fresh-worker", ownerClientId: "fresh-owner" } };
+	const launchWorker = vi.fn(
+		async (_command: DaemonCreateCommand, _existing?: unknown, _owner?: string) => replacement,
+	);
+	const supervisor = Object.assign(
+		new DaemonSupervisor(join(root, "supervisor.sock"), {
+			defaultSessionConfig: { cwd: root, agentDir: root },
+			descriptorDir,
+		}),
+		{
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			processIdentity: vi.fn(() => "gone"),
+			rlmSpawnLedger: vi.fn(() => ({ family: vi.fn(async () => []) })),
+			broadcastHeartbeatsChanged: vi.fn(),
+			launchWorker,
+			log: vi.fn(),
+		},
+	) as unknown as {
+		workers: Map<
+			string,
+			Omit<typeof fixture, "descriptor"> & { descriptor: DaemonWorkerDescriptor; recovery?: Promise<void> }
+		>;
+		clients: Set<DaemonSocketClient>;
+		loadWorkerDescriptors(): void;
+		attachClient(client: DaemonSocketClient, command: Extract<DaemonCommand, { type: "attach" }>): Promise<unknown>;
+		createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<unknown>;
+		reclaimStaleWorkerRegistration(worker: object, freshCreate?: boolean): Promise<boolean>;
+		processIdentity: ReturnType<typeof vi.fn>;
+		recoverUncertainWorkerOperations(worker: object): Promise<void>;
+		stopWorker(worker: object, removeDescriptor: boolean, force?: boolean, archive?: boolean): Promise<void>;
+		releaseWorkerRlmCapacity(worker: object): void;
+		cancelEphemeralWorkerScheduledJobs(worker: object): Promise<boolean>;
+		scheduleOwnedWorkerCleanup(worker: object): void;
+	};
+	supervisor.loadWorkerDescriptors();
+	const worker = supervisor.workers.get(descriptor.workerId)!;
+	worker.descriptor.lifecycle = "failed";
+	const command: DaemonCreateCommand = {
+		type: "create",
+		sessionPath,
+		lifecycle: "client_owned",
+		config: { cwd: join(root, "fresh-cwd"), model: "fresh-model" },
+		launchEnv: {},
+	};
+	return { supervisor, worker, command, launchWorker, replacement, sessionPath, childPath, retainedSource };
 }
 
 const recoveryEligibilityInvalidations: Array<{
@@ -2041,6 +2111,105 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker);
 		expect(deleteWorkerDescriptor).toHaveBeenCalledWith(worker);
 		expect(workers.has(worker.descriptor.workerId)).toBe(false);
+	});
+
+	it.each(["gone", "replaced"])(
+		"reopens a failed owned session with fresh context when its process is %s",
+		async (identity) => {
+			const { supervisor, worker, command, launchWorker, replacement, sessionPath, childPath, retainedSource } =
+				createFailedOwnedReclaimHarness();
+			supervisor.processIdentity.mockReturnValue(identity);
+			const stop = vi.spyOn(supervisor, "stopWorker");
+			const recover = vi.spyOn(supervisor, "recoverUncertainWorkerOperations");
+			const cancelJobs = vi.spyOn(supervisor, "cancelEphemeralWorkerScheduledJobs");
+			const releaseCapacity = vi.spyOn(supervisor, "releaseWorkerRlmCapacity");
+			// Concurrent fresh opens must share teardown, then join the same fresh launch.
+			const opened = await Promise.all([
+				supervisor.createOrReuseWorker("fresh-owner", command),
+				supervisor.createOrReuseWorker("fresh-owner", command),
+			]);
+			expect(opened).toEqual([replacement, replacement]);
+			expect(recover).toHaveBeenCalledOnce();
+			expect(stop).toHaveBeenCalledOnce();
+			expect(stop).toHaveBeenCalledWith(worker, true);
+			expect(cancelJobs).toHaveBeenCalledOnce();
+			expect(releaseCapacity).toHaveBeenCalledOnce();
+			expect(worker.descriptor.ownerClientId).toBe("original-owner");
+			expect(supervisor.workers.has(worker.descriptor.workerId)).toBe(false);
+			expect(existsSync(worker.descriptorPath)).toBe(false);
+			expect(launchWorker).toHaveBeenCalledOnce();
+			expect(launchWorker).toHaveBeenCalledWith(command, undefined, "fresh-owner");
+			expect(readFileSync(sessionPath, "utf8")).toBe(retainedSource);
+			expect(readFileSync(childPath, "utf8")).toBe(retainedSource);
+		},
+	);
+
+	it.each([
+		{ name: "connected owner", identity: "gone", connected: true, fresh: true },
+		{ name: "live process", identity: "current", connected: false, fresh: true },
+		{ name: "unknown process", identity: "unknown", connected: false, fresh: true },
+		{ name: "no fresh context", identity: "gone", connected: false, fresh: false },
+	])("does not reclaim a failed owned registration with $name", async ({ identity, connected, fresh }) => {
+		const { supervisor, worker, command, launchWorker } = createFailedOwnedReclaimHarness();
+		supervisor.processIdentity.mockReturnValue(identity);
+		if (connected) supervisor.clients.add({ id: "original-owner" } as DaemonSocketClient);
+		const stop = vi.spyOn(supervisor, "stopWorker");
+		const recover = vi.spyOn(supervisor, "recoverUncertainWorkerOperations");
+		await expect(
+			supervisor.createOrReuseWorker("fresh-owner", { ...command, launchEnv: fresh ? {} : undefined }),
+		).rejects.toThrow("registered to a failed worker that could not be safely reclaimed");
+		expect(stop).not.toHaveBeenCalled();
+		expect(recover).not.toHaveBeenCalled();
+		expect(launchWorker).not.toHaveBeenCalled();
+		expect(supervisor.workers.get(worker.descriptor.workerId)).toBe(worker);
+		expect(worker.intentionalStop).toBe(false);
+		expect(worker.descriptor.stopRequestedAt).toBeUndefined();
+		expect(existsSync(worker.descriptorPath)).toBe(true);
+	});
+
+	it("lets a returning owner join reclaim cleanup before recovering with fresh context", async () => {
+		const { supervisor, worker, launchWorker } = createFailedOwnedReclaimHarness();
+		const cleanup = createDeferred<void>();
+		const recover = vi.spyOn(supervisor, "recoverUncertainWorkerOperations").mockImplementation(async () => {
+			expect(worker.intentionalStop).toBe(true);
+			await cleanup.promise;
+		});
+		const stop = vi.spyOn(supervisor, "stopWorker");
+		const ownerRecovery = vi.fn(async () => {
+			throw new Error("owning client recovery reached");
+		});
+		Object.assign(supervisor, { recoverWorker: ownerRecovery });
+		const owner = { id: "original-owner" } as DaemonSocketClient;
+		const reclaim = supervisor.reclaimStaleWorkerRegistration(worker, true);
+		try {
+			expect(recover).toHaveBeenCalledOnce();
+			supervisor.clients.add(owner);
+			const attach = supervisor
+				.attachClient(owner, {
+					type: "attach",
+					activeSessionId: worker.descriptor.rootActiveSessionId,
+					launchEnv: {},
+					recoveryConfig: { cwd: "/fresh-owner-cwd" },
+				})
+				.catch((error: unknown) => error);
+			expect(worker.intentionalStop).toBe(true);
+			expect(ownerRecovery).not.toHaveBeenCalled();
+			cleanup.resolve();
+			await expect(reclaim).resolves.toBe(false);
+			await expect(attach).resolves.toEqual(new Error("owning client recovery reached"));
+			expect(ownerRecovery).toHaveBeenCalledWith(worker);
+			expect(supervisor.workers.get(worker.descriptor.workerId)).toBe(worker);
+			expect(worker).toMatchObject({
+				intentionalStop: false,
+				transientCreateCommand: { sessionPath: worker.descriptor.sessionFile, config: { cwd: "/fresh-owner-cwd" } },
+			});
+			expect(stop).not.toHaveBeenCalled();
+			expect(launchWorker).not.toHaveBeenCalled();
+			expect(existsSync(worker.descriptorPath)).toBe(true);
+		} finally {
+			cleanup.resolve();
+			await reclaim;
+		}
 	});
 
 	it("stops only an identity-verified failed resident when a fresh create arrives", async () => {

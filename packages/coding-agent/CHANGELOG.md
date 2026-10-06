@@ -16,6 +16,7 @@
 - Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication. Required the complete offline CI suites before release packaging.
 - Separated goal state, accounting, and persistence from session scheduling while preserving goal control and continuation ownership.
 - Fixed manual compaction over daemon connections using the short request timeout instead of the existing full-operation wait policy, while preserving cancellation.
+- Allowed fresh clients to reclaim confirmed-dead client-owned workers when resuming saved sessions, without taking over live processes or connected owners.
 
 ## [1.1.1] - 2026-10-05
 

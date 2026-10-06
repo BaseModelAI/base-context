@@ -3284,12 +3284,61 @@ export class DaemonSupervisor {
 	private async reclaimStaleWorkerRegistration(worker: ResidentWorker, freshCreate = false): Promise<boolean> {
 		// Adoption may finish by parking a dead worker; decide reuse only after that transition settles.
 		if (worker.recovery) await worker.recovery;
+		// A concurrent reclaim may have removed this registration while we joined its recovery.
+		if (!this.workers.has(worker.descriptor.workerId)) return true;
 		if (worker.client !== undefined || worker.recovery !== undefined) {
 			return false;
 		}
 		if (worker.descriptor.stopRequestedAt === undefined) {
-			if (worker.descriptor.lifecycle !== "failed" || worker.descriptor.ownerClientId) {
+			if (worker.descriptor.lifecycle !== "failed") {
 				return false;
+			}
+			const ownerClientId = worker.descriptor.ownerClientId;
+			if (ownerClientId !== undefined) {
+				const ownerConnected = () =>
+					[...this.clients].some((client) => this.protocolClientId(client) === ownerClientId);
+				if (
+					!freshCreate ||
+					worker.compatibilityError ||
+					ownerConnected() ||
+					(this.workerStopCounts?.get(worker) ?? 0) > 0
+				) {
+					return false;
+				}
+				const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+				if (identity !== "gone" && identity !== "replaced") return false;
+				// Fresh resume need not wait out the reconnect grace for a confirmed-dead worker.
+				// Keep recovery/stop single-flight; attach joins before it can rescind this intent.
+				const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
+				worker.intentionalStop = true;
+				if (worker.ownerCleanupTimer) {
+					clearTimeout(worker.ownerCleanupTimer);
+					worker.ownerCleanupTimer = undefined;
+				}
+				worker.recovery = (async () => {
+					await this.recoverUncertainWorkerOperations(worker);
+					if (
+						this.isWorkerCleanupCancelled(worker) ||
+						worker.descriptor.ownerClientId !== ownerClientId ||
+						ownerConnected()
+					)
+						return;
+					// Commit teardown without another yield. Native stop preserves source files and
+					// handles owned schedules, capacity, and descriptor cleanup without archival.
+					await this.stopWorker(worker, true);
+				})().finally(() => {
+					worker.recovery = undefined;
+					releaseStopOwnership();
+					if (
+						this.workers.get(worker.descriptor.workerId) === worker &&
+						worker.descriptor.stopRequestedAt === undefined
+					) {
+						worker.intentionalStop = false;
+						this.scheduleOwnedWorkerCleanup(worker);
+					}
+				});
+				await worker.recovery;
+				return !this.workers.has(worker.descriptor.workerId);
 			}
 			const identity = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
 			if (identity === "current") {
@@ -5361,6 +5410,10 @@ export class DaemonSupervisor {
 		);
 		if (ownedWorker) {
 			if (ownedWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
+				throw new Error(`Unknown active session: ${command.activeSessionId}`);
+			}
+			if (ownedWorker.recovery) await ownedWorker.recovery;
+			if (this.workers.get(ownedWorker.descriptor.workerId) !== ownedWorker) {
 				throw new Error(`Unknown active session: ${command.activeSessionId}`);
 			}
 			ownedWorker.launchEnv = command.launchEnv ?? ownedWorker.launchEnv;
