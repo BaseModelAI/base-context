@@ -103,9 +103,15 @@ jobs:
           echo "Production: $publish_production ${production_version:+v${production_version}}"
           echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
 
+  source-checks:
+    needs: release-context
+    uses: ./.github/workflows/ci.yml
+    with:
+      source_ref: ${{ needs.release-context.outputs.build_ref }}
+
   build:
     runs-on: ubuntu-latest
-    needs: release-context
+    needs: [release-context, source-checks]
     permissions:
       contents: read
     env:

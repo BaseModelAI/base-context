@@ -1,1 +1,1 @@
-- Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication.
+- Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication. Required the complete offline CI suites before release packaging.
