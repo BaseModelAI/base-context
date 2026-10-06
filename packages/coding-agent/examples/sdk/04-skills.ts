@@ -38,7 +38,7 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Discover all skills from cwd/.pi/skills, ~/.pi/agent/skills, etc.
+// Read the filtered skills from <cwd>/.base-context/skills and the global state root.
 const { skills: allSkills, diagnostics } = loader.getSkills();
 console.log(
 	"Discovered skills:",

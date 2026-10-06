@@ -1,7 +1,7 @@
 /**
  * Subagent Tool - Delegate tasks to specialized agents
  *
- * Spawns a separate `pi` process for each subagent invocation,
+ * Spawns a separate Base Context process for each subagent invocation,
  * giving it an isolated context window.
  *
  * Supports three modes:
@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, getMarkdownTheme, withFileMutationQueue } from "@ponythewhite/base-context";
 import type { AgentToolResult } from "@ponythewhite/base-context-agent";
 import type { Message } from "@ponythewhite/base-context-ai";
@@ -176,7 +177,7 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 }
 
 async function writePromptToTempFile(agentName: string, prompt: string): Promise<{ dir: string; filePath: string }> {
-	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "pi-subagent-"));
+	const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "base-context-subagent-"));
 	const safeName = agentName.replace(/[^\w.-]+/g, "_");
 	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
 	await withFileMutationQueue(filePath, async () => {
@@ -185,11 +186,11 @@ async function writePromptToTempFile(agentName: string, prompt: string): Promise
 	return { dir: tmpDir, filePath };
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+function getBaseContextInvocation(args: string[]): { command: string; args: string[] } {
 	const currentScript = process.argv[1];
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
 	if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
+		return { command: process.execPath, args: [...process.execArgv, currentScript, ...args] };
 	}
 
 	const execName = path.basename(process.execPath).toLowerCase();
@@ -198,7 +199,26 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 		return { command: process.execPath, args };
 	}
 
-	return { command: "pi", args };
+	return { command: "base-context", args };
+}
+
+export function buildSubagentEnv(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	// This is a new CLI session, not the parent's owned/daemon worker or lease owner.
+	return Object.fromEntries(
+		Object.entries(environment).filter(([name]) => !name.startsWith("BASE_CONTEXT_INTERNAL_")),
+	);
+}
+
+export function buildSubagentArgs(agent: AgentConfig): string[] {
+	const args = ["--mode", "json", "-p", "--no-session"];
+	if (agent.model) args.push("--model", agent.model);
+	if (agent.tools && agent.tools.length > 0) {
+		args.push("--tools", agent.tools.join(","));
+		if (agent.tools.includes("bash")) {
+			args.push("--extension", fileURLToPath(new URL("./bash-tool.ts", import.meta.url)));
+		}
+	}
+	return args;
 }
 
 type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;
@@ -230,9 +250,7 @@ async function runSingleAgent(
 		};
 	}
 
-	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) args.push("--model", agent.model);
-	if (agent.tools && agent.tools.length > 0) args.push("--tools", agent.tools.join(","));
+	const args = buildSubagentArgs(agent);
 
 	let tmpPromptDir: string | null = null;
 	let tmpPromptPath: string | null = null;
@@ -270,9 +288,10 @@ async function runSingleAgent(
 		let wasAborted = false;
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const invocation = getPiInvocation(args);
+			const invocation = getBaseContextInvocation(args);
 			const proc = spawn(invocation.command, invocation.args, {
 				cwd: cwd ?? defaultCwd,
+				env: buildSubagentEnv(),
 				shell: false,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -403,8 +422,8 @@ export default function (pi: ExtensionAPI) {
 		description: [
 			"Delegate tasks to specialized subagents with isolated context.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
-			'Default agent scope is "user" (from ~/.prime/agent/agents).',
-			'To enable project-local agents in .prime/agent/agents, set agentScope: "both" (or "project").',
+			'Default agent scope is "user" (from the Base Context state root, normally ~/.base-context/agents).',
+			'To enable project-local agents in .base-context/agents, set agentScope: "both" (or "project").',
 		].join(" "),
 		parameters: SubagentParams,
 

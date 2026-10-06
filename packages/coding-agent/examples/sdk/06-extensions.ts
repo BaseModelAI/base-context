@@ -5,8 +5,8 @@
  * They provide a unified system for extensions, custom tools, commands, and more.
  *
  * By default, extension files are discovered from:
- * - ~/.pi/agent/extensions/
- * - <cwd>/.pi/extensions/
+ * - ~/.base-context/extensions/ (or BASE_CONTEXT_HOME/extensions/)
+ * - <cwd>/.base-context/extensions/
  * - Paths specified in settings.json "extensions" array
  *
  * An extension is a TypeScript file that exports a default function:
@@ -49,6 +49,7 @@ console.log();
 // Example extension file (./my-logging-extension.ts):
 /*
 import type { ExtensionAPI } from "@ponythewhite/base-context";
+import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", async () => {

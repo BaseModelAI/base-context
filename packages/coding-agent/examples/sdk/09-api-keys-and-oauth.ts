@@ -6,8 +6,8 @@
 
 import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@ponythewhite/base-context";
 
-// Default: AuthStorage uses ~/.pi/agent/auth.json
-// ModelRegistry loads built-in + custom models from ~/.pi/agent/models.json
+// Defaults use BASE_CONTEXT_HOME or ~/.base-context.
+// AuthStorage reads auth.json; ModelRegistry loads built-in models and models.json.
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 

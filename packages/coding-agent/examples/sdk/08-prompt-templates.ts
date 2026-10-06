@@ -36,7 +36,7 @@ const loader = new DefaultResourceLoader({
 });
 await loader.reload();
 
-// Discover templates from cwd/.pi/prompts/ and ~/.pi/agent/prompts/
+// Read templates from <cwd>/.base-context/prompts/ and the global state root.
 const discovered = loader.getPrompts().prompts;
 console.log("Discovered prompt templates:");
 for (const template of discovered) {

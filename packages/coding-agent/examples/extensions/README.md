@@ -13,6 +13,12 @@ mkdir -p ~/.base-context/extensions
 cp packages/coding-agent/examples/extensions/permission-gate.ts ~/.base-context/extensions/
 ```
 
+## Tool assumptions and security limits
+
+The default built-ins are `ipython` and `prime_context`. Bash/edit examples require those named custom tools to be registered; the SDK exports `createBashToolDefinition` and `createEditToolDefinition` for this. A Python cell can also run shell commands or edit files, but those operations do not emit separate `bash` or `edit` tool calls.
+
+`permission-gate.ts` inspects only calls to a tool named `bash`. `protected-paths.ts` inspects only calls to `edit`. Neither protects ordinary Python execution, other tools, or arbitrary subprocesses. Treat them as examples of event interception, not as a security sandbox. Use an external sandbox for untrusted work.
+
 ## Examples
 
 ### Lifecycle & Safety
@@ -20,7 +26,7 @@ cp packages/coding-agent/examples/extensions/permission-gate.ts ~/.base-context/
 | Extension | Description |
 |-----------|-------------|
 | `permission-gate.ts` | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
-| `protected-paths.ts` | Blocks writes to protected paths (.env, .git/, node_modules/) |
+| `protected-paths.ts` | Blocks matching paths in calls to the `edit` tool, not all filesystem writes |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, fork) |
 | `dirty-repo-guard.ts` | Prevents session changes with uncommitted git changes |
 | `sandbox/` | OS-level sandboxing using `@anthropic-ai/sandbox-runtime` with per-project config |
@@ -36,7 +42,7 @@ cp packages/coding-agent/examples/extensions/permission-gate.ts ~/.base-context/
 | `tool-override.ts` | Override tools (e.g., add logging/access control to a custom file reader) |
 | `dynamic-tools.ts` | Register tools after startup (`session_start`) and at runtime via command, with prompt snippets and tool-specific prompt guidelines |
 | `structured-output.ts` | Final structured-output tool that returns `terminate: true` so the agent can end on the tool call |
-| `built-in-tool-renderer.ts` | Custom compact rendering for built-in tools (bash and edit) while keeping original behavior |
+| `built-in-tool-renderer.ts` | Custom compact rendering for named Bash/edit tools; register those tools first |
 | `minimal-mode.ts` | Override built-in tool rendering for minimal display (only tool calls, no output in collapsed mode) |
 | `truncated-tool.ts` | Wraps ripgrep with proper output truncation (50KB/2000 lines) |
 | `ssh.ts` | Delegate bash and edit to a remote machine via SSH using pluggable operations |

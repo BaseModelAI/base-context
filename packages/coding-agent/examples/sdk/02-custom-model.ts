@@ -11,39 +11,36 @@ import { getModel } from "@ponythewhite/base-context-ai";
 const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
-// Option 1: Find a specific built-in model by provider/id
+// Choose the model this example will actually use. Authenticate to this provider first.
 const opus = getModel("anthropic", "claude-opus-4-5");
-if (opus) {
-	console.log(`Found model: ${opus.provider}/${opus.id}`);
-}
+if (!opus) throw new Error("The explicitly selected model was not found");
+console.log(`Selected model: ${opus.provider}/${opus.id}`);
 
-// Option 2: Find model via registry (includes custom models from models.json)
+// Discovery only: find a custom model without replacing the explicit choice above.
 const customModel = modelRegistry.find("my-provider", "my-model");
 if (customModel) {
 	console.log(`Found custom model: ${customModel.provider}/${customModel.id}`);
 }
 
-// Option 3: Pick from available models (have valid API keys)
+// Discovery only: list models with configured authentication, not a fallback order.
 const available = await modelRegistry.getAvailable();
 console.log(
 	"Available models:",
 	available.map((m) => `${m.provider}/${m.id}`),
 );
 
-if (available.length > 0) {
-	const { session } = await createAgentSession({
-		model: available[0],
-		thinkingLevel: "medium", // off, low, medium, high
-		authStorage,
-		modelRegistry,
-	});
+const { session } = await createAgentSession({
+	model: opus,
+	thinkingLevel: "medium", // Supported levels depend on the selected model
+	authStorage,
+	modelRegistry,
+});
 
-	session.subscribe((event) => {
-		if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-			process.stdout.write(event.assistantMessageEvent.delta);
-		}
-	});
+session.subscribe((event) => {
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
+});
 
-	await session.prompt("Say hello in one sentence.");
-	console.log();
-}
+await session.prompt("Say hello in one sentence.");
+console.log();

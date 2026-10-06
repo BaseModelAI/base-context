@@ -1,6 +1,6 @@
 # Examples
 
-Example code for the Prime Agent SDK and extension system.
+Example code for the Base Context SDK and extension system. Base Context builds on Prime Agent; use the package names and state paths shown in these examples.
 
 ## Directories
 
@@ -17,6 +17,10 @@ Example extensions demonstrating:
 - System prompt modifications and custom compaction
 - External integrations (SSH, file watchers, system theme sync)
 - Custom providers (Anthropic with custom streaming, GitLab Duo)
+
+## Request budgets
+
+[request-token-budget.json](request-token-budget.json) is a complete settings example for the opt-in request budget. Read the [setup and route limits](../docs/request-token-budgets.md) before using it. It contains no credentials.
 
 ## Documentation
 

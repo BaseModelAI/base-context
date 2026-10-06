@@ -1,8 +1,9 @@
 /**
  * Minimal SDK Usage
  *
- * Uses all defaults: discovers skills, extensions, tools, context files
- * from cwd and ~/.pi/agent. Model chosen from settings or first available.
+ * Discovers skills, extensions, tools, and context files from cwd and
+ * ~/.base-context (or BASE_CONTEXT_HOME). Requires a saved explicit model
+ * selection and that provider's authentication; there is no model fallback.
  */
 
 import { createAgentSession } from "@ponythewhite/base-context";
