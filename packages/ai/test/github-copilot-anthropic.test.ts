@@ -22,6 +22,7 @@ vi.mock("@anthropic-ai/sdk", () => {
 				delta: { stop_reason: "end_turn" },
 				usage: { output_tokens: 5 },
 			})}\n`,
+			`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
 		].join("\n");
 
 		return new Response(body, {
@@ -59,9 +60,7 @@ describe("Copilot Claude via Anthropic Messages", () => {
 
 		const { streamAnthropic } = await import("../src/providers/anthropic.js");
 		const s = streamAnthropic(model, context, { apiKey: "tid_copilot_session_test_token" });
-		for await (const event of s) {
-			if (event.type === "error") break;
-		}
+		expect((await s.result()).stopReason).toBe("stop");
 
 		const opts = mockState.constructorOpts!;
 		expect(opts).toBeDefined();
@@ -95,9 +94,7 @@ describe("Copilot Claude via Anthropic Messages", () => {
 			apiKey: "tid_copilot_session_test_token",
 			interleavedThinking: true,
 		});
-		for await (const event of s) {
-			if (event.type === "error") break;
-		}
+		expect((await s.result()).stopReason).toBe("stop");
 
 		const headers = mockState.constructorOpts!.defaultHeaders as Record<string, string>;
 		expect(headers["anthropic-beta"]).toContain("interleaved-thinking-2025-05-14");

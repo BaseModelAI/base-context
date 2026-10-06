@@ -32,6 +32,7 @@ vi.mock("@google/genai", () => {
 
 	return {
 		GoogleGenAI,
+		FinishReason: { STOP: "STOP" },
 		ResourceScope: {
 			COLLECTION: "COLLECTION",
 		},
@@ -77,7 +78,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -96,7 +97,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -116,7 +117,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -133,7 +134,7 @@ describe("google-vertex api key resolution", () => {
 			apiKey: "AIzaSyExampleRealisticLookingApiKey123456",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -151,7 +152,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toBeUndefined();
@@ -164,7 +165,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -185,7 +186,7 @@ describe("google-vertex api key resolution", () => {
 			apiKey: "AIzaSyExampleRealisticLookingApiKey123456",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({
@@ -209,7 +210,7 @@ describe("google-vertex api key resolution", () => {
 			location: "us-central1",
 		});
 
-		await stream.result();
+		expect((await stream.result()).stopReason).toBe("stop");
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]).toMatchObject({

@@ -10,6 +10,26 @@ const mockState = vi.hoisted(() => ({
 }));
 
 vi.mock("openai", () => {
+	function createMockStream(params: unknown, chunk: unknown) {
+		mockState.lastParams = params;
+		const stream = {
+			async *[Symbol.asyncIterator]() {
+				yield chunk;
+			},
+		};
+		const promise = Promise.resolve(stream) as Promise<typeof stream> & {
+			withResponse: () => Promise<{
+				data: typeof stream;
+				response: { status: number; headers: Headers };
+			}>;
+		};
+		promise.withResponse = async () => ({
+			data: stream,
+			response: { status: 200, headers: new Headers() },
+		});
+		return promise;
+	}
+
 	class FakeOpenAI {
 		static APIConnectionTimeoutError = class extends Error {};
 		baseURL: string;
@@ -20,34 +40,28 @@ vi.mock("openai", () => {
 
 		chat = {
 			completions: {
-				create: (params: unknown) => {
-					mockState.lastParams = params;
-					const stream = {
-						async *[Symbol.asyncIterator]() {
-							yield {
-								choices: [{ delta: {}, finish_reason: "stop" }],
-								usage: {
-									prompt_tokens: 1,
-									completion_tokens: 1,
-									prompt_tokens_details: { cached_tokens: 0 },
-									completion_tokens_details: { reasoning_tokens: 0 },
-								},
-							};
+				create: (params: unknown) =>
+					createMockStream(params, {
+						choices: [{ delta: {}, finish_reason: "stop" }],
+						usage: {
+							prompt_tokens: 1,
+							completion_tokens: 1,
+							prompt_tokens_details: { cached_tokens: 0 },
+							completion_tokens_details: { reasoning_tokens: 0 },
 						},
-					};
-					const promise = Promise.resolve(stream) as Promise<typeof stream> & {
-						withResponse: () => Promise<{
-							data: typeof stream;
-							response: { status: number; headers: Headers };
-						}>;
-					};
-					promise.withResponse = async () => ({
-						data: stream,
-						response: { status: 200, headers: new Headers() },
-					});
-					return promise;
-				},
+					}),
 			},
+		};
+		responses = {
+			create: (params: unknown) =>
+				createMockStream(params, {
+					type: "response.completed",
+					response: {
+						id: "response-test",
+						status: "completed",
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					},
+				}),
 		};
 	}
 
@@ -172,7 +186,7 @@ describe("openai-completions empty tools handling", () => {
 		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
 		const model = getModel("cloudflare-ai-gateway", "gpt-5.1")!;
 
-		await streamSimple(
+		const response = await streamSimple(
 			model,
 			{
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
@@ -180,6 +194,8 @@ describe("openai-completions empty tools handling", () => {
 			{ apiKey: "cf-token", headers: { Authorization: "Bearer upstream-token" } },
 		).result();
 
+		expect(response.stopReason).toBe("stop");
+		expect(mockState.lastParams).toMatchObject({ model: "gpt-5.1" });
 		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
 		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
