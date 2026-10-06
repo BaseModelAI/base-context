@@ -54,11 +54,15 @@ class CodexProtocol:
         self._turn_waiter: asyncio.Future | None = None
         self._active_turn_id: str | None = None
         self._completed_turns: dict[tuple[str, str], dict[str, Any]] = {}
+        self._compaction_waiter: asyncio.Future | None = None
+        self._compaction_event: dict[str, Any] | None = None
+        self._compaction_turn_id: str | None = None
+        self._activity = asyncio.Event()
         self._raw = self.raw_event_path.open("wb")
         self._reader_task = asyncio.create_task(self._read_loop())
 
-    async def ready(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Initialize a fresh native thread without sending any task prompt."""
+    async def ready(self, params: dict[str, Any], resume: dict[str, str] | None = None) -> dict[str, Any]:
+        """Start or reopen the native saved thread without injecting task history."""
         if self.thread_metadata is not None:
             raise RuntimeError("CodexProtocol.ready may only be called once")
         if any(params.get(key) is not None for key in ("baseInstructions", "developerInstructions")):
@@ -67,13 +71,94 @@ class CodexProtocol:
             "clientInfo": {"name": "published-codex160-benchmark", "version": "1"},
         })
         await self._write({"method": "initialized", "params": {}})
-        result = await self._request("thread/start", params)
+        if resume is None:
+            result = await self._request("thread/start", params)
+        else:
+            resume_params = {key: value for key, value in params.items() if key != "ephemeral"}
+            if any(key in resume_params for key in ("history", "path", "threadId")):
+                raise ValueError("Resume must use only the saved native thread ID")
+            result = await self._request("thread/resume", {**resume_params, "threadId": resume["threadId"]})
+            if result["thread"]["id"] != resume["threadId"]:
+                raise RuntimeError("Codex reopened a different saved thread")
         self.thread_metadata = result
         status = result["thread"].get("status", {}).get("type")
         if status != "idle":
             raise RuntimeError(f"Codex thread is not ready: {status!r}")
         self.thread_id = result["thread"]["id"]
         return result
+
+    async def resume_identity(self) -> dict[str, str]:
+        if self.thread_id is None:
+            raise RuntimeError("Call ready before resume_identity")
+        return {"threadId": self.thread_id}
+
+    async def compact(self) -> dict[str, Any]:
+        """Await both the compaction item and its matching terminal turn."""
+        if self.thread_id is None or self._turn_waiter is not None or self._compaction_waiter is not None:
+            raise RuntimeError("Compaction requires an idle initialized thread")
+        waiter = self._compaction_waiter = asyncio.get_running_loop().create_future()
+        self._compaction_event = None
+        self._compaction_turn_id = None
+        try:
+            await self._request("thread/compact/start", {"threadId": self.thread_id})
+            completed = await waiter
+            return {"status": "completed", **completed}
+        finally:
+            self._compaction_waiter = None
+            self._compaction_event = None
+            self._compaction_turn_id = None
+            if not waiter.done():
+                waiter.cancel()
+            elif not waiter.cancelled():
+                waiter.exception()
+
+    def _finish_compaction(self) -> None:
+        if self._compaction_turn_id is None or self._compaction_waiter is None or self._compaction_waiter.done():
+            return
+        terminal = self._completed_turns.get((self.thread_id, self._compaction_turn_id))
+        if terminal is None:
+            return
+        turn = terminal["params"]["turn"]
+        if turn["status"] != "completed" or turn.get("error"):
+            self._compaction_waiter.set_exception(RuntimeError("Codex compaction turn failed: " + str(turn)))
+        elif self._compaction_event is not None:
+            self._compaction_waiter.set_result({"event": self._compaction_event, "turn_completed": terminal})
+
+    async def wait_for_family_idle(self) -> dict[str, Any]:
+        """Observe native root/descendant status; this is not an atomic admission barrier."""
+        if self.thread_id is None:
+            raise RuntimeError("Call ready before waiting for native idle")
+        while True:
+            self._raise_reader_error()
+            self._activity.clear()
+            descendants = set()
+            cursor = None
+            while True:
+                page = await self._request("thread/list", {
+                    "ancestorThreadId": self.thread_id, "cursor": cursor,
+                    "sourceKinds": ["subAgent", "subAgentReview", "subAgentCompact",
+                                    "subAgentThreadSpawn", "subAgentOther"],
+                })
+                descendants.update(thread["id"] for thread in page["data"])
+                cursor = page.get("nextCursor")
+                if cursor is None:
+                    break
+            states = {}
+            # Read the root last so a child-triggered parent turn is not mistaken for idle.
+            for thread_id in [*sorted(descendants), self.thread_id]:
+                result = await self._request("thread/read", {"threadId": thread_id, "includeTurns": False})
+                states[thread_id] = result["thread"]["status"]["type"]
+            if "systemError" in states.values():
+                raise RuntimeError("Codex native thread entered systemError: " + str(states))
+            settled = states[self.thread_id] == "idle" and all(
+                state in {"idle", "notLoaded"} for state in states.values())
+            if settled and not self._activity.is_set():
+                return {"completion_scope": "observed_native_family_idle", "thread_states": states}
+            if not settled:
+                try:
+                    await asyncio.wait_for(self._activity.wait(), 0.5)
+                except TimeoutError:
+                    pass  # Descendant notifications may not be subscribed; re-read native status.
 
     async def prompt(
         self, text: str, effort: str,
@@ -189,8 +274,23 @@ class CodexProtocol:
             raise RuntimeError(f"Unhandled Codex server request: {message.get('method')}")
         method = message.get("method")
         params = message.get("params", {})
+        if method in {"thread/started", "thread/status/changed", "turn/started", "turn/completed"}:
+            self._activity.set()
         if method == "error":
             self._record_error(message, params["error"])
+            if (params.get("threadId") == self.thread_id and self._compaction_waiter is not None
+                    and not self._compaction_waiter.done() and not params.get("willRetry", False)):
+                self._compaction_waiter.set_exception(RuntimeError("Codex compaction failed: " + str(params["error"])))
+        elif (method == "turn/started" and params.get("threadId") == self.thread_id
+              and self._compaction_waiter is not None and self._compaction_turn_id is None):
+            self._compaction_turn_id = params["turn"]["id"]
+        elif (method in {"item/started", "item/completed"} and params.get("threadId") == self.thread_id
+              and (params.get("item") or {}).get("type") == "contextCompaction"):
+            if self._compaction_waiter is not None and not self._compaction_waiter.done():
+                self._compaction_turn_id = params["turnId"]
+                if method == "item/completed":
+                    self._compaction_event = message
+                self._finish_compaction()
         elif method == "thread/tokenUsage/updated":
             self.usage_events.append(message)
         elif method in {"model/rerouted", "model/verification", "thread/started"}:
@@ -201,6 +301,7 @@ class CodexProtocol:
                 self._record_error(message, turn["error"])
             key = (params["threadId"], turn["id"])
             self._completed_turns[key] = message
+            self._finish_compaction()
             if (self._turn_waiter is not None and not self._turn_waiter.done()
                     and key == (self.thread_id, self._active_turn_id)):
                 self._turn_waiter.set_result(message)
@@ -213,6 +314,8 @@ class CodexProtocol:
                 future.set_exception(error)
         if self._turn_waiter is not None and not self._turn_waiter.done():
             self._turn_waiter.set_exception(error)
+        if self._compaction_waiter is not None and not self._compaction_waiter.done():
+            self._compaction_waiter.set_exception(error)
 
     async def _read_loop(self) -> None:
         buffer = bytearray()

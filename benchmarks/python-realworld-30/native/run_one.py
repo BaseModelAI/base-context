@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from base_protocol import BaseContextProtocol
 from candidate_service import CandidateService
 from codex_protocol import CodexProtocol
-from benchlib import load_scenarios, prepare_workspace, inject_stage, make_writable_tree, make_read_only, run_judge
+from benchlib import prepare_workspace, inject_stage, make_writable_tree, make_read_only, run_judge
+from stress_suite import SCHEMA as STRESS_SCHEMA, load_task, run_stress_judge
 
 ROOT = Path(__file__).resolve().parent
 
@@ -66,6 +67,8 @@ def prepare_configuration(config, spec, directory):
         else:
             auth = {"openai-codex": json.loads(Path(config["base_auth_source"]).read_text())["openai-codex"]}
         write_json(agent_home / "auth.json", auth, secret=True)
+        if "base_settings" in config:
+            write_json(agent_home / "settings.json", config["base_settings"])
         environment.update({"BASE_CONTEXT_HOME": "/home/bench/.base-context", "BASE_CONTEXT_OFFLINE": "1"})
         argv = [str(Path(config["base_install"]) / "bin/base-context"), "--mode", "rpc",
                 "--rpc-protocol-version", "13", "--provider", "deepseek" if deepseek else "openai-codex",
@@ -99,8 +102,8 @@ def prepare_configuration(config, spec, directory):
     return home, driver, install
 
 
-async def copy_stream(reader, path):
-    with path.open("wb") as output:
+async def copy_stream(reader, path, append=False):
+    with path.open("ab" if append else "wb") as output:
         while chunk := await reader.read(65536):
             output.write(chunk)
             output.flush()
@@ -159,7 +162,8 @@ async def run_attempt(spec, config, output):
     directory.mkdir(parents=True, exist_ok=True)
     workspace = directory / "workspace"
     preparation_started = time.monotonic()
-    source_task_dir, scenario = load_scenarios(Path(config["corpus_root"]))[int(spec["task_id"])]
+    source_task_dir, scenario = load_task(Path(config["corpus_root"]), int(spec["task_id"]))
+    stress = scenario["schema"] == STRESS_SCHEMA
     # Frozen inputs are read-only. Seed scripts may copy TASK.md and the original
     # preparation helper then overwrites it. Use an owned, byte-unchanged source
     # copy with normal owner write permission; the helper protects public inputs.
@@ -179,6 +183,8 @@ async def run_attempt(spec, config, output):
     name = "published-bench-" + uuid.uuid4().hex[:16]
     containers = [name]
     process = client = watchdog = None
+    clients = []
+    generation = 0
     readers = []
     candidate_service = CandidateService(config, scenario, workspace, directory, name, readers)
     first_prompt = None
@@ -199,6 +205,10 @@ async def run_attempt(spec, config, output):
     try:
         docker = ["docker", "run", "--rm", "--interactive", "--name", name,
                   "--network", config.get("network", "bridge"), "--user", f"{os.getuid()}:{os.getgid()}", "--workdir", "/workspace"]
+        if config.get("container_cpus") is not None:
+            docker += ["--cpus", str(config["container_cpus"])]
+        if config.get("container_memory") is not None:
+            docker += ["--memory", str(config["container_memory"])]
         for resolver in config.get("dns", []):
             docker += ["--dns", resolver]
         docker += mount("/usr", "/usr") + mount(config["node"], "/opt/node/bin/node")
@@ -219,15 +229,18 @@ async def run_attempt(spec, config, output):
         startup_started = time.monotonic()
         process = await asyncio.create_subprocess_exec(*docker, stdin=asyncio.subprocess.PIPE,
                                                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        readers.append(asyncio.create_task(copy_stream(process.stderr, directory / "native-stderr.jsonl")))
+        stderr_reader = asyncio.create_task(copy_stream(process.stderr, directory / "native-stderr.jsonl"))
+        readers.append(stderr_reader)
         client_class = BaseContextProtocol if spec["harness"] == "base-context" else CodexProtocol
         client = client_class(process, directory / "native-events.jsonl")
+        clients.append(client)
         params = {}
         if spec["harness"] == "codex":
             params = {"model": spec["profile"]["model"],
                       "modelProvider": "deepseek" if spec["profile"]["family"] == "deepseek" else "openai",
                       "cwd": "/workspace", "approvalPolicy": "never", "sandbox": config["codex_sandbox"],
-                      "config": {"model_reasoning_effort": spec["profile"]["effort"]}, "ephemeral": False}
+                      "config": {**config.get("codex_thread_config", {}),
+                                 "model_reasoning_effort": spec["profile"]["effort"]}, "ephemeral": False}
         ready = await client.ready(params)
         if spec["harness"] == "base-context":
             resolved = {"model": (ready.get("model") or {}).get("id"), "provider": (ready.get("model") or {}).get("provider"),
@@ -272,6 +285,18 @@ async def run_attempt(spec, config, output):
                 "deadline_monotonic": first_prompt + result["timeout_seconds"],
                 "timeout_seconds": result["timeout_seconds"]})
 
+        async def watchdog_request(message, response_key):
+            watchdog.stdin.write((json.dumps(message) + "\n").encode())
+            await watchdog.stdin.drain()
+            while line := await watchdog.stdout.readline():
+                event = json.loads(line)
+                watchdog_events.append(event)
+                if event.get(response_key):
+                    return event
+                if event.get("reason"):
+                    raise RuntimeError("Deadline watchdog stopped: " + str(event))
+            raise RuntimeError("Deadline watchdog closed during restart")
+
         for index, stage in enumerate(scenario["stages"]):
             if index:
                 await asyncio.to_thread(inject_stage, task_dir, workspace, stage, "main")
@@ -279,10 +304,69 @@ async def run_attempt(spec, config, output):
                     make_writable_tree(workspace / editable)
             await candidate_service.before_stage(str(stage["id"]))
             text = scenario["initial_prompt"] if index == 0 else stage["message"]
+            if index == 0 and config.get("task_instructions"):
+                text = config["task_instructions"].strip() + "\n\n" + text
             stage_result = await client.prompt(text, spec["profile"]["effort"], before_send=before_send)
             stages.append({"index": index, "native": stage_result})
+            if stress and spec["harness"] == "codex":
+                stages[-1]["settlement"] = await client.wait_for_family_idle()
             if stage_result["status"] != "completed":
                 break
+            if stress and stage.get("compact_after"):
+                stages[-1]["compaction"] = await client.compact()
+                if spec["harness"] == "codex":
+                    stages[-1]["compaction"]["settlement"] = await client.wait_for_family_idle()
+            if stress and stage.get("cold_resume_after"):
+                identity = await client.resume_identity()
+                remaining = first_prompt + result["timeout_seconds"] - time.monotonic()
+                async with asyncio.timeout(max(0, remaining)):
+                    await watchdog_request({"begin_restart": True}, "restart_ready")
+                    await command("docker", "rm", "--force", name)
+                    await process.wait()
+                    await stderr_reader
+                    await client.close()
+                    if spec["harness"] == "base-context":
+                        launch = json.loads((driver / "launch.json").read_text())
+                        launch["command"] += ["--session", identity["sessionFile"]]
+                        write_json(driver / "launch.json", launch)
+                    if watchdog.returncode is not None:
+                        raise RuntimeError("Deadline watchdog exited before namespace restart")
+                    generation += 1
+                    process = await asyncio.create_subprocess_exec(
+                        *docker, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE)
+                    stderr_reader = asyncio.create_task(copy_stream(
+                        process.stderr, directory / "native-stderr.jsonl", append=True))
+                    readers.append(stderr_reader)
+                    client = client_class(process, directory / f"native-events-resume-{generation}.jsonl")
+                    clients.append(client)
+                    # Register the new namespace before native readiness or another prompt.
+                    # Docker's attach process is admitted before the daemon reports its PID.
+                    pid = 0
+                    while pid <= 0:
+                        if watchdog.returncode is not None:
+                            raise RuntimeError("Deadline watchdog exited during namespace restart")
+                        code, text, _ = await command("docker", "inspect", "--format", "{{.State.Pid}}", name,
+                                                      check=False)
+                        pid = int(text.strip()) if code == 0 else 0
+                        if pid <= 0:
+                            if process.returncode is not None:
+                                raise RuntimeError("Restarted native container exited before registration")
+                            await asyncio.sleep(0.05)
+                    registered = await watchdog_request({"namespace_init_pids": [pid]}, "namespace_registered")
+                    result["containment"]["namespace_init_pids"].append(pid)
+                    ready = await client.ready(params, resume=identity)
+                    if watchdog.returncode is not None:
+                        raise RuntimeError("Deadline watchdog exited during native resume")
+                    if spec["harness"] == "base-context":
+                        resumed_model = (ready.get("model") or {}).get("id")
+                        resumed_effort = ready.get("thinkingLevel")
+                    else:
+                        resumed_model, resumed_effort = ready.get("model"), ready.get("reasoningEffort")
+                    if (resumed_model, resumed_effort) != (spec["profile"]["model"], spec["profile"]["effort"]):
+                        raise RuntimeError("Cold resume changed the requested model or effort")
+                    stages[-1]["cold_resume"] = {"status": "completed", "identity": identity,
+                                                 "generation": registered["generation"]}
         process.stdin.close()
         await process.wait()
         native_finished = time.monotonic()
@@ -311,10 +395,10 @@ async def run_attempt(spec, config, output):
                     await watchdog.stdin.drain()
                 watchdog.stdin.close()
             remainder, watchdog_error = await watchdog.communicate()
-            watchdog_events = [json.loads(line) for line in remainder.splitlines() if line.strip()]
+            watchdog_events.extend(json.loads(line) for line in remainder.splitlines() if line.strip())
             write_json(directory / "deadline.json", {"events": watchdog_events, "stderr": watchdog_error.decode()})
             exit_seen = next((event["native_exit_monotonic"] for event in watchdog_events
-                              if "native_exit_monotonic" in event), None)
+                              if "native_exit_monotonic" in event and event.get("generation", 0) == generation), None)
             deadline_kill = next((event for event in watchdog_events if event.get("reason") == "timeout"), None)
             if exit_seen is not None:
                 result["native_exit_observed_monotonic"] = exit_seen
@@ -323,15 +407,16 @@ async def run_attempt(spec, config, output):
                 native_finished = deadline_kill["kill_monotonic"]
                 result["status"] = "timeout"
                 result["completion"] = False
-        if client is not None:
-            result["protocol_provider_errors"] = client.provider_errors
-            result["provider_error_observed"] = bool(client.provider_errors)
+        if clients:
+            result["protocol_provider_errors"] = [error for item in clients for error in item.provider_errors]
+            result["provider_error_observed"] = bool(result["protocol_provider_errors"])
             if spec["harness"] == "codex":
-                result["protocol_errors"] = client.errors
-                result["protocol_usage_events"] = client.usage_events
+                result["protocol_errors"] = [error for item in clients for error in item.errors]
+                result["protocol_usage_events"] = [event for item in clients for event in item.usage_events]
             else:
-                result["protocol_message_usage"] = client.message_usage
-            await client.close()
+                result["protocol_message_usage"] = [usage for item in clients for usage in item.message_usage]
+            for item in clients:
+                await item.close()
         if readers:
             await asyncio.gather(*readers, return_exceptions=True)
         for secret in (home / ".base-context/auth.json", home / ".codex/auth.json", driver / "secret-environment.json"):
@@ -364,7 +449,11 @@ async def run_attempt(spec, config, output):
         raise RuntimeError("Mechanical usage pricing failed; raw attempt retained")
     result["api_rate_cost"] = json.loads(price_output.read_text())
     result["valid_for_selection"] = not result["provider_error_observed"] and not result.get("measurement_error")
-    judge, judge_seconds, transcript = await asyncio.to_thread(run_judge, task_dir, scenario, workspace, "/usr/bin/bwrap")
+    if stress:
+        judge, judge_seconds, transcript = await asyncio.to_thread(
+            run_stress_judge, task_dir, scenario, workspace, config["node"])
+    else:
+        judge, judge_seconds, transcript = await asyncio.to_thread(run_judge, task_dir, scenario, workspace, "/usr/bin/bwrap")
     result["judge"] = judge
     result["judge_seconds"] = judge_seconds
     (directory / "judge.log").write_text(transcript)

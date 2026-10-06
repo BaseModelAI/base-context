@@ -97,6 +97,40 @@ final `stop`. Codex uses its app-server lifecycle. Private fixture services and
 external judges are not exposed as solver files. Candidate services share the
 attempt's lifecycle and can restart between stages.
 
+## Context Stress 5 extension
+
+Set `corpus_root` to `benchmarks/context-stress-5` and `timeout_multiplier` to `1`
+for its fixed 2700-second task window. Its own manifest selects the five-task
+loader; the historical 30-task validator and stage semantics remain unchanged.
+Only the stress suite acts on `compact_after` and `cold_resume_after`.
+
+Base compaction must emit a successful manual `compaction_end`. Codex's
+`thread/compact/start` ACK is not completion: the client waits for that thread's
+`contextCompaction` item in `item/completed` AND its matching successful `turn/completed`.
+For this suite only, Codex stages also wait for observed root/descendant idle status using
+native `thread/list` and `thread/read`, including child-triggered parent turns. This is an
+observed idle boundary, not Base's atomic family-quiescence barrier. Unknown or active
+statuses do not count as idle; unloaded descendants have no loaded runtime work.
+The same check follows compaction before teardown. Cold resume removes the whole
+owned Docker namespace, starts a new process with the same persistent home,
+workspace and Base runtime, and reopens the same native session/thread ID.
+It never resends old task prompts. Model and effort are checked again.
+The watchdog acknowledges namespace replacement without resetting its deadline;
+old-generation exits cannot end the measured task. Results retain compaction
+completion and resumed identity per stage. Stderr, sessions and protocol usage
+from both processes are retained for the existing collectors.
+
+Optional `container_cpus` and `container_memory` set Docker limits for either
+product. There is no disk quota or endpoint filter in this runner.
+`base_settings` writes the attempt's native settings.json; `codex_thread_config`
+is merged into native thread configuration, with the selected effort fixed.
+Optional `task_instructions` prepends a shared user policy to the first prompt;
+use identical wording for both products on the same profile, not product-specific hints.
+Freeze these controls before task outcomes. Do not treat a profile output ceiling
+as a lower native output reserve. The stress judge reuses Bubblewrap and mounts
+the exact configured Node binary read-only; no SQLite CLI is required.
+See the [stress protocol](../../context-stress-5/DESIGN.md) for interpretation limits.
+
 ## Local outputs and pricing
 
 Outputs can include native events, service logs, usage, price estimates, judge

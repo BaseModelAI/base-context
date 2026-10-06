@@ -41,6 +41,9 @@ def main():
         selector.register(kill_fds[0], selectors.EVENT_READ)
     deadline = None
     pending = b""
+    generation = 0
+    restart_pending = False
+    primary_registered = not args.cgroup
     print(json.dumps({"ready": True}), flush=True)
     try:
         while True:
@@ -50,11 +53,12 @@ def main():
                 killed_at = time.monotonic()
                 kill_owned()
                 print(json.dumps({"reason": "timeout", "deadline_monotonic": deadline,
-                                  "kill_monotonic": killed_at}), flush=True)
+                                  "kill_monotonic": killed_at, "generation": generation}), flush=True)
                 return
-            if not args.cgroup and any(key.fd == kill_fds[0] for key, _ in events):
+            if primary_registered and any(key.fd == kill_fds[0] for key, _ in events):
                 selector.unregister(kill_fds[0])
-                print(json.dumps({"native_exit_monotonic": time.monotonic()}), flush=True)
+                primary_registered = False
+                print(json.dumps({"native_exit_monotonic": time.monotonic(), "generation": generation}), flush=True)
             if not any(key.fd == 0 for key, _ in events):
                 continue
             chunk = os.read(0, 65536)
@@ -70,10 +74,33 @@ def main():
                     kill_owned()
                     print(json.dumps({"reason": "finished"}), flush=True)
                     return
-                if deadline is not None:
-                    raise ValueError("The first-prompt deadline cannot be reset")
-                deadline = float(message["first_prompt_monotonic"]) + float(message["timeout_seconds"])
-                print(json.dumps({"armed": True, "deadline_monotonic": deadline}), flush=True)
+                if message.get("begin_restart"):
+                    if args.cgroup or deadline is None or restart_pending or not primary_registered:
+                        raise ValueError("Restart requires a live armed namespace")
+                    selector.unregister(kill_fds[0])
+                    primary_registered = False
+                    restart_pending = True
+                    print(json.dumps({"restart_ready": True, "generation": generation}), flush=True)
+                elif "namespace_init_pids" in message:
+                    if args.cgroup or not restart_pending or not message["namespace_init_pids"]:
+                        raise ValueError("Namespace registration requires an admitted restart")
+                    new_fds = [os.pidfd_open(pid) for pid in message["namespace_init_pids"]]
+                    for fd in new_fds:
+                        signal.pidfd_send_signal(fd, 0)
+                    for fd in kill_fds:
+                        os.close(fd)
+                    kill_fds = new_fds
+                    generation += 1
+                    selector.register(kill_fds[0], selectors.EVENT_READ)
+                    primary_registered = True
+                    restart_pending = False
+                    print(json.dumps({"namespace_registered": True, "generation": generation,
+                                      "deadline_monotonic": deadline}), flush=True)
+                else:
+                    if deadline is not None:
+                        raise ValueError("The first-prompt deadline cannot be reset")
+                    deadline = float(message["first_prompt_monotonic"]) + float(message["timeout_seconds"])
+                    print(json.dumps({"armed": True, "deadline_monotonic": deadline}), flush=True)
     finally:
         for fd in ([kill_fd] if args.cgroup else kill_fds):
             os.close(fd)

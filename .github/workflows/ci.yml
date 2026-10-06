@@ -53,6 +53,10 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Check native benchmark protocol
+        working-directory: benchmarks/python-realworld-30/native
+        run: python3 -m unittest test_base_protocol test_native_lifecycle
+
       - name: Require committed formatting
         run: git diff --exit-code
 

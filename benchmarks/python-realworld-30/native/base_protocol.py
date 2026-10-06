@@ -95,13 +95,36 @@ class BaseContextProtocol:
         data = response.get("data") or {}
         return (data, watermark) if with_event_watermark else data
 
-    async def ready(self, params=None):
+    async def ready(self, params=None, resume=None):
         state = await self.request({"type": "get_state"})
         if (state.get("protocolVersion", 0) < 13 or state.get("schemaRevision", 0) < 51
                 or "rlm_quiescence_barrier" not in (state.get("capabilities") or [])):
             raise RuntimeError("Base Context RPC requires schema 51 and rlm_quiescence_barrier")
+        if resume is not None and any(state.get(key) != resume[key] for key in ("sessionId", "sessionFile")):
+            raise RuntimeError("Base Context reopened a different saved session")
         self.state = state
         return state
+
+    async def compact(self):
+        """Require the manual compaction event as well as the RPC response."""
+        after_event = self.event_sequence
+        response, through_event = await self.request({"type": "compact"}, with_event_watermark=True)
+        completed = None
+        while self.consumed_event_sequence < through_event:
+            item = await self.events.get()
+            if isinstance(item, Exception):
+                raise item
+            sequence, event = item
+            self.consumed_event_sequence = sequence
+            if sequence > after_event and event.get("type") == "compaction_end" and event.get("reason") == "manual":
+                completed = event
+        if not completed or completed.get("aborted") or not completed.get("result"):
+            raise RuntimeError("Base Context manual compaction did not complete: " + str(completed))
+        return {"status": "completed", "event": completed, "response": response}
+
+    async def resume_identity(self):
+        state = await self.request({"type": "get_state"})
+        return {key: state[key] for key in ("sessionId", "sessionFile")}
 
     async def prompt(self, text, effort=None, before_send=None):
         """Admit this prompt, await native family settlement, then read its outcome."""
