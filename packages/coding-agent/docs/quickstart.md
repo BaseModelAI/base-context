@@ -44,10 +44,14 @@ This is not unlimited memory. Kernel restoration is best-effort, and some Python
 
 ## 3. Make one change with a clear constraint
 
+If the check fails, ask:
+
 ```text
 Fix that failure. Keep the public API unchanged. Run the smallest relevant check,
 then explain the change and any remaining failures.
 ```
+
+If the check passes, choose a small change instead: “Add one example for the parser in the README. Do not change code.”
 
 Put lasting project rules in `AGENTS.md`. Base Context reads global instructions from `~/.base-context/AGENTS.md` and project instructions from parent/current directories. Restart or use `/reload` after changing them.
 
@@ -66,11 +70,13 @@ Use `/btw Why did you choose this approach?` for a tool-free side question that 
 
 ## 5. Continue later
 
+First, list resident agents:
+
 ```bash
 base-context list
-base-context attach <agent>
-base-context -c
 ```
+
+To reconnect to one, run `base-context attach <agent>` with the name or ID from that list. To continue the latest saved session instead, run `base-context -c`. These are alternative routes, not three setup commands to run in sequence.
 
 `attach` returns to a resident agent; `-c` continues the latest saved session. Closing the terminal can leave interactive work running. Use `base-context stop <agent>` to stop one agent, or `base-context shutdown` to stop all agents and services.
 
@@ -84,7 +90,7 @@ Manage it with `/goal status`, `/goal pause`, `/goal resume`, or `/goal clear`. 
 
 ## What needs extra configuration?
 
-The Python workspace, retained output, instruction frame, compaction, and workers are available in ordinary sessions. **Request-budget selection and stable context epochs need an explicit profile.** They are not active just because you launched the CLI. Use the [tested settings example](request-token-budgets.md) if you want to opt in on a supported route.
+The Python workspace, retained output, instruction frame, compaction, and workers are available in ordinary sessions. **Request-budget selection and stable context epochs need an explicit profile.** They are not active just because you launched the CLI. Use the [offline-tested settings example](request-token-budgets.md) if you want to opt in on a supported route.
 
 Use `/context` and `/usage` to inspect the session. Python and project commands run with your user permissions, not inside a built-in security sandbox. Use an external sandbox for untrusted code.
 

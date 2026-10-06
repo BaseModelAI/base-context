@@ -2,9 +2,11 @@
 
 Normal sessions keep Python state, retain output, and carry selected earlier instructions. They do **not** enable request-budget selection by default. This page enables that separate feature from the CLI; no SDK program is needed.
 
+This is a limit on each model request, not a total spending cap for the session. It accounts for the serialized input, reserved output, and configured margin. It is separate from [goal token budgets](long-running-agents.md#persistent-goals) and the threshold that triggers compaction.
+
 ## Configure a new session
 
-Merge the following into `~/.base-context/settings.json` (global) or `.base-context/settings.json` in your project. Do not overwrite unrelated settings. The same JSON is available as [examples/request-token-budget.json](../examples/request-token-budget.json) and is exercised by the offline tests.
+Merge the following into `~/.base-context/settings.json` (global) or `.base-context/settings.json` in your project. If you use `BASE_CONTEXT_HOME`, the global file is `settings.json` inside that directory. Create the directory/file if needed, but do not overwrite unrelated settings. The same JSON is available as [examples/request-token-budget.json](../examples/request-token-budget.json).
 
 ```json
 {
@@ -37,15 +39,31 @@ Merge the following into `~/.base-context/settings.json` (global) or `.base-cont
 }
 ```
 
-Authenticate to OpenAI with `/login` or your normal `OPENAI_API_KEY` environment setting. Do not put a key in the profile or its URL. Start a **new** session:
+Authenticate to OpenAI with `/login` or your normal `OPENAI_API_KEY` environment setting. This example uses OpenAI API-key access, not a ChatGPT subscription or the Codex route. Do not put a key in the profile or its URL. From the configured project directory, start a **new** session (not `--continue`, `--resume`, or `attach`):
 
 ```bash
 base-context --provider openai --model gpt-4.1
 ```
 
+You can then ask for a short response, such as “Reply with one sentence.” This sends a real provider request and can incur charges. A short request that already fits does not demonstrate context omission.
+
 The example uses the catalogued GPT-4.1 context and output limits. Confirm the limits for your deployment before changing the model, endpoint, or provider. Profiles are explicit configuration, not automatically inferred from a model name.
 
 Project settings override global settings; a project `profiles` array replaces the global array. Settings are captured when a session is created. Existing sessions do not acquire a new budget through `/reload`. SDK `requestTokenBudget` options take precedence over settings, and child sessions inherit the effective configuration.
+
+## Check configuration and diagnose refusals
+
+There is no dedicated CLI budget-status view. `/context` and `/usage` describe the session; they do not by themselves prove that a request used budget-aware selection. SDK callers can inspect `session.requests.getRequestTokenBudgetOptions()`; see the [complete SDK example](sdk.md#explicit-request-token-budget-profiles).
+
+The offline settings test loads the checked-in JSON through the CLI's session services. It checks the selected model and effective budget, admits the matching route to a mocked transport, and refuses an uncovered model before that transport is called. This tests configuration and admission, not live authentication, response identities, or savings.
+
+| Symptom | What to check |
+| --- | --- |
+| `Invalid requestTokenBudget: ...` | Fix the named settings field. Use JSON numbers for limits and an array for `profiles`. |
+| `Request token budget unknown: exact explicit route/model profile unavailable or ambiguous` | Check the selected provider/model, actual API, and full request URL. Exactly one profile must match. Remove duplicate matches; add a confirmed supported profile when changing routes or models. |
+| Refusal after a model switch or during a summary/learning request | Cover that operation's actual model and route too. Main-model coverage does not cover a different auxiliary model. |
+| Unknown media/replay or required context over the limit | The request cannot be admitted under the current profile/layout. Do not invent larger limits or expect required user text to be dropped. Use a supported layout and confirmed deployment limits. |
+| Edited settings have no effect on the current session | Start a new session. `/reload` does not replace the session's captured budget. |
 
 ## What the fields mean
 
@@ -63,7 +81,9 @@ Project settings override global settings; a project `profiles` array replaces t
 
 `outputCeilingTokens` checks the requested output limit; it does not lower that limit for you. Set the model/provider output limit separately if needed. The actual output reservation, margin, and required input must fit inside `contextTokens`.
 
-`responseModels` is optional. It lists accepted exact response-model identities when the provider returns a different versioned name. Without it, only the configured request model is accepted for calibration and retained-state credit.
+`responseModels` is optional. It lists exact model identities accepted from provider responses. Without it, only the configured request model is accepted. If your provider returns a versioned name, inspect the actual response identity in provider/SDK diagnostics before adding it; do not guess a snapshot suffix. When you supply the array, it replaces the implicit request-model list, so include the request model too if responses can use that name.
+
+An unlisted response identity prevents ordinary calibration and can prevent Codex retained-prefix credit. It does **not** by itself reject ordinary OpenAI Responses admission. It also does not fix a missing request profile: the profile's `model` must still match the model in the outgoing request.
 
 ## Supported scope and limits
 

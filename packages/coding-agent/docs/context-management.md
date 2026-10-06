@@ -6,12 +6,21 @@ Base Context separates session history from the model's active working set. A se
 
 This is a source-backed context system, not unlimited model memory. Summaries can omit details. Retrieval is bounded. A retained file is not proof that its contents are in the model's current prompt.
 
+## Start with the normal session
+
+1. Keep data and command handles in the Python workspace instead of rerunning work.
+2. When a long result is shortened, ask the agent to recover the needed passage with `prime_context`.
+3. Use `/compact` when the conversation gets long. It summarizes the conversation; selected earlier instructions stay in the TaskFrame.
+4. Use `/context` and `/usage` to inspect the current session.
+
+These steps do not require a budget profile. [Request-budget selection](request-token-budgets.md) is a separate, opt-in feature on supported routes. It can omit optional older assistant context, but cannot remove required user text or tool dependencies just to fit a limit.
+
 ## The four layers
 
 | Layer | What it does | What it does not promise |
 | --- | --- | --- |
-| Canonical history and index | Keep session records and support targeted reads | Every past record is always sent to the model |
-| Working view | Assemble selected source-backed context and required message groups | Arbitrary clipping of required instructions or tool dependencies |
+| Saved history and search index | Keep session records and support targeted reads | Every past record is always sent to the model |
+| Working view (the next prompt) | Assemble context from saved sources and required message groups | Arbitrary clipping of required instructions or tool dependencies |
 | TaskFrame | Carry selected recorded task state with source references | New instructions, complete task knowledge, or live resource status |
 | Python workspace | Hold variables, parsed data, files, and background-work handles | Unlimited RAM or guaranteed restoration of every object |
 
@@ -51,7 +60,9 @@ Results report coverage and a status such as `found`, `complete-miss`, `partial`
 
 ## TaskFrame: carry the task, not just a summary
 
-The TaskFrame renders selected structured task records near the active context. The normal session path records user text and goal updates. Other kinds, such as open questions and artifact state, can come from explicit or legacy records; this is not general automatic fact extraction. Entries keep their source identities, authority, and state.
+The TaskFrame is a small reminder built from recorded user text and goal state, with references to the original records. Native task-state producers record complete admitted user text, user goal creation/revision, and goal-control observations such as completion or clearing. Those observations can close that goal; they do not cancel unrelated user instructions.
+
+The task-state reader also recognizes kinds such as decisions, open questions, artifact state, and hypotheses. These names describe data it can read, not facts the agent automatically extracts. Generic `task_state` proposals are not selected into the TaskFrame. See the [structured task-state API](sdk.md#structured-task-state-view) for the full reader contract.
 
 User text already present in the literal prompt is not repeated when its source identity, revision, and complete text match. The bounded text budget goes first to the oldest instructions omitted from the literal view, so a long new prompt does not displace those earlier clauses.
 
@@ -61,7 +72,7 @@ The runtime also has a bounded view of its owned kernel lifecycle. This records 
 
 ## ViewUnits and dependency closure
 
-A working view contains units such as literals, task frames, selected recovery, and replay groups. A unit can require other units to remain visible.
+A **ViewUnit** is a group of context that can be selected together: original messages, a task frame, recovered text, or a provider replay group. A unit can require other units to remain visible. **Dependency closure** means including all those required companions.
 
 Before accepting a selection, Base Context includes the full set of required dependencies. For example, a selected tool result needs its corresponding call. Source order is preserved. Missing or incomplete required groups can refuse the selection rather than produce an invalid partial transcript.
 
@@ -112,7 +123,7 @@ including Astra; see [agent-requested compaction](compaction.md#agent-requested-
 
 Budget-driven epochs use the explicit profile above. Supported native recovery can also require an accepted replay epoch without enabling request-budget selection.
 
-An epoch is a committed context choice: selected source recipes, task-frame text, and the accepted request contract. Within an epoch, unchanged context stays stable. A new selection or relevant resource change requires an accepted boundary rather than an unrecorded rewrite of the prefix.
+An **epoch** is a saved context choice: which source messages to include, the task-frame text, and the request configuration. Base Context reuses that choice until an accepted transition, such as a new selection or relevant resource change. This keeps unchanged prompt prefixes stable instead of rewriting them on every turn.
 
 Restoring a session rebuilds the view from retained sources. Forks and imports rebuild on the destination; they do not inherit unrestricted native replay permission. Some supported transitions can render closed native groups as descriptive public data. This does not preserve hidden reasoning or turn public text into a replacement for provider signatures.
 

@@ -5,6 +5,12 @@ import type { NativeEntryOrigin } from "./session-entry-origin.js";
 export const TASK_STATE_CUSTOM_TYPE = "task_state";
 export const TASK_STATE_SCHEMA = "base-context.task-state/v1";
 
+/**
+ * Reader vocabulary, not a list of automatic extractors. Native producers currently
+ * record complete user input, user goal revisions, and goal-control observations.
+ * Other kinds can be read from explicit/legacy records as unverified proposals;
+ * they do not become authoritative TaskFrame rows merely by naming a kind.
+ */
 export const TASK_STATE_KINDS = [
 	"user_requirement",
 	"user_goal_revision",

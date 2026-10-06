@@ -13,6 +13,8 @@ The SDK provides programmatic access to Base Context's capabilities. Use it to e
 
 See [examples/sdk/](../examples/sdk/) for working examples from minimal to full control.
 
+For a first integration, use [Quick Start](#quick-start), [authentication](#api-keys-and-oauth), and [events](#events). The later context sections describe advanced controls; they are not required to send a prompt. Snippets that omit `model` assume you already saved an explicit provider/model selection. They never select the first available provider.
+
 ## Quick Start
 
 Choose a supported provider and model explicitly. This example uses Anthropic; configure `ANTHROPIC_API_KEY` or its saved authentication before running it.
@@ -63,7 +65,7 @@ The main factory function for a single `AgentSession`.
 ```typescript
 import { createAgentSession } from "@ponythewhite/base-context";
 
-// Minimal: defaults with DefaultResourceLoader
+// Standard resource discovery; reuses a saved explicit model choice
 const { session } = await createAgentSession();
 
 // Custom: override specific options
@@ -589,12 +591,7 @@ const { session } = await createAgentSession({
 });
 ```
 
-**When you don't need factories:**
-- If you omit `tools`, Base Context automatically creates them with the correct `cwd`
-- If you use `process.cwd()` as your `cwd`, the pre-built instances work fine
-
-**When you must use factories:**
-- When you specify both `cwd` (different from `process.cwd()`) AND `tools`
+Built-in names such as `tools: ["ipython", "prime_context"]` already use the session's `cwd`; changing `cwd` does not require tool factories. Use factories when you register custom definitions, such as a Bash or edit tool with a separate working directory. Include those custom names in `tools` if you also supply an explicit tool allowlist.
 
 > See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
 
@@ -702,10 +699,11 @@ are outside this new captured-native API.
 
 ### Native TaskFrame and working-view metadata
 
-The native SDK compiler now renders a selective source-backed task frame alongside the
-complete retained context. Defaults are16KiB for all retained frame messages,32 displayed
-references and2KiB of exact clause text. Oversized clauses remain exact references, not
-truncated instructions. These limits are bytes/items, not model tokens.
+The TaskFrame carries selected recorded user instructions and goal state alongside the active context. User text that already appears in the request is not repeated when its identity, revision, and full text match. Older omitted instructions receive the text budget first.
+
+Native task-state producers record complete admitted user text, user goal creation/revision, and goal-control observations such as completion or clearing. The reader's broader kind list is not an automatic fact extractor: generic `task_state` proposals, including decisions, questions, artifact state, and hypotheses, are not selected into the frame.
+
+Defaults are 16 KiB for all retained frame messages, 32 displayed references, and 2 KiB of exact clause text. Oversized clauses remain exact references, not truncated instructions. These limits are bytes/items, not model tokens.
 
 The stable base stays at the front. Material updates add sparse revisions near current
 input; earlier text and insertion positions stay fixed until the existing source/branch/
@@ -725,24 +723,44 @@ not profile names or tool-shaped JSON. Unsupported layouts remain intact or refu
 
 ### Explicit request-token budget profiles
 
-The native SDK and direct `AgentSessionConfig` accept optional `requestTokenBudget`.
-Supply application-owned `RequestTokenProfile[]` from the AI package, rather than treating
-catalog defaults or a model label as confirmed deployment limits:
+Start with the [complete settings profile and field guide](request-token-budgets.md). It works from the CLI without an SDK application. Normal sessions do not enable request-budget selection.
+
+SDK callers can pass the same `requestTokenBudget` object directly. This example runs from the repository root and loads the checked-in [profile](../examples/request-token-budget.json), rather than leaving `explicitDeploymentProfiles` undefined:
 
 ```typescript
-await createAgentSession({
-  requestTokenBudget: {
-    mode: "enforce",
-    profiles: explicitDeploymentProfiles,
-  },
+import { readFile } from "node:fs/promises";
+import { getModel, type RequestTokenBudgetOptions } from "@ponythewhite/base-context-ai";
+import { createAgentSession } from "@ponythewhite/base-context";
+
+const example = JSON.parse(
+  await readFile("packages/coding-agent/examples/request-token-budget.json", "utf8"),
+) as { requestTokenBudget: RequestTokenBudgetOptions };
+
+const { session } = await createAgentSession({
+  model: getModel("openai", "gpt-4.1"),
+  requestTokenBudget: example.requestTokenBudget,
 });
+
+try {
+  console.log(session.requests.getRequestTokenBudgetOptions());
+  // Requires OpenAI API-key authentication and can incur charges.
+  await session.prompt("Reply with one short sentence.");
+} finally {
+  await session.disposeAsync();
+}
 ```
 
-Each profile names the exact API/provider/endpoint/final request model, profile/template/
-replay revisions, declared auth mode, total context limit, output ceiling and conservative
-estimate parameters. `contextTokens` means the combined input/output allowance; do not
-substitute an input-only limit without checking its semantics. Auth mode is descriptive
-configuration, not authorization or proof of the live login. Normal auth rules still apply.
+For an installed SDK application, copy the JSON into your project and adjust the file path. Use your own confirmed deployment limits. An explicit SDK option overrides settings; children inherit the effective configuration. Choosing another model or provider requires a matching profile.
+
+Profiles match the actual API, provider, full endpoint, and final request model. `contextTokens` is the combined input/output allowance, not an input-only limit. `outputCeilingTokens` checks the output reservation; it does not configure a smaller model output limit.
+
+`id`, `revision`, `authMode`, `templateRevision`, and `replayFamily` are nonempty labels, not enums or feature switches. In particular, writing `"oauth"` does not authenticate a request, and a replay label does not grant provider support. See the [field table and supported routes](request-token-budgets.md#what-the-fields-mean).
+
+`responseModels` lists exact accepted response identities. If omitted, only the request model is accepted for calibration and retained-prefix credit. A versioned response name can therefore need an explicit entry even when the request uses an unversioned alias.
+
+#### Advanced request and replay behavior
+
+The following details matter when embedding the request controller or replacing provider adapters. An **epoch** is a saved context choice. An **ACK** here is the session owner's confirmation that the corresponding change was recorded. **Admission** is the final check before sending a request; **replay** is earlier context sent again to a provider.
 
 `observe` preserves control thresholds. In supported native main-session Responses/Codex
 paths, `enforce` can remove historical assistant literals after complete dependency closure.
@@ -755,8 +773,7 @@ the post-hook serialization, including instructions and tool schemas. Codex rese
 explicit route output ceiling because it does not serialize the generic `maxTokens` option.
 Reasoning is included in output for these adapters and is not reserved twice.
 
-The counter is a configured conservative UTF8-based estimate, not bytes/4, an exact tokenizer
-or a proven future bound. Ordinary complete physical usage can add observed error samples
+The counter uses a conservative UTF-8 byte estimate or the optional supported tokenizer estimate. It is not bytes/4 or an exact provider token count. Ordinary complete physical usage can add observed error samples
 only after its existing settlement ACK. Calibration remains unproven in cold/config-changed
 state; observed errors are not calibrated confidence. Counter/profile data stays in
 descriptors/receipts, outside the prompt and stable KV prefix. No warming request is made.

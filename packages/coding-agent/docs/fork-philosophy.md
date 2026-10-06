@@ -14,7 +14,7 @@ Our design separates these concerns:
 
 1. **Retain source records.** History is evidence, not an obligation to replay every byte.
 2. **Compile a working view.** Select context under explicit dependency and resource rules.
-3. **Carry task state.** Keep recorded goals, constraints, questions, and artifact state distinguishable from free-form summaries.
+3. **Carry instructions and goals.** Keep selected original user text and goal state alongside summaries. The task-state schema is broader than the currently produced TaskFrame content; it is not automatic extraction of decisions, questions, or artifact facts.
 4. **Recover on demand.** Bring selected public evidence back through an indexed, bounded interface.
 5. **Continue through transient failures.** Keep completed work and pending operations within the same invocation when recovery is allowed.
 
@@ -38,19 +38,19 @@ We selectively adapt upstream fixes rather than merging every release. The [0.9.
 | Active context | Source-backed working views rather than an arbitrary last-N transcript | Required context must fit or the request can refuse |
 | Task state | Structured TaskFrame with source, authority, and state | Selected recorded evidence, not a complete or live world model |
 | Message dependencies | ViewUnit closure keeps required replay groups together | Provider adapters decide which layouts support selection |
-| Budgeting | Explicit model/provider request profiles in the SDK | Opt-in enforcement; conservative estimation, not an exact tokenizer |
-| Context stability | Accepted epochs freeze context choices until a new boundary | Does not guarantee cache hits or hidden-state continuity |
+| Budgeting | Explicit model/provider request profiles in settings or the SDK | Opt-in on supported routes; estimates are not exact provider token counts |
+| Context stability | Saved context choices stay stable until an accepted change | Budget-driven epochs need a profile; cache hits and hidden-state continuity are not guaranteed |
 | Provider recovery | Retry recognized transient failures inside the same invocation | Authorization, cancellation, permanent errors, and budgets still apply |
 | Runtime identity | Own package, binary, state root, and runtime distribution | Upstream installers and credential stores are not interchangeable |
 | Transport | SSE by default; other supported transports are opt-in | Transport choice does not imply free caching or universal support |
 
-This table describes the fork's implementation, not a claim that every capability is absent from every upstream revision. See [context management](context-management.md) for behavior and [SDK configuration](sdk.md) for supported request-budget paths.
+This table describes the fork's implementation, not a claim that every capability is absent from every upstream revision. See [context management](context-management.md) for behavior and the [request-budget guide](request-token-budgets.md) for a complete CLI/settings profile and supported routes.
 
 ## How we evaluate the difference
 
 The published comparison covers Base Context **1.1.1** and Codex **0.160.0** on 30 Python tasks with two model/effort profiles: **GPT-6.1 Sol high** and **GPT-6 Astra medium**. Each harness uses its native execution path, with the same tasks and task checks. Best-of-two selection yields 60 matched task/profile pairs.
 
-Both tools pass **60/60** selected tasks. Base Context has **30.99% shorter mean selected-run duration** and **18.73% lower selected captured API-cost estimates**. These are results for the published scope, not universal savings. Cost estimates are not invoices; task-run durations are not campaign wall time. Native execution conditions differ, and the comparison does not isolate the effect of context selection, Python, or delegation.
+Both tools pass **60/60** selected tasks. Base Context has **30.99% shorter mean selected-run duration** and **18.73% lower selected captured API-cost estimates**. These are results for the published scope, not universal savings. Cost estimates are not invoices; task-run durations are not campaign wall time. Native execution conditions differ, and the comparison does not isolate the effect of individual features. **Request-budget selection was disabled.** The tasks did not evaluate long-session recall, post-compaction instruction recovery, or delegation quality. The results do not measure the current source changes. Those questions need separate evaluations; relabeling this historical comparison does not answer them.
 
 Read the [benchmark results and methodology](../../../benchmarks/python-realworld-30/README.md) for the exact selection rules, execution settings, per-profile results, and per-task pairs.
 

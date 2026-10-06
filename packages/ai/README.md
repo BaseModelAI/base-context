@@ -386,11 +386,11 @@ All streaming events emitted during assistant message generation:
 | `done` | Stream complete | `reason`: Stop reason ("stop", "length", "toolUse"), `message`: Final assistant message |
 | `error` | Error occurred | `reason`: Error type ("error" or "aborted"), `error`: AssistantMessage with partial content |
 
-Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and Prime Agent may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
+Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and Base Context may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
 
 ## Image Input
 
-Models with vision capabilities can process images. You can check if a model supports images via the `input` property. If you pass images to a non-vision model, they are silently ignored.
+Models with vision capabilities can process images. You can check if a model supports images via the `input` property. When the shared message converter targets a non-vision model, it replaces images with text placeholders; it does not preserve their visual content.
 
 ```typescript
 import { readFileSync } from 'fs';
@@ -592,7 +592,7 @@ if (response.stopReason === 'aborted') {
 
 ### Continuing After Abort
 
-Aborted messages can be added to the conversation context and continued in subsequent requests:
+Aborted messages can be retained in your local conversation history. The shared provider converter skips errored or aborted assistant turns on replay, so the next request continues from valid context, not the partial assistant response:
 
 ```typescript
 const context = {
@@ -826,7 +826,7 @@ const response = await stream(ollamaModel, context, {
 
 Some OpenAI-compatible servers do not understand the `developer` role used for reasoning-capable models. For those providers, set `compat.supportsDeveloperRole` to `false` so the system prompt is sent as a `system` message instead. If the server also does not support `reasoning_effort`, set `compat.supportsReasoningEffort` to `false` too.
 
-Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are Prime Agent thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
+Use model-level `thinkingLevelMap` to describe model-specific thinking controls. Keys are Base Context thinking levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`). Missing keys use provider defaults, string values are sent to the provider, and `null` marks a level unsupported.
 
 This commonly applies to Ollama, vLLM, SGLang, and similar OpenAI-compatible servers. You can set `compat` at the provider level or per model.
 
@@ -910,16 +910,17 @@ await streamAnthropic(claude, context, options);
 
 ## Cross-Provider Handoffs
 
-The library supports seamless handoffs between different LLM providers within the same conversation. This allows you to switch models mid-conversation while preserving context, including thinking blocks, tool calls, and tool results.
+The library converts supported public conversation content when you switch models or providers. This is not lossless transfer of hidden reasoning, provider signatures, cached state, or every media format. The target model must support the content and tools you need.
 
 ### How It Works
 
 When messages from one provider are sent to a different provider, the library automatically transforms them for compatibility:
 
-- **User and tool result messages** are passed through unchanged
-- **Assistant messages from the same provider/API** are preserved as-is
-- **Assistant messages from different providers** have their thinking blocks converted to text with `<thinking>` tags
-- **Tool calls and regular text** are preserved unchanged
+- **User text** is retained. Unsupported user/tool images become text placeholders.
+- **Same-model thinking blocks** can retain their provider signatures. “Same model” means the same provider, API, and model ID.
+- **Cross-model visible thinking** becomes plain text, without a portable provider signature. Redacted thinking is dropped across models; hidden reasoning is not recovered.
+- **Tool IDs** can be normalized with matching result IDs. Orphaned results are skipped; missing results can receive error placeholders.
+- **Errored or aborted assistant turns** are skipped on replay. Keeping them in local history does not send their partial content to the next model.
 
 ### Example: Multi-Provider Conversation
 
@@ -938,7 +939,7 @@ const claudeResponse = await complete(claude, context, {
 });
 context.messages.push(claudeResponse);
 
-// Switch to GPT-5 - it will see Claude's thinking as <thinking> tagged text
+// Switch to GPT-5 - visible thinking can become plain text, not native reasoning
 const gpt5 = getModel('openai', 'gpt-5-mini');
 context.messages.push({ role: 'user', content: 'Is that calculation correct?' });
 const gptResponse = await complete(gpt5, context);
@@ -952,13 +953,9 @@ const geminiResponse = await complete(gemini, context);
 
 ### Provider Compatibility
 
-All providers can handle messages from other providers, including:
-- Text content
-- Tool calls and tool results (including images in tool results)
-- Thinking/reasoning blocks (transformed to tagged text for cross-provider compatibility)
-- Aborted messages with partial content
+Provider adapters still have their own replay and media rules. A supported model switch is not a guarantee that any context fits or that every request is accepted. Authenticate to the target provider separately. In a budgeted Base Context session, also supply its matching request profile; a model switch does not create one.
 
-This enables flexible workflows where you can:
+With those limits, you can:
 - Start with a fast model for initial responses
 - Switch to a more capable model for complex reasoning
 - Use specialized models for specific tasks
@@ -1127,7 +1124,7 @@ Official docs: [Application Default Credentials](https://cloud.google.com/docs/a
 
 Subscription OAuth is supported for Anthropic (Claude Pro/Max), OpenAI Codex (ChatGPT), and GitHub Copilot. Each provider uses its browser authorization flow; account access and usage limits remain provider-controlled. Prime integrations are disabled. An OpenAI API key belongs to `openai`, not `openai-codex`; Claude subscription login is separate from Anthropic API-key authentication.
 
-For the Base Context application, use `/login` to choose the provider and authenticate, then `/model` to select a model. See [Base Context authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/providers.md#authentication-availability).
+For the Base Context application, use `/login` to choose the provider and authenticate, then `/model` to select a model. See [Base Context authentication](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/providers.md#authentication-availability).
 
 ### CLI Availability
 
@@ -1154,7 +1151,7 @@ Credential storage and persistence of refreshed credentials are the caller's res
 
 ### Optional Read-Only Codex SDK Mode
 
-The separate Base Context coding-agent SDK can use an explicitly injected read-only OpenAI Codex backend with existing credentials. Only this mode disables login, refresh, credential writes, and API-key fallback. Normal writable OAuth storage supports interactive subscription login and refresh. See [SDK authentication](https://github.com/BaseModelAI/base-context/blob/v1.0.1/packages/coding-agent/docs/sdk.md#api-keys-and-oauth).
+The separate Base Context coding-agent SDK can use an explicitly injected read-only OpenAI Codex backend with existing credentials. Only this mode disables login, refresh, credential writes, and API-key fallback. Normal writable OAuth storage supports interactive subscription login and refresh. See [SDK authentication](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md#api-keys-and-oauth).
 
 ## Provider Notes
 
@@ -1225,7 +1222,7 @@ For providers with non-standard auth (AWS, Google Vertex), create a utility like
 
 Update `src/core/model-resolver.ts`:
 
-- Add a default model ID for the provider in `DEFAULT_MODELS`
+- Register supported provider/model choices explicitly. Do not add an automatic first-available model or provider fallback.
 
 Update `src/cli/args.ts`:
 
@@ -1245,11 +1242,10 @@ Update `packages/ai/README.md`:
 
 #### 8. Changelog
 
-Add an entry to `packages/ai/CHANGELOG.md` under `## [Unreleased]`:
+Add a fragment under `packages/ai/.changes/<slug>.md`; do not edit released changelog entries:
 
 ```markdown
-### Added
-- Added support for [Provider Name] provider ([#PR](link) by [@author](link))
+- Added support for [Provider Name] provider ([#PR](link) by [@author](link)).
 ```
 
 ## License

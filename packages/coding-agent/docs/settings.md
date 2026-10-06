@@ -13,7 +13,7 @@ Edit directly or use `/settings` for common options. `BASE_CONTEXT_HOME` overrid
 
 Use [providers](providers.md) for credentials, [models](models.md) for custom model definitions, and [usage](usage.md#environment-variables) for environment overrides. Project settings override global settings, except where a setting is explicitly global-only. Arrays replace rather than merge with global arrays.
 
-The sections below cover user-facing settings. Onboarding flags, recent-model history, and disclosure markers are maintained by the application. Request-token profiles can be set here or through the SDK; see the [working request-budget example](request-token-budgets.md).
+The sections below cover user-facing settings. Onboarding flags, recent-model history, and disclosure markers are maintained by the application. Request-token profiles can be set here or through the SDK; see the [complete request-budget example](request-token-budgets.md). These profiles are not configured by the common-options `/settings` menu.
 
 ## Settings reference
 
@@ -158,9 +158,13 @@ extra calls or enable context optimization when it is off.
 
 ### Request token budgets
 
-`requestTokenBudget` is optional. When present, it configures request measurement and enables supported budget-aware context epochs. Use `mode: "observe"` to measure without budget-driven omission or refusal, or `mode: "enforce"` to select supported optional context and reject unknown or over-budget requests. Required user text and tool dependencies are not discarded to make a request fit.
+`requestTokenBudget` is optional and off by default. It limits individual requests, not total session spending. When present, it configures request measurement and enables supported budget-aware context epochs (saved context selections). Use `mode: "observe"` to measure without adding a token cutoff, or `mode: "enforce"` to select supported optional context and reject unknown or over-budget requests. Other request and resource checks still apply. Required user text and tool dependencies are not discarded to make a request fit.
 
-The `profiles` array must cover each exact API/provider/endpoint/model used, including auxiliary summary or learning models. Profiles are captured at session creation; explicit SDK options override settings. See [the complete CLI/settings example and profile field guide](request-token-budgets.md). This is separate from compaction thresholds and goal token accounting.
+The `profiles` array must cover each exact API/provider/full endpoint/request model used, including auxiliary summary or learning models. A project `profiles` array replaces the global array; it does not append to it. Labels such as `authMode` and `replayFamily` describe the deployment, not authentication or capability switches.
+
+Profiles are captured at session creation. Start a new session after editing them; `/reload` does not replace the current budget. Explicit SDK options override settings, and new native children inherit the effective configuration. Removing the setting disables it for new sessions, but a restored budgeted epoch still needs its matching configuration.
+
+See [the complete CLI/settings example, field guide, and refusal troubleshooting](request-token-budgets.md). This is separate from compaction thresholds and goal token accounting. There is no dedicated CLI budget-status view; the SDK exposes `session.requests.getRequestTokenBudgetOptions()`.
 
 ### Canonical Context Resources
 
