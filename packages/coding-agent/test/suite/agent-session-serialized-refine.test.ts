@@ -216,6 +216,10 @@ describe("Serialized auto-refine checkpoint", () => {
 		internals._assistantTurnsSinceAutoRefine = 1;
 
 		let applyInFlight = false;
+		let markApplyStarted!: () => void;
+		const applyStarted = new Promise<void>((resolve) => {
+			markApplyStarted = resolve;
+		});
 		let resolveApply: () => void = () => {};
 		const applyPromise = new Promise<void>((resolve) => {
 			resolveApply = resolve;
@@ -223,25 +227,31 @@ describe("Serialized auto-refine checkpoint", () => {
 		vi.spyOn(internals, "_planRefine").mockResolvedValue({ id: "p", proposal: { edits: [] } });
 		vi.spyOn(internals, "_applyRefine").mockImplementation(async () => {
 			applyInFlight = true;
+			markApplyStarted();
 			await applyPromise;
 			applyInFlight = false;
 			return emptyRefinementResult();
 		});
 
 		// Start _shouldStopAfterTurn — it will await the serialized refine
-		const checkpointPromise = internals._shouldStopAfterTurn(makeCtx("test"));
+		let checkpointSettled = false;
+		const checkpointPromise = internals._shouldStopAfterTurn(makeCtx("test")).then(() => {
+			checkpointSettled = true;
+		});
 
-		// The checkpoint is running and apply is in flight.
-		// _shouldStopAfterTurn has not returned yet, so the agent loop
-		// cannot start the next model request.
-		await new Promise<void>((resolve) => setTimeout(resolve, 10));
-		expect(applyInFlight).toBe(true);
-
-		// Release the apply
-		resolveApply();
-		await checkpointPromise;
+		// Wait for the actual apply boundary, not an assumed planning duration.
+		// While apply is held, the checkpoint must not admit the next model turn.
+		try {
+			await applyStarted;
+			expect(applyInFlight).toBe(true);
+			expect(checkpointSettled).toBe(false);
+		} finally {
+			resolveApply();
+			await checkpointPromise;
+		}
 
 		expect(applyInFlight).toBe(false);
+		expect(checkpointSettled).toBe(true);
 	});
 
 	it("prompt/state update visible on resumed turn after serialized refine", async () => {

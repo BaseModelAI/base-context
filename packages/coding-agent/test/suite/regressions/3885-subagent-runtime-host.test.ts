@@ -142,6 +142,7 @@ describe("ENG-3885 subagent runtime host", () => {
 				await release;
 				return fauxAssistantMessage(`child answer from ${model.id}`);
 			},
+			fauxAssistantMessage("parent handles child completion"),
 		]);
 
 		const resultPromise = runtime.session.runRlmChild("inspect child runtime", {
@@ -164,7 +165,9 @@ describe("ENG-3885 subagent runtime host", () => {
 
 		releaseChild();
 		const result = await resultPromise;
-		await waitFor(() => childRuntime?.session.getLastAssistantText() === "child answer from faux-child");
+		// Live assistant text can precede the child's canonical source/catalog writes.
+		await runtime.session.waitForRlmQuiescence();
+		expect(childRuntime?.session.getLastAssistantText()).toBe("child answer from faux-child");
 
 		expect(result.rlm_child_id).toBe(childRuntime?.metadata.rlmChildId);
 		expect(result.session_dir).not.toBeNull();

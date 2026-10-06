@@ -782,17 +782,24 @@ describe("AgentSessionRuntime characterization", () => {
 			(await parent.runtime.session.sessionManager.readEntries()).filter(
 				(entry) => entry.type === "child_usage_attributed",
 			);
-		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("done")]);
+		// Each child also starts a parent terminal-notice turn.
+		faux.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("first child notice handled"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("second child notice handled"),
+		]);
 		const firstStart = parent.runtime.session.runRlmChild("first resident", { name: "resident-one" });
 		// Neither name/model selection nor the factory has completed its first await.
 		await expect(parent.runtime.session.runRlmChild("overlapping startup")).rejects.toThrow("resident child limit");
 		const first = await firstStart;
-		await vi.waitFor(() => expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false));
+		// Spawn resolves at admission, before the child's durable completion and parent notice.
+		await parent.runtime.session.waitForRlmQuiescence();
+		expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false);
 		const firstState = [...internals.sessions.values()].find(
 			(state) => state.runtime.metadata.rlmChildId === first.rlm_child_id,
 		)!;
 		const firstFile = firstState.runtime.session.sessionFile!;
-		await parent.runtime.session.waitForRlmQuiescence();
 		expect(await parentAttributions()).toHaveLength(1);
 		expect((await parentAttributions())[0].origin).toBe("spawn_task");
 		expect(firstState.runtime.session.requests.getRequestTokenBudgetOptions()).toEqual(requestTokenBudget);
@@ -815,7 +822,8 @@ describe("AgentSessionRuntime characterization", () => {
 		const second = await parent.runtime.session.runRlmChild("historical first child is not resident", {
 			name: "resident-two",
 		});
-		await vi.waitFor(() => expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false));
+		await parent.runtime.session.waitForRlmQuiescence();
+		expect(parent.runtime.session.hasRunningRlmChildren()).toBe(false);
 		const secondState = [...internals.sessions.values()].find(
 			(state) => state.runtime.metadata.rlmChildId === second.rlm_child_id,
 		)!;

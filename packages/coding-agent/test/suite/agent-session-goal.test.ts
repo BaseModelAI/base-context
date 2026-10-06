@@ -49,16 +49,6 @@ function currentAgentContext(harness: Harness): AgentContext {
 	};
 }
 
-async function waitForCondition(predicate: () => boolean): Promise<void> {
-	for (let attempt = 0; attempt < 100; attempt++) {
-		if (predicate()) {
-			return;
-		}
-		await new Promise((resolve) => setTimeout(resolve, 0));
-	}
-	throw new Error("condition was not met");
-}
-
 /**
  * Stand-in for the real ipython tool. Goal calls reach the host over the
  * kernel comm bridge while an ipython cell executes; this stub mirrors that
@@ -863,11 +853,16 @@ describe("AgentSession goals", () => {
 		const blockedMessageEnd = new Promise<void>((resolve) => {
 			releaseMessageEnd = resolve;
 		});
+		let signalMessageEnd!: () => void;
+		const messageEndStarted = new Promise<void>((resolve) => {
+			signalMessageEnd = resolve;
+		});
 		let didBlock = false;
 		const extension: ExtensionFactory = (pi) => {
 			pi.on("message_end", async (event) => {
 				if (event.message.role === "assistant" && !didBlock) {
 					didBlock = true;
+					signalMessageEnd();
 					await blockedMessageEnd;
 				}
 			});
@@ -887,7 +882,9 @@ describe("AgentSession goals", () => {
 
 		const promptPromise = harness.session.prompt("/goal --budget 10 do work");
 		try {
-			await waitForCondition(() => didBlock && harness.session.goalState.status === "budget_limited");
+			// Hook entry follows native budget accounting; do not race it with a fixed poll count.
+			await messageEndStarted;
+			expect(harness.session.goalState.status).toBe("budget_limited");
 			expect(harness.session.agent.state.isStreaming).toBe(true);
 		} finally {
 			releaseMessageEnd?.();

@@ -17,6 +17,7 @@
 - Separated goal state, accounting, and persistence from session scheduling while preserving goal control and continuation ownership.
 - Fixed manual compaction over daemon connections using the short request timeout instead of the existing full-operation wait policy, while preserving cancellation.
 - Allowed fresh clients to reclaim confirmed-dead client-owned workers when resuming saved sessions, without taking over live processes or connected owners.
+- Fixed returned child handles failing to resolve for retained completed children during agent messaging, while preserving deletion and family-routing checks.
 
 ## [1.1.1] - 2026-10-05
 

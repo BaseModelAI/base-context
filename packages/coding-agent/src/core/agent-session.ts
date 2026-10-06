@@ -12441,6 +12441,17 @@ export class AgentSession {
 	}
 
 	private async _awaitPendingRlmChildPublication(selector: string): Promise<string | undefined> {
+		const isHidden = (childId: string) =>
+			this._deletingRlmChildren.has(childId) ||
+			this._deletedRlmChildIds.has(childId) ||
+			this._rlmChildCleanupFailures.has(childId);
+		const retainedSessionId = (childId: string) =>
+			isHidden(childId) ? undefined : this._rlmChildSessions.get(childId)?.session.sessionId;
+
+		// Resolve an exact retained handle before an unrelated active child's name.
+		const retainedId = retainedSessionId(selector);
+		if (retainedId !== undefined) return retainedId;
+
 		const run = [...this._activeRlmChildRuns.values()].find(
 			(candidate) =>
 				(candidate.status === "queued" || candidate.status === "running" || candidate.status === "done") &&
@@ -12449,7 +12460,9 @@ export class AgentSession {
 		);
 		if (!run) return undefined;
 		await run.publication.promise;
-		return run.session?.sessionId;
+		if (run.detachedDeletion || isHidden(run.id)) return undefined;
+		// Successful settlement can clear run.session during the publication await.
+		return retainedSessionId(run.id) ?? run.session?.sessionId;
 	}
 
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {

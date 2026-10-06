@@ -408,7 +408,10 @@ describe("AgentSession rlm recursion", () => {
 		expect(forked.rlmDepth).toBe(0);
 		const spawned = await forked.runRlmChild("recursion remains available");
 		expect(spawned.rlm_child_id).toMatch(/^sub-/);
-		await waitFor(() => forked.getRlmChildSession(spawned.rlm_child_id)?.getLastAssistantText() !== undefined);
+		await forked.waitForRlmQuiescence();
+		expect(forked.getRlmChildSession(spawned.rlm_child_id)?.getLastAssistantText()).toBe(
+			"child answer: recursion remains available",
+		);
 	});
 
 	it("creates readable collision-resistant default subagent session names", () => {
@@ -428,7 +431,7 @@ describe("AgentSession rlm recursion", () => {
 		const root = await createSession({ depth: 2, maxDepth: 4 });
 		const result = await root.runRlmChild("persist my tree position");
 		if (!result.session_dir) throw new Error("Missing child session directory");
-		await waitFor(() => root.getRlmChildSession(basename(result.session_dir)) !== undefined);
+		await root.waitForRlmQuiescence();
 		const child = root.getRlmChildSession(basename(result.session_dir));
 		if (!child?.sessionFile || !root.sessionFile) throw new Error("Missing persisted session paths");
 
@@ -446,7 +449,7 @@ describe("AgentSession rlm recursion", () => {
 			throw new Error("Missing child session directory");
 		}
 		const childId = basename(result.session_dir);
-		await waitFor(() => root.getRlmChildSession(childId) !== undefined);
+		await root.waitForRlmQuiescence();
 		const childSession = root.getRlmChildSession(childId);
 		if (!childSession) {
 			throw new Error("Missing retained child session");
@@ -811,7 +814,8 @@ describe("AgentSession rlm recursion", () => {
 		});
 
 		const spawned = await root.runRlmChild("inspect custom runtime", { name: "orchestrator-name" });
-		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) === hostedChild);
+		await root.waitForRlmQuiescence();
+		expect(root.getRlmChildSession(spawned.rlm_child_id)).toBe(hostedChild);
 
 		expect(hostedChild.sessionName).toBe("orchestrator-name");
 	});
@@ -982,6 +986,8 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("delivers an id-addressed send after a completed child durably admits its terminal notice", async () => {
+		const cleanupStarted = deferred();
+		const cleanupGate = deferred();
 		const child = await createSession({ rlmSessionDir: join(tempDir, "completed-child") });
 		const sendAgentMessage = vi.fn(async (input: { target: string; message: string }) => ({
 			id: "agentmsg-completed-child",
@@ -1009,21 +1015,41 @@ describe("AgentSession rlm recursion", () => {
 			},
 			subagentRuntimeHost: {
 				createRlmSubagentRuntime: async () => ({ session: child }),
-				deleteRlmSubagentRuntime: async (_id, session) => session?.disposeAsync(),
+				deleteRlmSubagentRuntime: async (_id, session) => {
+					cleanupStarted.resolve();
+					await cleanupGate.promise;
+					await session?.disposeAsync();
+				},
 			},
 		});
-		const spawned = await root.runRlmChild("completed task", { name: "completed-worker" });
-		await waitFor(() => root.getRlmChildSession(spawned.rlm_child_id) === child);
-		const internals = root as unknown as InspectableRlmSession;
-		const send = internals._createKernelHostHandlers()["agent_message.send"];
-		if (!send) throw new Error("Missing agent_message.send host handler");
+		let deletion: ReturnType<AgentSession["deleteRlmSubagent"]> | undefined;
+		try {
+			const spawned = await root.runRlmChild("completed task", { name: "completed-worker" });
+			await root.waitForRlmQuiescence();
+			expect(root.getRlmChildSession(spawned.rlm_child_id)).toBe(child);
+			const internals = root as unknown as InspectableRlmSession;
+			const send = internals._createKernelHostHandlers()["agent_message.send"];
+			if (!send) throw new Error("Missing agent_message.send host handler");
 
-		await expect(
-			send({ message: "follow-up", receiver_role: "child", receiver_name: spawned.rlm_child_id }),
-		).resolves.toMatchObject({ message: "follow-up" });
-		expect(sendAgentMessage).toHaveBeenCalledWith(
-			expect.objectContaining({ target: child.sessionId, message: "follow-up" }),
-		);
+			await expect(
+				send({ message: "follow-up", receiver_role: "child", receiver_name: spawned.rlm_child_id }),
+			).resolves.toMatchObject({ message: "follow-up" });
+			expect(sendAgentMessage).toHaveBeenCalledWith(
+				expect.objectContaining({ target: child.sessionId, message: "follow-up" }),
+			);
+
+			deletion = root.deleteRlmSubagent(spawned.rlm_child_id);
+			await cleanupStarted.promise;
+			// Native deletion hides this handle before cleanup removes its still-listed session.
+			expect(root.getRlmChildSession(spawned.rlm_child_id)).toBe(child);
+			await expect(
+				send({ message: "after deletion", receiver_role: "child", receiver_name: spawned.rlm_child_id }),
+			).rejects.toThrow(`No child matches "${spawned.rlm_child_id}"`);
+			expect(sendAgentMessage).toHaveBeenCalledTimes(1);
+		} finally {
+			cleanupGate.resolve();
+			if (deletion) await deletion;
+		}
 	});
 
 	it("propagates pending child startup failure to an immediate roled send", async () => {
@@ -2308,13 +2334,14 @@ describe("AgentSession rlm recursion", () => {
 			throw new Error("Missing child session directory");
 		}
 		const childId = basename(result.session_dir);
-		await waitFor(() => root.getRlmChildSession(childId) !== undefined);
+		// Spawn admits detached startup; join publication and settlement before reading the retained child.
+		await root.waitForRlmQuiescence();
 		const child = root.getRlmChildSession(childId);
 		if (!child) {
 			throw new Error("Missing retained child session");
 		}
 		const rootInternals = root as unknown as InspectableRlmSession;
-		await waitFor(() => !rootInternals._activeRlmChildRuns.has(childId));
+		expect(rootInternals._activeRlmChildRuns.has(childId)).toBe(false);
 		const tokenCount = lastAssistantUsage(child).totalTokens;
 		const completeRelease = root.releaseRlmChildSession(childId, child);
 		if (!completeRelease) throw new Error("Failed to release retained child");
@@ -2811,10 +2838,11 @@ describe("AgentSession rlm recursion", () => {
 		const root = await createSession({ maxDepth: 2 });
 		const childResult = await root.runRlmChild("child with a durable override");
 		if (!childResult.session_dir) throw new Error("Missing child session directory");
-		await waitFor(() => root.getRlmChildSession(childResult.rlm_child_id) !== undefined);
+		// Spawn admits detached startup; join publication and settlement before reading the retained child.
+		await root.waitForRlmQuiescence();
 		const child = root.getRlmChildSession(childResult.rlm_child_id);
 		if (!child?.sessionFile) throw new Error("Missing persisted child session");
-		await waitFor(() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.size === 0);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
 
 		expect(child.getRlmMaxDepthStatus()).toEqual({ maxDepth: 2, source: "inherited" });
 		await child.setRlmMaxDepth(3);
@@ -2831,10 +2859,10 @@ describe("AgentSession rlm recursion", () => {
 		await root.setRlmMaxDepth(2);
 		const childResult = await root.runRlmChild("first child");
 		if (!childResult.session_dir) throw new Error("Missing child session directory");
-		await waitFor(() => root.getRlmChildSession(childResult.rlm_child_id) !== undefined);
+		await root.waitForRlmQuiescence();
 		const child = root.getRlmChildSession(childResult.rlm_child_id);
 		if (!child) throw new Error("Missing retained child session");
-		await waitFor(() => (root as unknown as InspectableRlmSession)._activeRlmChildRuns.size === 0);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
 		expect(child.rlmMaxDepth).toBe(2);
 
 		await child.setRlmMaxDepth(3);
@@ -2842,7 +2870,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.rlmMaxDepth).toBe(2);
 		const grandchildResult = await child.runRlmChild("grandchild after override");
 		if (!grandchildResult.session_dir) throw new Error("Missing grandchild session directory");
-		await waitFor(() => child.getRlmChildSession(grandchildResult.rlm_child_id) !== undefined);
+		await child.waitForRlmQuiescence();
 		const grandchild = child.getRlmChildSession(grandchildResult.rlm_child_id);
 		expect(grandchild?.rlmMaxDepth).toBe(3);
 
