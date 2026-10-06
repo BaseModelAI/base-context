@@ -1,0 +1,64 @@
+{
+  "schema": "context-workflow-stress-task/v1",
+  "id": 5,
+  "slug": "release-handoff",
+  "title": "Delegation-friendly regional release handoff",
+  "pressure": "targeted-staged",
+  "timeout_seconds": 2700,
+  "editable_paths": [
+    "solution/",
+    "output/",
+    "notes/"
+  ],
+  "initial_prompt": "Read TASK.md. Coordinate a release-readiness review across capacity, security, and billing. The workstreams are independent until final integration. You may delegate them with native tools or work serially; neither choice changes the score. Keep concise durable notes and identify owners.",
+  "stages": [
+    {
+      "id": "stage-1",
+      "inject": "visible/",
+      "message": "Read TASK.md. Coordinate a release-readiness review across capacity, security, and billing. The workstreams are independent until final integration. You may delegate them with native tools or work serially; neither choice changes the score. Keep concise durable notes and identify owners.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-2",
+      "inject": "stages/02/",
+      "message": "The capacity team supplied peak demand and replica ceilings in inputs/capacity.json. Required replicas are ceil(peak_rps*10/(capacity_per_replica_rps*7)); recommended_replicas is max(current_replicas,required). Capacity blocks when recommended exceeds max_replicas. Produce provisional capacity findings.",
+      "compact_after": true,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-3",
+      "inject": "stages/03/",
+      "message": "Security supplied revisioned findings and waivers. Select highest revision per finding_id. Inactive findings do not block. Active critical findings always block, even with a waiver. Active high findings block unless a matching-region waiver expires on or after 2026-10-01. Medium/low findings do not block. Keep exact finding IDs.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-4",
+      "inject": "stages/04/",
+      "message": "Finance supplied hourly prices and monthly budgets. Proposed monthly cost is recommended_replicas*720*hourly_cents, including services already blocked elsewhere. A cost strictly above budget adds a budget blocker; equality is allowed. Do not trade security or capacity against budget.",
+      "compact_after": true,
+      "cold_resume_after": true
+    },
+    {
+      "id": "stage-5",
+      "inject": "stages/05/",
+      "message": "Architecture supplied same-region service dependencies. A service with no direct blocker is still blocked when any transitive dependency has a direct blocker. blocked_by lists all such transitive service IDs sorted, excluding the service itself. Do not duplicate inherited work as owner actions.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-6",
+      "inject": "stages/06/",
+      "message": "Late security revisions and corrected waiver scopes are now included in the cumulative security snapshot. Reconcile workstream notes against current source data and finalize all three artifacts. The release remains a partial rollout: do not reject every region merely because one region has a blocker. Retain early rules and no secret compensating controls.",
+      "compact_after": false,
+      "cold_resume_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

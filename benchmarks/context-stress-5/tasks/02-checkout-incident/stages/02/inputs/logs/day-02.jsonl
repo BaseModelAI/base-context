@@ -1,0 +1,7 @@
+{"event_id": "gateway-fail-00", "raw_ms": 1790589617500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-000", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-01", "raw_ms": 1790589618500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-001", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-02", "raw_ms": 1790589619500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-002", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-03", "raw_ms": 1790589620500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-003", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-04", "raw_ms": 1790589621500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-004", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-05", "raw_ms": 1790589622500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-005", "code": "RESPONSE", "status": 504}
+{"event_id": "gateway-fail-06", "raw_ms": 1790589623500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-006", "code": "RESPONSE", "status": 504}

@@ -1,0 +1,7582 @@
+{
+  "orders": [
+    {
+      "order_id": "00-ORDER-00000",
+      "customer_name": "Customer 0",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1,
+          "quantity": 1,
+          "weight_g": 101,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00001",
+      "customer_name": "Customer 1",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 72,
+          "quantity": 1,
+          "weight_g": 102,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 271,
+          "quantity": 2,
+          "weight_g": 103,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00002",
+      "customer_name": "Customer 2",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 143,
+          "quantity": 1,
+          "weight_g": 103,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 342,
+          "quantity": 2,
+          "weight_g": 104,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 541,
+          "quantity": 3,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00003",
+      "customer_name": "Customer 3",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 214,
+          "quantity": 1,
+          "weight_g": 104,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 413,
+          "quantity": 2,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 612,
+          "quantity": 3,
+          "weight_g": 106,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 811,
+          "quantity": 4,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00004",
+      "customer_name": "Customer 4",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 285,
+          "quantity": 1,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00005",
+      "customer_name": "Customer 5",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 356,
+          "quantity": 1,
+          "weight_g": 106,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 555,
+          "quantity": 2,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00006",
+      "customer_name": "Customer 6",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 427,
+          "quantity": 1,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 626,
+          "quantity": 2,
+          "weight_g": 108,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 825,
+          "quantity": 3,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00007",
+      "customer_name": "Customer 7",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 498,
+          "quantity": 1,
+          "weight_g": 108,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 697,
+          "quantity": 2,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 896,
+          "quantity": 3,
+          "weight_g": 110,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1095,
+          "quantity": 4,
+          "weight_g": 111,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00008",
+      "customer_name": "Customer 8",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 569,
+          "quantity": 1,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00009",
+      "customer_name": "Customer 9",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 640,
+          "quantity": 1,
+          "weight_g": 110,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 839,
+          "quantity": 2,
+          "weight_g": 111,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00010",
+      "customer_name": "Customer 10",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 711,
+          "quantity": 1,
+          "weight_g": 111,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 910,
+          "quantity": 2,
+          "weight_g": 112,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1109,
+          "quantity": 3,
+          "weight_g": 113,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00011",
+      "customer_name": "Customer 11",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 782,
+          "quantity": 1,
+          "weight_g": 112,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 981,
+          "quantity": 2,
+          "weight_g": 113,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1180,
+          "quantity": 3,
+          "weight_g": 114,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1379,
+          "quantity": 4,
+          "weight_g": 115,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00012",
+      "customer_name": "Customer 12",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 853,
+          "quantity": 1,
+          "weight_g": 113,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00013",
+      "customer_name": "Customer 13",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 924,
+          "quantity": 1,
+          "weight_g": 114,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1123,
+          "quantity": 2,
+          "weight_g": 115,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00014",
+      "customer_name": "Customer 14",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 995,
+          "quantity": 1,
+          "weight_g": 115,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1194,
+          "quantity": 2,
+          "weight_g": 116,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1393,
+          "quantity": 3,
+          "weight_g": 117,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00015",
+      "customer_name": "Customer 15",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1066,
+          "quantity": 1,
+          "weight_g": 116,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1265,
+          "quantity": 2,
+          "weight_g": 117,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1464,
+          "quantity": 3,
+          "weight_g": 118,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1663,
+          "quantity": 4,
+          "weight_g": 119,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00016",
+      "customer_name": "Customer 16",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1137,
+          "quantity": 1,
+          "weight_g": 117,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00017",
+      "customer_name": "Customer 17",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1208,
+          "quantity": 1,
+          "weight_g": 118,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1407,
+          "quantity": 2,
+          "weight_g": 119,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00018",
+      "customer_name": "Customer 18",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1279,
+          "quantity": 1,
+          "weight_g": 119,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1478,
+          "quantity": 2,
+          "weight_g": 120,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1677,
+          "quantity": 3,
+          "weight_g": 121,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00019",
+      "customer_name": "Customer 19",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1350,
+          "quantity": 1,
+          "weight_g": 120,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1549,
+          "quantity": 2,
+          "weight_g": 121,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1748,
+          "quantity": 3,
+          "weight_g": 122,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1947,
+          "quantity": 4,
+          "weight_g": 123,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00020",
+      "customer_name": "Customer 20",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1421,
+          "quantity": 1,
+          "weight_g": 121,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00021",
+      "customer_name": "Customer 21",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1492,
+          "quantity": 1,
+          "weight_g": 122,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1691,
+          "quantity": 2,
+          "weight_g": 123,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00022",
+      "customer_name": "Customer 22",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1563,
+          "quantity": 1,
+          "weight_g": 123,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1762,
+          "quantity": 2,
+          "weight_g": 124,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1961,
+          "quantity": 3,
+          "weight_g": 125,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00023",
+      "customer_name": "Customer 23",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1634,
+          "quantity": 1,
+          "weight_g": 124,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1833,
+          "quantity": 2,
+          "weight_g": 125,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2032,
+          "quantity": 3,
+          "weight_g": 126,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2231,
+          "quantity": 4,
+          "weight_g": 127,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00024",
+      "customer_name": "Customer 24",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1705,
+          "quantity": 1,
+          "weight_g": 125,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00025",
+      "customer_name": "Customer 25",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1776,
+          "quantity": 1,
+          "weight_g": 126,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1975,
+          "quantity": 2,
+          "weight_g": 127,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00026",
+      "customer_name": "Customer 26",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1847,
+          "quantity": 1,
+          "weight_g": 127,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2046,
+          "quantity": 2,
+          "weight_g": 128,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2245,
+          "quantity": 3,
+          "weight_g": 129,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00027",
+      "customer_name": "Customer 27",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1918,
+          "quantity": 1,
+          "weight_g": 128,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2117,
+          "quantity": 2,
+          "weight_g": 129,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2316,
+          "quantity": 3,
+          "weight_g": 130,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2515,
+          "quantity": 4,
+          "weight_g": 131,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00028",
+      "customer_name": "Customer 28",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1989,
+          "quantity": 1,
+          "weight_g": 129,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00029",
+      "customer_name": "Customer 29",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2060,
+          "quantity": 1,
+          "weight_g": 130,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2259,
+          "quantity": 2,
+          "weight_g": 131,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00030",
+      "customer_name": "Customer 30",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2131,
+          "quantity": 1,
+          "weight_g": 131,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2330,
+          "quantity": 2,
+          "weight_g": 132,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2529,
+          "quantity": 3,
+          "weight_g": 133,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00031",
+      "customer_name": "Customer 31",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2202,
+          "quantity": 1,
+          "weight_g": 132,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2401,
+          "quantity": 2,
+          "weight_g": 133,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2600,
+          "quantity": 3,
+          "weight_g": 134,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2799,
+          "quantity": 4,
+          "weight_g": 135,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00032",
+      "customer_name": "Customer 32",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2273,
+          "quantity": 1,
+          "weight_g": 133,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00033",
+      "customer_name": "Customer 33",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2344,
+          "quantity": 1,
+          "weight_g": 134,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2543,
+          "quantity": 2,
+          "weight_g": 135,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00034",
+      "customer_name": "Customer 34",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2415,
+          "quantity": 1,
+          "weight_g": 135,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2614,
+          "quantity": 2,
+          "weight_g": 136,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2813,
+          "quantity": 3,
+          "weight_g": 137,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00035",
+      "customer_name": "Customer 35",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2486,
+          "quantity": 1,
+          "weight_g": 136,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 2685,
+          "quantity": 2,
+          "weight_g": 137,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 2884,
+          "quantity": 3,
+          "weight_g": 138,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3083,
+          "quantity": 4,
+          "weight_g": 139,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00036",
+      "customer_name": "Customer 36",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2557,
+          "quantity": 1,
+          "weight_g": 137,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00037",
+      "customer_name": "Customer 37",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2628,
+          "quantity": 1,
+          "weight_g": 138,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2827,
+          "quantity": 2,
+          "weight_g": 139,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00038",
+      "customer_name": "Customer 38",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2699,
+          "quantity": 1,
+          "weight_g": 139,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2898,
+          "quantity": 2,
+          "weight_g": 140,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3097,
+          "quantity": 3,
+          "weight_g": 141,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00039",
+      "customer_name": "Customer 39",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2770,
+          "quantity": 1,
+          "weight_g": 140,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2969,
+          "quantity": 2,
+          "weight_g": 141,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3168,
+          "quantity": 3,
+          "weight_g": 142,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3367,
+          "quantity": 4,
+          "weight_g": 143,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00040",
+      "customer_name": "Customer 40",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2841,
+          "quantity": 1,
+          "weight_g": 141,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00041",
+      "customer_name": "Customer 41",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2912,
+          "quantity": 1,
+          "weight_g": 142,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3111,
+          "quantity": 2,
+          "weight_g": 143,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00042",
+      "customer_name": "Customer 42",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2983,
+          "quantity": 1,
+          "weight_g": 143,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3182,
+          "quantity": 2,
+          "weight_g": 144,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3381,
+          "quantity": 3,
+          "weight_g": 145,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00043",
+      "customer_name": "Customer 43",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3054,
+          "quantity": 1,
+          "weight_g": 144,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3253,
+          "quantity": 2,
+          "weight_g": 145,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3452,
+          "quantity": 3,
+          "weight_g": 146,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3651,
+          "quantity": 4,
+          "weight_g": 147,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00044",
+      "customer_name": "Customer 44",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3125,
+          "quantity": 1,
+          "weight_g": 145,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00045",
+      "customer_name": "Customer 45",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3196,
+          "quantity": 1,
+          "weight_g": 146,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3395,
+          "quantity": 2,
+          "weight_g": 147,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00046",
+      "customer_name": "Customer 46",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3267,
+          "quantity": 1,
+          "weight_g": 147,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3466,
+          "quantity": 2,
+          "weight_g": 148,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3665,
+          "quantity": 3,
+          "weight_g": 149,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00047",
+      "customer_name": "Customer 47",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3338,
+          "quantity": 1,
+          "weight_g": 148,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3537,
+          "quantity": 2,
+          "weight_g": 149,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3736,
+          "quantity": 3,
+          "weight_g": 150,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3935,
+          "quantity": 4,
+          "weight_g": 151,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00048",
+      "customer_name": "Customer 48",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3409,
+          "quantity": 1,
+          "weight_g": 149,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00049",
+      "customer_name": "Customer 49",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3480,
+          "quantity": 1,
+          "weight_g": 150,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3679,
+          "quantity": 2,
+          "weight_g": 151,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00050",
+      "customer_name": "Customer 50",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3551,
+          "quantity": 1,
+          "weight_g": 151,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3750,
+          "quantity": 2,
+          "weight_g": 152,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3949,
+          "quantity": 3,
+          "weight_g": 153,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00051",
+      "customer_name": "Customer 51",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3622,
+          "quantity": 1,
+          "weight_g": 152,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3821,
+          "quantity": 2,
+          "weight_g": 153,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4020,
+          "quantity": 3,
+          "weight_g": 154,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4219,
+          "quantity": 4,
+          "weight_g": 155,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00052",
+      "customer_name": "Customer 52",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3693,
+          "quantity": 1,
+          "weight_g": 153,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00053",
+      "customer_name": "Customer 53",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3764,
+          "quantity": 1,
+          "weight_g": 154,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3963,
+          "quantity": 2,
+          "weight_g": 155,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00054",
+      "customer_name": "Customer 54",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3835,
+          "quantity": 1,
+          "weight_g": 155,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4034,
+          "quantity": 2,
+          "weight_g": 156,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4233,
+          "quantity": 3,
+          "weight_g": 157,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00055",
+      "customer_name": "Customer 55",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3906,
+          "quantity": 1,
+          "weight_g": 156,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4105,
+          "quantity": 2,
+          "weight_g": 157,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4304,
+          "quantity": 3,
+          "weight_g": 158,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4503,
+          "quantity": 4,
+          "weight_g": 159,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00056",
+      "customer_name": "Customer 56",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3977,
+          "quantity": 1,
+          "weight_g": 157,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00057",
+      "customer_name": "Customer 57",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4048,
+          "quantity": 1,
+          "weight_g": 158,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4247,
+          "quantity": 2,
+          "weight_g": 159,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00058",
+      "customer_name": "Customer 58",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4119,
+          "quantity": 1,
+          "weight_g": 159,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4318,
+          "quantity": 2,
+          "weight_g": 160,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4517,
+          "quantity": 3,
+          "weight_g": 161,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00059",
+      "customer_name": "Customer 59",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4190,
+          "quantity": 1,
+          "weight_g": 160,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4389,
+          "quantity": 2,
+          "weight_g": 161,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4588,
+          "quantity": 3,
+          "weight_g": 162,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4787,
+          "quantity": 4,
+          "weight_g": 163,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00060",
+      "customer_name": "Customer 60",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4261,
+          "quantity": 1,
+          "weight_g": 161,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00061",
+      "customer_name": "Customer 61",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4332,
+          "quantity": 1,
+          "weight_g": 162,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4531,
+          "quantity": 2,
+          "weight_g": 163,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00062",
+      "customer_name": "Customer 62",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4403,
+          "quantity": 1,
+          "weight_g": 163,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4602,
+          "quantity": 2,
+          "weight_g": 164,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4801,
+          "quantity": 3,
+          "weight_g": 165,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00063",
+      "customer_name": "Customer 63",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4474,
+          "quantity": 1,
+          "weight_g": 164,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 4673,
+          "quantity": 2,
+          "weight_g": 165,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 4872,
+          "quantity": 3,
+          "weight_g": 166,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5071,
+          "quantity": 4,
+          "weight_g": 167,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00064",
+      "customer_name": "Customer 64",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4545,
+          "quantity": 1,
+          "weight_g": 165,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00065",
+      "customer_name": "Customer 65",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4616,
+          "quantity": 1,
+          "weight_g": 166,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4815,
+          "quantity": 2,
+          "weight_g": 167,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00066",
+      "customer_name": "Customer 66",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4687,
+          "quantity": 1,
+          "weight_g": 167,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4886,
+          "quantity": 2,
+          "weight_g": 168,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5085,
+          "quantity": 3,
+          "weight_g": 169,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00067",
+      "customer_name": "Customer 67",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4758,
+          "quantity": 1,
+          "weight_g": 168,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4957,
+          "quantity": 2,
+          "weight_g": 169,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5156,
+          "quantity": 3,
+          "weight_g": 170,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5355,
+          "quantity": 4,
+          "weight_g": 171,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00068",
+      "customer_name": "Customer 68",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4829,
+          "quantity": 1,
+          "weight_g": 169,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00069",
+      "customer_name": "Customer 69",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4900,
+          "quantity": 1,
+          "weight_g": 170,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5099,
+          "quantity": 2,
+          "weight_g": 171,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00070",
+      "customer_name": "Customer 70",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4971,
+          "quantity": 1,
+          "weight_g": 171,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5170,
+          "quantity": 2,
+          "weight_g": 172,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5369,
+          "quantity": 3,
+          "weight_g": 173,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00071",
+      "customer_name": "Customer 71",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5042,
+          "quantity": 1,
+          "weight_g": 172,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5241,
+          "quantity": 2,
+          "weight_g": 173,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5440,
+          "quantity": 3,
+          "weight_g": 174,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5639,
+          "quantity": 4,
+          "weight_g": 175,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00072",
+      "customer_name": "Customer 72",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5113,
+          "quantity": 1,
+          "weight_g": 173,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00073",
+      "customer_name": "Customer 73",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5184,
+          "quantity": 1,
+          "weight_g": 174,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5383,
+          "quantity": 2,
+          "weight_g": 175,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00074",
+      "customer_name": "Customer 74",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5255,
+          "quantity": 1,
+          "weight_g": 175,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5454,
+          "quantity": 2,
+          "weight_g": 176,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5653,
+          "quantity": 3,
+          "weight_g": 177,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00075",
+      "customer_name": "Customer 75",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5326,
+          "quantity": 1,
+          "weight_g": 176,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5525,
+          "quantity": 2,
+          "weight_g": 177,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5724,
+          "quantity": 3,
+          "weight_g": 178,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5923,
+          "quantity": 4,
+          "weight_g": 179,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00076",
+      "customer_name": "Customer 76",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5397,
+          "quantity": 1,
+          "weight_g": 177,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00077",
+      "customer_name": "Customer 77",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5468,
+          "quantity": 1,
+          "weight_g": 178,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5667,
+          "quantity": 2,
+          "weight_g": 179,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00078",
+      "customer_name": "Customer 78",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5539,
+          "quantity": 1,
+          "weight_g": 179,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5738,
+          "quantity": 2,
+          "weight_g": 180,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5937,
+          "quantity": 3,
+          "weight_g": 181,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00079",
+      "customer_name": "Customer 79",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5610,
+          "quantity": 1,
+          "weight_g": 180,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5809,
+          "quantity": 2,
+          "weight_g": 181,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6008,
+          "quantity": 3,
+          "weight_g": 182,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6207,
+          "quantity": 4,
+          "weight_g": 183,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00080",
+      "customer_name": "Customer 80",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5681,
+          "quantity": 1,
+          "weight_g": 181,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00081",
+      "customer_name": "Customer 81",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5752,
+          "quantity": 1,
+          "weight_g": 182,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5951,
+          "quantity": 2,
+          "weight_g": 183,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00082",
+      "customer_name": "Customer 82",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5823,
+          "quantity": 1,
+          "weight_g": 183,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6022,
+          "quantity": 2,
+          "weight_g": 184,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6221,
+          "quantity": 3,
+          "weight_g": 185,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00083",
+      "customer_name": "Customer 83",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5894,
+          "quantity": 1,
+          "weight_g": 184,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6093,
+          "quantity": 2,
+          "weight_g": 185,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6292,
+          "quantity": 3,
+          "weight_g": 186,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6491,
+          "quantity": 4,
+          "weight_g": 187,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00084",
+      "customer_name": "Customer 84",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5965,
+          "quantity": 1,
+          "weight_g": 185,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00085",
+      "customer_name": "Customer 85",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6036,
+          "quantity": 1,
+          "weight_g": 186,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6235,
+          "quantity": 2,
+          "weight_g": 187,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00086",
+      "customer_name": "Customer 86",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6107,
+          "quantity": 1,
+          "weight_g": 187,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6306,
+          "quantity": 2,
+          "weight_g": 188,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6505,
+          "quantity": 3,
+          "weight_g": 189,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00087",
+      "customer_name": "Customer 87",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6178,
+          "quantity": 1,
+          "weight_g": 188,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6377,
+          "quantity": 2,
+          "weight_g": 189,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6576,
+          "quantity": 3,
+          "weight_g": 190,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6775,
+          "quantity": 4,
+          "weight_g": 191,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00088",
+      "customer_name": "Customer 88",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6249,
+          "quantity": 1,
+          "weight_g": 189,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00089",
+      "customer_name": "Customer 89",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6320,
+          "quantity": 1,
+          "weight_g": 190,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6519,
+          "quantity": 2,
+          "weight_g": 191,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00090",
+      "customer_name": "Customer 90",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6391,
+          "quantity": 1,
+          "weight_g": 191,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6590,
+          "quantity": 2,
+          "weight_g": 192,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6789,
+          "quantity": 3,
+          "weight_g": 193,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00091",
+      "customer_name": "Customer 91",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6462,
+          "quantity": 1,
+          "weight_g": 192,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 6661,
+          "quantity": 2,
+          "weight_g": 193,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 6860,
+          "quantity": 3,
+          "weight_g": 194,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7059,
+          "quantity": 4,
+          "weight_g": 195,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00092",
+      "customer_name": "Customer 92",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6533,
+          "quantity": 1,
+          "weight_g": 193,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00093",
+      "customer_name": "Customer 93",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6604,
+          "quantity": 1,
+          "weight_g": 194,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6803,
+          "quantity": 2,
+          "weight_g": 195,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00094",
+      "customer_name": "Customer 94",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6675,
+          "quantity": 1,
+          "weight_g": 195,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6874,
+          "quantity": 2,
+          "weight_g": 196,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7073,
+          "quantity": 3,
+          "weight_g": 197,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00095",
+      "customer_name": "Customer 95",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6746,
+          "quantity": 1,
+          "weight_g": 196,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6945,
+          "quantity": 2,
+          "weight_g": 197,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7144,
+          "quantity": 3,
+          "weight_g": 198,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7343,
+          "quantity": 4,
+          "weight_g": 199,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00096",
+      "customer_name": "Customer 96",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6817,
+          "quantity": 1,
+          "weight_g": 197,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00097",
+      "customer_name": "Customer 97",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6888,
+          "quantity": 1,
+          "weight_g": 198,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7087,
+          "quantity": 2,
+          "weight_g": 199,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00098",
+      "customer_name": "Customer 98",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6959,
+          "quantity": 1,
+          "weight_g": 199,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7158,
+          "quantity": 2,
+          "weight_g": 200,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7357,
+          "quantity": 3,
+          "weight_g": 201,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00099",
+      "customer_name": "Customer 99",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7030,
+          "quantity": 1,
+          "weight_g": 200,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7229,
+          "quantity": 2,
+          "weight_g": 201,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7428,
+          "quantity": 3,
+          "weight_g": 202,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7627,
+          "quantity": 4,
+          "weight_g": 203,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00100",
+      "customer_name": "Customer 100",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7101,
+          "quantity": 1,
+          "weight_g": 201,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00101",
+      "customer_name": "Customer 101",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7172,
+          "quantity": 1,
+          "weight_g": 202,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7371,
+          "quantity": 2,
+          "weight_g": 203,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00102",
+      "customer_name": "Customer 102",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7243,
+          "quantity": 1,
+          "weight_g": 203,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7442,
+          "quantity": 2,
+          "weight_g": 204,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7641,
+          "quantity": 3,
+          "weight_g": 205,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00103",
+      "customer_name": "Customer 103",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7314,
+          "quantity": 1,
+          "weight_g": 204,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7513,
+          "quantity": 2,
+          "weight_g": 205,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7712,
+          "quantity": 3,
+          "weight_g": 206,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7911,
+          "quantity": 4,
+          "weight_g": 207,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00104",
+      "customer_name": "Customer 104",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7385,
+          "quantity": 1,
+          "weight_g": 205,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00105",
+      "customer_name": "Customer 105",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7456,
+          "quantity": 1,
+          "weight_g": 206,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7655,
+          "quantity": 2,
+          "weight_g": 207,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00106",
+      "customer_name": "Customer 106",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7527,
+          "quantity": 1,
+          "weight_g": 207,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7726,
+          "quantity": 2,
+          "weight_g": 208,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7925,
+          "quantity": 3,
+          "weight_g": 209,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00107",
+      "customer_name": "Customer 107",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7598,
+          "quantity": 1,
+          "weight_g": 208,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7797,
+          "quantity": 2,
+          "weight_g": 209,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7996,
+          "quantity": 3,
+          "weight_g": 210,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8195,
+          "quantity": 4,
+          "weight_g": 211,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00108",
+      "customer_name": "Customer 108",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7669,
+          "quantity": 1,
+          "weight_g": 209,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00109",
+      "customer_name": "Customer 109",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7740,
+          "quantity": 1,
+          "weight_g": 210,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7939,
+          "quantity": 2,
+          "weight_g": 211,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00110",
+      "customer_name": "Customer 110",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7811,
+          "quantity": 1,
+          "weight_g": 211,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8010,
+          "quantity": 2,
+          "weight_g": 212,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8209,
+          "quantity": 3,
+          "weight_g": 213,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00111",
+      "customer_name": "Customer 111",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7882,
+          "quantity": 1,
+          "weight_g": 212,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8081,
+          "quantity": 2,
+          "weight_g": 213,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8280,
+          "quantity": 3,
+          "weight_g": 214,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8479,
+          "quantity": 4,
+          "weight_g": 215,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00112",
+      "customer_name": "Customer 112",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7953,
+          "quantity": 1,
+          "weight_g": 213,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00113",
+      "customer_name": "Customer 113",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8024,
+          "quantity": 1,
+          "weight_g": 214,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8223,
+          "quantity": 2,
+          "weight_g": 215,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00114",
+      "customer_name": "Customer 114",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8095,
+          "quantity": 1,
+          "weight_g": 215,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8294,
+          "quantity": 2,
+          "weight_g": 216,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8493,
+          "quantity": 3,
+          "weight_g": 217,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00115",
+      "customer_name": "Customer 115",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8166,
+          "quantity": 1,
+          "weight_g": 216,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8365,
+          "quantity": 2,
+          "weight_g": 217,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8564,
+          "quantity": 3,
+          "weight_g": 218,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8763,
+          "quantity": 4,
+          "weight_g": 219,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00116",
+      "customer_name": "Customer 116",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8237,
+          "quantity": 1,
+          "weight_g": 217,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00117",
+      "customer_name": "Customer 117",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8308,
+          "quantity": 1,
+          "weight_g": 218,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8507,
+          "quantity": 2,
+          "weight_g": 219,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00118",
+      "customer_name": "Customer 118",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8379,
+          "quantity": 1,
+          "weight_g": 219,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8578,
+          "quantity": 2,
+          "weight_g": 220,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8777,
+          "quantity": 3,
+          "weight_g": 221,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00119",
+      "customer_name": "Customer 119",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8450,
+          "quantity": 1,
+          "weight_g": 220,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 8649,
+          "quantity": 2,
+          "weight_g": 221,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 8848,
+          "quantity": 3,
+          "weight_g": 222,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9047,
+          "quantity": 4,
+          "weight_g": 223,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00120",
+      "customer_name": "Customer 120",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8521,
+          "quantity": 1,
+          "weight_g": 221,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00121",
+      "customer_name": "Customer 121",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8592,
+          "quantity": 1,
+          "weight_g": 222,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8791,
+          "quantity": 2,
+          "weight_g": 223,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00122",
+      "customer_name": "Customer 122",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8663,
+          "quantity": 1,
+          "weight_g": 223,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8862,
+          "quantity": 2,
+          "weight_g": 224,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9061,
+          "quantity": 3,
+          "weight_g": 225,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00123",
+      "customer_name": "Customer 123",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8734,
+          "quantity": 1,
+          "weight_g": 224,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8933,
+          "quantity": 2,
+          "weight_g": 225,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9132,
+          "quantity": 3,
+          "weight_g": 226,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9331,
+          "quantity": 4,
+          "weight_g": 227,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00124",
+      "customer_name": "Customer 124",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8805,
+          "quantity": 1,
+          "weight_g": 225,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00125",
+      "customer_name": "Customer 125",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8876,
+          "quantity": 1,
+          "weight_g": 226,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9075,
+          "quantity": 2,
+          "weight_g": 227,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00126",
+      "customer_name": "Customer 126",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8947,
+          "quantity": 1,
+          "weight_g": 227,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9146,
+          "quantity": 2,
+          "weight_g": 228,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9345,
+          "quantity": 3,
+          "weight_g": 229,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00127",
+      "customer_name": "Customer 127",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9018,
+          "quantity": 1,
+          "weight_g": 228,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9217,
+          "quantity": 2,
+          "weight_g": 229,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9416,
+          "quantity": 3,
+          "weight_g": 230,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9615,
+          "quantity": 4,
+          "weight_g": 231,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00128",
+      "customer_name": "Customer 128",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9089,
+          "quantity": 1,
+          "weight_g": 229,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00129",
+      "customer_name": "Customer 129",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9160,
+          "quantity": 1,
+          "weight_g": 230,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9359,
+          "quantity": 2,
+          "weight_g": 231,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00130",
+      "customer_name": "Customer 130",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9231,
+          "quantity": 1,
+          "weight_g": 231,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9430,
+          "quantity": 2,
+          "weight_g": 232,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9629,
+          "quantity": 3,
+          "weight_g": 233,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00131",
+      "customer_name": "Customer 131",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9302,
+          "quantity": 1,
+          "weight_g": 232,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9501,
+          "quantity": 2,
+          "weight_g": 233,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9700,
+          "quantity": 3,
+          "weight_g": 234,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9899,
+          "quantity": 4,
+          "weight_g": 235,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00132",
+      "customer_name": "Customer 132",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9373,
+          "quantity": 1,
+          "weight_g": 233,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00133",
+      "customer_name": "Customer 133",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9444,
+          "quantity": 1,
+          "weight_g": 234,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9643,
+          "quantity": 2,
+          "weight_g": 235,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00134",
+      "customer_name": "Customer 134",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9515,
+          "quantity": 1,
+          "weight_g": 235,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9714,
+          "quantity": 2,
+          "weight_g": 236,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 12,
+          "quantity": 3,
+          "weight_g": 237,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00135",
+      "customer_name": "Customer 135",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9586,
+          "quantity": 1,
+          "weight_g": 236,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9785,
+          "quantity": 2,
+          "weight_g": 237,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 83,
+          "quantity": 3,
+          "weight_g": 238,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 282,
+          "quantity": 4,
+          "weight_g": 239,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00136",
+      "customer_name": "Customer 136",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9657,
+          "quantity": 1,
+          "weight_g": 237,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00137",
+      "customer_name": "Customer 137",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9728,
+          "quantity": 1,
+          "weight_g": 238,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 26,
+          "quantity": 2,
+          "weight_g": 239,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00138",
+      "customer_name": "Customer 138",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9799,
+          "quantity": 1,
+          "weight_g": 239,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 97,
+          "quantity": 2,
+          "weight_g": 240,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 296,
+          "quantity": 3,
+          "weight_g": 241,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00139",
+      "customer_name": "Customer 139",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9870,
+          "quantity": 1,
+          "weight_g": 240,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 168,
+          "quantity": 2,
+          "weight_g": 241,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 367,
+          "quantity": 3,
+          "weight_g": 242,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 566,
+          "quantity": 4,
+          "weight_g": 243,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00140",
+      "customer_name": "Customer 140",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 40,
+          "quantity": 1,
+          "weight_g": 241,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00141",
+      "customer_name": "Customer 141",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 111,
+          "quantity": 1,
+          "weight_g": 242,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 310,
+          "quantity": 2,
+          "weight_g": 243,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00142",
+      "customer_name": "Customer 142",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 182,
+          "quantity": 1,
+          "weight_g": 243,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 381,
+          "quantity": 2,
+          "weight_g": 244,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 580,
+          "quantity": 3,
+          "weight_g": 245,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00143",
+      "customer_name": "Customer 143",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 253,
+          "quantity": 1,
+          "weight_g": 244,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 452,
+          "quantity": 2,
+          "weight_g": 245,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 651,
+          "quantity": 3,
+          "weight_g": 246,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 850,
+          "quantity": 4,
+          "weight_g": 247,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00144",
+      "customer_name": "Customer 144",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 324,
+          "quantity": 1,
+          "weight_g": 245,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00145",
+      "customer_name": "Customer 145",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 395,
+          "quantity": 1,
+          "weight_g": 246,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 594,
+          "quantity": 2,
+          "weight_g": 247,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00146",
+      "customer_name": "Customer 146",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 466,
+          "quantity": 1,
+          "weight_g": 247,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 665,
+          "quantity": 2,
+          "weight_g": 248,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 864,
+          "quantity": 3,
+          "weight_g": 249,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00147",
+      "customer_name": "Customer 147",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 537,
+          "quantity": 1,
+          "weight_g": 248,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 736,
+          "quantity": 2,
+          "weight_g": 249,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 935,
+          "quantity": 3,
+          "weight_g": 250,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1134,
+          "quantity": 4,
+          "weight_g": 251,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00148",
+      "customer_name": "Customer 148",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 608,
+          "quantity": 1,
+          "weight_g": 249,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00149",
+      "customer_name": "Customer 149",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 679,
+          "quantity": 1,
+          "weight_g": 250,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 878,
+          "quantity": 2,
+          "weight_g": 251,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00150",
+      "customer_name": "Customer 150",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 750,
+          "quantity": 1,
+          "weight_g": 251,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 949,
+          "quantity": 2,
+          "weight_g": 252,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1148,
+          "quantity": 3,
+          "weight_g": 253,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00151",
+      "customer_name": "Customer 151",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 821,
+          "quantity": 1,
+          "weight_g": 252,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1020,
+          "quantity": 2,
+          "weight_g": 253,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1219,
+          "quantity": 3,
+          "weight_g": 254,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1418,
+          "quantity": 4,
+          "weight_g": 255,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00152",
+      "customer_name": "Customer 152",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 892,
+          "quantity": 1,
+          "weight_g": 253,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00153",
+      "customer_name": "Customer 153",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 963,
+          "quantity": 1,
+          "weight_g": 254,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1162,
+          "quantity": 2,
+          "weight_g": 255,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00154",
+      "customer_name": "Customer 154",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1034,
+          "quantity": 1,
+          "weight_g": 255,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1233,
+          "quantity": 2,
+          "weight_g": 256,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1432,
+          "quantity": 3,
+          "weight_g": 257,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00155",
+      "customer_name": "Customer 155",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1105,
+          "quantity": 1,
+          "weight_g": 256,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1304,
+          "quantity": 2,
+          "weight_g": 257,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1503,
+          "quantity": 3,
+          "weight_g": 258,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1702,
+          "quantity": 4,
+          "weight_g": 259,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00156",
+      "customer_name": "Customer 156",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1176,
+          "quantity": 1,
+          "weight_g": 257,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00157",
+      "customer_name": "Customer 157",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1247,
+          "quantity": 1,
+          "weight_g": 258,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1446,
+          "quantity": 2,
+          "weight_g": 259,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00158",
+      "customer_name": "Customer 158",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1318,
+          "quantity": 1,
+          "weight_g": 259,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1517,
+          "quantity": 2,
+          "weight_g": 260,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1716,
+          "quantity": 3,
+          "weight_g": 261,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00159",
+      "customer_name": "Customer 159",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1389,
+          "quantity": 1,
+          "weight_g": 260,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1588,
+          "quantity": 2,
+          "weight_g": 261,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1787,
+          "quantity": 3,
+          "weight_g": 262,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1986,
+          "quantity": 4,
+          "weight_g": 263,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00160",
+      "customer_name": "Customer 160",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1460,
+          "quantity": 1,
+          "weight_g": 261,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00161",
+      "customer_name": "Customer 161",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1531,
+          "quantity": 1,
+          "weight_g": 262,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1730,
+          "quantity": 2,
+          "weight_g": 263,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00162",
+      "customer_name": "Customer 162",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1602,
+          "quantity": 1,
+          "weight_g": 263,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1801,
+          "quantity": 2,
+          "weight_g": 264,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2000,
+          "quantity": 3,
+          "weight_g": 265,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00163",
+      "customer_name": "Customer 163",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1673,
+          "quantity": 1,
+          "weight_g": 264,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 1872,
+          "quantity": 2,
+          "weight_g": 265,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2071,
+          "quantity": 3,
+          "weight_g": 266,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2270,
+          "quantity": 4,
+          "weight_g": 267,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00164",
+      "customer_name": "Customer 164",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1744,
+          "quantity": 1,
+          "weight_g": 265,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00165",
+      "customer_name": "Customer 165",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 1815,
+          "quantity": 1,
+          "weight_g": 266,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2014,
+          "quantity": 2,
+          "weight_g": 267,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00166",
+      "customer_name": "Customer 166",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 1886,
+          "quantity": 1,
+          "weight_g": 267,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2085,
+          "quantity": 2,
+          "weight_g": 268,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2284,
+          "quantity": 3,
+          "weight_g": 269,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00167",
+      "customer_name": "Customer 167",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 1957,
+          "quantity": 1,
+          "weight_g": 268,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2156,
+          "quantity": 2,
+          "weight_g": 269,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2355,
+          "quantity": 3,
+          "weight_g": 270,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2554,
+          "quantity": 4,
+          "weight_g": 271,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00168",
+      "customer_name": "Customer 168",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2028,
+          "quantity": 1,
+          "weight_g": 269,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00169",
+      "customer_name": "Customer 169",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2099,
+          "quantity": 1,
+          "weight_g": 270,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2298,
+          "quantity": 2,
+          "weight_g": 271,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00170",
+      "customer_name": "Customer 170",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2170,
+          "quantity": 1,
+          "weight_g": 271,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2369,
+          "quantity": 2,
+          "weight_g": 272,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2568,
+          "quantity": 3,
+          "weight_g": 273,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00171",
+      "customer_name": "Customer 171",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2241,
+          "quantity": 1,
+          "weight_g": 272,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2440,
+          "quantity": 2,
+          "weight_g": 273,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2639,
+          "quantity": 3,
+          "weight_g": 274,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2838,
+          "quantity": 4,
+          "weight_g": 275,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00172",
+      "customer_name": "Customer 172",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2312,
+          "quantity": 1,
+          "weight_g": 273,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00173",
+      "customer_name": "Customer 173",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2383,
+          "quantity": 1,
+          "weight_g": 274,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2582,
+          "quantity": 2,
+          "weight_g": 275,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00174",
+      "customer_name": "Customer 174",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2454,
+          "quantity": 1,
+          "weight_g": 275,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2653,
+          "quantity": 2,
+          "weight_g": 276,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2852,
+          "quantity": 3,
+          "weight_g": 277,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00175",
+      "customer_name": "Customer 175",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2525,
+          "quantity": 1,
+          "weight_g": 276,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 2724,
+          "quantity": 2,
+          "weight_g": 277,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 2923,
+          "quantity": 3,
+          "weight_g": 278,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3122,
+          "quantity": 4,
+          "weight_g": 279,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00176",
+      "customer_name": "Customer 176",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2596,
+          "quantity": 1,
+          "weight_g": 277,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00177",
+      "customer_name": "Customer 177",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2667,
+          "quantity": 1,
+          "weight_g": 278,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2866,
+          "quantity": 2,
+          "weight_g": 279,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00178",
+      "customer_name": "Customer 178",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 2738,
+          "quantity": 1,
+          "weight_g": 279,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 2937,
+          "quantity": 2,
+          "weight_g": 280,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3136,
+          "quantity": 3,
+          "weight_g": 281,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00179",
+      "customer_name": "Customer 179",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 2809,
+          "quantity": 1,
+          "weight_g": 280,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3008,
+          "quantity": 2,
+          "weight_g": 281,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3207,
+          "quantity": 3,
+          "weight_g": 282,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3406,
+          "quantity": 4,
+          "weight_g": 283,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00180",
+      "customer_name": "Customer 180",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 2880,
+          "quantity": 1,
+          "weight_g": 281,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00181",
+      "customer_name": "Customer 181",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 2951,
+          "quantity": 1,
+          "weight_g": 282,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3150,
+          "quantity": 2,
+          "weight_g": 283,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00182",
+      "customer_name": "Customer 182",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3022,
+          "quantity": 1,
+          "weight_g": 283,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3221,
+          "quantity": 2,
+          "weight_g": 284,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3420,
+          "quantity": 3,
+          "weight_g": 285,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00183",
+      "customer_name": "Customer 183",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3093,
+          "quantity": 1,
+          "weight_g": 284,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3292,
+          "quantity": 2,
+          "weight_g": 285,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3491,
+          "quantity": 3,
+          "weight_g": 286,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3690,
+          "quantity": 4,
+          "weight_g": 287,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00184",
+      "customer_name": "Customer 184",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3164,
+          "quantity": 1,
+          "weight_g": 285,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00185",
+      "customer_name": "Customer 185",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3235,
+          "quantity": 1,
+          "weight_g": 286,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3434,
+          "quantity": 2,
+          "weight_g": 287,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00186",
+      "customer_name": "Customer 186",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3306,
+          "quantity": 1,
+          "weight_g": 287,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3505,
+          "quantity": 2,
+          "weight_g": 288,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3704,
+          "quantity": 3,
+          "weight_g": 289,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00187",
+      "customer_name": "Customer 187",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3377,
+          "quantity": 1,
+          "weight_g": 288,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3576,
+          "quantity": 2,
+          "weight_g": 289,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3775,
+          "quantity": 3,
+          "weight_g": 290,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3974,
+          "quantity": 4,
+          "weight_g": 291,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00188",
+      "customer_name": "Customer 188",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3448,
+          "quantity": 1,
+          "weight_g": 289,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00189",
+      "customer_name": "Customer 189",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3519,
+          "quantity": 1,
+          "weight_g": 290,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 3718,
+          "quantity": 2,
+          "weight_g": 291,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00190",
+      "customer_name": "Customer 190",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3590,
+          "quantity": 1,
+          "weight_g": 291,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3789,
+          "quantity": 2,
+          "weight_g": 292,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3988,
+          "quantity": 3,
+          "weight_g": 293,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00191",
+      "customer_name": "Customer 191",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3661,
+          "quantity": 1,
+          "weight_g": 292,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 3860,
+          "quantity": 2,
+          "weight_g": 293,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4059,
+          "quantity": 3,
+          "weight_g": 294,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4258,
+          "quantity": 4,
+          "weight_g": 295,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00192",
+      "customer_name": "Customer 192",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 3732,
+          "quantity": 1,
+          "weight_g": 293,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00193",
+      "customer_name": "Customer 193",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 3803,
+          "quantity": 1,
+          "weight_g": 294,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4002,
+          "quantity": 2,
+          "weight_g": 295,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00194",
+      "customer_name": "Customer 194",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 3874,
+          "quantity": 1,
+          "weight_g": 295,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4073,
+          "quantity": 2,
+          "weight_g": 296,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4272,
+          "quantity": 3,
+          "weight_g": 297,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00195",
+      "customer_name": "Customer 195",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 3945,
+          "quantity": 1,
+          "weight_g": 296,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4144,
+          "quantity": 2,
+          "weight_g": 297,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4343,
+          "quantity": 3,
+          "weight_g": 298,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4542,
+          "quantity": 4,
+          "weight_g": 299,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00196",
+      "customer_name": "Customer 196",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4016,
+          "quantity": 1,
+          "weight_g": 297,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00197",
+      "customer_name": "Customer 197",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4087,
+          "quantity": 1,
+          "weight_g": 298,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4286,
+          "quantity": 2,
+          "weight_g": 299,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00198",
+      "customer_name": "Customer 198",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4158,
+          "quantity": 1,
+          "weight_g": 299,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4357,
+          "quantity": 2,
+          "weight_g": 300,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4556,
+          "quantity": 3,
+          "weight_g": 301,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00199",
+      "customer_name": "Customer 199",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4229,
+          "quantity": 1,
+          "weight_g": 300,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4428,
+          "quantity": 2,
+          "weight_g": 301,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4627,
+          "quantity": 3,
+          "weight_g": 302,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4826,
+          "quantity": 4,
+          "weight_g": 303,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00200",
+      "customer_name": "Customer 200",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4300,
+          "quantity": 1,
+          "weight_g": 301,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00201",
+      "customer_name": "Customer 201",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4371,
+          "quantity": 1,
+          "weight_g": 302,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4570,
+          "quantity": 2,
+          "weight_g": 303,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00202",
+      "customer_name": "Customer 202",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4442,
+          "quantity": 1,
+          "weight_g": 303,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4641,
+          "quantity": 2,
+          "weight_g": 304,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4840,
+          "quantity": 3,
+          "weight_g": 305,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00203",
+      "customer_name": "Customer 203",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4513,
+          "quantity": 1,
+          "weight_g": 304,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 4712,
+          "quantity": 2,
+          "weight_g": 305,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 4911,
+          "quantity": 3,
+          "weight_g": 306,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5110,
+          "quantity": 4,
+          "weight_g": 307,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00204",
+      "customer_name": "Customer 204",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4584,
+          "quantity": 1,
+          "weight_g": 305,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00205",
+      "customer_name": "Customer 205",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4655,
+          "quantity": 1,
+          "weight_g": 306,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4854,
+          "quantity": 2,
+          "weight_g": 307,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00206",
+      "customer_name": "Customer 206",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 4726,
+          "quantity": 1,
+          "weight_g": 307,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4925,
+          "quantity": 2,
+          "weight_g": 308,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5124,
+          "quantity": 3,
+          "weight_g": 309,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00207",
+      "customer_name": "Customer 207",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 4797,
+          "quantity": 1,
+          "weight_g": 308,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 4996,
+          "quantity": 2,
+          "weight_g": 309,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5195,
+          "quantity": 3,
+          "weight_g": 310,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5394,
+          "quantity": 4,
+          "weight_g": 311,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00208",
+      "customer_name": "Customer 208",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 4868,
+          "quantity": 1,
+          "weight_g": 309,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00209",
+      "customer_name": "Customer 209",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 4939,
+          "quantity": 1,
+          "weight_g": 310,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5138,
+          "quantity": 2,
+          "weight_g": 311,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00210",
+      "customer_name": "Customer 210",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5010,
+          "quantity": 1,
+          "weight_g": 311,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5209,
+          "quantity": 2,
+          "weight_g": 312,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5408,
+          "quantity": 3,
+          "weight_g": 313,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00211",
+      "customer_name": "Customer 211",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5081,
+          "quantity": 1,
+          "weight_g": 312,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5280,
+          "quantity": 2,
+          "weight_g": 313,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5479,
+          "quantity": 3,
+          "weight_g": 314,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5678,
+          "quantity": 4,
+          "weight_g": 315,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00212",
+      "customer_name": "Customer 212",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5152,
+          "quantity": 1,
+          "weight_g": 313,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00213",
+      "customer_name": "Customer 213",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5223,
+          "quantity": 1,
+          "weight_g": 314,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5422,
+          "quantity": 2,
+          "weight_g": 315,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00214",
+      "customer_name": "Customer 214",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5294,
+          "quantity": 1,
+          "weight_g": 315,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5493,
+          "quantity": 2,
+          "weight_g": 316,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5692,
+          "quantity": 3,
+          "weight_g": 317,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00215",
+      "customer_name": "Customer 215",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5365,
+          "quantity": 1,
+          "weight_g": 316,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5564,
+          "quantity": 2,
+          "weight_g": 317,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5763,
+          "quantity": 3,
+          "weight_g": 318,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5962,
+          "quantity": 4,
+          "weight_g": 319,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00216",
+      "customer_name": "Customer 216",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5436,
+          "quantity": 1,
+          "weight_g": 317,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00217",
+      "customer_name": "Customer 217",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5507,
+          "quantity": 1,
+          "weight_g": 318,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 5706,
+          "quantity": 2,
+          "weight_g": 319,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00218",
+      "customer_name": "Customer 218",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5578,
+          "quantity": 1,
+          "weight_g": 319,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5777,
+          "quantity": 2,
+          "weight_g": 320,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5976,
+          "quantity": 3,
+          "weight_g": 321,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00219",
+      "customer_name": "Customer 219",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5649,
+          "quantity": 1,
+          "weight_g": 320,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5848,
+          "quantity": 2,
+          "weight_g": 321,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6047,
+          "quantity": 3,
+          "weight_g": 322,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6246,
+          "quantity": 4,
+          "weight_g": 323,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00220",
+      "customer_name": "Customer 220",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 5720,
+          "quantity": 1,
+          "weight_g": 321,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00221",
+      "customer_name": "Customer 221",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 5791,
+          "quantity": 1,
+          "weight_g": 322,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 5990,
+          "quantity": 2,
+          "weight_g": 323,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00222",
+      "customer_name": "Customer 222",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 5862,
+          "quantity": 1,
+          "weight_g": 323,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6061,
+          "quantity": 2,
+          "weight_g": 324,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6260,
+          "quantity": 3,
+          "weight_g": 325,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00223",
+      "customer_name": "Customer 223",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 5933,
+          "quantity": 1,
+          "weight_g": 324,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6132,
+          "quantity": 2,
+          "weight_g": 325,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6331,
+          "quantity": 3,
+          "weight_g": 326,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6530,
+          "quantity": 4,
+          "weight_g": 327,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00224",
+      "customer_name": "Customer 224",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6004,
+          "quantity": 1,
+          "weight_g": 325,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00225",
+      "customer_name": "Customer 225",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6075,
+          "quantity": 1,
+          "weight_g": 326,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6274,
+          "quantity": 2,
+          "weight_g": 327,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00226",
+      "customer_name": "Customer 226",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6146,
+          "quantity": 1,
+          "weight_g": 327,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6345,
+          "quantity": 2,
+          "weight_g": 328,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6544,
+          "quantity": 3,
+          "weight_g": 329,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00227",
+      "customer_name": "Customer 227",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6217,
+          "quantity": 1,
+          "weight_g": 328,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6416,
+          "quantity": 2,
+          "weight_g": 329,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6615,
+          "quantity": 3,
+          "weight_g": 330,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6814,
+          "quantity": 4,
+          "weight_g": 331,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00228",
+      "customer_name": "Customer 228",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6288,
+          "quantity": 1,
+          "weight_g": 329,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00229",
+      "customer_name": "Customer 229",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6359,
+          "quantity": 1,
+          "weight_g": 330,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6558,
+          "quantity": 2,
+          "weight_g": 331,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00230",
+      "customer_name": "Customer 230",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6430,
+          "quantity": 1,
+          "weight_g": 331,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6629,
+          "quantity": 2,
+          "weight_g": 332,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6828,
+          "quantity": 3,
+          "weight_g": 333,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00231",
+      "customer_name": "Customer 231",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6501,
+          "quantity": 1,
+          "weight_g": 332,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 6700,
+          "quantity": 2,
+          "weight_g": 333,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 6899,
+          "quantity": 3,
+          "weight_g": 334,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7098,
+          "quantity": 4,
+          "weight_g": 335,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00232",
+      "customer_name": "Customer 232",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6572,
+          "quantity": 1,
+          "weight_g": 333,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00233",
+      "customer_name": "Customer 233",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6643,
+          "quantity": 1,
+          "weight_g": 334,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6842,
+          "quantity": 2,
+          "weight_g": 335,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00234",
+      "customer_name": "Customer 234",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6714,
+          "quantity": 1,
+          "weight_g": 335,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6913,
+          "quantity": 2,
+          "weight_g": 336,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7112,
+          "quantity": 3,
+          "weight_g": 337,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00235",
+      "customer_name": "Customer 235",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 6785,
+          "quantity": 1,
+          "weight_g": 336,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 6984,
+          "quantity": 2,
+          "weight_g": 337,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7183,
+          "quantity": 3,
+          "weight_g": 338,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7382,
+          "quantity": 4,
+          "weight_g": 339,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00236",
+      "customer_name": "Customer 236",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 6856,
+          "quantity": 1,
+          "weight_g": 337,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00237",
+      "customer_name": "Customer 237",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 6927,
+          "quantity": 1,
+          "weight_g": 338,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7126,
+          "quantity": 2,
+          "weight_g": 339,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00238",
+      "customer_name": "Customer 238",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 6998,
+          "quantity": 1,
+          "weight_g": 339,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7197,
+          "quantity": 2,
+          "weight_g": 340,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7396,
+          "quantity": 3,
+          "weight_g": 341,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00239",
+      "customer_name": "Customer 239",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7069,
+          "quantity": 1,
+          "weight_g": 340,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7268,
+          "quantity": 2,
+          "weight_g": 341,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7467,
+          "quantity": 3,
+          "weight_g": 342,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7666,
+          "quantity": 4,
+          "weight_g": 343,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00240",
+      "customer_name": "Customer 240",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7140,
+          "quantity": 1,
+          "weight_g": 341,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00241",
+      "customer_name": "Customer 241",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7211,
+          "quantity": 1,
+          "weight_g": 342,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7410,
+          "quantity": 2,
+          "weight_g": 343,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00242",
+      "customer_name": "Customer 242",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7282,
+          "quantity": 1,
+          "weight_g": 343,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7481,
+          "quantity": 2,
+          "weight_g": 344,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7680,
+          "quantity": 3,
+          "weight_g": 345,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00243",
+      "customer_name": "Customer 243",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7353,
+          "quantity": 1,
+          "weight_g": 344,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7552,
+          "quantity": 2,
+          "weight_g": 345,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7751,
+          "quantity": 3,
+          "weight_g": 346,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7950,
+          "quantity": 4,
+          "weight_g": 347,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00244",
+      "customer_name": "Customer 244",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7424,
+          "quantity": 1,
+          "weight_g": 345,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00245",
+      "customer_name": "Customer 245",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7495,
+          "quantity": 1,
+          "weight_g": 346,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 7694,
+          "quantity": 2,
+          "weight_g": 347,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00246",
+      "customer_name": "Customer 246",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7566,
+          "quantity": 1,
+          "weight_g": 347,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7765,
+          "quantity": 2,
+          "weight_g": 348,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7964,
+          "quantity": 3,
+          "weight_g": 349,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00247",
+      "customer_name": "Customer 247",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7637,
+          "quantity": 1,
+          "weight_g": 348,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7836,
+          "quantity": 2,
+          "weight_g": 349,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8035,
+          "quantity": 3,
+          "weight_g": 350,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8234,
+          "quantity": 4,
+          "weight_g": 351,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00248",
+      "customer_name": "Customer 248",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7708,
+          "quantity": 1,
+          "weight_g": 349,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00249",
+      "customer_name": "Customer 249",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 7779,
+          "quantity": 1,
+          "weight_g": 350,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 7978,
+          "quantity": 2,
+          "weight_g": 351,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00250",
+      "customer_name": "Customer 250",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 7850,
+          "quantity": 1,
+          "weight_g": 351,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8049,
+          "quantity": 2,
+          "weight_g": 352,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8248,
+          "quantity": 3,
+          "weight_g": 353,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00251",
+      "customer_name": "Customer 251",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 7921,
+          "quantity": 1,
+          "weight_g": 352,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8120,
+          "quantity": 2,
+          "weight_g": 353,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8319,
+          "quantity": 3,
+          "weight_g": 354,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8518,
+          "quantity": 4,
+          "weight_g": 355,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00252",
+      "customer_name": "Customer 252",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 7992,
+          "quantity": 1,
+          "weight_g": 353,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00253",
+      "customer_name": "Customer 253",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8063,
+          "quantity": 1,
+          "weight_g": 354,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8262,
+          "quantity": 2,
+          "weight_g": 355,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00254",
+      "customer_name": "Customer 254",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8134,
+          "quantity": 1,
+          "weight_g": 355,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8333,
+          "quantity": 2,
+          "weight_g": 356,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8532,
+          "quantity": 3,
+          "weight_g": 357,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00255",
+      "customer_name": "Customer 255",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8205,
+          "quantity": 1,
+          "weight_g": 356,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8404,
+          "quantity": 2,
+          "weight_g": 357,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8603,
+          "quantity": 3,
+          "weight_g": 358,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8802,
+          "quantity": 4,
+          "weight_g": 359,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00256",
+      "customer_name": "Customer 256",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8276,
+          "quantity": 1,
+          "weight_g": 357,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00257",
+      "customer_name": "Customer 257",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8347,
+          "quantity": 1,
+          "weight_g": 358,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8546,
+          "quantity": 2,
+          "weight_g": 359,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00258",
+      "customer_name": "Customer 258",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8418,
+          "quantity": 1,
+          "weight_g": 359,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8617,
+          "quantity": 2,
+          "weight_g": 360,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8816,
+          "quantity": 3,
+          "weight_g": 361,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00259",
+      "customer_name": "Customer 259",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8489,
+          "quantity": 1,
+          "weight_g": 360,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 8688,
+          "quantity": 2,
+          "weight_g": 361,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 8887,
+          "quantity": 3,
+          "weight_g": 362,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9086,
+          "quantity": 4,
+          "weight_g": 363,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00260",
+      "customer_name": "Customer 260",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8560,
+          "quantity": 1,
+          "weight_g": 361,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00261",
+      "customer_name": "Customer 261",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8631,
+          "quantity": 1,
+          "weight_g": 362,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8830,
+          "quantity": 2,
+          "weight_g": 363,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00262",
+      "customer_name": "Customer 262",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8702,
+          "quantity": 1,
+          "weight_g": 363,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8901,
+          "quantity": 2,
+          "weight_g": 364,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9100,
+          "quantity": 3,
+          "weight_g": 365,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00263",
+      "customer_name": "Customer 263",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8773,
+          "quantity": 1,
+          "weight_g": 364,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 8972,
+          "quantity": 2,
+          "weight_g": 365,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9171,
+          "quantity": 3,
+          "weight_g": 366,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9370,
+          "quantity": 4,
+          "weight_g": 367,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00264",
+      "customer_name": "Customer 264",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 8844,
+          "quantity": 1,
+          "weight_g": 365,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00265",
+      "customer_name": "Customer 265",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 8915,
+          "quantity": 1,
+          "weight_g": 366,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9114,
+          "quantity": 2,
+          "weight_g": 367,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00266",
+      "customer_name": "Customer 266",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 8986,
+          "quantity": 1,
+          "weight_g": 367,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9185,
+          "quantity": 2,
+          "weight_g": 368,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9384,
+          "quantity": 3,
+          "weight_g": 369,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00267",
+      "customer_name": "Customer 267",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9057,
+          "quantity": 1,
+          "weight_g": 368,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9256,
+          "quantity": 2,
+          "weight_g": 369,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9455,
+          "quantity": 3,
+          "weight_g": 370,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9654,
+          "quantity": 4,
+          "weight_g": 371,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00268",
+      "customer_name": "Customer 268",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9128,
+          "quantity": 1,
+          "weight_g": 369,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00269",
+      "customer_name": "Customer 269",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9199,
+          "quantity": 1,
+          "weight_g": 370,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9398,
+          "quantity": 2,
+          "weight_g": 371,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00270",
+      "customer_name": "Customer 270",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9270,
+          "quantity": 1,
+          "weight_g": 371,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9469,
+          "quantity": 2,
+          "weight_g": 372,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9668,
+          "quantity": 3,
+          "weight_g": 373,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00271",
+      "customer_name": "Customer 271",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9341,
+          "quantity": 1,
+          "weight_g": 372,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9540,
+          "quantity": 2,
+          "weight_g": 373,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9739,
+          "quantity": 3,
+          "weight_g": 374,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 37,
+          "quantity": 4,
+          "weight_g": 375,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00272",
+      "customer_name": "Customer 272",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9412,
+          "quantity": 1,
+          "weight_g": 373,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00273",
+      "customer_name": "Customer 273",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9483,
+          "quantity": 1,
+          "weight_g": 374,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 9682,
+          "quantity": 2,
+          "weight_g": 375,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00274",
+      "customer_name": "Customer 274",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9554,
+          "quantity": 1,
+          "weight_g": 375,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9753,
+          "quantity": 2,
+          "weight_g": 376,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 51,
+          "quantity": 3,
+          "weight_g": 377,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00275",
+      "customer_name": "Customer 275",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 9625,
+          "quantity": 1,
+          "weight_g": 376,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 9824,
+          "quantity": 2,
+          "weight_g": 377,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 122,
+          "quantity": 3,
+          "weight_g": 378,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 321,
+          "quantity": 4,
+          "weight_g": 379,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00276",
+      "customer_name": "Customer 276",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 9696,
+          "quantity": 1,
+          "weight_g": 377,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00277",
+      "customer_name": "Customer 277",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 9767,
+          "quantity": 1,
+          "weight_g": 378,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 65,
+          "quantity": 2,
+          "weight_g": 379,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00278",
+      "customer_name": "Customer 278",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 9838,
+          "quantity": 1,
+          "weight_g": 379,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 136,
+          "quantity": 2,
+          "weight_g": 380,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 335,
+          "quantity": 3,
+          "weight_g": 381,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00279",
+      "customer_name": "Customer 279",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 8,
+          "quantity": 1,
+          "weight_g": 380,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 207,
+          "quantity": 2,
+          "weight_g": 381,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 406,
+          "quantity": 3,
+          "weight_g": 382,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 605,
+          "quantity": 4,
+          "weight_g": 383,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    }
+  ],
+  "carriers": [
+    {
+      "carrier_id": "carrier-a",
+      "zones": [
+        "EU",
+        "US",
+        "AP",
+        "MOON"
+      ],
+      "hazardous": true,
+      "flat_cents": 0,
+      "per_kg_cents": 0
+    }
+  ],
+  "holds": [],
+  "policy": {
+    "free_shipping_min_cents": 1000000000000
+  }
+}

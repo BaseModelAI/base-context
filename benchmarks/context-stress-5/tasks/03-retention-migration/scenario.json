@@ -1,0 +1,64 @@
+{
+  "schema": "context-workflow-stress-task/v1",
+  "id": 3,
+  "slug": "retention-migration",
+  "title": "Privacy retention migration through compact and resume",
+  "pressure": "targeted-staged",
+  "timeout_seconds": 2700,
+  "editable_paths": [
+    "solution/",
+    "output/",
+    "notes/"
+  ],
+  "initial_prompt": "Read TASK.md. Prepare the privacy-safe customer retention migration and export view for the initial snapshot. Keep the exact original external keys, including leading zeroes. Never export names or emails. The fixed reference date is 2026-10-01.",
+  "stages": [
+    {
+      "id": "stage-1",
+      "inject": "visible/",
+      "message": "Read TASK.md. Prepare the privacy-safe customer retention migration and export view for the initial snapshot. Keep the exact original external keys, including leading zeroes. Never export names or emails. The fixed reference date is 2026-10-01.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-2",
+      "inject": "stages/02/",
+      "message": "The CRM team delivered an expanded customer snapshot with older contact dates. Customers last contacted more than 90 days before the reference date are stale; exactly 90 days is not stale. Populate retention_decisions and update the export view. Preserve the original instructions.",
+      "compact_after": true,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-3",
+      "inject": "stages/03/",
+      "message": "Legal holds are now populated. A hold with expires_day on or after the reference date is active and prevents stale-contact email redaction. An expired hold does not. Use action=keep, reason=legal_hold for an active hold unless opt-out takes precedence.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-4",
+      "inject": "stages/04/",
+      "message": "The support snapshot now includes tickets. Count tickets in open or pending state. A positive count assigns action=keep, reason=open_support to a customer of any age, including recent and exactly-90-day contacts, unless an active legal hold or opt-out takes precedence. This protects otherwise-stale customers from redaction. Closed tickets never protect.",
+      "compact_after": true,
+      "cold_resume_after": true
+    },
+    {
+      "id": "stage-5",
+      "inject": "stages/05/",
+      "message": "Privacy operations supplied opt-outs. An opted-out customer always has action=redact, reason=opt_out and email=NULL, even with an active hold or open ticket. Other protected customers retain their exact original email. Refresh the derived table from current inputs.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-6",
+      "inject": "stages/06/",
+      "message": "The final export includes boundary dates, expired holds, and duplicate ticket subjects under different ticket IDs. Finalize solution/migrate.sql. It must run twice safely against a fresh copy of the final snapshot. Preserve all customer rows, keys, names, and unrelated source tables.",
+      "compact_after": false,
+      "cold_resume_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

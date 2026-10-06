@@ -1,0 +1,8 @@
+{
+  "sign_convention": "service clock = UTC + offset_ms",
+  "offset_ms": {
+    "deploy": 3000,
+    "checkout": 9000,
+    "gateway": -2500
+  }
+}

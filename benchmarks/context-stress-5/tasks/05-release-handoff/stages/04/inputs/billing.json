@@ -1,0 +1,1730 @@
+[
+  {
+    "service_id": "svc-000",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 80000
+  },
+  {
+    "service_id": "svc-000",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 80911
+  },
+  {
+    "service_id": "svc-000",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 81822
+  },
+  {
+    "service_id": "svc-001",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 80491
+  },
+  {
+    "service_id": "svc-001",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 81402
+  },
+  {
+    "service_id": "svc-001",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 82313
+  },
+  {
+    "service_id": "svc-002",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 80982
+  },
+  {
+    "service_id": "svc-002",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 81893
+  },
+  {
+    "service_id": "svc-002",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 82804
+  },
+  {
+    "service_id": "svc-003",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 81473
+  },
+  {
+    "service_id": "svc-003",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 82384
+  },
+  {
+    "service_id": "svc-003",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 83295
+  },
+  {
+    "service_id": "svc-004",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 81964
+  },
+  {
+    "service_id": "svc-004",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 82875
+  },
+  {
+    "service_id": "svc-004",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 83786
+  },
+  {
+    "service_id": "svc-005",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 82455
+  },
+  {
+    "service_id": "svc-005",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 83366
+  },
+  {
+    "service_id": "svc-005",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 84277
+  },
+  {
+    "service_id": "svc-006",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 82946
+  },
+  {
+    "service_id": "svc-006",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 83857
+  },
+  {
+    "service_id": "svc-006",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 84768
+  },
+  {
+    "service_id": "svc-007",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 83437
+  },
+  {
+    "service_id": "svc-007",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 84348
+  },
+  {
+    "service_id": "svc-007",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 85259
+  },
+  {
+    "service_id": "svc-008",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 83928
+  },
+  {
+    "service_id": "svc-008",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 84839
+  },
+  {
+    "service_id": "svc-008",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 85750
+  },
+  {
+    "service_id": "svc-009",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 84419
+  },
+  {
+    "service_id": "svc-009",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 85330
+  },
+  {
+    "service_id": "svc-009",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 86241
+  },
+  {
+    "service_id": "svc-010",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 84910
+  },
+  {
+    "service_id": "svc-010",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 85821
+  },
+  {
+    "service_id": "svc-010",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 86732
+  },
+  {
+    "service_id": "svc-011",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 85401
+  },
+  {
+    "service_id": "svc-011",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 86312
+  },
+  {
+    "service_id": "svc-011",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 87223
+  },
+  {
+    "service_id": "svc-012",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 85892
+  },
+  {
+    "service_id": "svc-012",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 86803
+  },
+  {
+    "service_id": "svc-012",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 87714
+  },
+  {
+    "service_id": "svc-013",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 86383
+  },
+  {
+    "service_id": "svc-013",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 87294
+  },
+  {
+    "service_id": "svc-013",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 88205
+  },
+  {
+    "service_id": "svc-014",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 86874
+  },
+  {
+    "service_id": "svc-014",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 87785
+  },
+  {
+    "service_id": "svc-014",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 88696
+  },
+  {
+    "service_id": "svc-015",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 87365
+  },
+  {
+    "service_id": "svc-015",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 88276
+  },
+  {
+    "service_id": "svc-015",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 89187
+  },
+  {
+    "service_id": "svc-016",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 87856
+  },
+  {
+    "service_id": "svc-016",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 88767
+  },
+  {
+    "service_id": "svc-016",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 89678
+  },
+  {
+    "service_id": "svc-017",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 88347
+  },
+  {
+    "service_id": "svc-017",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 89258
+  },
+  {
+    "service_id": "svc-017",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 90169
+  },
+  {
+    "service_id": "svc-018",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 88838
+  },
+  {
+    "service_id": "svc-018",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 89749
+  },
+  {
+    "service_id": "svc-018",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 90660
+  },
+  {
+    "service_id": "svc-019",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 89329
+  },
+  {
+    "service_id": "svc-019",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 90240
+  },
+  {
+    "service_id": "svc-019",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 91151
+  },
+  {
+    "service_id": "svc-020",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 89820
+  },
+  {
+    "service_id": "svc-020",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 90731
+  },
+  {
+    "service_id": "svc-020",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 91642
+  },
+  {
+    "service_id": "svc-021",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 90311
+  },
+  {
+    "service_id": "svc-021",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 91222
+  },
+  {
+    "service_id": "svc-021",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 92133
+  },
+  {
+    "service_id": "svc-022",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 90802
+  },
+  {
+    "service_id": "svc-022",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 91713
+  },
+  {
+    "service_id": "svc-022",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 92624
+  },
+  {
+    "service_id": "svc-023",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 91293
+  },
+  {
+    "service_id": "svc-023",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 92204
+  },
+  {
+    "service_id": "svc-023",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 93115
+  },
+  {
+    "service_id": "svc-024",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 91784
+  },
+  {
+    "service_id": "svc-024",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 92695
+  },
+  {
+    "service_id": "svc-024",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 93606
+  },
+  {
+    "service_id": "svc-025",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 92275
+  },
+  {
+    "service_id": "svc-025",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 93186
+  },
+  {
+    "service_id": "svc-025",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 94097
+  },
+  {
+    "service_id": "svc-026",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 92766
+  },
+  {
+    "service_id": "svc-026",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 93677
+  },
+  {
+    "service_id": "svc-026",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 94588
+  },
+  {
+    "service_id": "svc-027",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 93257
+  },
+  {
+    "service_id": "svc-027",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 94168
+  },
+  {
+    "service_id": "svc-027",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 95079
+  },
+  {
+    "service_id": "svc-028",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 93748
+  },
+  {
+    "service_id": "svc-028",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 94659
+  },
+  {
+    "service_id": "svc-028",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 95570
+  },
+  {
+    "service_id": "svc-029",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 94239
+  },
+  {
+    "service_id": "svc-029",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 95150
+  },
+  {
+    "service_id": "svc-029",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 96061
+  },
+  {
+    "service_id": "svc-030",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 94730
+  },
+  {
+    "service_id": "svc-030",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 95641
+  },
+  {
+    "service_id": "svc-030",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 96552
+  },
+  {
+    "service_id": "svc-031",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 95221
+  },
+  {
+    "service_id": "svc-031",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 96132
+  },
+  {
+    "service_id": "svc-031",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 97043
+  },
+  {
+    "service_id": "svc-032",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 95712
+  },
+  {
+    "service_id": "svc-032",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 96623
+  },
+  {
+    "service_id": "svc-032",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 97534
+  },
+  {
+    "service_id": "svc-033",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 96203
+  },
+  {
+    "service_id": "svc-033",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 97114
+  },
+  {
+    "service_id": "svc-033",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 98025
+  },
+  {
+    "service_id": "svc-034",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 96694
+  },
+  {
+    "service_id": "svc-034",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 97605
+  },
+  {
+    "service_id": "svc-034",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 98516
+  },
+  {
+    "service_id": "svc-035",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 97185
+  },
+  {
+    "service_id": "svc-035",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 98096
+  },
+  {
+    "service_id": "svc-035",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 99007
+  },
+  {
+    "service_id": "svc-036",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 97676
+  },
+  {
+    "service_id": "svc-036",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 98587
+  },
+  {
+    "service_id": "svc-036",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 99498
+  },
+  {
+    "service_id": "svc-037",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 98167
+  },
+  {
+    "service_id": "svc-037",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 99078
+  },
+  {
+    "service_id": "svc-037",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 99989
+  },
+  {
+    "service_id": "svc-038",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 98658
+  },
+  {
+    "service_id": "svc-038",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 99569
+  },
+  {
+    "service_id": "svc-038",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 100480
+  },
+  {
+    "service_id": "svc-039",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 99149
+  },
+  {
+    "service_id": "svc-039",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 100060
+  },
+  {
+    "service_id": "svc-039",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 100971
+  },
+  {
+    "service_id": "svc-040",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 99640
+  },
+  {
+    "service_id": "svc-040",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 100551
+  },
+  {
+    "service_id": "svc-040",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 101462
+  },
+  {
+    "service_id": "svc-041",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 100131
+  },
+  {
+    "service_id": "svc-041",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 101042
+  },
+  {
+    "service_id": "svc-041",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 101953
+  },
+  {
+    "service_id": "svc-042",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 100622
+  },
+  {
+    "service_id": "svc-042",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 101533
+  },
+  {
+    "service_id": "svc-042",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 102444
+  },
+  {
+    "service_id": "svc-043",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 101113
+  },
+  {
+    "service_id": "svc-043",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 102024
+  },
+  {
+    "service_id": "svc-043",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 102935
+  },
+  {
+    "service_id": "svc-044",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 101604
+  },
+  {
+    "service_id": "svc-044",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 102515
+  },
+  {
+    "service_id": "svc-044",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 103426
+  },
+  {
+    "service_id": "svc-045",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 102095
+  },
+  {
+    "service_id": "svc-045",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 103006
+  },
+  {
+    "service_id": "svc-045",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 103917
+  },
+  {
+    "service_id": "svc-046",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 102586
+  },
+  {
+    "service_id": "svc-046",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 103497
+  },
+  {
+    "service_id": "svc-046",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 104408
+  },
+  {
+    "service_id": "svc-047",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 103077
+  },
+  {
+    "service_id": "svc-047",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 103988
+  },
+  {
+    "service_id": "svc-047",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 104899
+  },
+  {
+    "service_id": "svc-048",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 103568
+  },
+  {
+    "service_id": "svc-048",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 104479
+  },
+  {
+    "service_id": "svc-048",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 105390
+  },
+  {
+    "service_id": "svc-049",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 104059
+  },
+  {
+    "service_id": "svc-049",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 104970
+  },
+  {
+    "service_id": "svc-049",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 105881
+  },
+  {
+    "service_id": "svc-050",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 104550
+  },
+  {
+    "service_id": "svc-050",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 105461
+  },
+  {
+    "service_id": "svc-050",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 106372
+  },
+  {
+    "service_id": "svc-051",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 105041
+  },
+  {
+    "service_id": "svc-051",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 105952
+  },
+  {
+    "service_id": "svc-051",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 106863
+  },
+  {
+    "service_id": "svc-052",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 105532
+  },
+  {
+    "service_id": "svc-052",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 106443
+  },
+  {
+    "service_id": "svc-052",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 107354
+  },
+  {
+    "service_id": "svc-053",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 106023
+  },
+  {
+    "service_id": "svc-053",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 106934
+  },
+  {
+    "service_id": "svc-053",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 107845
+  },
+  {
+    "service_id": "svc-054",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 106514
+  },
+  {
+    "service_id": "svc-054",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 107425
+  },
+  {
+    "service_id": "svc-054",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 108336
+  },
+  {
+    "service_id": "svc-055",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 107005
+  },
+  {
+    "service_id": "svc-055",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 107916
+  },
+  {
+    "service_id": "svc-055",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 108827
+  },
+  {
+    "service_id": "svc-056",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 107496
+  },
+  {
+    "service_id": "svc-056",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 108407
+  },
+  {
+    "service_id": "svc-056",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 109318
+  },
+  {
+    "service_id": "svc-057",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 107987
+  },
+  {
+    "service_id": "svc-057",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 108898
+  },
+  {
+    "service_id": "svc-057",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 109809
+  },
+  {
+    "service_id": "svc-058",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 108478
+  },
+  {
+    "service_id": "svc-058",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 109389
+  },
+  {
+    "service_id": "svc-058",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 110300
+  },
+  {
+    "service_id": "svc-059",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 108969
+  },
+  {
+    "service_id": "svc-059",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 109880
+  },
+  {
+    "service_id": "svc-059",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 110791
+  },
+  {
+    "service_id": "svc-060",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 109460
+  },
+  {
+    "service_id": "svc-060",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 110371
+  },
+  {
+    "service_id": "svc-060",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 111282
+  },
+  {
+    "service_id": "svc-061",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 109951
+  },
+  {
+    "service_id": "svc-061",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 110862
+  },
+  {
+    "service_id": "svc-061",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 111773
+  },
+  {
+    "service_id": "svc-062",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 110442
+  },
+  {
+    "service_id": "svc-062",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 111353
+  },
+  {
+    "service_id": "svc-062",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 112264
+  },
+  {
+    "service_id": "svc-063",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 110933
+  },
+  {
+    "service_id": "svc-063",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 111844
+  },
+  {
+    "service_id": "svc-063",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 112755
+  },
+  {
+    "service_id": "svc-064",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 111424
+  },
+  {
+    "service_id": "svc-064",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 112335
+  },
+  {
+    "service_id": "svc-064",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 113246
+  },
+  {
+    "service_id": "svc-065",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 111915
+  },
+  {
+    "service_id": "svc-065",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 112826
+  },
+  {
+    "service_id": "svc-065",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 113737
+  },
+  {
+    "service_id": "svc-066",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 112406
+  },
+  {
+    "service_id": "svc-066",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 113317
+  },
+  {
+    "service_id": "svc-066",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 114228
+  },
+  {
+    "service_id": "svc-067",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 112897
+  },
+  {
+    "service_id": "svc-067",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 113808
+  },
+  {
+    "service_id": "svc-067",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 114719
+  },
+  {
+    "service_id": "svc-068",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 113388
+  },
+  {
+    "service_id": "svc-068",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 114299
+  },
+  {
+    "service_id": "svc-068",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 115210
+  },
+  {
+    "service_id": "svc-069",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 113879
+  },
+  {
+    "service_id": "svc-069",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 114790
+  },
+  {
+    "service_id": "svc-069",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 115701
+  },
+  {
+    "service_id": "svc-070",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 114370
+  },
+  {
+    "service_id": "svc-070",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 115281
+  },
+  {
+    "service_id": "svc-070",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 116192
+  },
+  {
+    "service_id": "svc-071",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 114861
+  },
+  {
+    "service_id": "svc-071",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 115772
+  },
+  {
+    "service_id": "svc-071",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 116683
+  },
+  {
+    "service_id": "svc-072",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 115352
+  },
+  {
+    "service_id": "svc-072",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 116263
+  },
+  {
+    "service_id": "svc-072",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 117174
+  },
+  {
+    "service_id": "svc-073",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 115843
+  },
+  {
+    "service_id": "svc-073",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 116754
+  },
+  {
+    "service_id": "svc-073",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 117665
+  },
+  {
+    "service_id": "svc-074",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 116334
+  },
+  {
+    "service_id": "svc-074",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 117245
+  },
+  {
+    "service_id": "svc-074",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 118156
+  },
+  {
+    "service_id": "svc-075",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 116825
+  },
+  {
+    "service_id": "svc-075",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 117736
+  },
+  {
+    "service_id": "svc-075",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 118647
+  },
+  {
+    "service_id": "svc-076",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 117316
+  },
+  {
+    "service_id": "svc-076",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 118227
+  },
+  {
+    "service_id": "svc-076",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 119138
+  },
+  {
+    "service_id": "svc-077",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 117807
+  },
+  {
+    "service_id": "svc-077",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 118718
+  },
+  {
+    "service_id": "svc-077",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 119629
+  },
+  {
+    "service_id": "svc-078",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 118298
+  },
+  {
+    "service_id": "svc-078",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 119209
+  },
+  {
+    "service_id": "svc-078",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 120120
+  },
+  {
+    "service_id": "svc-079",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 118789
+  },
+  {
+    "service_id": "svc-079",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 119700
+  },
+  {
+    "service_id": "svc-079",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 120611
+  },
+  {
+    "service_id": "svc-080",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 119280
+  },
+  {
+    "service_id": "svc-080",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 120191
+  },
+  {
+    "service_id": "svc-080",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 121102
+  },
+  {
+    "service_id": "svc-081",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 119771
+  },
+  {
+    "service_id": "svc-081",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 120682
+  },
+  {
+    "service_id": "svc-081",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 121593
+  },
+  {
+    "service_id": "svc-082",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 120262
+  },
+  {
+    "service_id": "svc-082",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 121173
+  },
+  {
+    "service_id": "svc-082",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 122084
+  },
+  {
+    "service_id": "svc-083",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 120753
+  },
+  {
+    "service_id": "svc-083",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 121664
+  },
+  {
+    "service_id": "svc-083",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 122575
+  },
+  {
+    "service_id": "svc-084",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 121244
+  },
+  {
+    "service_id": "svc-084",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 122155
+  },
+  {
+    "service_id": "svc-084",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 123066
+  },
+  {
+    "service_id": "svc-085",
+    "region": "eu-west",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 121735
+  },
+  {
+    "service_id": "svc-085",
+    "region": "us-east",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 122646
+  },
+  {
+    "service_id": "svc-085",
+    "region": "ap-south",
+    "hourly_cents": 20,
+    "monthly_budget_cents": 123557
+  },
+  {
+    "service_id": "svc-086",
+    "region": "eu-west",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 122226
+  },
+  {
+    "service_id": "svc-086",
+    "region": "us-east",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 123137
+  },
+  {
+    "service_id": "svc-086",
+    "region": "ap-south",
+    "hourly_cents": 21,
+    "monthly_budget_cents": 124048
+  },
+  {
+    "service_id": "svc-087",
+    "region": "eu-west",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 122717
+  },
+  {
+    "service_id": "svc-087",
+    "region": "us-east",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 123628
+  },
+  {
+    "service_id": "svc-087",
+    "region": "ap-south",
+    "hourly_cents": 22,
+    "monthly_budget_cents": 124539
+  },
+  {
+    "service_id": "svc-088",
+    "region": "eu-west",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 123208
+  },
+  {
+    "service_id": "svc-088",
+    "region": "us-east",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 124119
+  },
+  {
+    "service_id": "svc-088",
+    "region": "ap-south",
+    "hourly_cents": 12,
+    "monthly_budget_cents": 125030
+  },
+  {
+    "service_id": "svc-089",
+    "region": "eu-west",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 123699
+  },
+  {
+    "service_id": "svc-089",
+    "region": "us-east",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 124610
+  },
+  {
+    "service_id": "svc-089",
+    "region": "ap-south",
+    "hourly_cents": 13,
+    "monthly_budget_cents": 125521
+  },
+  {
+    "service_id": "svc-090",
+    "region": "eu-west",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 124190
+  },
+  {
+    "service_id": "svc-090",
+    "region": "us-east",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 125101
+  },
+  {
+    "service_id": "svc-090",
+    "region": "ap-south",
+    "hourly_cents": 14,
+    "monthly_budget_cents": 126012
+  },
+  {
+    "service_id": "svc-091",
+    "region": "eu-west",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 124681
+  },
+  {
+    "service_id": "svc-091",
+    "region": "us-east",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 125592
+  },
+  {
+    "service_id": "svc-091",
+    "region": "ap-south",
+    "hourly_cents": 15,
+    "monthly_budget_cents": 126503
+  },
+  {
+    "service_id": "svc-092",
+    "region": "eu-west",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 125172
+  },
+  {
+    "service_id": "svc-092",
+    "region": "us-east",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 126083
+  },
+  {
+    "service_id": "svc-092",
+    "region": "ap-south",
+    "hourly_cents": 16,
+    "monthly_budget_cents": 126994
+  },
+  {
+    "service_id": "svc-093",
+    "region": "eu-west",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 125663
+  },
+  {
+    "service_id": "svc-093",
+    "region": "us-east",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 126574
+  },
+  {
+    "service_id": "svc-093",
+    "region": "ap-south",
+    "hourly_cents": 17,
+    "monthly_budget_cents": 127485
+  },
+  {
+    "service_id": "svc-094",
+    "region": "eu-west",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 126154
+  },
+  {
+    "service_id": "svc-094",
+    "region": "us-east",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 127065
+  },
+  {
+    "service_id": "svc-094",
+    "region": "ap-south",
+    "hourly_cents": 18,
+    "monthly_budget_cents": 127976
+  },
+  {
+    "service_id": "svc-095",
+    "region": "eu-west",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 126645
+  },
+  {
+    "service_id": "svc-095",
+    "region": "us-east",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 127556
+  },
+  {
+    "service_id": "svc-095",
+    "region": "ap-south",
+    "hourly_cents": 19,
+    "monthly_budget_cents": 128467
+  }
+]

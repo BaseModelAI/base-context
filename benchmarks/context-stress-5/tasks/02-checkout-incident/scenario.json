@@ -1,0 +1,65 @@
+{
+  "schema": "context-workflow-stress-task/v1",
+  "id": 2,
+  "slug": "checkout-incident",
+  "title": "Large-output checkout incident and narrow rollback",
+  "pressure": "targeted-staged",
+  "timeout_seconds": 2700,
+  "editable_paths": [
+    "config/",
+    "solution/",
+    "output/",
+    "notes/"
+  ],
+  "initial_prompt": "Read TASK.md. Investigate the checkout error spike using inputs/logs/day-01.jsonl and the current runtime configuration. Leave provisional structured findings and working notes. You can filter the source files or run node inputs/export.mjs; saving, redirecting, or repeating its output is allowed.",
+  "stages": [
+    {
+      "id": "stage-1",
+      "inject": "visible/",
+      "message": "Read TASK.md. Investigate the checkout error spike using inputs/logs/day-01.jsonl and the current runtime configuration. Leave provisional structured findings and working notes. You can filter the source files or run node inputs/export.mjs; saving, redirecting, or repeating its output is allowed.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-2",
+      "inject": "stages/02/",
+      "message": "The regional release catalog and gateway traces arrived. Determine which rollout changed behavior rather than blaming the nearest error in time. Keep the source event IDs, not just a prose summary. Do not edit configuration until the scope is established.",
+      "compact_after": true,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-3",
+      "inject": "stages/03/",
+      "message": "The upstream payment team supplied its independent traces. Join only same-region same-request events whose corrected UTC times differ by at most 120 seconds. A repeated request_id outside that interval is another request occurrence.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-4",
+      "inject": "stages/04/",
+      "message": "Clock calibration is now in inputs/clock-offsets.json. Each service clock equals UTC plus offset_ms; subtract the offset from raw_ms. Recompute first application error and first customer failure for the implicated release. Retain the raw source IDs.",
+      "compact_after": true,
+      "cold_resume_after": true
+    },
+    {
+      "id": "stage-5",
+      "inject": "stages/05/",
+      "message": "Operations approved rolling back only the implicated region\u2019s checkout timeout to the previous release value. Preserve every other JSON value, including independent emergency feature flags. Update config/runtime.json and the structured incident findings.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-6",
+      "inject": "stages/06/",
+      "message": "The archival replay includes a next-day occurrence of an already affected request ID and a same-time error in another region. Finalize output/incident.json. Exclude these unrelated occurrences; count the next-day occurrence under excluded_reused_request_count. Leave the narrow config rollback in place.",
+      "compact_after": false,
+      "cold_resume_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

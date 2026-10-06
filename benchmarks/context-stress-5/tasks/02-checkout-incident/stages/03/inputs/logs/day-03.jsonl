@@ -1,0 +1,8 @@
+{"event_id": "checkout-error-00", "raw_ms": 1790589628500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-000", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-01", "raw_ms": 1790589629500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-001", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-02", "raw_ms": 1790589630500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-002", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-03", "raw_ms": 1790589631500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-003", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-04", "raw_ms": 1790589632500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-004", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-05", "raw_ms": 1790589633500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-005", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-06", "raw_ms": 1790589634500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-006", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "checkout-error-retry-00", "raw_ms": 1790589628800, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-000", "code": "UPSTREAM_TIMEOUT", "status": 502}

@@ -1,0 +1,1 @@
+Approved: restore the previous eu-west checkout timeout only. Preserve emergency fraud_hold and every other current setting.

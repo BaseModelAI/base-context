@@ -1,0 +1,2018 @@
+[
+  {
+    "service_id": "svc-000",
+    "region": "eu-west",
+    "peak_rps": 140,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-000",
+    "region": "us-east",
+    "peak_rps": 177,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-000",
+    "region": "ap-south",
+    "peak_rps": 214,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-001",
+    "region": "eu-west",
+    "peak_rps": 241,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-001",
+    "region": "us-east",
+    "peak_rps": 278,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-001",
+    "region": "ap-south",
+    "peak_rps": 315,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-002",
+    "region": "eu-west",
+    "peak_rps": 342,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-002",
+    "region": "us-east",
+    "peak_rps": 379,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-002",
+    "region": "ap-south",
+    "peak_rps": 416,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-003",
+    "region": "eu-west",
+    "peak_rps": 443,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-003",
+    "region": "us-east",
+    "peak_rps": 480,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-003",
+    "region": "ap-south",
+    "peak_rps": 517,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-004",
+    "region": "eu-west",
+    "peak_rps": 544,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-004",
+    "region": "us-east",
+    "peak_rps": 581,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-004",
+    "region": "ap-south",
+    "peak_rps": 618,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-005",
+    "region": "eu-west",
+    "peak_rps": 645,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-005",
+    "region": "us-east",
+    "peak_rps": 682,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-005",
+    "region": "ap-south",
+    "peak_rps": 719,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-006",
+    "region": "eu-west",
+    "peak_rps": 746,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-006",
+    "region": "us-east",
+    "peak_rps": 783,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-006",
+    "region": "ap-south",
+    "peak_rps": 820,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-007",
+    "region": "eu-west",
+    "peak_rps": 847,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-007",
+    "region": "us-east",
+    "peak_rps": 884,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-007",
+    "region": "ap-south",
+    "peak_rps": 921,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-008",
+    "region": "eu-west",
+    "peak_rps": 948,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-008",
+    "region": "us-east",
+    "peak_rps": 985,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-008",
+    "region": "ap-south",
+    "peak_rps": 1022,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-009",
+    "region": "eu-west",
+    "peak_rps": 1049,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-009",
+    "region": "us-east",
+    "peak_rps": 1086,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-009",
+    "region": "ap-south",
+    "peak_rps": 1123,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-010",
+    "region": "eu-west",
+    "peak_rps": 1150,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-010",
+    "region": "us-east",
+    "peak_rps": 1187,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-010",
+    "region": "ap-south",
+    "peak_rps": 1224,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-011",
+    "region": "eu-west",
+    "peak_rps": 1251,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-011",
+    "region": "us-east",
+    "peak_rps": 1288,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-011",
+    "region": "ap-south",
+    "peak_rps": 1325,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-012",
+    "region": "eu-west",
+    "peak_rps": 1352,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-012",
+    "region": "us-east",
+    "peak_rps": 1389,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-012",
+    "region": "ap-south",
+    "peak_rps": 1426,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-013",
+    "region": "eu-west",
+    "peak_rps": 1453,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-013",
+    "region": "us-east",
+    "peak_rps": 1490,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-013",
+    "region": "ap-south",
+    "peak_rps": 1527,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-014",
+    "region": "eu-west",
+    "peak_rps": 1554,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-014",
+    "region": "us-east",
+    "peak_rps": 1591,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-014",
+    "region": "ap-south",
+    "peak_rps": 1628,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-015",
+    "region": "eu-west",
+    "peak_rps": 1655,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-015",
+    "region": "us-east",
+    "peak_rps": 1692,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-015",
+    "region": "ap-south",
+    "peak_rps": 1729,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-016",
+    "region": "eu-west",
+    "peak_rps": 1756,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-016",
+    "region": "us-east",
+    "peak_rps": 1793,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-016",
+    "region": "ap-south",
+    "peak_rps": 1830,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-017",
+    "region": "eu-west",
+    "peak_rps": 1857,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-017",
+    "region": "us-east",
+    "peak_rps": 1894,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-017",
+    "region": "ap-south",
+    "peak_rps": 1931,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-018",
+    "region": "eu-west",
+    "peak_rps": 1958,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-018",
+    "region": "us-east",
+    "peak_rps": 1995,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-018",
+    "region": "ap-south",
+    "peak_rps": 2032,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-019",
+    "region": "eu-west",
+    "peak_rps": 2059,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-019",
+    "region": "us-east",
+    "peak_rps": 2096,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-019",
+    "region": "ap-south",
+    "peak_rps": 2133,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-020",
+    "region": "eu-west",
+    "peak_rps": 2160,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-020",
+    "region": "us-east",
+    "peak_rps": 2197,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-020",
+    "region": "ap-south",
+    "peak_rps": 2234,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-021",
+    "region": "eu-west",
+    "peak_rps": 2261,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-021",
+    "region": "us-east",
+    "peak_rps": 2298,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-021",
+    "region": "ap-south",
+    "peak_rps": 2335,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-022",
+    "region": "eu-west",
+    "peak_rps": 2362,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-022",
+    "region": "us-east",
+    "peak_rps": 2399,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-022",
+    "region": "ap-south",
+    "peak_rps": 2436,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-023",
+    "region": "eu-west",
+    "peak_rps": 2463,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-023",
+    "region": "us-east",
+    "peak_rps": 2500,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-023",
+    "region": "ap-south",
+    "peak_rps": 2537,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-024",
+    "region": "eu-west",
+    "peak_rps": 164,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-024",
+    "region": "us-east",
+    "peak_rps": 201,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-024",
+    "region": "ap-south",
+    "peak_rps": 238,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-025",
+    "region": "eu-west",
+    "peak_rps": 265,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-025",
+    "region": "us-east",
+    "peak_rps": 302,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-025",
+    "region": "ap-south",
+    "peak_rps": 339,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-026",
+    "region": "eu-west",
+    "peak_rps": 366,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-026",
+    "region": "us-east",
+    "peak_rps": 403,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-026",
+    "region": "ap-south",
+    "peak_rps": 440,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-027",
+    "region": "eu-west",
+    "peak_rps": 467,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-027",
+    "region": "us-east",
+    "peak_rps": 504,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-027",
+    "region": "ap-south",
+    "peak_rps": 541,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-028",
+    "region": "eu-west",
+    "peak_rps": 568,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-028",
+    "region": "us-east",
+    "peak_rps": 605,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-028",
+    "region": "ap-south",
+    "peak_rps": 642,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-029",
+    "region": "eu-west",
+    "peak_rps": 669,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-029",
+    "region": "us-east",
+    "peak_rps": 706,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-029",
+    "region": "ap-south",
+    "peak_rps": 743,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-030",
+    "region": "eu-west",
+    "peak_rps": 770,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-030",
+    "region": "us-east",
+    "peak_rps": 807,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-030",
+    "region": "ap-south",
+    "peak_rps": 844,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-031",
+    "region": "eu-west",
+    "peak_rps": 871,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-031",
+    "region": "us-east",
+    "peak_rps": 908,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-031",
+    "region": "ap-south",
+    "peak_rps": 945,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-032",
+    "region": "eu-west",
+    "peak_rps": 972,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-032",
+    "region": "us-east",
+    "peak_rps": 1009,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-032",
+    "region": "ap-south",
+    "peak_rps": 1046,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-033",
+    "region": "eu-west",
+    "peak_rps": 1073,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-033",
+    "region": "us-east",
+    "peak_rps": 1110,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-033",
+    "region": "ap-south",
+    "peak_rps": 1147,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-034",
+    "region": "eu-west",
+    "peak_rps": 1174,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-034",
+    "region": "us-east",
+    "peak_rps": 1211,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-034",
+    "region": "ap-south",
+    "peak_rps": 1248,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-035",
+    "region": "eu-west",
+    "peak_rps": 1275,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-035",
+    "region": "us-east",
+    "peak_rps": 1312,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-035",
+    "region": "ap-south",
+    "peak_rps": 1349,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-036",
+    "region": "eu-west",
+    "peak_rps": 1376,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-036",
+    "region": "us-east",
+    "peak_rps": 1413,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-036",
+    "region": "ap-south",
+    "peak_rps": 1450,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-037",
+    "region": "eu-west",
+    "peak_rps": 1477,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-037",
+    "region": "us-east",
+    "peak_rps": 1514,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-037",
+    "region": "ap-south",
+    "peak_rps": 1551,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-038",
+    "region": "eu-west",
+    "peak_rps": 1578,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-038",
+    "region": "us-east",
+    "peak_rps": 1615,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-038",
+    "region": "ap-south",
+    "peak_rps": 1652,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-039",
+    "region": "eu-west",
+    "peak_rps": 1679,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-039",
+    "region": "us-east",
+    "peak_rps": 1716,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-039",
+    "region": "ap-south",
+    "peak_rps": 1753,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-040",
+    "region": "eu-west",
+    "peak_rps": 1780,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-040",
+    "region": "us-east",
+    "peak_rps": 1817,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-040",
+    "region": "ap-south",
+    "peak_rps": 1854,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-041",
+    "region": "eu-west",
+    "peak_rps": 1881,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-041",
+    "region": "us-east",
+    "peak_rps": 1918,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-041",
+    "region": "ap-south",
+    "peak_rps": 1955,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-042",
+    "region": "eu-west",
+    "peak_rps": 1982,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-042",
+    "region": "us-east",
+    "peak_rps": 2019,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-042",
+    "region": "ap-south",
+    "peak_rps": 2056,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-043",
+    "region": "eu-west",
+    "peak_rps": 2083,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-043",
+    "region": "us-east",
+    "peak_rps": 2120,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-043",
+    "region": "ap-south",
+    "peak_rps": 2157,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-044",
+    "region": "eu-west",
+    "peak_rps": 2184,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-044",
+    "region": "us-east",
+    "peak_rps": 2221,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-044",
+    "region": "ap-south",
+    "peak_rps": 2258,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-045",
+    "region": "eu-west",
+    "peak_rps": 2285,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-045",
+    "region": "us-east",
+    "peak_rps": 2322,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-045",
+    "region": "ap-south",
+    "peak_rps": 2359,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-046",
+    "region": "eu-west",
+    "peak_rps": 2386,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-046",
+    "region": "us-east",
+    "peak_rps": 2423,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-046",
+    "region": "ap-south",
+    "peak_rps": 2460,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-047",
+    "region": "eu-west",
+    "peak_rps": 2487,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-047",
+    "region": "us-east",
+    "peak_rps": 2524,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-047",
+    "region": "ap-south",
+    "peak_rps": 161,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-048",
+    "region": "eu-west",
+    "peak_rps": 188,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-048",
+    "region": "us-east",
+    "peak_rps": 225,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-048",
+    "region": "ap-south",
+    "peak_rps": 262,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-049",
+    "region": "eu-west",
+    "peak_rps": 289,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-049",
+    "region": "us-east",
+    "peak_rps": 326,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-049",
+    "region": "ap-south",
+    "peak_rps": 363,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-050",
+    "region": "eu-west",
+    "peak_rps": 390,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-050",
+    "region": "us-east",
+    "peak_rps": 427,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-050",
+    "region": "ap-south",
+    "peak_rps": 464,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-051",
+    "region": "eu-west",
+    "peak_rps": 491,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-051",
+    "region": "us-east",
+    "peak_rps": 528,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-051",
+    "region": "ap-south",
+    "peak_rps": 565,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-052",
+    "region": "eu-west",
+    "peak_rps": 592,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-052",
+    "region": "us-east",
+    "peak_rps": 629,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-052",
+    "region": "ap-south",
+    "peak_rps": 666,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-053",
+    "region": "eu-west",
+    "peak_rps": 693,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-053",
+    "region": "us-east",
+    "peak_rps": 730,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-053",
+    "region": "ap-south",
+    "peak_rps": 767,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-054",
+    "region": "eu-west",
+    "peak_rps": 794,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-054",
+    "region": "us-east",
+    "peak_rps": 831,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-054",
+    "region": "ap-south",
+    "peak_rps": 868,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-055",
+    "region": "eu-west",
+    "peak_rps": 895,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-055",
+    "region": "us-east",
+    "peak_rps": 932,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-055",
+    "region": "ap-south",
+    "peak_rps": 969,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-056",
+    "region": "eu-west",
+    "peak_rps": 996,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-056",
+    "region": "us-east",
+    "peak_rps": 1033,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-056",
+    "region": "ap-south",
+    "peak_rps": 1070,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-057",
+    "region": "eu-west",
+    "peak_rps": 1097,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-057",
+    "region": "us-east",
+    "peak_rps": 1134,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-057",
+    "region": "ap-south",
+    "peak_rps": 1171,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-058",
+    "region": "eu-west",
+    "peak_rps": 1198,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-058",
+    "region": "us-east",
+    "peak_rps": 1235,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-058",
+    "region": "ap-south",
+    "peak_rps": 1272,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-059",
+    "region": "eu-west",
+    "peak_rps": 1299,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-059",
+    "region": "us-east",
+    "peak_rps": 1336,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-059",
+    "region": "ap-south",
+    "peak_rps": 1373,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-060",
+    "region": "eu-west",
+    "peak_rps": 1400,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-060",
+    "region": "us-east",
+    "peak_rps": 1437,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-060",
+    "region": "ap-south",
+    "peak_rps": 1474,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-061",
+    "region": "eu-west",
+    "peak_rps": 1501,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-061",
+    "region": "us-east",
+    "peak_rps": 1538,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-061",
+    "region": "ap-south",
+    "peak_rps": 1575,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-062",
+    "region": "eu-west",
+    "peak_rps": 1602,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-062",
+    "region": "us-east",
+    "peak_rps": 1639,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-062",
+    "region": "ap-south",
+    "peak_rps": 1676,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-063",
+    "region": "eu-west",
+    "peak_rps": 1703,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-063",
+    "region": "us-east",
+    "peak_rps": 1740,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-063",
+    "region": "ap-south",
+    "peak_rps": 1777,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-064",
+    "region": "eu-west",
+    "peak_rps": 1804,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-064",
+    "region": "us-east",
+    "peak_rps": 1841,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-064",
+    "region": "ap-south",
+    "peak_rps": 1878,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-065",
+    "region": "eu-west",
+    "peak_rps": 1905,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-065",
+    "region": "us-east",
+    "peak_rps": 1942,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-065",
+    "region": "ap-south",
+    "peak_rps": 1979,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-066",
+    "region": "eu-west",
+    "peak_rps": 2006,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-066",
+    "region": "us-east",
+    "peak_rps": 2043,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-066",
+    "region": "ap-south",
+    "peak_rps": 2080,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-067",
+    "region": "eu-west",
+    "peak_rps": 2107,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-067",
+    "region": "us-east",
+    "peak_rps": 2144,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-067",
+    "region": "ap-south",
+    "peak_rps": 2181,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-068",
+    "region": "eu-west",
+    "peak_rps": 2208,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-068",
+    "region": "us-east",
+    "peak_rps": 2245,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-068",
+    "region": "ap-south",
+    "peak_rps": 2282,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-069",
+    "region": "eu-west",
+    "peak_rps": 2309,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-069",
+    "region": "us-east",
+    "peak_rps": 2346,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-069",
+    "region": "ap-south",
+    "peak_rps": 2383,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-070",
+    "region": "eu-west",
+    "peak_rps": 2410,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-070",
+    "region": "us-east",
+    "peak_rps": 2447,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-070",
+    "region": "ap-south",
+    "peak_rps": 2484,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-071",
+    "region": "eu-west",
+    "peak_rps": 2511,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-071",
+    "region": "us-east",
+    "peak_rps": 148,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-071",
+    "region": "ap-south",
+    "peak_rps": 185,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-072",
+    "region": "eu-west",
+    "peak_rps": 212,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-072",
+    "region": "us-east",
+    "peak_rps": 249,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-072",
+    "region": "ap-south",
+    "peak_rps": 286,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-073",
+    "region": "eu-west",
+    "peak_rps": 313,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-073",
+    "region": "us-east",
+    "peak_rps": 350,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-073",
+    "region": "ap-south",
+    "peak_rps": 387,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-074",
+    "region": "eu-west",
+    "peak_rps": 414,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-074",
+    "region": "us-east",
+    "peak_rps": 451,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-074",
+    "region": "ap-south",
+    "peak_rps": 488,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-075",
+    "region": "eu-west",
+    "peak_rps": 515,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-075",
+    "region": "us-east",
+    "peak_rps": 552,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-075",
+    "region": "ap-south",
+    "peak_rps": 589,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-076",
+    "region": "eu-west",
+    "peak_rps": 616,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-076",
+    "region": "us-east",
+    "peak_rps": 653,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-076",
+    "region": "ap-south",
+    "peak_rps": 690,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-077",
+    "region": "eu-west",
+    "peak_rps": 717,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-077",
+    "region": "us-east",
+    "peak_rps": 754,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-077",
+    "region": "ap-south",
+    "peak_rps": 791,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-078",
+    "region": "eu-west",
+    "peak_rps": 818,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-078",
+    "region": "us-east",
+    "peak_rps": 855,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-078",
+    "region": "ap-south",
+    "peak_rps": 892,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-079",
+    "region": "eu-west",
+    "peak_rps": 919,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-079",
+    "region": "us-east",
+    "peak_rps": 956,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-079",
+    "region": "ap-south",
+    "peak_rps": 993,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-080",
+    "region": "eu-west",
+    "peak_rps": 1020,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-080",
+    "region": "us-east",
+    "peak_rps": 1057,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-080",
+    "region": "ap-south",
+    "peak_rps": 1094,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-081",
+    "region": "eu-west",
+    "peak_rps": 1121,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-081",
+    "region": "us-east",
+    "peak_rps": 1158,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-081",
+    "region": "ap-south",
+    "peak_rps": 1195,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-082",
+    "region": "eu-west",
+    "peak_rps": 1222,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-082",
+    "region": "us-east",
+    "peak_rps": 1259,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-082",
+    "region": "ap-south",
+    "peak_rps": 1296,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-083",
+    "region": "eu-west",
+    "peak_rps": 1323,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-083",
+    "region": "us-east",
+    "peak_rps": 1360,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-083",
+    "region": "ap-south",
+    "peak_rps": 1397,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-084",
+    "region": "eu-west",
+    "peak_rps": 1424,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-084",
+    "region": "us-east",
+    "peak_rps": 1461,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-084",
+    "region": "ap-south",
+    "peak_rps": 1498,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-085",
+    "region": "eu-west",
+    "peak_rps": 1525,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-085",
+    "region": "us-east",
+    "peak_rps": 1562,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-085",
+    "region": "ap-south",
+    "peak_rps": 1599,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-086",
+    "region": "eu-west",
+    "peak_rps": 1626,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-086",
+    "region": "us-east",
+    "peak_rps": 1663,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-086",
+    "region": "ap-south",
+    "peak_rps": 1700,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-087",
+    "region": "eu-west",
+    "peak_rps": 1727,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-087",
+    "region": "us-east",
+    "peak_rps": 1764,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-087",
+    "region": "ap-south",
+    "peak_rps": 1801,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-088",
+    "region": "eu-west",
+    "peak_rps": 1828,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-088",
+    "region": "us-east",
+    "peak_rps": 1865,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-088",
+    "region": "ap-south",
+    "peak_rps": 1902,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-089",
+    "region": "eu-west",
+    "peak_rps": 1929,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-089",
+    "region": "us-east",
+    "peak_rps": 1966,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-089",
+    "region": "ap-south",
+    "peak_rps": 2003,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 9
+  },
+  {
+    "service_id": "svc-090",
+    "region": "eu-west",
+    "peak_rps": 2030,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-090",
+    "region": "us-east",
+    "peak_rps": 2067,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-090",
+    "region": "ap-south",
+    "peak_rps": 2104,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 10
+  },
+  {
+    "service_id": "svc-091",
+    "region": "eu-west",
+    "peak_rps": 2131,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-091",
+    "region": "us-east",
+    "peak_rps": 2168,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-091",
+    "region": "ap-south",
+    "peak_rps": 2205,
+    "capacity_per_replica_rps": 250,
+    "max_replicas": 4
+  },
+  {
+    "service_id": "svc-092",
+    "region": "eu-west",
+    "peak_rps": 2232,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-092",
+    "region": "us-east",
+    "peak_rps": 2269,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-092",
+    "region": "ap-south",
+    "peak_rps": 2306,
+    "capacity_per_replica_rps": 300,
+    "max_replicas": 5
+  },
+  {
+    "service_id": "svc-093",
+    "region": "eu-west",
+    "peak_rps": 2333,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-093",
+    "region": "us-east",
+    "peak_rps": 2370,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-093",
+    "region": "ap-south",
+    "peak_rps": 2407,
+    "capacity_per_replica_rps": 350,
+    "max_replicas": 6
+  },
+  {
+    "service_id": "svc-094",
+    "region": "eu-west",
+    "peak_rps": 2434,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-094",
+    "region": "us-east",
+    "peak_rps": 2471,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-094",
+    "region": "ap-south",
+    "peak_rps": 2508,
+    "capacity_per_replica_rps": 400,
+    "max_replicas": 7
+  },
+  {
+    "service_id": "svc-095",
+    "region": "eu-west",
+    "peak_rps": 2535,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-095",
+    "region": "us-east",
+    "peak_rps": 172,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  },
+  {
+    "service_id": "svc-095",
+    "region": "ap-south",
+    "peak_rps": 209,
+    "capacity_per_replica_rps": 200,
+    "max_replicas": 8
+  }
+]

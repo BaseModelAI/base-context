@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { plan } from '../src/plan.mjs';
+import { csv } from '../src/csv.mjs';
+const [inputPath, outputDir] = process.argv.slice(2);
+const input=JSON.parse(fs.readFileSync(inputPath,'utf8'));
+const result=plan(input);
+fs.mkdirSync(outputDir,{recursive:true});
+fs.writeFileSync(path.join(outputDir,'plan.json'),JSON.stringify(result,null,2)+'\n');
+fs.writeFileSync(path.join(outputDir,'labels.csv'),csv([['order_id','customer_name','status','carrier_id','total_cents'],...result.map((row,i)=>[row.order_id,input.orders[i].customer_name,row.status,row.carrier_id??'',row.total_cents])]));

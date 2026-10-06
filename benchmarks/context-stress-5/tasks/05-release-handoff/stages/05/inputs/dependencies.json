@@ -1,0 +1,1910 @@
+[
+  {
+    "service_id": "svc-000",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-000",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-000",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-001",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-000"
+    ]
+  },
+  {
+    "service_id": "svc-001",
+    "region": "us-east",
+    "depends_on": [
+      "svc-000"
+    ]
+  },
+  {
+    "service_id": "svc-001",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-000"
+    ]
+  },
+  {
+    "service_id": "svc-002",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-001"
+    ]
+  },
+  {
+    "service_id": "svc-002",
+    "region": "us-east",
+    "depends_on": [
+      "svc-001"
+    ]
+  },
+  {
+    "service_id": "svc-002",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-001"
+    ]
+  },
+  {
+    "service_id": "svc-003",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-002"
+    ]
+  },
+  {
+    "service_id": "svc-003",
+    "region": "us-east",
+    "depends_on": [
+      "svc-002"
+    ]
+  },
+  {
+    "service_id": "svc-003",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-002"
+    ]
+  },
+  {
+    "service_id": "svc-004",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-004",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-004",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-005",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-004"
+    ]
+  },
+  {
+    "service_id": "svc-005",
+    "region": "us-east",
+    "depends_on": [
+      "svc-004"
+    ]
+  },
+  {
+    "service_id": "svc-005",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-004"
+    ]
+  },
+  {
+    "service_id": "svc-006",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-006",
+    "region": "us-east",
+    "depends_on": [
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-006",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-007",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-006"
+    ]
+  },
+  {
+    "service_id": "svc-007",
+    "region": "us-east",
+    "depends_on": [
+      "svc-006"
+    ]
+  },
+  {
+    "service_id": "svc-007",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-006"
+    ]
+  },
+  {
+    "service_id": "svc-008",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-008",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-008",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-009",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-008",
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-009",
+    "region": "us-east",
+    "depends_on": [
+      "svc-008",
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-009",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-008",
+      "svc-005"
+    ]
+  },
+  {
+    "service_id": "svc-010",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-009"
+    ]
+  },
+  {
+    "service_id": "svc-010",
+    "region": "us-east",
+    "depends_on": [
+      "svc-009"
+    ]
+  },
+  {
+    "service_id": "svc-010",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-009"
+    ]
+  },
+  {
+    "service_id": "svc-011",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-010"
+    ]
+  },
+  {
+    "service_id": "svc-011",
+    "region": "us-east",
+    "depends_on": [
+      "svc-010"
+    ]
+  },
+  {
+    "service_id": "svc-011",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-010"
+    ]
+  },
+  {
+    "service_id": "svc-012",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-012",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-012",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-013",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-012"
+    ]
+  },
+  {
+    "service_id": "svc-013",
+    "region": "us-east",
+    "depends_on": [
+      "svc-012"
+    ]
+  },
+  {
+    "service_id": "svc-013",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-012"
+    ]
+  },
+  {
+    "service_id": "svc-014",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-013"
+    ]
+  },
+  {
+    "service_id": "svc-014",
+    "region": "us-east",
+    "depends_on": [
+      "svc-013"
+    ]
+  },
+  {
+    "service_id": "svc-014",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-013"
+    ]
+  },
+  {
+    "service_id": "svc-015",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-015",
+    "region": "us-east",
+    "depends_on": [
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-015",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-016",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-016",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-016",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-017",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-016"
+    ]
+  },
+  {
+    "service_id": "svc-017",
+    "region": "us-east",
+    "depends_on": [
+      "svc-016"
+    ]
+  },
+  {
+    "service_id": "svc-017",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-016"
+    ]
+  },
+  {
+    "service_id": "svc-018",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-017",
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-018",
+    "region": "us-east",
+    "depends_on": [
+      "svc-017",
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-018",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-017",
+      "svc-014"
+    ]
+  },
+  {
+    "service_id": "svc-019",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-018"
+    ]
+  },
+  {
+    "service_id": "svc-019",
+    "region": "us-east",
+    "depends_on": [
+      "svc-018"
+    ]
+  },
+  {
+    "service_id": "svc-019",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-018"
+    ]
+  },
+  {
+    "service_id": "svc-020",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-020",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-020",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-021",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-020"
+    ]
+  },
+  {
+    "service_id": "svc-021",
+    "region": "us-east",
+    "depends_on": [
+      "svc-020"
+    ]
+  },
+  {
+    "service_id": "svc-021",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-020"
+    ]
+  },
+  {
+    "service_id": "svc-022",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-021"
+    ]
+  },
+  {
+    "service_id": "svc-022",
+    "region": "us-east",
+    "depends_on": [
+      "svc-021"
+    ]
+  },
+  {
+    "service_id": "svc-022",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-021"
+    ]
+  },
+  {
+    "service_id": "svc-023",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-022"
+    ]
+  },
+  {
+    "service_id": "svc-023",
+    "region": "us-east",
+    "depends_on": [
+      "svc-022"
+    ]
+  },
+  {
+    "service_id": "svc-023",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-022"
+    ]
+  },
+  {
+    "service_id": "svc-024",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-024",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-024",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-025",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-024"
+    ]
+  },
+  {
+    "service_id": "svc-025",
+    "region": "us-east",
+    "depends_on": [
+      "svc-024"
+    ]
+  },
+  {
+    "service_id": "svc-025",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-024"
+    ]
+  },
+  {
+    "service_id": "svc-026",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-025"
+    ]
+  },
+  {
+    "service_id": "svc-026",
+    "region": "us-east",
+    "depends_on": [
+      "svc-025"
+    ]
+  },
+  {
+    "service_id": "svc-026",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-025"
+    ]
+  },
+  {
+    "service_id": "svc-027",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-026",
+      "svc-023"
+    ]
+  },
+  {
+    "service_id": "svc-027",
+    "region": "us-east",
+    "depends_on": [
+      "svc-026",
+      "svc-023"
+    ]
+  },
+  {
+    "service_id": "svc-027",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-026",
+      "svc-023"
+    ]
+  },
+  {
+    "service_id": "svc-028",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-028",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-028",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-029",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-028"
+    ]
+  },
+  {
+    "service_id": "svc-029",
+    "region": "us-east",
+    "depends_on": [
+      "svc-028"
+    ]
+  },
+  {
+    "service_id": "svc-029",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-028"
+    ]
+  },
+  {
+    "service_id": "svc-030",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-029"
+    ]
+  },
+  {
+    "service_id": "svc-030",
+    "region": "us-east",
+    "depends_on": [
+      "svc-029"
+    ]
+  },
+  {
+    "service_id": "svc-030",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-029"
+    ]
+  },
+  {
+    "service_id": "svc-031",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-030"
+    ]
+  },
+  {
+    "service_id": "svc-031",
+    "region": "us-east",
+    "depends_on": [
+      "svc-030"
+    ]
+  },
+  {
+    "service_id": "svc-031",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-030"
+    ]
+  },
+  {
+    "service_id": "svc-032",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-032",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-032",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-033",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-033",
+    "region": "us-east",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-033",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-034",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-033"
+    ]
+  },
+  {
+    "service_id": "svc-034",
+    "region": "us-east",
+    "depends_on": [
+      "svc-033"
+    ]
+  },
+  {
+    "service_id": "svc-034",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-033"
+    ]
+  },
+  {
+    "service_id": "svc-035",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-034"
+    ]
+  },
+  {
+    "service_id": "svc-035",
+    "region": "us-east",
+    "depends_on": [
+      "svc-034"
+    ]
+  },
+  {
+    "service_id": "svc-035",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-034"
+    ]
+  },
+  {
+    "service_id": "svc-036",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-036",
+    "region": "us-east",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-036",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-032"
+    ]
+  },
+  {
+    "service_id": "svc-037",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-036"
+    ]
+  },
+  {
+    "service_id": "svc-037",
+    "region": "us-east",
+    "depends_on": [
+      "svc-036"
+    ]
+  },
+  {
+    "service_id": "svc-037",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-036"
+    ]
+  },
+  {
+    "service_id": "svc-038",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-037"
+    ]
+  },
+  {
+    "service_id": "svc-038",
+    "region": "us-east",
+    "depends_on": [
+      "svc-037"
+    ]
+  },
+  {
+    "service_id": "svc-038",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-037"
+    ]
+  },
+  {
+    "service_id": "svc-039",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-038"
+    ]
+  },
+  {
+    "service_id": "svc-039",
+    "region": "us-east",
+    "depends_on": [
+      "svc-038"
+    ]
+  },
+  {
+    "service_id": "svc-039",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-038"
+    ]
+  },
+  {
+    "service_id": "svc-040",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-040",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-040",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-041",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-040"
+    ]
+  },
+  {
+    "service_id": "svc-041",
+    "region": "us-east",
+    "depends_on": [
+      "svc-040"
+    ]
+  },
+  {
+    "service_id": "svc-041",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-040"
+    ]
+  },
+  {
+    "service_id": "svc-042",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-042",
+    "region": "us-east",
+    "depends_on": [
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-042",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-043",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-042"
+    ]
+  },
+  {
+    "service_id": "svc-043",
+    "region": "us-east",
+    "depends_on": [
+      "svc-042"
+    ]
+  },
+  {
+    "service_id": "svc-043",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-042"
+    ]
+  },
+  {
+    "service_id": "svc-044",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-044",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-044",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-045",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-044",
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-045",
+    "region": "us-east",
+    "depends_on": [
+      "svc-044",
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-045",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-044",
+      "svc-041"
+    ]
+  },
+  {
+    "service_id": "svc-046",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-045"
+    ]
+  },
+  {
+    "service_id": "svc-046",
+    "region": "us-east",
+    "depends_on": [
+      "svc-045"
+    ]
+  },
+  {
+    "service_id": "svc-046",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-045"
+    ]
+  },
+  {
+    "service_id": "svc-047",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-046"
+    ]
+  },
+  {
+    "service_id": "svc-047",
+    "region": "us-east",
+    "depends_on": [
+      "svc-046"
+    ]
+  },
+  {
+    "service_id": "svc-047",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-046"
+    ]
+  },
+  {
+    "service_id": "svc-048",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-048",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-048",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-049",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-048"
+    ]
+  },
+  {
+    "service_id": "svc-049",
+    "region": "us-east",
+    "depends_on": [
+      "svc-048"
+    ]
+  },
+  {
+    "service_id": "svc-049",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-048"
+    ]
+  },
+  {
+    "service_id": "svc-050",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-049"
+    ]
+  },
+  {
+    "service_id": "svc-050",
+    "region": "us-east",
+    "depends_on": [
+      "svc-049"
+    ]
+  },
+  {
+    "service_id": "svc-050",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-049"
+    ]
+  },
+  {
+    "service_id": "svc-051",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-051",
+    "region": "us-east",
+    "depends_on": [
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-051",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-052",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-052",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-052",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-053",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-052"
+    ]
+  },
+  {
+    "service_id": "svc-053",
+    "region": "us-east",
+    "depends_on": [
+      "svc-052"
+    ]
+  },
+  {
+    "service_id": "svc-053",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-052"
+    ]
+  },
+  {
+    "service_id": "svc-054",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-053",
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-054",
+    "region": "us-east",
+    "depends_on": [
+      "svc-053",
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-054",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-053",
+      "svc-050"
+    ]
+  },
+  {
+    "service_id": "svc-055",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-054"
+    ]
+  },
+  {
+    "service_id": "svc-055",
+    "region": "us-east",
+    "depends_on": [
+      "svc-054"
+    ]
+  },
+  {
+    "service_id": "svc-055",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-054"
+    ]
+  },
+  {
+    "service_id": "svc-056",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-056",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-056",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-057",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-056"
+    ]
+  },
+  {
+    "service_id": "svc-057",
+    "region": "us-east",
+    "depends_on": [
+      "svc-056"
+    ]
+  },
+  {
+    "service_id": "svc-057",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-056"
+    ]
+  },
+  {
+    "service_id": "svc-058",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-057"
+    ]
+  },
+  {
+    "service_id": "svc-058",
+    "region": "us-east",
+    "depends_on": [
+      "svc-057"
+    ]
+  },
+  {
+    "service_id": "svc-058",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-057"
+    ]
+  },
+  {
+    "service_id": "svc-059",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-058"
+    ]
+  },
+  {
+    "service_id": "svc-059",
+    "region": "us-east",
+    "depends_on": [
+      "svc-058"
+    ]
+  },
+  {
+    "service_id": "svc-059",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-058"
+    ]
+  },
+  {
+    "service_id": "svc-060",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-060",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-060",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-061",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-060"
+    ]
+  },
+  {
+    "service_id": "svc-061",
+    "region": "us-east",
+    "depends_on": [
+      "svc-060"
+    ]
+  },
+  {
+    "service_id": "svc-061",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-060"
+    ]
+  },
+  {
+    "service_id": "svc-062",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-061"
+    ]
+  },
+  {
+    "service_id": "svc-062",
+    "region": "us-east",
+    "depends_on": [
+      "svc-061"
+    ]
+  },
+  {
+    "service_id": "svc-062",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-061"
+    ]
+  },
+  {
+    "service_id": "svc-063",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-062",
+      "svc-059"
+    ]
+  },
+  {
+    "service_id": "svc-063",
+    "region": "us-east",
+    "depends_on": [
+      "svc-062",
+      "svc-059"
+    ]
+  },
+  {
+    "service_id": "svc-063",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-062",
+      "svc-059"
+    ]
+  },
+  {
+    "service_id": "svc-064",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-064",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-064",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-065",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-064"
+    ]
+  },
+  {
+    "service_id": "svc-065",
+    "region": "us-east",
+    "depends_on": [
+      "svc-064"
+    ]
+  },
+  {
+    "service_id": "svc-065",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-064"
+    ]
+  },
+  {
+    "service_id": "svc-066",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-065"
+    ]
+  },
+  {
+    "service_id": "svc-066",
+    "region": "us-east",
+    "depends_on": [
+      "svc-065"
+    ]
+  },
+  {
+    "service_id": "svc-066",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-065"
+    ]
+  },
+  {
+    "service_id": "svc-067",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-066"
+    ]
+  },
+  {
+    "service_id": "svc-067",
+    "region": "us-east",
+    "depends_on": [
+      "svc-066"
+    ]
+  },
+  {
+    "service_id": "svc-067",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-066"
+    ]
+  },
+  {
+    "service_id": "svc-068",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-068",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-068",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-069",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-069",
+    "region": "us-east",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-069",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-070",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-069"
+    ]
+  },
+  {
+    "service_id": "svc-070",
+    "region": "us-east",
+    "depends_on": [
+      "svc-069"
+    ]
+  },
+  {
+    "service_id": "svc-070",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-069"
+    ]
+  },
+  {
+    "service_id": "svc-071",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-070"
+    ]
+  },
+  {
+    "service_id": "svc-071",
+    "region": "us-east",
+    "depends_on": [
+      "svc-070"
+    ]
+  },
+  {
+    "service_id": "svc-071",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-070"
+    ]
+  },
+  {
+    "service_id": "svc-072",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-072",
+    "region": "us-east",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-072",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-068"
+    ]
+  },
+  {
+    "service_id": "svc-073",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-072"
+    ]
+  },
+  {
+    "service_id": "svc-073",
+    "region": "us-east",
+    "depends_on": [
+      "svc-072"
+    ]
+  },
+  {
+    "service_id": "svc-073",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-072"
+    ]
+  },
+  {
+    "service_id": "svc-074",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-073"
+    ]
+  },
+  {
+    "service_id": "svc-074",
+    "region": "us-east",
+    "depends_on": [
+      "svc-073"
+    ]
+  },
+  {
+    "service_id": "svc-074",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-073"
+    ]
+  },
+  {
+    "service_id": "svc-075",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-074"
+    ]
+  },
+  {
+    "service_id": "svc-075",
+    "region": "us-east",
+    "depends_on": [
+      "svc-074"
+    ]
+  },
+  {
+    "service_id": "svc-075",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-074"
+    ]
+  },
+  {
+    "service_id": "svc-076",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-076",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-076",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-077",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-076"
+    ]
+  },
+  {
+    "service_id": "svc-077",
+    "region": "us-east",
+    "depends_on": [
+      "svc-076"
+    ]
+  },
+  {
+    "service_id": "svc-077",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-076"
+    ]
+  },
+  {
+    "service_id": "svc-078",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-078",
+    "region": "us-east",
+    "depends_on": [
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-078",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-079",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-078"
+    ]
+  },
+  {
+    "service_id": "svc-079",
+    "region": "us-east",
+    "depends_on": [
+      "svc-078"
+    ]
+  },
+  {
+    "service_id": "svc-079",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-078"
+    ]
+  },
+  {
+    "service_id": "svc-080",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-080",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-080",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-081",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-080",
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-081",
+    "region": "us-east",
+    "depends_on": [
+      "svc-080",
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-081",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-080",
+      "svc-077"
+    ]
+  },
+  {
+    "service_id": "svc-082",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-081"
+    ]
+  },
+  {
+    "service_id": "svc-082",
+    "region": "us-east",
+    "depends_on": [
+      "svc-081"
+    ]
+  },
+  {
+    "service_id": "svc-082",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-081"
+    ]
+  },
+  {
+    "service_id": "svc-083",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-082"
+    ]
+  },
+  {
+    "service_id": "svc-083",
+    "region": "us-east",
+    "depends_on": [
+      "svc-082"
+    ]
+  },
+  {
+    "service_id": "svc-083",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-082"
+    ]
+  },
+  {
+    "service_id": "svc-084",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-084",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-084",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-085",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-084"
+    ]
+  },
+  {
+    "service_id": "svc-085",
+    "region": "us-east",
+    "depends_on": [
+      "svc-084"
+    ]
+  },
+  {
+    "service_id": "svc-085",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-084"
+    ]
+  },
+  {
+    "service_id": "svc-086",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-085"
+    ]
+  },
+  {
+    "service_id": "svc-086",
+    "region": "us-east",
+    "depends_on": [
+      "svc-085"
+    ]
+  },
+  {
+    "service_id": "svc-086",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-085"
+    ]
+  },
+  {
+    "service_id": "svc-087",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-087",
+    "region": "us-east",
+    "depends_on": [
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-087",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-088",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-088",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-088",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-089",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-088"
+    ]
+  },
+  {
+    "service_id": "svc-089",
+    "region": "us-east",
+    "depends_on": [
+      "svc-088"
+    ]
+  },
+  {
+    "service_id": "svc-089",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-088"
+    ]
+  },
+  {
+    "service_id": "svc-090",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-089",
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-090",
+    "region": "us-east",
+    "depends_on": [
+      "svc-089",
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-090",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-089",
+      "svc-086"
+    ]
+  },
+  {
+    "service_id": "svc-091",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-090"
+    ]
+  },
+  {
+    "service_id": "svc-091",
+    "region": "us-east",
+    "depends_on": [
+      "svc-090"
+    ]
+  },
+  {
+    "service_id": "svc-091",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-090"
+    ]
+  },
+  {
+    "service_id": "svc-092",
+    "region": "eu-west",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-092",
+    "region": "us-east",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-092",
+    "region": "ap-south",
+    "depends_on": []
+  },
+  {
+    "service_id": "svc-093",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-092"
+    ]
+  },
+  {
+    "service_id": "svc-093",
+    "region": "us-east",
+    "depends_on": [
+      "svc-092"
+    ]
+  },
+  {
+    "service_id": "svc-093",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-092"
+    ]
+  },
+  {
+    "service_id": "svc-094",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-093"
+    ]
+  },
+  {
+    "service_id": "svc-094",
+    "region": "us-east",
+    "depends_on": [
+      "svc-093"
+    ]
+  },
+  {
+    "service_id": "svc-094",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-093"
+    ]
+  },
+  {
+    "service_id": "svc-095",
+    "region": "eu-west",
+    "depends_on": [
+      "svc-094"
+    ]
+  },
+  {
+    "service_id": "svc-095",
+    "region": "us-east",
+    "depends_on": [
+      "svc-094"
+    ]
+  },
+  {
+    "service_id": "svc-095",
+    "region": "ap-south",
+    "depends_on": [
+      "svc-094"
+    ]
+  }
+]

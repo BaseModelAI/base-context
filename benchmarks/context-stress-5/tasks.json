@@ -1,0 +1,48 @@
+{
+  "schema": "context-workflow-stress-suite/v1",
+  "selection": "deliberately-targeted-not-representative",
+  "task_content_status": "frozen-v2-before-provider-outcomes",
+  "scoring": {
+    "main_checks_per_task": 5,
+    "edge_checks_per_task": 1,
+    "full_pass": "all six checks",
+    "best_of_selection": false
+  },
+  "tasks": [
+    {
+      "id": 1,
+      "slug": "settlement-close",
+      "title": "SQL settlement close with late revisions",
+      "pressure": "targeted-staged",
+      "scenario": "tasks/01-settlement-close/scenario.json"
+    },
+    {
+      "id": 2,
+      "slug": "checkout-incident",
+      "title": "Large-output checkout incident and narrow rollback",
+      "pressure": "targeted-staged",
+      "scenario": "tasks/02-checkout-incident/scenario.json"
+    },
+    {
+      "id": 3,
+      "slug": "retention-migration",
+      "title": "Privacy retention migration through compact and resume",
+      "pressure": "targeted-staged",
+      "scenario": "tasks/03-retention-migration/scenario.json"
+    },
+    {
+      "id": 4,
+      "slug": "label-service",
+      "title": "Multi-file Node order-label service upgrade",
+      "pressure": "targeted-staged",
+      "scenario": "tasks/04-label-service/scenario.json"
+    },
+    {
+      "id": 5,
+      "slug": "release-handoff",
+      "title": "Delegation-friendly regional release handoff",
+      "pressure": "targeted-staged",
+      "scenario": "tasks/05-release-handoff/scenario.json"
+    }
+  ]
+}

@@ -1,0 +1,323 @@
+{
+  "orders": [
+    {
+      "order_id": "00-ORDER-00700",
+      "customer_name": "Müller, Anna",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1,
+          "quantity": 1,
+          "weight_g": 101,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00701",
+      "customer_name": "A \"quoted\" name",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 72,
+          "quantity": 1,
+          "weight_g": 102,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 271,
+          "quantity": 2,
+          "weight_g": 103,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00702",
+      "customer_name": "Line one\nLine two",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 143,
+          "quantity": 1,
+          "weight_g": 103,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 342,
+          "quantity": 2,
+          "weight_g": 104,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 541,
+          "quantity": 3,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00703",
+      "customer_name": "普通客户 3",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 214,
+          "quantity": 1,
+          "weight_g": 104,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 413,
+          "quantity": 2,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 612,
+          "quantity": 3,
+          "weight_g": 106,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 811,
+          "quantity": 4,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00704",
+      "customer_name": "Müller, Anna",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 285,
+          "quantity": 1,
+          "weight_g": 105,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00705",
+      "customer_name": "A \"quoted\" name",
+      "zone": "US",
+      "items": [
+        {
+          "unit_cents": 356,
+          "quantity": 1,
+          "weight_g": 106,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 555,
+          "quantity": 2,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00706",
+      "customer_name": "Line one\nLine two",
+      "zone": "AP",
+      "items": [
+        {
+          "unit_cents": 427,
+          "quantity": 1,
+          "weight_g": 107,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 626,
+          "quantity": 2,
+          "weight_g": 108,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": false
+        },
+        {
+          "unit_cents": 825,
+          "quantity": 3,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00707",
+      "customer_name": "普通客户 7",
+      "zone": "MOON",
+      "items": [
+        {
+          "unit_cents": 498,
+          "quantity": 1,
+          "weight_g": 108,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 697,
+          "quantity": 2,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 896,
+          "quantity": 3,
+          "weight_g": 110,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        },
+        {
+          "unit_cents": 1095,
+          "quantity": 4,
+          "weight_g": 111,
+          "discount_bps": 3333,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00708",
+      "customer_name": "Müller, Anna",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 569,
+          "quantity": 1,
+          "weight_g": 109,
+          "discount_bps": 5000,
+          "tax_bps": 825,
+          "hazardous": false
+        }
+      ]
+    },
+    {
+      "order_id": "00-ORDER-00709",
+      "customer_name": "Müller, Anna",
+      "zone": "EU",
+      "items": [
+        {
+          "unit_cents": 1,
+          "quantity": 1,
+          "weight_g": 101,
+          "discount_bps": 0,
+          "tax_bps": 825,
+          "hazardous": true
+        }
+      ]
+    }
+  ],
+  "carriers": [
+    {
+      "carrier_id": "carrier-a",
+      "zones": [
+        "EU",
+        "US"
+      ],
+      "hazardous": false,
+      "flat_cents": 200,
+      "per_kg_cents": 70
+    },
+    {
+      "carrier_id": "carrier-b",
+      "zones": [
+        "EU",
+        "US",
+        "AP"
+      ],
+      "hazardous": true,
+      "flat_cents": 320,
+      "per_kg_cents": 30
+    },
+    {
+      "carrier_id": "carrier-c",
+      "zones": [
+        "EU"
+      ],
+      "hazardous": true,
+      "flat_cents": 320,
+      "per_kg_cents": 30
+    }
+  ],
+  "holds": [
+    {
+      "event_id": "hold-00-ORDER-00700",
+      "revision": 1,
+      "order_id": "00-ORDER-00700",
+      "active": true
+    },
+    {
+      "event_id": "hold-00-ORDER-00700",
+      "revision": 2,
+      "order_id": "00-ORDER-00700",
+      "active": false
+    },
+    {
+      "event_id": "other-hold-00-ORDER-00700",
+      "revision": 1,
+      "order_id": "00-ORDER-00700",
+      "active": true
+    },
+    {
+      "event_id": "hold-00-ORDER-00703",
+      "revision": 1,
+      "order_id": "00-ORDER-00703",
+      "active": true
+    },
+    {
+      "event_id": "hold-00-ORDER-00706",
+      "revision": 1,
+      "order_id": "00-ORDER-00706",
+      "active": true
+    },
+    {
+      "event_id": "hold-00-ORDER-00706",
+      "revision": 2,
+      "order_id": "00-ORDER-00706",
+      "active": false
+    }
+  ],
+  "policy": {
+    "free_shipping_min_cents": 12000
+  }
+}

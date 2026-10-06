@@ -1,0 +1,64 @@
+{
+  "schema": "context-workflow-stress-task/v1",
+  "id": 1,
+  "slug": "settlement-close",
+  "title": "SQL settlement close with late revisions",
+  "pressure": "targeted-staged",
+  "timeout_seconds": 2700,
+  "editable_paths": [
+    "solution/",
+    "output/",
+    "notes/"
+  ],
+  "initial_prompt": "Read TASK.md. Establish the merchant settlement query on inputs/settlement.sqlite. Reconcile the initial processor export and keep your query and notes for later batches.",
+  "stages": [
+    {
+      "id": "stage-1",
+      "inject": "visible/",
+      "message": "Read TASK.md. Establish the merchant settlement query on inputs/settlement.sqlite. Reconcile the initial processor export and keep your query and notes for later batches.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-2",
+      "inject": "stages/02/",
+      "message": "The treasury export now contains cross-currency orders. Rates are fixed per order currency in fx; 10000 basis points means 1:1. Convert each per-order component with integer half-up rounding (x*rate+5000)//10000. Update your query and summarize which merchants changed.",
+      "compact_after": true,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-3",
+      "inject": "stages/03/",
+      "message": "The processor replay introduced revised events. Select only the highest revision of each event_id before status or amount filtering. A higher revision can void a previously settled capture. Preserve all earlier settlement rules.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-4",
+      "inject": "stages/04/",
+      "message": "Customer refunds have arrived. Per order, cap settled refunds at its settled captured amount before converting. The database is the complete cumulative snapshot. Update the query; retain zero-activity merchants.",
+      "compact_after": true,
+      "cold_resume_after": true
+    },
+    {
+      "id": "stage-5",
+      "inject": "stages/05/",
+      "message": "Risk operations supplied chargebacks. Only posted chargebacks count, and each order\u2019s chargeback debit is capped at capture minus the already-capped refund, in source cents. Convert the chargeback component separately. Keep all earlier behavior.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-6",
+      "inject": "stages/06/",
+      "message": "Complete the close on the final cumulative snapshot. Write output/reconciliation.csv using the required five columns, and leave solution/reconcile.sql runnable against this schema. Judge uses the final main snapshot and one small edge snapshot. Do not special-case IDs.",
+      "compact_after": false,
+      "cold_resume_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

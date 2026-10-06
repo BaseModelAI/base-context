@@ -1,0 +1,4 @@
+{"event_id": "gateway-next-day-reused", "raw_ms": 1790676017500, "service": "gateway", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-000", "code": "RESPONSE", "status": 504}
+{"event_id": "checkout-next-day-reused", "raw_ms": 1790676028500, "service": "checkout", "region": "eu-west", "release_id": "r2026.40", "request_id": "checkout-000", "code": "UPSTREAM_TIMEOUT", "status": 502}
+{"event_id": "gateway-other-region", "raw_ms": 1790589619500, "service": "gateway", "region": "us-east", "release_id": "r2026.40", "request_id": "other-region-001", "code": "RESPONSE", "status": 504}
+{"event_id": "checkout-other-region", "raw_ms": 1790589630500, "service": "checkout", "region": "us-east", "release_id": "r2026.40", "request_id": "other-region-001", "code": "UPSTREAM_TIMEOUT", "status": 502}

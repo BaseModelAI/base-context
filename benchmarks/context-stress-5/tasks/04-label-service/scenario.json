@@ -1,0 +1,64 @@
+{
+  "schema": "context-workflow-stress-task/v1",
+  "id": 4,
+  "slug": "label-service",
+  "title": "Multi-file Node order-label service upgrade",
+  "pressure": "targeted-staged",
+  "timeout_seconds": 2700,
+  "editable_paths": [
+    "service/",
+    "output/",
+    "notes/"
+  ],
+  "initial_prompt": "Read TASK.md and inspect the existing Node service. Repair the initial order-label CLI while preserving the public quote(items) helper. Generate the initial output/plan.json and output/labels.csv.",
+  "stages": [
+    {
+      "id": "stage-1",
+      "inject": "visible/",
+      "message": "Read TASK.md and inspect the existing Node service. Repair the initial order-label CLI while preserving the public quote(items) helper. Generate the initial output/plan.json and output/labels.csv.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-2",
+      "inject": "stages/02/",
+      "message": "The catalog now includes per-line discounts and tax. Compute line gross=unit_cents*quantity; discount=(gross*discount_bps+5000)//10000; taxable=gross-discount; tax=(taxable*tax_bps+5000)//10000. Sum integer line values. Do not round only at invoice level.",
+      "compact_after": true,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-3",
+      "inject": "stages/03/",
+      "message": "Carrier contracts now include weight, zones, and hazardous-goods restrictions. Eligible carriers contain the order zone and accept hazardous goods when any item is hazardous. Shipping quote is flat_cents+ceil(total_weight_g/1000)*per_kg_cents. Pick lowest quote, then carrier_id lexicographically. No eligible carrier means unsupported.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-4",
+      "inject": "stages/04/",
+      "message": "Risk updates are in holds, with repeated event_id revisions. Keep the highest revision per event_id, then an order is held if ANY latest event has active=true. Held takes precedence over unsupported. Preserve input order in final outputs, regardless of hold arrival order.",
+      "compact_after": true,
+      "cold_resume_after": true
+    },
+    {
+      "id": "stage-5",
+      "inject": "stages/05/",
+      "message": "Sales approved free shipping when the discounted merchandise subtotal is at least policy.free_shipping_min_cents. Choose the carrier using its original quote, then set shipping to zero when qualified. Held/unsupported orders always have zero shipping and total, but retain computed merchandise amounts and tax for review.",
+      "compact_after": false,
+      "cold_resume_after": false
+    },
+    {
+      "id": "stage-6",
+      "inject": "stages/06/",
+      "message": "Customer-service names now include commas, quotes, non-ASCII characters, and newlines. Finish the RFC 4180-readable CSV without changing customer text or ASCII order IDs. Keep quote(items), prior CLI behavior and all monetary/routing rules. The judge runs fresh main and edge orders through the CLI.",
+      "compact_after": false,
+      "cold_resume_after": false
+    }
+  ],
+  "judge_command": [
+    "python",
+    "judge.py",
+    "--workspace",
+    "{workspace}"
+  ]
+}

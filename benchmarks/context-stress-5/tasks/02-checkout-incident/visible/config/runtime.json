@@ -1,0 +1,29 @@
+{
+  "global": {
+    "tls_verify": true,
+    "timeout_ms": 5000,
+    "label": "Paiements — production"
+  },
+  "regions": {
+    "eu-west": {
+      "checkout": {
+        "timeout_ms": 120,
+        "retries": 1,
+        "release_id": "r2026.40"
+      },
+      "emergency_features": {
+        "fraud_hold": true
+      }
+    },
+    "us-east": {
+      "checkout": {
+        "timeout_ms": 900,
+        "retries": 2,
+        "release_id": "r2026.39"
+      },
+      "emergency_features": {
+        "fraud_hold": false
+      }
+    }
+  }
+}

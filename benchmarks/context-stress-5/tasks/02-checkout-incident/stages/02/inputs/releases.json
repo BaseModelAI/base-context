@@ -1,0 +1,16 @@
+{
+  "r2026.39": {
+    "eu-west": {
+      "checkout": {
+        "timeout_ms": 1200
+      }
+    }
+  },
+  "r2026.40": {
+    "eu-west": {
+      "checkout": {
+        "timeout_ms": 120
+      }
+    }
+  }
+}
