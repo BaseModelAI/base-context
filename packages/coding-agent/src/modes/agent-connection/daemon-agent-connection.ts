@@ -1256,11 +1256,15 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async compact(customInstructions?: string): Promise<CompactionResult> {
-		return this.requestData<CompactionResult>({
-			type: "compact",
-			activeSessionId: this.activeSessionId,
-			customInstructions,
-		});
+		// Like promptAndWait, compaction replies only after the model-backed operation settles.
+		return this.requestData<CompactionResult>(
+			{
+				type: "compact",
+				activeSessionId: this.activeSessionId,
+				customInstructions,
+			},
+			DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS,
+		);
 	}
 
 	async refine(

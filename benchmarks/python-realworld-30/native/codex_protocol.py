@@ -69,6 +69,7 @@ class CodexProtocol:
             raise ValueError("Custom system/developer instructions are not allowed")
         await self._request("initialize", {
             "clientInfo": {"name": "published-codex160-benchmark", "version": "1"},
+            "capabilities": {"experimentalApi": True},
         })
         await self._write({"method": "initialized", "params": {}})
         if resume is None:

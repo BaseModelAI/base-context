@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import {
 	CANONICAL_SESSION_OWNERSHIP_COMPATIBILITY,
@@ -494,6 +495,86 @@ describe("DaemonClient", () => {
 			command: { type: "ack_result", commandId: request.id },
 		});
 		client.close();
+	});
+
+	it("waits for the compact result beyond the ordinary request deadline", async () => {
+		vi.useFakeTimers();
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket);
+		const connection = new DaemonAgentConnection(client, "active-1");
+		try {
+			const compaction = connection.compact("retain the task");
+			const settled = vi.fn();
+			void compaction.then(settled, settled);
+			const envelope = JSON.parse(socket.writes[0]!);
+			expect(envelope.command).toEqual({
+				id: envelope.id,
+				type: "compact",
+				activeSessionId: "active-1",
+				customInstructions: "retain the task",
+			});
+			const ordinaryTimeout = expect(client.request({ type: "list" })).rejects.toThrow(
+				'Timed out after 30000ms waiting for the Base Context daemon response to "list"',
+			);
+			await vi.advanceTimersByTimeAsync(30_001);
+			await ordinaryTimeout;
+			expect(settled).not.toHaveBeenCalled();
+
+			const result = { summary: "Retained task", firstKeptEntryId: "entry-1", tokensBefore: 12598 };
+			socket.emit(
+				"data",
+				`${JSON.stringify({ id: envelope.id, type: "response", command: "compact", success: true, data: result })}\n`,
+			);
+			await expect(compaction).resolves.toEqual(result);
+		} finally {
+			client.close();
+			await connection.dispose();
+		}
+	});
+
+	it("still cancels a compact request held beyond the ordinary request deadline", async () => {
+		vi.useFakeTimers();
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket);
+		const connection = new DaemonAgentConnection(client, "active-1");
+		try {
+			const compaction = connection.compact();
+			const rejected = compaction.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			const envelope = JSON.parse(socket.writes[0]!);
+			await vi.advanceTimersByTimeAsync(30_001);
+			const abort = connection.abortCompaction();
+			void abort.catch(() => undefined);
+			const abortEnvelope = JSON.parse(socket.writes.at(-1)!);
+			expect(abortEnvelope.command).toEqual({
+				id: abortEnvelope.id,
+				type: "abort_compaction",
+				activeSessionId: "active-1",
+			});
+			socket.emit(
+				"data",
+				`${JSON.stringify({ id: abortEnvelope.id, type: "response", command: "abort_compaction", success: true })}\n`,
+			);
+			socket.emit(
+				"data",
+				`${JSON.stringify({ id: envelope.id, type: "response", command: "compact", success: false, error: "Compaction cancelled" })}\n`,
+			);
+			await abort;
+			await expect(rejected).resolves.toMatchObject({ message: "Compaction cancelled" });
+		} finally {
+			client.close();
+			await connection.dispose();
+		}
 	});
 
 	it("routes request progress by response id without notifying general listeners", async () => {

@@ -15,6 +15,7 @@
 - Fixed observe-mode request budgets rejecting over-budget requests, required tool continuations, and compatible saved sessions restored without a matching profile.
 - Fixed release upload and installer smoke paths, used the owned installation root, and rejected stable source-version and existing-tag mismatches before publication. Required the complete offline CI suites before release packaging.
 - Separated goal state, accounting, and persistence from session scheduling while preserving goal control and continuation ownership.
+- Fixed manual compaction over daemon connections using the short request timeout instead of the existing full-operation wait policy, while preserving cancellation.
 
 ## [1.1.1] - 2026-10-05
 

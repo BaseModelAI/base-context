@@ -123,7 +123,12 @@ class NativeLifecycleTest(unittest.IsolatedAsyncioTestCase):
 
         rpc, codex = self.client(CodexProtocol)
         operation = self.task(codex.ready(PARAMS, resume={"threadId": "saved-thread"}))
-        self.reply(rpc, await self.request(rpc, "initialize"), {})
+        request = await self.request(rpc, "initialize")
+        self.assertEqual(request["params"], {
+            "clientInfo": {"name": "published-codex160-benchmark", "version": "1"},
+            "capabilities": {"experimentalApi": True},
+        })
+        self.reply(rpc, request, {})
         await self.request(rpc, "initialized")
         request = await self.request(rpc, "thread/resume")
         self.assertEqual(request["params"], {**{k:v for k,v in PARAMS.items() if k != "ephemeral"}, "threadId": "saved-thread"})
