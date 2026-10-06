@@ -1,2 +1,0 @@
-- Moved cache-retention tests to local mocked transports and separated credential-dependent integration tests from the required offline suite.
-- Corrected cross-provider replay documentation to describe reasoning, failed turns, and unsupported images accurately.

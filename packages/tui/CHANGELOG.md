@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.2] - 2026-10-06
+
+- Corrected the product name in the TUI usage documentation.
+
 ## [1.0.8] - 2026-09-18
 
 - Flushed final pending terminal output through the existing coalesced differential renderer.

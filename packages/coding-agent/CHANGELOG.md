@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.2] - 2026-10-06
+
+- Fixed duplicate TaskFrame instructions by excluding exact user text already visible in the request and prioritizing older instructions after compaction.
+- Split canonical context compilation, session epoch admission, and action recovery into focused components without changing replay or commit behavior.
+- Added validated request-token budget settings, SDK precedence, and a working CLI configuration example.
+- Honored explicit native retry limits for main and auxiliary requests while preserving unlimited recovery when no limit was configured.
+- Fixed passive-session discovery during teardown, joined pending worker recovery before restart reclamation, and captured child request ancestry and usage ownership before asynchronous admission.
+- Repaired offline test fixtures and added isolated test commands and required CI groups without using stored credentials.
+- Simplified the first-session guide, clarified opt-in features and historical benchmark limits, and corrected fork paths and launcher branding.
+- Fixed SDK examples to use their selected model and corrected subagent Bash setup, inherited worker identity, and configuration paths.
+- Added local-only release preparation without reinstalling dependencies, tagging, publication, or pushes.
+- Added offline workflow coverage for retained Python state, exact historical recovery, and concurrent parent/child reporting, and preserved configured Python runtimes in the test runner.
+
 ## [1.1.1] - 2026-10-05
 
 - Fixed the installer download in GitHub releases by including the configured installation script in release artifacts.

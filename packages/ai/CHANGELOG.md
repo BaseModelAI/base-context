@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.2] - 2026-10-06
+
+- Moved cache-retention tests to local mocked transports and separated credential-dependent integration tests from the required offline suite.
+- Corrected cross-provider replay documentation to describe reasoning, failed turns, and unsupported images accurately.
+
 ## [1.1.0] - 2026-10-04
 
 - Fixed DeepSeek requests to use native effort-aware output limits when no explicit limit is set, without changing other provider defaults.
