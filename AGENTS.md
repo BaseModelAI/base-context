@@ -193,13 +193,14 @@ Create provider file exporting:
 
 1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
 
-2. **Run release script**:
+2. **Prepare locally** (no publication):
    ```bash
-   npm run release:patch    # Fixes and additions
-   npm run release:minor    # API breaking changes
+   node scripts/release.mjs patch --dry-run
+   node scripts/release.mjs patch --prepare
    ```
+   Review and commit the version/changelog changes, then build and pack from that commit. See [scripts/README-release.md](scripts/README-release.md) for npm and GitHub artifacts.
 
-The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.
+3. **Publish only with explicit authorization**. The existing `npm run release:patch` / `npm run release:minor` commands perform the full version bump, dependency reinstall, changelog folding, commit, tag, publication, and push. They are not local preparation commands and must not be rerun against an already prepared version.
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 

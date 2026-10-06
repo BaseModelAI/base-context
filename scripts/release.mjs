@@ -6,6 +6,7 @@
  *   node scripts/release.mjs <major|minor|patch>
  *   node scripts/release.mjs <x.y.z>
  *   node scripts/release.mjs <target> --dry-run   (preview changelog updates only)
+ *   node scripts/release.mjs <target> --prepare   (local files only; no commit/tag/publish/push)
  *
  * Steps:
  * 1. Check for uncommitted changes
@@ -17,17 +18,23 @@
  */
 
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, readdirSync, existsSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
 import { buildReleaseSection } from "./lib/changelog-fragments.mjs";
 
 const DRY_RUN = process.argv.includes("--dry-run");
+const PREPARE_ONLY = process.argv.includes("--prepare");
 const RELEASE_TARGET = process.argv.slice(2).find((arg) => !arg.startsWith("--"));
 const BUMP_TYPES = new Set(["major", "minor", "patch"]);
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
-if (!RELEASE_TARGET || (!BUMP_TYPES.has(RELEASE_TARGET) && !SEMVER_RE.test(RELEASE_TARGET))) {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z> [--dry-run]");
+if (
+	!RELEASE_TARGET ||
+	(!BUMP_TYPES.has(RELEASE_TARGET) && !SEMVER_RE.test(RELEASE_TARGET)) ||
+	process.argv.slice(2).some((arg) => arg.startsWith("--") && !["--dry-run", "--prepare"].includes(arg)) ||
+	(DRY_RUN && PREPARE_ONLY)
+) {
+	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z> [--dry-run|--prepare]");
 	process.exit(1);
 }
 
@@ -98,6 +105,28 @@ function bumpOrSetVersion(target) {
 	return getVersion();
 }
 
+function prepareVersion(target) {
+	const version = previewVersion(target);
+	if (compareVersions(version, getVersion()) <= 0) {
+		console.error(`Error: version ${version} must be greater than current version ${getVersion()}.`);
+		process.exit(1);
+	}
+	const packageDirs = getChangelogs().map(dirname);
+	const workspaceFlags = packageDirs.map((dir) => `--workspace=${shellQuote(dir)}`).join(" ");
+	// npm version normally reifies workspaces; disable that so installed dependencies stay untouched.
+	run(`npm version ${version} ${workspaceFlags} --include-workspace-root --no-git-tag-version --ignore-scripts --workspaces-update=false`);
+	run("node scripts/sync-versions.js");
+	const root = JSON.parse(readFileSync("package.json", "utf-8"));
+	for (const dir of packageDirs) {
+		const { name } = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+		if (root.dependencies?.[name]) root.dependencies[name] = version;
+	}
+	writeFileSync("package.json", `${JSON.stringify(root, null, "\t")}\n`);
+	// Reconcile workspace metadata without reinstalling or resolving new dependency versions.
+	run("npm install --package-lock-only --ignore-scripts --offline --no-audit --no-fund");
+	return version;
+}
+
 function getChangelogs() {
 	const packagesDir = "packages";
 	const packages = readdirSync(packagesDir);
@@ -166,6 +195,8 @@ function updateChangelogsForRelease(version) {
 	if (consumedFragments.length > 0) {
 		if (DRY_RUN) {
 			console.log(`\nWould git rm: ${consumedFragments.join(", ")}`);
+		} else if (PREPARE_ONLY) {
+			for (const path of consumedFragments) unlinkSync(path);
 		} else {
 			run(`git rm -q -- ${consumedFragments.map(shellQuote).join(" ")}`);
 		}
@@ -201,12 +232,18 @@ if (status && status.trim()) {
 }
 console.log("  Working directory clean\n");
 
-const version = bumpOrSetVersion(RELEASE_TARGET);
+const version = PREPARE_ONLY ? prepareVersion(RELEASE_TARGET) : bumpOrSetVersion(RELEASE_TARGET);
 console.log(`  New version: ${version}\n`);
 
 console.log("Updating CHANGELOG.md files...");
 updateChangelogsForRelease(version);
 console.log();
+
+if (PREPARE_ONLY) {
+	console.log(`=== Prepared v${version} locally; no commit, tag, publication, or push ===`);
+	console.log("Review and commit the version/changelog changes, then build and pack the release artifacts.");
+	process.exit(0);
+}
 
 console.log("Committing and tagging...");
 stageChangedFiles();

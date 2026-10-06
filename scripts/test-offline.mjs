@@ -32,7 +32,7 @@ function run(command, commandArgs, cwd, env) {
 }
 const home = mkdtempSync(join(tmpdir(), "base-context-offline-"));
 const env = {};
-for (const key of ["PATH", "LANG", "LC_ALL", "TERM", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_OFFLINE", "UV_PYTHON_DOWNLOADS", "NPM_CONFIG_CACHE"]) {
+for (const key of ["PATH", "LANG", "LC_ALL", "TERM", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_OFFLINE", "UV_PYTHON_DOWNLOADS", "NPM_CONFIG_CACHE", "BASE_CONTEXT_KERNEL_PYTHON"]) {
 	if (process.env[key] !== undefined) env[key] = process.env[key];
 }
 env.HOME = home;
@@ -59,7 +59,7 @@ try {
 		if (pkg === "coding-agent") {
 			const code = await run(process.execPath, [tsx, join(root, "scripts", "bootstrap-test-kernel.mjs")], cwd, env);
 			if (code) { status = code; break; }
-			env.BASE_CONTEXT_KERNEL_PYTHON = join(env.BASE_CONTEXT_HOME, "runtime", "bin", "python");
+			env.BASE_CONTEXT_KERNEL_PYTHON ??= join(env.BASE_CONTEXT_HOME, "runtime", "bin", "python");
 		}
 		const offlineEnv = { ...env, NODE_OPTIONS: `--require=${join(root, "scripts", "offline-network.cjs")}` };
 		const commandArgs = pkg === "tui"
