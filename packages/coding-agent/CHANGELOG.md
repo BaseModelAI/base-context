@@ -24,6 +24,7 @@
 - Joined already-running Python startup and restoration before canonical resource capture, preserving cancellation and stale-owner checks.
 - Marked withdrawn historical benchmark comparisons as archival-only without changing their numbers or charts.
 - Clarified that job-watch parking requires registered watch IDs; waiting for child replies alone does not require parking.
+- Clarified that explicit child model selections require a provider/model selector, including the current model.
 
 ## [1.1.1] - 2026-10-05
 
