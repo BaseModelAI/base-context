@@ -551,31 +551,35 @@ describe("AgentSession rlm recursion", () => {
 		const release = new Promise<void>((resolve) => {
 			releaseChild = resolve;
 		});
-		let childStarted = false;
+		const childStarted = deferred<void>();
 		const root = await createSession({
 			respond: async (context) => {
-				childStarted = true;
+				childStarted.resolve();
 				await release;
 				return assistantMessage(`child answer: ${userText(context)}`);
 			},
 		});
-		const runPromise = root.runRlmChild("rename while running", { name: "spawn-worker" });
-		await waitFor(() => childStarted);
-		const running = (await root.listRlmSubagents()).subagents[0];
-		if (!running) {
-			throw new Error("Missing running child");
-		}
-		if (!running.session_id) {
-			throw new Error("Missing running child session ID");
-		}
-		await root.getRlmChildSession(running.rlm_child_id)?.setSessionName("renamed-running-worker");
-		expect((await root.listRlmSubagents()).subagents[0]?.session_name).toBe("renamed-running-worker");
+		try {
+			await root.runRlmChild("rename while running", { name: "spawn-worker" });
+			// Admission precedes startup; wait for the held provider without settling the running child.
+			await childStarted.promise;
+			const running = (await root.listRlmSubagents()).subagents[0];
+			if (!running) {
+				throw new Error("Missing running child");
+			}
+			if (!running.session_id) {
+				throw new Error("Missing running child session ID");
+			}
+			await root.getRlmChildSession(running.rlm_child_id)?.setSessionName("renamed-running-worker");
+			expect((await root.listRlmSubagents()).subagents[0]?.session_name).toBe("renamed-running-worker");
 
-		await expect(root.runRlmChild("reuse renamed selector", { name: "renamed-running-worker" })).rejects.toThrow(
-			'Agent name "renamed-running-worker" is unavailable: an agent of that name already exists at depth 1 under this parent',
-		);
-		releaseChild();
-		await runPromise;
+			await expect(root.runRlmChild("reuse renamed selector", { name: "renamed-running-worker" })).rejects.toThrow(
+				'Agent name "renamed-running-worker" is unavailable: an agent of that name already exists at depth 1 under this parent',
+			);
+		} finally {
+			releaseChild();
+			await root.waitForRlmQuiescence();
+		}
 	});
 
 	it("makes an externally restored retained child listable and deletable", async () => {
@@ -2317,7 +2321,10 @@ describe("AgentSession rlm recursion", () => {
 		try {
 			const spawned = await root.runRlmChild("inline naming failure", { name: "bad-name" });
 			expect(spawned.rlm_child_id).toMatch(/^sub-/);
-			await waitFor(() => dispose.mock.calls.length > 0);
+			// Keep the naming fault installed until detached startup and its async cleanup settle.
+			await root.waitForRlmQuiescence();
+			expect(appendSessionInfo).toHaveBeenCalledWith("bad-name");
+			expect(dispose).toHaveBeenCalled();
 		} finally {
 			appendSessionInfo.mockRestore();
 			dispose.mockRestore();

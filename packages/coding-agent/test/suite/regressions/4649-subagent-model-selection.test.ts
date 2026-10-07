@@ -139,14 +139,16 @@ describe("ENG-4649 subagent model selection", () => {
 		const catalog = vi.spyOn(harness.session.modelRegistry, "getExecutableModels").mockResolvedValue([]);
 		try {
 			await expect(harness.session.findRlmModels("parent", 8)).resolves.toEqual({ models: [] });
-			harness.setResponses([fauxAssistantMessage("same parent answer")]);
+			harness.setResponses([
+				fauxAssistantMessage("same parent answer"),
+				fauxAssistantMessage("Parent acknowledges the child's terminal notice."),
+			]);
 			const result = await harness.session.runRlmChild("keep the parent model", {
 				model: `${provider}/parent-model`,
 			});
 			expect(result.model).toBe(`${provider}/parent-model`);
-			await vi.waitFor(async () => {
-				expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
-			});
+			await harness.session.waitForRlmQuiescence();
+			expect((await harness.session.listRlmSubagents()).subagents[0]?.status).toBe("completed");
 		} finally {
 			catalog.mockRestore();
 			await harness.cleanup();
