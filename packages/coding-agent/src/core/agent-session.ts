@@ -309,6 +309,7 @@ import {
 	NativeRecoveryCursorStore,
 	type NativeRecoveryInput,
 	type NativeRecoveryResponse,
+	type NativeRecoveryToolCall,
 	parseNativeRecoveryInput,
 	recoverCapturedHistory,
 } from "./selective-recovery.js";
@@ -1404,7 +1405,11 @@ export class AgentSession {
 	private _nativeRecoveryTools = new WeakMap<AgentTool, AgentTool["execute"]>();
 	private _nativeRecoveryCursors = new NativeRecoveryCursorStore();
 	private _nativeRecoveryCursorSource?: string;
-	private _nativeRecoveryProducer = new AsyncLocalStorage<{ used: boolean; skillOwner?: NativeSkillSelectionOwner }>();
+	private _nativeRecoveryProducer = new AsyncLocalStorage<{
+		used: boolean;
+		skillOwner?: NativeSkillSelectionOwner;
+		activeToolCall?: NativeRecoveryToolCall;
+	}>();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -1741,7 +1746,14 @@ export class AgentSession {
 						: undefined;
 				await intentWrite(invocation);
 				if (!recoveryWrite && !exchangeWrite) return;
-				const producer = { used: false, skillOwner };
+				const producer = {
+					used: false,
+					skillOwner,
+					activeToolCall:
+						qualified && assistant
+							? { entryId: assistant.entryId, toolCallId: invocation.toolCallId }
+							: undefined,
+				};
 				const owner: BoundToolExecution = {
 					run: (run) => (recoveryWrite ? this._nativeRecoveryProducer.run(producer, run) : run()),
 					finalize: async (exchange) => {
@@ -11720,6 +11732,7 @@ export class AgentSession {
 					{ ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxBytes: responseBytes },
 					signal,
 					this._nativeRecoveryCursors,
+					producer?.activeToolCall,
 				),
 			);
 		} catch (error) {

@@ -1675,6 +1675,110 @@ it("bounds the encoded envelope of a 2364-byte selected skill under a 2800-byte 
 	}
 });
 
+it("keeps other public fields and the original call exclusion across search cursors", async () => {
+	const journalPath = join(dir, "self-search.jsonl");
+	const owner = await SessionJournalOwner.open({ journalPath, create: true });
+	const needle = "QX7-search-cursor-4411";
+	try {
+		await owner.appendJson(JSON.stringify({ type: "session", version: 3, id: "self-search", cwd: dir }));
+		await owner.appendJson(
+			JSON.stringify({ type: "message", id: "user", parentId: null, message: { role: "user", content: needle } }),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "older",
+				parentId: "user",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "active", name: "prime_context", arguments: { query: needle } }],
+				},
+			}),
+		);
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "current",
+				parentId: "older",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: needle },
+						{ type: "toolCall", id: "active", name: "prime_context", arguments: { query: needle } },
+						{ type: "toolCall", id: "sibling", name: "ipython", arguments: { code: needle } },
+					],
+				},
+			}),
+		);
+		await index.syncSource("self-search", owner.getSnapshot());
+		const source = {
+			sessionId: "self-search",
+			sessionFile: journalPath,
+			leafId: "current",
+			sourceSequence: 3,
+			persistent: true,
+		};
+		const view = createBranchHistoryReadView(index, source, (query) => query());
+		const cursors = new NativeRecoveryCursorStore();
+		const limits = { ...DEFAULT_NATIVE_RECOVERY_LIMITS, maxItems: 1 };
+		let response = await recoverCapturedHistory(
+			view,
+			{ action: "search", query: needle },
+			limits,
+			undefined,
+			cursors,
+			{ entryId: "current", toolCallId: "active" },
+		);
+		expect(response.results[0]).toMatchObject({ status: "partial", cursor: expect.any(String) });
+		const records = [...response.results[0].records];
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "later",
+				parentId: "current",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "next", name: "prime_context", arguments: { query: needle } }],
+				},
+			}),
+		);
+		await index.syncSource("self-search", owner.getSnapshot());
+		const newer = createBranchHistoryReadView(index, { ...source, leafId: "later", sourceSequence: 4 }, (query) =>
+			query(),
+		);
+		while (response.results[0].cursor) {
+			response = await recoverCapturedHistory(
+				newer,
+				{ action: "search", cursor: response.results[0].cursor },
+				limits,
+				undefined,
+				cursors,
+				{ entryId: "later", toolCallId: "next" },
+			);
+			expect(response.scope).toMatchObject({ leafId: "current", sourceSequence: 3 });
+			records.push(...response.results[0].records);
+		}
+		expect(response.results[0]).toMatchObject({ status: "found", coverage: "complete", exhausted: true });
+		expect(records.map(({ ref, field }) => ({ ref, field }))).toEqual([
+			{ ref: "user", field: "/message/content" },
+			{ ref: "older", field: "/message/content/0/arguments/query" },
+			{ ref: "current", field: "/message/content/0/text" },
+			{ ref: "current", field: "/message/content/2/arguments/code" },
+		]);
+		const direct = await recoverCapturedHistory(
+			newer,
+			{ action: "read", ref: "current", field: "/message/content/1/arguments/query" },
+			DEFAULT_NATIVE_RECOVERY_LIMITS,
+			undefined,
+			cursors,
+			{ entryId: "current", toolCallId: "active" },
+		);
+		expect(direct.results[0]).toMatchObject({ status: "found", records: [{ text: needle }] });
+	} finally {
+		await owner.close();
+	}
+});
+
 it("scans case-sensitive public substrings rather than whole index terms", async () => {
 	const journalPath = join(dir, "literal.jsonl");
 	const owner = await SessionJournalOwner.open({ journalPath, create: true });

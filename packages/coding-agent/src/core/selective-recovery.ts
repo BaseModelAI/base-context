@@ -18,6 +18,12 @@ import { hydrateCapturedHistoryEntry, type SessionHistoryReadView } from "./sess
 import { getSessionArtifactPathForFile, type SessionEntry } from "./session-manager.js";
 import { projectTaskStateSource } from "./task-state.js";
 
+/** Host-admitted source identity, never supplied by the public recovery request. */
+export interface NativeRecoveryToolCall {
+	readonly entryId: string;
+	readonly toolCallId: string;
+}
+
 export interface NativeRecoveryLimits {
 	maxBytes: number;
 	maxSourceBytes: number;
@@ -219,6 +225,7 @@ export function createNativeRecoveryRefusal(
 interface PublicField {
 	field: string;
 	text: string;
+	toolCallId?: string;
 	retained?: RetainedToolOutput;
 	unavailable?: boolean;
 }
@@ -306,7 +313,7 @@ function publicFields(
 				if (typeof value !== "string") continue;
 				if (fields.length >= maxItems) throw new NativeRecoveryBudgetRefusal();
 				const escaped = key.replaceAll("~", "~0").replaceAll("/", "~1");
-				fields.push({ field: `${field}/${i}/arguments/${escaped}`, text: value });
+				fields.push({ field: `${field}/${i}/arguments/${escaped}`, text: value, toolCallId: block.id });
 			}
 		} else if (
 			block.type === "image" &&
@@ -384,6 +391,7 @@ export function parseNativeRecoveryInput(value: unknown): NativeRecoveryInput {
 
 interface RecoveryCursorState {
 	source: SourceSnapshotRef;
+	excludedToolCall?: NativeRecoveryToolCall;
 	operation: NativeRecoveryOperation;
 	after: number;
 	entryId?: string;
@@ -428,6 +436,7 @@ export async function recoverCapturedHistory(
 	limits: NativeRecoveryLimits = DEFAULT_NATIVE_RECOVERY_LIMITS,
 	signal?: AbortSignal,
 	cursors?: NativeRecoveryCursorStore,
+	activeToolCall?: NativeRecoveryToolCall,
 ): Promise<NativeRecoveryResponse> {
 	const cap = { ...limits };
 	for (const key of ["maxBytes", "maxSourceBytes", "maxItems", "maxRequests"] as const) {
@@ -576,6 +585,7 @@ export async function recoverCapturedHistory(
 			? structuredClone(saved)
 			: {
 					source: { ...view.source },
+					excludedToolCall: continuable && activeToolCall ? { ...activeToolCall } : undefined,
 					operation: { ...operation, cursor: undefined, maxBytes: undefined },
 					after: 0,
 					field: 0,
@@ -717,6 +727,13 @@ export async function recoverCapturedHistory(
 			let paused = false;
 			for (; state.field < fields.length; state.field++, resetField()) {
 				const field = fields[state.field];
+				// Keep field positions stable for cursors; only this search's original call arguments are skipped.
+				if (
+					state.excludedToolCall &&
+					metadata.id === state.excludedToolCall.entryId &&
+					field.toolCallId === state.excludedToolCall.toolCallId
+				)
+					continue;
 				if (operation.field !== undefined && field.field !== operation.field) continue;
 				if (field.unavailable) {
 					state.unavailable = true;

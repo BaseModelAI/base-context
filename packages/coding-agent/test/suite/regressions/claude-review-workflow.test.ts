@@ -15,6 +15,45 @@ import { createTestResourceLoader } from "../../utilities.js";
 import { createHarness, getMessageText, type Harness } from "../harness.js";
 import { createDeferred } from "../scheduling.js";
 
+it("does not find the running prime_context search in its own arguments", async () => {
+	const harness = await createHarness({
+		persistSession: true,
+		settings: { compaction: { enabled: false }, autoRefine: { enabled: false } },
+	});
+	let recovered: NativeRecoveryResponse | undefined;
+	try {
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					{
+						type: "toolCall",
+						id: "active-history-search",
+						name: "prime_context",
+						arguments: { action: "search", query: "QX7-active-arguments-only-4411" },
+					},
+				],
+				{ stopReason: "toolUse" },
+			),
+			(context) => {
+				const result = context.messages.find(
+					(message) => message.role === "toolResult" && message.toolCallId === "active-history-search",
+				);
+				recovered = JSON.parse(getMessageText(result)) as NativeRecoveryResponse;
+				return fauxAssistantMessage("Search complete.");
+			},
+		]);
+		await harness.session.prompt("Search the captured history for the missing marker.");
+		expect(recovered).toMatchObject({
+			status: "complete-miss",
+			coverage: "complete",
+			sources: [],
+			results: [{ status: "complete-miss", coverage: "complete", records: [], exhausted: true }],
+		});
+	} finally {
+		await harness.cleanup();
+	}
+});
+
 it("recovers a large Python result and its old constraint after compaction and cold reopening", async () => {
 	const settings = { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } };
 	const harness = await createHarness({ persistSession: true, settings });
