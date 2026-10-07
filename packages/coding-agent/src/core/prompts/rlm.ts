@@ -14,7 +14,7 @@ export interface RlmPromptOptions {
 function buildLongRunningWorkPrompt(hasJobWatch: boolean): string {
 	return [
 		hasJobWatch
-			? "Use `job_watch` for repeated job checks after an authorized launch. Consume prepared evidence; call `park` and end the turn only when no independent work remains. Parking holds goal and autonomous continuation, not user input. Preserve every required report. Tiny one-off commands stay inline."
+			? "Use `job_watch` for repeated job checks after an authorized launch. Consume prepared evidence. When no independent work remains, call `park` only with a nonempty list of registered watch IDs, then end the turn. If waiting only for a child reply, end the turn without parking. Parking holds goal and autonomous continuation, not user input. Preserve every required report. Tiny one-off commands stay inline."
 			: "For slow or independently completing work, use a nonblocking control loop: start the work, record its handle or output location, then end your turn. Read the result on a later turn or when a reply arrives.",
 		"When delegation is available and useful, assign independent substantive tasks to separate workers. Start independent workers without waiting for each one sequentially, and let them run in parallel.",
 		"Do not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.",

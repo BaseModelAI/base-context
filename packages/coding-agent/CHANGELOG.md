@@ -23,6 +23,7 @@
 - Reported failures of already-acknowledged direct prompts before native family quiescence, without duplicating awaited or output-limit outcomes.
 - Joined already-running Python startup and restoration before canonical resource capture, preserving cancellation and stale-owner checks.
 - Marked withdrawn historical benchmark comparisons as archival-only without changing their numbers or charts.
+- Clarified that job-watch parking requires registered watch IDs; waiting for child replies alone does not require parking.
 
 ## [1.1.1] - 2026-10-05
 

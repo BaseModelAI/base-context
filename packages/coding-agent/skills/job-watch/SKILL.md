@@ -23,7 +23,7 @@ Continue independent work when possible. `park` returns immediately and holds on
 
 - `await watch(job=None, *, job_id=None, completion_source, probe_command=None, interval="5m", notify="terminal", fields=None, report_every=None, deadline=None, probe_timeout=30)` registers once. Repeated active-resource registration returns its watch. `fields` selects top-level progress keys for status, reports, and `notify="changes"`; include every required metric. Timestamps never count as changes. Intervals use existing schedule syntax (ten-second minimum). Deadline is ISO; timeout is seconds.
 - `await status(id=None)` reads cached snapshots, without probing.
-- `await park(ids)` registers a nonblocking wait.
+- `await park(ids)` registers a nonblocking wait for a nonempty list of IDs returned by `watch`. It does not register watches. If waiting only for a child reply, end the turn without parking.
 - `await unregister(id)` stops observation, never the job. It may cancel a probe and revoke queued routine snapshots. Already-admitted terminal/failure/attention/monitoring-loss evidence remains. Selected/in-flight input is unchanged. Unregister is idempotent.
 
 Use `completion_source="probe"` and a `job_id` for detached remote jobs. Successful SSH launcher exit is **not** remote completion. The probe must be authorized, noninteractive, read-only, and run in the project's native environment; no notebook closures. It prints one JSON object, at most 16 KiB:
