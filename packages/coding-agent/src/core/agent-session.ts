@@ -7305,6 +7305,23 @@ export class AgentSession {
 					if (actions.some((action) => action.payload.kind !== "turn" || action.payload.queueVisible)) {
 						this._surfaceSessionInputError(error);
 					}
+					if (
+						!(error instanceof AgentOutputLimitError) &&
+						actions.some(
+							(action) =>
+								action.lifecycle.state === "failed" &&
+								action.payload.kind === "turn" &&
+								action.payload.acceptedBeforeCompletion &&
+								!action.payload.queueVisible &&
+								action.agentMessageId === undefined &&
+								primaryDeliveryRecord(action).durable,
+						)
+					) {
+						// This caller received a durable admission ACK without a completion waiter.
+						// Report its terminal failure before the pump becomes idle. Output-limit
+						// refusals already have their own refusal-only agent_end.
+						this._surfaceSessionInputError(error, "prompt_completion");
+					}
 				} finally {
 					for (const action of actions) {
 						const retainedCancelledDispatch =
@@ -7418,12 +7435,15 @@ export class AgentSession {
 		return false;
 	}
 
-	private _surfaceSessionInputError(error: unknown): void {
+	private _surfaceSessionInputError(
+		error: unknown,
+		event: "session_input" | "prompt_completion" = "session_input",
+	): void {
 		const normalized = this._asError(error);
 		try {
 			this._extensionRunner.emitError({
 				extensionPath: "<session-input>",
-				event: "session_input",
+				event,
 				error: normalized.message,
 				stack: normalized.stack,
 			});

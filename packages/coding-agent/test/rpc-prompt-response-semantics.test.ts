@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import { Agent } from "@ponythewhite/base-context-agent";
 import { fauxAssistantMessage, getModel, type Model, registerFauxProvider } from "@ponythewhite/base-context-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
+import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -297,6 +297,106 @@ describe("RPC prompt response semantics", () => {
 			await cleanup();
 		}
 	});
+
+	it.each([
+		{ kind: "acceptance-only", waitForCompletion: false },
+		{ kind: "completion-waiting", waitForCompletion: true },
+	])(
+		"keeps $kind native budget failures observable without duplicate outcomes",
+		async ({ kind, waitForCompletion }) => {
+			const tempDir = join(tmpdir(), `rpc-native-accepted-refusal-${kind}-${Date.now()}`);
+			mkdirSync(tempDir, { recursive: true });
+			const manager = await SessionManager.create(tempDir, tempDir);
+			const model: Model<"openai-responses"> = {
+				...getModel("openai", "gpt-4.1"),
+				api: "openai-responses",
+				baseUrl: "https://example.invalid/v1",
+				contextWindow: 128,
+				maxTokens: 16,
+			};
+			const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected diagnostic network send"));
+			let session: AgentSession | undefined;
+			try {
+				({ session } = await createAgentSession({
+					cwd: tempDir,
+					agentDir: tempDir,
+					sessionManager: manager,
+					model,
+					authStorage: AuthStorage.inMemory({ openai: { type: "api_key", key: "offline-test" } }),
+					settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+					resourceLoader: createTestResourceLoader(),
+					tools: [],
+					includeGoals: false,
+					includeCompactSkill: false,
+					prewarmIpythonKernel: false,
+					requestTokenBudget: {
+						mode: "enforce",
+						profiles: [
+							{
+								id: "offline-rpc-refusal",
+								revision: "1",
+								api: model.api,
+								provider: model.provider,
+								url: "https://example.invalid/v1/responses",
+								model: model.id,
+								authMode: "fixture-api-key",
+								templateRevision: "responses-text-v1",
+								replayFamily: "responses-text-v1",
+								contextTokens: 128,
+								outputCeilingTokens: 16,
+								estimate: { tokensPerUtf8Byte: 1, templateTokens: 0, marginTokens: 16 },
+							},
+						],
+					},
+				}));
+				const events: AgentSessionEvent[] = [];
+				const failures: Array<{ extensionPath: string; event: string; error: string }> = [];
+				const order: string[] = [];
+				const accepted: boolean[] = [];
+				session.subscribe((event) => {
+					events.push(event);
+					if (event.type === "turn_start") order.push("turn_start");
+				});
+				await session.bindExtensions({
+					onError: (error) => {
+						failures.push(error);
+						order.push("failure");
+					},
+				});
+				const options = { preflightResult: (success: boolean) => accepted.push(success) };
+				const failure = "Request token budget over-budget: configured context limit exceeded";
+				if (waitForCompletion) {
+					await expect(session.promptAndWait("Diagnostic request", options)).rejects.toThrow(failure);
+				} else {
+					await session.promptUntilAccepted("Diagnostic request", options);
+				}
+				await session.waitForRlmQuiescence();
+				expect(accepted).toEqual([true]);
+				if (waitForCompletion) {
+					// The completion promise already delivered this error to its caller.
+					expect(failures).toEqual([]);
+				} else {
+					// A durable admission ACK is not a successful prompt outcome. This must
+					// be observable before native family quiescence can return.
+					expect(failures).toHaveLength(1);
+					expect(failures[0]).toMatchObject({
+						extensionPath: "<session-input>",
+						event: "prompt_completion",
+						error: failure,
+					});
+					expect(order).toEqual(["turn_start", "failure"]);
+				}
+				expect(events.some((event) => event.type === "agent_end")).toBe(false);
+				expect(session.messages.some((message) => message.role === "assistant")).toBe(false);
+				expect(fetch).not.toHaveBeenCalled();
+			} finally {
+				fetch.mockRestore();
+				if (session) await session.disposeAsync();
+				else await manager.close();
+				rmSync(tempDir, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("reports a late native request-budget failure after ACK while stdin stays open", async () => {
 		const tempDir = join(tmpdir(), `rpc-native-refusal-${Date.now()}`);
