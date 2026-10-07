@@ -18,6 +18,7 @@
 - Fixed manual compaction over daemon connections using the short request timeout instead of the existing full-operation wait policy, while preserving cancellation.
 - Allowed fresh clients to reclaim confirmed-dead client-owned workers when resuming saved sessions, without taking over live processes or connected owners.
 - Fixed returned child handles failing to resolve for retained completed children during agent messaging, while preserving deletion and family-routing checks.
+- Fixed manual compaction rejecting a valid recovery boundary when an internal selected-skill capture separates an assistant call from its tool result.
 
 ## [1.1.1] - 2026-10-05
 

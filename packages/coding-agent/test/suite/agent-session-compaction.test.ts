@@ -1,4 +1,5 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	AgentContinueError,
 	type AgentMessage,
@@ -29,6 +30,8 @@ import { getRecoveryCompactionAuthorization, PublicContextBudgetError } from "..
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
+import type { Skill } from "../../src/core/skills.js";
+import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { TASK_FRAME_CUSTOM_TYPE } from "../../src/core/task-frame.js";
 import type { IpythonKernelProvisioner } from "../../src/core/tools/ipython.js";
 import { createTestResourceLoader } from "../utilities.js";
@@ -1032,6 +1035,175 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		if (containing.type !== "attempt_admitted") throw new Error("Expected actual MAIN admission");
 		expect(containing.descriptor.requestBudget).toBeUndefined();
 		expect(containing.contextEpoch).toBeDefined();
+	});
+
+	it("compacts selected skill recovery before manual compaction", async () => {
+		const model = getModel("deepseek", "deepseek-flash");
+		const skills: Skill[] = [];
+		const harness = await createHarness({
+			persistSession: true,
+			resourceLoader: createTestResourceLoader({ skills }),
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 }, autoRefine: { enabled: false } },
+		});
+		harnesses.push(harness);
+		const skillPath = join(harness.tempDir, "COMPACTION-SKILL.md");
+		writeFileSync(
+			skillPath,
+			"---\nname: compaction-fixture\ndescription: Native compaction skill\n---\nSELECTED_SKILL_EVIDENCE",
+		);
+		skills.push({
+			name: "compaction-fixture",
+			description: "Native compaction skill",
+			kind: "markdown",
+			filePath: skillPath,
+			baseDir: harness.tempDir,
+			disableModelInvocation: false,
+			sourceInfo: createSyntheticSourceInfo("compaction-skill-fixture", { source: "test" }),
+		});
+		await harness.session.reload();
+		harness.session.modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			baseUrl: model.baseUrl,
+			apiKey: "offline-recovery-key",
+			models: [model],
+		});
+		harness.authStorage.setRuntimeApiKey(model.provider, "offline-recovery-key");
+		await harness.session.setModel(model);
+		await harness.session.setThinkingLevel("low");
+		harness.session.setActiveToolsByName(["prime_context"]);
+		const main: RequestJournalEntry["request"][] = [];
+		const summaries: unknown[] = [];
+		// Only HTTP is offline. The built-in skill route owns the declaration, recovery and epoch ACK.
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+			expect(String(url)).toBe("https://api.deepseek.com/chat/completions");
+			const entries = await harness.sessionManager.readEntries();
+			const admitted = entries
+				.flatMap((entry) =>
+					entry.type === "request" && entry.request.type === "attempt_admitted" ? [entry.request] : [],
+				)
+				.at(-1)!;
+			const summarizing = admitted.purpose === "summary";
+			if (summarizing) summaries.push(JSON.parse(String(init?.body)));
+			else main.push(admitted);
+			// A fresh unbudgeted session first needs a native recovery ACK before skill selection.
+			const call = summarizing
+				? undefined
+				: main.length === 1
+					? { id: "initial_recovery", arguments: '{"action":"search","query":"RECOVERY_EVIDENCE"}' }
+					: main.length === 2
+						? { id: "selected_skill_recovery", arguments: '{"action":"skill","name":"compaction-fixture"}' }
+						: undefined;
+			const delta = call
+				? {
+						role: "assistant",
+						reasoning_content: "Select the advertised skill.",
+						tool_calls: [
+							{
+								index: 0,
+								id: call.id,
+								type: "function",
+								function: {
+									name: "prime_context",
+									arguments: call.arguments,
+								},
+							},
+						],
+					}
+				: { role: "assistant", content: summarizing ? "Selected skill summary." : "Skill selected." };
+			const chunk = {
+				id: `selected_skill_${main.length}_${summaries.length}`,
+				object: "chat.completion.chunk",
+				model: model.id,
+				choices: [{ index: 0, delta, finish_reason: call ? "tool_calls" : "stop" }],
+				usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+			};
+			return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		await harness.session.prompt("RECOVERY_EVIDENCE: select the compaction-fixture skill and retain its evidence.");
+		expect(main).toHaveLength(3);
+		const initial = main[1];
+		if (initial.type !== "attempt_admitted") throw new Error("Expected initial recovery admission");
+		expect(initial.descriptor.requestBudget).toBeUndefined();
+		expect(initial.contextEpoch).toBeDefined();
+		const containing = main[2];
+		if (containing.type !== "attempt_admitted") throw new Error("Expected actual MAIN admission");
+		expect(containing.descriptor.requestBudget).toBeUndefined();
+		expect(containing.contextEpoch).toBeDefined();
+		expect(containing.contextEpoch!.entryId).not.toBe(initial.contextEpoch!.entryId);
+		const epoch = await harness.sessionManager.readEntry(containing.contextEpoch!.entryId);
+		if (epoch?.type !== "compaction") throw new Error("Expected accepted selected-skill epoch");
+		const checkpoint = readContextEpoch(epoch.details, 2 * 1024 * 1024)!;
+		const skill = checkpoint.selectedSkills?.find((selected) => selected.name === "compaction-fixture");
+		expect(skill).toBeDefined();
+		const declaration = await harness.sessionManager.readEntry(skill!.view.ref.entryId);
+		expect(declaration).toMatchObject({
+			type: "custom_message",
+			customType: "base-context-selected-skill",
+			display: false,
+			details: { baseContextSelectedSkill: { producer: "model" } },
+		});
+		const entries = await harness.sessionManager.readEntries();
+		expect(
+			entries.find(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolCallId === "initial_recovery",
+			),
+		).toMatchObject({ message: { toolName: "prime_context", isError: false } });
+		const caller = entries.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some((part) => part.type === "toolCall" && part.id === "selected_skill_recovery"),
+		)!;
+		const recovery = entries.find(
+			(entry) =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === "selected_skill_recovery",
+		)!;
+		expect(caller).toBeDefined();
+		expect(recovery).toMatchObject({ message: { toolName: "prime_context", isError: false } });
+		await harness.sessionManager.readBranchHistory(async (history) => {
+			const source = await history.get(declaration!.id);
+			const result = await history.get(recovery.id);
+			expect(source?.qualification).toBe("native-recovery");
+			expect(result?.qualification).toBe("native-recovery");
+			expect((await history.get(caller.id))!.sequence).toBeLessThan(source!.sequence);
+			expect(source!.sequence).toBeLessThan(result!.sequence);
+		});
+		expect(checkpoint.literalTailId).toBe(recovery.id);
+		expect(checkpoint.replayContract).toBe("message-groups");
+
+		// Compact this accepted recovery boundary, without a mode change or another MAIN request.
+		const compacted = await harness.session.compact();
+		expect(compacted.summary).toContain("Selected skill summary.");
+		expect(compacted.firstKeptEntryId).toBe(caller.id);
+		expect(summaries.length).toBeGreaterThan(0);
+		expect(main).toHaveLength(3);
+		expect(harness.eventsOfType("compaction_end")).toEqual([
+			expect.objectContaining({ reason: "manual", aborted: false, result: compacted }),
+		]);
+		const saved = (await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction").at(-1)!;
+		expect(
+			readContextEpoch(saved.details, 2 * 1024 * 1024)?.selectedSkills?.find(
+				(selected) => selected.name === "compaction-fixture",
+			)?.view.ref.entryId,
+		).toBe(declaration!.id);
+		const rebuilt = await harness.sessionManager.readBranchHistory((history) =>
+			new CanonicalContextCompiler().compile(
+				history.branchContext,
+				harness.settingsManager.getCanonicalContextLimits(),
+			),
+		);
+		expect(getCanonicalViewUnits(rebuilt)!.flatMap((unit) => unit.exactSources)).toEqual(
+			expect.arrayContaining([caller.id, recovery.id]),
+		);
+		expect(rebuilt.map(getMessageText).join("\n")).toContain("SELECTED_SKILL_EVIDENCE");
 	});
 
 	it.each([0, 1])("keeps unprojected recovery native (depth %i)", async (rlmDepth) => {

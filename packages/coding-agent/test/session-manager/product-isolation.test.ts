@@ -55,6 +55,18 @@ describe("session write isolation", () => {
 		} finally {
 			await bounded.release();
 		}
+
+		// UI-hidden ordinary custom context is still a cut barrier, not an internal skill declaration.
+		await session.appendCustomMessageEntry("ordinary-context", "omitted ordinary custom context", false);
+		const laterTail = await session.appendMessage({ role: "user", content: "later selected tail", timestamp: 4 });
+		const customSink = session.bindCompactionSink();
+		try {
+			const selected = await customSink.readCompactionEntries([tail, laterTail]);
+			expect(selected.entries.map((entry) => entry.id)).toEqual([tail, laterTail]);
+			expect([...selected.suffixAnchors]).toEqual([laterTail]);
+		} finally {
+			await customSink.release();
+		}
 	});
 
 	it("persists owned sessions and permits explicit read/copy from a legacy input", async () => {

@@ -3870,8 +3870,18 @@ export class SessionManager {
 		}
 		references.sort((a, b) => a.sequence - b.sequence);
 
+		let sourceBytes = 0;
+		const readEntry = async (reference: IndexedSourceEvent): Promise<SessionEntry> => {
+			const remaining = maxSourceBytes - sourceBytes;
+			sourceBytes += reference.locator.length;
+			if (sourceBytes > maxSourceBytes) throw new Error("Compaction source byte budget exceeded");
+			const value = await history.hydrateEntry(reference.id, remaining);
+			if (!value) throw new Error("Compaction entry source is unavailable");
+			return withEntryRetention(value.entry, value.source.retention, value.source.qualification);
+		};
+
 		// Pinned older views cannot cross an omitted message to become a chronological cut.
-		// Walk metadata only: excluded lifetime payloads must not consume the hydration budget.
+		// Decode only unselected qualified custom-message candidates within the source byte budget.
 		const suffixAnchors = new Set<string>();
 		const visited = new Set<string>();
 		let current = history.source.leafId;
@@ -3883,21 +3893,22 @@ export class SessionManager {
 			if (!reference) throw new Error("Compaction parent path is unresolved");
 			leafKind ??= reference.kind;
 			if (["message", "custom_message", "branch_summary"].includes(reference.kind)) {
-				if (!selected.has(reference.id)) break;
-				suffixAnchors.add(reference.id);
+				if (!selected.has(reference.id)) {
+					// The compiler renders these captures as skill references, not message anchors.
+					if (
+						reference.kind !== "custom_message" ||
+						reference.qualification !== "native-recovery" ||
+						!selectedSkillCapture(await readEntry(reference))
+					)
+						break;
+				} else {
+					suffixAnchors.add(reference.id);
+				}
 			}
 			current = reference.parentId;
 		}
 		const entries: SessionEntry[] = [];
-		let sourceBytes = 0;
-		for (const reference of references) {
-			const remaining = maxSourceBytes - sourceBytes;
-			sourceBytes += reference.locator.length;
-			if (sourceBytes > maxSourceBytes) throw new Error("Compaction source byte budget exceeded");
-			const value = await history.hydrateEntry(reference.id, remaining);
-			if (!value) throw new Error("Compaction entry source is unavailable");
-			entries.push(withEntryRetention(value.entry, value.source.retention, value.source.qualification));
-		}
+		for (const reference of references) entries.push(await readEntry(reference));
 		return { entries, suffixAnchors, leafKind };
 	}
 
