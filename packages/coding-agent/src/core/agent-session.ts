@@ -1543,7 +1543,8 @@ export class AgentSession {
 			const controls = this._contextOmissions;
 			const omitted = new Set(controls?.ids);
 			const epochManager = this.sessionManager;
-			const resource = this._captureKernelResource();
+			const resource = await this._captureKernelResource(this.agent.signal);
+			assertHarnessSourceCurrent();
 			const compaction = epochManager.bindCompactionSink({
 				maxEntries: limits.maxMessages,
 				maxSourceBytes: limits.maxSourceBytes,
@@ -1989,7 +1990,8 @@ export class AgentSession {
 	private async _writeContextMode(mode: ContextMode, freshContextContract = false): Promise<void> {
 		const manager = this.sessionManager;
 		const limits = this.settingsManager.getCanonicalContextLimits();
-		const resource = this._captureKernelResource();
+		const resource = await this._captureKernelResource(this.agent.signal);
+		if (this.sessionManager !== manager) throw new Error("Context mode source changed before adoption");
 		const compaction = manager.bindCompactionSink({
 			maxEntries: limits.maxMessages,
 			maxSourceBytes: limits.maxSourceBytes,
@@ -8917,10 +8919,11 @@ export class AgentSession {
 		this._flushPendingIpythonExecutions();
 	}
 
-	private _captureKernelResource(): OwnedResourceCapture {
+	private async _captureKernelResource(signal?: AbortSignal): Promise<OwnedResourceCapture> {
 		const provisioner = this._ipythonKernelProvisioner;
+		await provisioner?.waitForPendingStartup(signal);
 		const captured = provisioner ? captureOwnedKernelState.call(provisioner) : undefined;
-		return Object.freeze({
+		const resource = Object.freeze({
 			enabled: this._contextEpochsEnabled,
 			snapshot:
 				captured?.snapshot ??
@@ -8932,6 +8935,8 @@ export class AgentSession {
 				}),
 			isCurrent: () => this._ipythonKernelProvisioner === provisioner && (captured?.isCurrent() ?? true),
 		});
+		assertResourceCurrent(resource);
+		return resource;
 	}
 
 	private async _syncKernelStateAfterCompaction(owner = this._captureCompactionOwner()): Promise<void> {
@@ -9223,6 +9228,7 @@ export class AgentSession {
 		allowShortSession = false,
 		budgetPressure = false,
 		capacity?: PublicContextBudgetError,
+		signal: AbortSignal | undefined = owner.signal,
 	): Promise<{
 		preparation: CompactionPreparation | undefined;
 		pathEntries: SessionEntry[];
@@ -9233,7 +9239,8 @@ export class AgentSession {
 	}> {
 		this._assertCompactionOwner(owner);
 		const limits = this.settingsManager.getCanonicalContextLimits();
-		const resource = this._captureKernelResource();
+		const resource = await this._captureKernelResource(signal);
+		this._assertCompactionOwner(owner);
 		const source = await compaction.source;
 		this._assertCompactionOwner(owner);
 		if (!source.persistent) {
@@ -9341,6 +9348,7 @@ export class AgentSession {
 			allowShortSession,
 			budgetPressure,
 			options.capacity,
+			signal,
 		);
 		this._assertCompactionOwner(owner);
 		if (prepared.resource) assertResourceCurrent(prepared.resource);

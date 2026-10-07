@@ -76,6 +76,8 @@ Summaries are not lossless, retrieval is bounded, and Python restoration is best
 
 ## Historical benchmark
 
+> **Archived — comparison withdrawn.** This historical comparison is withdrawn, along with all earlier Base Context comparisons, including released-version comparisons. Its numbers, tables, and charts are preserved as archival records only and must not be used to support performance claims.
+
 Base Context **1.1.1** and Codex **0.160.0** both passed **60/60** selected task/profile pairs on 30 self-authored Python standard-library tasks. Base had **31% shorter mean selected-run time** and a **19% lower captured API-cost estimate** in that sample, using GPT-6.1 Sol high and GPT-6 Astra medium.
 
 These are best-of-two results with a ceiling effect, different dates and concurrency limits, and different native tools/instructions. They are not single-attempt reliability, invoices, complete campaign spend, or measurements of the current changes. Request-budget selection was not enabled, so the comparison cannot establish its effect or long-session quality. [Data, charts, and full method](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md).

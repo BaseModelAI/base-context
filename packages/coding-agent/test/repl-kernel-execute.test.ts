@@ -667,6 +667,103 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		}
 	}, 30_000);
 
+	it("joins snapshot kernel startup before the first cold request capture", async () => {
+		const lifecycle = await createNativeLifecycleFixture(dir, "native-lifecycle-prewarm");
+		let releaseRestore = () => {};
+		const restoreGate = new Promise<void>((resolve) => {
+			releaseRestore = resolve;
+		});
+		let enteredRestore = () => {};
+		const restoring = new Promise<void>((resolve) => {
+			enteredRestore = resolve;
+		});
+		let enteredPreparation = () => {};
+		const preparing = new Promise<void>((resolve) => {
+			enteredPreparation = resolve;
+		});
+		const restore = ReplKernelManager.prototype.restoreState;
+		const wait = IpythonKernelProvisioner.prototype.waitForPendingStartup;
+		const restoreSpy = vi.spyOn(ReplKernelManager.prototype, "restoreState");
+		const waitSpy = vi.spyOn(IpythonKernelProvisioner.prototype, "waitForPendingStartup");
+		try {
+			lifecycle.calls.push({
+				type: "toolCall",
+				id: "call_snapshot_start",
+				name: "ipython",
+				arguments: { code: "restored_probe = 42" },
+			});
+			await lifecycle.session.prompt("Keep a value in the owned kernel.");
+			const previous = await lifecycle.manager();
+			expect(await previous.snapshotState()).not.toBeNull();
+			restoreSpy.mockImplementation(async function (this: ReplKernelManager) {
+				enteredRestore();
+				await restoreGate;
+				return restore.call(this);
+			});
+			await lifecycle.reopen();
+			await restoring;
+			const started = lifecycle.manager();
+			const sendsBefore = lifecycle.bodies.length;
+			// Either the old compiler or the corrected producer join releases this independent gate.
+			// The fixture never requires compiler entry while correct capture is waiting for startup.
+			waitSpy.mockImplementation(function (this: IpythonKernelProvisioner, signal) {
+				enteredPreparation();
+				return wait.call(this, signal);
+			});
+			lifecycle.compiled.mockImplementationOnce(async function (this: CanonicalContextCompiler, ...args) {
+				enteredPreparation();
+				await started;
+				return lifecycle.compile.apply(this, args);
+			});
+			const outcome = lifecycle.session.prompt("Observe the restored kernel without executing a cell.").then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			await preparing;
+			expect(lifecycle.bodies).toHaveLength(sendsBefore);
+			releaseRestore();
+			expect(await outcome).toBeUndefined();
+			const current = await started;
+			expect(current).not.toBe(previous);
+			expect(lifecycle.bodies).toHaveLength(sendsBefore + 1);
+			expect(lifecycle.observations.at(-1)?.snapshot).toEqual(current.captureLifecycleState().snapshot);
+			expect(lifecycle.observations.at(-1)?.snapshot.state).toBe("running");
+			expect((await current.execute("print(restored_probe)")).stdout).toBe("42\n");
+		} finally {
+			releaseRestore();
+			waitSpy.mockRestore();
+			restoreSpy.mockRestore();
+			await lifecycle.dispose();
+		}
+	}, 30_000);
+
+	it("cancels a kernel startup join without canceling the shared startup", async () => {
+		let release = () => {};
+		const readyGate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const provisioner = new IpythonKernelProvisioner(dir, { python: python as string, readyGate });
+		try {
+			const lazy = provisioner.captureKernelState();
+			await provisioner.waitForPendingStartup();
+			expect(lazy.isCurrent()).toBe(true);
+			expect(provisioner.manager).toBeUndefined();
+			provisioner.prewarm();
+			const pending = provisioner.captureKernelState();
+			expect(pending.snapshot.state).toBe("provisioning");
+			const abort = new AbortController();
+			const joined = provisioner.waitForPendingStartup(abort.signal);
+			abort.abort();
+			await expect(joined).rejects.toThrow("Python execution aborted");
+			expect(pending.isCurrent()).toBe(true);
+			release();
+			expect((await provisioner.ensure()).isRunning).toBe(true);
+		} finally {
+			release();
+			await provisioner.dispose({ snapshot: false });
+		}
+	}, 30_000);
+
 	it("reports cell errors with a clean traceback", async () => {
 		manager = new ReplKernelManager({ python: python as string, cwd: dir });
 		const r = await manager.execute("def boom():\n    raise ValueError('nope')\nboom()");

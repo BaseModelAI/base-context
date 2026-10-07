@@ -101,6 +101,8 @@ Normal interactive sessions keep running after the terminal detaches. Save impor
 
 ## Benchmarks
 
+> **Archived — comparison withdrawn.** This historical comparison is withdrawn, along with all earlier Base Context comparisons, including released-version comparisons. Its numbers, tables, and charts are preserved as archival records only and must not be used to support performance claims.
+
 **Historical comparison: Base Context 1.1.1 versus Codex 0.160.0.** On 30 Python tasks × two profiles (GPT-6.1 Sol high and GPT-6 Astra medium), selected best-of-two runs passed 60/60 for both tools. Base had 31% shorter mean selected-run time and a 19% lower captured API-cost estimate in this sample.
 
 [![Historical Base 1.1.1 versus Codex 0.160.0 selected best-of-two results.](packages/coding-agent/docs/images/benchmarks/benchmark-overview.svg)](benchmarks/python-realworld-30/README.md)

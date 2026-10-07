@@ -21,6 +21,8 @@
 - Fixed manual compaction rejecting a valid recovery boundary when an internal selected-skill capture separates an assistant call from its tool result.
 - Fixed native history searches matching their own running tool-call arguments, while preserving genuine matches and the original search scope across cursor continuations.
 - Reported failures of already-acknowledged direct prompts before native family quiescence, without duplicating awaited or output-limit outcomes.
+- Joined already-running Python startup and restoration before canonical resource capture, preserving cancellation and stale-owner checks.
+- Marked withdrawn historical benchmark comparisons as archival-only without changing their numbers or charts.
 
 ## [1.1.1] - 2026-10-05
 

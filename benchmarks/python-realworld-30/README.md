@@ -1,5 +1,7 @@
 # Python Real-World 30: Base Context vs Codex
 
+> **Archived — comparison withdrawn.** This historical comparison is withdrawn, along with all earlier Base Context comparisons, including released-version comparisons. Its numbers, tables, and charts are preserved as archival records only and must not be used to support performance claims.
+
 **GPT-6.1 Sol · high and GPT-6 Astra · medium only.** 30 Python tasks,
 60 exact task/profile pairs. Historical Base Context **1.1.1** vs vanilla Codex **0.160.0**; these are not measurements of later source changes.
 

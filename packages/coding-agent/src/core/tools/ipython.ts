@@ -417,6 +417,16 @@ export class IpythonKernelProvisioner {
 		void this.ensure().catch(() => {});
 	}
 
+	/** Join only admitted startup; optional prewarm failure is not a request failure or a retry. */
+	async waitForPendingStartup(signal?: AbortSignal): Promise<void> {
+		const pending = this.managerPromise;
+		if (!pending || this.startedManager) return;
+		await raceWithAbort(
+			pending.catch(() => undefined),
+			signal,
+		);
+	}
+
 	/** Whether a kernel has finished starting and is currently running. */
 	get hasRunningKernel(): boolean {
 		return this.startedManager?.isRunning ?? false;
