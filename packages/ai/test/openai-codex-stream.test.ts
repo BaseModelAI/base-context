@@ -207,6 +207,73 @@ describe("Codex websocket connection identity", () => {
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
+	it.each(["immediate", "delayed"] as const)("retains terminal frames with %s decoding before close", async (mode) => {
+		process.env.BASE_CONTEXT_HOME = mkdtempSync(join(tmpdir(), "codex-terminal-order-"));
+		let releaseDecode!: () => void;
+		const decodeGate = new Promise<void>((resolve) => {
+			releaseDecode = resolve;
+		});
+		let closed!: () => void;
+		const socketClosed = new Promise<void>((resolve) => {
+			closed = resolve;
+		});
+		class ClosingWebSocket extends MockWebSocket {
+			override complete(): void {
+				const terminal = JSON.stringify({
+					type: "response.completed",
+					response: {
+						id: "resp_terminal",
+						status: "completed",
+						usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8 },
+					},
+				});
+				const data =
+					mode === "delayed"
+						? {
+								async arrayBuffer() {
+									await decodeGate;
+									return new TextEncoder().encode(terminal).buffer;
+								},
+							}
+						: terminal;
+				this.dispatchEvent(new MessageEvent("message", { data }));
+				if (mode === "immediate") {
+					this.dispatchEvent(
+						Object.assign(new Event("error"), { error: new Error("Error after terminal frame") }),
+					);
+				}
+				this.readyState = 3;
+				this.dispatchEvent(Object.assign(new Event("close"), { code: 1000, reason: "", wasClean: true }));
+				closed();
+			}
+		}
+		MockWebSocket.instances = [];
+		globalThis.WebSocket = ClosingWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => {
+			throw new Error("Unexpected SSE fallback");
+		});
+		let settled = false;
+		const result = streamOpenAICodexResponses(model, context, options)
+			.result()
+			.then((message) => {
+				settled = true;
+				return message;
+			});
+		try {
+			await socketClosed;
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(settled).toBe(mode === "immediate");
+		} finally {
+			releaseDecode();
+		}
+		expect(await result).toMatchObject({
+			stopReason: "stop",
+			responseId: "resp_terminal",
+			usage: { totalTokens: 8 },
+		});
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
+
 	it("keeps a busy socket with its owner and does not let its stale release evict a replacement", async () => {
 		MockWebSocket.instances = [];
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;

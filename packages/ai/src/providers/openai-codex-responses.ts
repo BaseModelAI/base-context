@@ -1125,6 +1125,7 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 	let done = false;
 	let failed: Error | null = null;
 	let sawCompletion = false;
+	let decodeChain = Promise.resolve();
 
 	const wake = () => {
 		if (!pending) return;
@@ -1134,7 +1135,7 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 	};
 
 	const onMessage: WebSocketListener = (event) => {
-		void (async () => {
+		decodeChain = decodeChain.then(async () => {
 			let text: string | null = null;
 			try {
 				if (!event || typeof event !== "object" || !("data" in event)) return;
@@ -1156,26 +1157,31 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 				done = true;
 				wake();
 			}
-		})();
+		});
 	};
 
+	// Transport termination must follow received frame decodes; abort remains immediate.
 	const onError: WebSocketListener = (event) => {
-		failed = extractWebSocketError(event);
-		done = true;
-		wake();
+		void decodeChain.then(() => {
+			failed = extractWebSocketError(event);
+			done = true;
+			wake();
+		});
 	};
 
 	const onClose: WebSocketListener = (event) => {
-		if (sawCompletion) {
+		void decodeChain.then(() => {
+			if (sawCompletion) {
+				done = true;
+				wake();
+				return;
+			}
+			if (!failed) {
+				failed = extractWebSocketCloseError(event);
+			}
 			done = true;
 			wake();
-			return;
-		}
-		if (!failed) {
-			failed = extractWebSocketCloseError(event);
-		}
-		done = true;
-		wake();
+		});
 	};
 
 	const onAbort = () => {
