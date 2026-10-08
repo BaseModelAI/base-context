@@ -149,7 +149,7 @@ Explore the working-set architecture, history recovery, and SDK controls in [Con
 
 ## Documentation
 
-[Quickstart](packages/coding-agent/docs/quickstart.md) · [Usage](packages/coding-agent/docs/usage.md) · [Settings](packages/coding-agent/docs/settings.md) · [Providers](packages/coding-agent/docs/providers.md) · [Skills](packages/coding-agent/docs/skills.md) · [RLM](packages/coding-agent/docs/rlm.md) · [SDK](packages/coding-agent/docs/sdk.md) · [All docs](packages/coding-agent/docs/index.md)
+[Quickstart](packages/coding-agent/docs/quickstart.md) · [Usage](packages/coding-agent/docs/usage.md) · [Settings](packages/coding-agent/docs/settings.md) · [Providers](packages/coding-agent/docs/providers.md) · [Skills](packages/coding-agent/docs/skills.md) · [RLM](packages/coding-agent/docs/rlm.md) · [SDK](packages/coding-agent/docs/sdk.md) · [All docs](packages/coding-agent/docs/index.md) · [1.1.2 review follow-up](packages/coding-agent/docs/release-1.1.2.md)
 
 See the [changelog](CHANGELOG.md) for releases. Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).
 

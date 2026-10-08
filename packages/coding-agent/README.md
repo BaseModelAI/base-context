@@ -72,7 +72,7 @@ Base Context inherits the Python-first programming model from Prime Agent. Its f
 
 Summaries are not lossless, retrieval is bounded, and Python restoration is best-effort. Generated code runs with your user permissions; workers are **not a security sandbox**. Use an external sandbox for untrusted work. Retained sessions can contain sensitive data; compaction does not delete it.
 
-[Architecture, comparison charts, and design details](https://github.com/BaseModelAI/base-context#how-it-works) · [Context management](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/context-management.md) · [SDK](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md) · [All docs](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md).
+[Architecture, comparison charts, and design details](https://github.com/BaseModelAI/base-context#how-it-works) · [Context management](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/context-management.md) · [SDK](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md) · [All docs](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md) · [1.1.2 review follow-up](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-1.1.2.md).
 
 ## Historical benchmark
 
