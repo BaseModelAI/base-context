@@ -29,7 +29,7 @@ base-context
 
 **Bring your existing provider account.** Choose **`/login`**, then **`/model`** and **`/effort`**. Have ChatGPT with Codex access? Choose **OpenAI Codex** in `/login`—no separate API key needed. Other supported subscriptions and API keys are available through their provider routes. [Provider setup](packages/coding-agent/docs/providers.md).
 
-This page describes **1.1.2**; install commands use the latest public release. [What's new](packages/coding-agent/docs/release-notes-1.1.2.md).
+This page describes **1.1.3**; install commands use the latest public release. [What's new](packages/coding-agent/docs/release-notes-1.1.3.md).
 
 <details>
 <summary>Prefer npm, Windows, or a source build?</summary>
@@ -167,7 +167,7 @@ Save important deliverables in files; Python restoration is best-effort. Command
 
 ## Documentation
 
-[Quickstart](packages/coding-agent/docs/quickstart.md) · [Usage](packages/coding-agent/docs/usage.md) · [Settings](packages/coding-agent/docs/settings.md) · [Providers](packages/coding-agent/docs/providers.md) · [Skills](packages/coding-agent/docs/skills.md) · [RLM](packages/coding-agent/docs/rlm.md) · [SDK](packages/coding-agent/docs/sdk.md) · [All docs](packages/coding-agent/docs/index.md) · [1.1.2 release notes](packages/coding-agent/docs/release-notes-1.1.2.md)
+[Quickstart](packages/coding-agent/docs/quickstart.md) · [Usage](packages/coding-agent/docs/usage.md) · [Settings](packages/coding-agent/docs/settings.md) · [Providers](packages/coding-agent/docs/providers.md) · [Skills](packages/coding-agent/docs/skills.md) · [RLM](packages/coding-agent/docs/rlm.md) · [SDK](packages/coding-agent/docs/sdk.md) · [All docs](packages/coding-agent/docs/index.md) · [1.1.3 release notes](packages/coding-agent/docs/release-notes-1.1.3.md)
 
 See the [changelog](CHANGELOG.md) for releases. Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).
 

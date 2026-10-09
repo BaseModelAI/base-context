@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.3] - 2026-10-09
+
+- Simplified benchmark documentation and chart labels to describe the single published comparison without internal run numbering.
+- Changed benchmark cost reporting to estimate missing costs for both products, leading with mean dollars per task and percentage savings while retaining known subtotals, assumptions, and sensitivity.
+
 ## [1.1.2] - 2026-10-06
 
 - Fixed duplicate TaskFrame instructions by excluding exact user text already visible in the request and prioritizing older instructions after compaction.

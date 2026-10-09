@@ -49,9 +49,9 @@
 	"engines": {
 		"node": "^22.12.0 || >=23.3.0"
 	},
-	"version": "1.1.2",
+	"version": "1.1.3",
 	"dependencies": {
-		"@ponythewhite/base-context": "1.1.2",
+		"@ponythewhite/base-context": "1.1.3",
 		"get-east-asian-width": "^1.6.0"
 	},
 	"overrides": {

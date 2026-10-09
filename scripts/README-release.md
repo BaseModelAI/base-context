@@ -9,11 +9,11 @@ Preparation and publication are separate actions. Run from the repository root w
 3. Preview the changelog, then prepare the next version:
 
    ```sh
-   node scripts/release.mjs 1.1.2 --dry-run
-   node scripts/release.mjs 1.1.2 --prepare
+   node scripts/release.mjs 1.1.3 --dry-run
+   node scripts/release.mjs 1.1.3 --prepare
    ```
 
-   Replace `1.1.2` with the intended release version. `patch` and `minor` also work.
+   Replace `1.1.3` with the intended release version. `patch` and `minor` also work.
 
 `--prepare` updates the root and four public package versions, internal dependencies, and lockfile. It folds changelog fragments using the normal release helper and removes consumed fragments. It does not reinstall or remove `node_modules`, stage files, commit, tag, publish, or push. The lockfile update runs offline. Existing dependency versions stay pinned; this is not a dependency update command.
 
@@ -37,7 +37,7 @@ For GitHub Releases:
 ```sh
 node scripts/pack-base-context-release.mjs \
   --base-url https://github.com/BaseModelAI/base-context \
-  --out-dir packages/coding-agent/release/local-1.1.2
+  --out-dir packages/coding-agent/release/local-1.1.3
 ```
 
 Use a new owned output directory. The packer replaces that directory. The base URL is the repository URL, **not** a `/releases/download/...` URL. The packer adds the versioned download path itself. Do not override `--version` to disguise an old build as a new release.
@@ -58,7 +58,7 @@ For this prepared release use:
 
 | Input | Build artifacts only | Publish GitHub/download channel | Publish both GitHub and npm |
 | --- | --- | --- | --- |
-| `release_tag` | `v1.1.2` | `v1.1.2` | `v1.1.2` |
+| `release_tag` | `v1.1.3` | `v1.1.3` | `v1.1.3` |
 | `channel` | `stable` | `stable` | `stable` |
 | `publish` | `false` | `true` | `true` |
 | `publish_npm` | `false` | `false` | `true` |
@@ -69,4 +69,4 @@ The existing download-channel publication requires `BASE_CONTEXT_DOWNLOAD_BASE_U
 
 Publication creates public releases and is not a dry run. This preparation does not dispatch the workflow, create a tag, push, or publish. Release summaries come from `packages/coding-agent/docs/release-notes-<version>.md` when present; otherwise the workflow uses that version's changelog section.
 
-Version 1.1.2 is already prepared. Do not run `release.mjs patch`, which would advance to 1.1.3, or the full release command against it. Final artifacts must be built and packed from the completed source commit, with the remaining fragments incorporated into its unreleased 1.1.2 notes. Never rewrite the released 1.1.1 sections.
+Once a version is prepared, do not rerun the version bump or the full release command against it. Build and pack from the committed prepared source. Published packages, release assets, and released changelog sections remain immutable; later fragments belong to a new release.
