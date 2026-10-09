@@ -5,10 +5,10 @@
 <g font-family="Arial, Helvetica, sans-serif">
 <rect x="0.00" y="0.00" width="1200.00" height="1080.00" rx="0" fill="#f5f8fb" stroke="none"/>
 <rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
-<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
+<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50-TASK BENCHMARK</text>
 <text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">04 / COST</text>
 <text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Cost per run: captured + estimated*</text>
-<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Mean USD per selected R1 attempt · Captured usage at API list rates, not subscription charges</text>
+<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Mean USD per selected attempt · Captured usage at API list rates, not subscription charges</text>
 <rect x="44.00" y="158.00" width="13.00" height="13.00" rx="3" fill="#087e75" stroke="none"/>
 <text x="67" y="171" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base Context</text>
 <rect x="246.00" y="158.00" width="13.00" height="13.00" rx="3" fill="#5062cf" stroke="none"/>
@@ -67,6 +67,6 @@
 <text x="895" y="896" font-size="21" fill="#5062cf" font-weight="700" text-anchor="middle">$1.759</text>
 <text x="44" y="963" font-size="17" fill="#526278" font-weight="400" text-anchor="start">* Model-price estimate, not measured cost. Sol/Astra values are scenarios, not bounds.</text>
 <text x="44" y="994" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base: 8 receipts have no usage (7 native-control, 1 refine); extra cost unknown, not zero.</text>
-<text x="44" y="1025" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Selected R1 only; excludes invalid/interrupted attempts and R2. Full-family costs remain unknown.</text>
+<text x="44" y="1025" font-size="17" fill="#526278" font-weight="400" text-anchor="start">300 selected attempts only; excludes invalid/interrupted attempts. Full-family costs remain unknown.</text>
 </g>
 </svg>

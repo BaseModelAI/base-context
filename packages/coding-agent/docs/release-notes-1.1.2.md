@@ -4,7 +4,7 @@ base-context — made in ![Poland](https://raw.githubusercontent.com/BaseModelAI
 
 **Built for work that outlives one context window.** Base Context brings a persistent Python workspace, recoverable tool outputs, and instruction recovery to a coding agent built on Prime Agent and Pi. Keep useful state close. Find the exact result you need. Spend the next step solving the problem instead of rebuilding the last one.
 
-![Base Context: 27–39% shorter mean attempt times across three profiles in the curated R1 benchmark](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.1.2/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)
+![Base Context: 27–39% shorter mean attempt times across three profiles in the curated benchmark](https://raw.githubusercontent.com/BaseModelAI/base-context/main/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)
 
 ## Where Base Context shines
 
@@ -14,7 +14,7 @@ In our **50-task, three-profile context-stress benchmark**, Base delivered:
 - **150/150 native completions** across the three benchmark profiles.
 - **128 of 141 timing wins** where both agents completed and produced fully passing artifacts.
 
-[Explore the full benchmark](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md).
+[Explore the full benchmark](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md).
 
 ## What's new in 1.1.2
 
@@ -32,7 +32,7 @@ In our **50-task, three-profile context-stress benchmark**, Base delivered:
 | Sol / high | 50/50 | 49/50 | 606.4 | 967.4 | 37.3% |
 | Sol / xhigh | 49/50 | 47/50 | 908.1 | 1,481.3 | 38.7% |
 
-R1 covers 300 first provider-clean attempts on a curated task set. Time means include clean failures and timeouts; full passes require all five main checks plus the edge check. Codex completed 144/150 runs and produced 146/150 passing artifacts. The [benchmark report](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md) has detailed scores, graphs, build identities, and methods. Replica 2 remains a separate, stopped archive.
+The benchmark covers 300 first provider-clean attempts on a curated task set. Time means include clean failures and timeouts; full passes require all five main checks plus the edge check. Codex completed 144/150 runs and produced 146/150 passing artifacts. The [benchmark report](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) has detailed scores, graphs, build identities, and methods.
 
 ## Captured-request costs*
 
@@ -44,7 +44,7 @@ Mean USD per selected run:
 | Sol / high | $0.7533 | $0.7226 | $0.1129 | $0.8355 |
 | Sol / xhigh | $0.9467 | $1.0273 | $0.1334 | $1.1607 |
 
-\* Known API-list-rate equivalents for captured usage, not subscription bills or complete spend. † The Codex scenario prices 441 missing-model receipts at each run's selected-model rates: **$38.07** added across 150 runs. Base has eight receipts without usable token counts, so its missing amount is unquantified. [Cost coverage and assumptions](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md#cost-known-subtotals-and-model-price-hypotheses) explain this partial-cost comparison.
+\* Known API-list-rate equivalents for captured usage, not subscription bills or complete spend. † The Codex scenario prices 441 missing-model receipts at each run's selected-model rates: **$38.07** added across 150 runs. Base has eight receipts without usable token counts, so its missing amount is unquantified. [Cost coverage and assumptions](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md#cost-known-subtotals-and-model-price-hypotheses) explain this partial-cost comparison.
 
 ## Get started
 

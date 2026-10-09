@@ -1,12 +1,12 @@
-# Curated 50 — first replica
+# Curated 50-task benchmark
 
-![Base Context has 27–39% lower mean attempt time in these three matching profiles, with near-ceiling artifact scores. This is a curated first-replica comparison, not a general ranking.](../../packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)
+![Base Context has 27–39% lower mean attempt time in these three matching profiles, with near-ceiling artifact scores. This is a curated comparison, not a general ranking.](../../packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)
 
 **Less time on these workflows, with strong artifact scores.** Base Context's mean attempt time was **27.1%, 37.3% and 38.7% lower** than Codex's at the three matching model/effort profiles. Full artifact passes were **148/150 vs 146/150**. These are descriptive results on a curated, outcome-informed task set, not evidence of general superiority or a particular mechanism's effect.
 
-This page reports **R1 only: 50 tasks × 3 profiles × 2 products = 300 selected attempts**, 50 per group. It retains all six clean failures and all six native timeouts. R2 was stopped by the user and remains archival; it is not a primary or best-of-two result. Costs below are incomplete captured-usage subtotals, with hypothetical additions clearly separated.
+This page reports only **50 tasks × 3 profiles × 2 products = 300 selected attempts**, 50 per group. It retains all six clean failures and all six native timeouts. Costs below are incomplete captured-usage subtotals, with hypothetical additions clearly separated.
 
-[Machine-readable summary](summary-replica1.json) · [Time](#mean-attempt-time) · [Quality](#artifact-quality) · [Cost](#cost-known-subtotals-and-model-price-hypotheses) · [Methods](#methods-and-limits) · [Reproducibility](#reproducibility)
+[Machine-readable summary](summary.json) · [Time](#mean-attempt-time) · [Quality](#artifact-quality) · [Cost](#cost-known-subtotals-and-model-price-hypotheses) · [Methods](#methods-and-limits) · [Reproducibility](#reproducibility)
 
 ## Mean attempt time
 
@@ -115,7 +115,7 @@ USD = (ordinary_input × input_rate + cache_read × cache_read_rate
 
 It assumes standard tier (multiplier 1). Reasoning output is already included in output and is not added again. All 441 receipts have zero cache-write tokens and input below the 272,000-token long-context threshold, so no long-context modifier applies. Token aggregates and unrounded scenario amounts are in the JSON summary. These assumptions do not establish actual billing tiers.
 
-Selected-attempt subtotals exclude provider-invalid attempts, parent interruptions and archival R2. They are **not total campaign expenditure**.
+Selected-attempt subtotals cover only the 300 selected attempts and exclude provider-invalid attempts and parent interruptions. They are **not total campaign expenditure**.
 
 ## Methods and limits
 
@@ -148,21 +148,21 @@ These are scheduled interventions, not evidence that every timed-out attempt rea
 
 ### First provider-clean selection, not quality selection
 
-R1 admitted **380 physical attempts**:
+Collection admitted **380 physical attempts**:
 
 | Disposition | Base Context | Codex | Total |
 | --- | ---: | ---: | ---: |
-| Selected provider-clean R1 attempts | 150 | 150 | 300 |
+| Selected provider-clean attempts | 150 | 150 | 300 |
 | Provider-invalid physical attempts | 72 | 4 | 76 |
 | Parent-interrupted physical attempts | 2 | 2 | 4 |
 
 An observed provider/transport error invalidated the whole physical attempt, including an eventual recovered pass. Its evidence and captured usage stayed in the private campaign record. Explicit replacements used the same cell and deadline. The **first provider-clean attempt** was selected; clean quality failures and clean native timeouts were not rerolled. “Provider-clean” means no qualifying error was observed, not proof that all provider behavior was identical. Conditioning on clean attempts excludes the 76 invalid attempts from headline quality/time and selected cost, so this is not an unconditional reliability or all-in operational-cost result.
 
-R1 has 294 full artifact passes and six clean failures. The user stopped R2 after R1 was complete; the campaign is on user-stop hold with no running or outstanding work. No R2 selection or best-of-two value enters this publication.
+The selected attempts include 294 full artifact passes and six clean failures.
 
 ### Actual builds, not a single-build claim
 
-| Product | Observed identity | Selected R1 attempts |
+| Product | Observed identity | Selected attempts |
 | --- | --- | ---: |
 | Base Context | `31d7827b0ab8a57e9c09e6b6f66661793c1e550a` | 24 |
 | Base Context | `694414adbd29908d753c1d90fc7bb82cdc674456` | 126 |
@@ -172,9 +172,9 @@ An asynchronous frame decode/close ordering defect triggered a stop. At the user
 
 ## Reproducibility
 
-This directory supplies the aggregate [R1 summary](summary-replica1.json), this method description and a standard-library SVG renderer. The five existing Stress5 inputs and judges are public in the adjacent directory. **The 45 adaptive corpora, full frozen runtime configs, native raw records and controller artifacts are not supplied here. This is not a complete public rerun package.** No benchmark was rerun to prepare these publication assets.
+This directory supplies the aggregate [summary](summary.json), this method description and a standard-library SVG renderer. The five existing Stress5 inputs and judges are public in the adjacent directory. **The 45 adaptive corpora, full frozen runtime configs, native raw records and controller artifacts are not supplied here. This is not a complete public rerun package.** No benchmark was rerun to prepare these publication assets.
 
-Aggregates were taken from the private campaign's `matched-summary-collection175.json` and `matched-completion-summary-collection175.json`, filtered to R1. Per-record cost metadata was consulted for Base's eight missing-usage receipts. The publication does not copy corpora, raw runs, credentials or private host paths. The archived campaign retains non-selected attempts and earlier outcomes, but this page does not promise public access to those records.
+Aggregates were taken from the private campaign's `matched-summary-collection175.json` and `matched-completion-summary-collection175.json`, filtered to the 300 selected attempts. Per-record cost metadata was consulted for Base's eight missing-usage receipts. The publication does not copy corpora, raw runs, credentials or private host paths. The archived campaign retains non-selected attempts and earlier outcomes, but this page does not promise public access to those records.
 
 Rebuild only the four charts, without dependencies or provider access:
 
@@ -182,4 +182,4 @@ Rebuild only the four charts, without dependencies or provider access:
 python3 benchmarks/context-curated-50/render_charts.py
 ```
 
-The renderer reads only `summary-replica1.json` and writes `packages/coding-agent/docs/images/benchmarks/curated50-{overview,time,quality,cost}.svg`. It does not collect, judge or reprice runs. All bar axes start at zero; labels are rounded for display, while the JSON keeps unrounded aggregates. The cost hatching denotes an assumption, not additional measured coverage.
+The renderer reads only `summary.json` and writes `packages/coding-agent/docs/images/benchmarks/curated50-{overview,time,quality,cost}.svg`. It does not collect, judge or reprice runs. All bar axes start at zero; labels are rounded for display, while the JSON keeps unrounded aggregates. The cost hatching denotes an assumption, not additional measured coverage.

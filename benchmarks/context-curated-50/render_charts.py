@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the four publication SVGs from summary-replica1.json (stdlib only).
+"""Render the four publication SVGs from summary.json (stdlib only).
 
 Run from the repository root:
     python3 benchmarks/context-curated-50/render_charts.py
@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE.parents[1] / "packages/coding-agent/docs/images/benchmarks"
-DATA = json.loads((HERE / "summary-replica1.json").read_text())
+DATA = json.loads((HERE / "summary.json").read_text())
 BASE, CODEX = "#087e75", "#5062cf"
 INK, MUTED, LINE = "#14263c", "#526278", "#dbe3eb"
 LABELS = ["Astra · medium", "Sol 6.1 · high", "Sol 6.1 · xhigh"]
@@ -55,7 +55,7 @@ class Chart:
         )
 
     def header(self, number, title, subtitle):
-        self.text(44, 45, "CURATED 50 / REPLICA 1", 15, BASE, 700)
+        self.text(44, 45, "CURATED 50-TASK BENCHMARK", 15, BASE, 700)
         self.text(375, 45, number, 15, BASE, 700)
         self.text(44, 95, title, 36, INK, 700)
         self.text(44, 130, subtitle, 18, MUTED)
@@ -72,13 +72,13 @@ class Chart:
 
 def overview():
     chart = Chart(680, "Less waiting. Strong results.",
-        "Curated first replica: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. "
+        "Curated 50-task benchmark: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. "
         "Base Context mean attempt times are 27%, 37% and 39% lower than Codex at matching requested model and effort. "
         "Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs "
         "where both products fully passed and completed. Full quality and methodology are in the benchmark report.")
     chart.header("01 / OVERVIEW", "Less waiting. Strong results.",
         "Base Context vs Codex · Matching requested model + effort")
-    chart.text(44, 163, "50 curated tasks · Three model/effort profiles · First replica", 18, MUTED)
+    chart.text(44, 163, "50 curated tasks · Three model/effort profiles", 18, MUTED)
     for i, (base, codex) in enumerate(PAIRS):
         x = 44 + i * 376
         chart.rect(x, 192, 360, 260, "white", 16, LINE)
@@ -108,7 +108,7 @@ def overview():
 
 def time_chart():
     chart = Chart(840, "Mean attempt time, including failures and timeouts",
-        "All 50 selected R1 attempts per group. Base Context versus Codex, in minutes: "
+        "All 50 selected attempts per group. Base Context versus Codex, in minutes: "
         "Astra medium 8.47 vs 11.62; Sol high 10.11 vs 16.12; Sol xhigh 15.13 vs 24.69. "
         "A separate completed, both-full-pass subset has 128 faster Base pairs and 13 faster Codex pairs out of 141.")
     chart.header("02 / TIME", "Mean attempt time", "All 50 selected attempts per group · Failures + deadline-limited timeouts included · Lower is better")
@@ -138,11 +138,11 @@ def time_chart():
 
 def quality_chart():
     chart = Chart(850, "Artifact quality and mean judge score",
-        "First replica, 50 tasks per profile per product. Full artifact passes: "
+        "Curated 50-task benchmark, 50 tasks per profile per product. Full artifact passes: "
         "Base Context 49, 50, 49; Codex 50, 49, 47. Mean judge progress scores: "
         "Base 4.96, 5.00, 4.96; Codex 5.00, 4.96, 4.84. Scores are near ceiling. "
         "Progress scores are not main-check counts. Three Codex timeouts have full artifact passes.")
-    chart.header("03 / QUALITY", "Strong artifact scores. Small gaps.", "Full pass = five main checks + the edge check · 50 selected R1 attempts per group")
+    chart.header("03 / QUALITY", "Strong artifact scores. Small gaps.", "Full pass = five main checks + the edge check · 50 selected attempts per group")
     chart.legend(167)
     chart.text(350, 209, "Mean judge progress / 5", 18, INK, 700)
     chart.text(856, 209, "Full passes", 18, INK, 700, "middle")
@@ -177,7 +177,7 @@ def cost_chart():
         "Hatching adds hypothetical Codex cost if unknown-model receipts used the profile model. "
         "All 441 Codex unpriced receipts have usage but unknown model. Eight Base receipts have known model "
         "but no usage, leaving an unquantified additional component. Sol/Astra sensitivities are scenarios, not bounds.")
-    chart.header("04 / COST", "Cost per run: captured + estimated*", "Mean USD per selected R1 attempt · Captured usage at API list rates, not subscription charges")
+    chart.header("04 / COST", "Cost per run: captured + estimated*", "Mean USD per selected attempt · Captured usage at API list rates, not subscription charges")
     chart.legend(171)
     chart.rect(382, 157, 24, 16, "url(#hypothesis)", stroke=CODEX)
     chart.text(416, 171, "Codex estimate: missing model priced at profile model", 17, MUTED)
@@ -220,7 +220,7 @@ def cost_chart():
             chart.text(x, y, f"${total:.3f}", 21, CODEX, 700, "middle")
     chart.text(44, 963, "* Model-price estimate, not measured cost. Sol/Astra values are scenarios, not bounds.", 17, MUTED)
     chart.text(44, 994, "Base: 8 receipts have no usage (7 native-control, 1 refine); extra cost unknown, not zero.", 17, MUTED)
-    chart.text(44, 1025, "Selected R1 only; excludes invalid/interrupted attempts and R2. Full-family costs remain unknown.", 17, MUTED)
+    chart.text(44, 1025, "300 selected attempts only; excludes invalid/interrupted attempts. Full-family costs remain unknown.", 17, MUTED)
     chart.save("cost")
 
 

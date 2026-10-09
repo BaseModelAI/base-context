@@ -1,15 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
 <title id="title">Less waiting. Strong results.</title>
-<desc id="desc">Curated first replica: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. Base Context mean attempt times are 27%, 37% and 39% lower than Codex at matching requested model and effort. Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs where both products fully passed and completed. Full quality and methodology are in the benchmark report.</desc>
+<desc id="desc">Curated 50-task benchmark: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. Base Context mean attempt times are 27%, 37% and 39% lower than Codex at matching requested model and effort. Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs where both products fully passed and completed. Full quality and methodology are in the benchmark report.</desc>
 <defs><pattern id="hypothesis" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#e6eaff"/><path d="M-2 2L2-2M0 8L8 0M6 10L10 6" stroke="#5062cf" stroke-width="1.5"/></pattern></defs>
 <g font-family="Arial, Helvetica, sans-serif">
 <rect x="0.00" y="0.00" width="1200.00" height="680.00" rx="0" fill="#f5f8fb" stroke="none"/>
 <rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
-<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
+<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50-TASK BENCHMARK</text>
 <text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">01 / OVERVIEW</text>
 <text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Less waiting. Strong results.</text>
 <text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Base Context vs Codex · Matching requested model + effort</text>
-<text x="44" y="163" font-size="18" fill="#526278" font-weight="400" text-anchor="start">50 curated tasks · Three model/effort profiles · First replica</text>
+<text x="44" y="163" font-size="18" fill="#526278" font-weight="400" text-anchor="start">50 curated tasks · Three model/effort profiles</text>
 <rect x="44.00" y="192.00" width="360.00" height="260.00" rx="16" fill="white" stroke="#dbe3eb"/>
 <text x="66" y="229" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Astra · medium</text>
 <text x="66" y="282" font-size="35" fill="#087e75" font-weight="700" text-anchor="start">27% less time</text>

@@ -1,0 +1,1 @@
+- Simplified benchmark documentation and chart labels to describe the single published comparison without internal run numbering.

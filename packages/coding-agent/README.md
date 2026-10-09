@@ -6,9 +6,9 @@ base-context — made in ![Poland](https://raw.githubusercontent.com/BaseModelAI
 
 Give your agent a workspace, not just a conversation. Base Context combines **persistent Python, retained outputs, and instruction recovery** to keep coding and research moving across long sessions. Developed by [Synerise](https://synerise.com), built on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-[![Curated R1: 27–39% shorter mean attempt times, 150/150 Base native completions, and faster results in 128/141 pairs where both harnesses completed and fully passed.](https://raw.githubusercontent.com/BaseModelAI/base-context/main/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md)
+[![Curated benchmark: 27–39% shorter mean attempt times, 150/150 Base native completions, and faster results in 128/141 pairs where both harnesses completed and fully passed.](https://raw.githubusercontent.com/BaseModelAI/base-context/main/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md)
 
-**Less waiting. Strong results.** In our curated 50-task R1 benchmark, Base delivered **27–39% shorter mean attempt times** across three matching profiles and **150/150 native completions**. [Explore the benchmark](#benchmarks).
+**Less waiting. Strong results.** In our curated 50-task benchmark, Base delivered **27–39% shorter mean attempt times** across three matching profiles and **150/150 native completions**. [Explore the benchmark](#benchmarks).
 
 [Install](#install) · [Workflow](#use-it) · [Benchmarks](#benchmarks) · [Design](#how-it-works) · [Documentation](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md)
 
@@ -81,7 +81,7 @@ Normal interactive work can continue after the terminal detaches. Reattach when 
 
 ### Long tasks. Less waiting.
 
-Our **curated 50-task R1 comparison** puts Base Context development builds and **Codex 0.160.0** through staged work with forced compaction and scheduled cold restarts.
+Our **curated 50-task comparison** puts Base Context development builds and **Codex 0.160.0** through staged work with forced compaction and scheduled cold restarts.
 
 | Profile · 50 attempts per harness | Mean time, Base / Codex | Full artifact passes, Base / Codex |
 | --- | ---: | ---: |
@@ -91,9 +91,9 @@ Our **curated 50-task R1 comparison** puts Base Context development builds and *
 
 **Base was faster in 128/141 pairs where both harnesses completed natively and fully passed.** Across all selected attempts, native completions were **150/150 versus 144/150**, and full artifact passes were **148/150 versus 146/150**. Artifact scores include three passing Codex timeouts; completion is scored separately.
 
-[Time chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-time.svg) · [Quality chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-quality.svg) · [Cost chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-cost.svg) · [R1 data](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/summary-replica1.json).
+[Time chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-time.svg) · [Quality chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-quality.svg) · [Cost chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-cost.svg) · [Benchmark data](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/summary.json).
 
-**Scope:** 50 curated, outcome-informed tasks; three profiles; first provider-clean attempt per cell, including clean failures and timeouts. Request-budget selection was off. Cost charts distinguish **known-usage API-rate subtotals\*** from **hypothetical same-model additions**. Both harnesses have unpriced receipts; these are incomplete estimates, not invoices. [Full methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) covers selection, provider exclusions, mixed builds, cost sensitivity, and archival R2.
+**Scope:** 50 curated, outcome-informed tasks; three profiles; first provider-clean attempt per cell, including clean failures and timeouts. Request-budget selection was off. Cost charts distinguish **known-usage API-rate subtotals\*** from **hypothetical same-model additions**. Both harnesses have unpriced receipts; these are incomplete estimates, not invoices. [Full methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) covers selection, provider exclusions, mixed builds, and cost sensitivity.
 
 Earlier comparisons remain **withdrawn** and available as archives: [Python 30](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md) · [Earlier evaluation records](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-1.1.2.md).
 

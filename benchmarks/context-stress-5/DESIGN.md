@@ -60,7 +60,7 @@ candidate. No provider preflight or benchmark may use an earlier incomplete buil
 - Two exact shared profiles: gpt-6.1-sol/high and gpt-6-astra/medium, through the SAME existing
   ChatGPT subscription route for both products. No API-key substitution and no DeepSeek.
   One valid first attempt per arm/task/profile: 5 x 2 x 2 = 20 baseline cells. No best-of-two.
-  Any added replicates must be frozen before live outcomes and all must count.
+  Any additional benchmark runs must be planned before live outcomes and all must count.
 - Optional third arm: SAME Base build with requestTokenBudget.mode=enforce (ON), only after
   the real subscription-route profile is validated and the decision to include it is frozen.
   This gives 30 cells total. It isolates the budgeted-selection bundle, including epochs and

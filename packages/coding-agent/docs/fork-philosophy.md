@@ -46,7 +46,7 @@ We selectively adapt upstream improvements while developing the fork's context a
 
 ## Where it shines in the benchmark
 
-Our [curated 50-task R1 comparison](../../../benchmarks/context-curated-50/README.md) puts Base Context development builds and Codex 0.160.0 through staged work with forced compaction and scheduled cold restarts. Across three matching model/effort profiles, Base delivered:
+Our [curated 50-task comparison](../../../benchmarks/context-curated-50/README.md) puts Base Context development builds and Codex 0.160.0 through staged work with forced compaction and scheduled cold restarts. Across three matching model/effort profiles, Base delivered:
 
 - **27–39% shorter mean attempt times.**
 - **Faster results in 128/141 pairs** where both harnesses completed natively and fully passed.

@@ -1,10 +1,8 @@
 # 1.1.2 review follow-up
 
-> **Release update, 2026-10-09.** See the [release highlights and installation](release-notes-1.1.2.md) and the [curated first-replica results](../../../benchmarks/context-curated-50/README.md). The release comparison uses completed R1: 300 provider-clean outcomes, 148/150 Base artifact passes versus 146/150 Codex, and 150/150 versus 144/150 native completions. Clean failures and passing-artifact timeouts remain in the results. The benchmark methods document the 76 provider-invalid attempts, four interruptions, mixed builds, and cost estimates.
+> **Release update, 2026-10-09.** See the [release highlights and installation](release-notes-1.1.2.md) and the [curated benchmark results](../../../benchmarks/context-curated-50/README.md). The benchmark covers 300 provider-clean outcomes, 148/150 Base artifact passes versus 146/150 Codex, and 150/150 versus 144/150 native completions. Clean failures and passing-artifact timeouts remain in the results. The benchmark methods document the 76 provider-invalid attempts, four interruptions, mixed builds, and cost estimates.
 >
-> Replica 2 was stopped by the user after 44 selected outcomes. It remains archival and is excluded from release metrics. No native benchmark jobs remain active.
->
-> The corrected runtime `694414adb` finishes decoding received WebSocket frames before transport shutdown. Its qualification included 28 focused provider tests, project checks, source build, eight package archives, and native offline CLI/SDK checks. The release adds the R1 publication assets and explicit stable npm opt-in. Earlier full-suite and readiness records below retain their own source revisions. Publication is a separate manual action.
+> The corrected runtime `694414adb` finishes decoding received WebSocket frames before transport shutdown. Its qualification included 28 focused provider tests, project checks, source build, eight package archives, and native offline CLI/SDK checks. The release adds the benchmark charts and data and explicit stable npm opt-in. Earlier full-suite and readiness records below retain their own source revisions. Publication is a separate manual action.
 
 ## Earlier qualification and discovery record
 

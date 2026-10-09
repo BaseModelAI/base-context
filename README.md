@@ -6,9 +6,9 @@ base-context — made in ![Poland](packages/coding-agent/docs/images/poland-flag
 
 Give your agent a workspace, not just a conversation. Base Context combines **persistent Python, retained outputs, and instruction recovery** to keep coding and research moving across long sessions. Built by [Synerise](https://synerise.com), on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-[![Curated R1: 27–39% shorter mean attempt times for Base Context across three matching profiles, with 150/150 native completions.](packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](benchmarks/context-curated-50/README.md)
+[![Curated benchmark: 27–39% shorter mean attempt times for Base Context across three matching profiles, with 150/150 native completions.](packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](benchmarks/context-curated-50/README.md)
 
-**27–39% shorter mean attempt times. 150/150 native completions.** In our curated 50-task R1 benchmark, Base was also faster in **128 of 141 pairs** where both agents completed and fully passed. [Explore the results](#benchmarks).
+**27–39% shorter mean attempt times. 150/150 native completions.** In our curated 50-task benchmark, Base was also faster in **128 of 141 pairs** where both agents completed and fully passed. [Explore the results](#benchmarks).
 
 [Install](#install) · [Workflow](#work-with-it) · [Benchmarks](#benchmarks) · [Design](#how-it-works) · [Documentation](#documentation) · [Attribution](#license-and-thanks)
 
@@ -110,7 +110,7 @@ Normal interactive sessions can keep running after the terminal detaches. Reatta
 
 ### Long tasks. Less waiting.
 
-Our **curated 50-task R1 comparison** puts Base Context development builds and **Codex 0.160.0** through staged work with forced compaction and scheduled cold restarts. Across three matching model/effort profiles, Base delivered **27–39% shorter mean attempt times**.
+Our **curated 50-task comparison** puts Base Context development builds and **Codex 0.160.0** through staged work with forced compaction and scheduled cold restarts. Across three matching model/effort profiles, Base delivered **27–39% shorter mean attempt times**.
 
 | Profile · 50 attempts per harness | Mean time, Base / Codex | Native completions, Base / Codex | Full artifact passes, Base / Codex |
 | --- | ---: | ---: | ---: |
@@ -122,7 +122,7 @@ The speed difference also holds among successful runs: **Base was faster in 128/
 
 [![Mean attempt time by profile and faster results among pairs where both harnesses completed and fully passed.](packages/coding-agent/docs/images/benchmarks/curated50-time.svg)](benchmarks/context-curated-50/README.md)
 
-[![Curated R1 quality: full artifact passes, main-check accuracy, and mean progress scores by profile.](packages/coding-agent/docs/images/benchmarks/curated50-quality.svg)](benchmarks/context-curated-50/README.md)
+[![Benchmark quality: full artifact passes, main-check accuracy, and mean progress scores by profile.](packages/coding-agent/docs/images/benchmarks/curated50-quality.svg)](benchmarks/context-curated-50/README.md)
 
 ### Cost, with the accounting visible
 
@@ -130,7 +130,7 @@ The speed difference also holds among successful runs: **Base was faster in 128/
 
 **Known costs\*** are API-rate subtotals from captured, priced usage—not invoices. Both harnesses have unpriced receipts, so totals are incomplete. Hatched additions show a **hypothetical same-main-model estimate** for Codex receipts with unknown model identities. [Cost breakdown and assumptions](benchmarks/context-curated-50/README.md).
 
-**Scope:** R1, 50 curated and outcome-informed tasks, three profiles, first provider-clean attempt per cell. Clean failures and timeouts are included. Request-budget selection was off. [Full methodology](benchmarks/context-curated-50/README.md) covers task selection, provider exclusions, mixed builds, cost sensitivity, and archival R2. [Download the R1 summary](benchmarks/context-curated-50/summary-replica1.json).
+**Scope:** 50 curated and outcome-informed tasks, three profiles, first provider-clean attempt per cell. Clean failures and timeouts are included. Request-budget selection was off. [Full methodology](benchmarks/context-curated-50/README.md) covers task selection, provider exclusions, mixed builds, and cost sensitivity. [Download the benchmark summary](benchmarks/context-curated-50/summary.json).
 
 Earlier comparisons remain **withdrawn** and available as archives: [Python 30](benchmarks/python-realworld-30/README.md) · [Earlier evaluation records](packages/coding-agent/docs/release-1.1.2.md).
 

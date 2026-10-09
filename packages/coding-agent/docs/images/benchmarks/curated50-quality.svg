@@ -1,14 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="850" viewBox="0 0 1200 850" role="img" aria-labelledby="title desc">
 <title id="title">Artifact quality and mean judge score</title>
-<desc id="desc">First replica, 50 tasks per profile per product. Full artifact passes: Base Context 49, 50, 49; Codex 50, 49, 47. Mean judge progress scores: Base 4.96, 5.00, 4.96; Codex 5.00, 4.96, 4.84. Scores are near ceiling. Progress scores are not main-check counts. Three Codex timeouts have full artifact passes.</desc>
+<desc id="desc">Curated 50-task benchmark, 50 tasks per profile per product. Full artifact passes: Base Context 49, 50, 49; Codex 50, 49, 47. Mean judge progress scores: Base 4.96, 5.00, 4.96; Codex 5.00, 4.96, 4.84. Scores are near ceiling. Progress scores are not main-check counts. Three Codex timeouts have full artifact passes.</desc>
 <defs><pattern id="hypothesis" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#e6eaff"/><path d="M-2 2L2-2M0 8L8 0M6 10L10 6" stroke="#5062cf" stroke-width="1.5"/></pattern></defs>
 <g font-family="Arial, Helvetica, sans-serif">
 <rect x="0.00" y="0.00" width="1200.00" height="850.00" rx="0" fill="#f5f8fb" stroke="none"/>
 <rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
-<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
+<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50-TASK BENCHMARK</text>
 <text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">03 / QUALITY</text>
 <text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Strong artifact scores. Small gaps.</text>
-<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Full pass = five main checks + the edge check · 50 selected R1 attempts per group</text>
+<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Full pass = five main checks + the edge check · 50 selected attempts per group</text>
 <rect x="44.00" y="154.00" width="13.00" height="13.00" rx="3" fill="#087e75" stroke="none"/>
 <text x="67" y="167" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base Context</text>
 <rect x="246.00" y="154.00" width="13.00" height="13.00" rx="3" fill="#5062cf" stroke="none"/>

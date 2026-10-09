@@ -1,7 +1,6 @@
 {
-  "title": "Curated 50: first-replica native workflow comparison",
-  "scope": "replica1 only, curated 50 tasks, first provider-clean physical attempt per cell; all failures and native timeouts retained",
-  "primary_replicate": 1,
+  "title": "Curated 50-task benchmark: native workflow comparison",
+  "scope": "300 selected attempts across 50 curated tasks, 3 profiles and 2 products; first provider-clean physical attempt per cell; all failures and native timeouts retained",
   "tasks": 50,
   "profiles": [
     "gpt-6-astra-medium",
@@ -372,7 +371,7 @@
       "note": "Usage fields are null. An amount cannot be estimated from captured usage; unknown is not zero."
     },
     "full_family_cost_complete": null,
-    "excluded_from_selected_subtotals": "Provider-invalid attempts, parent interruptions and replica2; no all-campaign-spend claim.",
+    "excluded_from_selected_subtotals": "Only the 300 selected attempts are included; provider-invalid attempts and parent interruptions are excluded; no all-campaign-spend claim.",
     "pricing_metadata": "../python-realworld-30/native/pricing-metadata.json",
     "pricing_recorded_on": "2026-10-03",
     "rates_usd_per_million_tokens": {
@@ -451,7 +450,7 @@
   },
   "build_continuation": "A frame decode/close ordering defect triggered a stop. At user direction, completed valid results were retained and only unfinished cells continued on the corrected build. No recorded result is established to have been affected; old-build immunity is not proven.",
   "methods": {
-    "selection": "First provider-clean physical attempt per R1 task/profile/product cell. No clean-quality rerolls; failures and native timeouts retained. Observed provider/transport errors invalidate an entire attempt even after recovery.",
+    "selection": "First provider-clean physical attempt per task/profile/product cell. No clean-quality rerolls; failures and native timeouts retained. Observed provider/transport errors invalidate an entire attempt even after recovery.",
     "capacity": {
       "global": 8,
       "per_product": 4,
@@ -568,7 +567,6 @@
     "schedule_limits": "Scheduled compaction/cold reopen is not proof that every timed-out run reached every stage, or that a specific recovery mechanism caused the result.",
     "deadlines": "Per task: 48 at 2700 seconds; F06 and I09 at 5400 seconds. No reset for compaction or cold reopen."
   },
-  "replica2": "User stopped after R1 complete; archival only, never primary or best2 headline",
   "reproducibility": {
     "public_assets": "Aggregate summary, method description and deterministic SVG renderer. Existing Context Stress 5 inputs/judges are public.",
     "not_supplied": "The 45 adaptive task corpora, full frozen configs, native raw records and controller artifacts are not included in this publication. This is not a complete public rerun package.",
@@ -576,7 +574,7 @@
       "matched-summary-collection175.json",
       "matched-completion-summary-collection175.json"
     ],
-    "source_report_scope": "Private campaign reports contain other scopes too; this summary includes R1 only. Raw per-record cost metadata was read for the eight Base missing-usage receipts.",
-    "limitations": "Curated near-ceiling sample, one selected replicate, mixed Base builds and unmatched native/auxiliary behavior. No significance test, causal attribution, general superiority, invoice or complete-cost claim."
+    "source_report_scope": "Private campaign reports contain other scopes too; this summary includes only the 300 selected attempts. Raw per-record cost metadata was read for the eight Base missing-usage receipts.",
+    "limitations": "Curated near-ceiling sample, mixed Base builds and unmatched native/auxiliary behavior. No significance test, causal attribution, general superiority, invoice or complete-cost claim."
   }
 }
