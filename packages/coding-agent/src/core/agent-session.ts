@@ -13277,11 +13277,11 @@ export class AgentSession {
 
 	private _rlmChildSessionSnapshot(): AgentSession[] {
 		const sessions = new Set<AgentSession>();
-		for (const [childId, { session }] of this._rlmChildSessions) {
-			if (!this._abandonedRlmQuiescenceChildIds.has(childId)) sessions.add(session);
+		for (const [childId, { session, run }] of this._rlmChildSessions) {
+			if (!this._abandonedRlmQuiescenceChildIds.has(childId) && !run?.detachedDeletion) sessions.add(session);
 		}
 		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.session && !run.abandonedForQuiescence) sessions.add(run.session);
+			if (run.session && !run.abandonedForQuiescence && !run.detachedDeletion) sessions.add(run.session);
 		}
 		return [...sessions];
 	}

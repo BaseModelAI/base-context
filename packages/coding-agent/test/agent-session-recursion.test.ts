@@ -152,6 +152,7 @@ interface InspectableRlmSession {
 	_rlmChildUnsubscribes: Map<string, () => void>;
 	_deletedRlmChildIds: Set<string>;
 	_rlmQuiescenceWaitAborts: Set<AbortController>;
+	_rlmChildSessionSnapshot(): AgentSession[];
 	_createKernelHostHandlers(): HostRequestHandlers;
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
@@ -3500,10 +3501,17 @@ describe("AgentSession rlm recursion", () => {
 			releaseCleanup = resolve;
 		});
 		let cleanupStarted = false;
+		const cleanupFinished = deferred<void>();
+		// A child barrier entered after deletion must remain pending until disposal cancels it.
+		vi.spyOn(hostedChild, "waitForHeadlessIdle").mockImplementation(() => cleanupFinished.promise);
 		const deleteRuntime = vi.fn(async () => {
 			cleanupStarted = true;
 			await cleanupGate;
-			await hostedChild.disposeAsync();
+			try {
+				await hostedChild.disposeAsync();
+			} finally {
+				cleanupFinished.resolve();
+			}
 		});
 		const root = await createSession({
 			subagentRuntimeHost: {
@@ -3521,11 +3529,19 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => toolAborted && cleanupStarted);
 		expect(deleteRuntime).toHaveBeenCalledOnce();
 
+		const snapshotTaken = deferred<void>();
+		const rootInternals = root as unknown as InspectableRlmSession;
+		const snapshot = rootInternals._rlmChildSessionSnapshot.bind(root);
+		vi.spyOn(rootInternals, "_rlmChildSessionSnapshot").mockImplementation(() => {
+			const children = snapshot();
+			snapshotTaken.resolve();
+			return children;
+		});
 		let quiesced = false;
 		const quiescence = root.waitForRlmQuiescence().then(() => {
 			quiesced = true;
 		});
-		await sleep(20);
+		await snapshotTaken.promise;
 		expect(quiesced).toBe(false);
 		expect(
 			root.messages.filter(

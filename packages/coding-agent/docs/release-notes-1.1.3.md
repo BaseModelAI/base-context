@@ -1,11 +1,12 @@
-# Base Context 1.1.3 — clearer benchmark costs
+# Base Context 1.1.3 — clearer costs and a child-cleanup fix
 
 base-context — made in ![Poland](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.1.3/packages/coding-agent/docs/images/poland-flag.svg) by [Synerise AI](https://synerise.com).
 
-This documentation-only patch brings the updated benchmark report to npm. It does not change agent runtime behavior or add new benchmark runs.
+This patch brings the updated benchmark report to npm and fixes a race when waiting for a deleted child agent to finish cleanup. No new benchmark runs were added.
 
 ## What's changed
 
+- Fixed a race that could cancel a parent's completion wait while its deleted child finished cleanup.
 - Plain benchmark language and corrected links to the curated 50-task report and data.
 - Missing captured costs estimated for **both Base Context and Codex**.
 - Bold estimated dollars per task and percentage savings, with known subtotals and estimated additions kept as supporting detail.

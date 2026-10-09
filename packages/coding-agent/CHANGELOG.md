@@ -4,6 +4,7 @@
 
 - Simplified benchmark documentation and chart labels to describe the single published comparison without internal run numbering.
 - Changed benchmark cost reporting to estimate missing costs for both products, leading with mean dollars per task and percentage savings while retaining known subtotals, assumptions, and sensitivity.
+- Fixed RLM completion waits being cancelled while an already-deleted child finished runtime cleanup.
 
 ## [1.1.2] - 2026-10-06
 
