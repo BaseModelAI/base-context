@@ -1,6 +1,6 @@
 # Base Context 1.1.2 — keep the work, move faster
 
-base-context — made in 🇵🇱 by [Synerise AI](https://synerise.com).
+base-context — made in ![Poland](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.1.2/packages/coding-agent/docs/images/poland-flag.svg) by [Synerise AI](https://synerise.com).
 
 **Built for work that outlives one context window.** Base Context brings a persistent Python workspace, recoverable tool outputs, and instruction recovery to a coding agent built on Prime Agent and Pi. Keep useful state close. Find the exact result you need. Spend the next step solving the problem instead of rebuilding the last one.
 

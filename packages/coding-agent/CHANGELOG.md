@@ -30,6 +30,7 @@
 - Added explicit stable npm publication approval to the manual GitHub release workflow while keeping the existing publisher.
 - Led release pages with timing and completion strengths, keeping full quality comparisons and methods in the detailed results.
 - Linked Synerise AI and highlighted the product’s Polish origin on the README and release pages.
+- Used a Polish flag image in the Synerise branding so it renders independently of emoji support.
 
 ## [1.1.1] - 2026-10-05
 

@@ -1,6 +1,6 @@
 # Synerise Base Context
 
-base-context — made in 🇵🇱 by [Synerise AI](https://synerise.com).
+base-context — made in ![Poland](packages/coding-agent/docs/images/poland-flag.svg) by [Synerise AI](https://synerise.com).
 
 **Keep the work. Focus the context.**
 
