@@ -1,16 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
 <title id="title">Less waiting. Strong results.</title>
-<desc id="desc">Curated, outcome-informed first replica: 50 tasks per matching profile. Base Context mean attempt times are 27%, 37% and 39% lower than Codex. Full artifact passes are 49/50 vs 50/50, 50/50 vs 49/50, and 49/50 vs 47/50. Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs where both products fully passed and completed. All failures and timeouts are included.</desc>
+<desc id="desc">Curated first replica: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. Base Context mean attempt times are 27%, 37% and 39% lower than Codex at matching requested model and effort. Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs where both products fully passed and completed. Full quality and methodology are in the benchmark report.</desc>
 <defs><pattern id="hypothesis" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#e6eaff"/><path d="M-2 2L2-2M0 8L8 0M6 10L10 6" stroke="#5062cf" stroke-width="1.5"/></pattern></defs>
 <g font-family="Arial, Helvetica, sans-serif">
-<rect x="0.00" y="0.00" width="1200.00" height="760.00" rx="0" fill="#f5f8fb" stroke="none"/>
+<rect x="0.00" y="0.00" width="1200.00" height="680.00" rx="0" fill="#f5f8fb" stroke="none"/>
 <rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
 <text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
 <text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">01 / OVERVIEW</text>
 <text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Less waiting. Strong results.</text>
 <text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Base Context vs Codex · Matching requested model + effort</text>
-<text x="44" y="163" font-size="18" fill="#526278" font-weight="400" text-anchor="start">50 curated, outcome-informed tasks · First replica · 50 selected attempts per product/profile</text>
-<rect x="44.00" y="192.00" width="360.00" height="352.00" rx="16" fill="white" stroke="#dbe3eb"/>
+<text x="44" y="163" font-size="18" fill="#526278" font-weight="400" text-anchor="start">50 curated tasks · Three model/effort profiles · First replica</text>
+<rect x="44.00" y="192.00" width="360.00" height="260.00" rx="16" fill="white" stroke="#dbe3eb"/>
 <text x="66" y="229" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Astra · medium</text>
 <text x="66" y="282" font-size="35" fill="#087e75" font-weight="700" text-anchor="start">27% less time</text>
 <text x="66" y="309" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Lower mean attempt time</text>
@@ -22,12 +22,7 @@
 <text x="382" y="411" font-size="18" fill="#14263c" font-weight="700" text-anchor="end">11.62 min</text>
 <rect x="66.00" y="423.00" width="316.00" height="10.00" rx="5" fill="#edf1f6" stroke="none"/>
 <rect x="66.00" y="423.00" width="141.22" height="10.00" rx="5" fill="#5062cf" stroke="none"/>
-<path d="M66.00 450.00H382.00" stroke="#dbe3eb"/>
-<text x="66" y="480" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Full artifact passes</text>
-<text x="66" y="517" font-size="28" fill="#087e75" font-weight="700" text-anchor="start">49/50</text>
-<text x="180" y="515" font-size="17" fill="#526278" font-weight="400" text-anchor="start">vs</text>
-<text x="235" y="517" font-size="28" fill="#5062cf" font-weight="700" text-anchor="start">50/50</text>
-<rect x="420.00" y="192.00" width="360.00" height="352.00" rx="16" fill="white" stroke="#dbe3eb"/>
+<rect x="420.00" y="192.00" width="360.00" height="260.00" rx="16" fill="white" stroke="#dbe3eb"/>
 <text x="442" y="229" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · high</text>
 <text x="442" y="282" font-size="35" fill="#087e75" font-weight="700" text-anchor="start">37% less time</text>
 <text x="442" y="309" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Lower mean attempt time</text>
@@ -39,12 +34,7 @@
 <text x="758" y="411" font-size="18" fill="#14263c" font-weight="700" text-anchor="end">16.12 min</text>
 <rect x="442.00" y="423.00" width="316.00" height="10.00" rx="5" fill="#edf1f6" stroke="none"/>
 <rect x="442.00" y="423.00" width="195.95" height="10.00" rx="5" fill="#5062cf" stroke="none"/>
-<path d="M442.00 450.00H758.00" stroke="#dbe3eb"/>
-<text x="442" y="480" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Full artifact passes</text>
-<text x="442" y="517" font-size="28" fill="#087e75" font-weight="700" text-anchor="start">50/50</text>
-<text x="556" y="515" font-size="17" fill="#526278" font-weight="400" text-anchor="start">vs</text>
-<text x="611" y="517" font-size="28" fill="#5062cf" font-weight="700" text-anchor="start">49/50</text>
-<rect x="796.00" y="192.00" width="360.00" height="352.00" rx="16" fill="white" stroke="#dbe3eb"/>
+<rect x="796.00" y="192.00" width="360.00" height="260.00" rx="16" fill="white" stroke="#dbe3eb"/>
 <text x="818" y="229" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · xhigh</text>
 <text x="818" y="282" font-size="35" fill="#087e75" font-weight="700" text-anchor="start">39% less time</text>
 <text x="818" y="309" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Lower mean attempt time</text>
@@ -56,15 +46,15 @@
 <text x="1134" y="411" font-size="18" fill="#14263c" font-weight="700" text-anchor="end">24.69 min</text>
 <rect x="818.00" y="423.00" width="316.00" height="10.00" rx="5" fill="#edf1f6" stroke="none"/>
 <rect x="818.00" y="423.00" width="300.05" height="10.00" rx="5" fill="#5062cf" stroke="none"/>
-<path d="M818.00 450.00H1134.00" stroke="#dbe3eb"/>
-<text x="818" y="480" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Full artifact passes</text>
-<text x="818" y="517" font-size="28" fill="#087e75" font-weight="700" text-anchor="start">49/50</text>
-<text x="932" y="515" font-size="17" fill="#526278" font-weight="400" text-anchor="start">vs</text>
-<text x="987" y="517" font-size="28" fill="#5062cf" font-weight="700" text-anchor="start">47/50</text>
-<rect x="44.00" y="568.00" width="1112.00" height="89.00" rx="12" fill="#e4f2ef" stroke="none"/>
-<text x="64" y="601" font-size="21" fill="#14263c" font-weight="700" text-anchor="start">150/150 Base Context attempts completed natively.</text>
-<text x="64" y="632" font-size="18" fill="#14263c" font-weight="400" text-anchor="start">Base faster in 128 of 141 matched pairs where both products fully passed and completed.</text>
-<text x="44" y="692" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Means include all 6 clean failures and 6 Codex timeouts; 3 timed-out artifacts fully passed.</text>
-<text x="44" y="721" font-size="17" fill="#526278" font-weight="400" text-anchor="start">300 selected R1 attempts · 4 active/product · Mixed Base builds · Methods: benchmarks/context-curated-50</text>
+<rect x="44.00" y="474.00" width="548.00" height="125.00" rx="12" fill="#e4f2ef" stroke="none"/>
+<text x="68" y="519" font-size="36" fill="#087e75" font-weight="700" text-anchor="start">150/150</text>
+<text x="68" y="552" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">Base Context native completions</text>
+<text x="68" y="579" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Across all three benchmark profiles</text>
+<rect x="608.00" y="474.00" width="548.00" height="125.00" rx="12" fill="#e4f2ef" stroke="none"/>
+<text x="632" y="519" font-size="36" fill="#087e75" font-weight="700" text-anchor="start">128/141</text>
+<text x="632" y="552" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">Pairs where Base Context was faster</text>
+<text x="632" y="579" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Both agents completed and fully passed</text>
+<text x="44" y="633" font-size="16" fill="#526278" font-weight="400" text-anchor="start">50 selected attempts per product/profile · First provider-clean attempt per cell</text>
+<text x="44" y="658" font-size="16" fill="#526278" font-weight="400" text-anchor="start">Full results and methodology: benchmarks/context-curated-50</text>
 </g>
 </svg>

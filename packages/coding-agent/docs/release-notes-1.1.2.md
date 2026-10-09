@@ -1,5 +1,7 @@
 # Base Context 1.1.2 — keep the work, move faster
 
+base-context — made in 🇵🇱 by [Synerise AI](https://synerise.com).
+
 **Built for work that outlives one context window.** Base Context brings a persistent Python workspace, recoverable tool outputs, and instruction recovery to a coding agent built on Prime Agent and Pi. Keep useful state close. Find the exact result you need. Spend the next step solving the problem instead of rebuilding the last one.
 
 ![Base Context: 27–39% shorter mean attempt times across three profiles in the curated R1 benchmark](https://raw.githubusercontent.com/BaseModelAI/base-context/v1.1.2/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)
@@ -9,16 +11,10 @@
 In our **50-task, three-profile context-stress benchmark**, Base delivered:
 
 - **27–39% shorter mean attempt times** than Codex across all three matched model/effort profiles.
-- **150/150 native completions**, alongside **148/150 full artifact passes**.
+- **150/150 native completions** across the three benchmark profiles.
 - **128 of 141 timing wins** where both agents completed and produced fully passing artifacts.
 
-| Model / effort | Base full passes | Codex full passes | Base mean seconds | Codex mean seconds | Shorter Base mean time |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Astra / medium | 49/50 | 50/50 | 508.4 | 697.2 | 27.1% |
-| Sol / high | 50/50 | 49/50 | 606.4 | 967.4 | 37.3% |
-| Sol / xhigh | 49/50 | 47/50 | 908.1 | 1,481.3 | 38.7% |
-
-R1 covers 300 first provider-clean attempts on a curated task set. Time means include clean failures and timeouts; full passes require all five main checks plus the edge check. Codex completed 144/150 runs and produced 146/150 passing artifacts. The [benchmark report](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md) has detailed scores, graphs, build identities, and methods. Replica 2 remains a separate, stopped archive.
+[Explore the full benchmark](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md).
 
 ## What's new in 1.1.2
 
@@ -27,6 +23,16 @@ R1 covers 300 first provider-clean attempts on a curated task set. Time means in
 - **Smoother long-running work.** This release fixes kernel-startup coordination, prompt-result delivery, and WebSocket frame ordering, so received frames finish decoding before transport shutdown.
 - **Controls within reach.** Turn on request budgets through settings or the SDK, with a working profile example. Set explicit retry limits when you want them.
 - **A stronger foundation.** Smaller compiler and ownership modules, repaired lifecycle fixtures, and offline CI across package suites, coding-agent shards, kernel tests, and process-stress tests.
+
+## Detailed benchmark results
+
+| Model / effort | Base full passes | Codex full passes | Base mean seconds | Codex mean seconds | Shorter Base mean time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Astra / medium | 49/50 | 50/50 | 508.4 | 697.2 | 27.1% |
+| Sol / high | 50/50 | 49/50 | 606.4 | 967.4 | 37.3% |
+| Sol / xhigh | 49/50 | 47/50 | 908.1 | 1,481.3 | 38.7% |
+
+R1 covers 300 first provider-clean attempts on a curated task set. Time means include clean failures and timeouts; full passes require all five main checks plus the edge check. Codex completed 144/150 runs and produced 146/150 passing artifacts. The [benchmark report](https://github.com/BaseModelAI/base-context/blob/v1.1.2/benchmarks/context-curated-50/README.md) has detailed scores, graphs, build identities, and methods. Replica 2 remains a separate, stopped archive.
 
 ## Captured-request costs*
 

@@ -1,12 +1,14 @@
 # Synerise Base Context
 
+base-context — made in 🇵🇱 by [Synerise AI](https://synerise.com).
+
 **Keep the work. Focus the context.**
 
 Give your agent a workspace, not just a conversation. Base Context combines **persistent Python, retained outputs, and instruction recovery** to keep coding and research moving across long sessions. Built by [Synerise](https://synerise.com), on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
 [![Curated R1: 27–39% shorter mean attempt times for Base Context across three matching profiles, with 150/150 native completions.](packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](benchmarks/context-curated-50/README.md)
 
-**27–39% shorter mean attempt times. 150/150 native completions.** Base was also faster in **128 of 141 pairs** where both harnesses completed and fully passed. Our R1 comparison uses 50 curated, outcome-informed tasks across three model/effort profiles, selecting the first provider-clean attempt per cell. [Explore the results](#benchmarks).
+**27–39% shorter mean attempt times. 150/150 native completions.** In our curated 50-task R1 benchmark, Base was also faster in **128 of 141 pairs** where both agents completed and fully passed. [Explore the results](#benchmarks).
 
 [Install](#install) · [Workflow](#work-with-it) · [Benchmarks](#benchmarks) · [Design](#how-it-works) · [Documentation](#documentation) · [Attribution](#license-and-thanks)
 

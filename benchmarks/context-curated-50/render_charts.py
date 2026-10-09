@@ -71,18 +71,17 @@ class Chart:
 
 
 def overview():
-    chart = Chart(760, "Less waiting. Strong results.",
-        "Curated, outcome-informed first replica: 50 tasks per matching profile. "
-        "Base Context mean attempt times are 27%, 37% and 39% lower than Codex. "
-        "Full artifact passes are 49/50 vs 50/50, 50/50 vs 49/50, and 49/50 vs 47/50. "
+    chart = Chart(680, "Less waiting. Strong results.",
+        "Curated first replica: 50 selected attempts per product/profile, using the first provider-clean attempt per cell. "
+        "Base Context mean attempt times are 27%, 37% and 39% lower than Codex at matching requested model and effort. "
         "Base completed all 150 selected attempts natively and was faster in 128 of the 141 pairs "
-        "where both products fully passed and completed. All failures and timeouts are included.")
+        "where both products fully passed and completed. Full quality and methodology are in the benchmark report.")
     chart.header("01 / OVERVIEW", "Less waiting. Strong results.",
         "Base Context vs Codex · Matching requested model + effort")
-    chart.text(44, 163, "50 curated, outcome-informed tasks · First replica · 50 selected attempts per product/profile", 18, MUTED)
+    chart.text(44, 163, "50 curated tasks · Three model/effort profiles · First replica", 18, MUTED)
     for i, (base, codex) in enumerate(PAIRS):
         x = 44 + i * 376
-        chart.rect(x, 192, 360, 352, "white", 16, LINE)
+        chart.rect(x, 192, 360, 260, "white", 16, LINE)
         chart.text(x + 22, 229, LABELS[i], 23, INK, 700)
         pct = DATA["mean_attempt_time_comparisons"][i]["base_lower_mean_attempt_time_pct"]
         chart.text(x + 22, 282, f"{pct:.0f}% less time", 35, BASE, 700)
@@ -94,16 +93,16 @@ def overview():
             chart.text(x + 338, y, f"{minutes:.2f} min", 18, INK, 700, "end")
             chart.rect(x + 22, y + 12, 316, 10, "#edf1f6", 5)
             chart.rect(x + 22, y + 12, minutes / 26 * 316, 10, color, 5)
-        chart.line(x + 22, 450, x + 338, 450)
-        chart.text(x + 22, 480, "Full artifact passes", 17, MUTED)
-        chart.text(x + 22, 517, f"{base['clean_full_passes']}/50", 28, BASE, 700)
-        chart.text(x + 136, 515, "vs", 17, MUTED)
-        chart.text(x + 191, 517, f"{codex['clean_full_passes']}/50", 28, CODEX, 700)
-    chart.rect(44, 568, 1112, 89, "#e4f2ef", 12)
-    chart.text(64, 601, "150/150 Base Context attempts completed natively.", 21, INK, 700)
-    chart.text(64, 632, "Base faster in 128 of 141 matched pairs where both products fully passed and completed.", 18, INK)
-    chart.text(44, 692, "Means include all 6 clean failures and 6 Codex timeouts; 3 timed-out artifacts fully passed.", 17, MUTED)
-    chart.text(44, 721, "300 selected R1 attempts · 4 active/product · Mixed Base builds · Methods: benchmarks/context-curated-50", 17, MUTED)
+    for x, value, label, detail in [
+        (44, "150/150", "Base Context native completions", "Across all three benchmark profiles"),
+        (608, "128/141", "Pairs where Base Context was faster", "Both agents completed and fully passed"),
+    ]:
+        chart.rect(x, 474, 548, 125, "#e4f2ef", 12)
+        chart.text(x + 24, 519, value, 36, BASE, 700)
+        chart.text(x + 24, 552, label, 20, INK, 700)
+        chart.text(x + 24, 579, detail, 17, MUTED)
+    chart.text(44, 633, "50 selected attempts per product/profile · First provider-clean attempt per cell", 16, MUTED)
+    chart.text(44, 658, "Full results and methodology: benchmarks/context-curated-50", 16, MUTED)
     chart.save("overview")
 
 
