@@ -172,55 +172,65 @@ def quality_chart():
 
 
 def cost_chart():
-    chart = Chart(1080, "Cost per run: captured + estimated",
-        "Solid bars are captured-usage API-list-rate subtotals, not invoices or complete costs. "
-        "Hatching adds hypothetical Codex cost if unknown-model receipts used the profile model. "
-        "All 441 Codex unpriced receipts have usage but unknown model. Eight Base receipts have known model "
-        "but no usage, leaving an unquantified additional component. Sol/Astra sensitivities are scenarios, not bounds.")
-    chart.header("04 / COST", "Cost per run: captured + estimated*", "Mean USD per selected attempt · Captured usage at API list rates, not subscription charges")
-    chart.legend(171)
-    chart.rect(382, 157, 24, 16, "url(#hypothesis)", stroke=CODEX)
-    chart.text(416, 171, "Codex estimate: missing model priced at profile model", 17, MUTED)
-    start, width = 310, 465
-    chart.text(44, 217, "Matching profile / product", 17, MUTED)
-    chart.text(815, 217, "Captured + estimate = scenario", 17, MUTED)
-    for tick in range(5):
-        x = start + width * tick / 4
-        chart.line(x, 237, x, 631)
-        chart.text(x, 662, f"${tick}", 17, MUTED, anchor="middle")
-    estimates = DATA["cost"]["codex_hypothetical_missing_model_estimates"]
-    for i, ((base, codex), estimate) in enumerate(zip(PAIRS, estimates)):
-        y = 266 + i * 132
-        chart.text(44, y, LABELS[i], 22, INK, 700)
-        for j, (group, color, name) in enumerate([(base, BASE, "Base"), (codex, CODEX, "Codex")]):
-            top = y + 15 + j * 38
-            known = group["mean_known_api_rate_cost_usd"]
-            length = width * known / 4
-            chart.text(220, top + 20, name, 17, color, 700)
-            chart.rect(start, top, length, 25, color)
-            if j == 0:
-                missing = group["captured_receipts"] - group["priced_receipts"]
-                noun = "receipt" if missing == 1 else "receipts"
-                chart.text(815, top + 20, f"${known:.3f} + unknown ({missing} {noun})", 18, color, 700)
-            else:
-                extra = estimate["estimated_missing_mean_same_model_usd"]
-                total = estimate["estimated_total_mean_same_model_usd"]
-                chart.rect(start + length, top, width * extra / 4, 25, "url(#hypothesis)", stroke=CODEX)
-                chart.text(815, top + 20, f"${known:.3f} + ${extra:.3f} = ${total:.3f}*", 18, color, 700)
-    chart.rect(44, 695, 1112, 231, "white", 12, LINE)
-    chart.text(64, 727, "Unknown-model sensitivity · Codex total mean", 22, INK, 700)
-    chart.text(64, 758, "Same 441 unpriced receipts; all have usage, none has a recorded model (147/profile).", 17, MUTED)
-    chart.text(560, 792, "Assume Sol rates", 18, MUTED, anchor="middle")
-    chart.text(895, 792, "Assume Astra rates", 18, MUTED, anchor="middle")
-    for i, estimate in enumerate(estimates):
-        y = 826 + i * 35
-        chart.text(64, y, LABELS[i], 19, INK, 700)
-        for x, model in [(560, "gpt-6.1-sol"), (895, "gpt-6-astra")]:
-            total = estimate["known_mean_usd"] + estimate["estimated_missing_by_assumed_model_usd"][model] / estimate["runs"]
-            chart.text(x, y, f"${total:.3f}", 21, CODEX, 700, "middle")
-    chart.text(44, 963, "* Model-price estimate, not measured cost. Sol/Astra values are scenarios, not bounds.", 17, MUTED)
-    chart.text(44, 994, "Base: 8 receipts have no usage (7 native-control, 1 refine); extra cost unknown, not zero.", 17, MUTED)
-    chart.text(44, 1025, "300 selected attempts only; excludes invalid/interrupted attempts. Full-family costs remain unknown.", 17, MUTED)
+    estimates = DATA["cost"]["fair_estimated_comparison"]
+    chart = Chart(740, "Estimated cost per task",
+        "Estimated mean USD across all 50 selected attempts per product/profile, not only successes. "
+        "Both products include estimated missing costs, using captured requests and API list rates. "
+        "Solid bars compare estimated totals on a common zero-based scale. "
+        "Known subtotals and estimated additions are shown separately for both products. "
+        "These are API-list-rate estimates, not invoices or complete family spend.")
+    chart.header("04 / COST", "Estimated cost per task",
+        "Missing costs estimated for both products · Captured requests at API list rates")
+    chart.text(44, 163, "All 50 selected attempts per product/profile · USD per task · Common zero-based scale", 18, MUTED)
+    maximum = max(row[f"{product}_estimated_mean_usd"]
+        for row in estimates for product in ("base", "codex"))
+    for i, row in enumerate(estimates):
+        x = 44 + i * 376
+        chart.rect(x, 192, 360, 430, "white", 16, LINE)
+        chart.text(x + 22, 229, LABELS[i], 23, INK, 700)
+        savings = row["base_savings_mean_usd"]
+        percent = row["base_savings_pct"]
+        if savings > 0:
+            headline = f"{percent:.1f}% Base savings"
+            detail = f"${savings:.3f} saved per task"
+            color = BASE
+        elif savings < 0:
+            headline = f"{abs(percent):.1f}% higher cost"
+            detail = f"Base costs ${abs(savings):.3f} more/task"
+            color = INK
+        else:
+            headline = "Same estimated cost"
+            detail = "$0.000 difference per task"
+            color = INK
+        chart.text(x + 22, 280, headline, 29, color, 700)
+        chart.text(x + 22, 314, detail, 22, color, 700)
+        chart.line(x + 22, 339, x + 338, 339)
+        for j, (product, name, color) in enumerate([
+            ("base", "Base Context", BASE), ("codex", "Codex", CODEX)
+        ]):
+            y = 381 + j * 64
+            total = row[f"{product}_estimated_mean_usd"]
+            chart.text(x + 22, y, name, 18, color, 700)
+            chart.text(x + 338, y, f"${total:.3f}", 28, color, 700, "end")
+            chart.rect(x + 22, y + 13, 316, 14, "#edf1f6", 7)
+            chart.rect(x + 22, y + 13, 316 * total / maximum, 14, color, 7)
+        chart.line(x + 22, 495, x + 338, 495)
+        chart.text(x + 22, 527, "Mean USD", 15, MUTED)
+        chart.text(x + 236, 527, "Base", 15, BASE, 700, "end")
+        chart.text(x + 338, 527, "Codex", 15, CODEX, 700, "end")
+        for y, label, field, decimals in [
+            (559, "Known subtotal", "known_mean_usd", 3),
+            (592, "Estimated add.", "estimated_missing_mean_usd", 6),
+        ]:
+            chart.text(x + 22, y, label, 15, MUTED)
+            for offset, product in [(236, "base"), (338, "codex")]:
+                value = row[f"{product}_{field}"]
+                chart.text(x + offset, y, f"${value:.{decimals}f}", 17, MUTED, anchor="end")
+    chart.text(44, 660, "Main scenario: Base matched-request mean costs; missing Codex models use profile-model rates.", 16, MUTED)
+    chart.text(44, 685, "API-list-rate estimate · Not an invoice or complete family spend", 16, MUTED)
+    chart.parts.append('<a href="../../../../../benchmarks/context-curated-50/README.md#estimated-cost-per-task">')
+    chart.text(44, 710, "Methodology + assumptions: benchmarks/context-curated-50", 16, BASE)
+    chart.parts.append("</a>")
     chart.save("cost")
 
 

@@ -53,7 +53,7 @@ Our [curated 50-task comparison](../../../benchmarks/context-curated-50/README.m
 - **150/150 native completions**, versus Codex 144/150.
 - **148/150 full artifact passes**, versus Codex 146/150.
 
-These are workflow results on 50 curated, outcome-informed tasks, using the first provider-clean attempt per cell. Request-budget selection was off. The [full methodology and charts](../../../benchmarks/context-curated-50/README.md) include selection, provider exclusions, mixed builds, separate completion and artifact scores, and known-usage costs alongside hypothetical pricing scenarios.
+These are workflow results on 50 curated, outcome-informed tasks, using the first provider-clean attempt per cell. Request-budget selection was off. The [full methodology and charts](../../../benchmarks/context-curated-50/README.md) include selection, provider exclusions, mixed builds, separate completion and artifact scores, and estimated costs for both products, with known subtotals, missing-cost assumptions, and sensitivity.
 
 Earlier comparisons remain **withdrawn** and preserved as archives: [Python 30](../../../benchmarks/python-realworld-30/README.md) · [Earlier evaluation records](release-1.1.2.md).
 

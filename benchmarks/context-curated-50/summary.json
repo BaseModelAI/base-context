@@ -289,7 +289,7 @@
   },
   "cost": {
     "currency": "USD",
-    "basis": "Captured usage at recorded API list rates, not invoices or subscription charges. Measured-known subtotals are incomplete for both products.",
+    "basis": "Captured requests valued at recorded API list rates, with missing costs estimated for both products; not invoices, subscription charges, or complete agent-family spend.",
     "codex_hypothetical_missing_model_estimates": [
       {
         "profile": "gpt-6-astra-medium",
@@ -352,7 +352,7 @@
       "estimated_missing_scenario_high_usd": 93.13136600000001
     },
     "codex_missingness": "All 441 unpriced receipts have usage but no recorded model; 147 per profile. Neither their model nor their purpose is established.",
-    "main_hypothesis": "Assume each unknown-model receipt uses the requested model for its profile. This is an imputation, not a recovered measurement.",
+    "main_hypothesis": "For Base, impute missing usage cost from the arithmetic mean of comparable complete priced requests. For Codex, price known tokens at the requested profile model when the actual model is missing. Both are explicit assumptions, not recovered measurements.",
     "sensitivity": "Price the same unknown-model usage once as gpt-6.1-sol and once as gpt-6-astra. The endpoints are scenarios, not confidence intervals or bounds on actual cost.",
     "base_unpriced": {
       "receipts": 8,
@@ -368,7 +368,8 @@
         "refine": 1
       },
       "missing_cost_usd": null,
-      "note": "Usage fields are null. An amount cannot be estimated from captured usage; unknown is not zero."
+      "note": "Usage remains unknown, not zero. A separate comparable-request mean imputation is included in the estimated comparison; the missing usage was not recovered.",
+      "estimated_missing_total_usd": 0.10447252900431843
     },
     "full_family_cost_complete": null,
     "excluded_from_selected_subtotals": "Only the 300 selected attempts are included; provider-invalid attempts and parent interruptions are excluded; no all-campaign-spend claim.",
@@ -422,6 +423,409 @@
           "max_input_total": 141591
         }
       ]
+    },
+    "fair_estimated_comparison": [
+      {
+        "profile": "gpt-6-astra-medium",
+        "runs_per_product": 50,
+        "base_known_mean_usd": 3.32421536,
+        "base_estimated_missing_mean_usd": 0.0010156592427616926,
+        "base_estimated_mean_usd": 3.3252310192427617,
+        "codex_known_mean_usd": 3.1527103999999997,
+        "codex_estimated_missing_mean_usd": 0.5151852,
+        "codex_estimated_mean_usd": 3.6678956,
+        "base_savings_mean_usd": 0.3426645807572384,
+        "base_savings_pct": 9.342266469013957
+      },
+      {
+        "profile": "gpt-6.1-sol-high",
+        "runs_per_product": 50,
+        "base_known_mean_usd": 0.753287648,
+        "base_estimated_missing_mean_usd": 4.2418561205273075e-05,
+        "base_estimated_mean_usd": 0.7533300665612053,
+        "codex_known_mean_usd": 0.7226265279999998,
+        "codex_estimated_missing_mean_usd": 0.11291639199999998,
+        "codex_estimated_mean_usd": 0.8355429199999997,
+        "base_savings_mean_usd": 0.08221285343879448,
+        "base_savings_pct": 9.839453063499654
+      },
+      {
+        "profile": "gpt-6.1-sol-xhigh",
+        "runs_per_product": 50,
+        "base_known_mean_usd": 0.946721424,
+        "base_estimated_missing_mean_usd": 0.0010313727761194031,
+        "base_estimated_mean_usd": 0.9477527967761195,
+        "codex_known_mean_usd": 1.0273421360000001,
+        "codex_estimated_missing_mean_usd": 0.13338048,
+        "codex_estimated_mean_usd": 1.1607226160000002,
+        "base_savings_mean_usd": 0.2129698192238807,
+        "base_savings_pct": 18.348037359503017
+      }
+    ],
+    "fair_estimated_overall": {
+      "profile": "all",
+      "runs_per_product": 150,
+      "base_known_mean_usd": 1.6747414773333333,
+      "base_estimated_missing_mean_usd": 0.0006964835266954561,
+      "base_estimated_mean_usd": 1.6754379608600287,
+      "codex_known_mean_usd": 1.6342263546666664,
+      "codex_estimated_missing_mean_usd": 0.25382735733333334,
+      "codex_estimated_mean_usd": 1.8880537119999998,
+      "base_savings_mean_usd": 0.2126157511399711,
+      "base_savings_pct": 11.261107127866032
+    },
+    "base_missing_usage_estimation": {
+      "method": [
+        "Use the arithmetic mean of saved cost_usd among priced native requests matching recorded model, provider/API, purpose/subtype, selected profile, root role, transport, attempt kind and requested effort. Match effective effort when recorded.",
+        "Pool same-profile receipts across selected runs for the primary estimate. This estimates aggregate expected cost, without favoring a low median or a favorable run. All donors are completed; no outcome-matched missing/interrupted priced donors exist.",
+        "All missing requested request-level efforts are null. All donor effective efforts are medium. The requested high/xhigh profile does not establish auxiliary request effort.",
+        "Keep native costs and tokens unchanged. Add one imputed monetary amount per missing receipt; no tokens are invented. Saved donors use standard list rate for unknown service tier and no long-context modifier.",
+        "Use existing Codex same-profile-model estimates for the main balanced comparison. Codex usage is known but model/purpose is unknown; Base model/subtype is recorded but usage is unknown.",
+        "Savings = 100 * (1 - estimated Base mean / estimated Codex mean). Negative values mean Base is more expensive.",
+        "Same-run means, pooled cross-profile means, donor quartiles and alternate Codex models are sensitivity scenarios, not confidence intervals or bounds."
+      ],
+      "donor_classes": [
+        {
+          "matching_fields": {
+            "model": "gpt-6.1-sol",
+            "provider": "openai-codex",
+            "api": "openai-codex-responses",
+            "purpose": "native-control",
+            "purpose_detail": "daemon-status",
+            "role": "root",
+            "transport": "websocket",
+            "attempt_kind": "initial",
+            "requested_effort": null
+          },
+          "profile": "gpt-6.1-sol-xhigh",
+          "missing_effective_effort": null,
+          "donor_effective_efforts": {
+            "medium": 737
+          },
+          "donor_outcomes": {
+            "completed": 737
+          },
+          "donor_usage_completeness": {
+            "complete": 737
+          },
+          "donor_filters": {
+            "pricing_status": "priced_list_rate",
+            "cost_usd": "non-null",
+            "usage_completeness": "complete",
+            "outcome": "completed"
+          },
+          "same_class_priced_receipts_excluded_by_filters": 0,
+          "pooled_same_profile": {
+            "receipts": 737,
+            "runs": 50,
+            "mean_usd": 0.0021070388059701494,
+            "q1_usd": 0.001792,
+            "q3_usd": 0.002388,
+            "min_usd": 0.0007912,
+            "max_usd": 0.003466
+          },
+          "pooled_same_model_across_profiles": {
+            "receipts": 1268,
+            "runs": 100,
+            "mean_usd": 0.002112855205047319,
+            "q1_usd": 0.0017835,
+            "q3_usd": 0.0024045,
+            "min_usd": 0.0007912,
+            "max_usd": 0.003782
+          },
+          "pricing_assumptions": [
+            "standard_list_rate_assumption_for_unknown_service_tier"
+          ],
+          "donor_long_context_receipts": 0
+        },
+        {
+          "matching_fields": {
+            "model": "gpt-6-astra",
+            "provider": "openai-codex",
+            "api": "openai-codex-responses",
+            "purpose": "native-control",
+            "purpose_detail": "daemon-status",
+            "role": "root",
+            "transport": "websocket",
+            "attempt_kind": "initial",
+            "requested_effort": null
+          },
+          "profile": "gpt-6-astra-medium",
+          "missing_effective_effort": null,
+          "donor_effective_efforts": {
+            "medium": 449
+          },
+          "donor_outcomes": {
+            "completed": 449
+          },
+          "donor_usage_completeness": {
+            "complete": 449
+          },
+          "donor_filters": {
+            "pricing_status": "priced_list_rate",
+            "cost_usd": "non-null",
+            "usage_completeness": "complete",
+            "outcome": "completed"
+          },
+          "same_class_priced_receipts_excluded_by_filters": 0,
+          "pooled_same_profile": {
+            "receipts": 449,
+            "runs": 50,
+            "mean_usd": 0.010156592427616927,
+            "q1_usd": 0.00848,
+            "q3_usd": 0.01139,
+            "min_usd": 0.00426,
+            "max_usd": 0.01809
+          },
+          "pooled_same_model_across_profiles": {
+            "receipts": 449,
+            "runs": 50,
+            "mean_usd": 0.010156592427616927,
+            "q1_usd": 0.00848,
+            "q3_usd": 0.01139,
+            "min_usd": 0.00426,
+            "max_usd": 0.01809
+          },
+          "pricing_assumptions": [
+            "standard_list_rate_assumption_for_unknown_service_tier"
+          ],
+          "donor_long_context_receipts": 0
+        },
+        {
+          "matching_fields": {
+            "model": "gpt-6.1-sol",
+            "provider": "openai-codex",
+            "api": "openai-codex-responses",
+            "purpose": "native-control",
+            "purpose_detail": "daemon-status",
+            "role": "root",
+            "transport": "websocket",
+            "attempt_kind": "initial",
+            "requested_effort": null
+          },
+          "profile": "gpt-6.1-sol-high",
+          "missing_effective_effort": null,
+          "donor_effective_efforts": {
+            "medium": 531
+          },
+          "donor_outcomes": {
+            "completed": 531
+          },
+          "donor_usage_completeness": {
+            "complete": 531
+          },
+          "donor_filters": {
+            "pricing_status": "priced_list_rate",
+            "cost_usd": "non-null",
+            "usage_completeness": "complete",
+            "outcome": "completed"
+          },
+          "same_class_priced_receipts_excluded_by_filters": 0,
+          "pooled_same_profile": {
+            "receipts": 531,
+            "runs": 50,
+            "mean_usd": 0.0021209280602636537,
+            "q1_usd": 0.0017699999999999999,
+            "q3_usd": 0.0024289999999999997,
+            "min_usd": 0.0010788,
+            "max_usd": 0.003782
+          },
+          "pooled_same_model_across_profiles": {
+            "receipts": 1268,
+            "runs": 100,
+            "mean_usd": 0.002112855205047319,
+            "q1_usd": 0.0017835,
+            "q3_usd": 0.0024045,
+            "min_usd": 0.0007912,
+            "max_usd": 0.003782
+          },
+          "pricing_assumptions": [
+            "standard_list_rate_assumption_for_unknown_service_tier"
+          ],
+          "donor_long_context_receipts": 0
+        },
+        {
+          "matching_fields": {
+            "model": "gpt-6.1-sol",
+            "provider": "openai-codex",
+            "api": "openai-codex-responses",
+            "purpose": "refine",
+            "purpose_detail": "plan",
+            "role": "root",
+            "transport": "websocket",
+            "attempt_kind": "initial",
+            "requested_effort": null
+          },
+          "profile": "gpt-6.1-sol-xhigh",
+          "missing_effective_effort": "medium",
+          "donor_effective_efforts": {
+            "medium": 10
+          },
+          "donor_outcomes": {
+            "completed": 10
+          },
+          "donor_usage_completeness": {
+            "complete": 10
+          },
+          "donor_filters": {
+            "pricing_status": "priced_list_rate",
+            "cost_usd": "non-null",
+            "usage_completeness": "complete",
+            "outcome": "completed"
+          },
+          "same_class_priced_receipts_excluded_by_filters": 0,
+          "pooled_same_profile": {
+            "receipts": 10,
+            "runs": 10,
+            "mean_usd": 0.0494616,
+            "q1_usd": 0.0434535,
+            "q3_usd": 0.055225,
+            "min_usd": 0.02955,
+            "max_usd": 0.061518
+          },
+          "pooled_same_model_across_profiles": {
+            "receipts": 19,
+            "runs": 19,
+            "mean_usd": 0.042212,
+            "q1_usd": 0.034398,
+            "q3_usd": 0.053038,
+            "min_usd": 0.010592,
+            "max_usd": 0.061518
+          },
+          "pricing_assumptions": [
+            "standard_list_rate_assumption_for_unknown_service_tier"
+          ],
+          "donor_long_context_receipts": 0
+        }
+      ],
+      "profiles": [
+        {
+          "profile": "gpt-6-astra-medium",
+          "priced_receipts": 3778,
+          "missing_receipts": 5,
+          "measured_subtotal_usd": 166.210768,
+          "estimated_addition_usd": 0.050782962138084635,
+          "estimated_total_usd": 166.26155096213807,
+          "measured_mean_usd": 3.32421536,
+          "estimated_mean_usd": 3.3252310192427617,
+          "sensitivity": {
+            "base_same_run": {
+              "estimated_addition_usd": 0.049618865384615386,
+              "estimated_mean_usd": 3.3252077373076925,
+              "base_savings_pct": 9.342901218134664
+            },
+            "base_pooled_same_model_across_profiles": {
+              "estimated_addition_usd": 0.050782962138084635,
+              "estimated_mean_usd": 3.3252310192427617
+            },
+            "base_donor_q1": {
+              "estimated_addition_usd": 0.0424,
+              "estimated_mean_usd": 3.32506336,
+              "base_savings_pct": 9.34683746178599
+            },
+            "base_donor_q3": {
+              "estimated_addition_usd": 0.05695,
+              "estimated_mean_usd": 3.32535436,
+              "base_savings_pct": 9.338903757238892
+            },
+            "codex_model_alternatives_with_pooled_base": {
+              "gpt-6.1-sol": {
+                "codex_mean_usd": 3.24706392,
+                "base_savings_pct": -2.4073163069349706
+              },
+              "gpt-6-astra": {
+                "codex_mean_usd": 3.6678955999999996,
+                "base_savings_pct": 9.342266469013953
+              }
+            }
+          }
+        },
+        {
+          "profile": "gpt-6.1-sol-high",
+          "priced_receipts": 3987,
+          "missing_receipts": 1,
+          "measured_subtotal_usd": 37.6643824,
+          "estimated_addition_usd": 0.0021209280602636537,
+          "estimated_total_usd": 37.666503328060266,
+          "measured_mean_usd": 0.753287648,
+          "estimated_mean_usd": 0.7533300665612053,
+          "sensitivity": {
+            "base_same_run": {
+              "estimated_addition_usd": 0.001701,
+              "estimated_mean_usd": 0.753321668,
+              "base_savings_pct": 9.840458225652817
+            },
+            "base_pooled_same_model_across_profiles": {
+              "estimated_addition_usd": 0.002112855205047319,
+              "estimated_mean_usd": 0.7533299051041009
+            },
+            "base_donor_q1": {
+              "estimated_addition_usd": 0.0017699999999999999,
+              "estimated_mean_usd": 0.753323048,
+              "base_savings_pct": 9.840293063580711
+            },
+            "base_donor_q3": {
+              "estimated_addition_usd": 0.0024289999999999997,
+              "estimated_mean_usd": 0.753336228,
+              "base_savings_pct": 9.838715646109446
+            },
+            "codex_model_alternatives_with_pooled_base": {
+              "gpt-6.1-sol": {
+                "codex_mean_usd": 0.8355429199999997,
+                "base_savings_pct": 9.839453063499661
+              },
+              "gpt-6-astra": {
+                "codex_mean_usd": 1.3386158479999999,
+                "base_savings_pct": 43.72320724524954
+              }
+            }
+          }
+        },
+        {
+          "profile": "gpt-6.1-sol-xhigh",
+          "priced_receipts": 4230,
+          "missing_receipts": 2,
+          "measured_subtotal_usd": 47.3360712,
+          "estimated_addition_usd": 0.05156863880597015,
+          "estimated_total_usd": 47.38763983880597,
+          "measured_mean_usd": 0.946721424,
+          "estimated_mean_usd": 0.9477527967761195,
+          "sensitivity": {
+            "base_same_run": {
+              "estimated_addition_usd": 0.059283,
+              "estimated_mean_usd": 0.947907084,
+              "base_savings_pct": 18.334745017150606
+            },
+            "base_pooled_same_model_across_profiles": {
+              "estimated_addition_usd": 0.044324855205047316,
+              "estimated_mean_usd": 0.947607921104101
+            },
+            "base_donor_q1": {
+              "estimated_addition_usd": 0.0452455,
+              "estimated_mean_usd": 0.947626334,
+              "base_savings_pct": 18.358932535867826
+            },
+            "base_donor_q3": {
+              "estimated_addition_usd": 0.057613,
+              "estimated_mean_usd": 0.947873684,
+              "base_savings_pct": 18.337622534960598
+            },
+            "codex_model_alternatives_with_pooled_base": {
+              "gpt-6.1-sol": {
+                "codex_mean_usd": 1.1607226160000002,
+                "base_savings_pct": 18.348037359503017
+              },
+              "gpt-6-astra": {
+                "codex_mean_usd": 1.7587949360000006,
+                "base_savings_pct": 46.11351344167623
+              }
+            }
+          }
+        }
+      ],
+      "dispatch_and_charge_uncertainty": "Seven daemon-status admissions have no recorded sent/settlement timing or usage; dispatch and charge are unknown. One refine/plan request was sent and interrupted after first events, with no usage. Comparable completed requests are used for all eight rather than assuming zero.",
+      "direct_usage_reconstruction": false,
+      "scope": "Only the eight missing captured receipts in the 150 selected Base attempts are imputed. Uncaptured family work is not estimated."
     }
   },
   "physical_attempts": {

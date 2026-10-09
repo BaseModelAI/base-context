@@ -93,7 +93,20 @@ Our **curated 50-task comparison** puts Base Context development builds and **Co
 
 [Time chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-time.svg) · [Quality chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-quality.svg) · [Cost chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-cost.svg) · [Benchmark data](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/summary.json).
 
-**Scope:** 50 curated, outcome-informed tasks; three profiles; first provider-clean attempt per cell, including clean failures and timeouts. Request-budget selection was off. Cost charts distinguish **known-usage API-rate subtotals\*** from **hypothetical same-model additions**. Both harnesses have unpriced receipts; these are incomplete estimates, not invoices. [Full methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) covers selection, provider exclusions, mixed builds, and cost sensitivity.
+### Estimated cost per task
+
+**About 11.3% lower estimated cost overall**, or **$0.213 saved per task**, across 150 selected attempts per product.
+
+| Model / effort | **Base estimate / task** | **Codex estimate / task** | **Base saving / task** | **Base saving** |
+| --- | ---: | ---: | ---: | ---: |
+| Astra / medium | **$3.325** | **$3.668** | **$0.343** | **9.3%** |
+| Sol 6.1 / high | **$0.753** | **$0.836** | **$0.082** | **9.8%** |
+| Sol 6.1 / xhigh | **$0.948** | **$1.161** | **$0.213** | **18.3%** |
+| All profiles | **$1.675** | **$1.888** | **$0.213** | **11.3%** |
+
+Both products include estimates for missing captured costs: Base's missing usage uses comparable-request means; Codex's missing model identities use requested-profile rates. [Known components, assumptions and sensitivity](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md#estimated-cost-per-task) support this API-list-rate comparison, not an invoice or complete-family-spend claim.
+
+**Scope:** 50 curated, outcome-informed tasks; three profiles; first provider-clean attempt per cell, including clean failures and timeouts. Request-budget selection was off. [Full methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) covers selection, provider exclusions, mixed builds, and cost sensitivity.
 
 Earlier comparisons remain **withdrawn** and available as archives: [Python 30](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md) · [Earlier evaluation records](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-1.1.2.md).
 

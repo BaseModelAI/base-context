@@ -34,17 +34,31 @@ In our **50-task, three-profile context-stress benchmark**, Base delivered:
 
 The benchmark covers 300 first provider-clean attempts on a curated task set. Time means include clean failures and timeouts; full passes require all five main checks plus the edge check. Codex completed 144/150 runs and produced 146/150 passing artifacts. The [benchmark report](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) has detailed scores, graphs, build identities, and methods.
 
-## Captured-request costs*
+## Estimated cost per task
 
-Mean USD per selected run:
+**About 11.3% lower estimated cost overall: $1.675 versus $1.888 per task**, saving **$0.213 per task** across 150 selected attempts per product.
 
-| Model / effort | Base known* | Codex known* | Codex added estimate† | Codex known + estimate† |
+| Model / effort | **Base estimate / task** | **Codex estimate / task** | **Base saving / task** | **Base saving** |
 | --- | ---: | ---: | ---: | ---: |
-| Astra / medium | $3.3242 | $3.1527 | $0.5152 | $3.6679 |
-| Sol / high | $0.7533 | $0.7226 | $0.1129 | $0.8355 |
-| Sol / xhigh | $0.9467 | $1.0273 | $0.1334 | $1.1607 |
+| Astra / medium | **$3.325** | **$3.668** | **$0.343** | **9.3%** |
+| Sol 6.1 / high | **$0.753** | **$0.836** | **$0.082** | **9.8%** |
+| Sol 6.1 / xhigh | **$0.948** | **$1.161** | **$0.213** | **18.3%** |
+| All profiles | **$1.675** | **$1.888** | **$0.213** | **11.3%** |
 
-\* Known API-list-rate equivalents for captured usage, not subscription bills or complete spend. † The Codex scenario prices 441 missing-model receipts at each run's selected-model rates: **$38.07** added across 150 runs. Base has eight receipts without usable token counts, so its missing amount is unquantified. [Cost coverage and assumptions](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md#cost-known-subtotals-and-model-price-hypotheses) explain this partial-cost comparison.
+Both sides include their missing captured costs. Base's eight missing-usage receipts are imputed from comparable priced requests. Codex's 441 missing-model receipts use their recorded token counts at requested-profile rates. These are API-list-rate estimates, not subscription bills or complete agent-family spend. [Methods and sensitivity](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md#estimated-cost-per-task) explain the assumptions, including when the comparison changes direction.
+
+<details>
+<summary>Supporting known subtotals and estimated additions</summary>
+
+| Model / effort | Base known / task | Base added estimate / task | Codex known / task | Codex added estimate / task |
+| --- | ---: | ---: | ---: | ---: |
+| Astra / medium | $3.3242 | +$0.001016 | $3.1527 | +$0.515185 |
+| Sol 6.1 / high | $0.7533 | +$0.000042 | $0.7226 | +$0.112916 |
+| Sol 6.1 / xhigh | $0.9467 | +$0.001031 | $1.0273 | +$0.133380 |
+
+Additions use six decimals so small nonzero estimates remain visible.
+
+</details>
 
 ## Get started
 

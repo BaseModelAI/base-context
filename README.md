@@ -124,11 +124,20 @@ The speed difference also holds among successful runs: **Base was faster in 128/
 
 [![Benchmark quality: full artifact passes, main-check accuracy, and mean progress scores by profile.](packages/coding-agent/docs/images/benchmarks/curated50-quality.svg)](benchmarks/context-curated-50/README.md)
 
-### Cost, with the accounting visible
+### Estimated cost per task
 
-[![Known-usage API-rate cost subtotals, with separate hypothetical Codex same-model additions and model-price sensitivity.](packages/coding-agent/docs/images/benchmarks/curated50-cost.svg)](benchmarks/context-curated-50/README.md)
+**About 11.3% lower estimated cost overall: $1.675 for Base versus $1.888 for Codex per task**, a saving of **$0.213 per task** across the 150 selected attempts per product.
 
-**Known costs\*** are API-rate subtotals from captured, priced usage—not invoices. Both harnesses have unpriced receipts, so totals are incomplete. Hatched additions show a **hypothetical same-main-model estimate** for Codex receipts with unknown model identities. [Cost breakdown and assumptions](benchmarks/context-curated-50/README.md).
+[![Estimated cost per task for both products, with Base percentage and dollar savings and symmetric missing-cost additions.](packages/coding-agent/docs/images/benchmarks/curated50-cost.svg)](benchmarks/context-curated-50/README.md#estimated-cost-per-task)
+
+| Model / effort | **Base estimate / task** | **Codex estimate / task** | **Base saving / task** | **Base saving** |
+| --- | ---: | ---: | ---: | ---: |
+| Astra / medium | **$3.325** | **$3.668** | **$0.343** | **9.3%** |
+| Sol 6.1 / high | **$0.753** | **$0.836** | **$0.082** | **9.8%** |
+| Sol 6.1 / xhigh | **$0.948** | **$1.161** | **$0.213** | **18.3%** |
+| All profiles | **$1.675** | **$1.888** | **$0.213** | **11.3%** |
+
+Both sides include missing-cost estimates: comparable-request means for Base's missing usage, and requested-profile model rates for Codex's missing model identities. These are API-list-rate estimates for captured requests, not subscription bills or complete family spend. [Supporting components, assumptions and sensitivity](benchmarks/context-curated-50/README.md#estimated-cost-per-task).
 
 **Scope:** 50 curated and outcome-informed tasks, three profiles, first provider-clean attempt per cell. Clean failures and timeouts are included. Request-budget selection was off. [Full methodology](benchmarks/context-curated-50/README.md) covers task selection, provider exclusions, mixed builds, and cost sensitivity. [Download the benchmark summary](benchmarks/context-curated-50/summary.json).
 
