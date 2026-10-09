@@ -1,1 +1,0 @@
-- Added 1.1.2 review-follow-up notes covering implemented changes, qualification scope, benchmark limits, and remaining maintenance debt.

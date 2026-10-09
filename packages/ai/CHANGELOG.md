@@ -4,6 +4,7 @@
 
 - Moved cache-retention tests to local mocked transports and separated credential-dependent integration tests from the required offline suite.
 - Corrected cross-provider replay documentation to describe reasoning, failed turns, and unsupported images accurately.
+- Fixed WebSocket response ordering so already received frames finish decoding before transport shutdown is handled.
 
 ## [1.1.0] - 2026-10-04
 

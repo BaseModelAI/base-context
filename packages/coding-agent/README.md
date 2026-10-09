@@ -2,88 +2,113 @@
 
 **Keep the work. Focus the context.**
 
-An MIT-licensed coding and research agent with a persistent Python workspace, parallel workers, and source-backed context. Developed by [Synerise](https://synerise.com), built on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
+Give your agent a workspace, not just a conversation. Base Context combines **persistent Python, retained outputs, and instruction recovery** to keep coding and research moving across long sessions. Developed by [Synerise](https://synerise.com), built on [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent).
 
-Keep parsed data and command handles across turns. Retain long output outside the prompt, recover details by reference, and carry selected earlier instructions through compaction. Delegate independent work while the parent continues.
+[![Curated R1: 27–39% shorter mean attempt times, 150/150 Base native completions, and faster results in 128/141 pairs where both harnesses completed and fully passed.](https://raw.githubusercontent.com/BaseModelAI/base-context/main/packages/coding-agent/docs/images/benchmarks/curated50-overview.svg)](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md)
 
-Request-budget selection is **opt-in**, not default CLI optimization. Start with the [ten-minute workflow](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/quickstart.md), then see the [working budget profile](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/request-token-budgets.md) if you need request-level limits.
+**Less waiting. Strong results.** In our curated 50-task R1 comparison, Base delivered **27–39% shorter mean attempt times** and **150/150 native completions**. Three matching model/effort profiles; first provider-clean attempt per cell. [Explore the benchmark](#benchmarks).
 
-[Install](#install) · [Use it](#use-it) · [How it works](#how-it-works) · [Documentation](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md)
+[Install](#install) · [Workflow](#use-it) · [Benchmarks](#benchmarks) · [Design](#how-it-works) · [Documentation](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md)
 
 ## Install
 
-On macOS or Linux, the recommended installer prepares missing prerequisites and managed Python before activating the CLI:
+On **macOS or Linux**:
 
 ```bash
 curl -fsSL https://github.com/BaseModelAI/base-context/releases/latest/download/install.sh | bash
 ```
 
-Run the final PATH command it prints, then:
+The installer offers missing prerequisites and prepares Node.js, `uv`, and managed Python. Run the final PATH command it prints, then:
 
 ```bash
 cd /path/to/project
 base-context
 ```
 
-Use `/login` for your provider, `/model` for your model, and `/effort` for its reasoning level. Selection and authentication are explicit; Base Context uses its own settings and credentials.
+**Bring your existing provider account.** Choose `/login`, then `/model` and `/effort`. Have ChatGPT with Codex access? Choose **OpenAI Codex** in `/login`—no separate API key needed. Other supported subscriptions and API keys are available through their provider routes. [Provider setup](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/providers.md).
 
-**npm alternative:** if you already manage Node.js/npm, use Node.js **22.12+ on 22.x, or 23.3+**. In Bash/Zsh:
+This page describes **1.1.2**; install commands use the latest public release. [What's new](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-notes-1.1.2.md).
+
+<details>
+<summary>npm, Windows, and source installations</summary>
+
+If you already manage Node.js/npm, use Node.js **22.12+ on 22.x, or 23.3+**. In Bash/Zsh:
 
 ```bash
 npm install -g @ponythewhite/base-context
 BASE_CONTEXT_INSTALL_UV=1 base-context
 ```
 
-The first normal launch prepares managed Python. The flag permits installing missing `uv`; you do not need a manual Python installation. Use npm instead of, not in addition to, the installer above.
+The first normal launch prepares managed Python. The flag permits installing missing `uv`. Use this route instead of the installer above.
 
 [Windows, source builds, updates, rollback, and uninstall](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/installation.md).
 
+</details>
+
+## Built for more than one turn
+
+- **Inspect once. Build on it.** Keep parsed data, variables, and command handles in a persistent Python workspace. Project tools still run in the project's own environment. You do not need to write Python yourself.
+- **Keep output, not clutter.** Retain long results and recover the exact failure, passage, or line you need through `prime_context`.
+- **Carry the thread.** TaskFrames carry selected earlier user instructions and goal state through compaction. Retained sources support recovery after a saved-session restart.
+- **Put independent work in parallel.** Workers have their own contexts and return messages or reports while the parent keeps moving.
+
 ## Use it
 
-Start in your repository and ask for an outcome. Put project rules in `AGENTS.md`. You do not need to write Python yourself.
+Start in your repository, put project rules in `AGENTS.md`, and ask for an outcome:
+
+```text
+Fix the failing parser test. Keep the public API unchanged.
+Delegate the API review to a worker while you finish the documentation.
+```
 
 | Command | Purpose |
 | --- | --- |
-| `/goal <objective>` | Explicitly start a persistent goal; manage it with `status`, `pause`, `resume`, or `clear` |
-| `/agents [N]` | Show or save the live-subagent cap, default four; lowering it does not stop workers |
-| `/btw <question>` | Ask a tool-free side question without adding the conversation to the main session; Esc returns |
-| `/context`, `/usage` | Inspect context, captured usage, cost estimates, and separate goal-budget scope |
+| `/goal <objective>` | Start a persistent goal; manage it with `status`, `pause`, `resume`, or `clear` |
+| `/agents [N]` | Show or set the subagent cap, default four |
+| `/btw <question>` | Ask a side question without steering the main task; Esc returns |
+| `/context`, `/usage` | Inspect context, captured usage, and cost estimates |
 | `/compact`, `/refine` | Summarize context or refine saved harness advice |
+| `base-context -c` | Continue the latest saved session |
 | `base-context agents` | Open the agents view |
 | `base-context attach <agent>` | Reattach to a resident agent |
 | `base-context shutdown` | Stop all agents and background services |
 
-For independent work, ask:
+Normal interactive work can continue after the terminal detaches. Reattach when you're ready. [Ten-minute workflow](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/quickstart.md) · [Full usage](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/usage.md) · [Goals and background work](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/long-running-agents.md).
 
-```text
-Delegate the API review and documentation update to separate workers.
-Keep working on the parser fix, then integrate their replies.
-```
+## Benchmarks
 
-Normal interactive workers can continue after the terminal detaches. [Quickstart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/quickstart.md) · [Full usage](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/usage.md).
+### Long tasks. Less waiting.
+
+Our **curated 50-task R1 comparison** puts Base Context development builds and **Codex 0.160.0** through staged work with forced compaction and scheduled cold restarts.
+
+| Profile · 50 attempts per harness | Mean time, Base / Codex | Full artifact passes, Base / Codex |
+| --- | ---: | ---: |
+| GPT-6 Astra · medium | **508.4 / 697.2 s** | 49 / 50 |
+| GPT-6.1 Sol · high | **606.4 / 967.4 s** | 50 / 49 |
+| GPT-6.1 Sol · xhigh | **908.1 / 1,481.3 s** | 49 / 47 |
+
+**Base was faster in 128/141 pairs where both harnesses completed natively and fully passed.** Across all selected attempts, native completions were **150/150 versus 144/150**, and full artifact passes were **148/150 versus 146/150**. Artifact scores include three passing Codex timeouts; completion is scored separately.
+
+[Time chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-time.svg) · [Quality chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-quality.svg) · [Cost chart](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/images/benchmarks/curated50-cost.svg) · [R1 data](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/summary-replica1.json).
+
+**Scope:** 50 curated, outcome-informed tasks; three profiles; first provider-clean attempt per cell, including clean failures and timeouts. Request-budget selection was off. Cost charts distinguish **known-usage API-rate subtotals\*** from **hypothetical same-model additions**. Both harnesses have unpriced receipts; these are incomplete estimates, not invoices. [Full methodology](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/context-curated-50/README.md) covers selection, provider exclusions, mixed builds, cost sensitivity, and archival R2.
+
+Earlier comparisons remain **withdrawn** and available as archives: [Python 30](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md) · [Earlier evaluation records](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-1.1.2.md).
 
 ## How it works
 
-- **Persistent Python:** keep variables, parsed data, commands, and skills available across tool calls.
-- **Instructions and recovery:** TaskFrames carry selected earlier user text and goal state without repeating visible user inputs. Indexed recovery retrieves original public text. An explicit budget profile enables supported ViewUnit selection and stable context epochs.
-- **Parallel children:** `await rlm(...)` returns an admission handle. Results arrive through messages or files, while independent work can continue.
+**Keep a notebook. Work from a clear desk.** Retained history holds the source material. The working context carries what the agent is using now. The Python workspace keeps reusable data and command handles, while the TypeScript host runs model calls, sessions, goals, and worker lifecycles.
 
-Base Context inherits the Python-first programming model from Prime Agent. Its focus is the source-backed working-set architecture around that model. Bring that workflow to your next coding or research task.
+Base Context builds source-backed context and recovery around Prime Agent's persistent Python programming model. The workspace, retained output, TaskFrame, and recovery are available in ordinary sessions. For tighter per-request control, opt into budget-driven selection with an explicit `enforce`-mode settings profile or SDK option on supported routes. [Working budget profile](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/request-token-budgets.md).
 
-Summaries are not lossless, retrieval is bounded, and Python restoration is best-effort. Generated code runs with your user permissions; workers are **not a security sandbox**. Use an external sandbox for untrusted work. Retained sessions can contain sensitive data; compaction does not delete it.
+[Architecture](https://github.com/BaseModelAI/base-context#how-it-works) · [Why we forked](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/fork-philosophy.md) · [Context management](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/context-management.md) · [SDK](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md) · [All docs](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md).
 
-[Architecture, comparison charts, and design details](https://github.com/BaseModelAI/base-context#how-it-works) · [Context management](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/context-management.md) · [SDK](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/sdk.md) · [All docs](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/index.md) · [1.1.2 review follow-up](https://github.com/BaseModelAI/base-context/blob/main/packages/coding-agent/docs/release-1.1.2.md).
-
-## Historical benchmark
-
-> **Archived — comparison withdrawn.** This historical comparison is withdrawn, along with all earlier Base Context comparisons, including released-version comparisons. Its numbers, tables, and charts are preserved as archival records only and must not be used to support performance claims.
-
-Base Context **1.1.1** and Codex **0.160.0** both passed **60/60** selected task/profile pairs on 30 self-authored Python standard-library tasks. Base had **31% shorter mean selected-run time** and a **19% lower captured API-cost estimate** in that sample, using GPT-6.1 Sol high and GPT-6 Astra medium.
-
-These are best-of-two results with a ceiling effect, different dates and concurrency limits, and different native tools/instructions. They are not single-attempt reliability, invoices, complete campaign spend, or measurements of the current changes. Request-budget selection was not enabled, so the comparison cannot establish its effect or long-session quality. [Data, charts, and full method](https://github.com/BaseModelAI/base-context/blob/main/benchmarks/python-realworld-30/README.md).
+Save important deliverables in files; Python restoration is best-effort. Commands run with your user permissions, so use an external sandbox for untrusted code.
 
 ## License and thanks
 
-[MIT](LICENSE). Upstream notices are preserved in [NOTICE](NOTICE).
+[Synerise](https://synerise.com) develops Base Context. [BaseModelAI/base-context](https://github.com/BaseModelAI/base-context) is its GitHub home; `@ponythewhite/base-context` is the npm package; `base-context` is the command.
 
-Thank you to [Prime Intellect](https://github.com/PrimeIntellect-ai/prime-agent) for the excellent Python-first agent foundation, and to [Mario Zechner's Pi](https://github.com/badlogic/pi-mono), on which Prime Agent builds. Base Context is an independent fork, not an official Prime Intellect release.
+[MIT](LICENSE), with upstream notices preserved in [NOTICE](NOTICE).
+
+Thank you to [Prime Intellect](https://github.com/PrimeIntellect-ai/prime-agent) for the excellent Python-first agent and recursive runtime, and to [Mario Zechner's Pi](https://github.com/badlogic/pi-mono), on which Prime Agent builds. Base Context is an independent Synerise fork.

@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="850" viewBox="0 0 1200 850" role="img" aria-labelledby="title desc">
+<title id="title">Artifact quality and mean judge score</title>
+<desc id="desc">First replica, 50 tasks per profile per product. Full artifact passes: Base Context 49, 50, 49; Codex 50, 49, 47. Mean judge progress scores: Base 4.96, 5.00, 4.96; Codex 5.00, 4.96, 4.84. Scores are near ceiling. Progress scores are not main-check counts. Three Codex timeouts have full artifact passes.</desc>
+<defs><pattern id="hypothesis" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#e6eaff"/><path d="M-2 2L2-2M0 8L8 0M6 10L10 6" stroke="#5062cf" stroke-width="1.5"/></pattern></defs>
+<g font-family="Arial, Helvetica, sans-serif">
+<rect x="0.00" y="0.00" width="1200.00" height="850.00" rx="0" fill="#f5f8fb" stroke="none"/>
+<rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
+<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
+<text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">03 / QUALITY</text>
+<text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Strong artifact scores. Small gaps.</text>
+<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Full pass = five main checks + the edge check · 50 selected R1 attempts per group</text>
+<rect x="44.00" y="154.00" width="13.00" height="13.00" rx="3" fill="#087e75" stroke="none"/>
+<text x="67" y="167" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base Context</text>
+<rect x="246.00" y="154.00" width="13.00" height="13.00" rx="3" fill="#5062cf" stroke="none"/>
+<text x="269" y="167" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Codex</text>
+<text x="350" y="209" font-size="18" fill="#14263c" font-weight="700" text-anchor="start">Mean judge progress / 5</text>
+<text x="856" y="209" font-size="18" fill="#14263c" font-weight="700" text-anchor="middle">Full passes</text>
+<text x="1060" y="209" font-size="18" fill="#14263c" font-weight="700" text-anchor="middle">Main checks</text>
+<path d="M350.00 246.00L350.00 666.00" stroke="#dbe3eb"/>
+<text x="350.0" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">0</text>
+<path d="M422.40 246.00L422.40 666.00" stroke="#dbe3eb"/>
+<text x="422.4" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">1</text>
+<path d="M494.80 246.00L494.80 666.00" stroke="#dbe3eb"/>
+<text x="494.8" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">2</text>
+<path d="M567.20 246.00L567.20 666.00" stroke="#dbe3eb"/>
+<text x="567.2" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">3</text>
+<path d="M639.60 246.00L639.60 666.00" stroke="#dbe3eb"/>
+<text x="639.6" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">4</text>
+<path d="M712.00 246.00L712.00 666.00" stroke="#dbe3eb"/>
+<text x="712.0" y="699" font-size="16" fill="#526278" font-weight="400" text-anchor="middle">5</text>
+<text x="44" y="273" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Astra · medium</text>
+<text x="255" y="288" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base</text>
+<rect x="350.00" y="266.00" width="359.10" height="30.00" rx="4" fill="#087e75" stroke="none"/>
+<text x="765" y="289" font-size="21" fill="#087e75" font-weight="700" text-anchor="end">4.96</text>
+<text x="856" y="289" font-size="23" fill="#087e75" font-weight="700" text-anchor="middle">49/50</text>
+<text x="1060" y="289" font-size="21" fill="#087e75" font-weight="700" text-anchor="middle">98.8%</text>
+<text x="255" y="339" font-size="17" fill="#5062cf" font-weight="700" text-anchor="start">Codex</text>
+<rect x="350.00" y="317.00" width="362.00" height="30.00" rx="4" fill="#5062cf" stroke="none"/>
+<text x="765" y="340" font-size="21" fill="#5062cf" font-weight="700" text-anchor="end">5.00</text>
+<text x="856" y="340" font-size="23" fill="#5062cf" font-weight="700" text-anchor="middle">50/50</text>
+<text x="1060" y="340" font-size="21" fill="#5062cf" font-weight="700" text-anchor="middle">100.0%</text>
+<path d="M44.00 371.00H1156.00" stroke="#dbe3eb"/>
+<text x="44" y="415" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · high</text>
+<text x="255" y="430" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base</text>
+<rect x="350.00" y="408.00" width="362.00" height="30.00" rx="4" fill="#087e75" stroke="none"/>
+<text x="765" y="431" font-size="21" fill="#087e75" font-weight="700" text-anchor="end">5.00</text>
+<text x="856" y="431" font-size="23" fill="#087e75" font-weight="700" text-anchor="middle">50/50</text>
+<text x="1060" y="431" font-size="21" fill="#087e75" font-weight="700" text-anchor="middle">100.0%</text>
+<text x="255" y="481" font-size="17" fill="#5062cf" font-weight="700" text-anchor="start">Codex</text>
+<rect x="350.00" y="459.00" width="359.10" height="30.00" rx="4" fill="#5062cf" stroke="none"/>
+<text x="765" y="482" font-size="21" fill="#5062cf" font-weight="700" text-anchor="end">4.96</text>
+<text x="856" y="482" font-size="23" fill="#5062cf" font-weight="700" text-anchor="middle">49/50</text>
+<text x="1060" y="482" font-size="21" fill="#5062cf" font-weight="700" text-anchor="middle">98.8%</text>
+<path d="M44.00 513.00H1156.00" stroke="#dbe3eb"/>
+<text x="44" y="557" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · xhigh</text>
+<text x="255" y="572" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base</text>
+<rect x="350.00" y="550.00" width="359.10" height="30.00" rx="4" fill="#087e75" stroke="none"/>
+<text x="765" y="573" font-size="21" fill="#087e75" font-weight="700" text-anchor="end">4.96</text>
+<text x="856" y="573" font-size="23" fill="#087e75" font-weight="700" text-anchor="middle">49/50</text>
+<text x="1060" y="573" font-size="21" fill="#087e75" font-weight="700" text-anchor="middle">99.6%</text>
+<text x="255" y="623" font-size="17" fill="#5062cf" font-weight="700" text-anchor="start">Codex</text>
+<rect x="350.00" y="601.00" width="350.42" height="30.00" rx="4" fill="#5062cf" stroke="none"/>
+<text x="765" y="624" font-size="21" fill="#5062cf" font-weight="700" text-anchor="end">4.84</text>
+<text x="856" y="624" font-size="23" fill="#5062cf" font-weight="700" text-anchor="middle">47/50</text>
+<text x="1060" y="624" font-size="21" fill="#5062cf" font-weight="700" text-anchor="middle">96.8%</text>
+<rect x="44.00" y="731.00" width="1112.00" height="82.00" rx="12" fill="white" stroke="#dbe3eb"/>
+<text x="64" y="761" font-size="18" fill="#14263c" font-weight="400" text-anchor="start">Artifact pass ≠ native completion. Six clean failures retained; three timed-out artifacts fully pass.</text>
+<text x="64" y="790" font-size="18" fill="#526278" font-weight="400" text-anchor="start">Judge progress is not a count of passed checks. Curated, near-ceiling sample; no significance claim.</text>
+</g>
+</svg>

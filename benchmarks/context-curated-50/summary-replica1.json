@@ -1,0 +1,582 @@
+{
+  "title": "Curated 50: first-replica native workflow comparison",
+  "scope": "replica1 only, curated 50 tasks, first provider-clean physical attempt per cell; all failures and native timeouts retained",
+  "primary_replicate": 1,
+  "tasks": 50,
+  "profiles": [
+    "gpt-6-astra-medium",
+    "gpt-6.1-sol-high",
+    "gpt-6.1-sol-xhigh"
+  ],
+  "task_selection": {
+    "stress5": 5,
+    "adaptive": 45,
+    "method": "Outcome-informed: the 45 adaptive candidates previously had provider-clean Codex passes on both earlier profiles. Frozen before these fresh runs, not an unseen holdout or a representative sample.",
+    "omitted_candidates": {
+      "W23": "not qualified",
+      "AL38": "authoring-contract hold",
+      "AN40": "authoring-contract hold"
+    }
+  },
+  "groups": [
+    {
+      "harness": "base-context",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "clean_runs": 50,
+      "clean_full_passes": 49,
+      "accuracy_full_pass_pct": 98.0,
+      "mean_judge_progress_score": 4.96,
+      "main_check_accuracy_pct": 98.8,
+      "mean_main_checks": 4.94,
+      "mean_time_seconds": 508.4278623944002,
+      "mean_known_api_rate_cost_usd": 3.3242153599999993,
+      "priced_receipts": 3778,
+      "captured_receipts": 3783,
+      "native_completed": 50,
+      "timeout_count": 0,
+      "passing_timeouts": 0,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    },
+    {
+      "harness": "codex",
+      "model": "gpt-6-astra",
+      "effort": "medium",
+      "clean_runs": 50,
+      "clean_full_passes": 50,
+      "accuracy_full_pass_pct": 100.0,
+      "mean_judge_progress_score": 5.0,
+      "main_check_accuracy_pct": 100.0,
+      "mean_main_checks": 5.0,
+      "mean_time_seconds": 697.1772091525594,
+      "mean_known_api_rate_cost_usd": 3.1527103999999997,
+      "priced_receipts": 2622,
+      "captured_receipts": 2769,
+      "native_completed": 50,
+      "timeout_count": 0,
+      "passing_timeouts": 0,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    },
+    {
+      "harness": "base-context",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "clean_runs": 50,
+      "clean_full_passes": 50,
+      "accuracy_full_pass_pct": 100.0,
+      "mean_judge_progress_score": 5.0,
+      "main_check_accuracy_pct": 100.0,
+      "mean_main_checks": 5.0,
+      "mean_time_seconds": 606.3967775167401,
+      "mean_known_api_rate_cost_usd": 0.753287648,
+      "priced_receipts": 3987,
+      "captured_receipts": 3988,
+      "native_completed": 50,
+      "timeout_count": 0,
+      "passing_timeouts": 0,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    },
+    {
+      "harness": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "high",
+      "clean_runs": 50,
+      "clean_full_passes": 49,
+      "accuracy_full_pass_pct": 98.0,
+      "mean_judge_progress_score": 4.96,
+      "main_check_accuracy_pct": 98.8,
+      "mean_main_checks": 4.94,
+      "mean_time_seconds": 967.3627606358996,
+      "mean_known_api_rate_cost_usd": 0.7226265279999998,
+      "priced_receipts": 2907,
+      "captured_receipts": 3054,
+      "native_completed": 50,
+      "timeout_count": 0,
+      "passing_timeouts": 0,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    },
+    {
+      "harness": "base-context",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "clean_runs": 50,
+      "clean_full_passes": 49,
+      "accuracy_full_pass_pct": 98.0,
+      "mean_judge_progress_score": 4.96,
+      "main_check_accuracy_pct": 99.6,
+      "mean_main_checks": 4.98,
+      "mean_time_seconds": 908.0635334154006,
+      "mean_known_api_rate_cost_usd": 0.9467214240000001,
+      "priced_receipts": 4230,
+      "captured_receipts": 4232,
+      "native_completed": 50,
+      "timeout_count": 0,
+      "passing_timeouts": 0,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    },
+    {
+      "harness": "codex",
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "clean_runs": 50,
+      "clean_full_passes": 47,
+      "accuracy_full_pass_pct": 94.0,
+      "mean_judge_progress_score": 4.84,
+      "main_check_accuracy_pct": 96.8,
+      "mean_main_checks": 4.84,
+      "mean_time_seconds": 1481.2764286852203,
+      "mean_known_api_rate_cost_usd": 1.0273421360000001,
+      "priced_receipts": 3208,
+      "captured_receipts": 3355,
+      "native_completed": 44,
+      "timeout_count": 6,
+      "passing_timeouts": 3,
+      "not_observed_provider_clean": 0,
+      "raw_provider_error_observed": 0
+    }
+  ],
+  "mean_attempt_time_comparisons": [
+    {
+      "profile": "gpt-6-astra-medium",
+      "base_mean_attempt_seconds": 508.4278623944002,
+      "codex_mean_attempt_seconds": 697.1772091525594,
+      "base_lower_mean_attempt_time_pct": 27.073367327596653
+    },
+    {
+      "profile": "gpt-6.1-sol-high",
+      "base_mean_attempt_seconds": 606.3967775167401,
+      "codex_mean_attempt_seconds": 967.3627606358996,
+      "base_lower_mean_attempt_time_pct": 37.31443857543959
+    },
+    {
+      "profile": "gpt-6.1-sol-xhigh",
+      "base_mean_attempt_seconds": 908.0635334154006,
+      "codex_mean_attempt_seconds": 1481.2764286852203,
+      "base_lower_mean_attempt_time_pct": 38.69722653850659
+    }
+  ],
+  "quality_definition": {
+    "full_artifact_pass": "All five main checks and the edge check pass, regardless of native completion.",
+    "mean_judge_progress_score": "Mean of judge-reported progress_level (0 to 5), not the mean number of passed checks.",
+    "main_check_accuracy_pct": "Main checks passed divided by 250 per group; edge checks excluded from this percentage.",
+    "full_artifact_pass_totals": {
+      "base-context": 148,
+      "codex": 146
+    },
+    "clean_failures": [
+      {
+        "task": "adaptive-f06",
+        "harness": "base-context",
+        "profile": "gpt-6.1-sol-xhigh",
+        "native_status": "completed",
+        "main_checks_passed": 4,
+        "edge_check_passed": false,
+        "judge_progress_score": 3
+      },
+      {
+        "task": "adaptive-i09",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "native_status": "timeout",
+        "main_checks_passed": 0,
+        "edge_check_passed": true,
+        "judge_progress_score": 1
+      },
+      {
+        "task": "adaptive-ab28",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "native_status": "timeout",
+        "main_checks_passed": 4,
+        "edge_check_passed": false,
+        "judge_progress_score": 3
+      },
+      {
+        "task": "adaptive-ag33",
+        "harness": "base-context",
+        "profile": "gpt-6-astra-medium",
+        "native_status": "completed",
+        "main_checks_passed": 2,
+        "edge_check_passed": true,
+        "judge_progress_score": 3
+      },
+      {
+        "task": "adaptive-ag33",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-high",
+        "native_status": "completed",
+        "main_checks_passed": 2,
+        "edge_check_passed": true,
+        "judge_progress_score": 3
+      },
+      {
+        "task": "adaptive-at46",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "native_status": "timeout",
+        "main_checks_passed": 3,
+        "edge_check_passed": false,
+        "judge_progress_score": 3
+      }
+    ]
+  },
+  "time_definition": {
+    "primary": "Arithmetic mean of observed elapsed seconds from first prompt through native attempt termination, including scheduled stage work, compaction/reopen, clean failures and deadline-limited timeouts. Preparation/startup and post-run judging excluded. All 50 selected attempts per group.",
+    "base_reduction_formula": "100 * (1 - base_mean_seconds / codex_mean_seconds)",
+    "completed_full_pass_pairs": {
+      "both_full_artifact_pass": 144,
+      "both_native_completed": 141,
+      "faster_pairs": {
+        "base-context": 128,
+        "codex": 13
+      },
+      "tied_pairs": 0,
+      "excluded_passing_codex_timeouts": [
+        "adaptive-y25",
+        "adaptive-ad30",
+        "adaptive-aw49"
+      ],
+      "scope": "Descriptive subset, not the denominator for the all-attempt means."
+    },
+    "timeouts": [
+      {
+        "task": "adaptive-i09",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 5400.100611263999,
+        "full_artifact_pass": false
+      },
+      {
+        "task": "adaptive-y25",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 2700.100090095999,
+        "full_artifact_pass": true
+      },
+      {
+        "task": "adaptive-ab28",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 2700.1012429149996,
+        "full_artifact_pass": false
+      },
+      {
+        "task": "adaptive-ad30",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 2700.1001435469952,
+        "full_artifact_pass": true
+      },
+      {
+        "task": "adaptive-at46",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 2700.0999457,
+        "full_artifact_pass": false
+      },
+      {
+        "task": "adaptive-aw49",
+        "harness": "codex",
+        "profile": "gpt-6.1-sol-xhigh",
+        "elapsed_seconds": 2700.1001362079987,
+        "full_artifact_pass": true
+      }
+    ]
+  },
+  "cost": {
+    "currency": "USD",
+    "basis": "Captured usage at recorded API list rates, not invoices or subscription charges. Measured-known subtotals are incomplete for both products.",
+    "codex_hypothetical_missing_model_estimates": [
+      {
+        "profile": "gpt-6-astra-medium",
+        "runs": 50,
+        "unpriced_receipts": 147,
+        "known_total_usd": 157.63551999999999,
+        "known_mean_usd": 3.1527103999999997,
+        "estimated_missing_total_same_model_usd": 25.75926,
+        "estimated_missing_mean_same_model_usd": 0.5151852,
+        "estimated_total_mean_same_model_usd": 3.6678956,
+        "uplift_pct_same_model": 16.341025169961696,
+        "estimated_missing_by_assumed_model_usd": {
+          "gpt-6.1-sol": 4.717676,
+          "gpt-6-astra": 25.75926
+        },
+        "estimated_total_mean_scenario_low_usd": 3.24706392,
+        "estimated_total_mean_scenario_high_usd": 3.6678956
+      },
+      {
+        "profile": "gpt-6.1-sol-high",
+        "runs": 50,
+        "unpriced_receipts": 147,
+        "known_total_usd": 36.13132639999999,
+        "known_mean_usd": 0.7226265279999998,
+        "estimated_missing_total_same_model_usd": 5.6458195999999985,
+        "estimated_missing_mean_same_model_usd": 0.11291639199999998,
+        "estimated_total_mean_same_model_usd": 0.8355429199999997,
+        "uplift_pct_same_model": 15.625829889267502,
+        "estimated_missing_by_assumed_model_usd": {
+          "gpt-6.1-sol": 5.6458195999999985,
+          "gpt-6-astra": 30.799466
+        },
+        "estimated_total_mean_scenario_low_usd": 0.8355429199999997,
+        "estimated_total_mean_scenario_high_usd": 1.3386158479999997
+      },
+      {
+        "profile": "gpt-6.1-sol-xhigh",
+        "runs": 50,
+        "unpriced_receipts": 147,
+        "known_total_usd": 51.36710680000001,
+        "known_mean_usd": 1.0273421360000001,
+        "estimated_missing_total_same_model_usd": 6.669024,
+        "estimated_missing_mean_same_model_usd": 0.13338048,
+        "estimated_total_mean_same_model_usd": 1.1607226160000002,
+        "uplift_pct_same_model": 12.983063317087579,
+        "estimated_missing_by_assumed_model_usd": {
+          "gpt-6.1-sol": 6.669024,
+          "gpt-6-astra": 36.57264000000002
+        },
+        "estimated_total_mean_scenario_low_usd": 1.1607226160000002,
+        "estimated_total_mean_scenario_high_usd": 1.7587949360000004
+      }
+    ],
+    "codex_unpriced_totals": {
+      "runs": 150,
+      "unpriced_receipts": 441,
+      "known_total_usd": 245.13395319999998,
+      "estimated_missing_same_model_usd": 38.0741036,
+      "estimated_missing_scenario_low_usd": 17.0325196,
+      "estimated_missing_scenario_high_usd": 93.13136600000001
+    },
+    "codex_missingness": "All 441 unpriced receipts have usage but no recorded model; 147 per profile. Neither their model nor their purpose is established.",
+    "main_hypothesis": "Assume each unknown-model receipt uses the requested model for its profile. This is an imputation, not a recovered measurement.",
+    "sensitivity": "Price the same unknown-model usage once as gpt-6.1-sol and once as gpt-6-astra. The endpoints are scenarios, not confidence intervals or bounds on actual cost.",
+    "base_unpriced": {
+      "receipts": 8,
+      "by_profile": {
+        "gpt-6-astra-medium": 5,
+        "gpt-6.1-sol-high": 1,
+        "gpt-6.1-sol-xhigh": 2
+      },
+      "model_known": true,
+      "usage_known": false,
+      "purposes": {
+        "native-control": 7,
+        "refine": 1
+      },
+      "missing_cost_usd": null,
+      "note": "Usage fields are null. An amount cannot be estimated from captured usage; unknown is not zero."
+    },
+    "full_family_cost_complete": null,
+    "excluded_from_selected_subtotals": "Provider-invalid attempts, parent interruptions and replica2; no all-campaign-spend claim.",
+    "pricing_metadata": "../python-realworld-30/native/pricing-metadata.json",
+    "pricing_recorded_on": "2026-10-03",
+    "rates_usd_per_million_tokens": {
+      "gpt-6.1-sol": {
+        "input": 2.0,
+        "cache_read": 0.1,
+        "cache_write": 2.5,
+        "output": 10.0
+      },
+      "gpt-6-astra": {
+        "input": 10.0,
+        "cache_read": 1.0,
+        "cache_write": 12.5,
+        "output": 50.0
+      }
+    },
+    "hypothetical_pricing_formula": "((input_total - cache_read - cache_write) * input_rate + cache_read * cache_read_rate + cache_write * cache_write_rate + output * output_rate) / 1e6 per receipt, at standard tier 1. Reasoning output is already in output; it is not added again.",
+    "hypothetical_pricing_conditions": {
+      "service_tier": "Assumed standard, multiplier 1; not an invoice claim.",
+      "cache_write_tokens": 0,
+      "long_context": "No unknown-model receipt exceeds the 272000-input-token threshold; no long-context modifier applies.",
+      "unknown_model_token_aggregates": [
+        {
+          "profile": "gpt-6-astra-medium",
+          "receipts": 147,
+          "input_total": 4420330,
+          "cache_read": 4341760,
+          "cache_write": 0,
+          "output": 412636,
+          "max_input_total": 57105
+        },
+        {
+          "profile": "gpt-6.1-sol-high",
+          "receipts": 147,
+          "input_total": 5260114,
+          "cache_read": 5140736,
+          "cache_write": 0,
+          "output": 489299,
+          "max_input_total": 94690
+        },
+        {
+          "profile": "gpt-6.1-sol-xhigh",
+          "receipts": 147,
+          "input_total": 6604640,
+          "cache_read": 6455040,
+          "cache_write": 0,
+          "output": 572432,
+          "max_input_total": 141591
+        }
+      ]
+    }
+  },
+  "physical_attempts": {
+    "admitted": 380,
+    "provider_invalid": 76,
+    "provider_invalid_by_harness": {
+      "base-context": 72,
+      "codex": 4
+    },
+    "parent_interrupted": 4,
+    "parent_interrupted_by_harness": {
+      "base-context": 2,
+      "codex": 2
+    },
+    "selected": 300,
+    "full_artifact_passes": 294
+  },
+  "observed_selected_builds": {
+    "base-context": {
+      "31d7827b0ab8a57e9c09e6b6f66661793c1e550a": 24,
+      "694414adbd29908d753c1d90fc7bb82cdc674456": 126
+    },
+    "codex": {
+      "0.160.0": 150
+    }
+  },
+  "build_continuation": "A frame decode/close ordering defect triggered a stop. At user direction, completed valid results were retained and only unfinished cells continued on the corrected build. No recorded result is established to have been affected; old-build immunity is not proven.",
+  "methods": {
+    "selection": "First provider-clean physical attempt per R1 task/profile/product cell. No clean-quality rerolls; failures and native timeouts retained. Observed provider/transport errors invalidate an entire attempt even after recovery.",
+    "capacity": {
+      "global": 8,
+      "per_product": 4,
+      "scheduling": "Rolling paired admission with alternating product leader; no batch completion barrier."
+    },
+    "resource_limits": {
+      "cpu": 2,
+      "memory_gib": 8
+    },
+    "requestTokenBudget": "omitted; no budgeted request-view selection result",
+    "parity": "Shared task/profile configuration, task information, judges, stage treatment and deadlines. No architecture, tool, auxiliary-model, delegation or native-lifecycle parity claim.",
+    "delegation": "Optional and unscored; Base maximum two children and depth one. Native depth and idle/barrier semantics differ.",
+    "scheduled_workflows": [
+      {
+        "suite": "stress5",
+        "stage_count": 6,
+        "compact_after_stages": [
+          2,
+          4
+        ],
+        "cold_resume_after_stages": [
+          4
+        ],
+        "timeout_seconds": 2700,
+        "tasks": 5
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 14,
+        "compact_after_stages": [
+          4,
+          8,
+          11
+        ],
+        "cold_resume_after_stages": [
+          8
+        ],
+        "timeout_seconds": 2700,
+        "tasks": 1
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 12,
+        "compact_after_stages": [
+          3,
+          6,
+          9
+        ],
+        "cold_resume_after_stages": [
+          6
+        ],
+        "timeout_seconds": 2700,
+        "tasks": 1
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 20,
+        "compact_after_stages": [
+          4,
+          8,
+          12,
+          16
+        ],
+        "cold_resume_after_stages": [
+          12
+        ],
+        "timeout_seconds": 5400,
+        "tasks": 1
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 14,
+        "compact_after_stages": [
+          4,
+          8,
+          12
+        ],
+        "cold_resume_after_stages": [
+          8
+        ],
+        "timeout_seconds": 2700,
+        "tasks": 6
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 16,
+        "compact_after_stages": [
+          4,
+          8,
+          12
+        ],
+        "cold_resume_after_stages": [
+          8
+        ],
+        "timeout_seconds": 2700,
+        "tasks": 35
+      },
+      {
+        "suite": "adaptive",
+        "stage_count": 22,
+        "compact_after_stages": [
+          4,
+          8,
+          12,
+          16
+        ],
+        "cold_resume_after_stages": [
+          12
+        ],
+        "timeout_seconds": 5400,
+        "tasks": 1
+      }
+    ],
+    "schedule_limits": "Scheduled compaction/cold reopen is not proof that every timed-out run reached every stage, or that a specific recovery mechanism caused the result.",
+    "deadlines": "Per task: 48 at 2700 seconds; F06 and I09 at 5400 seconds. No reset for compaction or cold reopen."
+  },
+  "replica2": "User stopped after R1 complete; archival only, never primary or best2 headline",
+  "reproducibility": {
+    "public_assets": "Aggregate summary, method description and deterministic SVG renderer. Existing Context Stress 5 inputs/judges are public.",
+    "not_supplied": "The 45 adaptive task corpora, full frozen configs, native raw records and controller artifacts are not included in this publication. This is not a complete public rerun package.",
+    "aggregate_source_reports": [
+      "matched-summary-collection175.json",
+      "matched-completion-summary-collection175.json"
+    ],
+    "source_report_scope": "Private campaign reports contain other scopes too; this summary includes R1 only. Raw per-record cost metadata was read for the eight Base missing-usage receipts.",
+    "limitations": "Curated near-ceiling sample, one selected replicate, mixed Base builds and unmatched native/auxiliary behavior. No significance test, causal attribution, general superiority, invoice or complete-cost claim."
+  }
+}

@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="840" viewBox="0 0 1200 840" role="img" aria-labelledby="title desc">
+<title id="title">Mean attempt time, including failures and timeouts</title>
+<desc id="desc">All 50 selected R1 attempts per group. Base Context versus Codex, in minutes: Astra medium 8.47 vs 11.62; Sol high 10.11 vs 16.12; Sol xhigh 15.13 vs 24.69. A separate completed, both-full-pass subset has 128 faster Base pairs and 13 faster Codex pairs out of 141.</desc>
+<defs><pattern id="hypothesis" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#e6eaff"/><path d="M-2 2L2-2M0 8L8 0M6 10L10 6" stroke="#5062cf" stroke-width="1.5"/></pattern></defs>
+<g font-family="Arial, Helvetica, sans-serif">
+<rect x="0.00" y="0.00" width="1200.00" height="840.00" rx="0" fill="#f5f8fb" stroke="none"/>
+<rect x="0.00" y="0.00" width="1200.00" height="7.00" rx="0" fill="#087e75" stroke="none"/>
+<text x="44" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">CURATED 50 / REPLICA 1</text>
+<text x="375" y="45" font-size="15" fill="#087e75" font-weight="700" text-anchor="start">02 / TIME</text>
+<text x="44" y="95" font-size="36" fill="#14263c" font-weight="700" text-anchor="start">Mean attempt time</text>
+<text x="44" y="130" font-size="18" fill="#526278" font-weight="400" text-anchor="start">All 50 selected attempts per group · Failures + deadline-limited timeouts included · Lower is better</text>
+<rect x="44.00" y="156.00" width="13.00" height="13.00" rx="3" fill="#087e75" stroke="none"/>
+<text x="67" y="169" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base Context</text>
+<rect x="246.00" y="156.00" width="13.00" height="13.00" rx="3" fill="#5062cf" stroke="none"/>
+<text x="269" y="169" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Codex</text>
+<path d="M294.00 207.00L294.00 643.00" stroke="#dbe3eb"/>
+<text x="294.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">0</text>
+<path d="M417.00 207.00L417.00 643.00" stroke="#dbe3eb"/>
+<text x="417.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">5</text>
+<path d="M540.00 207.00L540.00 643.00" stroke="#dbe3eb"/>
+<text x="540.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">10</text>
+<path d="M663.00 207.00L663.00 643.00" stroke="#dbe3eb"/>
+<text x="663.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">15</text>
+<path d="M786.00 207.00L786.00 643.00" stroke="#dbe3eb"/>
+<text x="786.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">20</text>
+<path d="M909.00 207.00L909.00 643.00" stroke="#dbe3eb"/>
+<text x="909.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">25</text>
+<path d="M1032.00 207.00L1032.00 643.00" stroke="#dbe3eb"/>
+<text x="1032.0" y="673" font-size="17" fill="#526278" font-weight="400" text-anchor="middle">30</text>
+<text x="44" y="250" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Astra · medium</text>
+<text x="44" y="283" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base mean 27.1% lower</text>
+<rect x="294.00" y="230.00" width="208.46" height="30.00" rx="5" fill="#087e75" stroke="none"/>
+<text x="514.455423581704" y="252" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">8.47 min</text>
+<rect x="294.00" y="278.00" width="285.84" height="30.00" rx="5" fill="#5062cf" stroke="none"/>
+<text x="591.8426557525493" y="300" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">11.62 min</text>
+<text x="44" y="396" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · high</text>
+<text x="44" y="429" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base mean 37.3% lower</text>
+<rect x="294.00" y="376.00" width="248.62" height="30.00" rx="5" fill="#087e75" stroke="none"/>
+<text x="554.6226787818634" y="398" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">10.11 min</text>
+<rect x="294.00" y="424.00" width="396.62" height="30.00" rx="5" fill="#5062cf" stroke="none"/>
+<text x="702.6187318607188" y="446" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">16.12 min</text>
+<text x="44" y="542" font-size="23" fill="#14263c" font-weight="700" text-anchor="start">Sol 6.1 · xhigh</text>
+<text x="44" y="575" font-size="17" fill="#087e75" font-weight="700" text-anchor="start">Base mean 38.7% lower</text>
+<rect x="294.00" y="522.00" width="372.31" height="30.00" rx="5" fill="#087e75" stroke="none"/>
+<text x="678.3060487003142" y="544" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">15.13 min</text>
+<rect x="294.00" y="570.00" width="607.32" height="30.00" rx="5" fill="#5062cf" stroke="none"/>
+<text x="913.3233357609403" y="592" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">24.69 min</text>
+<text x="1032" y="702" font-size="17" fill="#526278" font-weight="400" text-anchor="end">Minutes · zero-based scale</text>
+<rect x="44.00" y="722.00" width="1112.00" height="83.00" rx="12" fill="white" stroke="#dbe3eb"/>
+<text x="64" y="752" font-size="20" fill="#14263c" font-weight="700" text-anchor="start">Separate subset: 141 pairs both fully passed AND completed natively.</text>
+<text x="64" y="782" font-size="17" fill="#526278" font-weight="400" text-anchor="start">Base faster in 128; Codex in 13. Three passing Codex timeouts excluded here, not from the means above.</text>
+</g>
+</svg>

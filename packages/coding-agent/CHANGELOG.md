@@ -25,6 +25,9 @@
 - Marked withdrawn historical benchmark comparisons as archival-only without changing their numbers or charts.
 - Clarified that job-watch parking requires registered watch IDs; waiting for child replies alone does not require parking.
 - Clarified that explicit child model selections require a provider/model selector, including the current model.
+- Added 1.1.2 review-follow-up notes covering implemented changes, qualification scope, benchmark limits, and remaining maintenance debt.
+- Added first-replica benchmark charts, quality and completion results, and separately labeled measured-usage and missing-model cost estimates.
+- Added explicit stable npm publication approval to the manual GitHub release workflow while keeping the existing publisher.
 
 ## [1.1.1] - 2026-10-05
 

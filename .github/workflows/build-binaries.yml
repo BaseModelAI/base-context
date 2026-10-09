@@ -18,6 +18,11 @@ on:
         required: true
         type: boolean
         default: false
+      publish_npm:
+        description: 'Also publish the four stable @ponythewhite packages to npm (requires publish and NPM_TOKEN)'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: release-base-context
@@ -141,6 +146,23 @@ jobs:
 
       - name: Build
         run: npm run build:source
+
+      - name: Pack npm release
+        if: env.PUBLISH_PRODUCTION == 'true'
+        run: |
+          mkdir -p npm-artifacts
+          npm pack ./packages/ai --pack-destination "$PWD/npm-artifacts"
+          npm pack ./packages/tui --pack-destination "$PWD/npm-artifacts"
+          npm pack ./packages/agent --pack-destination "$PWD/npm-artifacts"
+          npm pack ./packages/coding-agent --pack-destination "$PWD/npm-artifacts"
+
+      - name: Upload npm artifacts
+        if: env.PUBLISH_PRODUCTION == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: base-context-npm
+          path: npm-artifacts/*.tgz
+          if-no-files-found: error
 
       - name: Pack production release
         if: env.PUBLISH_PRODUCTION == 'true'
@@ -291,7 +313,12 @@ jobs:
       - name: Extract production release notes
         if: env.PUBLISH_PRODUCTION == 'true'
         run: |
-          awk "/^## \[${PRODUCTION_VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > /tmp/release-notes.md
+          notes="packages/coding-agent/docs/release-notes-${PRODUCTION_VERSION}.md"
+          if [ -f "$notes" ]; then
+            cp "$notes" /tmp/release-notes.md
+          else
+            awk "/^## \[${PRODUCTION_VERSION}\]/{flag=1; next} /^## \[/{flag=0} flag" packages/coding-agent/CHANGELOG.md > /tmp/release-notes.md
+          fi
           if [ ! -s /tmp/release-notes.md ]; then
             echo "Release v${PRODUCTION_VERSION}" > /tmp/release-notes.md
           fi
@@ -454,3 +481,35 @@ jobs:
 
           gh release upload beta "$BETA_DIR"/* --clobber
           echo "Beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.sh"
+
+  publish-npm:
+    if: ${{ inputs.publish && inputs.publish_npm && inputs.channel == 'stable' }}
+    runs-on: ubuntu-latest
+    needs: [release-context, build, publish]
+    permissions:
+      contents: read
+    env:
+      PRODUCTION_VERSION: ${{ needs.release-context.outputs.production_version }}
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download npm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: base-context-npm
+          path: npm-artifacts
+
+      - name: Publish stable packages in dependency order
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN"
+          test "$(npm whoami)" = ponythewhite
+          npm publish "npm-artifacts/ponythewhite-base-context-ai-${PRODUCTION_VERSION}.tgz" --access public
+          npm publish "npm-artifacts/ponythewhite-base-context-tui-${PRODUCTION_VERSION}.tgz" --access public
+          npm publish "npm-artifacts/ponythewhite-base-context-agent-${PRODUCTION_VERSION}.tgz" --access public
+          npm publish "npm-artifacts/ponythewhite-base-context-${PRODUCTION_VERSION}.tgz" --access public
