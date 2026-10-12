@@ -1,3 +1,0 @@
-- Added explicit consumption of pending job-watch reports and batched watcher notifications without starting model turns for routine progress.
-- Fixed compaction after fresh recovery results by retaining those results unchanged after the accepted history boundary.
-- Fixed stale IPython completion notices for execution results that were already collected.
