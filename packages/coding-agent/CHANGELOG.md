@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.5] - 2026-10-12
+
+- Fixed compaction failures when a child agent report arrives while a summary is being generated.
+
 ## [1.1.4] - 2026-10-12
 
 - Changed default compaction and branch-summary prompts to place instructions before conversation context.
