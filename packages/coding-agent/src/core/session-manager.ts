@@ -149,7 +149,8 @@ function isCompactionBookkeeping(entry: SessionEntry): boolean {
 	return (
 		COMPACTION_BOOKKEEPING_ENTRY_TYPES.has(entry.type) ||
 		(entry.type === "custom_message" && entry.customType === COMPACTION_OUTCOME_CUSTOM_TYPE) ||
-		(entry.type === "custom" && entry.customType === "job_watch_state")
+		(entry.type === "custom" &&
+			(entry.customType === "job_watch_state" || entry.customType === AGENT_RESULT_CUSTOM_TYPE))
 	);
 }
 

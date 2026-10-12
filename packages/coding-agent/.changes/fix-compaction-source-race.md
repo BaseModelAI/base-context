@@ -1,0 +1,1 @@
+- Fixed compaction failures when a child agent report arrives while a summary is being generated.

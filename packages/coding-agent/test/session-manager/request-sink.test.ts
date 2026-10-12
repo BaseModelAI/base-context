@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@ponythewhite/base-context-ai";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { AGENT_MESSAGE_CUSTOM_TYPE } from "../../src/core/agent-messages.js";
+import { AGENT_RESULT_CUSTOM_TYPE, stageAgentResult } from "../../src/core/agent-results.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { COMPACTION_OUTCOME_CUSTOM_TYPE } from "../../src/core/messages.js";
 import type { BoundRequestSink, NativeRequestEvent } from "../../src/core/request-events.js";
@@ -186,6 +188,12 @@ it.each(["resident", "indexed"] as const)(
 		await manager.appendSessionState({ status: "active" });
 		await manager.appendAgentStatus({ summary: "Waiting for child work", basedOnMessageCount: 2 });
 		await manager.appendGitState({ branch: "work" });
+		const report = { messageId: "child-result", summary: "Child work finished", findings: "Full child findings" };
+		const reportId =
+			storage === "indexed"
+				? (await stageAgentResult(manager, report)).ref
+				: await manager.appendCustomEntry(AGENT_RESULT_CUSTOM_TYPE, report);
+		expect(sink.isCurrent()).toBe(true);
 		await sink.persist(settled(request));
 		const attribution = manager.appendChildUsageAttributionWithAggregate(assistantId, {
 			...emptyUsage(),
@@ -211,9 +219,16 @@ it.each(["resident", "indexed"] as const)(
 			"session_state",
 			"agent_status",
 			"git_state",
+			"custom",
 			"child_usage_attributed",
 			"compaction",
 		]);
+		expect(await manager.readEntry(reportId)).toMatchObject({
+			type: "custom",
+			customType: AGENT_RESULT_CUSTOM_TYPE,
+			data: report,
+		});
+		expect((await manager.readBranch()).map((entry) => entry.id)).toContain(reportId);
 		const restoredAssistant = await manager.readEntry(assistantId);
 		expect(restoredAssistant).toMatchObject({
 			type: "message",
@@ -247,6 +262,7 @@ it.each(["resident", "indexed"] as const)(
 		const changes = [
 			() => manager.appendMessage({ role: "user" as const, content: "New input", timestamp: 3 }),
 			() => manager.appendCustomMessageEntry("context", "New context", false),
+			() => manager.appendCustomMessageEntry(AGENT_MESSAGE_CUSTOM_TYPE, "Child result capsule", true),
 			() => manager.appendCustomEntry("goal", { active: true }),
 			async () => {
 				const leaf = manager.getLeafId();
