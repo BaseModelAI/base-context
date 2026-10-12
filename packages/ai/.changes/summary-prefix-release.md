@@ -1,2 +1,0 @@
-- Fixed recovery after Codex WebSocket connections closed before a response completed.
-- Fixed cached Codex continuation when transport was left at its default.

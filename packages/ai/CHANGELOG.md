@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.4] - 2026-10-12
+
+- Fixed recovery after Codex WebSocket connections closed before a response completed.
+- Fixed cached Codex continuation when transport was left at its default.
+
 ## [1.1.2] - 2026-10-06
 
 - Moved cache-retention tests to local mocked transports and separated credential-dependent integration tests from the required offline suite.
