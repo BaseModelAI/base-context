@@ -226,7 +226,7 @@ export async function rebuildCopiedContextEpoch(
 		copied.retained || origin.retention === "retained-import" || hydrated.source.retention === "retained-import";
 	const inherited =
 		checkpoint.version === 5 && lowered ? { ...checkpoint, pendingRequestContract: undefined } : checkpoint;
-	const { replayContract, publicWindow: _publicWindow, continuation, ...unchanged } = inherited;
+	const { replayContract, publicWindow: _publicWindow, continuation, recoveryReplayThrough, ...unchanged } = inherited;
 	const rebuiltContinuation = continuation
 		? {
 				kind: continuation.kind,
@@ -237,6 +237,7 @@ export async function rebuildCopiedContextEpoch(
 		{
 			...unchanged,
 			source: view.source,
+			...(recoveryReplayThrough ? { recoveryReplayThrough: (await prefix(recoveryReplayThrough)).source } : {}),
 			views,
 			...(selectedSkills?.length ? { selectedSkills } : {}),
 			taskFrame,

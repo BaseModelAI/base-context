@@ -19,6 +19,8 @@ export const CONTEXT_SKILL_EPOCH_RENDERER = "native-canonical-epoch/7";
 export const CONTEXT_TOOL_SUMMARY_RENDERER = "native-canonical-epoch/8";
 /** Ordinary summary retaining an accepted context mode, with no tool continuation recipes. */
 export const CONTEXT_MODE_SUMMARY_RENDERER = "native-canonical-epoch/10";
+/** Summary retains a replay frontier older than its captured literal tail. */
+export const CONTEXT_RECOVERY_SUMMARY_RENDERER = "native-canonical-epoch/11";
 /** Public recipes may record absent admission, never a fabricated execution outcome. */
 export const CONTEXT_INTERRUPTED_TOOL_RENDERER = "native-canonical-epoch/9";
 
@@ -86,11 +88,14 @@ interface ContextEpochFields {
 		| typeof CONTEXT_SKILL_EPOCH_RENDERER
 		| typeof CONTEXT_TOOL_SUMMARY_RENDERER
 		| typeof CONTEXT_MODE_SUMMARY_RENDERER
+		| typeof CONTEXT_RECOVERY_SUMMARY_RENDERER
 		| typeof CONTEXT_INTERRUPTED_TOOL_RENDERER;
 	readonly source: SourceSnapshotRef;
 	readonly includeSummary?: true;
 	/** Granted by an actual accepted adapter projection, never a caller profile name. */
 	readonly replayContract?: ContextReplayContract;
+	/** Summary coverage stops here; later recovery remains an unaccepted literal suffix. */
+	readonly recoveryReplayThrough?: SourceSnapshotRef;
 	/** Actual adapter permission to leave completed native groups for a fresh public window. */
 	readonly publicWindow?: true;
 	/** Frozen public transition. Later native messages are not silently converted. */
@@ -238,7 +243,9 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 			(value.version === 5 && value.renderer === CONTEXT_POLICY_EPOCH_RENDERER) ||
 			(value.version === 6 && value.renderer === CONTEXT_TOOL_EPOCH_RENDERER) ||
 			(value.version === 8 &&
-				[CONTEXT_TOOL_SUMMARY_RENDERER, CONTEXT_MODE_SUMMARY_RENDERER].includes(value.renderer as string)) ||
+				[CONTEXT_TOOL_SUMMARY_RENDERER, CONTEXT_MODE_SUMMARY_RENDERER, CONTEXT_RECOVERY_SUMMARY_RENDERER].includes(
+					value.renderer as string,
+				)) ||
 			([6, 8].includes(value.version as number) && value.renderer === CONTEXT_INTERRUPTED_TOOL_RENDERER) ||
 			([4, 5, 6].includes(value.version as number) && value.renderer === CONTEXT_SKILL_EPOCH_RENDERER)
 		) ||
@@ -298,6 +305,9 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 		("replayContract" in value &&
 			value.replayContract !== "complete-context" &&
 			value.replayContract !== "message-groups") ||
+		(value.renderer === CONTEXT_RECOVERY_SUMMARY_RENDERER) !== "recoveryReplayThrough" in value ||
+		("recoveryReplayThrough" in value &&
+			(!value.recoveryReplayThrough || typeof value.recoveryReplayThrough !== "object")) ||
 		("resourceRevision" in value &&
 			(typeof value.resourceRevision !== "string" ||
 				Buffer.byteLength(value.resourceRevision, "utf8") > MAX_RESOURCE_REVISION_BYTES)) ||
@@ -310,7 +320,10 @@ export function readContextEpoch(details: unknown, maxBytes: number): ContextEpo
 				value.publicWindow !== true)) ||
 		("toolContinuations" in value && value.version !== 6 && value.version !== 8) ||
 		(value.renderer === CONTEXT_MODE_SUMMARY_RENDERER && "toolContinuations" in value) ||
-		((value.version === 6 || (value.version === 8 && value.renderer !== CONTEXT_MODE_SUMMARY_RENDERER)) &&
+		((value.version === 6 ||
+			(value.version === 8 &&
+				value.renderer !== CONTEXT_MODE_SUMMARY_RENDERER &&
+				value.renderer !== CONTEXT_RECOVERY_SUMMARY_RENDERER)) &&
 			(!("toolContinuations" in value) ||
 				!Array.isArray(value.toolContinuations) ||
 				!value.toolContinuations.length ||

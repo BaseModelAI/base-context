@@ -3,6 +3,7 @@ import { stringifyBoundedJson } from "./bounded-json.js";
 import type { CachedContextEntry } from "./canonical-context-source.js";
 import {
 	CONTEXT_INTERRUPTED_TOOL_RENDERER,
+	CONTEXT_RECOVERY_SUMMARY_RENDERER,
 	type ContextEpochCheckpoint,
 	type ContextMode,
 	type EpochViewReference,
@@ -116,7 +117,8 @@ export async function collectToolContinuations(
 		for (const call of candidate.prior.calls) {
 			if (call.admission === "absent") {
 				if (
-					checkpoint?.renderer !== CONTEXT_INTERRUPTED_TOOL_RENDERER ||
+					(checkpoint?.renderer !== CONTEXT_INTERRUPTED_TOOL_RENDERER &&
+						checkpoint?.renderer !== CONTEXT_RECOVERY_SUMMARY_RENDERER) ||
 					!call.source ||
 					call.source.sourceSequence < candidate.reference.ref.sequence ||
 					call.intent !== undefined ||

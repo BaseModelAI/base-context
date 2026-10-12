@@ -45,6 +45,16 @@ async def status(id: str | None = None) -> dict[str, Any]:
     return await host_request("job_watch.status", {} if id is None else {"id": id})
 
 
+async def consume(id: str | None = None) -> dict[str, Any]:
+    """Transfer retained notification bodies and IDs to this Python caller.
+
+    Retain or inspect the returned evidence. This is not a model-delivery ACK.
+    Selected/in-flight notifications stay pending and appear in deferred_event_ids.
+    Unregistered watches remain consumable while they retain evidence.
+    """
+    return await host_request("job_watch.consume", {} if id is None else {"id": id})
+
+
 async def park(ids: list[str]) -> dict[str, Any]:
     """Declare no further owned continuation until a selected event. Returns immediately.
 

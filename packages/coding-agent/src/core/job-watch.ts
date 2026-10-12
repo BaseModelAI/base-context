@@ -33,6 +33,7 @@ interface PendingWatchEvent {
 	text: string;
 	generation?: string;
 	routine?: boolean;
+	wake?: boolean;
 	superseded?: number;
 	admitted?: boolean;
 	uncertain?: boolean;
@@ -55,6 +56,7 @@ export interface WatchDeclaration {
 	notify: "terminal" | "changes";
 	fields: string[];
 	active: boolean;
+	unregistered?: boolean;
 	goal_id?: string;
 	latest: JobObservation;
 	compared?: string;
@@ -81,7 +83,8 @@ interface WatchHooks {
 	persist: (state: JobWatchSnapshot) => Promise<void>;
 	admit: (text: string, eventId: string) => boolean;
 	replaceQueued?: (eventId: string, text: string) => boolean;
-	revokeQueued?: (eventId: string) => void;
+	revokeQueued?: (eventId: string) => boolean;
+	deliveryPending?: (eventId: string) => boolean;
 	waitForDelivery?: boolean;
 	stateBudgetBytes?: number;
 	retain?: (text: string) => Promise<string | undefined>;
@@ -155,6 +158,9 @@ export class JobWatchController {
 			unavailable: this.unavailable,
 		});
 	}
+	private registeredWatches(): WatchDeclaration[] {
+		return [...this.watches.values()].filter((watch) => !watch.unregistered);
+	}
 	private stateBudget(): number {
 		return Math.min(MAX_STATE_BYTES, this.hooks.stateBudgetBytes ?? MAX_STATE_BYTES);
 	}
@@ -218,7 +224,7 @@ export class JobWatchController {
 					throw new Error("Watch belongs to a different goal; unregister it first");
 				return this.status(existing.id);
 			}
-			if (this.watches.size >= MAX_WATCHES)
+			if (this.registeredWatches().length >= MAX_WATCHES)
 				throw new Error("Unregister an old watch before registering more than 16 watches");
 			const source = input.completion_source;
 			if (source !== "handle" && source !== "probe")
@@ -279,7 +285,7 @@ export class JobWatchController {
 		});
 	}
 	status(id?: string): Record<string, unknown> {
-		const values = id === undefined ? [...this.watches.values()] : [this.require(id)];
+		const values = id === undefined ? this.registeredWatches() : [this.require(id)];
 		const statuses = values.map((w) => ({
 			id: w.id,
 			generation: w.generation,
@@ -296,7 +302,7 @@ export class JobWatchController {
 	}
 	private require(id: string): WatchDeclaration {
 		const watch = this.watches.get(id);
-		if (!watch) throw new Error(`Unknown watch ${id}`);
+		if (!watch || watch.unregistered) throw new Error(`Unknown watch ${id}`);
 		return watch;
 	}
 	async park(ids: string[]): Promise<Record<string, unknown>> {
@@ -307,7 +313,7 @@ export class JobWatchController {
 			if (!this.owned() || selected.some((w) => w.goal_id !== this.hooks.goalId()))
 				throw new Error("Watch owner changed");
 			// A completion racing registration/park is already actionable; do not wait forever.
-			if (selected.some((w) => !w.active || w.pending.length > 0))
+			if (selected.some((w) => !w.active || w.pending.some((event) => !event.routine)))
 				return { parked: false, reason: "event_available" };
 			this.parked = { ids: [...new Set(ids)], goal_id: this.hooks.goalId() };
 			await this.save();
@@ -325,18 +331,61 @@ export class JobWatchController {
 	async unregister(id: string): Promise<Record<string, unknown>> {
 		return this.serialize(async () => {
 			const watch = this.watches.get(id);
-			if (watch) {
+			if (watch && !watch.unregistered) {
 				this.hooks.cancelProbe(watch.id, watch.generation);
-				for (const event of watch.pending) {
-					if (event.routine && !event.reconcile) this.hooks.revokeQueued?.(event.id);
-				}
-				this.watches.delete(id);
-				if (!this.watches.size) this.unavailable = undefined;
+				watch.active = false;
+				watch.unregistered = true;
+				watch.pending = watch.pending.filter((event) => {
+					if (!event.routine || event.reconcile) return true;
+					if (this.deliveryPending(event.id) && !this.hooks.revokeQueued?.(event.id)) return true;
+					this.queued.delete(event.id);
+					return false;
+				});
+				this.pruneUnregistered(watch);
+				if (!this.registeredWatches().length) this.unavailable = undefined;
 				if (this.parked?.ids.includes(id)) this.parked = undefined;
 				await this.save();
 			}
 			this.schedule();
 			return { id, unregistered: true };
+		});
+	}
+	private deliveryPending(id: string): boolean {
+		return this.hooks.deliveryPending?.(id) ?? this.queued.has(id);
+	}
+	private pruneUnregistered(watch: WatchDeclaration): void {
+		if (watch.unregistered && watch.pending.length === 0) this.watches.delete(watch.id);
+	}
+	async consume(id?: string): Promise<{ events: Record<string, unknown>[]; deferred_event_ids: string[] }> {
+		return this.serialize(async () => {
+			if (!this.owned()) throw new Error("Watch owner changed");
+			const selected = [...this.watches.values()].filter((watch) => id === undefined || watch.id === id);
+			const snapshots = selected.flatMap((watch) =>
+				watch.pending.map((event) => ({
+					watch,
+					id: event.id,
+					text: event.text,
+					body: JSON.parse(this.deliveryText(event)) as Record<string, unknown>,
+				})),
+			);
+			const events: Record<string, unknown>[] = [];
+			const deferred: string[] = [];
+			for (const snapshot of snapshots) {
+				const index = snapshot.watch.pending.findIndex(
+					(event) => event.id === snapshot.id && event.text === snapshot.text,
+				);
+				if (index < 0) continue;
+				if (this.deliveryPending(snapshot.id) && !this.hooks.revokeQueued?.(snapshot.id)) {
+					deferred.push(snapshot.id);
+					continue;
+				}
+				events.push(snapshot.body);
+				snapshot.watch.pending.splice(index, 1);
+				this.queued.delete(snapshot.id);
+				this.pruneUnregistered(snapshot.watch);
+			}
+			await this.save();
+			return { events, deferred_event_ids: deferred };
 		});
 	}
 	private schedule(): void {
@@ -495,7 +544,10 @@ export class JobWatchController {
 			watch.last_problem = problem;
 			watch.last_attention = attention;
 			const emit = (eventReasons: string[], due?: number) => {
-				const routine = eventReasons.every((reason) => reason === "progress" || reason === "report");
+				const routine = eventReasons.every((reason) => reason === "progress");
+				const wake =
+					eventReasons.some((reason) => reason !== "progress" && reason !== "terminal") ||
+					(eventReasons.includes("terminal") && this.parked?.ids.includes(watch.id) === true);
 				const value = {
 					watch_id: watch.id,
 					goal_id: watch.goal_id,
@@ -518,6 +570,7 @@ export class JobWatchController {
 					if (!pending.admitted || this.hooks.replaceQueued?.(pending.id, replacement)) {
 						pending.text = replacement;
 						pending.routine = routine;
+						pending.wake = wake;
 						pending.superseded = superseded;
 						return;
 					}
@@ -528,6 +581,7 @@ export class JobWatchController {
 					text: bounded({ ...value, event_id: id }),
 					generation: watch.generation,
 					routine,
+					wake,
 				});
 			};
 			if (reasons.length) emit(reasons);
@@ -561,32 +615,38 @@ export class JobWatchController {
 			});
 		return this.flushing;
 	}
+	private deliveryText(event: PendingWatchEvent): string {
+		if (!event.reconcile) return event.text;
+		let original: Record<string, unknown> = {};
+		try {
+			original = JSON.parse(event.text);
+		} catch {
+			/* unavailable prior body */
+		}
+		return bounded({
+			...original,
+			event_id: `${event.id}:delivery-unknown`,
+			original_event_id: event.id,
+			original_state: original.state,
+			state: "unknown",
+			reasons: ["delivery_unknown"],
+			observation_error:
+				"Delivery before interrupted shutdown is uncertain; reconcile evidence before repeating actions",
+		});
+	}
 	private async flushPrepared(): Promise<void> {
 		if (!this.owned()) return;
 		let changed = false;
 		for (const watch of this.watches.values()) {
 			for (const event of [...watch.pending]) {
 				if (!this.owned()) return;
-				if ((!event.admitted && watch.goal_id !== this.hooks.goalId()) || this.queued.has(event.id)) continue;
-				let deliveryText = event.text;
-				if (event.reconcile) {
-					let original: Record<string, unknown> = {};
-					try {
-						original = JSON.parse(event.text);
-					} catch {
-						/* unavailable prior body */
-					}
-					deliveryText = bounded({
-						...original,
-						event_id: `${event.id}:delivery-unknown`,
-						original_event_id: event.id,
-						original_state: original.state,
-						state: "unknown",
-						reasons: ["delivery_unknown"],
-						observation_error:
-							"Delivery before interrupted shutdown is uncertain; reconcile evidence before repeating actions",
-					});
-				}
+				if (
+					event.wake === false ||
+					(!event.admitted && watch.goal_id !== this.hooks.goalId()) ||
+					this.queued.has(event.id)
+				)
+					continue;
+				const deliveryText = this.deliveryText(event);
 				if (this.hooks.waitForDelivery) {
 					event.uncertain = true;
 					await this.save();
@@ -603,6 +663,7 @@ export class JobWatchController {
 				} else {
 					watch.last_admitted = event.id;
 					watch.pending.splice(watch.pending.indexOf(event), 1);
+					this.pruneUnregistered(watch);
 				}
 				changed = true;
 				if (watch.goal_id === this.hooks.goalId() && this.parked?.ids.includes(watch.id)) this.parked = undefined;
@@ -622,6 +683,7 @@ export class JobWatchController {
 				if (index >= 0) {
 					watch.pending.splice(index, 1);
 					watch.last_admitted = id;
+					this.pruneUnregistered(watch);
 				}
 			}
 			await this.save();
@@ -654,7 +716,7 @@ export class JobWatchController {
 			value.session_id !== this.hooks.sessionId ||
 			value.session_file !== this.hooks.sessionFile ||
 			!Array.isArray(value.watches) ||
-			value.watches.length > MAX_WATCHES
+			value.watches.filter((watch) => !record(watch) || !watch.unregistered).length > MAX_WATCHES
 		)
 			return;
 		this.unavailable = typeof value.unavailable === "string" ? value.unavailable : undefined;
@@ -688,6 +750,7 @@ export class JobWatchController {
 				if (event.uncertain) {
 					event.reconcile = true;
 					event.admitted = true;
+					event.wake = true;
 				}
 			}
 			this.watches.set(item.id, restored);

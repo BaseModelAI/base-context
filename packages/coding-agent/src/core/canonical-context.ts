@@ -14,6 +14,7 @@ import {
 	CONTEXT_INTERRUPTED_TOOL_RENDERER,
 	CONTEXT_MODE_SUMMARY_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
+	CONTEXT_RECOVERY_SUMMARY_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
 	CONTEXT_TOOL_SUMMARY_RENDERER,
@@ -476,15 +477,16 @@ export function canonicalRecoveryBoundary(
 	if (!recoveries.length) return;
 	const checkpoint = context.checkpoint;
 	const inherited = checkpoint?.includeSummary === true && checkpoint.replayContract === "message-groups";
+	const replayThrough = checkpoint?.recoveryReplayThrough ?? checkpoint?.source;
 	if (
 		checkpoint?.replayContract !== "message-groups" ||
 		recoveries.some(
 			(reference) =>
 				!reference ||
-				(checkpoint.representation
-					? reference.ref.sequence > checkpoint.source.sourceSequence
-					: !inherited ||
-						!context.inheritedRecoveryCoverage?.some((covered) => sameRecoveryReference(reference, covered))),
+				(reference.ref.sequence <= replayThrough!.sourceSequence &&
+					!checkpoint.representation &&
+					(!inherited ||
+						!context.inheritedRecoveryCoverage?.some((covered) => sameRecoveryReference(reference, covered)))),
 		)
 	)
 		throw new MissingRecoveryReplayContractError();
@@ -514,6 +516,13 @@ export function prepareRecoveryCompaction(
 	)
 		return;
 	if (!context) throw new Error("Recovery compaction requires captured canonical views");
+	// New recovery stays in the literal suffix; a summary must not grant it accepted coverage.
+	const recoveryReplayThrough =
+		!authorization &&
+		context.checkpoint?.replayContract === "message-groups" &&
+		(boundary || context.checkpoint.recoveryReplayThrough)
+			? (context.checkpoint.recoveryReplayThrough ?? context.checkpoint.source)
+			: undefined;
 	const selection = getCanonicalViewSelectionSource(messages)!;
 	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
 	const lastProved = boundary
@@ -557,18 +566,21 @@ export function prepareRecoveryCompaction(
 	return snapshotContextEpoch(
 		{
 			...(toolGroups.size || preserveMode ? { version: 8 as const, mode: context.mode } : { version: 4 as const }),
-			renderer: context.toolContinuations?.some((group) => group.calls.some((call) => call.admission === "absent"))
-				? CONTEXT_INTERRUPTED_TOOL_RENDERER
-				: toolGroups.size
-					? CONTEXT_TOOL_SUMMARY_RENDERER
-					: preserveMode
-						? CONTEXT_MODE_SUMMARY_RENDERER
-						: context.selectedSkills?.length
-							? CONTEXT_SKILL_EPOCH_RENDERER
-							: CONTEXT_EPOCH_RENDERER,
+			renderer: recoveryReplayThrough
+				? CONTEXT_RECOVERY_SUMMARY_RENDERER
+				: context.toolContinuations?.some((group) => group.calls.some((call) => call.admission === "absent"))
+					? CONTEXT_INTERRUPTED_TOOL_RENDERER
+					: toolGroups.size
+						? CONTEXT_TOOL_SUMMARY_RENDERER
+						: preserveMode
+							? CONTEXT_MODE_SUMMARY_RENDERER
+							: context.selectedSkills?.length
+								? CONTEXT_SKILL_EPOCH_RENDERER
+								: CONTEXT_EPOCH_RENDERER,
 			...(toolGroups.size ? { toolContinuations: context.toolContinuations } : {}),
 			...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 			source: context.source,
+			...(recoveryReplayThrough ? { recoveryReplayThrough } : {}),
 			representation: null,
 			includeSummary: true,
 			...(toolGroups.size && publicWindow ? { publicWindow: true as const } : {}),
@@ -578,7 +590,7 @@ export function prepareRecoveryCompaction(
 				? {
 						continuation: {
 							kind: "harness-summary" as const,
-							publicTailThrough: context.source,
+							publicTailThrough: recoveryReplayThrough ?? context.source,
 						},
 					}
 				: {}),
@@ -608,7 +620,7 @@ async function readInheritedRecoveryCoverage(
 		checkpoint.replayContract === "message-groups" &&
 		closedUnits.some((unit) => unit.kind === "recovery")
 	) {
-		const prefix = await view.atSnapshot!(checkpoint.source);
+		const prefix = await view.atSnapshot!(checkpoint.recoveryReplayThrough ?? checkpoint.source);
 		const suffix = new Map<string, ContextRef>();
 		const frozenViews = new Map<string, EpochViewReference>();
 		let capturedMessages = 0;
@@ -650,6 +662,7 @@ async function readInheritedRecoveryCoverage(
 		for (const [index, message] of closedMessages.entries()) {
 			if (closedUnits[index].kind !== "recovery") continue;
 			const reference = epochReferences.get(message)!;
+			if (reference.ref.sequence > prefix.source.sourceSequence) continue;
 			if (checkpoint.views.some((covered) => sameRecoveryReference(reference, covered))) {
 				inheritedRecoveryCoverage.push(reference);
 				continue;

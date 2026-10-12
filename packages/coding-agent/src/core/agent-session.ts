@@ -768,6 +768,7 @@ function turnExecutionPoliciesEqual(left: TurnExecutionPolicy, right: TurnExecut
 }
 
 interface PreparedTurnPayload extends RecoverableTurnPayload {
+	isIpythonCompletionRequired?: () => boolean;
 	prepared?: PreparedPromptPreparation;
 	captureRunMessages?: Set<AgentMessage>;
 	cancelledDispatchEnded?: boolean;
@@ -849,6 +850,12 @@ function isFamilyAgentMessageAction(action: QueuedSessionAction): action is Sess
 	if (action.payload.kind !== "turn") return false;
 	const message = primaryDeliveryRecord(action).message;
 	return isAgentSessionMessage(message) && message.details.fromRelationship !== undefined;
+}
+
+function isJobWatchAction(action: QueuedSessionAction): action is SessionAction<PreparedTurnPayload> {
+	if (action.source !== "internal" || action.payload.kind !== "turn") return false;
+	const message = primaryDeliveryRecord(action).message;
+	return message.role === "custom" && message.customType === "job_watch_event";
 }
 
 function queuedAgentMessagePreview(action: QueuedSessionAction): string {
@@ -3040,7 +3047,11 @@ export class AgentSession {
 	}
 
 	private _shouldStopBeforeTurn(): boolean {
-		return this._steeringStopPending;
+		this._discardCollectedIpythonCompletions();
+		if (this._steeringStopPending) return true;
+		if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) return false;
+		const first = this._actionStore.queuedActions()[0];
+		return first !== undefined && isJobWatchAction(first);
 	}
 
 	private _captureCompactionOwner(signal?: AbortSignal): CompactionOwner {
@@ -3198,7 +3209,7 @@ export class AgentSession {
 				return { kind: "cancelled" };
 			}
 			if (!current()) return { kind: "cancelled" };
-			return { kind: this._steeringStopPending ? "finish" : "proceed" };
+			return { kind: this._shouldStopBeforeTurn() ? "finish" : "proceed" };
 		} finally {
 			// Only an actual checkpoint decision replaces this preparing reference.
 			if (preparing && this._pendingCheckpoint === preparing) this._pendingCheckpoint = undefined;
@@ -7170,6 +7181,17 @@ export class AgentSession {
 		);
 	}
 
+	private _discardCollectedIpythonCompletions(): void {
+		const cancelled = this._cancelSessionActions(
+			(action) =>
+				action.lifecycle.state === "queued" &&
+				action.payload.kind === "turn" &&
+				action.payload.isIpythonCompletionRequired?.() === false,
+			new Error("IPython completion was already collected or its execution owner changed."),
+		);
+		if (cancelled.length > 0) this._emitQueueUpdate();
+	}
+
 	private _scheduleSessionInputPump(): void {
 		if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) return;
 		if (this._disposed || this._disposing || this._sessionInputPumpRequested || !this._hasSelectableSessionInput()) {
@@ -7214,6 +7236,7 @@ export class AgentSession {
 					this._notifySessionInputCheckpointChange();
 					return;
 				}
+				this._discardCollectedIpythonCompletions();
 				const first = preselected ?? this._actionStore.selectFirst();
 				if (!first) return;
 				if (first.payload.kind === "session_command") {
@@ -7223,11 +7246,12 @@ export class AgentSession {
 
 				const mode = first.delivery === "next_turn_boundary" ? this.steeringMode : this.followUpMode;
 				const actions: QueuedSessionAction[] = [first];
-				while (!preselected && mode === "all") {
+				while (!preselected && (mode === "all" || isJobWatchAction(first))) {
 					const next = this._actionStore.queuedActions(first.delivery)[0];
 					if (
 						!next ||
 						next.payload.kind !== "turn" ||
+						isJobWatchAction(first) !== isJobWatchAction(next) ||
 						!turnExecutionPoliciesEqual(first.payload.executionPolicy, next.payload.executionPolicy)
 					) {
 						break;
@@ -7542,12 +7566,16 @@ export class AgentSession {
 					) {
 						throw new DeferredSessionInputError("Agent became active before session input handoff");
 					}
-					// Deliver the pending family updates together, including arrivals during preparation.
-					// Keep user/control actions and delivery lanes as boundaries; retain every action's ticket.
-					if (turns.every(isFamilyAgentMessageAction)) {
+					// Include arrivals during preparation without crossing user/control or delivery-lane boundaries.
+					const batchPredicate = turns.every((action): boolean => isFamilyAgentMessageAction(action))
+						? isFamilyAgentMessageAction
+						: turns.every((action): boolean => isJobWatchAction(action))
+							? isJobWatchAction
+							: undefined;
+					if (batchPredicate) {
 						while (true) {
 							const next = this._actionStore.queuedActions()[0];
-							if (!next || next.delivery !== turns[0].delivery || !isFamilyAgentMessageAction(next)) break;
+							if (!next || next.delivery !== turns[0].delivery || !batchPredicate(next)) break;
 							this._actionStore.selectFirst();
 							transitionSessionAction(next, { state: "preparing" });
 							actions.push(next);
@@ -8884,22 +8912,25 @@ export class AgentSession {
 				)
 					continue;
 				const content = `IPython execution ${execution.id} finished (${execution.status}). Use ipython status with this id to collect the outcome.`;
-				this._admitSessionInput(
-					this._createPreparedTurnAction("followUp", content, undefined, {
-						message: {
-							role: "custom",
-							customType: "ipython_execution_complete",
-							content,
-							display: true,
-							details: { id: execution.id, state: execution.status },
-							timestamp: Date.now(),
-						},
-						queueKey: `ipython:${execution.id}`,
-						source: "internal",
-						queueVisible: false,
-						resumeIfIdle: true,
-					}),
-				);
+				const action = this._createPreparedTurnAction("followUp", content, undefined, {
+					message: {
+						role: "custom",
+						customType: "ipython_execution_complete",
+						content,
+						display: true,
+						details: { id: execution.id, state: execution.status },
+						timestamp: Date.now(),
+					},
+					queueKey: `ipython:${execution.id}`,
+					source: "internal",
+					queueVisible: false,
+					resumeIfIdle: true,
+				});
+				if (action.payload.kind === "turn") {
+					action.payload.isIpythonCompletionRequired = () =>
+						execution.notificationRequired && !pending.cancelled && pending.isCurrent();
+				}
+				this._admitSessionInput(action);
 			}
 			// Admission transfers ownership to the ordinary action before this owner disappears.
 			this._pendingIpythonExecutions.delete(execution);
@@ -11795,14 +11826,15 @@ export class AgentSession {
 		return true;
 	}
 
-	private _revokeQueuedJobWatchEvent(eventId: string): void {
+	private _revokeQueuedJobWatchEvent(eventId: string): boolean {
 		const action = this._queuedJobWatchAction(eventId);
-		if (!action) return;
+		if (!action) return false;
 		this._cancelSessionActions(
 			(candidate) => candidate === action,
-			new Error("Queued job-watch snapshot was cleared when its watch was unregistered."),
+			new Error("Queued job-watch evidence was consumed or unregistered."),
 		);
 		this._emitQueueUpdate();
+		return true;
 	}
 
 	private _getJobWatchController(): JobWatchController {
@@ -11848,9 +11880,12 @@ export class AgentSession {
 			onError: (error) => this._surfaceSessionInputError(error),
 			replaceQueued: (eventId, text) =>
 				this.sessionManager === manager && ownsSource() && this._replaceQueuedJobWatchEvent(eventId, text),
-			revokeQueued: (eventId) => {
-				if (this.sessionManager === manager && ownsSource()) this._revokeQueuedJobWatchEvent(eventId);
-			},
+			revokeQueued: (eventId) =>
+				this.sessionManager === manager && ownsSource() && this._revokeQueuedJobWatchEvent(eventId),
+			deliveryPending: (eventId) =>
+				this._actionStore
+					.unfinishedActions()
+					.some((action) => action.queueKey === eventId && isJobWatchAction(action)),
 			admit: (text, eventId) => {
 				if (this._sessionInputAdmissionPauses.size) return false;
 				const content = `[job-watch] ${text}`;
@@ -11931,7 +11966,7 @@ export class AgentSession {
 				handlers[type] = async (payload) => this.handleRlmHeartbeatHostRequest(type, payload);
 			}
 		}
-		for (const type of ["watch", "status", "park", "unregister", "observation"]) {
+		for (const type of ["watch", "status", "consume", "park", "unregister", "observation"]) {
 			handlers[`job_watch.${type}`] = async (payload) => {
 				if (this._disposed || this._disposing) throw new Error("Job watch source owner changed");
 				if (type === "observation" && !this._jobWatchController?.isCurrent()) return { ignored: true };
@@ -11941,6 +11976,8 @@ export class AgentSession {
 						return { ...(await controller.watch(payload)) };
 					case "status":
 						return controller.status(typeof payload.id === "string" ? payload.id : undefined);
+					case "consume":
+						return { ...(await controller.consume(typeof payload.id === "string" ? payload.id : undefined)) };
 					case "park":
 						if (!Array.isArray(payload.ids) || !payload.ids.every((id) => typeof id === "string"))
 							throw new Error("park requires watch ids");

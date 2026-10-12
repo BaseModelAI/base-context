@@ -837,7 +837,7 @@ export function createIpythonToolDefinition(
 								return physicallyComplete ? "completed" : "pending";
 							},
 							get notificationRequired() {
-								return yielded;
+								return yielded && pendingExecution === owned;
 							},
 							interrupt: () => first.kernel.interrupt(),
 						};

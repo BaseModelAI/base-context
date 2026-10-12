@@ -6,7 +6,7 @@ afterEach(() => {
 	for (const controller of controllers.splice(0)) controller.dispose();
 	vi.useRealTimers();
 });
-function fixture(waitForDelivery = false, stateBudgetBytes?: number) {
+function fixture(waitForDelivery = false, stateBudgetBytes?: number, sessionId = "s1") {
 	vi.useFakeTimers();
 	let now = Date.parse("2026-01-01T00:00:00Z");
 	let current = true;
@@ -14,14 +14,15 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number) {
 	let admits = true;
 	let stored: JobWatchSnapshot | undefined;
 	const notices: Array<Record<string, unknown>> = [];
+	const deliveries = new Map<string, "queued" | "selected">();
 	const probes: JobWatchProbeRequest[] = [];
 	let observation: Record<string, unknown> | undefined;
 	const cancelled: string[] = [];
 	const errors: unknown[] = [];
 	let retain: () => Promise<string | undefined> = async () => "/retained/probe.log";
 	const controller = new JobWatchController({
-		sessionId: "s1",
-		sessionFile: "/session/s1",
+		sessionId,
+		sessionFile: `/session/${sessionId}`,
 		current: () => current,
 		goalId: () => goalId,
 		now: () => now,
@@ -49,11 +50,14 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number) {
 		},
 		waitForDelivery,
 		stateBudgetBytes,
-		admit: (text) => {
+		admit: (text, id) => {
 			if (!admits) return false;
 			notices.push(JSON.parse(text));
+			if (waitForDelivery) deliveries.set(id, "queued");
 			return true;
 		},
+		deliveryPending: (id) => deliveries.has(id),
+		revokeQueued: (id) => deliveries.get(id) === "queued" && deliveries.delete(id),
 		retain: () => retain(),
 		onError: (error) => {
 			errors.push(error);
@@ -63,6 +67,7 @@ function fixture(waitForDelivery = false, stateBudgetBytes?: number) {
 	return {
 		controller,
 		notices,
+		deliveries,
 		probes,
 		cancelled,
 		errors,
@@ -206,7 +211,9 @@ describe("job-watch deterministic scheduling", () => {
 		});
 		expect(f.notices).toHaveLength(0);
 		await observe(f, w, f.observation("running", 2));
-		expect(f.notices).toHaveLength(1);
+		expect(f.notices).toHaveLength(0);
+		expect(f.controller.status(w.id)).toMatchObject({ pending_events: 1, progress: { updates: 2 } });
+		expect(await f.controller.park([w.id])).toMatchObject({ parked: true });
 	});
 	it("does not mistake SSH launcher exit for remote completion", async () => {
 		const f = fixture();
@@ -215,9 +222,11 @@ describe("job-watch deterministic scheduling", () => {
 		expect(f.notices).toHaveLength(0);
 		expect(f.controller.status(w.id)).toMatchObject({ active: true });
 		await observe(f, w, f.observation("succeeded"));
-		expect(f.notices).toHaveLength(1);
+		expect(f.notices).toHaveLength(0);
+		expect(f.controller.status(w.id)).toMatchObject({ state: "succeeded", pending_events: 1 });
+		expect(await f.controller.consume(w.id)).toMatchObject({ events: [{ state: "succeeded" }] });
 	});
-	it("keeps the latest unread report while admission is cancelled", async () => {
+	it("keeps each requested report while admission is cancelled", async () => {
 		const f = fixture();
 		const w = await watch(f, { report_every: "5m" });
 		await f.controller.park([w.id]);
@@ -225,11 +234,16 @@ describe("job-watch deterministic scheduling", () => {
 		await f.advance(900000);
 		expect(f.probes).toHaveLength(1);
 		expect(f.notices).toHaveLength(0);
-		expect(f.snapshot().watches[0].pending).toHaveLength(1);
+		expect(f.snapshot().watches[0].pending).toHaveLength(3);
 		f.setAdmits(true);
 		await f.controller.flushPending();
-		expect(f.notices).toHaveLength(1);
-		expect(f.notices[0]).toMatchObject({ late_by_ms: 0, superseded_snapshots: 2 });
+		expect(f.notices).toHaveLength(3);
+		expect(f.notices.map((notice) => notice.late_by_ms)).toEqual([600000, 300000, 0]);
+		expect(f.notices.map((notice) => notice.scheduled_for)).toEqual([
+			"2026-01-01T00:05:00.000Z",
+			"2026-01-01T00:10:00.000Z",
+			"2026-01-01T00:15:00.000Z",
+		]);
 		expect(f.controller.isParked()).toBe(false);
 	});
 	it("restores only authoritative probes; handles become unknown and imported/forked owners stay inactive", async () => {
@@ -304,7 +318,7 @@ describe("job-watch deterministic scheduling", () => {
 		await f.controller.flushPending();
 		expect(f.notices).toHaveLength(0);
 	});
-	it("keeps forty checks but only the latest unread report while admission is held", async () => {
+	it("keeps forty checks and all required report bodies while admission is held", async () => {
 		const f = fixture();
 		const w = await watch(f, { report_every: "5m", fields: ["updates"] });
 		f.setAdmits(false);
@@ -313,12 +327,14 @@ describe("job-watch deterministic scheduling", () => {
 			await f.advance();
 		}
 		expect(f.probes).toHaveLength(40);
-		expect(f.snapshot().watches[0].pending).toHaveLength(1);
+		expect(f.snapshot().watches[0].pending).toHaveLength(40);
 		f.setAdmits(true);
 		await f.controller.flushPending();
-		expect(f.notices).toHaveLength(1);
+		expect(f.notices).toHaveLength(40);
 		expect(f.controller.status(w.id)).toMatchObject({ pending_events: 0 });
-		expect(f.notices[0]).toMatchObject({ progress: { updates: 40 }, superseded_snapshots: 39 });
+		expect(f.notices.map((notice) => (notice.progress as Record<string, unknown>).updates)).toEqual(
+			Array.from({ length: 40 }, (_, index) => index + 1),
+		);
 	});
 	it("keeps five-minute checks when reports and a deadline fall between them", async () => {
 		const f = fixture();
@@ -380,6 +396,52 @@ describe("job-watch deterministic scheduling", () => {
 		await ack.controller.acknowledge(String(ack.notices[0].event_id));
 		expect(ack.snapshot().watches[0].pending).toHaveLength(0);
 	});
+	it("transfers complete retired reports and failures without consuming another watch or session", async () => {
+		const f = fixture(true);
+		const report = await watch(f, { report_every: "5m", fields: ["updates"] });
+		await f.advance();
+		const failed = await watch(f, { resource_id: "other-resource" });
+		await observe(f, failed, { ...f.observation("failed"), attention: ["retained failure detail"] });
+		const pending = f.snapshot().watches.flatMap((item) => item.pending);
+		await f.controller.unregister(report.id);
+		await f.controller.unregister(failed.id);
+		expect(f.controller.status()).toMatchObject({ watches: [] });
+		const other = fixture(true, undefined, "s2");
+		expect(await other.controller.consume(report.id)).toEqual({ events: [], deferred_event_ids: [] });
+		const transferred = await f.controller.consume(report.id);
+		expect(transferred).toEqual({ events: [JSON.parse(pending[0].text)], deferred_event_ids: [] });
+		expect(transferred.events[0]).toMatchObject({
+			watch_id: report.id,
+			reasons: ["report"],
+			scheduled_for: "2026-01-01T00:05:00.000Z",
+		});
+		expect(f.deliveries.size).toBe(1);
+		expect(await f.controller.consume()).toEqual({
+			events: [JSON.parse(pending[1].text)],
+			deferred_event_ids: [],
+		});
+		expect(f.deliveries.size).toBe(0);
+		expect(f.snapshot().watches).toEqual([]);
+		expect(await f.controller.consume()).toEqual({ events: [], deferred_event_ids: [] });
+	});
+
+	it("defers selected input and leaves a newer report outside the consumed snapshot", async () => {
+		const f = fixture(true);
+		const w = await watch(f, { report_every: "5m", fields: ["updates"] });
+		await f.advance();
+		const first = f.snapshot().watches[0].pending[0];
+		f.deliveries.set(first.id, "selected");
+		expect(await f.controller.consume(w.id)).toEqual({ events: [], deferred_event_ids: [first.id] });
+		expect(f.controller.status(w.id)).toMatchObject({ pending_events: 1 });
+		f.deliveries.set(first.id, "queued");
+		const consumed = f.controller.consume(w.id);
+		const newer = f.advance();
+		expect(await consumed).toEqual({ events: [JSON.parse(first.text)], deferred_event_ids: [] });
+		await newer;
+		expect(f.snapshot().watches[0].pending).toHaveLength(1);
+		expect(f.snapshot().watches[0].pending[0].id).not.toBe(first.id);
+	});
+
 	it("refuses exhausted critical-evidence budget without stopping the job", async () => {
 		const f = fixture(false, 8192);
 		const w = await watch(f, { report_every: "5m", fields: ["updates"] });

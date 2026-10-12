@@ -1924,26 +1924,36 @@ large_text = "x" * ${DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES + 1024}`,
 		expect(retained).toEqual(expect.arrayContaining([result.id, callerSource]));
 	});
 
-	it.each([0, 1])("refuses uncovered native recovery compaction (depth %i)", async (rlmDepth) => {
-		const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
-		const priorOutcome = harness.session.agent.getTurnOutcome;
-		harness.session.agent.getTurnOutcome = (context, signal) =>
-			context.toolResults.some((result) => result.toolCallId === "recovery_call")
-				? { kind: "finish" }
-				: (priorOutcome?.(context, signal) ?? { kind: "proceed" });
-		await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
-		expect(main).toHaveLength(1); // The result exists, but no request containing it has reached acceptance.
-		const { source } = await readRecovery();
-		const checkpoint = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
-		expect(source.sequence).toBeGreaterThan(checkpoint.source.sourceSequence);
-		await expect(harness.session.compact()).rejects.toThrow(
-			"Recovery compaction requires an accepted replay contract for its selected results",
-		);
-		expect(summaries).toHaveLength(0);
-		expect((await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction")).toEqual([
-			main[0].epoch,
-		]);
-	});
+	it.each([0, 1])(
+		"compacts accepted history while retaining uncovered recovery literally (depth %i)",
+		async (rlmDepth) => {
+			const { harness, main, summaries, readRecovery } = await createRecoveryCompactionFixture({ rlmDepth });
+			const priorOutcome = harness.session.agent.getTurnOutcome;
+			harness.session.agent.getTurnOutcome = (context, signal) =>
+				context.toolResults.some((result) => result.toolCallId === "recovery_call")
+					? { kind: "finish" }
+					: (priorOutcome?.(context, signal) ?? { kind: "proceed" });
+			await harness.session.prompt(`RECOVERY_EVIDENCE: keep the warehouse rule. ${"Earlier context. ".repeat(32)}`);
+			expect(main).toHaveLength(1); // The result exists, but no request containing it has reached acceptance.
+			const { result, source } = await readRecovery();
+			const checkpoint = readContextEpoch(main[0].epoch.details, 2 * 1024 * 1024)!;
+			expect(source.sequence).toBeGreaterThan(checkpoint.source.sourceSequence);
+			const compacted = await harness.session.compact();
+			expect(compacted.firstKeptEntryId).toBe(checkpoint.literalTailId);
+			expect(summaries.length).toBeGreaterThan(0);
+			expect(JSON.stringify(summaries)).not.toContain("recovery_call");
+			expect(main).toHaveLength(1);
+			const saved = readContextEpoch(compacted.details, 2 * 1024 * 1024)!;
+			expect(saved.source.sourceSequence).toBeGreaterThanOrEqual(source.sequence);
+			expect(saved.recoveryReplayThrough).toEqual(checkpoint.source);
+			expect(saved.continuation?.publicTailThrough).toEqual(checkpoint.source);
+			if (result.type !== "message") throw new Error("Expected the recovered tool result");
+			expect(harness.session.messages).toContainEqual(result.message);
+			expect(
+				(await harness.sessionManager.readEntries()).filter((entry) => entry.type === "compaction"),
+			).toHaveLength(2);
+		},
+	);
 
 	it.each([
 		{ finishReason: "tool_calls", rlmDepth: 0 },

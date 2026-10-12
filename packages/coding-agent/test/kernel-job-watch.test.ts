@@ -26,7 +26,7 @@ from rlm import bash
 import asyncio`;
 
 describe("job-watch native kernel bridge", () => {
-	it("delivers completion after the initiating cell, with four thin skill operations", async () => {
+	it("delivers completion after the initiating cell and transfers reports through the thin skill API", async () => {
 		let complete!: (value: Record<string, unknown>) => void;
 		const completion = new Promise<Record<string, unknown>>((resolve) => {
 			complete = resolve;
@@ -54,6 +54,14 @@ describe("job-watch native kernel bridge", () => {
 				calls.push("status");
 				return { state: "running" };
 			},
+			"job_watch.consume": async (payload: Record<string, unknown>) => {
+				calls.push("consume");
+				expect(payload.id).toBe("watch");
+				return {
+					events: [{ event_id: "completion", watch_id: "watch", state: "succeeded" }],
+					deferred_event_ids: [],
+				};
+			},
 			"job_watch.park": async () => {
 				calls.push("park");
 				return { parked: true };
@@ -73,13 +81,24 @@ await job_watch.park([w["id"]])`);
 			generation: "generation",
 			result: { source: "handle", observation: { job_id: "local", state: "succeeded" } },
 		});
-		expect(
-			(
-				await manager.execute(`await job_watch.status("watch")
-await job_watch.unregister("watch")`)
-			).status,
-		).toBe("ok");
-		expect(calls).toEqual(["watch", "park", "status", "unregister"]);
+		const transferred = await manager.execute(`await job_watch.status("watch")
+await job_watch.unregister("watch")
+transferred = await job_watch.consume("watch")
+assert transferred == {"events": [{"event_id": "completion", "watch_id": "watch", "state": "succeeded"}], "deferred_event_ids": []}`);
+		expect(transferred.status, JSON.stringify(transferred)).toBe("ok");
+		expect(calls).toEqual(["watch", "park", "status", "unregister", "consume"]);
+	});
+	it("passes an all-watch consume request through without changing deferred evidence", async () => {
+		const { manager } = create({
+			"job_watch.consume": async (payload: Record<string, unknown>) => {
+				expect(payload.id).toBeUndefined();
+				return { events: [], deferred_event_ids: ["selected-event"] };
+			},
+		});
+		const result = await manager.execute(`${load}
+result = await job_watch.consume()
+assert result == {"events": [], "deferred_event_ids": ["selected-event"]}`);
+		expect(result.status, JSON.stringify(result)).toBe("ok");
 	});
 	it("runs and parses a read-only native probe while another notebook cell is active", async () => {
 		const { manager } = create();

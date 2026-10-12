@@ -68,7 +68,7 @@ async function fixture(
 	handlers = Reflect.get(session, "_createKernelHostHandlers").call(session);
 	harness.setResponses([toolCall("watch"), fauxAssistantMessage("Waiting for selected job evidence.")]);
 	await session.prompt(goal ? "/goal finish two jobs" : "Start this job and wait for evidence.");
-	const observation = async (updates: number | null | undefined, state = "running") =>
+	const observation = async (updates: number | null | undefined, state = "running", attention: string[] = []) =>
 		handlers["job_watch.observation"]({
 			id: watch.id,
 			generation: watch.generation,
@@ -79,7 +79,7 @@ async function fixture(
 					job_id: "local-job",
 					state,
 					progress: { updates },
-					attention: [],
+					attention,
 					evidence: ["job.json"],
 				},
 			},
@@ -99,7 +99,7 @@ function eventCount(harness: Harness) {
 }
 
 describe("job-watch real AgentSession autonomous compatibility", () => {
-	it("delivers only the latest queued snapshot while busy, preserving terminal evidence after unregister", async () => {
+	it("keeps progress out of model turns and delivers awaited terminal evidence at the next tool boundary", async () => {
 		let release!: () => void;
 		let started!: () => void;
 		const gate = new Promise<void>((resolve) => {
@@ -116,35 +116,21 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		await harness.session.prompt("/autonomous off");
 		harness.setResponses([
 			toolCall("block"),
-			fauxAssistantMessage("Independent work finished."),
-			fauxAssistantMessage("Latest terminal snapshot consumed."),
+			fauxAssistantMessage("Terminal evidence handled with the tool result."),
 		]);
-		const work = harness.session.prompt("Do independent work.");
+		const calls = harness.faux.state.callCount;
+		const work = harness.session.prompt("Do independent work");
 		await entered;
 		try {
 			await f.observation(1);
 			await f.observation(2);
-			const before = harness.session.getSessionActionRecoverySnapshot().actions[0];
 			await f.observation(null);
-			const withNull = harness.session.getSessionActionRecoverySnapshot().actions[0];
-			if (withNull.payload.kind !== "turn") throw new Error("Expected watch input");
-			expect(JSON.parse(withNull.payload.text.slice("[job-watch] ".length))).toMatchObject({
-				progress: { updates: null },
-			});
+			expect(harness.session.queuedActionCount).toBe(0);
+			const consumed = await f.handlers["job_watch.consume"]({ id: f.watch().id });
+			expect(consumed.events).toEqual([expect.objectContaining({ progress: { updates: null } })]);
+			expect(consumed.deferred_event_ids).toEqual([]);
 			await f.observation(undefined, "succeeded");
 			expect(harness.session.queuedActionCount).toBe(1);
-			const after = harness.session.getSessionActionRecoverySnapshot().actions[0];
-			expect(after.id).toBe(before.id);
-			expect(after.queueKey).toBe(before.queueKey);
-			if (after.payload.kind !== "turn") throw new Error("Expected watch input");
-			const expected = JSON.parse(after.payload.text.slice("[job-watch] ".length));
-			expect(expected).toMatchObject({ state: "succeeded", progress: {}, superseded_snapshots: 2 });
-			expect(expected.progress).not.toHaveProperty("updates");
-			expect(after.payload.customMessage?.content).toBe(after.payload.text);
-			expect(after.payload.records.find((record) => record.role === "primary")?.message.content).toBe(
-				after.payload.text,
-			);
-			expect(after.payload.content).toEqual([{ type: "text", text: after.payload.text }]);
 			await f.handlers["job_watch.unregister"]({ id: f.watch().id });
 			expect(harness.session.queuedActionCount).toBe(1);
 		} finally {
@@ -160,8 +146,89 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		expect(JSON.parse(String(event.content).slice("[job-watch] ".length))).toMatchObject({
 			state: "succeeded",
 			progress: {},
-			superseded_snapshots: 2,
 		});
+		expect(getAssistantTexts(harness)).toContain("Terminal evidence handled with the tool result.");
+		expect(harness.faux.state.callCount - calls).toBe(2);
+	});
+
+	it("batches watch IDs without crossing an ordinary follow-up boundary", async () => {
+		const f = await fixture();
+		const { harness } = f;
+		await harness.session.prompt("/autonomous off");
+		await harness.session.abort();
+		const failWatch = async (job: string) => {
+			const watch = await f.handlers["job_watch.watch"]({
+				resource_id: job,
+				job_id: job,
+				completion_source: "handle",
+			});
+			await f.handlers["job_watch.observation"]({
+				id: watch.id,
+				generation: watch.generation,
+				result: {
+					source: "handle",
+					observation: {
+						observed_at: new Date().toISOString(),
+						job_id: job,
+						state: "failed",
+						progress: {},
+						attention: [],
+						evidence: [],
+					},
+				},
+			});
+			return String(watch.id);
+		};
+		const first = await failWatch("first");
+		const second = await failWatch("second");
+		await harness.session.followUp("Ordinary user boundary", undefined, { resumeIfIdle: false });
+		const third = await failWatch("third");
+		const calls = harness.faux.state.callCount;
+		harness.setResponses([
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain(first);
+				expect(JSON.stringify(context.messages)).toContain(second);
+				expect(JSON.stringify(context.messages)).not.toContain(third);
+				expect(JSON.stringify(context.messages)).not.toContain("Ordinary user boundary");
+				return fauxAssistantMessage("Handled two failures together.");
+			},
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain("Ordinary user boundary");
+				expect(JSON.stringify(context.messages)).not.toContain(third);
+				return fauxAssistantMessage("Answered the user.");
+			},
+			(context) => {
+				expect(JSON.stringify(context.messages)).toContain(third);
+				return fauxAssistantMessage("Handled the remaining failure.");
+			},
+		]);
+		harness.session.resumeQueuedWork();
+		await harness.session.waitForIdle();
+		expect(eventCount(harness)).toBe(3);
+		expect(harness.faux.state.callCount - calls).toBe(3);
+		expect(harness.session.followUpMode).toBe("one-at-a-time");
+		expect(harness.session.unfinishedActionCount).toBe(0);
+	});
+
+	it("consumes only the caller session's exact queued evidence", async () => {
+		const first = await fixture();
+		const second = await fixture();
+		for (const f of [first, second]) {
+			await f.harness.session.prompt("/autonomous off");
+			await f.harness.session.abort();
+			await f.observation(1, "failed");
+			expect(f.harness.session.queuedActionCount).toBe(1);
+		}
+		const consumed = await first.handlers["job_watch.consume"]({});
+		expect(consumed.events).toEqual([expect.objectContaining({ watch_id: first.watch().id, state: "failed" })]);
+		expect(consumed.deferred_event_ids).toEqual([]);
+		expect(first.harness.session.queuedActionCount).toBe(0);
+		expect(second.harness.session.queuedActionCount).toBe(1);
+		expect(await first.handlers["job_watch.consume"]({})).toEqual({ events: [], deferred_event_ids: [] });
+		const calls = first.harness.faux.state.callCount;
+		first.harness.session.resumeQueuedWork();
+		await first.harness.session.waitForIdle();
+		expect(first.harness.faux.state.callCount).toBe(calls);
 	});
 
 	it("freezes selected input before preparation without dropping a newer terminal snapshot", async () => {
@@ -186,18 +253,22 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 			fauxAssistantMessage("Terminal consumed."),
 		]);
 		await f.observation(1);
+		const calls = harness.faux.state.callCount;
 		hold = true;
-		await f.observation(2);
+		await f.observation(2, "running", ["input needed"]);
 		await entered;
 		try {
-			await f.observation(3, "succeeded");
+			const consumed = await f.handlers["job_watch.consume"]({ id: f.watch().id });
+			expect(consumed.events).toEqual([]);
+			expect(consumed.deferred_event_ids).toHaveLength(1);
+			await f.observation(3, "failed");
 			// Queue recovery snapshots exclude the action already selected for preparation.
 			expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(1);
 			const controller = Reflect.get(harness.session, "_jobWatchController") as JobWatchController;
 			const inputs = controller.snapshot().watches[0].pending.map((event) => JSON.parse(event.text));
 			expect(inputs).toHaveLength(2);
 			expect(inputs[0]).toMatchObject({ state: "running", progress: { updates: 2 } });
-			expect(inputs[1]).toMatchObject({ state: "succeeded", progress: { updates: 3 } });
+			expect(inputs[1]).toMatchObject({ state: "failed", progress: { updates: 3 } });
 			expect(inputs[0].event_id).not.toBe(inputs[1].event_id);
 			expect(inputs[1]).not.toHaveProperty("superseded_snapshots");
 		} finally {
@@ -206,6 +277,7 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		}
 		await harness.session.waitForIdle();
 		expect(eventCount(harness)).toBe(2);
+		expect(harness.faux.state.callCount - calls).toBe(1);
 	});
 
 	it("revokes only queued routine snapshots when a watch is unregistered", async () => {
@@ -214,7 +286,7 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		await f.observation(1);
 		await harness.session.abort();
 		await f.observation(2);
-		expect(harness.session.queuedActionCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(0);
 		await f.handlers["job_watch.unregister"]({ id: f.watch().id });
 		expect(harness.session.queuedActionCount).toBe(0);
 		expect(eventCount(harness)).toBe(0);
@@ -231,8 +303,12 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		for (let i = 0; i < 20; i++) await f.observation(1);
 		expect(getAssistantTexts(harness).filter(Boolean)).toHaveLength(1);
 		expect(harness.session.getAutonomousStatus()).toEqual(accounting);
-		harness.setResponses([toolCall("park"), fauxAssistantMessage("One selected update; waiting again.")]);
 		await f.observation(2);
+		expect(harness.session.queuedActionCount).toBe(0);
+		expect(f.isParked()).toBe(true);
+		expect(harness.session.getAutonomousStatus()).toEqual(accounting);
+		harness.setResponses([toolCall("park"), fauxAssistantMessage("One selected update; waiting again.")]);
+		await f.observation(3, "running", ["input needed"]);
 		await harness.session.waitForIdle();
 		expect(eventCount(harness)).toBe(1);
 		expect(f.isParked()).toBe(true);
@@ -270,7 +346,7 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		const { harness } = f;
 		await f.observation(1);
 		await harness.session.abort();
-		await f.observation(2);
+		await f.observation(2, "running", ["input needed"]);
 		expect(eventCount(harness)).toBe(0);
 		expect(harness.session.queuedActionCount).toBe(1);
 		expect(Reflect.get(harness.session, "_jobWatchController").snapshot().watches[0].pending).toHaveLength(1);
@@ -286,7 +362,7 @@ describe("job-watch real AgentSession autonomous compatibility", () => {
 		await f.observation(1);
 		const oldGoal = harness.session.goalState.goalId;
 		await harness.session.abort();
-		await f.observation(2);
+		await f.observation(2, "running", ["input needed"]);
 		expect(harness.session.queuedActionCount).toBe(1);
 		await harness.session.handleGoalHostRequest("goal.complete");
 		await harness.session.handleGoalHostRequest("goal.create", { objective: "new independent goal" });

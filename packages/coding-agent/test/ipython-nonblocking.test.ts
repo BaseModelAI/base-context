@@ -15,7 +15,7 @@ import {
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
-import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { IpythonKernelProvisioner, type IpythonPendingExecution } from "../src/core/tools/ipython.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -41,6 +41,12 @@ function controlledSession(responses: Parameters<ReturnType<typeof registerFauxP
 		modelRegistry: ModelRegistry.create(auth, cwd),
 		resourceLoader: createTestResourceLoader(),
 	});
+	const tracked = vi.spyOn(
+		session as unknown as {
+			_trackPendingIpythonExecution(execution: IpythonPendingExecution, provisioner: IpythonKernelProvisioner): void;
+		},
+		"_trackPendingIpythonExecution",
+	);
 	const result = createDeferred<ExecuteResult>();
 	const physical = createDeferred<void>();
 	const admitted = createDeferred<void>();
@@ -93,7 +99,7 @@ function controlledSession(responses: Parameters<ReturnType<typeof registerFauxP
 		faux.unregister();
 		rmSync(cwd, { recursive: true, force: true });
 	});
-	return { session, kernel, execute, ensure, prune, names, result, physical, admitted, interrupt, namespace };
+	return { session, kernel, execute, ensure, prune, names, result, physical, admitted, interrupt, namespace, tracked };
 }
 
 function tool(name: string, args: Record<string, unknown>) {
@@ -101,6 +107,44 @@ function tool(name: string, args: Record<string, unknown>) {
 }
 
 describe("owned nonblocking IPython execution", () => {
+	it.each(["ok", "error"] as const)(
+		"drops a queued completion notice after status collects its %s outcome",
+		async (outcome) => {
+			const staleWakeup = vi.fn(() => fauxAssistantMessage("Unexpected stale completion turn."));
+			const fixture = controlledSession([
+				tool("ipython", { code: "slow_work()" }),
+				async () => {
+					const execution = fixture.tracked.mock.calls[0][0];
+					expect(execution.notificationRequired).toBe(true);
+					if (outcome === "error") fixture.result.reject(new Error("terminal-failure"));
+					else fixture.result.resolve({ stdout: "collected-output", stderr: "", status: "ok", durationMs: 1001 });
+					fixture.physical.resolve();
+					await execution.completion;
+					expect(execution.notificationRequired).toBe(true);
+					return tool("ipython", { action: "status", execution_id: execution.id });
+				},
+				(context) => {
+					expect(JSON.stringify(context.messages)).toContain(
+						outcome === "error" ? "terminal-failure" : "collected-output",
+					);
+					expect(fixture.tracked.mock.calls[0][0].notificationRequired).toBe(false);
+					return fauxAssistantMessage("Collected the outcome without waiting for a notice.");
+				},
+				staleWakeup,
+			]);
+			await fixture.session.prompt("Run the work.");
+			await fixture.session.waitForHeadlessIdle();
+			expect(staleWakeup).not.toHaveBeenCalled();
+			expect(
+				fixture.session.messages.filter(
+					(message) => message.role === "custom" && message.customType === "ipython_execution_complete",
+				),
+			).toHaveLength(0);
+			expect(fixture.execute).toHaveBeenCalledTimes(1);
+			expect(fixture.ensure).toHaveBeenCalledTimes(1);
+		},
+	);
+
 	it("yields to the model, preserves one cell and drains its completion turn before headless completion", async () => {
 		const receivedPending = createDeferred<void>();
 		const receivedFinal = createDeferred<void>();
@@ -162,6 +206,11 @@ describe("owned nonblocking IPython execution", () => {
 		expect(fixture.kernel.kill).not.toHaveBeenCalled();
 		expect(fixture.kernel.restart).not.toHaveBeenCalled();
 		expect(fixture.session.isSessionActive).toBe(false);
+		expect(
+			fixture.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "ipython_execution_complete",
+			),
+		).toHaveLength(1);
 	});
 
 	it("keeps an early-aborted execution owned until native idle and does not wake an aborted session", async () => {
