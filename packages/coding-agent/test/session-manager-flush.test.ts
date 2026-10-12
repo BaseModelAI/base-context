@@ -5,6 +5,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	statSync,
 	symlinkSync,
@@ -94,6 +95,55 @@ describe("SessionManager.flushNow", () => {
 		);
 		expect(readFileSync(file)).toEqual(before);
 		expect(manager.getLeafId()).toBe(leaf);
+	});
+
+	it("retains identity mismatch diagnostics through failed appends until the owner is reopened", async () => {
+		const manager = await createManager();
+		await manager.appendCustomEntry("before_replacement");
+		const file = manager.getSessionFile()!;
+		const before = readFileSync(file);
+		const expected = statSync(file);
+		const leaf = manager.getLeafId();
+		const append = SessionJournalOwner.prototype.appendJson;
+		vi.spyOn(SessionJournalOwner.prototype, "appendJson").mockImplementationOnce(async function (
+			this: SessionJournalOwner,
+			json,
+		) {
+			// Replace after indexed metadata preparation so the real owner detects the mismatch.
+			const replacement = `${file}.replacement`;
+			writeFileSync(replacement, before);
+			renameSync(replacement, file);
+			return append.call(this, json);
+		});
+		const failure = await manager.appendCustomEntry("must_not_append").catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(Error);
+		const message = (failure as Error).message;
+		const observed = statSync(file);
+		expect(observed.ino).not.toBe(expected.ino);
+		expect(observed.size).toBe(expected.size);
+		expect(message).toContain("Session journal file identity changed outside its owner");
+		expect(message).toContain(JSON.stringify(file));
+		expect(message).toContain(`expected dev=${expected.dev}, ino=${expected.ino}`);
+		expect(message).toContain(`observed dev=${observed.dev}, ino=${observed.ino}`);
+		expect(message).toContain("inspect the journal before reopening it to reacquire ownership");
+		expect(message).toContain("base-context shutdown stops all workers");
+		expect(message).toContain("base-context --resume <path>");
+		const sticky = await manager.flushNow().catch((error: unknown) => error);
+		expect(sticky).toBeInstanceOf(Error);
+		expect((sticky as Error).message).toBe(`Session source append failed; outcome may be unknown: ${message}`);
+		expect((sticky as Error).cause).toBe(failure);
+		await expect(manager.appendCustomEntry("still_blocked")).rejects.toBe(sticky);
+		expect(readFileSync(file)).toEqual(before);
+		expect(manager.getLeafId()).toBe(leaf);
+
+		await manager.close();
+		const reopened = await SessionManager.open(file);
+		managers.push(reopened);
+		expect(reopened.getLeafId()).toBe(leaf);
+		await reopened.appendCustomEntry("after_reopen");
+		await reopened.flushNow();
+		expect(readFileSync(file).subarray(0, before.length)).toEqual(before);
+		expect(loadEntriesFromFile(file).at(-1)).toMatchObject({ customType: "after_reopen" });
 	});
 
 	it("preserves inode and file metadata by appending rather than replacing", async () => {

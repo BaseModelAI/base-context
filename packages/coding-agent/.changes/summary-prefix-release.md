@@ -1,0 +1,11 @@
+- Changed default compaction and branch-summary prompts to place instructions before conversation context.
+- Fixed preservation of binding output requirements across compaction.
+- Fixed explicit context-mode settings across session creation, compaction, copying, and reopening.
+- Fixed retention of full Python output when displayed output was truncated or execution was cancelled.
+- Added exact recovery references for retained Python output.
+- Fixed recovery from closed or corrupt history indexes.
+- Fixed journal failure diagnostics to retain underlying errors.
+- Fixed task requirements being truncated when larger task-frame limits were configured.
+- Fixed redundant reads of complete selected skills.
+- Fixed instructions for calling Python-backed skills.
+- Fixed compaction of tool calls with null arguments.

@@ -847,7 +847,7 @@ class WebSocketCloseError extends StreamFailureError {
 		const code = options?.code;
 		super(message, {
 			kind:
-				code === 1006 || code === 1011 || code === 1012 || code === 1013
+				code === 1000 || code === 1006 || code === 1011 || code === 1012 || code === 1013
 					? "transport"
 					: code === 1009
 						? "invalid_request"
@@ -1318,7 +1318,8 @@ async function processWebSocketStream(
 		options?.timeoutMs,
 	);
 	let keepConnection = true;
-	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
+	const transport = options?.transport || "auto";
+	const useCachedContext = transport === "websocket-cached" || transport === "auto";
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	let fullBody = body;

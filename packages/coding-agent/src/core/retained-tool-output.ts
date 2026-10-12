@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { closeSync, mkdirSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { mkdir, open } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -12,6 +13,8 @@ export interface RetainedToolOutput {
 	byteLength: number;
 	/** False when upstream already discarded output, or capture completeness was not reported. */
 	captureComplete: boolean;
+	/** Capture failed after admission; the artifact contains only the bytes actually written. */
+	captureError?: "write_failed" | "close_failed";
 }
 
 export function retainedToolOutput(value: unknown): RetainedToolOutput | undefined {
@@ -52,6 +55,77 @@ export async function retainToolOutput(
 		await file.close();
 	}
 	return descriptor;
+}
+
+/** Incremental capture in the existing artifact format; synchronous writes provide backpressure. */
+export class ToolOutputCapture {
+	private fd: number | undefined;
+	private channel?: string;
+	private readonly descriptor: RetainedToolOutput;
+	private readonly path: string;
+
+	constructor(directory: string) {
+		mkdirSync(directory, { recursive: true, mode: 0o700 });
+		this.descriptor = {
+			artifactId: `${randomUUID()}.log`,
+			field: RETAINED_OUTPUT_FIELD,
+			byteLength: 0,
+			captureComplete: false,
+		};
+		this.path = join(directory, this.descriptor.artifactId);
+		this.fd = openSync(this.path, "wx", 0o600);
+	}
+
+	append(channel: "stdout" | "stderr" | "result" | "error" | "background (unattributed)", text: string): void {
+		if (this.fd === undefined || this.descriptor.captureError || !text) return;
+		try {
+			if (this.channel !== channel) {
+				this.write(`${this.descriptor.byteLength ? "\n" : ""}[${channel}]\n`);
+				this.channel = channel;
+			}
+			this.write(text);
+		} catch {
+			this.descriptor.captureError = "write_failed";
+		}
+	}
+
+	private write(text: string): void {
+		// Bound temporary UTF-8 buffers even for a large single protocol event.
+		for (let start = 0; start < text.length; ) {
+			let end = Math.min(start + 16 * 1024, text.length);
+			if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+			const bytes = Buffer.from(text.slice(start, end));
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(this.fd!, bytes, offset);
+				if (written === 0) throw new Error("Retained output write made no progress");
+				offset += written;
+				this.descriptor.byteLength += written;
+			}
+			start = end;
+		}
+	}
+
+	finish(captureComplete: boolean): RetainedToolOutput | undefined {
+		if (this.fd === undefined) return undefined;
+		try {
+			closeSync(this.fd);
+		} catch {
+			this.descriptor.captureError ??= "close_failed";
+		} finally {
+			this.fd = undefined;
+		}
+		this.descriptor.captureComplete = captureComplete && !this.descriptor.captureError;
+		if (this.descriptor.captureComplete && this.descriptor.byteLength <= TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
+			try {
+				unlinkSync(this.path);
+			} catch {
+				/* An unused small artifact must not block result delivery. */
+			}
+			return undefined;
+		}
+		return { ...this.descriptor };
+	}
 }
 
 export function decodedTextWindow(text: string, startByte = 0, endByte = Buffer.byteLength(text)) {

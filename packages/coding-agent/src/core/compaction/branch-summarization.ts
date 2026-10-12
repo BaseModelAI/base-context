@@ -278,7 +278,10 @@ export async function generateBranchSummary(
 	} else {
 		instructions = BRANCH_SUMMARY_PROMPT;
 	}
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
+	// Preserve the position of custom append/replacement instructions relative to the evidence.
+	const promptText = customInstructions
+		? `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`
+		: `${instructions}\n\n<conversation>\n${conversationText}\n</conversation>`;
 
 	const summarizationMessages = [
 		{

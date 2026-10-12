@@ -4,6 +4,7 @@ import type { ContextEpochCheckpoint, EpochViewReference } from "./context-epoch
 import type { ContextRef, ContextUpdateTarget } from "./history-index.js";
 import { createCompactionSummaryMessage } from "./messages.js";
 import { PUBLIC_CONTEXT_RENDERER, renderPublicHistory } from "./public-context.js";
+import { retainedToolOutput } from "./retained-tool-output.js";
 import { isNativeSkillSelection, type SelectedSkillReference, selectedSkillCapture } from "./selected-skills.js";
 import { sessionEntryMessage } from "./session-context-messages.js";
 import {
@@ -181,6 +182,23 @@ export function canonicalMessageRenderer(
 				if (!sent || sent.toolCallId !== message.toolCallId)
 					throw new Error("Canonical sent-message update mismatch");
 				appendSentAgentMessageToToolResult(message, message.toolCallId, sent.message);
+			}
+		}
+		// Recovery addresses are display metadata: the journal bytes defining ref.revision stay unchanged.
+		if (message.role === "toolResult" && message.details && typeof message.details === "object") {
+			const retained = retainedToolOutput(
+				"retainedOutput" in message.details ? message.details.retainedOutput : undefined,
+			);
+			if (retained) {
+				message.content.push({
+					type: "text",
+					text: `Read retained output with prime_context ${JSON.stringify({
+						action: "read",
+						ref: ref.entryId,
+						revision: ref.revision,
+						field: retained.field,
+					})}`,
+				});
 			}
 		}
 		const publicHistory =

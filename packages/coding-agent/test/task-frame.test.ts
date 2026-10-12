@@ -60,17 +60,37 @@ describe("TaskFrame literal-aware selection", () => {
 		expect(JSON.stringify(withGoal.messages)).not.toContain(input.event.text);
 	});
 
-	it("spends the text budget on older omitted instructions, not the visible newest prompt", () => {
+	it("honors an explicit text budget and preserves older instructions before newer ones", () => {
 		const older = requirement("older", 1, `Warehouse codes must stay ASCII. ${"x".repeat(800)}`);
 		const omitted = requirement("omitted", 2, "y".repeat(1500));
 		const current = requirement("current", 3, "z".repeat(1500));
-		const frame = compileTaskFrame(view([current, omitted, older]), taskFrameLimits(), undefined, [
-			literal(current),
-		])!;
+		const frame = compileTaskFrame(
+			view([current, omitted, older]),
+			taskFrameLimits({ maxTextBytes: 2048 }),
+			undefined,
+			[literal(current)],
+		)!;
 		expect(frame.rows.map((row) => row.source.entryId)).toEqual(["older", "omitted"]);
 		expect(frame.rows[0]).toMatchObject({ text: older.event.text });
 		expect(frame.rows[1]).toMatchObject({ textOmitted: true });
 		expect(frame.rows[1].text).toBeUndefined();
+	});
+
+	it("keeps both binding requirements before lower-priority context within the frame budget", () => {
+		const older = requirement("older", 1, "a".repeat(1500));
+		const newer = requirement("newer", 2, "b".repeat(1500));
+		const fact = requirement("fact", 3, "c".repeat(6000));
+		fact.state = "descriptive";
+		fact.event.kind = "observed_fact";
+		fact.event.authority = "tool-data";
+		const limits = taskFrameLimits();
+		const frame = compileTaskFrame(view([fact, newer, older]), limits)!;
+		expect(frame.rows.map((row) => row.source.entryId)).toEqual(["older", "newer", "fact"]);
+		expect(frame.rows[0].text).toBe(older.event.text);
+		expect(frame.rows[1].text).toBe(newer.event.text);
+		expect(frame.rows[2]).toMatchObject({ textOmitted: true });
+		expect(frame.rows[2].text).toBeUndefined();
+		expect(Buffer.byteLength(JSON.stringify(frame.messages))).toBeLessThanOrEqual(limits.maxBytes);
 	});
 
 	it("requires the same source revision and actual complete text, not manifest membership", () => {

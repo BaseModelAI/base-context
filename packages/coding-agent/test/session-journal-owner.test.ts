@@ -283,8 +283,12 @@ describe("session journal owner process", () => {
 		// Identical bytes and size do not make a different inode the admitted source.
 		writeFileSync(replacementPath, first.line);
 		renameSync(replacementPath, replacedPath);
-		await expect(replaced.appendJson(lexical)).rejects.toThrow(/file identity changed/i);
-		await expect(replaced.recover()).rejects.toThrow(/file identity changed/i);
+		const observedIdentity = statSync(replacedPath);
+		const identityDetail =
+			`expected dev=${admittedSnapshot.dev}, ino=${admittedSnapshot.ino}; ` +
+			`observed dev=${observedIdentity.dev}, ino=${observedIdentity.ino}`;
+		await expect(replaced.appendJson(lexical)).rejects.toThrow(identityDetail);
+		await expect(replaced.recover()).rejects.toThrow(identityDetail);
 		expect(replaced.getSnapshot()).toEqual(admittedSnapshot);
 		expect(replaced.getSnapshot().ino).not.toBe(statSync(replacedPath).ino);
 		expect(readFileSync(replacedPath)).toEqual(Buffer.from(first.line));

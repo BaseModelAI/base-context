@@ -12,6 +12,7 @@ import {
 	CONTEXT_EPOCH_DETAIL,
 	CONTEXT_EPOCH_RENDERER,
 	CONTEXT_INTERRUPTED_TOOL_RENDERER,
+	CONTEXT_MODE_SUMMARY_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
@@ -502,7 +503,16 @@ export function prepareRecoveryCompaction(
 	const publicWindow = authorization
 		? authorization.publicWindow
 		: context?.checkpoint?.publicWindow === true && context.checkpoint.replayContract === "message-groups";
-	if (!boundary && !publicWindow && !context?.selectedSkills?.length && !context?.toolContinuations?.length) return;
+	// Keep an already accepted mode; fresh ordinary compaction does not create provider epoch obligations.
+	const preserveMode = context?.checkpoint !== undefined;
+	if (
+		!boundary &&
+		!publicWindow &&
+		!context?.selectedSkills?.length &&
+		!context?.toolContinuations?.length &&
+		!preserveMode
+	)
+		return;
 	if (!context) throw new Error("Recovery compaction requires captured canonical views");
 	const selection = getCanonicalViewSelectionSource(messages)!;
 	const cut = context.references.findIndex((reference) => reference?.ref.entryId === firstKeptEntryId);
@@ -543,17 +553,19 @@ export function prepareRecoveryCompaction(
 				]
 			: [];
 	});
-	if (!views.length && !publicWindow && !context.selectedSkills?.length && !toolGroups.size) return;
+	if (!views.length && !publicWindow && !context.selectedSkills?.length && !toolGroups.size && !preserveMode) return;
 	return snapshotContextEpoch(
 		{
-			...(toolGroups.size ? { version: 8 as const, mode: context.mode } : { version: 4 as const }),
+			...(toolGroups.size || preserveMode ? { version: 8 as const, mode: context.mode } : { version: 4 as const }),
 			renderer: context.toolContinuations?.some((group) => group.calls.some((call) => call.admission === "absent"))
 				? CONTEXT_INTERRUPTED_TOOL_RENDERER
 				: toolGroups.size
 					? CONTEXT_TOOL_SUMMARY_RENDERER
-					: context.selectedSkills?.length
-						? CONTEXT_SKILL_EPOCH_RENDERER
-						: CONTEXT_EPOCH_RENDERER,
+					: preserveMode
+						? CONTEXT_MODE_SUMMARY_RENDERER
+						: context.selectedSkills?.length
+							? CONTEXT_SKILL_EPOCH_RENDERER
+							: CONTEXT_EPOCH_RENDERER,
 			...(toolGroups.size ? { toolContinuations: context.toolContinuations } : {}),
 			...(context.selectedSkills?.length ? { selectedSkills: context.selectedSkills } : {}),
 			source: context.source,

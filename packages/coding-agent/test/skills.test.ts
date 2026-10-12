@@ -412,6 +412,27 @@ describe("skills", () => {
 			expect(introText).toContain("Skills with a python_import are prepared");
 		});
 
+		it("should use a complete native selection body without a second read", () => {
+			const { skills } = loadSkillsFromDir({ dir: join(fixturesDir, "valid-skill"), source: "test" });
+			const result = formatSkillsForPrompt(skills, true);
+
+			expect(result).toContain('Select a matching skill with the prime_context tool using {"action":"skill"');
+			expect(result).toContain("Use the complete skill body returned by selection.");
+			expect(result).not.toContain("Re-read the returned canonical ref");
+		});
+
+		it("should recover missing native skill context from the same frozen canonical ref", () => {
+			const { skills } = loadSkillsFromDir({ dir: join(fixturesDir, "valid-skill"), source: "test" });
+			const result = formatSkillsForPrompt(skills, true);
+
+			expect(result).toContain(
+				'Read the same canonical ref with action="read" only if that body is absent, incomplete, or no longer visible in context',
+			);
+			expect(result).toContain("do not reopen its mutable location");
+			expect(result).toContain("A selected version is frozen for its committed epoch.");
+			expect(result).toContain("A later accepted epoch permits a new selection.");
+		});
+
 		it("should escape XML special characters", () => {
 			const skills: Skill[] = [
 				createTestSkill({

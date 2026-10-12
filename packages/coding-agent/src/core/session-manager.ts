@@ -1616,6 +1616,13 @@ function newSessionWriteState(): SessionWriteState {
 const MAX_SESSION_PENDING_OPERATIONS = 32;
 const MAX_SESSION_PENDING_BYTES = 64 * 1024 * 1024;
 
+function sessionAppendFailure(error: unknown, source: "source" | "request" = "source"): Error {
+	return new Error(
+		`Session ${source} append failed; outcome may be unknown: ${error instanceof Error ? error.message : String(error)}`,
+		{ cause: error },
+	);
+}
+
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
@@ -2452,7 +2459,7 @@ export class SessionManager {
 					const ack = await appendSourceEntry(state.owner!, json, snapshot);
 					state.sequence = ack.sequence;
 				} catch (error) {
-					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
+					state.failure = sessionAppendFailure(error);
 					throw error;
 				}
 				Object.assign(state, metadata);
@@ -2530,7 +2537,7 @@ export class SessionManager {
 						state.sequence++;
 					}
 				} catch (error) {
-					state.failure = new Error("Session source append failed; outcome may be unknown", { cause: error });
+					state.failure = sessionAppendFailure(error);
 					throw error;
 				}
 				this._publishHistory(state);
@@ -2916,7 +2923,7 @@ export class SessionManager {
 						if (state.owner) state.sequence = (await state.owner.appendJson(json)).sequence;
 						else state.sequence++;
 					} catch (error) {
-						state.failure = new Error("Session request append failed; outcome may be unknown", { cause: error });
+						state.failure = sessionAppendFailure(error, "request");
 						throw error;
 					}
 					this._publishHistory(state);

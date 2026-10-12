@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import {
 	type CanonicalPayloadCursor,
 	type CanonicalPayloadFragment,
@@ -15,6 +16,7 @@ import {
 	type IndexedSourceEvent,
 	type IpythonSentMessagesOptions,
 	type IpythonSentMessagesPage,
+	isHistoryIndexCorruption,
 	type ParentPathOptions,
 	type ParentPathPage,
 	type SourceBootstrapState,
@@ -293,6 +295,7 @@ export class SessionHistoryIndex {
 	private pumping?: Promise<void>;
 	private failure?: unknown;
 	private closing?: Promise<void>;
+	private resetting?: Promise<void>;
 
 	constructor(
 		private readonly sessionId: string,
@@ -302,6 +305,10 @@ export class SessionHistoryIndex {
 	/** Retain at most one newer snapshot while the external worker indexes a prefix. */
 	publish(snapshot: SessionJournalState): void {
 		if (this.closing) return;
+		if (this.index?.isClosed) {
+			this.index = undefined;
+			this.indexedThrough = -1;
+		}
 		if (!this.latest || snapshot.nextSequence > this.latest.nextSequence) this.latest = { ...snapshot };
 		this.start();
 	}
@@ -311,7 +318,7 @@ export class SessionHistoryIndex {
 	}
 
 	private start(): void {
-		if (this.pumping || !this.needsWork()) return;
+		if (this.pumping || this.resetting || !this.needsWork()) return;
 		this.failure = undefined;
 		const job = this.pump();
 		this.pumping = job;
@@ -324,20 +331,59 @@ export class SessionHistoryIndex {
 	private async pump(): Promise<void> {
 		while (this.latest && this.needsWork()) {
 			const snapshot = this.latest;
-			try {
-				this.index ??= await HistoryIndex.open(this.path);
-				const frontier = await this.index.syncSource(this.sessionId, snapshot);
-				this.indexedThrough = frontier.indexedThrough;
-			} catch (error) {
-				this.failure = error;
-				return;
+			for (let attempt = 0; attempt < 2; attempt++) {
+				try {
+					this.index ??= await HistoryIndex.open(this.path);
+					const frontier = await this.index.syncSource(this.sessionId, snapshot);
+					this.indexedThrough = frontier.indexedThrough;
+					break;
+				} catch (error) {
+					const failed = this.index;
+					this.index = undefined;
+					this.indexedThrough = -1;
+					await failed?.close().catch(() => undefined);
+					if (attempt === 1) {
+						this.failure = error;
+						return;
+					}
+					// Only the disposable SQLite cache is replaced, never the authoritative journal.
+					if (isHistoryIndexCorruption(error)) {
+						try {
+							for (const suffix of ["", "-wal", "-shm"]) await rm(this.path + suffix, { force: true });
+						} catch (cleanup) {
+							this.failure = cleanup;
+							return;
+						}
+					}
+				}
 			}
+		}
+	}
+
+	/** Discard a failed read worker/cache without changing the capture or retrying semantic errors. */
+	async invalidate(failed: HistoryIndex, error: unknown): Promise<void> {
+		if (this.resetting) return this.resetting;
+		if (this.index !== failed || (!failed.isClosed && !isHistoryIndexCorruption(error))) return;
+		this.resetting = (async () => {
+			if (this.pumping) await this.pumping;
+			if (this.index !== failed) return;
+			this.index = undefined;
+			this.indexedThrough = -1;
+			await failed.close().catch(() => undefined);
+			if (isHistoryIndexCorruption(error))
+				for (const suffix of ["", "-wal", "-shm"]) await rm(this.path + suffix, { force: true });
+		})();
+		try {
+			await this.resetting;
+		} finally {
+			this.resetting = undefined;
 		}
 	}
 
 	/** Callers must apply their captured sequence/branch scope to the following query. */
 	async synchronize(snapshot: SessionJournalState): Promise<HistoryIndex> {
 		if (this.closing) throw new Error("Session history index is closing");
+		if (this.resetting) await this.resetting;
 		this.publish(snapshot);
 		while (this.indexedThrough < snapshot.nextSequence - 1) {
 			const job = this.pumping;
@@ -365,6 +411,7 @@ export class SessionHistoryIndex {
 	/** Finish accepted indexing, then wait for the external worker to close. */
 	close(): Promise<void> {
 		this.closing ??= (async () => {
+			if (this.resetting) await this.resetting;
 			while (this.pumping) await this.pumping;
 			await this.index?.close();
 		})();

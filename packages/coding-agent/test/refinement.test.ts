@@ -1501,6 +1501,16 @@ describe("global refinement history", () => {
 		expect(plan.id).toMatch(/^refine_/);
 		const request = completeSimpleMock.mock.calls[0][1];
 		const userPrompt = request.messages[0].content[0].text;
+		expect(request.systemPrompt).toContain(
+			"Use the documented binding and qualified call; await only awaitable results, not synchronous results.",
+		);
+		expect(request.systemPrompt).toContain(
+			"Preserve documented direct-import function calls and native callable `run`-wrapper shorthand.",
+		);
+		expect(request.systemPrompt).toContain(
+			'"import": "package.module", "callable": "function_name", "call_pattern": "await package.module.function_name(...)"',
+		);
+		expect(request.systemPrompt).not.toContain("Include the RLM-native call form `await <skill_import>(...)`.");
 		expect(userPrompt).toContain("Requested refinement scope: local");
 		expect(userPrompt).toContain("Global entries in the overview are read-only context");
 		expect(request.systemPrompt).toContain('handle = await rlm("sub-task")');

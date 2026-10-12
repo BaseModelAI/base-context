@@ -529,7 +529,7 @@ export function formatSkillsForPrompt(skills: Skill[], nativeSelection = false):
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
 		nativeSelection
-			? 'Select a matching skill with the prime_context tool using {"action":"skill","name":"..."}. Re-read the returned canonical ref with action="read"; do not reopen its mutable location. A selected version is frozen for its committed epoch. A later accepted epoch permits a new selection.'
+			? 'Select a matching skill with the prime_context tool using {"action":"skill","name":"..."}. Use the complete skill body returned by selection. Read the same canonical ref with action="read" only if that body is absent, incomplete, or no longer visible in context; do not reopen its mutable location. A selected version is frozen for its committed epoch. A later accepted epoch permits a new selection.'
 			: "Use ipython to inspect a skill's file when the task matches its description.",
 		"Skills with a python_import are prepared in the persistent Python kernel when available and can be called directly by that import name.",
 		"When a skill file references a relative path, resolve it against the skill directory (parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",

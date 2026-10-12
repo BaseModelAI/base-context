@@ -1,4 +1,5 @@
 import { registerSessionResourceCleanup } from "@ponythewhite/base-context-ai";
+import type { RetainedToolOutput } from "../retained-tool-output.js";
 import type { NativeRecoveryResponse } from "../selective-recovery.js";
 import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootstrap.js";
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
@@ -95,7 +96,9 @@ export interface ExecuteOptions {
 	onExecutionStarted?: (execution: KernelExecutionHandle) => void;
 	onStream?: (chunk: string, name: "stdout" | "stderr") => void;
 	onLateSentAgentMessage?: (message: KernelSentAgentMessage) => void;
-	/** Cap stdout / stderr / result at this many characters. Default 65536. */
+	/** Stream complete output into the existing session artifact directory. */
+	outputDirectory?: string;
+	/** Bound in-memory stdout / stderr / result previews. Default 65536. */
 	maxOutputChars?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
@@ -151,7 +154,9 @@ export interface KernelSentAgentMessage {
 }
 
 export interface ExecuteResult {
-	/** Whether the finalized textual output was captured without host truncation or interruption. */
+	/** Closed full-output artifact; textual result channels remain bounded previews. */
+	retainedOutput?: RetainedToolOutput;
+	/** Whether textual output was captured without loss or interruption, including retained output. */
 	outputComplete?: boolean;
 	/** Host-selected public data transferred once to the normal finalized ipython result. */
 	nativeRecoveries?: NativeRecoveryResponse[];
@@ -170,6 +175,17 @@ export interface ExecuteResult {
 	status: "ok" | "error" | "aborted";
 	error?: { ename: string; evalue: string; traceback: string[] };
 	durationMs: number;
+}
+
+/** A native execution failure with its closed partial capture, not a successful cell result. */
+export class KernelExecutionError extends Error {
+	constructor(
+		error: Error,
+		readonly output: ExecuteResult,
+	) {
+		super(error.message, { cause: error });
+		this.name = "KernelExecutionError";
+	}
 }
 
 /** Parse a {@link DIFF_DISPLAY_MIME} payload, tolerating malformed input. */

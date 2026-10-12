@@ -1199,6 +1199,7 @@ export class AgentSession {
 	};
 	private readonly _contextEpochsEnabled: boolean;
 	private readonly _initialContextMode: ContextMode;
+	private readonly _explicitInitialContextMode: boolean;
 	private _contextMode: ContextMode;
 	private _pendingContextModeChanges = 0;
 	private readonly _contextUsageReader = new ContextUsageReader();
@@ -1509,6 +1510,7 @@ export class AgentSession {
 		});
 		this.agent.bindInitializationOwner(() => this.initialize());
 		this._initialContextMode = config.contextMode ?? config.settingsManager.getContextMode();
+		this._explicitInitialContextMode = config.contextMode !== undefined;
 		if (this._initialContextMode !== "on" && this._initialContextMode !== "off")
 			throw new Error("context.mode must be on or off");
 		this._contextMode = this._initialContextMode;
@@ -1918,7 +1920,9 @@ export class AgentSession {
 			this._ensureGoalRuntimeActive();
 		}
 		await this.sessionManager.flushNow();
-		if (this._contextMode === "off") await this._writeContextMode("off", freshContextContract);
+		// Explicit choices are durable; an unspecified ON default keeps ordinary native bootstrap.
+		if (this._contextMode === "off" || (this._explicitInitialContextMode && this.sessionManager.isPersisted()))
+			await this._writeContextMode(this._contextMode, freshContextContract);
 	}
 
 	/** Accepted canonical policy. Settings are only the creation default. */
@@ -2005,10 +2009,7 @@ export class AgentSession {
 				this._contextCompiler.compile(view, limits, undefined, {}, resource, this._initialContextMode),
 			);
 			const context = getCanonicalEpochContext(messages)!;
-			if (
-				contextEpochMode(context.checkpoint, this._initialContextMode) === mode &&
-				(context.checkpoint !== undefined || mode === "on")
-			) {
+			if (context.checkpoint && contextEpochMode(context.checkpoint, this._initialContextMode) === mode) {
 				this._contextMode = mode;
 			} else {
 				const prepared = prepareContextModeEpoch(messages, mode, limits.maxSourceBytes, freshContextContract);

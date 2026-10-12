@@ -20,6 +20,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelClient,
 	type KernelDiffDisplay,
+	KernelExecutionError,
 	type KernelExecutionHandle,
 	type KernelSentAgentMessage,
 	ReplKernelManager,
@@ -670,6 +671,7 @@ async function executeWithBusyKernelChoice(
 					runNativeRecovery,
 					onExecutionStarted,
 					onStream,
+					outputDirectory: provisioner.artifactDir,
 					onLateSentAgentMessage: onLateSentAgentMessage
 						? (message) => onLateSentAgentMessage(toolCallId, message)
 						: undefined,
@@ -677,6 +679,7 @@ async function executeWithBusyKernelChoice(
 				kernelRestarted,
 			};
 		} catch (error) {
+			if (error instanceof KernelExecutionError) return { result: error.output, kernelRestarted };
 			if (!(error instanceof KernelBusyAfterInterruptError) || signal?.aborted) {
 				throw error;
 			}
@@ -800,7 +803,11 @@ export function createIpythonToolDefinition(
 						toolCallId,
 						params.code,
 						signal,
-						(chunk) => onUpdate?.({ content: [{ type: "text", text: chunk }], details: { status: "ok" } }),
+						(chunk) =>
+							onUpdate?.({
+								content: [{ type: "text", text: outputExcerpt(chunk, TOOL_OUTPUT_PREVIEW_BYTES)! }],
+								details: { status: "ok" },
+							}),
 						setToolWorkingMessage,
 						options?.onLateSentAgentMessage,
 						options?.captureNativeRecoveryScope?.(),
@@ -888,18 +895,20 @@ export function createIpythonToolDefinition(
 					add(r.backgroundOutput);
 				}
 				const byteLength = parts.reduce((size, part) => size + Buffer.byteLength(part), 0);
-				let retainedOutput: RetainedToolOutput | undefined;
-				let text: string;
-				if (provisioner.artifactDir && byteLength > TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
+				let retainedOutput = r.retainedOutput;
+				if (!retainedOutput && provisioner.artifactDir && byteLength > TOOL_OUTPUT_PREVIEW_BYTES - 2048) {
 					retainedOutput = await retainToolOutput(provisioner.artifactDir, parts, r.outputComplete === true);
-					const wrapper = `ipython ${r.status}; retained output ${retainedOutput.artifactId} (${byteLength} UTF-8 bytes; ${retainedOutput.captureComplete ? "capture complete" : "partial/unknown capture; discarded bytes unavailable"}).\n[Output omitted. Public history supplies prime_context ref + field ${retainedOutput.field}.]\n`;
+				}
+				let text: string;
+				if (retainedOutput) {
+					const wrapper = `ipython ${r.status}; retained output ${retainedOutput.artifactId} (${retainedOutput.byteLength} UTF-8 bytes; ${retainedOutput.captureComplete ? "capture complete" : "partial/unknown capture; uncaptured bytes unavailable"}${retainedOutput.captureError ? `; ${retainedOutput.captureError}` : ""}).\n[Output omitted; retained field ${retainedOutput.field}.]\n`;
 					let excerptBytes = 1024;
 					do {
 						const priority = errorText || r.stderr;
 						text =
 							wrapper +
 							(priority ? `Error/stderr:\n${outputExcerpt(priority, excerptBytes)}\n` : "") +
-							`Output head/tail:\n${outputExcerpt(parts[0], excerptBytes)}\n${parts.length > 1 ? outputExcerpt(parts[parts.length - 1], excerptBytes) : ""}`;
+							`Captured channel excerpts:\n${outputExcerpt(parts[0], excerptBytes)}\n${parts.length > 1 ? outputExcerpt(parts[parts.length - 1], excerptBytes) : ""}`;
 						excerptBytes = Math.floor(excerptBytes / 2);
 					} while (
 						Buffer.byteLength(JSON.stringify(text)) > TOOL_OUTPUT_PREVIEW_BYTES - 4096 &&

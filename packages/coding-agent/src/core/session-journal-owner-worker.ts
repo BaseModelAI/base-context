@@ -174,7 +174,13 @@ async function start(): Promise<void> {
 	const requireFileIdentity = (current: Pick<Stats, "dev" | "ino">) => {
 		if (fileIdentity && (current.dev !== fileIdentity.dev || current.ino !== fileIdentity.ino)) {
 			poisoned = true;
-			throw new Error("Session journal file identity changed outside its owner");
+			throw new Error(
+				`Session journal file identity changed outside its owner: ${JSON.stringify(journalPath)}; ` +
+					`expected dev=${fileIdentity.dev}, ino=${fileIdentity.ino}; observed dev=${current.dev}, ino=${current.ino}. ` +
+					"Stop the owning runtime and inspect the journal before reopening it to reacquire ownership. " +
+					"For CLI sessions, base-context shutdown stops all workers; then use base-context --resume <path>. " +
+					"Do not delete the owner lock or blindly retry the failed append.",
+			);
 		}
 		fileIdentity ??= current;
 	};

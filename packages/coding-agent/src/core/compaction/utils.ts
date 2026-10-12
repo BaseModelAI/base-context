@@ -115,9 +115,12 @@ export function serializeConversation(messages: Message[]): string {
 					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					const args = block.arguments as Record<string, unknown>;
-					const argsStr = Object.entries(args)
-						.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-						.join(", ");
+					const argsStr =
+						args === null
+							? "null"
+							: Object.entries(args)
+									.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+									.join(", ");
 					toolCalls.push(`${block.name}(${argsStr})`);
 				}
 			}

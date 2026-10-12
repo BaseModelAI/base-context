@@ -91,7 +91,7 @@ async function openIndex() {
 				`Index open and close failed: ${String(error)}; ${String(cleanup)}`,
 			);
 		}
-		if (readOnly && process.connected)
+		if (process.connected)
 			await new Promise<void>((resolveSent) => {
 				try {
 					process.send?.(

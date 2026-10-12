@@ -16,17 +16,23 @@ import {
 } from "@ponythewhite/base-context-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompactionCommittedError } from "../../src/core/agent-session.js";
+import { type AgentSession, CompactionCommittedError } from "../../src/core/agent-session.js";
 import {
 	CanonicalContextCompiler,
 	canonicalRecoveryBoundary,
 	getCanonicalViewUnits,
 } from "../../src/core/canonical-context.js";
-import { appendContextEpoch, readContextEpoch } from "../../src/core/context-epoch.js";
+import {
+	appendContextEpoch,
+	CONTEXT_MODE_SUMMARY_RENDERER,
+	CONTEXT_TOOL_SUMMARY_RENDERER,
+	readContextEpoch,
+} from "../../src/core/context-epoch.js";
 import { InferenceCoordinator } from "../../src/core/inference-coordinator.js";
 import { DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES } from "../../src/core/kernel/state-snapshot.js";
 import type { RefinementProposal } from "../../src/core/refinement/index.js";
 import { getRecoveryCompactionAuthorization, PublicContextBudgetError } from "../../src/core/request-view-selection.js";
+import { createAgentSession } from "../../src/core/sdk.js";
 import { SessionJournalOwner } from "../../src/core/session-journal-owner.js";
 import { readSessionJournal } from "../../src/core/session-journal-reader.js";
 import { type CompactionEntry, type RequestJournalEntry, SessionManager } from "../../src/core/session-manager.js";
@@ -141,6 +147,7 @@ function failingGateCommand(): string {
 
 describe("AgentSession compaction characterization", () => {
 	const harnesses: Harness[] = [];
+	const sdkSessions: AgentSession[] = [];
 
 	beforeEach(() => {
 		vi.useRealTimers();
@@ -149,6 +156,9 @@ describe("AgentSession compaction characterization", () => {
 	afterEach(async () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+		while (sdkSessions.length > 0) {
+			await sdkSessions.pop()?.disposeAsync();
+		}
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
@@ -319,6 +329,142 @@ describe("AgentSession compaction characterization", () => {
 		}
 		return { harness, internals, scheduled, continued, running, pause, releaseTool, compacted };
 	}
+
+	it.each(["immediate", "plain compaction"] as const)(
+		"persists SDK creation context ON across %s and cold reopen over changed defaults and overrides",
+		async (beforeReopen) => {
+			const harness = await createHarness({
+				provider: "deepseek",
+				models: [{ id: "deepseek-flash", name: "DeepSeek Flash (offline faux)" }],
+				settings: {
+					compaction: { enabled: false, keepRecentTokens: 1 },
+					autoRefine: { enabled: false },
+				},
+			});
+			harnesses.push(harness);
+			harness.settingsManager.applyOverrides({ context: { mode: "off" } });
+			const create = async (sessionManager: SessionManager, contextMode?: "on" | "off") => {
+				const { session } = await createAgentSession({
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					authStorage: harness.authStorage,
+					modelRegistry: harness.session.modelRegistry,
+					model: harness.getModel(),
+					settingsManager: harness.settingsManager,
+					resourceLoader: createTestResourceLoader(),
+					sessionManager,
+					contextMode,
+					noTools: "all",
+					prewarmIpythonKernel: false,
+				});
+				sdkSessions.push(session);
+				return session;
+			};
+			const manager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sdk-sessions"));
+			const created = await create(manager, "on");
+			expect(created.contextMode).toBe("on");
+			if (beforeReopen === "plain compaction") {
+				harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
+				await created.prompt("first plain request");
+				await created.prompt("second plain request");
+				harness.setResponses([
+					fauxAssistantMessage("plain history summary"),
+					fauxAssistantMessage("plain turn summary"),
+				]);
+				await created.compact();
+				expect(created.contextMode).toBe("on");
+			}
+			const file = manager.getSessionFile()!;
+			await created.disposeAsync();
+
+			const reopened = await create(await SessionManager.open(file));
+			expect(reopened.contextMode).toBe("on");
+			await reopened.disposeAsync();
+
+			harness.settingsManager.applyOverrides({ context: { mode: "on" } });
+			const overridden = await create(await SessionManager.open(file), "off");
+			expect(overridden.contextMode).toBe("on");
+			await overridden.setContextMode("off");
+			await overridden.disposeAsync();
+
+			const savedOff = await create(await SessionManager.open(file), "on");
+			expect(savedOff.contextMode).toBe("off");
+		},
+	);
+
+	it.each([
+		{ initial: "off", selected: "on" },
+		{ initial: "on", selected: "off" },
+	] as const)(
+		"keeps explicit context mode $selected over settings $initial across plain compaction and cold reopen",
+		async ({ initial, selected }) => {
+			const settings = {
+				context: { mode: initial },
+				compaction: { enabled: false, keepRecentTokens: 1 },
+				autoRefine: { enabled: false },
+			};
+			const seed = await createHarness({ persistSession: true, settings: { ...settings, context: { mode: "on" } } });
+			harnesses.push(seed);
+			seed.setResponses([fauxAssistantMessage("first answer")]);
+			await seed.session.prompt("first plain request");
+			const sourceFile = seed.sessionManager.getSessionFile()!;
+			await seed.session.dispose();
+			await seed.sessionManager.close();
+			const harness = await createHarness({ sessionManager: await SessionManager.open(sourceFile), settings });
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage("second answer")]);
+			await harness.session.setContextMode(selected);
+			await harness.session.prompt("second plain request");
+			expect(harness.session.contextMode).toBe(selected);
+			if (selected === "off") {
+				const before = await harness.sessionManager.readEntries();
+				await expect(harness.session.compact()).rejects.toThrow("Context optimization is disabled");
+				expect(await harness.sessionManager.readEntries()).toEqual(before);
+			} else {
+				harness.setResponses([
+					fauxAssistantMessage("plain history summary"),
+					fauxAssistantMessage("plain turn summary"),
+				]);
+				await harness.session.compact();
+				expect(harness.session.contextMode).toBe(selected);
+				const summary = (await harness.sessionManager.readEntries())
+					.filter((entry): entry is CompactionEntry => entry.type === "compaction")
+					.at(-1)!;
+				const epoch = readContextEpoch(summary.details, 1024 * 1024)!;
+				expect(epoch).toMatchObject({
+					version: 8,
+					renderer: CONTEXT_MODE_SUMMARY_RENDERER,
+					mode: selected,
+					includeSummary: true,
+					representation: null,
+				});
+				expect(epoch.toolContinuations).toBeUndefined();
+				expect(() =>
+					readContextEpoch(
+						{ baseContextEpoch: { ...epoch, renderer: CONTEXT_TOOL_SUMMARY_RENDERER } },
+						1024 * 1024,
+					),
+				).toThrow("Invalid committed context epoch");
+				const copied = await SessionManager.forkFrom(
+					harness.sessionManager.getSessionFile()!,
+					harness.tempDir,
+					join(harness.tempDir, "mode-summary-copy"),
+				);
+				const copiedHarness = await createHarness({ sessionManager: copied, settings });
+				harnesses.push(copiedHarness);
+				expect(copiedHarness.session.contextMode).toBe(selected);
+			}
+			const file = harness.sessionManager.getSessionFile()!;
+			await harness.session.dispose();
+			await harness.sessionManager.close();
+			const reopened = await createHarness({ sessionManager: await SessionManager.open(file), settings });
+			harnesses.push(reopened);
+			expect(reopened.session.contextMode).toBe(selected);
+			reopened.setResponses([fauxAssistantMessage("continued after cold reopen")]);
+			await reopened.session.prompt("continue with the saved mode");
+			expect(reopened.session.contextMode).toBe(selected);
+		},
+	);
 
 	it.each(["manual", "requested", "threshold", "overflow"] as const)(
 		"compacts a bounded active view over more than 64 MiB of older source (%s)",

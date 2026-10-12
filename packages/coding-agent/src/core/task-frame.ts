@@ -17,10 +17,12 @@ export interface TaskFrameLimits {
 }
 
 export function taskFrameLimits(limits: Partial<TaskFrameLimits> = {}): Readonly<TaskFrameLimits> {
+	const maxBytes = limits.maxBytes ?? 16_384;
 	const captured = Object.freeze({
-		maxBytes: limits.maxBytes ?? 16_384,
+		maxBytes,
 		maxReferences: limits.maxReferences ?? 32,
-		maxTextBytes: limits.maxTextBytes ?? 2_048,
+		// Let prioritized exact clauses use the current selection's space, not an unrelated smaller cap.
+		maxTextBytes: limits.maxTextBytes ?? Math.floor(maxBytes / 2),
 	});
 	if (
 		!Object.values(captured).every(Number.isSafeInteger) ||

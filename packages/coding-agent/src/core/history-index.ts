@@ -343,6 +343,10 @@ export type HistoryIndexRequest =
 
 export class HistoryIndexUnsupportedError extends Error {}
 
+export function isHistoryIndexCorruption(error: unknown): boolean {
+	return /database disk image is malformed|file is not a database|SQLITE_CORRUPT|SQLITE_NOTADB/i.test(String(error));
+}
+
 type Response =
 	| { id: number; result?: unknown; error?: string }
 	| { ready: true }
@@ -689,6 +693,11 @@ export class HistoryIndex {
 			...(scope ? { scope: { leafId: scope.leafId } } : {}),
 		})) as HistoryIndexPage;
 	}
+
+	get isClosed(): boolean {
+		return this.closed || this.closing;
+	}
+
 	/** Selection and text-coverage scans each reject after 256 unresolved candidates. */
 	async search(
 		sessionId: string,

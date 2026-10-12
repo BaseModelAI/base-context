@@ -165,6 +165,41 @@ describe("Codex websocket connection identity", () => {
 		}
 	}
 
+	it.each([
+		{ name: "omitted-auto", transport: undefined, cached: true },
+		{ name: "plain-websocket", transport: "websocket", cached: false },
+	] as const)("honors $name transport cache policy", async ({ name, transport, cached }) => {
+		MockWebSocket.instances = [];
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		global.fetch = vi.fn(async () => {
+			throw new Error("Unexpected SSE fallback");
+		});
+		const requestOptions = {
+			apiKey: mockToken(),
+			sessionId: `cache-policy-${name}`,
+			...(transport === undefined ? {} : { transport }),
+		};
+		const first = await streamSimpleOpenAICodexResponses(model, context, requestOptions).result();
+		expect(first.stopReason).toBe("stop");
+		const secondContext: Context = {
+			messages: [...context.messages, first, { role: "user", content: "Now finish", timestamp: 1 }],
+		};
+		expect((await streamSimpleOpenAICodexResponses(model, secondContext, requestOptions).result()).stopReason).toBe(
+			"stop",
+		);
+		expect(MockWebSocket.instances).toHaveLength(1);
+		const [firstBody, secondBody] = MockWebSocket.instances[0].bodies;
+		expect(firstBody.previous_response_id).toBeUndefined();
+		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Hello" }] }]);
+		expect(secondBody.previous_response_id).toBe(cached ? "resp_fixture" : undefined);
+		const nextInput = { role: "user", content: [{ type: "input_text", text: "Now finish" }] };
+		expect(secondBody.input).toEqual(cached ? [nextInput] : [...firstBody.input, nextInput]);
+		for (const body of [firstBody, secondBody]) {
+			expect(body).toMatchObject({ store: false, prompt_cache_key: requestOptions.sessionId });
+		}
+		expect(global.fetch).not.toHaveBeenCalled();
+	});
+
 	it("reuses unchanged auth despite trace headers, but replaces changed auth and URLs", async () => {
 		MockWebSocket.instances = [];
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
@@ -273,6 +308,44 @@ describe("Codex websocket connection identity", () => {
 		});
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
+
+	it.each([false, true])(
+		"recovers an unfinished normal websocket close without replaying partial output (%s)",
+		async (partial) => {
+			process.env.BASE_CONTEXT_HOME = mkdtempSync(join(tmpdir(), "codex-unfinished-close-"));
+			class InterruptedWebSocket extends MockWebSocket {
+				override complete(): void {
+					if (partial) {
+						for (const data of buildSSEPayload({ status: "completed" }).split("\n\n").slice(0, 3)) {
+							this.dispatchEvent(new MessageEvent("message", { data: data.slice(6) }));
+						}
+					}
+					this.readyState = 3;
+					this.dispatchEvent(Object.assign(new Event("close"), { code: 1000, reason: "", wasClean: true }));
+				}
+			}
+			MockWebSocket.instances = [];
+			globalThis.WebSocket = InterruptedWebSocket as unknown as typeof WebSocket;
+			global.fetch = vi.fn(async () => new Response(buildSSEPayload({ status: "completed" }), { status: 200 }));
+
+			const first = await streamOpenAICodexResponses(model, context, options).result();
+			expect(first.stopReason).toBe(partial ? "error" : "stop");
+			expect(first.content).toContainEqual(expect.objectContaining({ type: "text", text: "Hello" }));
+			expect(global.fetch).toHaveBeenCalledTimes(partial ? 0 : 1);
+			const diagnostic = first.diagnostics?.find(
+				(entry) => entry.type === (partial ? "provider_stream_failure" : "provider_transport_failure"),
+			);
+			expect(diagnostic?.error).toMatchObject({ name: "WebSocketCloseError", message: "WebSocket closed 1000" });
+			if (partial)
+				expect(diagnostic?.details).toMatchObject({ kind: "transport", providerErrorType: "websocket_close_1000" });
+			expect(getOpenAICodexWebSocketDebugStats(options.sessionId)?.websocketFallbackActive).toBe(true);
+
+			const next = await streamOpenAICodexResponses(model, context, options).result();
+			expect(next.stopReason).toBe("stop");
+			expect(MockWebSocket.instances).toHaveLength(1);
+			expect(global.fetch).toHaveBeenCalledTimes(partial ? 1 : 2);
+		},
+	);
 
 	it("keeps a busy socket with its owner and does not let its stale release evict a replacement", async () => {
 		MockWebSocket.instances = [];

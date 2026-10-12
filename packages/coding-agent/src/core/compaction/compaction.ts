@@ -560,6 +560,9 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
+const BINDING_REQUIREMENTS_SUMMARY_NOTE =
+	"Preserve still-binding user requirements and constraints with their original force, scope, and conditions, subject to higher-priority instructions. Keep them binding until a later user instruction changes or withdraws them; progress or assistant suggestions alone do not change them. Record them as constraints, not merely as past decisions or optional suggestions. Distinguish settled decisions from unaccepted recommendations, and do not invent new recommendations. Never instruct the next assistant to relax still-binding constraints.";
+
 const RUNTIME_STATE_SUMMARY_NOTE =
 	"Runtime note: this summary does not establish whether a Python kernel is live or whether its variables, imports, helpers, or jobs remain available. Preserve useful names and their last observed state, including uncertainty. Use current runtime reports before relying on them; do not infer either survival or loss from compaction.";
 
@@ -571,7 +574,7 @@ Update the existing structured summary with new information. RULES:
 - UPDATE the Progress section: move items from "In Progress" to "Done" when completed
 - UPDATE "Next Steps" based on what was accomplished
 - PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+- If something is no longer relevant, you may remove it; still-binding requirements and constraints remain relevant
 
 Use this EXACT format:
 
@@ -604,14 +607,14 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 /**
  * Build the instruction portion of the summarization prompt: the initial or
- * update template, optional user instructions, and the runtime-state qualification.
+ * update template, optional user instructions, and requirement/runtime-state qualifications.
  */
 export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
 	}
-	return `${basePrompt}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
+	return `${basePrompt}\n\n${BINDING_REQUIREMENTS_SUMMARY_NOTE}\n\n${RUNTIME_STATE_SUMMARY_NOTE}`;
 }
 
 /**
@@ -637,11 +640,14 @@ export async function generateSummary(
 	// Serialize before the LLM call so it summarizes rather than continues this conversation.
 	const llmMessages = convertToLlm(currentMessages);
 	const conversationText = serializeConversation(llmMessages);
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	let promptText = `<conversation>\n${conversationText}\n</conversation>`;
 	if (previousSummary) {
-		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
+		promptText += `\n\n<previous-summary>\n${previousSummary}\n</previous-summary>`;
 	}
-	promptText += basePrompt;
+	// Custom instructions may refer to the evidence above them.
+	promptText = customInstructions
+		? `${promptText}\n\n${basePrompt}`
+		: `${basePrompt.replace(/^The messages above/, "The messages in <conversation> tags")}\n\n${promptText}`;
 
 	const summarizationMessages = [
 		{
@@ -920,7 +926,7 @@ export function prepareCompaction(
 		settings,
 	};
 }
-const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
+const TURN_PREFIX_SUMMARIZATION_PROMPT = `The conversation in <conversation> tags is the PREFIX of a turn that was too large to keep. The SUFFIX (recent work) is retained.
 
 Summarize the prefix to provide context for the retained suffix:
 
@@ -933,7 +939,9 @@ Summarize the prefix to provide context for the retained suffix:
 ## Context for Suffix
 - [Information needed to understand the retained recent work]
 
-Be concise. Focus on what's needed to understand the kept suffix.`;
+Be concise. Focus on what's needed to understand the kept suffix.
+
+${BINDING_REQUIREMENTS_SUMMARY_NOTE}`;
 
 /**
  * Generate summaries for compaction using prepared data.
@@ -1103,7 +1111,7 @@ async function generateTurnPrefixSummary(
 	const maxTokens = outputTokenLimit ?? (getCodexContextPolicy(model) ? undefined : Math.floor(0.5 * reserveTokens));
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
-	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
+	const promptText = `${TURN_PREFIX_SUMMARIZATION_PROMPT}\n\n<conversation>\n${conversationText}\n</conversation>`;
 	const summarizationMessages = [
 		{
 			role: "user" as const,

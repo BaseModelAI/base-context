@@ -24,6 +24,7 @@ import {
 	type OrphanProcessJournalOwner,
 	reapKernelOrphanProcesses,
 } from "../orphan-process-journal.js";
+import { ToolOutputCapture } from "../retained-tool-output.js";
 import {
 	createNativeRecoveryRefusal,
 	DEFAULT_NATIVE_RECOVERY_LIMITS,
@@ -56,6 +57,7 @@ import {
 	type KernelAttachment,
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
+	KernelExecutionError,
 	type KernelManagerOptions,
 	type KernelSentAgentMessage,
 	type KernelShutdownOptions,
@@ -113,6 +115,10 @@ interface ActiveExecution {
 	stderr: string;
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
+	resultTruncated: boolean;
+	errorTruncated: boolean;
+	outputCapture?: ToolOutputCapture;
+	initialBackgroundTruncated: boolean;
 	result?: string;
 	diffs: KernelDiffDisplay[];
 	attachments: KernelAttachment[];
@@ -918,6 +924,7 @@ export class ReplKernelManager {
 		}
 		if (type === "stdout" || type === "stderr") {
 			const text = typeof event.text === "string" ? event.text : "";
+			execution.outputCapture?.append(type, text);
 			if (type === "stdout") {
 				if (execution.stdout.length < execution.maxChars) {
 					execution.stdout += text;
@@ -941,14 +948,20 @@ export class ReplKernelManager {
 			}
 			execution.opts.onStream?.(text, type);
 		} else if (type === "result") {
-			if (typeof event.text === "string") execution.result = event.text;
+			if (typeof event.text === "string") {
+				execution.outputCapture?.append("result", event.text);
+				execution.result = event.text.slice(0, execution.maxChars);
+				execution.resultTruncated = event.text.length > execution.maxChars;
+			}
 		} else if (type === "display") {
 			const data = isRecord(event.data) ? event.data : {};
 			const diff = parseDiffDisplay(data[DIFF_DISPLAY_MIME]);
 			if (diff) execution.diffs.push(diff);
 			const attachment = parseAttachmentDisplay(data[ATTACHMENT_DISPLAY_MIME]);
 			if (attachment === "oversized") {
-				execution.stderr += `${execution.stderr ? "\n" : ""}attachment dropped: exceeds ${MAX_ATTACHMENT_DATA_CHARS} base64 chars`;
+				const diagnostic = `attachment dropped: exceeds ${MAX_ATTACHMENT_DATA_CHARS} base64 chars`;
+				execution.outputCapture?.append("stderr", diagnostic);
+				execution.stderr += `${execution.stderr ? "\n" : ""}${diagnostic}`;
 				execution.status = "error";
 			} else if (attachment) {
 				execution.attachments.push(attachment);
@@ -956,10 +969,15 @@ export class ReplKernelManager {
 			const sentAgentMessage = parseSentAgentMessage(data[AGENT_MESSAGE_DISPLAY_MIME]);
 			if (sentAgentMessage) execution.sentAgentMessages.push(sentAgentMessage);
 		} else if (type === "error") {
+			const ename = typeof event.ename === "string" ? event.ename : "Error";
+			const evalue = typeof event.evalue === "string" ? event.evalue : "";
+			const traceback = asStringArray(event.traceback).join("\n");
+			execution.outputCapture?.append("error", traceback || `${ename}: ${evalue}`);
+			execution.errorTruncated = Math.max(ename.length, evalue.length, traceback.length) > execution.maxChars;
 			execution.error = {
-				ename: typeof event.ename === "string" ? event.ename : "Error",
-				evalue: typeof event.evalue === "string" ? event.evalue : "",
-				traceback: asStringArray(event.traceback),
+				ename: ename.slice(0, execution.maxChars),
+				evalue: evalue.slice(0, execution.maxChars),
+				traceback: traceback ? traceback.slice(0, execution.maxChars).split("\n") : [],
 			};
 			execution.status = "error";
 		} else if (type === "done") {
@@ -968,7 +986,13 @@ export class ReplKernelManager {
 				execution.status = "error";
 				// State requests report failures as a done reason without an error event.
 				if (!execution.error && typeof event.reason === "string") {
-					execution.error = { ename: "KernelError", evalue: event.reason, traceback: [] };
+					execution.outputCapture?.append("error", `KernelError: ${event.reason}`);
+					execution.errorTruncated = event.reason.length > execution.maxChars;
+					execution.error = {
+						ename: "KernelError",
+						evalue: event.reason.slice(0, execution.maxChars),
+						traceback: [],
+					};
 				}
 			}
 			this.finishActiveExecution(execution);
@@ -1091,6 +1115,11 @@ export class ReplKernelManager {
 			stderr: "",
 			stdoutTruncated: false,
 			stderrTruncated: false,
+			resultTruncated: false,
+			errorTruncated: false,
+			outputCapture:
+				opts.outputDirectory && !opts.internal ? new ToolOutputCapture(opts.outputDirectory) : undefined,
+			initialBackgroundTruncated: this.pendingBackgroundOutputTruncated,
 			diffs: [],
 			attachments: [],
 			sentAgentMessages: [],
@@ -1106,6 +1135,7 @@ export class ReplKernelManager {
 			resolve: result.resolve,
 			reject: result.reject,
 		};
+		execution.outputCapture?.append("background (unattributed)", execution.backgroundOutput);
 		this.pendingBackgroundOutput = "";
 		this.pendingBackgroundOutputTruncated = false;
 		let abortTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -1161,12 +1191,9 @@ export class ReplKernelManager {
 					await sendPromise;
 				}
 			} catch (error) {
-				if (this.activeExecution === execution) {
-					this.activeExecution = undefined;
-					execution.physicalSettlement.resolve();
-					this.notifyActiveExecutionIdle();
-				}
-				throw error instanceof Error ? error : new Error(String(error));
+				const failure = error instanceof Error ? error : new Error(String(error));
+				if (this.activeExecution === execution) this.rejectActiveExecution(failure);
+				return await result.promise;
 			}
 			return await result.promise;
 		} finally {
@@ -1180,6 +1207,7 @@ export class ReplKernelManager {
 		if (!text) return;
 		const execution = this.activeExecution;
 		if (execution) {
+			execution.outputCapture?.append("background (unattributed)", text);
 			if (execution.backgroundOutput.length >= MAX_BACKGROUND_OUTPUT_CHARS) {
 				execution.backgroundOutputTruncated = true;
 				return;
@@ -1221,49 +1249,52 @@ export class ReplKernelManager {
 				this.registerLateSentAgentMessageHandler(execution.requestId, execution.opts.onLateSentAgentMessage);
 			}
 
-			let stdout = execution.stdout;
-			let stderr = execution.stderr;
-			let result = execution.result;
-			let status = execution.status;
-			if (execution.stdoutTruncated) stdout += `\n[... output truncated at ${execution.maxChars} chars ...]`;
-			if (execution.stderrTruncated) stderr += `\n[... output truncated at ${execution.maxChars} chars ...]`;
-			if (result !== undefined && result.length > execution.maxChars) {
-				result = `${result.slice(0, execution.maxChars)}\n[... output truncated at ${execution.maxChars} chars ...]`;
-			}
-
-			if (execution.opts.signal?.aborted) status = "aborted";
-
-			let backgroundOutput = execution.backgroundOutput;
-			if (execution.backgroundOutputTruncated) {
-				backgroundOutput += `\n[... background output truncated at ${MAX_BACKGROUND_OUTPUT_CHARS} chars ...]`;
-			}
-
-			execution.resolve({
-				outputComplete:
-					status !== "aborted" &&
-					!execution.stdoutTruncated &&
-					!execution.stderrTruncated &&
-					!execution.backgroundOutputTruncated &&
-					(execution.result?.length ?? 0) <= execution.maxChars,
-				stdout,
-				stderr,
-				result,
-				diffs: execution.diffs.length > 0 ? execution.diffs : undefined,
-				attachments: execution.attachments.length > 0 ? execution.attachments : undefined,
-				sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
-				nativeRecoveries: execution.nativeRecoveries.length > 0 ? execution.nativeRecoveries : undefined,
-				backgroundOutput: backgroundOutput.length > 0 ? backgroundOutput : undefined,
-				error: execution.error,
-				status,
-				durationMs: Date.now() - execution.started,
-				doneFields: execution.doneFields,
-			});
+			execution.resolve(this.executionResult(execution));
 			execution.nativeRecoveries = [];
 		}
 		if (didClearActive) {
 			execution.physicalSettlement.resolve();
 			this.notifyActiveExecutionIdle();
 		}
+	}
+
+	private executionResult(execution: ActiveExecution): InternalExecuteResult {
+		const status = execution.opts.signal?.aborted ? "aborted" : execution.status;
+		const complete = status !== "aborted" && Boolean(execution.doneFields) && !execution.initialBackgroundTruncated;
+		const retainedOutput = execution.outputCapture?.finish(complete);
+		const preview = (text: string, truncated: boolean, background = false) => {
+			const marker = retainedOutput
+				? "preview omitted; read retained output"
+				: background
+					? `background output truncated at ${MAX_BACKGROUND_OUTPUT_CHARS} chars`
+					: `output truncated at ${execution.maxChars} chars`;
+			return truncated ? `${text}\n[... ${marker} ...]` : text;
+		};
+		return {
+			retainedOutput,
+			outputComplete: retainedOutput
+				? retainedOutput.captureComplete
+				: complete &&
+					!execution.stdoutTruncated &&
+					!execution.stderrTruncated &&
+					!execution.resultTruncated &&
+					!execution.errorTruncated &&
+					!execution.backgroundOutputTruncated,
+			stdout: preview(execution.stdout, execution.stdoutTruncated),
+			stderr: preview(execution.stderr, execution.stderrTruncated),
+			result: execution.result === undefined ? undefined : preview(execution.result, execution.resultTruncated),
+			diffs: execution.diffs.length > 0 ? execution.diffs : undefined,
+			attachments: execution.attachments.length > 0 ? execution.attachments : undefined,
+			sentAgentMessages: execution.sentAgentMessages.length > 0 ? execution.sentAgentMessages : undefined,
+			nativeRecoveries: execution.nativeRecoveries.length > 0 ? execution.nativeRecoveries : undefined,
+			backgroundOutput: execution.backgroundOutput
+				? preview(execution.backgroundOutput, execution.backgroundOutputTruncated, true)
+				: undefined,
+			error: execution.error,
+			status,
+			durationMs: Date.now() - execution.started,
+			doneFields: execution.doneFields,
+		};
 	}
 
 	private dispatchLateSentAgentMessage(requestId: string | undefined, value: unknown): boolean {
@@ -1303,7 +1334,15 @@ export class ReplKernelManager {
 		this.activeExecution = undefined;
 		execution.nativeRecoveryAbort.abort();
 		execution.nativeRecoveries = [];
-		execution.reject(error);
+		if (execution.outputCapture && !execution.settled) {
+			execution.status = "error";
+			execution.error = { ename: error.name, evalue: error.message, traceback: [] };
+			execution.outputCapture.append("error", `${error.name}: ${error.message}`);
+			execution.reject(new KernelExecutionError(error, this.executionResult(execution)));
+		} else {
+			execution.reject(error);
+		}
+		execution.settled = true;
 		execution.physicalSettlement.resolve();
 		this.notifyActiveExecutionIdle();
 	}

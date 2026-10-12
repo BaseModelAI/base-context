@@ -5,6 +5,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import { formatProductDiagnostics, getProductDiagnostics } from "../src/cli/product-doctor.js";
 import {
 	CONTEXT_EPOCH_RENDERER,
+	CONTEXT_MODE_SUMMARY_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
@@ -28,7 +29,7 @@ test("reports owned product paths and supported auth adapters without credential
 	expect(report.paths.settings).toBe(join(home, "settings.json"));
 	expect(report.schemas.daemon.name).toBe("base-context.daemon");
 	expect(report.schemas.nativeContext).toBe(
-		`${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation), ${CONTEXT_SKILL_EPOCH_RENDERER} (selected skills), ${CONTEXT_TOOL_SUMMARY_RENDERER} (tool summary)`,
+		`${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation), ${CONTEXT_SKILL_EPOCH_RENDERER} (selected skills), ${CONTEXT_TOOL_SUMMARY_RENDERER} (tool summary), ${CONTEXT_MODE_SUMMARY_RENDERER} (mode summary)`,
 	);
 	const formatted = formatProductDiagnostics(report);
 	expect(formatted).toContain(`native context: ${report.schemas.nativeContext}`);

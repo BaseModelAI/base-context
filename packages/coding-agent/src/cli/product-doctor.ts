@@ -12,6 +12,7 @@ import {
 } from "../config.js";
 import {
 	CONTEXT_EPOCH_RENDERER,
+	CONTEXT_MODE_SUMMARY_RENDERER,
 	CONTEXT_POLICY_EPOCH_RENDERER,
 	CONTEXT_SKILL_EPOCH_RENDERER,
 	CONTEXT_TOOL_EPOCH_RENDERER,
@@ -51,7 +52,7 @@ export function getProductDiagnostics() {
 			daemon: DAEMON_PROTOCOL_INFO,
 			daemonSchema: DAEMON_SCHEMA_ID,
 			session: CURRENT_SESSION_VERSION,
-			nativeContext: `${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation), ${CONTEXT_SKILL_EPOCH_RENDERER} (selected skills), ${CONTEXT_TOOL_SUMMARY_RENDERER} (tool summary)`,
+			nativeContext: `${CONTEXT_EPOCH_RENDERER} (request), ${CONTEXT_POLICY_EPOCH_RENDERER} (policy), ${CONTEXT_TOOL_EPOCH_RENDERER} (tool continuation), ${CONTEXT_SKILL_EPOCH_RENDERER} (selected skills), ${CONTEXT_TOOL_SUMMARY_RENDERER} (tool summary), ${CONTEXT_MODE_SUMMARY_RENDERER} (mode summary)`,
 		},
 		paths: {
 			...paths,
