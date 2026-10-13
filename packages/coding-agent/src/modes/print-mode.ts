@@ -118,7 +118,7 @@ async function runPrintModeWithConnectionInternal(
 			await connection.promptAndWait(message);
 		}
 
-		const autonomousStatus = await connection.waitForHeadlessCompletion();
+		const autonomousStatus = await connection.waitForHeadlessCompletion({ waitForRlmQuiescence: true });
 		const { primary, compactionOutcomes } = selectHeadlessTerminalResult(await connection.getMessages());
 		if (primary?.role === "assistant") {
 			if (primary.stopReason === "error" || primary.stopReason === "aborted") {

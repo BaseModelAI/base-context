@@ -33,6 +33,7 @@ type FakeSession = {
 	agent: { waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>> };
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	waitForHeadlessIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
+	waitForRlmQuiescence: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AgentMessage[] };
 	messages: AgentMessage[];
 	extensionRunner: FakeExtensionRunner;
@@ -105,6 +106,7 @@ function createRuntimeHost(
 		agent: { waitForIdle: vi.fn(async () => {}) },
 		waitForIdle,
 		waitForHeadlessIdle: waitForIdle,
+		waitForRlmQuiescence: waitForIdle,
 		state,
 		messages: state.messages,
 		extensionRunner,
@@ -148,6 +150,8 @@ describe("runPrintMode", () => {
 
 		expect(exitCode).toBe(0);
 		expect(session.promptAndWait).toHaveBeenCalledWith("Say done", { images });
+		expect(session.waitForRlmQuiescence).toHaveBeenCalledWith(undefined, { waitForOwnedChildDeletion: true });
+		expect(session.waitForRlmQuiescence).toHaveBeenCalledBefore(runtimeHost.dispose);
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});

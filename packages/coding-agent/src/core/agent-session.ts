@@ -217,6 +217,7 @@ import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
 	type BashExecutionMessage,
+	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
@@ -233,6 +234,7 @@ import {
 	HEARTBEAT_PROMPT_PREVIEW_LABEL,
 	IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 	isSessionSlashCommandMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	RLM_CHILD_FAILURE_CUSTOM_TYPE,
 	RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 } from "./messages.js";
@@ -11850,6 +11852,7 @@ export class AgentSession {
 			persist: async (state) => {
 				if (this.sessionManager !== manager || !ownsSource()) return;
 				await manager.appendCustomEntry(JOB_WATCH_STATE, state);
+				if (this.sessionManager === manager && ownsSource()) this._notifySessionInputCheckpointChange();
 			},
 			waitForDelivery: true,
 			stateBudgetBytes: Math.min(
@@ -13324,14 +13327,41 @@ export class AgentSession {
 		return [...sessions];
 	}
 
+	private _hasTerminalRlmQuiescenceFailure(): boolean {
+		if (
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this.requests.hasPending ||
+			this.unfinishedActionCount > 0 ||
+			this._postCompactionContinuationSettlement !== undefined
+		)
+			return false;
+		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+			const message = this.agent.state.messages[index];
+			if (
+				message.role === "custom" &&
+				(message.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
+					message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE)
+			)
+				continue;
+			return message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted");
+		}
+		return false;
+	}
+
 	private _hasUnsettledRlmQuiescenceWork(waitForOwnedChildDeletion = false): boolean {
+		if (this._hasTerminalRlmQuiescenceFailure()) return false;
+		if (this._jobWatchController?.isParked()) return true;
 		if (waitForOwnedChildDeletion && this._deletingRlmChildren.size > 0) return true;
 		if (this.requests.hasPending || this._pendingIpythonExecutions.size > 0 || this._childUsageWrites.size > 0)
 			return true;
 		if (this._hasDeferredRlmTerminalNotices()) return true;
 		if ([...this._unsettledRlmChildRuns].some((run) => !run.settled)) return true;
 		return this._rlmChildSessionSnapshot().some(
-			(child) => child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(waitForOwnedChildDeletion),
+			(child) =>
+				!child._hasTerminalRlmQuiescenceFailure() &&
+				(child.isSessionActive || child._hasUnsettledRlmQuiescenceWork(waitForOwnedChildDeletion)),
 		);
 	}
 
@@ -13361,12 +13391,23 @@ export class AgentSession {
 		cancellation.signal.addEventListener("abort", onCancelled, { once: true });
 		if (cancellation.signal.aborted) onCancelled();
 		const wait = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, cancelled]);
+		let terminalFailure = false;
+		const releaseForTerminalFailure = () => {
+			if (cancellation.signal.aborted) return;
+			if (this._hasTerminalRlmQuiescenceFailure()) {
+				terminalFailure = true;
+				cancellation.abort();
+				return;
+			}
+			this._sessionInputCheckpointWaiters.add(releaseForTerminalFailure);
+		};
+		releaseForTerminalFailure();
 		try {
 			while (true) {
 				await wait(this.waitForHeadlessIdle());
 				if (cancellation.signal.aborted) throw cancellationError();
 				// Strong RLM quiescence also owns work that interactive waitForIdle ignores.
-				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
+				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices() || this._jobWatchController?.isParked()) {
 					await wait(this._waitForSessionActivityChange(cancellation.signal));
 					continue;
 				}
@@ -13404,9 +13445,11 @@ export class AgentSession {
 				// start at the child-settlement boundary.
 			}
 		} catch (error) {
+			if (terminalFailure) return;
 			if (cancellation.signal.aborted) throw cancellationError();
 			throw error;
 		} finally {
+			this._sessionInputCheckpointWaiters.delete(releaseForTerminalFailure);
 			// A local descendant error must cancel sibling recursive waits owned by
 			// this barrier before their propagation listeners are removed.
 			cancellation.abort();
