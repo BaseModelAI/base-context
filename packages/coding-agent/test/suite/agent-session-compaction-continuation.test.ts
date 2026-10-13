@@ -196,6 +196,8 @@ describe("compaction continuation", () => {
 		}));
 		const harness = await createHarness({
 			persistSession: true,
+			// The scripted response sequence counts root "main" requests, not the test runner's RLM depth.
+			rlmDepth: 0,
 			tools: [
 				{
 					name: "pressure_fixture",
