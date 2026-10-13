@@ -1,1 +1,3 @@
 - Fixed print mode shutting down before owned child work and parked job continuations finish.
+- Fixed bounded `prime_context` reads returning an error instead of a smaller page with a continuation cursor.
+- Fixed repeated goal reminders after empty notification-only turns following compaction.

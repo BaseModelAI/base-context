@@ -1264,6 +1264,7 @@ export class AgentSession {
 		() => this._emitGoalUpdate(),
 	);
 	private _goalContinuationAwaitsRlmWork = false;
+	private _goalContinuationHasProgress = false;
 	private _jobWatchController?: JobWatchController;
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -3930,6 +3931,7 @@ export class AgentSession {
 			return undefined;
 		const queued = this._queuedGoalThresholdContinuation;
 		if (queued && this._checkpointActionPending(queued)) return queued;
+		if (!this._goalContinuationHasProgress && message.stopReason !== "toolUse") return undefined;
 		const before = owner.goal;
 		let counted = false;
 		try {
@@ -4503,6 +4505,7 @@ export class AgentSession {
 			return { kind: "wait_for_owned_work" };
 		}
 		this._goalContinuationAwaitsRlmWork = false;
+		if (!this._goalContinuationHasProgress) return { kind: "finish" };
 		try {
 			this._ensureGoalRuntimeActive(context.context);
 			const nextGoal = {
@@ -4716,7 +4719,20 @@ export class AgentSession {
 				}
 			}
 			this._invocationSuppressedAutonomousContinuation = false;
+			this._goalContinuationHasProgress = false;
 			this._invocationCompactionOwner = this._captureCompactionOwner(this.agent.signal);
+		}
+		if (event.type === "message_end") {
+			const message = event.message;
+			if (message.role === "custom" && message.customType === GOAL_CONTEXT_CUSTOM_TYPE) {
+				this._goalContinuationHasProgress = false;
+			} else if (
+				message.role === "user" ||
+				(message.role === "assistant" &&
+					message.content.some((part) => part.type === "toolCall" || (part.type === "text" && part.text.trim())))
+			) {
+				this._goalContinuationHasProgress = true;
+			}
 		}
 		if (
 			(event.type === "message_start" || event.type === "message_end") &&

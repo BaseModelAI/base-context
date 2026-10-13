@@ -41,6 +41,7 @@ function harness(overrides: Partial<Harness> = {}): Harness {
 		_sessionInputPumpEpoch: 0,
 		_goals: goals,
 		_goalContinuationAwaitsRlmWork: false,
+		_goalContinuationHasProgress: true,
 		_disposed: false,
 		_disposing: false,
 		_sessionInputAdmissionPauses: new Set(),

@@ -403,7 +403,7 @@ interface RecoveryCursorState {
 	matched: boolean;
 }
 
-/** Session-owned, ephemeral searches. No read lease or canonical body survives a call. */
+/** Session-owned, ephemeral selections. No read lease or canonical body survives a call. */
 export class NativeRecoveryCursorStore {
 	private readonly states = new Map<string, RecoveryCursorState>();
 	private generation = 0;
@@ -544,7 +544,8 @@ export async function recoverCapturedHistory(
 	async function recover(supplied: NativeRecoveryOperation, i: number): Promise<NativeRecoveryResult> {
 		const saved = resumed[i];
 		if (supplied.cursor && !saved) return outcome(i, "unavailable", "unknown", [], "expired_cursor");
-		if (saved && supplied.action === "read") return outcome(i, "unavailable", "unknown", [], "conflicting_selection");
+		if (saved && supplied.action === "read" && (saved.operation.need ?? saved.operation.query) !== undefined)
+			return outcome(i, "unavailable", "unknown", [], "conflicting_selection");
 		const operation = saved ? { ...saved.operation, maxBytes: supplied.maxBytes } : supplied;
 		const needle = operation.need ?? operation.query;
 		if (
@@ -580,7 +581,7 @@ export async function recoverCapturedHistory(
 			return outcome(i, "unavailable", "unknown", [], "exact_selection_requires_ref");
 		if (needle !== undefined && Buffer.byteLength(needle) > 8192) throw new NativeRecoveryBudgetRefusal();
 		const searching = needle !== undefined;
-		const continuable = operation.action !== "read" && searching;
+		const continuable = !searching || operation.action !== "read";
 		const state: RecoveryCursorState = saved
 			? structuredClone(saved)
 			: {
@@ -624,16 +625,44 @@ export async function recoverCapturedHistory(
 			stringifyNativeRecoveryResponse(assemble(scope, prospective), maxBytes);
 		};
 		reserve(); // Keep cursor/status space before examining any source material.
-		const admit = (record: NativeRecoveryRecord): boolean => {
+		const admit = (record: NativeRecoveryRecord, keep = true): boolean => {
 			if (selectedItems + records.length >= cap.maxItems) return false;
 			records.push(record);
 			try {
 				reserve();
+				if (!keep) records.pop();
 				return true;
 			} catch {
 				records.pop();
 				return false;
 			}
+		};
+		const fitRead = (record: NativeRecoveryRecord): NativeRecoveryRecord | undefined => {
+			let low = 1;
+			let high = Buffer.byteLength(record.text) - 1;
+			let fitted: NativeRecoveryRecord | undefined;
+			while (low <= high) {
+				const middle = Math.floor((low + high) / 2);
+				const window = decodedTextWindow(record.text, 0, middle);
+				if (window.endByte === 0) {
+					low = middle + 1;
+					continue;
+				}
+				const candidate = {
+					...record,
+					text: window.text,
+					endByte: record.startByte! + window.endByte,
+					suffixOmitted: true,
+					...(record.startLine === undefined
+						? {}
+						: { endLine: record.startLine + (window.text.match(/\n/g)?.length ?? 0) }),
+				};
+				if (admit(candidate, false)) {
+					fitted = candidate;
+					low = middle + 1;
+				} else high = middle - 1;
+			}
+			return fitted;
 		};
 		const resetField = () => {
 			state.byte = 0;
@@ -890,11 +919,19 @@ export async function recoverCapturedHistory(
 								partialWindow = true;
 								reason = "requested_end_beyond_source";
 							}
-							if (!admit(record)) {
-								paused = true;
-								reason = "output_limit";
-								break;
+						}
+						if (!admit(record, done)) {
+							const fitted = searching ? undefined : fitRead(record);
+							if (fitted && admit(fitted)) {
+								state.byte = fitted.endByte!;
+								state.line = fitted.endLine ?? state.line;
+								state.matched = true;
 							}
+							paused = true;
+							reason = "output_limit";
+							break;
+						}
+						if (done) {
 							state.matched = true;
 							if (searching && (startByte > 0 || endByte < total) && operation.ref) {
 								partialWindow = true;
@@ -902,7 +939,6 @@ export async function recoverCapturedHistory(
 							}
 							break;
 						}
-						if (Buffer.byteLength(readText) > maxBytes) throw new NativeRecoveryBudgetRefusal();
 					}
 					if (
 						window.endByte <= state.byte ||

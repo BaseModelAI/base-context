@@ -1616,14 +1616,92 @@ it("bounds the encoded envelope of a 2364-byte selected skill under a 2800-byte 
 			endLine: 55,
 			maxBytes: 2800,
 		};
-		const refused = await recoverCapturedHistory(view, request);
-		expect(refused).toMatchObject({
-			status: "budget_refused",
-			coverage: "unknown",
-			sources: [],
-			results: [{ reason: "output_limit", records: [] }],
+		const cursors = new NativeRecoveryCursorStore();
+		const partial = await recoverCapturedHistory(view, request, DEFAULT_NATIVE_RECOVERY_LIMITS, undefined, cursors);
+		expect(partial).toMatchObject({
+			status: "partial",
+			coverage: "partial",
+			results: [{ reason: "output_limit", exhausted: false, cursor: expect.any(String) }],
 		});
-		expect(Buffer.byteLength(stringifyNativeRecoveryResponse(refused, 2800))).toBeLessThanOrEqual(2800);
+		await owner.appendJson(
+			JSON.stringify({
+				type: "message",
+				id: "later",
+				parentId: metadata.id,
+				message: { role: "user", content: "Appended after the read capture" },
+			}),
+		);
+		await index.syncSource("skill-budget", owner.getSnapshot());
+		const newer = createBranchHistoryReadView(
+			index,
+			{ ...view.source, leafId: "later", sourceSequence: 2 },
+			(query) => query(),
+		);
+		const bodyBytes = Buffer.from(body);
+		for (const action of ["read", "recover"] as const) {
+			let page =
+				action === "read"
+					? partial
+					: await recoverCapturedHistory(view, request, DEFAULT_NATIVE_RECOVERY_LIMITS, undefined, cursors);
+			let recovered = "";
+			for (let call = 0; call < 8; call++) {
+				expect(Buffer.byteLength(stringifyNativeRecoveryResponse(page, 2800))).toBeLessThanOrEqual(2800);
+				expect(nativeRecoveryToolResult(page).isError).toBe(false);
+				expect(page.scope).toEqual(partial.scope);
+				expect(page.results[0].records).toHaveLength(1);
+				const record = page.results[0].records[0];
+				const startByte = Buffer.byteLength(recovered);
+				const endByte = startByte + Buffer.byteLength(record.text);
+				const coordinates = {
+					startByte,
+					endByte,
+					startLine: recovered.split("\n").length,
+					endLine: (recovered + record.text).split("\n").length,
+					prefixOmitted: startByte > 0,
+					suffixOmitted: endByte < bodyBytes.length,
+				};
+				expect(endByte).toBeGreaterThan(startByte);
+				expect(record.text).toBe(bodyBytes.subarray(startByte, endByte).toString("utf8"));
+				expect(record).toMatchObject({
+					...coordinates,
+					ref: metadata.id,
+					revision: metadata.revision,
+					sourceSessionId: "skill-budget",
+					field: "/content",
+				});
+				expect(page.sources).toEqual([
+					{
+						...coordinates,
+						entryId: metadata.id,
+						revision: metadata.revision,
+						sourceSessionId: "skill-budget",
+						field: "/content",
+					},
+				]);
+				recovered += record.text;
+				if (page.results[0].exhausted) break;
+				expect(page.results[0]).toMatchObject({
+					status: "partial",
+					coverage: "partial",
+					reason: "output_limit",
+					exhausted: false,
+					cursor: expect.any(String),
+				});
+				page = await recoverCapturedHistory(
+					newer,
+					{ action, cursor: page.results[0].cursor, maxBytes: 2800 },
+					DEFAULT_NATIVE_RECOVERY_LIMITS,
+					undefined,
+					cursors,
+				);
+			}
+			expect(page.results[0]).toMatchObject({ status: "found", coverage: "complete", exhausted: true });
+			expect(page.results[0].cursor).toBeUndefined();
+			expect(recovered).toBe(body);
+		}
+		await expect(
+			recoverCapturedHistory(view, { ...request, maxBytes: 1 }, DEFAULT_NATIVE_RECOVERY_LIMITS, undefined, cursors),
+		).rejects.toBeInstanceOf(NativeRecoveryBudgetRefusal);
 		const complete = await recoverCapturedHistory(view, { ...request, maxBytes: 4096 });
 		const encoded = stringifyNativeRecoveryResponse(complete, 4096);
 		expect(Buffer.byteLength(encoded)).toBeGreaterThan(2800);
