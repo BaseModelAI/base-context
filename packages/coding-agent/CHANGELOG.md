@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.1.7] - 2026-10-13
+
+- Fixed print mode shutting down before owned child work and parked job continuations finish.
+- Fixed bounded `prime_context` reads returning an error instead of a smaller page with a continuation cursor.
+- Fixed repeated goal reminders after empty notification-only turns following compaction.
+
 ## [1.1.6] - 2026-10-12
 
 - Added explicit consumption of pending job-watch reports and batched watcher notifications without starting model turns for routine progress.
